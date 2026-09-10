@@ -46,31 +46,11 @@ impl AppState {
                 let entries = page.sync.transcript;
                 let mut relay = self.relay.write().await;
                 let runtime = relay.ensure_runtime_for_thread(&input.thread_id);
-                let page_item_ids = entries
-                    .iter()
-                    .filter_map(|entry| entry.item_id.clone())
-                    .collect::<Vec<_>>();
-                runtime.prepend_provider_history(entries.clone(), input.before, page.prev_cursor);
-                // Return the MERGED records, not the raw page. A page holding only a
-                // tool's request carries a non-terminal status and no result, because the
-                // result sits on another page; shipping that raw lets the client overwrite
-                // the settled entry it already has and show a finished edit as running.
-                let merged = page_item_ids
-                    .iter()
-                    .filter_map(|item_id| {
-                        runtime
-                            .transcript
-                            .iter()
-                            .find(|record| &record.item_id == item_id)
-                            .map(|record| record.to_view())
-                    })
-                    .collect::<Vec<_>>();
-                let entries = if merged.len() == entries.len() {
-                    merged
-                } else {
-                    // Some entry had no id to match on; fall back rather than drop rows.
-                    entries
-                };
+                // The MERGED records, never the raw page: a page holding only a tool's
+                // request would let the client overwrite the settled entry it already
+                // has, and an id-less raw row would bypass id and order-key assignment.
+                let entries =
+                    runtime.prepend_provider_history(entries, input.before, page.prev_cursor);
                 return Ok(ThreadTranscriptResponse::from_provider_page(
                     input.thread_id,
                     entries,
@@ -129,7 +109,6 @@ impl AppState {
                         super::PROVIDER_DEFAULT_MODEL.to_string(),
                     )
                     .await;
-                let entries = page.sync.transcript.clone();
                 let paged = page.paged;
                 let prev_cursor = page.prev_cursor;
                 // A page has to carry the revision of the runtime it was built from,
@@ -139,6 +118,10 @@ impl AppState {
                 // stream event may have built the runtime in the meantime — making the
                 // page we just fetched stale relative to it.
                 let lost_hydration_race;
+                // Materialized under the SAME lock that captured the revision, from the
+                // runtime hydration just built — so ids and order keys are the numbered
+                // ones, never the raw provider parse (which carries neither).
+                let materialized;
                 {
                     let mut relay = self.relay.write().await;
                     lost_hydration_race = relay.runtime_for_thread(&input.thread_id).is_some();
@@ -163,8 +146,15 @@ impl AppState {
                     runtime.provider_history_paged = paged;
                     runtime.provider_history_cursor = prev_cursor;
                     hydrated_revision = runtime.transcript_revision;
+                    materialized = (paged && !lost_hydration_race).then(|| {
+                        runtime
+                            .transcript
+                            .iter()
+                            .map(super::super::relay::TranscriptRecord::to_view)
+                            .collect::<Vec<_>>()
+                    });
                 }
-                let mut response = if paged && !lost_hydration_race {
+                let mut response = if let Some(entries) = materialized {
                     ThreadTranscriptResponse::from_provider_page(
                         input.thread_id.clone(),
                         entries,

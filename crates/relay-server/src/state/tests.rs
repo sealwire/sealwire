@@ -1718,6 +1718,7 @@ fn thread_switch_back_keeps_single_user_message_when_ids_agree() {
             status: "active".to_string(),
             active_flags: vec!["waitingOnAskUser".to_string()],
             transcript: vec![TranscriptEntryView {
+                order_seq: None,
                 item_id: Some(user_item_id.to_string()),
                 kind: TranscriptEntryKind::UserText,
                 text: Some("what should I name this?".to_string()),
@@ -2815,6 +2816,7 @@ fn restore_thread_data_keeps_persisted_controller_and_settings() {
             status: "running".to_string(),
             active_flags: vec!["busy".to_string()],
             transcript: vec![TranscriptEntryView {
+                order_seq: None,
                 item_id: Some("history-1".to_string()),
                 kind: TranscriptEntryKind::UserText,
                 text: Some("ping".to_string()),
@@ -5168,6 +5170,7 @@ mod paged_history_merge_tests {
 
     fn view(item_id: &str, status: &str, tool: ToolCallView) -> TranscriptEntryView {
         TranscriptEntryView {
+            order_seq: None,
             item_id: Some(item_id.to_string()),
             kind: TranscriptEntryKind::ToolCall,
             text: None,
@@ -5669,6 +5672,7 @@ mod watched_threads {
                 base_revision: mutation.base_revision,
                 revision: mutation.revision,
                 entry_seq: mutation.entry_seq,
+                order_seq: mutation.order_seq,
                 server_time: mutation.server_time,
                 item_id: item_id.to_string(),
                 turn_id: Some("turn-1".to_string()),
@@ -6479,6 +6483,7 @@ fn rehydrating_a_thread_does_not_rewind_its_transcript_revision() {
             status: "idle".to_string(),
             active_flags: Vec::new(),
             transcript: vec![TranscriptEntryView {
+                order_seq: None,
                 item_id: Some("item-1".to_string()),
                 kind: TranscriptEntryKind::AgentText,
                 text: Some("hello".to_string()),
@@ -6530,6 +6535,7 @@ fn merging_fresh_history_draws_from_the_shared_revision_clock() {
             status: "idle".to_string(),
             active_flags: Vec::new(),
             transcript: vec![TranscriptEntryView {
+                order_seq: None,
                 item_id: Some("fresh-item".to_string()),
                 kind: TranscriptEntryKind::AgentText,
                 text: Some("fresh".to_string()),
@@ -6978,5 +6984,55 @@ fn order_seq_appends_increase_and_survive_withdrawal() {
     assert!(
         survivor_seq > withdrawn_seq,
         "the withdrawn key {withdrawn_seq} must not be reissued (got {survivor_seq})"
+    );
+}
+
+/// The order key must reach every channel a client consumes: snapshot views, runtime
+/// pages, and the delta meta the bridges copy onto wire deltas.
+#[test]
+fn order_seq_rides_snapshot_page_and_delta_meta() {
+    let mut relay = test_state();
+    let thread = "order-wire-thread";
+    relay.active_thread_id = Some(thread.to_string());
+
+    let meta = relay.upsert_transcript_item_for_thread(
+        thread,
+        "row-1".to_string(),
+        crate::protocol::TranscriptEntryKind::AgentText,
+        Some("hello".to_string()),
+        "completed".to_string(),
+        None,
+        None,
+    );
+    let record_seq = relay.runtimes.get(thread).unwrap().transcript[0].order_seq;
+    assert_eq!(meta.order_seq, record_seq, "delta meta names the row's key");
+
+    let delta_meta = relay.append_agent_delta_for_thread(thread, "row-1", "turn-1", " more");
+    assert_eq!(
+        delta_meta.order_seq, record_seq,
+        "append meta names the same key"
+    );
+
+    let snapshot = relay.snapshot();
+    let entry = snapshot
+        .transcript
+        .iter()
+        .find(|entry| entry.item_id.as_deref() == Some("row-1"))
+        .expect("snapshot row");
+    assert_eq!(
+        entry.order_seq,
+        Some(record_seq),
+        "snapshot view carries the key"
+    );
+
+    let page = relay
+        .runtimes
+        .get(thread)
+        .unwrap()
+        .transcript_page(thread, None);
+    assert_eq!(
+        page.entries[0].order_seq,
+        Some(record_seq),
+        "runtime page carries the key"
     );
 }

@@ -1594,6 +1594,7 @@ fn coalesce_transcript_deltas(deltas: Vec<PendingTranscriptDelta>) -> Vec<Pendin
                 last.delta.push_str(&delta.delta);
                 last.revision = delta.revision;
                 last.entry_seq = delta.entry_seq;
+                // Same item (can_merge), so order_seq is identical by contract.
                 last.server_time = delta.server_time;
                 continue;
             }
@@ -1651,6 +1652,7 @@ fn build_transcript_delta_messages(
                     base_revision: delta.base_revision,
                     revision: delta.revision,
                     entry_seq: delta.entry_seq,
+                    order_seq: delta.order_seq,
                     server_time: delta.server_time,
                     item_id: delta.item_id.clone(),
                     turn_id: delta.turn_id.clone(),
@@ -1673,6 +1675,7 @@ fn build_transcript_delta_messages(
                 "base_revision": delta.base_revision,
                 "revision": delta.revision,
                 "entry_seq": delta.entry_seq,
+                "order_seq": delta.order_seq,
                 "server_time": delta.server_time,
                 "item_id": delta.item_id,
                 "turn_id": delta.turn_id,

@@ -2809,6 +2809,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                 .ensure_runtime_for_thread("thread-a")
                 .prepend_provider_history(
                     vec![crate::protocol::TranscriptEntryView {
+                        order_seq: None,
                         item_id: Some("old-write".to_string()),
                         kind: crate::protocol::TranscriptEntryKind::ToolCall,
                         text: None,
@@ -2880,6 +2881,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     status: "idle".to_string(),
                     active_flags: Vec::new(),
                     transcript: vec![crate::protocol::TranscriptEntryView {
+                        order_seq: None,
                         item_id: Some("tail".to_string()),
                         kind: crate::protocol::TranscriptEntryKind::AgentText,
                         text: Some("bounded rebuilt tail".to_string()),
@@ -7226,6 +7228,126 @@ tree; got {}",
         assert!(thread_state.settings_writable);
     }
 
+    /// Both provider-page branches must ship MATERIALIZED runtime views: a raw
+    /// provider parse carries no order key and can carry no id at all, and such a
+    /// row would bypass id and order-key assignment entirely.
+    #[tokio::test]
+    async fn provider_pages_are_materialized_with_ids_and_order_keys() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let thread = claude.thread_summary("claude-materialize-thread", cwd);
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        let entry = |item_id: Option<&str>, text: &str| crate::protocol::TranscriptEntryView {
+            order_seq: None,
+            item_id: item_id.map(str::to_string),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some(text.to_string()),
+            status: "completed".to_string(),
+            turn_id: None,
+            tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
+        };
+        {
+            let mut pages = claude.transcript_pages.lock().await;
+            pages.insert(
+                (thread.id.clone(), None),
+                crate::provider::ThreadTranscriptPageData {
+                    sync: crate::provider::ThreadSyncData {
+                        thread: thread.clone(),
+                        status: "idle".to_string(),
+                        active_flags: Vec::new(),
+                        // One id-less row: the exact shape that used to bypass.
+                        transcript: vec![entry(Some("tail"), "tail"), entry(None, "no id")],
+                    },
+                    prev_cursor: Some(7),
+                    paged: true,
+                },
+            );
+            pages.insert(
+                (thread.id.clone(), Some(7)),
+                crate::provider::ThreadTranscriptPageData {
+                    sync: crate::provider::ThreadSyncData {
+                        thread: thread.clone(),
+                        status: "idle".to_string(),
+                        active_flags: Vec::new(),
+                        transcript: vec![
+                            entry(None, "older, no id"),
+                            entry(Some("older"), "older"),
+                        ],
+                    },
+                    prev_cursor: None,
+                    paged: true,
+                },
+            );
+        }
+        app.relay.write().await.threads = vec![thread.clone()];
+
+        let tail = app
+            .read_thread_transcript(ReadThreadTranscriptInput {
+                thread_id: thread.id.clone(),
+                cursor: None,
+                before: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("cold tail page");
+        assert_eq!(tail.entries.len(), 2);
+        for entry in &tail.entries {
+            assert!(
+                entry.item_id.is_some(),
+                "every shipped row carries an id: {entry:?}"
+            );
+            assert!(
+                entry.order_seq.is_some(),
+                "every shipped row carries an order key: {entry:?}"
+            );
+        }
+
+        let older = app
+            .read_thread_transcript(ReadThreadTranscriptInput {
+                thread_id: thread.id.clone(),
+                cursor: None,
+                before: Some(7),
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("older provider page");
+        assert_eq!(older.entries.len(), 2);
+        for entry in &older.entries {
+            assert!(
+                entry.item_id.is_some(),
+                "older rows carry ids too: {entry:?}"
+            );
+            assert!(
+                entry.order_seq.is_some(),
+                "older rows carry order keys too: {entry:?}"
+            );
+        }
+        let older_max = older
+            .entries
+            .iter()
+            .filter_map(|e| e.order_seq)
+            .max()
+            .unwrap();
+        let tail_min = tail
+            .entries
+            .iter()
+            .filter_map(|e| e.order_seq)
+            .min()
+            .unwrap();
+        assert!(
+            older_max < tail_min,
+            "older history sorts strictly before the tail: {older_max} !< {tail_min}"
+        );
+    }
+
     #[tokio::test]
     async fn cold_transcript_uses_provider_pages_without_full_session_read() {
         let project = TempDir::new().expect("project tempdir");
@@ -7241,6 +7363,7 @@ tree; got {}",
             .await
             .insert(thread.id.clone(), thread.clone());
         let entry = |item_id: &str, text: &str| crate::protocol::TranscriptEntryView {
+            order_seq: None,
             item_id: Some(item_id.to_string()),
             kind: crate::protocol::TranscriptEntryKind::AgentText,
             text: Some(text.to_string()),
@@ -7347,6 +7470,7 @@ tree; got {}",
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
                         transcript: vec![crate::protocol::TranscriptEntryView {
+                            order_seq: None,
                             item_id: Some("tail".to_string()),
                             kind: crate::protocol::TranscriptEntryKind::AgentText,
                             text: Some("tail".to_string()),
@@ -7424,6 +7548,7 @@ tree; got {}",
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
                         transcript: vec![crate::protocol::TranscriptEntryView {
+                            order_seq: None,
                             item_id: Some("stale-tail".to_string()),
                             kind: crate::protocol::TranscriptEntryKind::AgentText,
                             text: Some("stale".to_string()),
@@ -9139,6 +9264,7 @@ tree; got {}",
             let thread = Self::thread_summary(thread_id, cwd, preview.clone());
             let initial_user_message =
                 initial_prompt.map(|prompt| crate::protocol::TranscriptEntryView {
+                    order_seq: None,
                     item_id: Some("user:provider-initial".to_string()),
                     kind: crate::protocol::TranscriptEntryKind::UserText,
                     text: Some(prompt.to_string()),
@@ -9151,6 +9277,7 @@ tree; got {}",
             if let Some(entry) = initial_user_message.clone() {
                 transcript.push(entry);
                 transcript.push(crate::protocol::TranscriptEntryView {
+                    order_seq: None,
                     item_id: Some("assistant:provider-reply".to_string()),
                     kind: crate::protocol::TranscriptEntryKind::AgentText,
                     text: Some("provider reply".to_string()),
@@ -13771,6 +13898,7 @@ mod review_tests {
                 let mut transcripts = transcripts.lock().await;
                 let entries = transcripts.entry(thread_id).or_default();
                 entries.push(TranscriptEntryView {
+                    order_seq: None,
                     item_id: Some(user_item),
                     kind: TranscriptEntryKind::UserText,
                     text: Some(user_text),
@@ -13780,6 +13908,7 @@ mod review_tests {
                     content_state: crate::protocol::TranscriptContentState::Full,
                 });
                 entries.push(TranscriptEntryView {
+                    order_seq: None,
                     item_id: Some(assistant_item),
                     kind: TranscriptEntryKind::AgentText,
                     text: Some(reply_text),
@@ -14011,6 +14140,7 @@ mod review_tests {
                 let mut transcripts = transcripts.lock().await;
                 let entries = transcripts.entry(thread_id).or_default();
                 entries.push(TranscriptEntryView {
+                    order_seq: None,
                     item_id: Some(user_item),
                     kind: TranscriptEntryKind::UserText,
                     text: Some(user_text),
@@ -14021,6 +14151,7 @@ mod review_tests {
                 });
                 if emit_assistant && fail_completed_turn.is_none() {
                     entries.push(TranscriptEntryView {
+                        order_seq: None,
                         item_id: Some(assistant_item),
                         kind: TranscriptEntryKind::AgentText,
                         text: Some(reply_text.clone()),

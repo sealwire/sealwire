@@ -2656,6 +2656,7 @@ impl CodexReplayHarness {
 
 fn agent_entry(item_id: &str, text: &str, status: &str, turn_id: &str) -> TranscriptEntryView {
     TranscriptEntryView {
+        order_seq: None,
         item_id: Some(item_id.to_string()),
         kind: TranscriptEntryKind::AgentText,
         text: Some(text.to_string()),
@@ -3235,6 +3236,7 @@ async fn handle_notification_keeps_late_delta_for_prior_thread() {
                 status: "running".to_string(),
                 active_flags: Vec::new(),
                 transcript: vec![TranscriptEntryView {
+                    order_seq: None,
                     item_id: Some("msg-1".to_string()),
                     kind: TranscriptEntryKind::AgentText,
                     text: Some("Hello".to_string()),
@@ -3361,6 +3363,7 @@ async fn handle_notification_keeps_late_agent_completion_for_prior_thread() {
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
                 transcript: vec![TranscriptEntryView {
+                    order_seq: None,
                     item_id: Some("msg-1".to_string()),
                     kind: TranscriptEntryKind::AgentText,
                     text: Some("Hello world".to_string()),
@@ -3471,6 +3474,7 @@ async fn runtime_merge_does_not_downgrade_fresh_completed_agent_message() {
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
                 transcript: vec![TranscriptEntryView {
+                    order_seq: None,
                     item_id: Some("msg-1".to_string()),
                     kind: TranscriptEntryKind::AgentText,
                     text: Some("Hello world".to_string()),
@@ -3650,6 +3654,7 @@ async fn handle_notification_keeps_late_command_output_for_prior_thread() {
                 status: "running".to_string(),
                 active_flags: Vec::new(),
                 transcript: vec![TranscriptEntryView {
+                    order_seq: None,
                     item_id: Some("cmd-1".to_string()),
                     kind: TranscriptEntryKind::Command,
                     text: Some("npm test".to_string()),
