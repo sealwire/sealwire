@@ -127,14 +127,14 @@ enum AuthorTurnOutcome {
 enum CommittedEvidence {
     Real(relay_api::GitReviewTarget),
     Checkpoint(relay_api::GitReviewTarget),
-    NoChange(u64),
+    NoChange { head_sha: String, generated_at: u64 },
 }
 
 enum RoundEvidence {
     Committed(relay_api::GitReviewTarget),
     Checkpoint(relay_api::GitReviewTarget),
     WorkspaceDiff(crate::protocol::WorkspaceDiffResponse),
-    NoChange(u64),
+    NoChange { head_sha: String, generated_at: u64 },
 }
 
 impl RoundEvidence {
@@ -142,7 +142,7 @@ impl RoundEvidence {
         match self {
             Self::Committed(target) | Self::Checkpoint(target) => target.generated_at,
             Self::WorkspaceDiff(diff) => diff.generated_at,
-            Self::NoChange(generated_at) => *generated_at,
+            Self::NoChange { generated_at, .. } => *generated_at,
         }
     }
 
@@ -150,7 +150,7 @@ impl RoundEvidence {
         match self {
             Self::Committed(_) | Self::Checkpoint(_) => false,
             Self::WorkspaceDiff(diff) => diff.truncated,
-            Self::NoChange(_) => false,
+            Self::NoChange { .. } => false,
         }
     }
 
@@ -159,7 +159,7 @@ impl RoundEvidence {
             Self::Committed(target) | Self::Checkpoint(target) => {
                 Some(target.candidate_sha.as_str())
             }
-            Self::WorkspaceDiff(_) | Self::NoChange(_) => None,
+            Self::WorkspaceDiff(_) | Self::NoChange { .. } => None,
         }
     }
 
@@ -173,7 +173,8 @@ impl RoundEvidence {
         match self {
             Self::Committed(target) => Some(target.candidate_sha.as_str()),
             Self::Checkpoint(target) => Some(target.base_sha.as_str()),
-            Self::WorkspaceDiff(_) | Self::NoChange(_) => None,
+            Self::WorkspaceDiff(_) => None,
+            Self::NoChange { head_sha, .. } => Some(head_sha.as_str()),
         }
     }
 }
@@ -615,10 +616,10 @@ to this thread."
             return Ok(Some((candidate, None)));
         }
 
-        let base = first_parent_sha(&workspace, &candidate)
-            .await?
-            .unwrap_or_else(|| candidate.clone());
-        Ok(Some((base, Some(candidate))))
+        // Without a valid turn-local baseline, an older commit is not evidence that
+        // this author turn produced it. Keep the current HEAD as the no-change snapshot;
+        // the fresh author report gives the reviewer context for what to verify.
+        Ok(Some((candidate, None)))
     }
 
     /// A missing `LastMessage` is recovered by driving the author once. That
@@ -837,10 +838,22 @@ last message (no recap turn)."
                     }
                     _ => {
                         recovered_missing_last_message = true;
-                        recovery_base_sha =
-                            self.relay.read().await.review_job(&job_id).and_then(|job| {
-                                job.candidate_sha.clone().or_else(|| job.base_sha.clone())
-                            });
+                        recovery_base_sha = match self
+                            .current_review_head(&parent_thread_id, &device_id)
+                            .await
+                        {
+                            Ok(base) => base,
+                            Err(error) => {
+                                self.fail_job(
+                                    &job_id,
+                                    format!(
+                                        "failed to record the repository state before the author recovery turn: {error}"
+                                    ),
+                                )
+                                .await;
+                                return;
+                            }
+                        };
                         match self.drive_parent_recap(&job_id, &parent_thread_id).await {
                             RecapOutcome::Text(promoted, text) => {
                                 parent_thread_id = promoted;
@@ -1233,7 +1246,7 @@ reviewer ({error}); re-resolving the workspace and retrying the round."
                 (RoundEvidence::WorkspaceDiff(diff), false, None) => {
                     reviewer_prompt(&recap, diff, instructions.as_deref(), &workspace_line)
                 }
-                (RoundEvidence::NoChange(_), reused, prior) => reviewer_prompt_for_no_change(
+                (RoundEvidence::NoChange { .. }, reused, prior) => reviewer_prompt_for_no_change(
                     &recap,
                     instructions.as_deref(),
                     &workspace_line,
@@ -1343,20 +1356,22 @@ started ({error}); re-resolving the workspace and retrying the round."
                 // Checked against `expected_head_sha`, NOT `prompt_candidate_sha`: a
                 // checkpoint deliberately never moves HEAD, so HEAD staying at its
                 // `base_sha` is the non-stale outcome even though it differs from the
-                // checkpoint's own (HEAD-unreachable) candidate sha. The two only
-                // coincide for a real committed candidate. Both are `Some`/`None`
-                // together (see `RoundEvidence`), so destructuring the pair is safe.
-                if let (Some(candidate_sha), Some(expected_head)) = (
-                    prompt_candidate_sha.as_deref(),
-                    expected_head_sha.as_deref(),
-                ) {
+                // checkpoint's own (HEAD-unreachable) candidate sha. A no-change review
+                // has no candidate at all, but is still bound to the HEAD snapshot that
+                // existed when its prompt was built.
+                if let Some(expected_head) = expected_head_sha.as_deref() {
                     match self.current_head_for_review_cwd(&round_cwd).await {
                         Ok(Some(head)) if head != expected_head => {
+                            let reviewed_subject = prompt_candidate_sha
+                                .as_deref()
+                                .map(|candidate| format!("committed candidate `{candidate}`"))
+                                .unwrap_or_else(|| {
+                                    format!("a no-change report at HEAD `{expected_head}`")
+                                });
                             review = format!(
-                                "The reviewer approved committed candidate `{candidate_sha}`, \
-but the reviewed workspace is now at `{head}`. That approval is stale and cannot \
-complete this review; the new `HEAD` must be reviewed as a fresh committed candidate.\n\n\
-{review}"
+                                "The reviewer approved {reviewed_subject}, but the reviewed \
+workspace is now at `{head}`. That approval is stale and cannot complete this review; \
+the new `HEAD` must be reviewed as a fresh committed candidate.\n\n{review}"
                             );
                             stale_approval = true;
                             verdict = crate::state::Verdict::NeedsChanges;
@@ -1891,9 +1906,17 @@ tree would review commits this thread never made"
             Ok(Some(CommittedEvidence::Checkpoint(target))) => {
                 Ok((RoundEvidence::Checkpoint(target), workspace, cwd))
             }
-            Ok(Some(CommittedEvidence::NoChange(generated_at))) => {
-                Ok((RoundEvidence::NoChange(generated_at), workspace, cwd))
-            }
+            Ok(Some(CommittedEvidence::NoChange {
+                head_sha,
+                generated_at,
+            })) => Ok((
+                RoundEvidence::NoChange {
+                    head_sha,
+                    generated_at,
+                },
+                workspace,
+                cwd,
+            )),
             Ok(None) => self
                 .collect_round_diff(workspace, parent_thread_id, device_id)
                 .await
@@ -1913,9 +1936,17 @@ tree would review commits this thread never made"
                     Ok(Some(CommittedEvidence::Checkpoint(target))) => {
                         Ok((RoundEvidence::Checkpoint(target), retried, cwd))
                     }
-                    Ok(Some(CommittedEvidence::NoChange(generated_at))) => {
-                        Ok((RoundEvidence::NoChange(generated_at), retried, cwd))
-                    }
+                    Ok(Some(CommittedEvidence::NoChange {
+                        head_sha,
+                        generated_at,
+                    })) => Ok((
+                        RoundEvidence::NoChange {
+                            head_sha,
+                            generated_at,
+                        },
+                        retried,
+                        cwd,
+                    )),
                     Ok(None) => self
                         .collect_round_diff(retried, parent_thread_id, device_id)
                         .await
@@ -1996,7 +2027,10 @@ tree would review commits this thread never made"
                     build_checkpoint_candidate(&trusted, &round_base, job_id).await?;
                 (round_base, checkpoint_sha, true)
             } else {
-                return Ok(Some(CommittedEvidence::NoChange(unix_now())));
+                return Ok(Some(CommittedEvidence::NoChange {
+                    head_sha: current_head,
+                    generated_at: unix_now(),
+                }));
             }
         } else if dirty {
             let round_base = current_head;
@@ -2009,10 +2043,16 @@ tree would review commits this thread never made"
             let checkpoint_sha = build_checkpoint_candidate(&trusted, &round_base, job_id).await?;
             (round_base, checkpoint_sha, true)
         } else {
-            let base = first_parent_sha(&trusted, &current_head)
-                .await?
-                .unwrap_or_else(|| current_head.clone());
-            (base, current_head, false)
+            self.update_job(job_id, |job| {
+                job.base_sha = Some(current_head.clone());
+                job.round_base_sha = Some(current_head.clone());
+                job.candidate_sha = None;
+            })
+            .await;
+            return Ok(Some(CommittedEvidence::NoChange {
+                head_sha: current_head,
+                generated_at: unix_now(),
+            }));
         };
 
         let target = collect_git_review_target(&trusted, &base_sha, &candidate_sha).await?;
@@ -3369,7 +3409,7 @@ fn reviewer_failure_message(outcome: &WaitOutcome) -> &'static str {
 }
 
 fn latest_agent_entry(views: &[TranscriptEntryView]) -> Option<(String, String)> {
-    views.iter().rev().find_map(|entry| {
+    views.iter().enumerate().rev().find_map(|(index, entry)| {
         if entry.kind != TranscriptEntryKind::AgentText {
             return None;
         }
@@ -3378,9 +3418,60 @@ fn latest_agent_entry(views: &[TranscriptEntryView]) -> Option<(String, String)>
             .as_ref()
             .map(|text| text.trim())
             .filter(|text| !text.is_empty())?;
-        let item_id = entry.item_id.clone().unwrap_or_default();
+        let item_id = entry
+            .item_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                entry
+                    .turn_id
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                    .map(|id| format!("__relay_missing_item_turn__:{id}"))
+            })
+            .unwrap_or_else(|| format!("__relay_missing_item_index__:{index}"));
         Some((item_id, text.to_string()))
     })
+}
+
+#[cfg(test)]
+mod latest_agent_entry_tests {
+    use super::latest_agent_entry;
+    use crate::protocol::{TranscriptContentState, TranscriptEntryKind, TranscriptEntryView};
+
+    #[test]
+    fn assistant_identity_falls_back_when_item_ids_are_empty() {
+        let entry = |turn_id: Option<&str>, text: &str| TranscriptEntryView {
+            item_id: Some(String::new()),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some(text.to_string()),
+            status: "completed".to_string(),
+            turn_id: turn_id.map(str::to_string),
+            tool: None,
+            content_state: TranscriptContentState::Full,
+        };
+        let first = vec![entry(Some("turn-1"), "same reply")];
+        let second = vec![
+            entry(Some("turn-1"), "same reply"),
+            entry(Some("turn-2"), "same reply"),
+        ];
+        let missing_turn_ids = vec![entry(None, "first"), entry(None, "second")];
+
+        let first_id = latest_agent_entry(&first).expect("first reply").0;
+        let second_id = latest_agent_entry(&second).expect("second reply").0;
+        assert_ne!(
+            first_id, second_id,
+            "turn ids must distinguish fresh replies"
+        );
+        assert!(
+            !latest_agent_entry(&missing_turn_ids)
+                .expect("ordinal fallback")
+                .0
+                .is_empty(),
+            "even a provider with neither id must get a stable nonempty identity"
+        );
+    }
 }
 
 pub(super) fn random_suffix() -> String {

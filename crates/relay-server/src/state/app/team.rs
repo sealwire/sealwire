@@ -93,16 +93,26 @@ fn bounded_team_review_claim(text: &str) -> Option<String> {
     if response.is_empty() {
         return None;
     }
+    let final_line_start = response.rfind('\n').map_or(0, |index| index + 1);
     let final_line = response.lines().next_back().unwrap_or(response).trim();
     let claim = match final_line.strip_prefix(TEAM_REVIEW_CLAIM_MARKER) {
-        Some(marked) => marked.trim(),
-        None => response,
+        Some(marked) => {
+            let before = response[..final_line_start].trim_end();
+            let marked = marked.trim();
+            match (before.is_empty(), marked.is_empty()) {
+                (true, true) => String::new(),
+                (true, false) => marked.to_string(),
+                (false, true) => before.to_string(),
+                (false, false) => format!("{before}\n{marked}"),
+            }
+        }
+        None => response.to_string(),
     };
     if claim.is_empty() {
         return None;
     }
     if claim.len() <= TEAM_REVIEW_CLAIM_MAX_BYTES {
-        return Some(claim.to_string());
+        return Some(claim);
     }
 
     let body_limit = TEAM_REVIEW_CLAIM_MAX_BYTES.saturating_sub(TEAM_REVIEW_CLAIM_TRUNCATED.len());
@@ -4750,7 +4760,12 @@ mod no_op_review_claim_tests {
             bounded_team_review_claim(&format!(
                 "ordinary explanation\n{TEAM_REVIEW_CLAIM_MARKER} cargo test passed"
             )),
-            Some("cargo test passed".to_string())
+            Some("ordinary explanation\ncargo test passed".to_string())
+        );
+        assert_eq!(
+            bounded_team_review_claim(&format!("ordinary explanation\n{TEAM_REVIEW_CLAIM_MARKER}")),
+            Some("ordinary explanation".to_string()),
+            "a bare compatibility marker must not erase the fresh report above it"
         );
 
         let claim = bounded_team_review_claim(&format!(
