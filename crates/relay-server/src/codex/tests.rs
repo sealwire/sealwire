@@ -2657,6 +2657,7 @@ impl CodexReplayHarness {
 fn agent_entry(item_id: &str, text: &str, status: &str, turn_id: &str) -> TranscriptEntryView {
     TranscriptEntryView {
         order_seq: None,
+        withdrawn: false,
         item_id: Some(item_id.to_string()),
         kind: TranscriptEntryKind::AgentText,
         text: Some(text.to_string()),
@@ -2988,7 +2989,7 @@ async fn stale_codex_turn_started_cannot_claim_the_next_reservation() {
 }
 
 #[tokio::test]
-async fn rejected_codex_start_removes_its_placeholder() {
+async fn rejected_codex_start_withdraws_its_placeholder() {
     let (bridge, state) = spawn_fake_codex_bridge().await;
     let thread_id = activate_fake_codex_thread(&bridge, &state).await;
     configure_fake_codex_reject_turn_start(&bridge).await;
@@ -3003,10 +3004,17 @@ async fn rejected_codex_start_removes_its_placeholder() {
         .runtime_for_thread(&thread_id)
         .expect("thread runtime");
     assert!(runtime.codex_start_reservation.is_none());
-    assert!(!runtime.transcript.iter().any(|entry| {
-        entry.kind == TranscriptEntryKind::UserText
-            && entry.text.as_deref() == Some("rejected prompt")
-    }));
+    // A tombstone, not a deletion: the row survives, marked, so clients that saw
+    // it learn of the withdrawal through the ordinary update channel.
+    let placeholder = runtime
+        .transcript
+        .iter()
+        .find(|entry| {
+            entry.kind == TranscriptEntryKind::UserText
+                && entry.text.as_deref() == Some("rejected prompt")
+        })
+        .expect("the placeholder survives as a tombstone");
+    assert!(placeholder.withdrawn);
 }
 
 #[tokio::test]
@@ -3237,6 +3245,7 @@ async fn handle_notification_keeps_late_delta_for_prior_thread() {
                 active_flags: Vec::new(),
                 transcript: vec![TranscriptEntryView {
                     order_seq: None,
+                    withdrawn: false,
                     item_id: Some("msg-1".to_string()),
                     kind: TranscriptEntryKind::AgentText,
                     text: Some("Hello".to_string()),
@@ -3364,6 +3373,7 @@ async fn handle_notification_keeps_late_agent_completion_for_prior_thread() {
                 active_flags: Vec::new(),
                 transcript: vec![TranscriptEntryView {
                     order_seq: None,
+                    withdrawn: false,
                     item_id: Some("msg-1".to_string()),
                     kind: TranscriptEntryKind::AgentText,
                     text: Some("Hello world".to_string()),
@@ -3475,6 +3485,7 @@ async fn runtime_merge_does_not_downgrade_fresh_completed_agent_message() {
                 active_flags: Vec::new(),
                 transcript: vec![TranscriptEntryView {
                     order_seq: None,
+                    withdrawn: false,
                     item_id: Some("msg-1".to_string()),
                     kind: TranscriptEntryKind::AgentText,
                     text: Some("Hello world".to_string()),
@@ -3655,6 +3666,7 @@ async fn handle_notification_keeps_late_command_output_for_prior_thread() {
                 active_flags: Vec::new(),
                 transcript: vec![TranscriptEntryView {
                     order_seq: None,
+                    withdrawn: false,
                     item_id: Some("cmd-1".to_string()),
                     kind: TranscriptEntryKind::Command,
                     text: Some("npm test".to_string()),

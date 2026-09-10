@@ -1968,6 +1968,10 @@ pub struct TranscriptEntryView {
     /// numbered; clients fall back to array order then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_seq: Option<i64>,
+    /// A withdrawn row is delivered but never rendered: the send it represents was
+    /// definitively rejected. Absorbing — clients must OR it across merges.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub withdrawn: bool,
     pub kind: TranscriptEntryKind,
     pub text: Option<String>,
     pub status: String,

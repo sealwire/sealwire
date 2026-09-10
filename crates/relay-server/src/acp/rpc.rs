@@ -597,6 +597,7 @@ pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp
         TranscriptOp::User { item_id, text } => TranscriptEntryView {
             // Numbered when it becomes a runtime record; raw provider parses carry none.
             order_seq: None,
+            withdrawn: false,
             item_id: Some(item_id),
             kind: TranscriptEntryKind::UserText,
             text: Some(text),
@@ -608,6 +609,7 @@ pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp
         TranscriptOp::AgentChunk { item_id, text, .. } => TranscriptEntryView {
             // Numbered when it becomes a runtime record; raw provider parses carry none.
             order_seq: None,
+            withdrawn: false,
             item_id: Some(item_id),
             kind: TranscriptEntryKind::AgentText,
             text: Some(text),
@@ -619,6 +621,7 @@ pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp
         TranscriptOp::ThoughtChunk { item_id, text, .. } => TranscriptEntryView {
             // Numbered when it becomes a runtime record; raw provider parses carry none.
             order_seq: None,
+            withdrawn: false,
             item_id: Some(item_id),
             kind: TranscriptEntryKind::Reasoning,
             text: Some(text),
@@ -638,6 +641,7 @@ pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp
         } => TranscriptEntryView {
             // Numbered when it becomes a runtime record; raw provider parses carry none.
             order_seq: None,
+            withdrawn: false,
             item_id: Some(item_id),
             kind: TranscriptEntryKind::ToolCall,
             text: Some(title.clone()),

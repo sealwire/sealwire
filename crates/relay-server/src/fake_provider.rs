@@ -899,6 +899,7 @@ impl ProviderBridge for FakeProviderBridge {
             let user_entry = TranscriptEntryView {
                 // Numbered when it becomes a runtime record; raw provider parses carry none.
                 order_seq: None,
+                withdrawn: false,
                 item_id: Some(user_item_id.clone()),
                 kind: TranscriptEntryKind::UserText,
                 text: Some(prompt.clone()),
@@ -920,6 +921,7 @@ impl ProviderBridge for FakeProviderBridge {
             let assistant_entry = TranscriptEntryView {
                 // Numbered when it becomes a runtime record; raw provider parses carry none.
                 order_seq: None,
+                withdrawn: false,
                 item_id: Some(assistant_item_id.clone()),
                 kind: TranscriptEntryKind::AgentText,
                 text: Some(reply.clone()),
@@ -1276,6 +1278,7 @@ impl ProviderBridge for FakeProviderBridge {
                     ask_user_entries.push(TranscriptEntryView {
                         // Numbered when it becomes a runtime record; raw provider parses carry none.
                         order_seq: None,
+                        withdrawn: false,
                         item_id: Some(ask_item_id.clone()),
                         kind: TranscriptEntryKind::ToolCall,
                         text: None,
@@ -1288,6 +1291,7 @@ impl ProviderBridge for FakeProviderBridge {
                         ask_user_entries.push(TranscriptEntryView {
                             // Numbered when it becomes a runtime record; raw provider parses carry none.
                             order_seq: None,
+                            withdrawn: false,
                             item_id: Some(ask_user_trailing_item_id.clone()),
                             kind: TranscriptEntryKind::AgentText,
                             text: Some(text),
@@ -1416,6 +1420,7 @@ impl ProviderBridge for FakeProviderBridge {
                 tool_entries.push(TranscriptEntryView {
                     // Numbered when it becomes a runtime record; raw provider parses carry none.
                     order_seq: None,
+                    withdrawn: false,
                     item_id: Some(tool_item_id),
                     kind: entry_kind,
                     text: if is_command {
@@ -1453,6 +1458,7 @@ impl ProviderBridge for FakeProviderBridge {
                     tool_entries.push(TranscriptEntryView {
                         // Numbered when it becomes a runtime record; raw provider parses carry none.
                         order_seq: None,
+                        withdrawn: false,
                         item_id: Some(reasoning_item_id),
                         kind: TranscriptEntryKind::Reasoning,
                         text: Some(reasoning_text),
@@ -1610,6 +1616,7 @@ impl ProviderBridge for FakeProviderBridge {
                     let error_entry = TranscriptEntryView {
                         // Numbered when it becomes a runtime record; raw provider parses carry none.
                         order_seq: None,
+                        withdrawn: false,
                         item_id: Some(format!("fake-error:{turn_id_for_task}")),
                         kind: TranscriptEntryKind::Error,
                         text: Some(error_message.clone()),

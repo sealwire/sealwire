@@ -2484,6 +2484,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     turn_id: Some("turn-1".to_string()),
                     tool: Some(tool),
                     order_seq: 0,
+                    withdrawn: false,
                     last_live_upsert_revision: None,
                 });
         }
@@ -2506,6 +2507,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     turn_id: Some("turn-1".to_string()),
                     tool: Some(tool),
                     order_seq: 0,
+                    withdrawn: false,
                     last_live_upsert_revision: None,
                 });
         }
@@ -2810,6 +2812,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                 .prepend_provider_history(
                     vec![crate::protocol::TranscriptEntryView {
                         order_seq: None,
+                        withdrawn: false,
                         item_id: Some("old-write".to_string()),
                         kind: crate::protocol::TranscriptEntryKind::ToolCall,
                         text: None,
@@ -2854,6 +2857,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                         turn_id: Some("turn-old".to_string()),
                         tool: None,
                         order_seq: 0,
+                        withdrawn: false,
                         last_live_upsert_revision: None,
                     });
             }
@@ -2882,6 +2886,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     active_flags: Vec::new(),
                     transcript: vec![crate::protocol::TranscriptEntryView {
                         order_seq: None,
+                        withdrawn: false,
                         item_id: Some("tail".to_string()),
                         kind: crate::protocol::TranscriptEntryKind::AgentText,
                         text: Some("bounded rebuilt tail".to_string()),
@@ -3122,6 +3127,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     turn_id: Some("turn-1".to_string()),
                     tool: Some(file_tool(&[&linked_edit])),
                     order_seq: 0,
+                    withdrawn: false,
                     last_live_upsert_revision: Some(20),
                 });
             runtime
@@ -3134,6 +3140,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     turn_id: Some("turn-1".to_string()),
                     tool: Some(file_tool(&[&main_edit])),
                     order_seq: 0,
+                    withdrawn: false,
                     last_live_upsert_revision: Some(10),
                 });
         }
@@ -3480,6 +3487,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                         turn_id: Some("turn-chatter".to_string()),
                         tool: None,
                         order_seq: 0,
+                        withdrawn: false,
                         last_live_upsert_revision: None,
                     });
             }
@@ -7246,6 +7254,7 @@ tree; got {}",
             .insert(thread.id.clone(), thread.clone());
         let entry = |item_id: Option<&str>, text: &str| crate::protocol::TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: item_id.map(str::to_string),
             kind: crate::protocol::TranscriptEntryKind::AgentText,
             text: Some(text.to_string()),
@@ -7364,6 +7373,7 @@ tree; got {}",
             .insert(thread.id.clone(), thread.clone());
         let entry = |item_id: &str, text: &str| crate::protocol::TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some(item_id.to_string()),
             kind: crate::protocol::TranscriptEntryKind::AgentText,
             text: Some(text.to_string()),
@@ -7471,6 +7481,7 @@ tree; got {}",
                         active_flags: Vec::new(),
                         transcript: vec![crate::protocol::TranscriptEntryView {
                             order_seq: None,
+                            withdrawn: false,
                             item_id: Some("tail".to_string()),
                             kind: crate::protocol::TranscriptEntryKind::AgentText,
                             text: Some("tail".to_string()),
@@ -7549,6 +7560,7 @@ tree; got {}",
                         active_flags: Vec::new(),
                         transcript: vec![crate::protocol::TranscriptEntryView {
                             order_seq: None,
+                            withdrawn: false,
                             item_id: Some("stale-tail".to_string()),
                             kind: crate::protocol::TranscriptEntryKind::AgentText,
                             text: Some("stale".to_string()),
@@ -9265,6 +9277,7 @@ tree; got {}",
             let initial_user_message =
                 initial_prompt.map(|prompt| crate::protocol::TranscriptEntryView {
                     order_seq: None,
+                    withdrawn: false,
                     item_id: Some("user:provider-initial".to_string()),
                     kind: crate::protocol::TranscriptEntryKind::UserText,
                     text: Some(prompt.to_string()),
@@ -9278,6 +9291,7 @@ tree; got {}",
                 transcript.push(entry);
                 transcript.push(crate::protocol::TranscriptEntryView {
                     order_seq: None,
+                    withdrawn: false,
                     item_id: Some("assistant:provider-reply".to_string()),
                     kind: crate::protocol::TranscriptEntryKind::AgentText,
                     text: Some("provider reply".to_string()),
@@ -13899,6 +13913,7 @@ mod review_tests {
                 let entries = transcripts.entry(thread_id).or_default();
                 entries.push(TranscriptEntryView {
                     order_seq: None,
+                    withdrawn: false,
                     item_id: Some(user_item),
                     kind: TranscriptEntryKind::UserText,
                     text: Some(user_text),
@@ -13909,6 +13924,7 @@ mod review_tests {
                 });
                 entries.push(TranscriptEntryView {
                     order_seq: None,
+                    withdrawn: false,
                     item_id: Some(assistant_item),
                     kind: TranscriptEntryKind::AgentText,
                     text: Some(reply_text),
@@ -14141,6 +14157,7 @@ mod review_tests {
                 let entries = transcripts.entry(thread_id).or_default();
                 entries.push(TranscriptEntryView {
                     order_seq: None,
+                    withdrawn: false,
                     item_id: Some(user_item),
                     kind: TranscriptEntryKind::UserText,
                     text: Some(user_text),
@@ -14152,6 +14169,7 @@ mod review_tests {
                 if emit_assistant && fail_completed_turn.is_none() {
                     entries.push(TranscriptEntryView {
                         order_seq: None,
+                        withdrawn: false,
                         item_id: Some(assistant_item),
                         kind: TranscriptEntryKind::AgentText,
                         text: Some(reply_text.clone()),
@@ -19439,6 +19457,7 @@ settings update: {error}"
                 turn_id: Some("turn-evidence".to_string()),
                 tool: Some(tool),
                 order_seq: 0,
+                withdrawn: false,
                 last_live_upsert_revision: None,
             });
     }
@@ -19473,6 +19492,7 @@ settings update: {error}"
                     turn_id: Some("turn-chatter".to_string()),
                     tool: None,
                     order_seq: 0,
+                    withdrawn: false,
                     last_live_upsert_revision: None,
                 });
         }

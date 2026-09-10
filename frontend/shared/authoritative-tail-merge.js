@@ -75,6 +75,8 @@ function defaultMergeEntry(existing, incoming) {
     ...existing,
     ...incoming,
     text: selectTranscriptText(existing.text, incoming.text),
+    // Absorbing: a copy serialized before the withdrawal must not resurrect the row.
+    ...(existing.withdrawn === true || incoming.withdrawn === true ? { withdrawn: true } : {}),
   };
 }
 

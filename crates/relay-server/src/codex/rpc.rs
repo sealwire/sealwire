@@ -1281,12 +1281,14 @@ mod disconnect_tests {
         let runtime = relay
             .runtime_for_thread("codex-starting")
             .expect("codex runtime");
+        let placeholder = runtime
+            .transcript
+            .iter()
+            .find(|entry| entry.item_id == reservation_id)
+            .expect("provider exit leaves the unbound placeholder as a tombstone");
         assert!(
-            runtime
-                .transcript
-                .iter()
-                .all(|entry| entry.item_id != reservation_id),
-            "provider exit must remove an unbound placeholder before admitting a retry"
+            placeholder.withdrawn,
+            "the tombstone must be marked before admitting a retry"
         );
     }
 }
