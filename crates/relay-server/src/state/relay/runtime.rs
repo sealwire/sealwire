@@ -301,7 +301,7 @@ impl ThreadRuntime {
                 status: entry.status,
                 turn_id: entry.turn_id,
                 tool: entry.tool,
-                seq: None,
+                last_live_upsert_revision: None,
             })
             .collect();
 
@@ -468,7 +468,7 @@ impl ThreadRuntime {
                 status: entry.status,
                 turn_id: entry.turn_id,
                 tool: entry.tool,
-                seq: None,
+                last_live_upsert_revision: None,
             })
             .collect::<Vec<_>>();
         // Paging can split a tool's request from its result across pages. The newer page
@@ -625,9 +625,11 @@ fn merge_runtime_entry(existing: &mut TranscriptRecord, incoming: TranscriptReco
         || existing.turn_id != incoming.turn_id
         || !tool_calls_equal(existing.tool.as_ref(), incoming.tool.as_ref());
     if changed {
-        let seq = incoming.seq.or(existing.seq);
+        let last_live_upsert_revision = incoming
+            .last_live_upsert_revision
+            .or(existing.last_live_upsert_revision);
         *existing = incoming;
-        existing.seq = seq;
+        existing.last_live_upsert_revision = last_live_upsert_revision;
     }
     changed
 }
@@ -727,7 +729,7 @@ mod tests {
         TranscriptRecord {
             item_id: item_id.to_string(),
             // History-shaped: a re-read carries no live sequence number.
-            seq: None,
+            last_live_upsert_revision: None,
             kind: crate::protocol::TranscriptEntryKind::ToolCall,
             text: Some("Reading src/main.rs".to_string()),
             status: "completed".to_string(),
@@ -910,7 +912,7 @@ mod tests {
             status: "completed".to_string(),
             turn_id: None,
             tool: None,
-            seq: None,
+            last_live_upsert_revision: None,
         });
         let older = vec![TranscriptEntryView {
             item_id: Some("older".to_string()),

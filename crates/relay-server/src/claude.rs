@@ -4115,7 +4115,7 @@ mod tests {
                     .transcript
                     .iter()
                     .find(|entry| entry.item_id == "tool:write-b")
-                    .and_then(|entry| entry.seq)
+                    .and_then(|entry| entry.last_live_upsert_revision)
             })
             .expect("completed write should have a seq");
         let proven_at = relay

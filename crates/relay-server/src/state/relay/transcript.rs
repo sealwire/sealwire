@@ -48,9 +48,10 @@ pub(crate) struct TranscriptRecord {
     pub(crate) status: String,
     pub(crate) turn_id: Option<String>,
     pub(crate) tool: Option<ToolCallView>,
-    /// Relay-global clock at the last live upsert. Hydrated/prepended history leaves this unset.
+    /// Relay-global clock at the last live upsert. Hydrated/prepended history leaves this
+    /// unset, and delta/status writes do NOT touch it — it is not a general write stamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) seq: Option<u64>,
+    pub(crate) last_live_upsert_revision: Option<u64>,
 }
 
 impl TranscriptRecord {
@@ -94,7 +95,7 @@ impl RelayState {
                 .iter_mut()
                 .find(|entry| entry.item_id == item_id)
             {
-                entry.seq = Some(revision);
+                entry.last_live_upsert_revision = Some(revision);
             }
         }
     }
@@ -137,7 +138,7 @@ impl RelayState {
                     status,
                     turn_id,
                     tool,
-                    seq: None,
+                    last_live_upsert_revision: None,
                 });
                 entry_seq
             }
@@ -175,7 +176,7 @@ impl RelayState {
             } else {
                 tool
             };
-            entry.seq = Some(revision);
+            entry.last_live_upsert_revision = Some(revision);
             return transcript_mutation_meta(base_revision, revision, index as u64 + 1);
         }
 
@@ -188,7 +189,7 @@ impl RelayState {
             status,
             turn_id,
             tool,
-            seq: Some(revision),
+            last_live_upsert_revision: Some(revision),
         });
         transcript_mutation_meta(base_revision, revision, entry_seq)
     }
@@ -296,7 +297,7 @@ impl RelayState {
                     status: "streaming".to_string(),
                     turn_id: Some(turn_id.to_string()),
                     tool: None,
-                    seq: None,
+                    last_live_upsert_revision: None,
                 });
                 (entry_seq, 0)
             }
@@ -863,7 +864,7 @@ impl RelayState {
                     status: "running".to_string(),
                     turn_id: None,
                     tool: None,
-                    seq: None,
+                    last_live_upsert_revision: None,
                 });
                 entry_seq
             }
