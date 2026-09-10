@@ -28,6 +28,7 @@ import {
   getFileChanges,
   parseUnifiedDiffRows,
 } from "./file-change-diff.js";
+import { transcriptRowKey } from "./transcript-row-key.js";
 import { renderMarkdown, renderStreamingMarkdown } from "./markdown.js";
 import { didPrependOlderTranscript } from "./transcript-scroll.js";
 
@@ -101,7 +102,7 @@ function transcriptEntryDomAttrs(
   extras = null,
   { justPrepended = false, inGroup = false } = {}
 ) {
-  const itemId = entry?.item_id || entry?.id || "";
+  const itemId = transcriptRowKey(entry) || "";
   let finalClassName = inGroup ? `${className} is-group-member` : className;
   if (justPrepended) {
     finalClassName = `${finalClassName} chat-message-just-prepended`;
@@ -2459,7 +2460,7 @@ export function collapseDuplicateTranscriptRows(entries) {
   let collapsed = null;
   for (let index = 0; index < entries.length; index += 1) {
     const entry = entries[index];
-    const itemId = entry?.item_id || entry?.id || "";
+    const itemId = transcriptRowKey(entry) || "";
     if (!itemId) {
       if (collapsed) collapsed.push(entry);
       continue;
@@ -2499,7 +2500,7 @@ export function TranscriptContent({
     for (let index = entries.length - 1; index >= 0; index -= 1) {
       const entry = entries[index];
       if (entry?.kind === "user_text") {
-        return entry.item_id || entry.id || "";
+        return transcriptRowKey(entry) || "";
       }
     }
     return "";
@@ -2622,7 +2623,7 @@ export function TranscriptContent({
       return;
     }
 
-    const entryId = item.item_id || item.id || "";
+    const entryId = transcriptRowKey(item) || "";
     const pinnedRequestId = entryId ? pinnedAskUserItemIds.get(entryId) : null;
     if (pinnedRequestId) {
       // Hold the ROW back and hand it to the footer's card as a prop. Holding back
