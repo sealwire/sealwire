@@ -4180,12 +4180,11 @@ async fn a_settlement_before_attach_sub_task_thread_is_refused_and_released() {
     );
 }
 
-/// `Replied` proves the agent SPOKE, not that it worked. A dev that answers
-/// "I couldn't do this" and spends nothing must not open the reviewer gate —
-/// otherwise a reviewer runs against an unchanged branch, burns both rounds and
-/// escalates, which is the false failure this whole feature exists to stop.
+/// A fresh developer reply is evidence for the independent reviewer to judge;
+/// billing is not a second truth source. In particular, a provider that reports
+/// zero usage must not strand an otherwise reviewable verification report.
 #[tokio::test]
-async fn a_dev_turn_that_replies_but_bills_nothing_leaves_the_gate_shut() {
+async fn a_fresh_dev_reply_opens_no_change_review_even_when_usage_is_zero() {
     let (_repo, root) = init_team_repo().await;
     let (app, providers) = build_review_app(&root, &["codex"]).await;
     // The provider reports a figure, and that figure is zero.
@@ -4213,31 +4212,29 @@ async fn a_dev_turn_that_replies_but_bills_nothing_leaves_the_gate_shut() {
     let mut input = team_input(&root);
     input.dev_provider = "codex".to_string();
     let run_id = app.start_team_run(input).await.expect("start");
-    // A gate refusal settles the run `Paused` at a boundary, the same terminal
-    // `a_reviewer_turn_is_refused_without_a_landed_dev_turn` waits for.
-    let run = wait_for_team_status(&app, &run_id, crate::state::TeamRunStatus::Paused).await;
+    let run = wait_for_team_to_settle(&app, &run_id).await;
 
     assert!(
         matches!(
             dev_outcome.lock().await.clone(),
             Some(relay_api::team::TeamTurnOutcome::Replied(_))
         ),
-        "the premise: the dev DID reply, it just did no work"
+        "the premise: this turn produced a fresh developer reply"
     );
     assert_eq!(
-        run.sub_tasks[0].dev_turns_landed, 0,
-        "a turn that billed nothing has not landed"
+        run.sub_tasks[0].dev_turns_landed, 1,
+        "fresh no-change evidence should count as a landed developer result"
     );
+    assert_eq!(run.sub_tasks[0].review_claim.as_deref(), Some(REVIEW_REPLY));
     match reviewer_outcomes.lock().await.first() {
-        Some(relay_api::team::TeamTurnOutcome::Failed(reason)) => assert_eq!(
-            reason, "This step hasn't produced any work yet. You can resume to run it again.",
-            "the reviewer must be refused by the gate"
-        ),
-        other => panic!("the reviewer must not run against an unchanged branch: {other:?}"),
+        Some(relay_api::team::TeamTurnOutcome::Replied(reply)) => {
+            assert_eq!(reply, REVIEW_REPLY, "the independent reviewer must run")
+        }
+        other => panic!("fresh no-change evidence must reach the reviewer: {other:?}"),
     }
     assert_eq!(
-        run.sub_tasks[0].rounds_used, 0,
-        "no review budget was spent"
+        run.sub_tasks[0].rounds_used, 1,
+        "one real reviewer round was spent"
     );
     assert_ne!(
         run.sub_tasks[0].status,
@@ -4245,11 +4242,10 @@ async fn a_dev_turn_that_replies_but_bills_nothing_leaves_the_gate_shut() {
     );
 }
 
-/// Billing proves that a provider turn ran, not that the implementation role
-/// intentionally submitted a verification-only result. Ordinary prose remains
-/// non-reviewable without the explicit no-change marker.
+/// The marker is an optional hint, not a protocol gate. Natural-language evidence
+/// from this exact developer turn must reach the independent reviewer unchanged.
 #[tokio::test]
-async fn a_billed_plain_no_change_reply_does_not_become_a_claim() {
+async fn an_unmarked_fresh_dev_reply_becomes_no_change_review_evidence() {
     let (_repo, root) = init_team_repo().await;
     let (app, providers) = build_review_app(&root, &["codex"]).await;
     providers
@@ -4259,6 +4255,15 @@ async fn a_billed_plain_no_change_reply_does_not_become_a_claim() {
         .lock()
         .await
         .replace((1_200, None, false));
+    providers
+        .get("codex")
+        .unwrap()
+        .scripted_replies
+        .lock()
+        .await
+        .push_back(
+            "I verified the generated schema against all fixtures; 18/18 passed.".to_string(),
+        );
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
     let app_for_driver = app.clone();
@@ -4275,17 +4280,19 @@ async fn a_billed_plain_no_change_reply_does_not_become_a_claim() {
     let mut input = team_input(&root);
     input.dev_provider = "codex".to_string();
     let run_id = app.start_team_run(input).await.expect("start");
-    let run = wait_for_team_status(&app, &run_id, crate::state::TeamRunStatus::Paused).await;
+    let run = wait_for_team_to_settle(&app, &run_id).await;
 
     let task = &run.sub_tasks[0];
-    assert_eq!(task.dev_turns_landed, 0);
-    assert_eq!(task.review_claim, None);
+    assert_eq!(task.dev_turns_landed, 1);
+    assert_eq!(
+        task.review_claim.as_deref(),
+        Some("I verified the generated schema against all fixtures; 18/18 passed.")
+    );
     match reviewer_outcomes.lock().await.first() {
-        Some(relay_api::team::TeamTurnOutcome::Failed(reason)) => assert_eq!(
-            reason,
-            "This step hasn't produced any work yet. You can resume to run it again."
-        ),
-        other => panic!("unmarked billed prose must not reach the reviewer: {other:?}"),
+        Some(relay_api::team::TeamTurnOutcome::Replied(reply)) => {
+            assert_eq!(reply, REVIEW_REPLY, "the independent reviewer must run")
+        }
+        other => panic!("unmarked fresh evidence must reach the reviewer: {other:?}"),
     };
 }
 
@@ -4456,11 +4463,10 @@ async fn a_dev_turn_that_bills_tokens_and_commits_opens_the_reviewer_gate() {
     );
 }
 
-/// Missing usage, a mismatched turn id, and an absent record are all empty.
-/// A reply without matching successful spend and without work vs the
-/// checkpoint must not open review or burn rounds into Escalated.
+/// Usage telemetry can be missing even though the turn's fresh assistant entry
+/// is present. The reply remains reviewable no-change evidence.
 #[tokio::test]
-async fn a_dev_turn_with_no_usage_figure_at_all_leaves_the_gate_shut() {
+async fn a_fresh_dev_reply_without_a_usage_figure_still_opens_no_change_review() {
     let (_repo, root) = init_team_repo().await;
     let (app, providers) = build_review_app(&root, &["codex"]).await;
     // Deliberately NOT setting `report_turn_usage`: nothing is reported.
@@ -4481,30 +4487,30 @@ async fn a_dev_turn_with_no_usage_figure_at_all_leaves_the_gate_shut() {
     let mut input = team_input(&root);
     input.dev_provider = "codex".to_string();
     let run_id = app.start_team_run(input).await.expect("start");
-    let run = wait_for_team_status(&app, &run_id, crate::state::TeamRunStatus::Paused).await;
+    let run = wait_for_team_to_settle(&app, &run_id).await;
 
     assert_eq!(
-        run.sub_tasks[0].dev_turns_landed, 0,
-        "absent usage is empty, not a fallback yes"
+        run.sub_tasks[0].dev_turns_landed, 1,
+        "fresh reply evidence does not depend on optional usage telemetry"
     );
+    assert_eq!(run.sub_tasks[0].review_claim.as_deref(), Some(REVIEW_REPLY));
     match reviewer_outcomes.lock().await.first() {
-        Some(relay_api::team::TeamTurnOutcome::Failed(reason)) => assert_eq!(
-            reason, "This step hasn't produced any work yet. You can resume to run it again.",
-            "the reviewer must be refused by the gate"
-        ),
-        other => panic!("empty output must not schedule a reviewer: {other:?}"),
+        Some(relay_api::team::TeamTurnOutcome::Replied(reply)) => {
+            assert_eq!(reply, REVIEW_REPLY)
+        }
+        other => panic!("fresh reply evidence must schedule a reviewer: {other:?}"),
     }
-    assert_eq!(run.sub_tasks[0].rounds_used, 0);
+    assert_eq!(run.sub_tasks[0].rounds_used, 1);
     assert_ne!(
         run.sub_tasks[0].status,
         crate::state::SubTaskStatus::Escalated
     );
 }
 
-/// The record is never cleared, so a leftover figure for another turn is not
-/// this turn's evidence. Mismatched ids are empty, same as a missing record.
+/// A leftover usage figure for another turn cannot validate or invalidate this
+/// turn. The fresh reply carries its own no-change evidence.
 #[tokio::test]
-async fn a_spend_figure_from_another_turn_is_empty_output() {
+async fn a_fresh_dev_reply_ignores_a_spend_figure_from_another_turn() {
     let (_repo, root) = init_team_repo().await;
     let (app, providers) = build_review_app(&root, &["codex"]).await;
     providers
@@ -4531,20 +4537,20 @@ async fn a_spend_figure_from_another_turn_is_empty_output() {
     let mut input = team_input(&root);
     input.dev_provider = "codex".to_string();
     let run_id = app.start_team_run(input).await.expect("start");
-    let run = wait_for_team_status(&app, &run_id, crate::state::TeamRunStatus::Paused).await;
+    let run = wait_for_team_to_settle(&app, &run_id).await;
 
     assert_eq!(
-        run.sub_tasks[0].dev_turns_landed, 0,
-        "a figure for a different turn is not this turn's evidence"
+        run.sub_tasks[0].dev_turns_landed, 1,
+        "a stale usage figure must not erase this turn's reply"
     );
+    assert_eq!(run.sub_tasks[0].review_claim.as_deref(), Some(REVIEW_REPLY));
     match reviewer_outcomes.lock().await.first() {
-        Some(relay_api::team::TeamTurnOutcome::Failed(reason)) => assert_eq!(
-            reason,
-            "This step hasn't produced any work yet. You can resume to run it again."
-        ),
-        other => panic!("mismatched usage must not schedule a reviewer: {other:?}"),
+        Some(relay_api::team::TeamTurnOutcome::Replied(reply)) => {
+            assert_eq!(reply, REVIEW_REPLY)
+        }
+        other => panic!("fresh reply evidence must schedule a reviewer: {other:?}"),
     }
-    assert_eq!(run.sub_tasks[0].rounds_used, 0);
+    assert_eq!(run.sub_tasks[0].rounds_used, 1);
     assert_ne!(
         run.sub_tasks[0].status,
         crate::state::SubTaskStatus::Escalated
@@ -5042,9 +5048,9 @@ async fn a_dev_turn_with_billed_but_failed_usage_leaves_the_gate_shut() {
     );
 }
 
-/// Prior run work vs `run.base_commit` must not land an empty current
-/// sub-task. With no sub-task checkpoint, the tree is empty for this step —
-/// falling back to the run base would schedule review on someone else's diff.
+/// Prior run work vs `run.base_commit` must not become this sub-task's candidate.
+/// A fresh reply may still open no-change review, but it must remain a claim-only
+/// subject rather than falling back to somebody else's diff.
 #[tokio::test]
 async fn prior_run_work_does_not_land_a_sub_task_without_its_own_checkpoint() {
     let (_repo, root) = init_team_repo().await;
@@ -5061,7 +5067,7 @@ async fn prior_run_work_does_not_land_a_sub_task_without_its_own_checkpoint() {
     let mut input = team_input(&root);
     input.dev_provider = "codex".to_string();
     let run_id = app.start_team_run(input).await.expect("start");
-    let run = wait_for_team_status(&app, &run_id, crate::state::TeamRunStatus::Paused).await;
+    let run = wait_for_team_status(&app, &run_id, crate::state::TeamRunStatus::Failed).await;
 
     assert!(
         run.sub_tasks[0].base_commit.is_empty(),
@@ -5072,15 +5078,16 @@ async fn prior_run_work_does_not_land_a_sub_task_without_its_own_checkpoint() {
         "the run still has a base — the unsafe fallback's temptation"
     );
     assert_eq!(
-        run.sub_tasks[0].dev_turns_landed, 0,
-        "prior run work must not count as this sub-task's output"
+        run.sub_tasks[0].dev_turns_landed, 1,
+        "the current reply, not prior run work, is this sub-task's output"
     );
+    assert!(run.sub_tasks[0].candidate_sha.is_empty());
+    assert_eq!(run.sub_tasks[0].review_claim.as_deref(), Some(REVIEW_REPLY));
     match reviewer_outcomes.lock().await.first() {
-        Some(relay_api::team::TeamTurnOutcome::Failed(reason)) => assert_eq!(
-            reason,
-            "This step hasn't produced any work yet. You can resume to run it again."
-        ),
-        other => panic!("empty sub-task checkpoint must not schedule a reviewer: {other:?}"),
+        Some(relay_api::team::TeamTurnOutcome::Replied(reply)) => {
+            assert_eq!(reply, REVIEW_REPLY)
+        }
+        other => panic!("claim-only review should run without a Git candidate: {other:?}"),
     }
     assert_eq!(run.sub_tasks[0].rounds_used, 0);
     assert_ne!(

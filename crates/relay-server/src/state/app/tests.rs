@@ -13443,7 +13443,8 @@ mod review_tests {
             // A reviewer/re-review turn always carries relay-collected evidence;
             // committed Git-object targets replaced raw workspace diffs for git reviews.
             let is_reviewer_diff_turn = text.contains("Workspace diff collected by the relay")
-                || text.contains("Committed review target");
+                || text.contains("Committed review target")
+                || text.contains("No repository changes were produced by this author turn");
             let is_reviewer_turn = text.contains("You are reviewing another agent's work");
             let is_team_dev_turn = text.contains("You are the developer on one sub-task")
                 || text.contains("Next sub-task in the same group")
@@ -15626,7 +15627,7 @@ resurrected into a turn that never completes: {:?}",
     }
 
     #[tokio::test]
-    async fn clean_turn_baseline_equal_to_head_reviews_the_last_commit() {
+    async fn clean_turn_baseline_equal_to_head_reviews_the_current_author_report() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         init_git_seed(cwd);
@@ -15659,8 +15660,8 @@ resurrected into a turn that never completes: {:?}",
             .expect("review should start");
         let job = wait_for_review(&app, &receipt.review_job_id).await;
         assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
-        assert_eq!(job.base_sha.as_deref(), Some(base.as_str()));
-        assert_eq!(job.candidate_sha.as_deref(), Some(candidate.as_str()));
+        assert_eq!(job.base_sha.as_deref(), Some(candidate.as_str()));
+        assert_eq!(job.candidate_sha, None);
 
         let turns = provider.turns.lock().await.clone();
         assert!(
@@ -15671,10 +15672,18 @@ resurrected into a turn that never completes: {:?}",
         );
         let prompt = turns
             .iter()
-            .find(|(_, text)| text.contains("Committed review target"))
+            .find(|(_, text)| {
+                text.contains("No repository changes were produced by this author turn")
+            })
             .map(|(_, text)| text)
-            .expect("reviewer prompt");
-        assert!(prompt.contains(&format!("Range: {base}..{candidate}")));
+            .expect("no-change reviewer prompt");
+        assert!(prompt.contains(REVIEW_REPLY), "{prompt}");
+        assert!(prompt.contains("untrusted evidence"), "{prompt}");
+        assert!(
+            prompt.contains("Do not review an unrelated historical commit"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains(&format!("Range: {base}..{candidate}")));
     }
 
     #[tokio::test]
@@ -16682,6 +16691,7 @@ one that was dirty going in"
         // fall back to driving a real recap turn rather than briefing the reviewer empty.
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
         let (app, providers) = build_review_app(cwd, &["codex"]).await;
         let parent = start_parent(&app, cwd, "codex").await;
         // No turn has run on the parent → no assistant message to brief from.
@@ -16701,6 +16711,20 @@ one that was dirty going in"
                 .iter()
                 .any(|(tid, prompt)| tid == &parent.id && prompt.contains("recap the changes")),
             "last_message with no parent message must fall back to a recap turn: {turns:?}"
+        );
+        let reviewer_thread = job.reviewer_thread_id.expect("reviewer thread id");
+        let prompt = turns
+            .iter()
+            .find(|(tid, prompt)| {
+                tid == &reviewer_thread
+                    && prompt.contains("No repository changes were produced by this author turn")
+            })
+            .map(|(_, prompt)| prompt)
+            .expect("the recovery reply should be reviewed as no-change evidence");
+        assert!(prompt.contains(REVIEW_REPLY), "{prompt}");
+        assert!(
+            !prompt.contains("Committed review target"),
+            "the fallback must not silently retarget an old commit: {prompt}"
         );
     }
 
@@ -16788,6 +16812,91 @@ one that was dirty going in"
         assert_eq!(
             turns[5].0, parent.id,
             "second review posts back to the parent"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_reuses_a_bound_reviewer_for_a_fresh_no_change_report() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        queue_verdicts(provider, &["APPROVE", "APPROVE"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        app.send_message(crate::protocol::SendMessageInput {
+            text: "verify the current schema without changing it".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            thread_id: parent.id.clone(),
+        })
+        .await
+        .expect("author verification turn should start");
+        wait_for_active_turn_idle(&app).await;
+
+        let mut first_input = review_input("codex");
+        first_input.recap_source = Some("last_message".to_string());
+        let first = app
+            .request_review(first_input)
+            .await
+            .expect("first review should start");
+        let first_job = wait_for_review(&app, &first.review_job_id).await;
+        assert_eq!(
+            first_job.status, "complete",
+            "job failed: {:?}",
+            first_job.error
+        );
+        let reviewer = first_job
+            .reviewer_thread_id
+            .clone()
+            .expect("reviewer thread id");
+        wait_for_active_turn_idle(&app).await;
+
+        app.send_message(crate::protocol::SendMessageInput {
+            text: "verify it once more; do not edit files".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            thread_id: parent.id.clone(),
+        })
+        .await
+        .expect("second author verification turn should start");
+        wait_for_active_turn_idle(&app).await;
+
+        let mut reuse = review_input("codex");
+        reuse.recap_source = Some("last_message".to_string());
+        reuse.reviewer_thread_id = Some(reviewer.clone());
+        let second = app
+            .request_review(reuse)
+            .await
+            .expect("bound reviewer should accept no-change review");
+        let second_job = wait_for_review(&app, &second.review_job_id).await;
+        assert_eq!(
+            second_job.status, "complete",
+            "reuse job failed: {:?}",
+            second_job.error
+        );
+
+        let turns = provider.turns.lock().await.clone();
+        let prompts = turns
+            .iter()
+            .filter(|(thread_id, prompt)| {
+                thread_id == &reviewer
+                    && prompt.contains("No repository changes were produced by this author turn")
+            })
+            .map(|(_, prompt)| prompt)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            prompts.len(),
+            2,
+            "both clean turns should be reviewed: {turns:?}"
+        );
+        assert!(
+            prompts[1].contains("You previously reviewed this repository"),
+            "the second no-change review must retain bound-reviewer context: {}",
+            prompts[1]
         );
     }
 
