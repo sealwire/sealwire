@@ -18,6 +18,7 @@ import { formatRelativeTime, formatTimestamp } from "../remote/utils.js";
 import { ToggleLeftPanelIcon } from "./panel-icons.js";
 import { TaskBoard } from "./task-board-react.js";
 import { bindTaskWorkspaceResizeHandle } from "./task-workspace-resize.js";
+import { visibleTranscriptEntries } from "./withdrawn-transcript.js";
 import { TranscriptPane } from "./transcript-pane.js";
 import {
   availableTeamActions,
@@ -322,7 +323,7 @@ export function OrchestratorPane({
         : h(TranscriptPane, {
             // Never null: ConversationPanel reads `entries.length`, and the
             // loading branch above deliberately gets here before the first page.
-            entries: transcriptEntries || [],
+            entries: visibleTranscriptEntries(transcriptEntries),
             hydrationLoading: transcriptLoading,
             // The renderer emits Copy, fork, tool toggles and file-change
             // actions here exactly as it does in the conversation. Without a
