@@ -2152,19 +2152,6 @@ pub(crate) async fn is_git_work_tree(workspace: &TrustedWorkspace) -> Result<boo
     Ok(output.status.success())
 }
 
-pub(crate) async fn first_parent_sha(
-    workspace: &TrustedWorkspace,
-    commit: &str,
-) -> Result<Option<String>, String> {
-    let spec = format!("{commit}^");
-    let output = run_git_capture(workspace, &["rev-parse", "--verify", "--quiet", &spec]).await?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let parent = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok((!parent.is_empty()).then_some(parent))
-}
-
 pub(crate) async fn has_uncommitted_changes(workspace: &TrustedWorkspace) -> Result<bool, String> {
     for (status, path) in status_entries(workspace).await? {
         if status != "??" || !is_symlink(workspace, &path).await {

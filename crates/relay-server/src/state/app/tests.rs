@@ -12794,6 +12794,9 @@ mod review_tests {
         // When true, author turns that are explicitly asked to commit (or to
         // address review findings) commit any dirty work in the test repository.
         auto_commit_author_changes: Arc<AtomicBool>,
+        // One-shot: a missing-last-message recap writes and commits a change. This
+        // models recovery itself producing the candidate under review.
+        commit_on_recap_turn: Arc<AtomicBool>,
         // AskUserQuestion request ids that were actually ANSWERED through the
         // bridge. A parked turn watches this rather than the pending map, because
         // cleanup also empties that map — and a turn that was drained must not
@@ -12929,6 +12932,7 @@ mod review_tests {
                 fail_next_turn_live_delay_ms: Arc::new(AtomicU64::new(0)),
                 fail_work_turns_with: Arc::new(Mutex::new(None)),
                 auto_commit_author_changes: Arc::new(AtomicBool::new(true)),
+                commit_on_recap_turn: Arc::new(AtomicBool::new(false)),
                 answered_asks: Arc::new(Mutex::new(std::collections::HashSet::new())),
                 reviewer_verdicts: Arc::new(Mutex::new(std::collections::VecDeque::new())),
                 raise_approval_on_fix_turn: Arc::new(AtomicBool::new(false)),
@@ -13453,6 +13457,7 @@ mod review_tests {
             // The parent fix turn (driven between rounds) carries this marker.
             let is_fix_turn = text.contains("Address the findings below");
             let is_commit_required_turn = text.contains("needs a committed candidate");
+            let is_recap_turn = text.contains("recap the changes");
             if is_reviewer_turn && self.fail_reviewer_start.load(Ordering::Relaxed) {
                 // Model a response-loss race: the provider has started work and
                 // published liveness, but the start request itself returns an
@@ -13562,6 +13567,16 @@ mod review_tests {
             {
                 if let Some(cwd) = self.cwd_for_thread(&thread_id).await {
                     Self::commit_all_if_dirty(&cwd, "review candidate");
+                }
+            }
+            if is_recap_turn && self.commit_on_recap_turn.swap(false, Ordering::Relaxed) {
+                if let Some(cwd) = self.cwd_for_thread(&thread_id).await {
+                    std::fs::write(
+                        std::path::Path::new(&cwd).join("recovered-candidate.txt"),
+                        "created during recap recovery\n",
+                    )
+                    .expect("recap recovery should write its candidate");
+                    Self::commit_all_if_dirty(&cwd, "recap recovery candidate");
                 }
             }
             if is_team_dev_turn && self.auto_commit_author_changes.load(Ordering::Relaxed) {
@@ -15515,17 +15530,27 @@ resurrected into a turn that never completes: {:?}",
         let cwd = dir.path().to_str().unwrap();
         init_git_seed(cwd);
         let base = git_head(cwd);
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        queue_verdicts(provider, &["APPROVE"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        app.send_message(crate::protocol::SendMessageInput {
+            text: "implement the candidate".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            thread_id: parent.id,
+        })
+        .await
+        .expect("author turn should start");
         std::fs::write(
             std::path::Path::new(cwd).join("seed.txt"),
             "line1\nline2\nRAW_DIFF_PAYLOAD_SHOULD_NOT_APPEAR\n",
         )
         .unwrap();
         let candidate = git_commit_all(cwd, "candidate");
-
-        let (app, providers) = build_review_app(cwd, &["codex"]).await;
-        let provider = providers.get("codex").unwrap();
-        queue_verdicts(provider, &["APPROVE"]).await;
-        start_parent(&app, cwd, "codex").await;
+        wait_for_active_turn_idle(&app).await;
 
         let receipt = app
             .request_review(review_input("codex"))
@@ -15687,6 +15712,62 @@ resurrected into a turn that never completes: {:?}",
     }
 
     #[tokio::test]
+    async fn no_change_approval_is_invalidated_when_head_moves_after_the_prompt() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        provider.complete_delay_ms.store(250, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        app.send_message(crate::protocol::SendMessageInput {
+            text: "verify the current state without changing it".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            thread_id: parent.id,
+        })
+        .await
+        .expect("verification turn should start");
+        wait_for_active_turn_idle(&app).await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        wait_for_provider_turn(
+            provider,
+            "No repository changes were produced by this author turn",
+        )
+        .await;
+        std::fs::write(
+            std::path::Path::new(cwd).join("late.txt"),
+            "landed after the no-change reviewer prompt\n",
+        )
+        .unwrap();
+        let later_head = git_commit_all(cwd, "later head");
+
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        assert_eq!(job.verdict.as_deref(), Some("needs_changes"));
+        assert_eq!(job.candidate_sha.as_deref(), Some(later_head.as_str()));
+        assert!(job.verdict_candidate_sha.is_none());
+        let stored_review = app
+            .relay
+            .read()
+            .await
+            .review_job(&receipt.review_job_id)
+            .and_then(|job| job.review_text.clone())
+            .unwrap_or_default();
+        assert!(
+            stored_review.contains("approval is stale"),
+            "approval of the old no-change snapshot must not survive HEAD movement"
+        );
+    }
+
+    #[tokio::test]
     async fn recorded_turn_baseline_from_another_workspace_is_ignored() {
         let dir = TempDir::new().expect("tmpdir");
         let repo_a = dir.path().join("repo-a");
@@ -15703,13 +15784,13 @@ resurrected into a turn that never completes: {:?}",
         )
         .unwrap();
         let foreign_base = git_commit_all(&repo_a_cwd, "repo a distinct candidate");
-        let expected_base = git_head(&repo_b_cwd);
+        let expected_head = git_head(&repo_b_cwd);
         assert_ne!(
-            foreign_base, expected_base,
+            foreign_base, expected_head,
             "the fixture needs an actually foreign commit"
         );
         std::fs::write(repo_b.join("seed.txt"), "line1\nline2\nrepo b candidate\n").unwrap();
-        let candidate = git_commit_all(&repo_b_cwd, "repo b candidate");
+        let historical_candidate = git_commit_all(&repo_b_cwd, "repo b candidate");
 
         let (app, providers) = build_review_app(&repo_b_cwd, &["codex"]).await;
         let provider = providers.get("codex").unwrap();
@@ -15727,18 +15808,20 @@ resurrected into a turn that never completes: {:?}",
             .expect("review should start");
         let job = wait_for_review(&app, &receipt.review_job_id).await;
         assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
-        assert_eq!(job.base_sha.as_deref(), Some(expected_base.as_str()));
-        assert_eq!(job.candidate_sha.as_deref(), Some(candidate.as_str()));
+        assert_eq!(job.base_sha.as_deref(), Some(historical_candidate.as_str()));
+        assert_eq!(job.candidate_sha, None);
 
         let turns = provider.turns.lock().await.clone();
         let prompt = turns
             .iter()
-            .find(|(_, text)| text.contains("Committed review target"))
+            .find(|(_, text)| {
+                text.contains("No repository changes were produced by this author turn")
+            })
             .map(|(_, text)| text)
             .expect("reviewer prompt");
         assert!(
-            !prompt.contains(&foreign_base) && prompt.contains(&candidate),
-            "a baseline from another repo must not be used: {prompt}"
+            !prompt.contains(&foreign_base) && !prompt.contains(&historical_candidate),
+            "a foreign/missing baseline must not silently select a historical commit: {prompt}"
         );
     }
 
@@ -15797,6 +15880,22 @@ resurrected into a turn that never completes: {:?}",
         let cwd = dir.path().to_str().unwrap();
         init_git_seed(cwd);
         let base = git_head(cwd);
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        provider
+            .auto_commit_author_changes
+            .store(false, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        app.send_message(crate::protocol::SendMessageInput {
+            text: "add the ignore rule".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            thread_id: parent.id,
+        })
+        .await
+        .expect("author turn should start");
         // The trailing slash in a `node_modules/` ignore pattern matches directories
         // only; a worktree that links `node_modules` in as a SYMLINK is never matched
         // by it, so `git status` reports the symlink untracked forever.
@@ -15812,18 +15911,10 @@ resurrected into a turn that never completes: {:?}",
             std::path::Path::new(cwd).join("node_modules"),
         )
         .expect("symlink");
-
-        let (app, providers) = build_review_app(cwd, &["codex"]).await;
-        let provider = providers.get("codex").unwrap();
+        wait_for_active_turn_idle(&app).await;
         // If the (buggy) code asks the author to commit anyway, nobody must silently
         // resolve that by committing the symlink itself — the assertions below need to
         // see the ask, not a phantom commit papering over it.
-        provider
-            .auto_commit_author_changes
-            .store(false, Ordering::Relaxed);
-        queue_verdicts(provider, &["APPROVE"]).await;
-        start_parent(&app, cwd, "codex").await;
-
         let receipt = app
             .request_review(review_input("codex"))
             .await
@@ -16430,18 +16521,28 @@ one that was dirty going in"
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         init_git_seed(cwd);
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        provider.complete_delay_ms.store(250, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        app.send_message(crate::protocol::SendMessageInput {
+            text: "implement candidate one".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            thread_id: parent.id,
+        })
+        .await
+        .expect("author turn should start");
         std::fs::write(
             std::path::Path::new(cwd).join("seed.txt"),
             "line1\nline2\ncandidate one\n",
         )
         .unwrap();
         let prompted_candidate = git_commit_all(cwd, "candidate one");
-
-        let (app, providers) = build_review_app(cwd, &["codex"]).await;
-        let provider = providers.get("codex").unwrap();
-        provider.complete_delay_ms.store(250, Ordering::Relaxed);
-        queue_verdicts(provider, &["APPROVE"]).await;
-        start_parent(&app, cwd, "codex").await;
+        wait_for_active_turn_idle(&app).await;
 
         let receipt = app
             .request_review(review_input("codex"))
@@ -16492,18 +16593,28 @@ one that was dirty going in"
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         init_git_seed(cwd);
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        provider.complete_delay_ms.store(250, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE", "APPROVE"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        app.send_message(crate::protocol::SendMessageInput {
+            text: "implement candidate one".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            thread_id: parent.id,
+        })
+        .await
+        .expect("author turn should start");
         std::fs::write(
             std::path::Path::new(cwd).join("seed.txt"),
             "line1\nline2\ncandidate one\n",
         )
         .unwrap();
         let first_candidate = git_commit_all(cwd, "candidate one");
-
-        let (app, providers) = build_review_app(cwd, &["codex"]).await;
-        let provider = providers.get("codex").unwrap();
-        provider.complete_delay_ms.store(250, Ordering::Relaxed);
-        queue_verdicts(provider, &["APPROVE", "APPROVE"]).await;
-        start_parent(&app, cwd, "codex").await;
+        wait_for_active_turn_idle(&app).await;
 
         let mut input = review_input("codex");
         input.max_rounds = Some(2);
@@ -16559,15 +16670,27 @@ one that was dirty going in"
         let cwd = dir.path().to_str().unwrap();
         init_git_seed(cwd);
         let base = git_head(cwd);
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        let parent = start_parent(&app, cwd, "codex").await;
+        app.send_message(crate::protocol::SendMessageInput {
+            text: "implement candidate one".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            thread_id: parent.id,
+        })
+        .await
+        .expect("author turn should start");
         std::fs::write(
             std::path::Path::new(cwd).join("seed.txt"),
             "line1\nline2\ncandidate one\n",
         )
         .unwrap();
         git_commit_all(cwd, "candidate one");
+        wait_for_active_turn_idle(&app).await;
 
-        let (app, providers) = build_review_app(cwd, &["codex"]).await;
-        let provider = providers.get("codex").unwrap();
         provider
             .mutate_cwd_on_fix_turn
             .lock()
@@ -16579,8 +16702,6 @@ one that was dirty going in"
             .await
             .push_back("ROUND_ONE_FINDING_CONTEXT".to_string());
         queue_verdicts(provider, &["NEEDS_CHANGES", "APPROVE"]).await;
-        start_parent(&app, cwd, "codex").await;
-
         let mut input = review_input("codex");
         input.max_rounds = Some(2);
         let receipt = app.request_review(input).await.expect("review accepted");
@@ -16725,6 +16846,67 @@ one that was dirty going in"
         assert!(
             !prompt.contains("Committed review target"),
             "the fallback must not silently retarget an old commit: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recap_recovery_binds_a_commit_to_the_head_from_before_recovery() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        let recovery_base = git_head(cwd);
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        provider.commit_on_recap_turn.store(true, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        // Hold the LastMessage provider fallback after request-time target pinning.
+        // Clearing the job target models a transient pin failure; recovery must read
+        // HEAD again before it asks the author to recap.
+        let before_reads = provider.read_thread_arrivals();
+        let read_latch = provider.hold_read_thread_barrier().await;
+        let mut input = review_input("codex");
+        input.recap_source = Some("last_message".to_string());
+        let receipt = app
+            .request_review(input)
+            .await
+            .expect("review should start");
+        for _ in 0..2_000 {
+            if provider.read_thread_arrivals() > before_reads {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+        assert!(provider.read_thread_arrivals() > before_reads);
+        app.relay
+            .write()
+            .await
+            .update_review_job(&receipt.review_job_id, |job| {
+                job.base_sha = None;
+                job.round_base_sha = None;
+                job.candidate_sha = None;
+            });
+        drop(read_latch);
+
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        let recovery_candidate = git_head(cwd);
+        assert_ne!(recovery_candidate, recovery_base);
+        assert_eq!(job.base_sha.as_deref(), Some(recovery_base.as_str()));
+        assert_eq!(
+            job.candidate_sha.as_deref(),
+            Some(recovery_candidate.as_str())
+        );
+        let turns = provider.turns.lock().await.clone();
+        let prompt = turns
+            .iter()
+            .find(|(_, prompt)| prompt.contains("Committed review target"))
+            .map(|(_, prompt)| prompt)
+            .expect("the recovery commit should be reviewed as a commit");
+        assert!(
+            prompt.contains(&format!("Range: {recovery_base}..{recovery_candidate}")),
+            "review must bind to the state from before recovery: {prompt}"
         );
     }
 
@@ -20083,22 +20265,29 @@ back to the tree it was born in: {second_cwd}"
             "approved on the re-review of the refreshed diff"
         );
 
-        // The two diff-carrying reviewer turns: the first saw the clean tree, the
-        // second (re-review) must carry the author's edit — proving the loop
-        // re-reviewed the REFRESHED diff rather than a stale one.
+        // The first turn reviews a no-change report; the second reviews the committed
+        // correction. Together they prove the loop refreshed its evidence rather than
+        // keeping an old clean-tree target.
         let codex_turns = providers.get("codex").unwrap().turns.lock().await.clone();
         let review_turns: Vec<&(String, String)> = codex_turns
             .iter()
-            .filter(|(_, text)| text.contains("Workspace diff collected by the relay"))
+            .filter(|(_, text)| {
+                text.contains("No repository changes were produced by this author turn")
+                    || text.contains("Committed review target")
+            })
             .collect();
         assert_eq!(review_turns.len(), 2, "an initial review and one re-review");
         assert!(
-            !review_turns[0].1.contains("AUTHOR_FIX_MARKER")
+            review_turns[0]
+                .1
+                .contains("No repository changes were produced by this author turn")
+                && !review_turns[0].1.contains("AUTHOR_FIX_MARKER")
                 && !review_turns[0].1.contains("M\tseed.txt"),
-            "the initial review saw the clean committed tree"
+            "the initial review must not substitute an older commit for the clean turn"
         );
         assert!(
-            review_turns[1].1.contains("M\tseed.txt")
+            review_turns[1].1.contains("Committed review target")
+                && review_turns[1].1.contains("M\tseed.txt")
                 && !review_turns[1].1.contains("AUTHOR_FIX_MARKER"),
             "the re-review must inspect the author's refreshed committed target"
         );
