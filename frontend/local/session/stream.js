@@ -1,3 +1,4 @@
+import { transcriptPageIsFromAnotherGeneration } from "../../shared/transcript-generation.js";
 import { openSessionStream, sessionStreamUrl } from "../../session-stream.js";
 import { applyDeltaToViewOnlyPin } from "../view-only-thread.js";
 import {
@@ -138,6 +139,13 @@ export function createStreamController(ctx) {
       // A newer refusal (and its own repair) started while this fetch was in
       // flight. That repair is the authoritative one; this response predates
       // it and must not be allowed to win the merge's length tie-break.
+      return;
+    }
+    if (transcriptPageIsFromAnotherGeneration(state.session, page)) {
+      // The relay restarted while this was in flight; the page's ids name these
+      // messages differently now (shared/transcript-generation.js). Merging it would
+      // add a second row for each of them. The refusal that triggered this repair
+      // stands, and the next one refetches under the current run.
       return;
     }
     // The SAME merge the gated hydration path itself uses for a tail
@@ -338,6 +346,15 @@ export function createStreamController(ctx) {
   function applyDeltaToOrchestratorEntries(event) {
     const threadId = state.orchestratorEntriesThreadId;
     if (!threadId || !Array.isArray(state.orchestratorEntries)) {
+      return false;
+    }
+    // These entries belong to the run that minted their ids. A delta from a newer run
+    // names its target differently, so applying it here either misses (harmless) or
+    // appends a second row for a message already in this buffer.
+    if (
+      (state.orchestratorEntriesGeneration || "")
+      !== (state.session?.transcript_generation || "")
+    ) {
       return false;
     }
     // The reducer returns the SAME object when the delta does not apply — which

@@ -1,3 +1,5 @@
+import { transcriptPageIsFromAnotherGeneration } from "./transcript-generation.js";
+
 function createStartableRequest(run) {
   let start;
   const promise = new Promise((resolve, reject) => {
@@ -247,11 +249,16 @@ function applyTranscriptHydrationProgress(state, store, onProgress) {
 }
 
 function isStaleTranscriptPage(state, page) {
-  return Boolean(
+  if (
     page?.thread_id
-      && state.session?.active_thread_id
-      && page.thread_id !== state.session.active_thread_id
-  );
+    && state.session?.active_thread_id
+    && page.thread_id !== state.session.active_thread_id
+  ) {
+    return true;
+  }
+  // A page requested before a relay restart can land after it — see
+  // shared/transcript-generation.js for the rule.
+  return transcriptPageIsFromAnotherGeneration(state.session, page);
 }
 
 // `capturedRefusalEpoch` is read back from `state.transcriptRefusalEpoch`

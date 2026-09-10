@@ -6,6 +6,8 @@ import {
   createMergedTranscriptHydrationPagePatch,
   invalidateTranscriptWindowEntryForPatch,
   prepareTranscriptHydrationState,
+  restoreTranscriptHydrationForThread,
+  stashTranscriptHydrationForThread,
   restoreHydratedTranscriptSnapshot,
 } from "./shared/transcript-hydration-store.js";
 
@@ -1124,4 +1126,70 @@ test("a newly sent user message at the end of a compact tail lands at the END of
   Object.assign(state, prepared.patch);
   assert.equal(state.transcriptHydrationOrder.at(-1), "sent");
   assert.equal(state.transcriptHydrationOrder.length, 31);
+});
+
+// A relay restart rebuilds a thread from provider history, which renumbers item ids.
+// Merging the window across that boundary keeps BOTH names for one message, so the
+// reader sees every message twice. The window has to be rebuilt instead.
+test("a snapshot from the next relay generation rebuilds the window instead of merging into it", () => {
+  const state = hydratedState();
+  state.transcriptHydrationGeneration = "gen-one";
+
+  const prepared = prepareTranscriptHydrationState(state, {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-3",
+    transcript_revision: 12,
+    transcript_truncated: true,
+    transcript_generation: "gen-two",
+    // The same three messages, renumbered by the provider read.
+    transcript: [
+      { item_id: "item-a", kind: "user_text", text: "older prompt", status: "completed", turn_id: "turn-1", tool: null },
+      { item_id: "item-b", kind: "agent_text", text: "older reply", status: "completed", turn_id: "turn-2", tool: null },
+    ],
+  });
+  Object.assign(state, prepared.patch);
+
+  // Rebuilt, not merged: the window is emptied and refills from this snapshot.
+  // Merged, it would be the old three ids followed by the new two — one message
+  // under both of its names.
+  assert.deepEqual(
+    state.transcriptHydrationOrder,
+    [],
+    "the previous generation's ids must not survive into the new window"
+  );
+  assert.equal(state.transcriptHydrationBaseSnapshot.transcript_generation, "gen-two");
+  assert.equal(state.transcriptHydrationGeneration, "gen-two");
+});
+
+test("a snapshot from the SAME generation still merges onto the loaded window", () => {
+  const state = hydratedState();
+  state.transcriptHydrationGeneration = "gen-one";
+
+  const prepared = prepareTranscriptHydrationState(state, {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-3",
+    transcript_revision: 12,
+    transcript_truncated: true,
+    transcript_generation: "gen-one",
+    transcript: [
+      { item_id: "item-4", kind: "agent_text", text: "done", status: "completed", turn_id: "turn-3", tool: null },
+    ],
+  });
+  Object.assign(state, prepared.patch);
+
+  assert.deepEqual(state.transcriptHydrationOrder, ["item-1", "item-2", "item-3", "item-4"]);
+});
+
+// The retained per-thread window is page memory, so it outlives a relay restart in an
+// open tab. It has to remember which generation it was built under, or every thread
+// switch would look cross-generation and throw the retained history away.
+test("a retained window is restored with the generation it was stashed under", () => {
+  const state = hydratedState();
+  state.transcriptHydrationGeneration = "gen-one";
+  stashTranscriptHydrationForThread(state);
+
+  Object.assign(state, restoreTranscriptHydrationForThread(state, "thread-1"));
+
+  assert.equal(state.transcriptHydrationGeneration, "gen-one");
+  assert.deepEqual(state.transcriptHydrationOrder, ["item-1", "item-2", "item-3"]);
 });

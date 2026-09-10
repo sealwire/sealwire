@@ -2387,3 +2387,45 @@ test("a tail repair keeps a retained older id above the repaired entry and never
     "the RENDERED transcript carries the never-shortened text, not the fetched page's shorter body"
   );
 });
+
+// The repair evicts the query key before refetching so a racing caller cannot attach
+// to the request it is superseding. That only works if it evicts the key ordinary
+// paging actually uses — generation included. Built without it, the current run's
+// in-flight request stays registered and the "fresh" fetch is not fresh at all.
+test("the repair evicts the key ordinary paging uses, generation included (real query client)", async () => {
+  const queryClient = createRelayQueryClient();
+  const inFlight = createDeferred();
+
+  const options = createThreadTranscriptPageQueryOptions({
+    before: null,
+    fetchPage: () => inFlight.promise,
+    generation: "gen-a",
+    scope: "local",
+    surface: "local",
+    threadId: "thread-1",
+  });
+  const pending = queryClient.fetchQuery(options);
+
+  await fetchThreadTranscriptPageFresh({
+    before: null,
+    fetchPage: async () => ({ thread_id: "thread-1", entries: [], prev_cursor: null }),
+    generation: "gen-a",
+    queryClient,
+    scope: "local",
+    surface: "local",
+    threadId: "thread-1",
+  });
+
+  const stillRegistered = queryClient
+    .getQueryCache()
+    .findAll({ queryKey: options.queryKey, exact: true })
+    .some((query) => query.state.fetchStatus === "fetching");
+  assert.equal(
+    stillRegistered,
+    false,
+    "the in-flight request for this generation must have been evicted"
+  );
+
+  inFlight.resolve({ thread_id: "thread-1", entries: [], prev_cursor: null });
+  await pending.catch(() => {});
+});

@@ -15,7 +15,12 @@
 //
 // Every cache interaction is best-effort: any failure degrades to a cache
 // miss / no-op so history loading keeps working exactly as before.
-export function createCachingTranscriptPageFetcher({ fetchPage, cache, getScope }) {
+export function createCachingTranscriptPageFetcher({
+  fetchPage,
+  cache,
+  getScope,
+  getGeneration,
+}) {
   if (typeof fetchPage !== "function") {
     throw new Error("createCachingTranscriptPageFetcher requires a fetchPage function");
   }
@@ -25,6 +30,11 @@ export function createCachingTranscriptPageFetcher({ fetchPage, cache, getScope 
   }
 
   const resolveScope = typeof getScope === "function" ? getScope : () => "default";
+  // Which relay process minted the ids in a page. A restart rebuilds threads from
+  // provider history and that renumbers item ids, so a page cached by the previous
+  // process names the same messages differently — merged in, one message renders
+  // twice. Keyed by it, those pages are simply never read.
+  const resolveGeneration = typeof getGeneration === "function" ? getGeneration : () => "";
 
   return async function cachedFetchTranscriptPage({ threadId, before }) {
     const isOlderPage = before != null;
@@ -36,7 +46,9 @@ export function createCachingTranscriptPageFetcher({ fetchPage, cache, getScope 
 
     const scope = resolveScope() || "default";
 
-    const cached = await readPageSafely(cache, { scope, threadId, before });
+    const generation = resolveGeneration() || "";
+
+    const cached = await readPageSafely(cache, { scope, threadId, before, generation });
     if (cached && cached.thread_id === threadId) {
       return cached;
     }
@@ -45,7 +57,7 @@ export function createCachingTranscriptPageFetcher({ fetchPage, cache, getScope 
 
     if (isCacheablePage(page, threadId)) {
       // Fire-and-forget: a write failure must never block or break loading.
-      void writePageSafely(cache, { scope, threadId, before, page });
+      void writePageSafely(cache, { scope, threadId, before, page, generation });
     }
 
     return page;

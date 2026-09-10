@@ -1,3 +1,4 @@
+import { transcriptPageIsFromAnotherGeneration } from "../shared/transcript-generation.js";
 import {
   dispatchOrRecover,
   dispatchRemoteActionWithoutReply,
@@ -49,6 +50,7 @@ import { providerLabel } from "../shared/provider-labels.js";
 import {
   createThreadListQueryOptions,
   createThreadTranscriptPageQueryOptions,
+  dropTranscriptPageQueriesFromOtherGenerations,
   fetchThreadListFresh,
 } from "../shared/thread-queries.js";
 import {
@@ -93,11 +95,16 @@ import {
   reduceTranscriptEntryPatchEvent,
 } from "../shared/transcript-event-reducer.js";
 import { reconcileAuthoritativeTail } from "../shared/authoritative-tail-merge.js";
+import { preserveVisibleTranscriptText } from "../shared/preserve-visible-transcript-text.js";
+import { reviewerPreviewEntriesFromPage } from "../shared/reviewer-panel.js";
 
 const fetchTranscriptPageOverBroker = createTranscriptPageFetcher(dispatchOrRecover);
 const fetchRawTranscriptPage = fetchTranscriptPageOverBroker;
 const fetchTranscriptEntryDetailRequest =
-  createTranscriptEntryDetailFetcher(dispatchOrRecover);
+  createTranscriptEntryDetailFetcher(dispatchOrRecover, {
+    // Checked per response: the chunk loop can span a relay restart.
+    currentGeneration: () => state.session?.transcript_generation || "",
+  });
 
 // Persistent, encrypted-at-rest cache for OLDER transcript history pages. Only
 // append-stable older pages (before != null) are cached; the live tail always
@@ -108,11 +115,18 @@ const fetchCachedTranscriptPage = createCachingTranscriptPageFetcher({
   cache: transcriptPageCache,
   fetchPage: fetchRawTranscriptPage,
   getScope: remoteQueryScope,
+  // Pages belong to the relay process that minted their item ids: a restart
+  // rebuilds threads from provider history and renumbers them. NOT folded into
+  // `scope` — that is the relay identity `clearScope` indexes on, and forgetting a
+  // relay has to wipe every generation of its cached history.
+  getGeneration: () => (state.realSession || state.session)?.transcript_generation || "",
 });
 
 // Client-local viewed thread. The relay's live/control snapshot is retained in
 // state.realSession while state.session is the rendered projection.
 let viewOnlyThreadId = null;
+// Which run of the relay minted the ids in the currently pinned view-only transcript.
+let viewOnlyRelayGeneration = "";
 let viewOnlyNavigationGeneration = 0;
 let viewOnlyRefreshInFlight = false;
 let viewOnlyLastRefreshAt = 0;
@@ -242,12 +256,24 @@ function remoteQueryScope() {
   return state.remoteAuth?.relayId || "unpaired";
 }
 
+// See the local surface's copy: `gcTime: Infinity` keeps every past run's pages, and
+// their in-flight requests, for the life of the tab.
+let sweptRemoteGeneration = null;
+
 function fetchTranscriptPage({ threadId, before }) {
+  const generation = (state.realSession || state.session)?.transcript_generation || "";
+  if (sweptRemoteGeneration !== generation) {
+    sweptRemoteGeneration = generation;
+    dropTranscriptPageQueriesFromOtherGenerations(remoteQueryClient, generation);
+  }
   return remoteQueryClient
     .fetchQuery(
       createThreadTranscriptPageQueryOptions({
         before,
         fetchPage: fetchCachedTranscriptPage,
+        // Keyed by the run, so a request made after a restart cannot dedupe onto the
+        // identical one still in flight from before it.
+        generation: (state.realSession || state.session)?.transcript_generation || "",
         scope: remoteQueryScope(),
         surface: "remote",
         threadId,
@@ -563,7 +589,17 @@ async function runTranscriptRepairLoop(threadId) {
         break;
       }
       try {
-        await repairActiveTranscriptTail(threadId, target);
+        const outcome = await repairActiveTranscriptTail(threadId, target);
+        if (outcome === "retry") {
+          // The gap is still open — do NOT advance `repairedToRevision`, or the loop
+          // exits believing it healed something it did not. Counted as a failure so a
+          // relay that keeps answering from another run cannot spin here forever.
+          consecutiveFailures += 1;
+          if (consecutiveFailures >= MAX_TRANSCRIPT_REPAIR_FAILURES) {
+            break;
+          }
+          continue;
+        }
         repairedToRevision = target;
         consecutiveFailures = 0;
       } catch (error) {
@@ -591,6 +627,14 @@ async function runTranscriptRepairLoop(threadId) {
 // (`prepareTranscriptHydrationState` no-ops when `transcript_truncated` is
 // false, which is exactly the normal live-gap case) and the query cache, so a
 // dropped live chunk is actually re-fetched and healed rather than only logged.
+/**
+ * Returns what actually happened, because "did not throw" is not "repaired":
+ *
+ *  - "applied"  — the tail was merged; the gap is closed.
+ *  - "obsolete" — the thread moved on; there is nothing left to repair.
+ *  - "retry"    — this answer cannot close the gap (it came from another run of the
+ *                 relay). The gap is still open and must NOT be marked repaired.
+ */
 async function repairActiveTranscriptTail(threadId, targetRevision) {
   const page = await fetchRawTranscriptPage({ threadId, before: null });
   // Settle before reading the transcript below — otherwise a delta pending
@@ -610,13 +654,20 @@ async function repairActiveTranscriptTail(threadId, targetRevision) {
   // The thread may have changed while the fetch was in flight — a legitimate no-op
   // (the user moved on), not a failure to retry.
   if (!liveSession || liveSession.active_thread_id !== threadId) {
-    return;
+    return "obsolete";
   }
   // A missing or wrong-thread page is an incomplete/garbled response: throw so
   // runTranscriptRepairLoop retries instead of silently treating the gap as
   // repaired and advancing past it.
   if (!page || page.thread_id !== threadId) {
     throw new Error("remote transcript repair page response is incomplete");
+  }
+  if (transcriptPageIsFromAnotherGeneration(state.realSession || state.session, page)) {
+    // The relay restarted while this was in flight; the page's ids name these messages
+    // differently now (shared/transcript-generation.js). The gap is real but this
+    // answer cannot close it — say so, so the loop refetches under the current run
+    // instead of recording a repair that never happened.
+    return "retry";
   }
 
   const pageEntries = Array.isArray(page.entries) ? page.entries : [];
@@ -665,6 +716,7 @@ async function repairActiveTranscriptTail(threadId, targetRevision) {
     syncTranscriptWindowWithRepairedEntries(state, threadId, result.repaired);
   }
   commit(nextSession);
+  return "applied";
 }
 
 // Converts a plain transcript array into the id-ordered lookup the shared
@@ -892,6 +944,22 @@ export function applySessionSnapshot(snapshot) {
   const previousThreadId = state.session?.active_thread_id || "-";
   const viewingLiveThread =
     viewOnlyThreadId && displaySnapshot.active_thread_id === viewOnlyThreadId;
+  // The projection SPREADS this snapshot and then injects the previously rendered
+  // entries, so it would hand the old array the new run's generation and nothing
+  // downstream could tell. Those ids are from a relay run that no longer exists —
+  // drop the pin and refetch instead of relabelling it.
+  if (
+    viewOnlyThreadId
+    && !viewingLiveThread
+    && viewOnlyRelayGeneration !== (displaySnapshot.transcript_generation || "")
+  ) {
+    const staleThreadId = viewOnlyThreadId;
+    viewOnlyThreadId = null;
+    viewOnlyRelayGeneration = displaySnapshot.transcript_generation || "";
+    applyRenderedSession(displaySnapshot);
+    void viewRemoteThread(staleThreadId);
+    return;
+  }
   const projectedSnapshot = viewOnlyThreadId && !viewingLiveThread
     ? projectRemoteViewedSession(displaySnapshot, viewOnlyThreadId, state.session)
     : displaySnapshot;
@@ -950,82 +1018,6 @@ export function applySessionSnapshot(snapshot) {
   console.log(message);
 }
 
-function preserveVisibleTranscriptText(currentSession, snapshot) {
-  if (
-    !currentSession?.active_thread_id
-    || !snapshot?.active_thread_id
-    || currentSession.active_thread_id !== snapshot.active_thread_id
-    || !Array.isArray(currentSession.transcript)
-    || !Array.isArray(snapshot.transcript)
-  ) {
-    return snapshot;
-  }
-
-  const currentByItemId = new Map(
-    currentSession.transcript
-      .filter((entry) => entry?.item_id)
-      .map((entry) => [entry.item_id, entry])
-  );
-  let changed = false;
-  const transcript = snapshot.transcript.map((entry) => {
-    const current = currentByItemId.get(entry?.item_id);
-    const resolved = selectVisibleSnapshotEntry(current, entry);
-    if (resolved === entry) {
-      return entry;
-    }
-    changed = true;
-    return resolved;
-  });
-
-  return changed
-    ? {
-      ...snapshot,
-      transcript,
-    }
-    : snapshot;
-}
-
-// Authoritative (`full`) content is anything not explicitly flagged
-// `preview`/`omitted` by snapshot compaction — including a genuine body that
-// ends in "...". String-suffix inference is intentionally gone.
-function isFullSnapshotEntry(entry) {
-  const state = entry?.content_state;
-  return state !== "preview" && state !== "omitted";
-}
-
-function selectVisibleSnapshotEntry(current, incoming) {
-  const currentText = current?.text;
-  const incomingText = incoming?.text;
-  // Take the incoming entry as-is when it is authoritative, or when we have no
-  // full text of our own to protect.
-  if (
-    isFullSnapshotEntry(incoming)
-    || typeof currentText !== "string"
-    || !isFullSnapshotEntry(current)
-  ) {
-    return incoming;
-  }
-  // Omitted: the incoming shell text is meaningless, so keep our visible body —
-  // but DO NOT promote content_state to full. The snapshot still says "omitted",
-  // so the hydration store re-fetches the authoritative body (promoting it here
-  // would defeat re-hydration and freeze a stale body).
-  if (incoming?.content_state === "omitted") {
-    return {
-      ...incoming,
-      text: currentText,
-    };
-  }
-  // Preview: keep our visible body only if it is at least as long (more
-  // complete); otherwise the grown preview is fresher. Either way the incoming
-  // content_state (preview) is preserved so hydration still settles the entry.
-  if (currentText.length >= incomingText.length) {
-    return {
-      ...incoming,
-      text: currentText,
-    };
-  }
-  return incoming;
-}
 
 function shouldAcceptSessionSnapshot(snapshot) {
   if (!snapshot) {
@@ -1805,6 +1797,7 @@ export async function viewRemoteThread(threadId) {
   renderLog(`Viewing remote session ${threadId}.`);
   if (state.realSession?.active_thread_id === threadId) {
     viewOnlyThreadId = threadId;
+    viewOnlyRelayGeneration = state.realSession?.transcript_generation || "";
     viewOnlyLastRefreshAt = Date.now();
     seedViewOnlyWasWorking(threadId);
     applyRenderedSession(state.realSession);
@@ -1812,6 +1805,7 @@ export async function viewRemoteThread(threadId) {
   }
 
   try {
+    const viewOnlyGeneration = (state.realSession || state.session)?.transcript_generation || "";
     const page = await fetchTranscriptPage({
       before: null,
       threadId,
@@ -1824,6 +1818,16 @@ export async function viewRemoteThread(threadId) {
     if (!page || page.thread_id !== threadId) {
       throw new Error("remote transcript page response is incomplete");
     }
+    // The relay restarted while this was in flight, or has since — either way these
+    // ids are not the ones the current run uses, and projecting them would show every
+    // message twice once live content arrives beside them.
+    if (
+      viewOnlyGeneration !== ((state.realSession || state.session)?.transcript_generation || "")
+      || transcriptPageIsFromAnotherGeneration(state.realSession || state.session, page)
+    ) {
+      return false;
+    }
+    viewOnlyRelayGeneration = viewOnlyGeneration;
 
     // Settle whatever is still pending for the OUTGOING window's thread
     // first: settleTranscriptProjection can only rebuild a session that
@@ -2296,7 +2300,7 @@ export async function fetchRemoteThreadTranscript(threadId) {
     return [];
   }
   const page = await fetchTranscriptPage({ threadId, before: null });
-  return page?.entries || [];
+  return reviewerPreviewEntriesFromPage(state.session, page);
 }
 
 export function clearSessionRuntime() {

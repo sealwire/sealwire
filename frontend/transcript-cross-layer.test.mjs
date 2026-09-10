@@ -326,3 +326,71 @@ test("a turn-end signature change discards an in-flight tail fetch and re-arms a
     "the re-armed fetch must land the authoritative turn-end text"
   );
 });
+
+// A page requested before a relay restart can land after it. Its item ids come from
+// the previous run and name the SAME messages differently, so merging it renders each
+// of them twice. The page says which run produced it; the merge has to check.
+test("a page that arrives from the previous relay generation is dropped, not merged", async () => {
+  const snapshot = {
+    ...fixture.remote_omitted_snapshot,
+    transcript_generation: "gen-b",
+  };
+
+  const store = makeStore();
+  const state = { session: null, ...createClearedTranscriptHydrationPatch() };
+  state.session = restoreHydratedTranscriptSnapshot(state, snapshot);
+
+  await hydrateTranscript(state, snapshot, store, {
+    fetchPage: async () => ({
+      thread_id: snapshot.active_thread_id,
+      prev_cursor: null,
+      // In flight since before the restart.
+      transcript_generation: "gen-a",
+      entries: fixture.remote_omitted_authoritative_entries,
+    }),
+    incompletePageError: "incomplete transcript page",
+    missingTailError: "missing transcript tail",
+    progressBeforeFetch: true,
+    minInitialEntries: 12,
+    maxInitialPages: 12,
+    onProgress: (hydrated) => {
+      state.session = hydrated;
+    },
+  });
+
+  assert.equal(
+    state.transcriptHydrationOrder.length,
+    0,
+    `the previous run's page must not enter the window: ${JSON.stringify(state.transcriptHydrationOrder)}`
+  );
+});
+
+test("a page from the CURRENT generation still merges", async () => {
+  const snapshot = {
+    ...fixture.remote_omitted_snapshot,
+    transcript_generation: "gen-b",
+  };
+
+  const store = makeStore();
+  const state = { session: null, ...createClearedTranscriptHydrationPatch() };
+  state.session = restoreHydratedTranscriptSnapshot(state, snapshot);
+
+  await hydrateTranscript(state, snapshot, store, {
+    fetchPage: async () => ({
+      thread_id: snapshot.active_thread_id,
+      prev_cursor: null,
+      transcript_generation: "gen-b",
+      entries: fixture.remote_omitted_authoritative_entries,
+    }),
+    incompletePageError: "incomplete transcript page",
+    missingTailError: "missing transcript tail",
+    progressBeforeFetch: true,
+    minInitialEntries: 12,
+    maxInitialPages: 12,
+    onProgress: (hydrated) => {
+      state.session = hydrated;
+    },
+  });
+
+  assert.ok(state.transcriptHydrationOrder.length > 0);
+});

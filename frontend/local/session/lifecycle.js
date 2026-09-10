@@ -58,6 +58,7 @@ import {
 import { threadAttention } from "../../shared/thread-attention.js";
 import { isDocumentForeground, notifyThreadEvents } from "../../shared/thread-notify.js";
 import { imageFileToDataUrl } from "../image-attachments.js";
+import { preserveVisibleTranscriptText } from "../../shared/preserve-visible-transcript-text.js";
 
 function requestIdSet(list) {
   return new Set(
@@ -104,86 +105,6 @@ function errorEntryIdSet(session) {
     }
   }
   return ids;
-}
-
-// Guards a snapshot against regressing already-visible text — independent of
-// the hydration window, unlike restoreHydratedTranscript (which is a no-op
-// returning the snapshot verbatim whenever the window has never loaded for
-// this thread; see .sealwire/PLAN.md, "Traps"). Deltas legitimately arrive
-// before the first hydration fetch resolves, so state.session can already
-// hold longer text than a compacted snapshot for the same entry — mirrors
-// remote's preserveVisibleTranscriptText (session-ops.js).
-function isFullSnapshotEntry(entry) {
-  const state = entry?.content_state;
-  return state !== "preview" && state !== "omitted";
-}
-
-function selectVisibleSnapshotEntry(current, incoming) {
-  const currentText = current?.text;
-  const incomingText = incoming?.text;
-  // Take the incoming entry as-is when it is authoritative, or when we have no
-  // full text of our own to protect.
-  if (
-    isFullSnapshotEntry(incoming)
-    || typeof currentText !== "string"
-    || !isFullSnapshotEntry(current)
-  ) {
-    return incoming;
-  }
-  // Omitted: the incoming shell text is meaningless, so keep our visible body —
-  // but DO NOT promote content_state to full; the snapshot still says
-  // "omitted", so the hydration store re-fetches the authoritative body.
-  if (incoming?.content_state === "omitted") {
-    return {
-      ...incoming,
-      text: currentText,
-    };
-  }
-  // Preview: keep our visible body only if it is at least as long (more
-  // complete); otherwise the grown preview is fresher. Either way the incoming
-  // content_state (preview) is preserved so hydration still settles the entry.
-  if (currentText.length >= incomingText.length) {
-    return {
-      ...incoming,
-      text: currentText,
-    };
-  }
-  return incoming;
-}
-
-function preserveVisibleTranscriptText(currentSession, snapshot) {
-  if (
-    !currentSession?.active_thread_id
-    || !snapshot?.active_thread_id
-    || currentSession.active_thread_id !== snapshot.active_thread_id
-    || !Array.isArray(currentSession.transcript)
-    || !Array.isArray(snapshot.transcript)
-  ) {
-    return snapshot;
-  }
-
-  const currentByItemId = new Map(
-    currentSession.transcript
-      .filter((entry) => entry?.item_id)
-      .map((entry) => [entry.item_id, entry])
-  );
-  let changed = false;
-  const transcript = snapshot.transcript.map((entry) => {
-    const current = currentByItemId.get(entry?.item_id);
-    const resolved = selectVisibleSnapshotEntry(current, entry);
-    if (resolved === entry) {
-      return entry;
-    }
-    changed = true;
-    return resolved;
-  });
-
-  return changed
-    ? {
-      ...snapshot,
-      transcript,
-    }
-    : snapshot;
 }
 
 /**

@@ -338,7 +338,20 @@ impl AppState {
         ))
     }
 
+    /// Stamps the generation on every detail response, whichever branch produced it —
+    /// same rule as `read_thread_transcript`: a branch that forgot would silently look
+    /// like "same run as whatever you have".
     pub async fn read_thread_entry_detail(
+        &self,
+        input: ReadThreadEntryDetailInput,
+    ) -> Result<ThreadEntryDetailResponse, String> {
+        let generation = self.relay.read().await.transcript_generation.clone();
+        self.read_thread_entry_detail_unstamped(input)
+            .await
+            .map(|detail| detail.stamp_generation(generation))
+    }
+
+    async fn read_thread_entry_detail_unstamped(
         &self,
         input: ReadThreadEntryDetailInput,
     ) -> Result<ThreadEntryDetailResponse, String> {

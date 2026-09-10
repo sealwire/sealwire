@@ -2050,6 +2050,10 @@ pub struct ThreadEntryDetailChunk {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadEntryDetailResponse {
     pub thread_id: String,
+    /// Which run minted `item_id` — without it a detail fetched across a restart
+    /// gets attached to whatever row holds that id now. See `ThreadTranscriptResponse`.
+    #[serde(default)]
+    pub transcript_generation: String,
     pub item_id: String,
     pub entry: Option<TranscriptEntryView>,
     pub pending_fields: Vec<ThreadEntryDetailPendingField>,
@@ -3644,6 +3648,13 @@ impl ThreadEntriesResponse {
 }
 
 impl ThreadEntryDetailResponse {
+    /// Name the run that minted these ids. Called once, at the API boundary, by the
+    /// only layer that holds the relay.
+    pub(crate) fn stamp_generation(mut self, generation: String) -> Self {
+        self.transcript_generation = generation;
+        self
+    }
+
     pub fn from_entry(thread_id: String, entry: TranscriptEntryView) -> Result<Self, String> {
         let item_id = entry
             .item_id
@@ -3673,6 +3684,8 @@ impl ThreadEntryDetailResponse {
 
         Ok(Self {
             thread_id,
+            // Stamped by the caller that holds the relay (see `stamp_generation`).
+            transcript_generation: String::new(),
             item_id,
             entry: Some(entry_for_response),
             pending_fields,
@@ -3699,6 +3712,8 @@ impl ThreadEntryDetailResponse {
 
         Ok(Self {
             thread_id,
+            // Stamped by the caller that holds the relay (see `stamp_generation`).
+            transcript_generation: String::new(),
             item_id,
             entry: None,
             pending_fields: next_cursor

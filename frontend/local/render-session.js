@@ -1,3 +1,4 @@
+import { transcriptPageIsFromAnotherGeneration } from "../shared/transcript-generation.js";
 import {
   appShell,
   auditSummary,
@@ -2424,6 +2425,23 @@ export function createSessionRenderer({
       // backoff the view-only pin uses for the same reason: long enough that a
       // tight loop cannot form (a failed fetch re-renders synchronously), short
       // enough that the next snapshot after the relay returns recovers.
+      // Entries belong to the run of the relay that minted their ids. A restart
+      // renumbers them, so anything already buffered describes these messages under
+      // names the relay no longer uses — drop it and reload rather than keep merging
+      // deltas into it. Bumping the load generation also abandons any fetch that was
+      // in flight for the previous run.
+      const liveGeneration = session?.transcript_generation || "";
+      if (
+        state.orchestratorEntriesThreadId
+        && (state.orchestratorEntriesGeneration || "") !== liveGeneration
+      ) {
+        state.orchestratorEntries = null;
+        state.orchestratorEntriesThreadId = null;
+        state.orchestratorOlderCursor = null;
+        state.orchestratorHistoryExtended = false;
+        state.orchestratorEntriesGeneration = liveGeneration;
+        state.orchestratorLoadGeneration = (state.orchestratorLoadGeneration || 0) + 1;
+      }
       const retryReady =
         !state.orchestratorEntriesErrorAt
         || Date.now() - state.orchestratorEntriesErrorAt >= VIEW_ONLY_LOAD_RETRY_BACKOFF_MS;
@@ -2487,6 +2505,7 @@ export function createSessionRenderer({
       if (!threadId || typeof fetchTranscriptPage !== "function") {
         state.orchestratorEntries = [];
         state.orchestratorEntriesThreadId = threadId || null;
+        state.orchestratorEntriesGeneration = state.session?.transcript_generation || "";
         state.orchestratorHistoryExtended = false;
         return;
       }
@@ -2495,6 +2514,7 @@ export function createSessionRenderer({
         // authoritative answer and the gap is closed by reading it.
         state.orchestratorEntries = state.session.transcript || [];
         state.orchestratorEntriesThreadId = threadId;
+        state.orchestratorEntriesGeneration = state.session?.transcript_generation || "";
         // These entries replace what was paged in, so no prefix is being held
         // open any more — a stale flag would keep a later refresh from trimming.
         state.orchestratorHistoryExtended = false;
@@ -2503,6 +2523,11 @@ export function createSessionRenderer({
       const prior = orchestratorRefreshPin(state, threadId);
       const page = await fetchTranscriptPage(threadId, {});
       if (generation !== state.orchestratorLoadGeneration) {
+        return;
+      }
+      // The relay restarted mid-fetch: these ids are from the previous run and would
+      // add a second row for every message already here.
+      if (transcriptPageIsFromAnotherGeneration(state.session, page)) {
         return;
       }
       // Normalize + validate the thread id + merge, the same three steps the

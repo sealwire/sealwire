@@ -5809,6 +5809,110 @@ tree; got {}",
         assert!(!tool.file_changes_omitted);
     }
 
+    /// A detail can be fetched across a restart, and run B's `history-3` can be a
+    /// different message than run A's. Both response shapes (full entry and field
+    /// chunk) must name the run that minted the id, or the client has nothing to
+    /// compare an in-flight result against.
+    #[tokio::test]
+    async fn thread_entry_detail_names_the_run_that_minted_its_ids() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_string_lossy().into_owned();
+        let (app, _, _) = build_app(&cwd).await;
+        let thread_id = "detail-generation-thread";
+        let item_id = "turn-diff:turn-1";
+
+        let expected_generation = {
+            let mut relay = app.relay.write().await;
+            relay.activate_thread(
+                ThreadSummaryView {
+                    workspace_trusted: false,
+                    id: thread_id.to_string(),
+                    name: None,
+                    preview: String::new(),
+                    cwd: cwd.clone(),
+                    updated_at: unix_now(),
+                    source: "fake".to_string(),
+                    status: "idle".to_string(),
+                    model_provider: "fake".to_string(),
+                    provider: "fake".to_string(),
+                    forked_from: None,
+                    renamed: false,
+                    flagged: false,
+                },
+                &cwd,
+                DEFAULT_MODEL,
+                DEFAULT_APPROVAL_POLICY,
+                DEFAULT_SANDBOX,
+                DEFAULT_EFFORT,
+                "device-a",
+            );
+            relay.upsert_transcript_item(
+                item_id.to_string(),
+                crate::protocol::TranscriptEntryKind::ToolCall,
+                Some("Edited files".to_string()),
+                "completed".to_string(),
+                Some("turn-1".to_string()),
+                Some(crate::protocol::ToolCallView {
+                    item_type: "turnDiff".to_string(),
+                    name: "turn_diff".to_string(),
+                    title: "Changed files".to_string(),
+                    kind: None,
+                    detail: None,
+                    query: None,
+                    path: None,
+                    url: None,
+                    command: None,
+                    input_preview: None,
+                    result_preview: None,
+                    diff: Some("@@ -1 +1 @@\n-old\n+new".to_string()),
+                    file_changes: vec![crate::protocol::FileChangeDiffView {
+                        path: "src/main.rs".to_string(),
+                        change_type: "modify".to_string(),
+                        diff: "-old\n+new".to_string(),
+                    }],
+                    apply_state: None,
+                    file_changes_omitted: false,
+                    can_apply: None,
+                }),
+            );
+            relay.transcript_generation.clone()
+        };
+        assert!(
+            !expected_generation.is_empty(),
+            "every relay run names itself"
+        );
+
+        let detail = app
+            .read_thread_entry_detail(crate::protocol::ReadThreadEntryDetailInput {
+                thread_id: thread_id.to_string(),
+                item_id: item_id.to_string(),
+                field: None,
+                cursor: None,
+                device_id: None,
+            })
+            .await
+            .expect("full detail read");
+        assert_eq!(
+            detail.transcript_generation, expected_generation,
+            "the full-entry response must be stamped with this run's generation"
+        );
+
+        let chunk = app
+            .read_thread_entry_detail(crate::protocol::ReadThreadEntryDetailInput {
+                thread_id: thread_id.to_string(),
+                item_id: item_id.to_string(),
+                field: Some("tool.diff".to_string()),
+                cursor: Some(0),
+                device_id: None,
+            })
+            .await
+            .expect("chunk detail read");
+        assert_eq!(
+            chunk.transcript_generation, expected_generation,
+            "the chunk response must be stamped too — a chunk loop can span the restart"
+        );
+    }
+
     pub(crate) async fn pair_device(app: &AppState, device_id: &str, path_scope: Vec<String>) {
         // Normalize the scope the same way start_pairing does in production, so symlinked
         // tmpdirs on macOS (/var/folders → /private/var/folders) don't produce false misses.

@@ -1,3 +1,5 @@
+import { transcriptPageMatchesGeneration } from "./transcript-generation.js";
+
 export function appendTranscriptEntryDetailChunk(entry, field, chunkText) {
   if (!entry || !field || !chunkText) {
     return;
@@ -28,6 +30,7 @@ export function appendTranscriptEntryDetailChunk(entry, field, chunkText) {
 }
 
 export async function fetchTranscriptEntryDetailViaRequester({
+  currentGeneration = () => "",
   itemId,
   requestDetail,
   threadId,
@@ -36,12 +39,22 @@ export async function fetchTranscriptEntryDetailViaRequester({
     return null;
   }
 
+  // One assembly = one run. A restart mid-loop would splice two runs' bodies under a
+  // reused id, and even a consistent run-A result poisons the run-B cache it lands in.
+  const expectedGeneration = currentGeneration() || "";
+  const responseIsFromAnotherRun = (response) =>
+    !transcriptPageMatchesGeneration(expectedGeneration, response?.transcript_generation)
+    || !transcriptPageMatchesGeneration(expectedGeneration, currentGeneration());
+
   const detailResponse = await requestDetail({
     cursor: null,
     field: null,
     itemId,
     threadId,
   });
+  if (detailResponse && responseIsFromAnotherRun(detailResponse)) {
+    return null;
+  }
   const entry = detailResponse?.entry || null;
   if (!entry) {
     return null;
@@ -62,6 +75,10 @@ export async function fetchTranscriptEntryDetailViaRequester({
         itemId,
         threadId,
       });
+      if (chunkResponse && responseIsFromAnotherRun(chunkResponse)) {
+        // Not `break`: a silently truncated field would read as the full body.
+        return null;
+      }
       const chunk = chunkResponse?.chunk;
       if (!chunk?.field || chunk.field !== pending.field) {
         break;

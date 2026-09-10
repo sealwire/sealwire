@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   createThreadListQueryOptions,
   createThreadTranscriptPageQueryOptions,
+  dropTranscriptPageQueriesFromOtherGenerations,
   fetchThreadListFresh,
   threadListQueryKey,
   threadTranscriptPageQueryKey,
@@ -46,6 +47,7 @@ test("transcript page query keys include cursor and thread identity", () => {
   assert.deepEqual(
     threadTranscriptPageQueryKey({
       before: 42,
+      generation: "gen-a",
       scope: "relay-1",
       surface: "remote",
       threadId: "thread-1",
@@ -54,10 +56,26 @@ test("transcript page query keys include cursor and thread identity", () => {
       "thread-transcript",
       "remote",
       "relay-1",
+      "gen-a",
       "thread-1",
       42,
     ]
   );
+});
+
+// A request issued after a relay restart must not dedupe onto the identical one
+// still in flight from before it — that hands the caller the previous run's ids.
+test("transcript page query keys separate two relay generations", () => {
+  const forGeneration = (generation) =>
+    threadTranscriptPageQueryKey({
+      before: 42,
+      generation,
+      scope: "relay-1",
+      surface: "remote",
+      threadId: "thread-1",
+    });
+
+  assert.notDeepEqual(forGeneration("gen-a"), forGeneration("gen-b"));
 });
 
 test("transcript page query options pass the requested cursor", async () => {
@@ -243,4 +261,24 @@ test("a refresh arriving after a fresh fetch cannot join the pre-mutation reques
     "Auth work",
     "a later refresh must not be served the request that predates the rename"
   );
+});
+
+// `gcTime: Infinity` means nothing expires by itself, so the previous run's pages
+// would otherwise sit in the cache for the life of the tab — and still be served.
+test("switching generation drops the previous run's transcript queries", () => {
+  const removed = [];
+  const queries = [
+    { queryKey: ["thread-transcript", "local", "s", "gen-a", "t1", 10] },
+    { queryKey: ["thread-transcript", "local", "s", "gen-a", "t1", 20] },
+    { queryKey: ["thread-transcript", "local", "s", "gen-b", "t1", 10] },
+  ];
+  const queryClient = {
+    getQueryCache: () => ({ findAll: () => queries }),
+    removeQueries: ({ queryKey }) => removed.push(queryKey),
+  };
+
+  const count = dropTranscriptPageQueriesFromOtherGenerations(queryClient, "gen-b");
+
+  assert.equal(count, 2);
+  assert.deepEqual(removed.map((key) => key[3]), ["gen-a", "gen-a"]);
 });

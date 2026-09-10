@@ -16,6 +16,10 @@ export function normalizeThreadTranscriptPage(page) {
       server_time: page.server_time ?? null,
       thread_state: page.thread_state ?? null,
       thread_id: page.thread_id,
+      // Both branches must carry this. Dropped on one of them, every page down that
+      // path looks like it came from a relay that cannot name its run — which the
+      // merge guards then (correctly) refuse, and nothing renders at all.
+      transcript_generation: page.transcript_generation ?? "",
     };
   }
 
@@ -58,6 +62,9 @@ export function normalizeThreadTranscriptPage(page) {
     prev_cursor: page.prev_cursor ?? page.next_cursor ?? null,
     revision: page.revision ?? null,
     server_time: page.server_time ?? null,
+    // Which run of the relay minted these item ids. Carried so a page that was in
+    // flight across a restart can be recognised and dropped rather than merged.
+    transcript_generation: page.transcript_generation ?? "",
     thread_state: page.thread_state ?? null,
     thread_id: page.thread_id,
   };

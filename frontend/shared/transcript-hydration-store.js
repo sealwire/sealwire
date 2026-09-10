@@ -22,6 +22,7 @@ export function createClearedTranscriptHydrationPatch() {
     transcriptHydrationStatus: "idle",
     transcriptHydrationTailReady: false,
     transcriptHydrationThreadId: null,
+    transcriptHydrationGeneration: null,
   };
 }
 
@@ -68,6 +69,7 @@ export function stashTranscriptHydrationForThread(state, extra = null) {
     olderCursor: state.transcriptHydrationOlderCursor ?? null,
     signature: state.transcriptHydrationSignature ?? null,
     tailReady: Boolean(state.transcriptHydrationTailReady),
+    generation: state.transcriptHydrationGeneration ?? null,
     ...(extra ? { extra } : {}),
   });
   while (cache.size > MAX_RETAINED_HYDRATION_THREADS) {
@@ -110,6 +112,7 @@ export function restoreTranscriptHydrationForThread(state, threadId) {
     transcriptHydrationSignature: stash.signature ?? null,
     transcriptHydrationTailReady: Boolean(stash.tailReady),
     transcriptHydrationThreadId: threadId,
+    transcriptHydrationGeneration: stash.generation ?? null,
     // Leave status idle: the next snapshot's prepareTranscriptHydration recomputes
     // whether the tail still needs a fetch, merging onto the restored window.
     transcriptHydrationStatus: "idle",
@@ -187,6 +190,9 @@ export function restoreHydratedTranscriptSnapshot(state, snapshot) {
   if (
     state.transcriptHydrationThreadId !== snapshot.active_thread_id
     || !state.transcriptHydrationOrder.length
+    // Ids from a previous relay process name these messages differently; overlaying
+    // that window would paint each of them twice until the next prepare clears it.
+    || (state.transcriptHydrationGeneration || "") !== (snapshot.transcript_generation || "")
   ) {
     return snapshot;
   }
@@ -338,7 +344,14 @@ export function prepareTranscriptHydrationState(state, snapshot) {
   }
 
   const signature = transcriptHydrationSignature(snapshot);
-  const sameThread = state.transcriptHydrationThreadId === snapshot.active_thread_id;
+  // A window may only be merged into while it still holds ids from the SAME relay
+  // process. A restart rebuilds threads from provider history and renumbers item
+  // ids, so merging across that boundary keeps both names for one message and
+  // renders it twice. Treating it as a different thread rebuilds the window instead.
+  const sameGeneration =
+    (state.transcriptHydrationGeneration || "") === (snapshot.transcript_generation || "");
+  const sameThread =
+    sameGeneration && state.transcriptHydrationThreadId === snapshot.active_thread_id;
   const sameThreadWithVisibleEntries = sameThread && state.transcriptHydrationOrder.length > 0;
 
   // A re-hydration fetch is actually running iff status is "loading". Re-arming
@@ -401,6 +414,7 @@ export function prepareTranscriptHydrationState(state, snapshot) {
           transcriptHydrationBaseSnapshot: snapshot,
           transcriptHydrationSignature: signature,
           transcriptHydrationThreadId: snapshot.active_thread_id,
+          transcriptHydrationGeneration: snapshot.transcript_generation || "",
         }
         : {
           transcriptHydrationBaseSnapshot: snapshot,
@@ -1055,10 +1069,22 @@ export function invalidateTranscriptWindowEntryForPatch(state, threadId, patched
 /// Order / ThreadId) on their own `state` object, and both must agree on
 /// this check: writing a delta or patch into a window loaded for the WRONG
 /// thread would splice one conversation into another.
+/**
+ * Whether the window may be written to or projected for this thread.
+ *
+ * Ownership, not just presence. `prepareTranscriptHydrationState` rebuilds the window
+ * when the generation changes, but the snapshot that carries the new generation lands
+ * on `state.session` BEFORE that runs (local renders coalesce frames). In that gap the
+ * window still holds the previous run's ids, and every caller of this — the delta
+ * writer and the render projection — would happily use it: a new-run delta appends a
+ * second row for a message the window already has under its old name.
+ */
 export function transcriptWindowIsLoaded(state, threadId) {
   return Boolean(
     threadId
     && state.transcriptHydrationThreadId === threadId
+    && (state.transcriptHydrationGeneration || "")
+      === (state.session?.transcript_generation || "")
     && state.transcriptHydrationEntries instanceof Map
     && Array.isArray(state.transcriptHydrationOrder)
     && state.transcriptHydrationOrder.length
