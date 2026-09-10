@@ -1,4 +1,5 @@
 import { isScrolledToBottom } from "./scroll-to-bottom-core.js";
+import { transcriptRowKey } from "./transcript-row-key.js";
 
 // Top-anchor transcript scroll.
 //
@@ -92,7 +93,7 @@ export function findLatestUserEntryId(entries) {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (entry?.kind === "user_text") {
-      return entry.item_id || entry.id || null;
+      return transcriptRowKey(entry);
     }
   }
   return null;

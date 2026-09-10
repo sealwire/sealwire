@@ -552,10 +552,9 @@ impl ThreadRuntime {
         for record in records {
             match first_by_id.get(&record.item_id) {
                 Some(&kept_index) => {
-                    let kept = &mut deduped[kept_index];
-                    kept.tool =
-                        super::transcript::merge_tool_call_view(kept.tool.take(), record.tool);
-                    kept.withdrawn |= record.withdrawn;
+                    // Full-content merge: the second copy can carry the settled
+                    // status and fuller text, not just the tool payload.
+                    let _ = merge_runtime_entry(&mut deduped[kept_index], record);
                 }
                 None => {
                     first_by_id.insert(record.item_id.clone(), deduped.len());
@@ -700,10 +699,27 @@ impl ThreadRuntime {
                 None => pending.push(record),
             }
         }
-        // No later anchor: these genuinely extend the tail.
-        for mut record in pending {
-            record.order_seq = self.alloc_tail_order_seq();
-            self.transcript.push(record);
+        // No later anchor. These rows still must not land past rows born LIVE while
+        // the read was in flight: walk back over the trailing run of live-upserted
+        // rows the read does not know, and insert before it.
+        if !pending.is_empty() {
+            let fresh_ids: std::collections::HashSet<&str> = pending
+                .iter()
+                .map(|record| record.item_id.as_str())
+                .collect();
+            let mut boundary = self.transcript.len();
+            while boundary > 0 {
+                let candidate = &self.transcript[boundary - 1];
+                if candidate.last_live_upsert_revision.is_some()
+                    && !fresh_ids.contains(candidate.item_id.as_str())
+                {
+                    boundary -= 1;
+                } else {
+                    break;
+                }
+            }
+            let pending = std::mem::take(&mut pending);
+            self.insert_records_before(boundary, pending);
             changed = true;
         }
         changed
@@ -715,6 +731,13 @@ impl ThreadRuntime {
     /// silent collision.
     fn insert_records_before(&mut self, index: usize, mut records: Vec<TranscriptRecord>) {
         let step = super::transcript::ORDER_SEQ_STEP;
+        if index == self.transcript.len() {
+            for mut record in records {
+                record.order_seq = self.alloc_tail_order_seq();
+                self.transcript.push(record);
+            }
+            return;
+        }
         if index == 0 {
             let base = self.alloc_head_order_seq_block(records.len());
             for (offset, record) in records.iter_mut().enumerate() {
@@ -1354,5 +1377,89 @@ mod tests {
             rt.transcript.iter().filter(|r| r.item_id == "dup").count(),
             1
         );
+    }
+    /// A live row can be born WHILE the provider read is in flight. History rows
+    /// with no right anchor must land before that live suffix, not after it.
+    #[test]
+    fn merge_places_unanchored_history_before_the_live_suffix() {
+        let record = |id: &str| TranscriptRecord {
+            item_id: id.to_string(),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some(id.to_string()),
+            status: "completed".to_string(),
+            turn_id: None,
+            tool: None,
+            order_seq: 0,
+            withdrawn: false,
+            last_live_upsert_revision: None,
+        };
+
+        // Left anchor, no right anchor: runtime [A(hist), D(live)], fresh [A, B, C].
+        let mut rt = runtime("t1", "idle");
+        let a = rt.alloc_tail_order_seq();
+        let d = rt.alloc_tail_order_seq();
+        rt.transcript.push(TranscriptRecord {
+            order_seq: a,
+            ..record("A")
+        });
+        rt.transcript.push(TranscriptRecord {
+            order_seq: d,
+            last_live_upsert_revision: Some(9),
+            ..record("D")
+        });
+        assert!(rt.merge_transcript_records(vec![record("A"), record("B"), record("C")]));
+        let ids: Vec<&str> = rt.transcript.iter().map(|r| r.item_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["A", "B", "C", "D"],
+            "history sorts before the read-race live row"
+        );
+        let keys: Vec<i64> = rt.transcript.iter().map(|r| r.order_seq).collect();
+        assert!(keys.windows(2).all(|w| w[0] < w[1]), "keys agree: {keys:?}");
+
+        // No overlap at all: runtime [D(live)], fresh [A, B, C].
+        let mut rt = runtime("t2", "idle");
+        let d = rt.alloc_tail_order_seq();
+        rt.transcript.push(TranscriptRecord {
+            order_seq: d,
+            last_live_upsert_revision: Some(9),
+            ..record("D")
+        });
+        assert!(rt.merge_transcript_records(vec![record("A"), record("B"), record("C")]));
+        let ids: Vec<&str> = rt.transcript.iter().map(|r| r.item_id.as_str()).collect();
+        assert_eq!(ids, ["A", "B", "C", "D"]);
+    }
+
+    /// In-page duplicates carry real content on both copies — the merge must keep
+    /// the settled status and fuller text, not only the tool payload.
+    #[test]
+    fn prepend_in_page_duplicate_keeps_settled_content() {
+        let mut rt = runtime("t1", "idle");
+        let page_entry = |text: &str, status: &str| TranscriptEntryView {
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some("dup".to_string()),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some(text.to_string()),
+            status: status.to_string(),
+            turn_id: None,
+            tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
+        };
+        rt.prepend_provider_history(
+            vec![
+                page_entry("first", "running"),
+                page_entry("second, fuller text", "completed"),
+            ],
+            Some(3),
+            None,
+        );
+        let kept = rt
+            .transcript
+            .iter()
+            .find(|r| r.item_id == "dup")
+            .expect("merged row");
+        assert_eq!(kept.status, "completed", "the settled copy's status wins");
+        assert_eq!(kept.text.as_deref(), Some("second, fuller text"));
     }
 }

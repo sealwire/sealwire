@@ -325,7 +325,7 @@ function AgentEntryImpl({ entry, isJustPrepended = false, isForkable = false, pr
 const AgentEntry = React.memo(AgentEntryImpl);
 
 function CommandEntry({ entry, isJustPrepended = false, options = null, inGroup = false }) {
-  const itemId = entry.item_id || "";
+  const itemId = transcriptRowKey(entry) || "";
   const expandKey = itemId ? `entry:${itemId}` : commandExpandKey(itemId);
   const expanded = Boolean(expandKey && options?.expandedKeys?.has(expandKey));
   const loading = Boolean(itemId && options?.loadingItemIds?.has(itemId));
@@ -2306,7 +2306,7 @@ export function diffPrependedItemIds(previousEntries, nextEntries) {
   const prependCount = nextEntries.length - previousEntries.length;
   const ids = [];
   for (let index = 0; index < prependCount; index += 1) {
-    const id = nextEntries[index]?.item_id;
+    const id = transcriptRowKey(nextEntries[index]);
     if (id) ids.push(id);
   }
   return ids;
