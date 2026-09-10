@@ -1719,6 +1719,7 @@ fn thread_switch_back_keeps_single_user_message_when_ids_agree() {
             active_flags: vec!["waitingOnAskUser".to_string()],
             transcript: vec![TranscriptEntryView {
                 order_seq: None,
+                withdrawn: false,
                 item_id: Some(user_item_id.to_string()),
                 kind: TranscriptEntryKind::UserText,
                 text: Some("what should I name this?".to_string()),
@@ -1983,6 +1984,7 @@ fn persisted_state_round_trip_drops_ephemeral_fields() {
         turn_id: Some("turn-1".to_string()),
         tool: None,
         order_seq: 0,
+        withdrawn: false,
         last_live_upsert_revision: None,
     });
     relay
@@ -2817,6 +2819,7 @@ fn restore_thread_data_keeps_persisted_controller_and_settings() {
             active_flags: vec!["busy".to_string()],
             transcript: vec![TranscriptEntryView {
                 order_seq: None,
+                withdrawn: false,
                 item_id: Some("history-1".to_string()),
                 kind: TranscriptEntryKind::UserText,
                 text: Some("ping".to_string()),
@@ -5171,6 +5174,7 @@ mod paged_history_merge_tests {
     fn view(item_id: &str, status: &str, tool: ToolCallView) -> TranscriptEntryView {
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some(item_id.to_string()),
             kind: TranscriptEntryKind::ToolCall,
             text: None,
@@ -6484,6 +6488,7 @@ fn rehydrating_a_thread_does_not_rewind_its_transcript_revision() {
             active_flags: Vec::new(),
             transcript: vec![TranscriptEntryView {
                 order_seq: None,
+                withdrawn: false,
                 item_id: Some("item-1".to_string()),
                 kind: TranscriptEntryKind::AgentText,
                 text: Some("hello".to_string()),
@@ -6536,6 +6541,7 @@ fn merging_fresh_history_draws_from_the_shared_revision_clock() {
             active_flags: Vec::new(),
             transcript: vec![TranscriptEntryView {
                 order_seq: None,
+                withdrawn: false,
                 item_id: Some("fresh-item".to_string()),
                 kind: TranscriptEntryKind::AgentText,
                 text: Some("fresh".to_string()),
@@ -6699,6 +6705,7 @@ fn promoting_a_background_thread_does_not_rewind_the_real_threads_revision() {
             turn_id: None,
             tool: None,
             order_seq: 0,
+            withdrawn: false,
             last_live_upsert_revision: None,
         },
         TranscriptRecord {
@@ -6709,6 +6716,7 @@ fn promoting_a_background_thread_does_not_rewind_the_real_threads_revision() {
             turn_id: None,
             tool: None,
             order_seq: 0,
+            withdrawn: false,
             last_live_upsert_revision: None,
         },
     ];
@@ -6971,11 +6979,8 @@ fn order_seq_appends_increase_and_survive_withdrawal() {
     let withdrawn_seq = seq_of(&relay, &reservation).expect("reservation row");
     assert!(withdrawn_seq > seq_b);
     relay.fail_codex_user_turn_definitive(thread, &reservation);
-    assert_eq!(
-        seq_of(&relay, &reservation),
-        None,
-        "the row is withdrawn today"
-    );
+    // The tombstone keeps the row — and its spent key — in place.
+    assert_eq!(seq_of(&relay, &reservation), Some(withdrawn_seq));
 
     let survivor = relay
         .begin_codex_user_turn(thread, "the send that goes through")
@@ -7035,4 +7040,54 @@ fn order_seq_rides_snapshot_page_and_delta_meta() {
         Some(record_seq),
         "runtime page carries the key"
     );
+}
+
+/// Withdrawal must be a TOMBSTONE, not a deletion. A snapshot merge can only add and
+/// update — it cannot express absence — so a deleted row lives on in every client
+/// that saw it. A marked row reaches them through the ordinary update channel.
+#[test]
+fn a_definitively_failed_send_leaves_a_withdrawn_tombstone() {
+    let mut relay = test_state();
+    let thread = "tombstone-thread";
+
+    let reservation = relay
+        .begin_codex_user_turn(thread, "doomed send")
+        .expect("reservation");
+    relay.fail_codex_user_turn_definitive(thread, &reservation);
+
+    let row = relay
+        .runtimes
+        .get(thread)
+        .unwrap()
+        .transcript
+        .iter()
+        .find(|record| record.item_id == reservation)
+        .expect("the row must SURVIVE withdrawal as a tombstone");
+    assert!(row.withdrawn, "the surviving row is marked withdrawn");
+
+    // The other withdrawal path behaves the same.
+    let second = relay
+        .begin_codex_user_turn(thread, "abandoned send")
+        .expect("second reservation");
+    relay.abandon_codex_start_reservation(thread);
+    let row = relay
+        .runtimes
+        .get(thread)
+        .unwrap()
+        .transcript
+        .iter()
+        .find(|record| record.item_id == second)
+        .expect("abandon leaves a tombstone too");
+    assert!(row.withdrawn);
+
+    // The tombstone reaches clients: view and snapshot carry the flag.
+    relay.active_thread_id = Some(thread.to_string());
+    relay.sync_selected_runtime_to_fields();
+    let snapshot = relay.snapshot();
+    let view = snapshot
+        .transcript
+        .iter()
+        .find(|entry| entry.item_id.as_deref() == Some(reservation.as_str()))
+        .expect("snapshot still carries the tombstone");
+    assert!(view.withdrawn, "the wire view carries the flag");
 }

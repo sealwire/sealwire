@@ -5,6 +5,7 @@ import { TranscriptPane } from "../shared/transcript-pane.js";
 import { attachTranscriptHistoryLoader } from "../shared/transcript-history-loader.js";
 import { stableTranscriptOptions } from "../shared/transcript-options-identity.js";
 import { useLocalTranscriptScrollBookkeeping } from "./use-local-transcript-scroll-bookkeeping.js";
+import { visibleTranscriptEntries } from "../shared/withdrawn-transcript.js";
 
 const h = React.createElement;
 
@@ -16,7 +17,7 @@ export function LocalTranscriptPanel({
   activeThreadLabel,
   approval,
   buildTranscriptOptions,
-  entries,
+  entries: rawEntries,
   entriesCanWrite,
   getStandbyEmptyContent,
   hydrationLoading,
@@ -36,6 +37,9 @@ export function LocalTranscriptPanel({
   viewingConversation,
   viewingDifferentThread,
 }) {
+  // Filtered HERE, before the scroll bookkeeping below — a withdrawn row must
+  // not anchor "latest user message" scrolling any more than it may render.
+  const entries = visibleTranscriptEntries(rawEntries);
   const loaderRef = useRef(null);
   // Ref-latched so a changing onLoadOlderTranscript identity never forces the
   // attach effect (deps: [scrollElement]) to re-run and re-attach.

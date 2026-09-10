@@ -297,6 +297,10 @@ export function reduceTranscriptEntryPatchEvent({
           text: entryPatch.text ?? entry.text ?? null,
           tool: entryPatch.tool ?? entry.tool ?? null,
           turn_id: entryPatch.turn_id || entry.turn_id || null,
+          // Absorbing: a late unmarked copy must not resurrect a withdrawn row.
+          ...(entry.withdrawn === true || entryPatch.withdrawn === true
+            ? { withdrawn: true }
+            : {}),
         };
       })
     : [

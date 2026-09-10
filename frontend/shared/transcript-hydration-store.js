@@ -1235,6 +1235,8 @@ function mergeTranscriptEntry(existing, incoming) {
     tool: mergeToolView(existing.tool, incoming.tool, existingFull, incomingFull),
     turn_id: incoming.turn_id || existing.turn_id || null,
     content_state: mergedContentState,
+    // Absorbing: a copy serialized before the withdrawal must not resurrect the row.
+    ...(existing.withdrawn === true || incoming.withdrawn === true ? { withdrawn: true } : {}),
   };
 }
 

@@ -60,6 +60,10 @@ pub(crate) struct TranscriptRecord {
     /// legal — continuity is the revision chain's job, never this field's.
     #[serde(default)]
     pub(crate) order_seq: i64,
+    /// Withdrawn rows stay in the transcript (a snapshot merge cannot express
+    /// absence). ABSORBING: once true, no later copy of the row may clear it.
+    #[serde(default)]
+    pub(crate) withdrawn: bool,
     /// Relay-global clock at the last live upsert. Hydrated/prepended history leaves this
     /// unset, and delta/status writes do NOT touch it — it is not a general write stamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -71,6 +75,7 @@ impl TranscriptRecord {
         TranscriptEntryView {
             item_id: Some(self.item_id.clone()),
             order_seq: Some(self.order_seq),
+            withdrawn: self.withdrawn,
             kind: self.kind,
             text: self.text.clone(),
             status: self.status.clone(),
@@ -153,6 +158,7 @@ impl RelayState {
                     turn_id,
                     tool,
                     order_seq,
+                    withdrawn: false,
                     last_live_upsert_revision: None,
                 });
                 (entry_seq, order_seq)
@@ -207,6 +213,7 @@ impl RelayState {
             turn_id,
             tool,
             order_seq,
+            withdrawn: false,
             last_live_upsert_revision: Some(revision),
         });
         transcript_mutation_meta(base_revision, revision, entry_seq, order_seq)
@@ -317,6 +324,7 @@ impl RelayState {
                     turn_id: Some(turn_id.to_string()),
                     tool: None,
                     order_seq,
+                    withdrawn: false,
                     last_live_upsert_revision: None,
                 });
                 (entry_seq, order_seq, 0)
@@ -518,9 +526,7 @@ impl RelayState {
             return;
         }
         runtime.codex_start_reservation = None;
-        runtime
-            .transcript
-            .retain(|entry| !is_withdrawable_reservation_row(entry, reservation_id));
+        mark_reservation_row_withdrawn(&mut runtime.transcript, reservation_id);
         let _ = self.bump_thread_transcript_revision(thread_id);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
@@ -539,9 +545,7 @@ impl RelayState {
         };
         if reservation.turn_id.is_none() {
             if let Some(runtime) = self.runtimes.get_mut(thread_id) {
-                runtime
-                    .transcript
-                    .retain(|entry| !is_withdrawable_reservation_row(entry, &reservation.item_id));
+                mark_reservation_row_withdrawn(&mut runtime.transcript, &reservation.item_id);
             }
             let _ = self.bump_thread_transcript_revision(thread_id);
             if self.active_thread_id.as_deref() == Some(thread_id) {
@@ -894,6 +898,7 @@ impl RelayState {
                     turn_id: None,
                     tool: None,
                     order_seq,
+                    withdrawn: false,
                     last_live_upsert_revision: None,
                 });
                 (entry_seq, order_seq)
@@ -1148,6 +1153,18 @@ pub(super) fn merge_tool_call_view(
 /// stamps the reservation and the row together, so this is belt-and-braces rather than
 /// the load-bearing check: it keeps the rule on the ROW, where a future caller that
 /// forgets the reservation-side guard still cannot delete a real message.
+/// A tombstone, not a deletion: a snapshot merge can only add and update, so a
+/// deleted row lives on in every client that saw it. The marked row travels the
+/// ordinary update channel instead. Withdrawal never rewinds the order cursors,
+/// so the key stays spent either way.
+fn mark_reservation_row_withdrawn(transcript: &mut [TranscriptRecord], reservation_id: &str) {
+    for entry in transcript.iter_mut() {
+        if is_withdrawable_reservation_row(entry, reservation_id) {
+            entry.withdrawn = true;
+        }
+    }
+}
+
 fn is_withdrawable_reservation_row(entry: &TranscriptRecord, reservation_id: &str) -> bool {
     entry.item_id == reservation_id
         && entry.kind == TranscriptEntryKind::UserText

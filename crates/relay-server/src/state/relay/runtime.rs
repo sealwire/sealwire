@@ -313,6 +313,7 @@ impl ThreadRuntime {
                 order_seq: (index as i64)
                     .checked_mul(super::transcript::ORDER_SEQ_STEP)
                     .expect("order_seq tail space exhausted"),
+                withdrawn: false,
                 last_live_upsert_revision: None,
             })
             .collect::<Vec<_>>();
@@ -540,6 +541,7 @@ impl ThreadRuntime {
                 tool: entry.tool,
                 // Placeholder: real keys are issued after the merge-away pass below.
                 order_seq: 0,
+                withdrawn: false,
                 last_live_upsert_revision: None,
             })
             .collect::<Vec<_>>();
@@ -724,13 +726,17 @@ fn merge_runtime_entry(existing: &mut TranscriptRecord, incoming: TranscriptReco
     if changed {
         // The row's issued key survives whole-record replacement: assigned once,
         // never mutated — an incoming history copy carries another counter's number.
+        // `withdrawn` is absorbing for the same reason: a late old page must not
+        // resurrect a row the relay already answered for.
         let order_seq = existing.order_seq;
+        let withdrawn = existing.withdrawn || incoming.withdrawn;
         let last_live_upsert_revision = incoming
             .last_live_upsert_revision
             .or(existing.last_live_upsert_revision);
         *existing = incoming;
         existing.last_live_upsert_revision = last_live_upsert_revision;
         existing.order_seq = order_seq;
+        existing.withdrawn = withdrawn;
     }
     changed
 }
@@ -831,6 +837,7 @@ mod tests {
             item_id: item_id.to_string(),
             // History-shaped: a re-read carries no live sequence number.
             order_seq: 0,
+            withdrawn: false,
             last_live_upsert_revision: None,
             kind: crate::protocol::TranscriptEntryKind::ToolCall,
             text: Some("Reading src/main.rs".to_string()),
@@ -1015,10 +1022,12 @@ mod tests {
             turn_id: None,
             tool: None,
             order_seq: 0,
+            withdrawn: false,
             last_live_upsert_revision: None,
         });
         let older = vec![TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("older".to_string()),
             kind: crate::protocol::TranscriptEntryKind::UserText,
             text: Some("older".to_string()),
@@ -1089,12 +1098,14 @@ mod tests {
             turn_id: None,
             tool: None,
             order_seq: issued,
+            withdrawn: false,
             last_live_upsert_revision: None,
         });
         let issued_tail = issued;
 
         let page = |id: &str| TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some(id.to_string()),
             kind: crate::protocol::TranscriptEntryKind::UserText,
             text: Some(id.to_string()),
@@ -1142,6 +1153,7 @@ mod tests {
             turn_id: None,
             tool: None,
             order_seq: issued,
+            withdrawn: false,
             last_live_upsert_revision: None,
         });
 
@@ -1155,6 +1167,7 @@ mod tests {
                 tool: None,
                 // A fresh read numbers from zero — colliding with this runtime's keys.
                 order_seq: 0,
+                withdrawn: false,
                 last_live_upsert_revision: None,
             },
             TranscriptRecord {
@@ -1165,6 +1178,7 @@ mod tests {
                 turn_id: None,
                 tool: None,
                 order_seq: 0,
+                withdrawn: false,
                 last_live_upsert_revision: None,
             },
         ];

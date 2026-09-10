@@ -755,6 +755,7 @@ mod tests {
         let transcript = (0..80)
             .map(|index| TranscriptEntryView {
                 order_seq: None,
+                withdrawn: false,
                 item_id: Some(format!("item-{index}")),
                 kind: TranscriptEntryKind::AgentText,
                 text: Some("context ".repeat(800)),
@@ -779,6 +780,7 @@ mod tests {
     fn agent_entry(item_id: &str, text: &str) -> TranscriptEntryView {
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some(item_id.to_string()),
             kind: TranscriptEntryKind::AgentText,
             text: Some(text.to_string()),
@@ -833,6 +835,7 @@ mod tests {
         let mut transcript = vec![agent_entry("a1", "one")];
         transcript.push(TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("tool-1".to_string()),
             kind: TranscriptEntryKind::ToolCall,
             text: None,

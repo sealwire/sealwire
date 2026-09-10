@@ -3697,6 +3697,7 @@ mod tests {
             TranscriptEntryView {
                 // Numbered when it becomes a runtime record; raw provider parses carry none.
                 order_seq: None,
+                withdrawn: false,
                 item_id: Some(item_id.to_string()),
                 kind: TranscriptEntryKind::ToolCall,
                 text: None,

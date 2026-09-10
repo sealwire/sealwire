@@ -129,6 +129,7 @@ fn make_snapshot() -> SessionSnapshot {
         transcript: (0..30)
             .map(|index| TranscriptEntryView {
                 order_seq: None,
+                withdrawn: false,
                 item_id: Some(format!("item-{index}")),
                 kind: TranscriptEntryKind::AgentText,
                 text: Some("x".repeat(4500 + index)),
@@ -484,6 +485,7 @@ fn compact_for_broker_drops_legacy_workflow_card_before_conversation_content() {
     snapshot.transcript = (0..3)
         .map(|index| TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some(format!("item-{index}")),
             kind: TranscriptEntryKind::AgentText,
             text: Some(format!("visible conversation tail {index}")),
@@ -530,6 +532,7 @@ fn compact_for_broker_keeps_the_teams_cache_key_under_maximum_pressure() {
     snapshot.transcript = (0..3)
         .map(|index| TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some(format!("item-{index}")),
             kind: TranscriptEntryKind::AgentText,
             text: Some(format!("visible conversation tail {index}")),
@@ -775,6 +778,7 @@ fn local_web_control_plane_metadata_does_not_shell_normal_live_transcript() {
     snapshot.transcript = (0..4)
         .map(|index| TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some(format!("assistant:live-message-{index}")),
             kind: TranscriptEntryKind::AgentText,
             text: Some(format!(
@@ -879,6 +883,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
     let authoritative_entries: Vec<TranscriptEntryView> = vec![
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("r-empty-full".to_string()),
             kind: TranscriptEntryKind::Reasoning,
             text: None,
@@ -889,6 +894,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
         },
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("a-empty-omitted".to_string()),
             kind: TranscriptEntryKind::AgentText,
             text: None,
@@ -899,6 +905,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
         },
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("a-omitted".to_string()),
             kind: TranscriptEntryKind::AgentText,
             text: Some(format!(
@@ -955,6 +962,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
     local.transcript = vec![
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("u-preview".to_string()),
             kind: TranscriptEntryKind::UserText,
             text: Some("walk me through it...".to_string()),
@@ -965,6 +973,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
         },
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("a-preview-long".to_string()),
             kind: TranscriptEntryKind::AgentText,
             text: Some(format!("Detailed answer. {}", "More detail. ".repeat(400))),
@@ -975,6 +984,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
         },
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("a-preview-short".to_string()),
             kind: TranscriptEntryKind::AgentText,
             text: Some("done, hope that helps...".to_string()),
@@ -1027,6 +1037,7 @@ fn long_session_snapshot_stays_bounded_in_bytes_and_entry_count() {
         snapshot.transcript = (0..1_000)
             .map(|index| TranscriptEntryView {
                 order_seq: None,
+                withdrawn: false,
                 item_id: Some(format!("item-{index:04}")),
                 kind: if index % 2 == 0 {
                     TranscriptEntryKind::UserText
@@ -1106,6 +1117,7 @@ fn compact_shelled_entries_are_marked_omitted_not_inferred_from_ellipsis() {
     snapshot.transcript = (0..3)
         .map(|index| TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some(format!("item-{index}")),
             kind: TranscriptEntryKind::AgentText,
             // Note: this content does NOT end in "..." — yet it is omitted. The
@@ -1151,6 +1163,7 @@ fn compact_emergency_shell_only_exempts_settled_empty_reasoning() {
                       text: Option<String>,
                       status: &str| TranscriptEntryView {
         order_seq: None,
+        withdrawn: false,
         item_id: Some(item_id.to_string()),
         kind,
         text,
@@ -1253,6 +1266,7 @@ fn compact_local_emergency_shell_keeps_empty_reasoning_full() {
     snapshot.pending_approvals.clear();
     snapshot.transcript = vec![TranscriptEntryView {
         order_seq: None,
+        withdrawn: false,
         item_id: Some("empty-reasoning".to_string()),
         kind: TranscriptEntryKind::Reasoning,
         text: None,
@@ -1265,6 +1279,7 @@ fn compact_local_emergency_shell_keeps_empty_reasoning_full() {
         .transcript
         .extend((0..3).map(|index| TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some(format!("large-{index}")),
             kind: TranscriptEntryKind::ToolCall,
             text: Some(format!("entry {index} ") + &"large body ".repeat(300)),
@@ -1352,6 +1367,7 @@ fn compact_emergency_shell_preserves_bodyless_entries_existing_states() {
     snapshot.transcript = vec![
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("bodyless-preview".to_string()),
             kind: TranscriptEntryKind::Reasoning,
             text: None,
@@ -1362,6 +1378,7 @@ fn compact_emergency_shell_preserves_bodyless_entries_existing_states() {
         },
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("bodyless-omitted".to_string()),
             kind: TranscriptEntryKind::Reasoning,
             text: None,
@@ -1398,6 +1415,7 @@ fn compact_marks_ellipsis_truncated_entry_preview_and_leaves_short_full() {
     snapshot.transcript = vec![
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("short-ellipsis".to_string()),
             kind: TranscriptEntryKind::AgentText,
             // A real, complete answer that happens to trail off in an ellipsis.
@@ -1409,6 +1427,7 @@ fn compact_marks_ellipsis_truncated_entry_preview_and_leaves_short_full() {
         },
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("long".to_string()),
             kind: TranscriptEntryKind::AgentText,
             text: Some("L".repeat(MAX_BROKER_TRANSCRIPT_CHARS * 4)),
@@ -1457,6 +1476,7 @@ fn control_plane_flood_keeps_both_surfaces_bounded_without_shelling_live_text() 
         snapshot.transcript = (0..3)
             .map(|index| TranscriptEntryView {
                 order_seq: None,
+                withdrawn: false,
                 item_id: Some(format!("live-{index}")),
                 kind: TranscriptEntryKind::AgentText,
                 text: Some(format!("live assistant message {index}")),
@@ -1670,6 +1690,7 @@ fn compact_for_broker_stays_under_budget_even_with_oversized_cwd() {
     snapshot.device_records.clear();
     snapshot.transcript = vec![TranscriptEntryView {
         order_seq: None,
+        withdrawn: false,
         item_id: Some("a1".to_string()),
         kind: TranscriptEntryKind::AgentText,
         text: Some("short answer".to_string()),
@@ -1833,6 +1854,7 @@ fn compact_for_surfaces_truncates_a_single_oversized_agent_message() {
         snapshot.transcript = vec![
             TranscriptEntryView {
                 order_seq: None,
+                withdrawn: false,
                 item_id: Some("u1".to_string()),
                 kind: TranscriptEntryKind::UserText,
                 text: Some("summarize the repo".to_string()),
@@ -1843,6 +1865,7 @@ fn compact_for_surfaces_truncates_a_single_oversized_agent_message() {
             },
             TranscriptEntryView {
                 order_seq: None,
+                withdrawn: false,
                 item_id: Some("a1".to_string()),
                 kind: TranscriptEntryKind::AgentText,
                 text: Some("Z".repeat(max_chars * 4)),
@@ -2135,6 +2158,7 @@ fn compact_for_broker_shells_transcript_tail_as_last_resort_without_clearing() {
     snapshot.transcript = (0..3)
         .map(|index| TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some(format!("item-{index}")),
             kind: TranscriptEntryKind::AgentText,
             text: Some(format!("{}-{index}", "内容".repeat(1_500))),
@@ -2185,6 +2209,7 @@ fn compact_for_broker_shells_tool_entries_dropping_heavy_content() {
     snapshot.pending_approvals.clear();
     snapshot.transcript = vec![TranscriptEntryView {
         order_seq: None,
+        withdrawn: false,
         item_id: Some("turn-diff:turn-1".to_string()),
         kind: TranscriptEntryKind::ToolCall,
         text: Some("内容".repeat(1_500)),
@@ -2239,6 +2264,7 @@ fn strip_file_change_diffs_keeps_summary_and_flags_entry() {
         // A turn-diff entry with full diffs — must be reduced to a summary.
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("turn-diff:turn-1".to_string()),
             kind: TranscriptEntryKind::ToolCall,
             text: Some("Edited files".to_string()),
@@ -2278,6 +2304,7 @@ fn strip_file_change_diffs_keeps_summary_and_flags_entry() {
         // A plain agent-text entry with no diff body — must be left untouched.
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("a1".to_string()),
             kind: TranscriptEntryKind::AgentText,
             text: Some("hello".to_string()),
@@ -2317,6 +2344,7 @@ fn compact_for_broker_shells_bring_oversized_transcript_under_budget() {
     snapshot.transcript = (0..3)
         .map(|index| TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some(format!("item-{index}")),
             kind: TranscriptEntryKind::ToolCall,
             text: Some("内容".repeat(2_000)),
@@ -2382,6 +2410,7 @@ fn compact_for_broker_trims_many_file_changes_without_clearing_transcript() {
     snapshot.logs.clear();
     snapshot.transcript = vec![TranscriptEntryView {
         order_seq: None,
+        withdrawn: false,
         item_id: Some("turn-diff:turn-1".to_string()),
         kind: TranscriptEntryKind::ToolCall,
         text: Some("Edited many files".to_string()),
@@ -2588,6 +2617,7 @@ fn compact_for_broker_preserves_existing_transcript_truncated_flag() {
     snapshot.transcript = (0..4)
         .map(|index| TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some(format!("item-{index}")),
             kind: TranscriptEntryKind::AgentText,
             text: Some(format!("entry-{index}")),
@@ -2609,6 +2639,7 @@ fn thread_transcript_response_preserves_oversized_single_entries() {
     let transcript = vec![
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("item-1".to_string()),
             kind: TranscriptEntryKind::AgentText,
             text: Some("长".repeat(9_500)),
@@ -2619,6 +2650,7 @@ fn thread_transcript_response_preserves_oversized_single_entries() {
         },
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("item-2".to_string()),
             kind: TranscriptEntryKind::UserText,
             text: Some("next".to_string()),
@@ -2680,6 +2712,7 @@ fn thread_transcript_response_preserves_oversized_single_entries() {
 fn thread_transcript_response_keeps_complete_entries_together() {
     let transcript = vec![TranscriptEntryView {
         order_seq: None,
+        withdrawn: false,
         item_id: Some("item-1".to_string()),
         kind: TranscriptEntryKind::AgentText,
         text: Some("a".repeat(4_500)),
@@ -2704,6 +2737,7 @@ fn thread_transcript_response_can_page_backwards_from_tail() {
     let transcript = (0..12)
         .map(|index| TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some(format!("item-{index}")),
             kind: TranscriptEntryKind::AgentText,
             text: Some(format!("entry-{index}-{}", "z".repeat(4500))),
@@ -2763,6 +2797,7 @@ fn thread_transcript_response_packs_many_small_entries_within_budget() {
     let transcript = (0..400)
         .map(|index| TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some(format!("item-{index}")),
             kind: TranscriptEntryKind::AgentText,
             text: Some(format!("small entry {index}")),
@@ -2830,6 +2865,7 @@ fn thread_transcript_page_materializes_only_entries_near_the_requested_cursor() 
             materialized.set(materialized.get() + 1);
             TranscriptEntryView {
                 order_seq: None,
+                withdrawn: false,
                 item_id: Some(format!("item-{index}")),
                 kind: TranscriptEntryKind::AgentText,
                 text: Some(format!("entry-{index}-{}", "x".repeat(900))),
@@ -2863,6 +2899,7 @@ fn thread_transcript_response_tail_returns_latest_page_first() {
     let transcript = (0..12)
         .map(|index| TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some(format!("item-{index}")),
             kind: TranscriptEntryKind::AgentText,
             text: Some(format!("entry-{index}-{}", "z".repeat(4500))),
@@ -2908,6 +2945,7 @@ fn thread_transcript_history_externalizes_large_file_change_diffs() {
     );
     let transcript = vec![TranscriptEntryView {
         order_seq: None,
+        withdrawn: false,
         item_id: Some("turn-diff:turn-1".to_string()),
         kind: TranscriptEntryKind::ToolCall,
         text: Some("Changed files".to_string()),
@@ -2956,6 +2994,7 @@ fn thread_entries_response_returns_complete_entries_for_requested_item_ids() {
     let transcript = vec![
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("item-1".to_string()),
             kind: TranscriptEntryKind::UserText,
             text: Some("hello".repeat(2_000)),
@@ -2966,6 +3005,7 @@ fn thread_entries_response_returns_complete_entries_for_requested_item_ids() {
         },
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("item-2".to_string()),
             kind: TranscriptEntryKind::AgentText,
             text: Some("world".repeat(2_000)),
@@ -2995,6 +3035,7 @@ fn thread_entries_response_returns_complete_entries_for_requested_item_ids() {
 fn thread_entry_detail_response_chunks_large_command_text() {
     let entry = TranscriptEntryView {
         order_seq: None,
+        withdrawn: false,
         item_id: Some("item-1".to_string()),
         kind: TranscriptEntryKind::Command,
         text: Some("x".repeat(20_000)),
@@ -3047,6 +3088,7 @@ fn thread_entry_detail_response_chunks_large_nested_file_change_diff() {
     );
     let entry = TranscriptEntryView {
         order_seq: None,
+        withdrawn: false,
         item_id: Some("turn-diff:turn-1".to_string()),
         kind: TranscriptEntryKind::ToolCall,
         text: Some("Changed files".to_string()),
@@ -3114,6 +3156,7 @@ mod can_apply_flag_tests {
     fn turn_diff_entry(diff: &str) -> TranscriptEntryView {
         TranscriptEntryView {
             order_seq: None,
+            withdrawn: false,
             item_id: Some("turn-diff:t1".to_string()),
             kind: TranscriptEntryKind::ToolCall,
             text: None,

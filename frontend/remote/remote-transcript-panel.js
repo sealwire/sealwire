@@ -13,6 +13,7 @@ import { maybeLoadOlderTranscriptHistory } from "./session-ops.js";
 import { shortId } from "./utils.js";
 import { useRemoteTranscriptScrollBookkeeping } from "./use-transcript-scroll-bookkeeping.js";
 import { useRelayNicknames } from "./use-relay-nicknames.js";
+import { visibleTranscriptEntries } from "../shared/withdrawn-transcript.js";
 
 const h = React.createElement;
 
@@ -41,7 +42,9 @@ export function RemoteTranscriptPanel({
   const transcriptOptionsRef = useRef(null);
 
   const approval = sessionView?.approval || null;
-  const entries = session?.transcript || [];
+  // Filtered HERE, before the scroll bookkeeping below — a withdrawn row must
+  // not anchor "latest user message" scrolling any more than it may render.
+  const entries = visibleTranscriptEntries(session?.transcript);
   const hydrationLoading = Boolean(
     session?.transcript_truncated
       && currentState.transcriptHydrationBaseSnapshot

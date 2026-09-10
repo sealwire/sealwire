@@ -1281,6 +1281,7 @@ fn summarize_thread_transcript_response_reports_entry_and_char_counts() {
         entries: vec![
             TranscriptEntryView {
                 order_seq: None,
+                withdrawn: false,
                 item_id: Some("item-1".to_string()),
                 kind: TranscriptEntryKind::AgentText,
                 text: Some("helloworld".to_string()),
@@ -1291,6 +1292,7 @@ fn summarize_thread_transcript_response_reports_entry_and_char_counts() {
             },
             TranscriptEntryView {
                 order_seq: None,
+                withdrawn: false,
                 item_id: Some("item-2".to_string()),
                 kind: TranscriptEntryKind::ToolCall,
                 text: Some("done".to_string()),

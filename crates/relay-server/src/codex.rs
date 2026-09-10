@@ -1230,6 +1230,7 @@ fn parse_transcript(thread: &Value) -> Vec<TranscriptEntryView> {
             transcript.push(TranscriptEntryView {
                 // Numbered when it becomes a runtime record; raw provider parses carry none.
                 order_seq: None,
+                withdrawn: false,
                 item_id: Some(codex_turn_error_item_id(turn_id.as_deref())),
                 kind: TranscriptEntryKind::Error,
                 text: Some(reason),
@@ -1329,6 +1330,7 @@ fn parse_transcript_item(
     Some(TranscriptEntryView {
         // Numbered when it becomes a runtime record; raw provider parses carry none.
         order_seq: None,
+        withdrawn: false,
         item_id: Some(item_id),
         kind,
         text,
@@ -1355,6 +1357,7 @@ fn parse_transcript_detail_item(
     Some(TranscriptEntryView {
         // Numbered when it becomes a runtime record; raw provider parses carry none.
         order_seq: None,
+        withdrawn: false,
         item_id: Some(item_id),
         kind,
         text,
@@ -1627,6 +1630,7 @@ pub(crate) fn build_turn_diff_entry_with_fallback(
     TranscriptEntryView {
         // Numbered when it becomes a runtime record; raw provider parses carry none.
         order_seq: None,
+        withdrawn: false,
         item_id: Some(format!("turn-diff:{turn_id}")),
         kind: TranscriptEntryKind::ToolCall,
         text: Some(format!("Changed files in turn {turn_id}")),
