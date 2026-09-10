@@ -155,6 +155,11 @@ pub(crate) struct ThreadRuntime {
     pub(crate) sandbox: String,
     pub(crate) reasoning_effort: String,
     pub(crate) transcript_revision: u64,
+    /// Next order key to issue at the tail / at the head (scroll-up history). Monotonic
+    /// cursors, never rewound: a deleted row's key must not be reissued, because a
+    /// client may still hold the old row under it.
+    pub(crate) next_tail_order_seq: i64,
+    pub(crate) next_head_order_seq: i64,
     pub(crate) transcript: Vec<TranscriptRecord>,
     pub(crate) provider_history_cursor: Option<usize>,
     pub(crate) provider_history_paged: bool,
@@ -224,6 +229,8 @@ impl ThreadRuntime {
             sandbox: String::new(),
             reasoning_effort: String::new(),
             transcript_revision,
+            next_tail_order_seq: 0,
+            next_head_order_seq: -super::transcript::ORDER_SEQ_STEP,
             transcript: Vec::new(),
             provider_history_cursor: None,
             provider_history_paged: false,
@@ -266,6 +273,8 @@ impl ThreadRuntime {
             liveness_stop_requested: false,
             active_flags: Vec::new(),
             transcript_revision,
+            next_tail_order_seq: 0,
+            next_head_order_seq: -super::transcript::ORDER_SEQ_STEP,
             transcript: Vec::new(),
             provider_history_cursor: None,
             provider_history_paged: false,
@@ -301,9 +310,12 @@ impl ThreadRuntime {
                 status: entry.status,
                 turn_id: entry.turn_id,
                 tool: entry.tool,
+                order_seq: (index as i64)
+                    .checked_mul(super::transcript::ORDER_SEQ_STEP)
+                    .expect("order_seq tail space exhausted"),
                 last_live_upsert_revision: None,
             })
-            .collect();
+            .collect::<Vec<_>>();
 
         // A read/restore is history, not liveness: this constructor always sets
         // active_turn_id = None (turn ids are never persisted nor surfaced by a read),
@@ -340,6 +352,10 @@ impl ThreadRuntime {
             liveness_stop_requested: false,
             active_flags: data.active_flags,
             transcript_revision,
+            next_tail_order_seq: (transcript.len() as i64)
+                .checked_mul(super::transcript::ORDER_SEQ_STEP)
+                .expect("order_seq tail space exhausted"),
+            next_head_order_seq: -super::transcript::ORDER_SEQ_STEP,
             transcript,
             provider_history_cursor: None,
             provider_history_paged: false,
@@ -447,6 +463,56 @@ impl ThreadRuntime {
         page
     }
 
+    pub(crate) fn alloc_tail_order_seq(&mut self) -> i64 {
+        let seq = self.next_tail_order_seq;
+        self.next_tail_order_seq = seq
+            .checked_add(super::transcript::ORDER_SEQ_STEP)
+            .expect("order_seq tail space exhausted");
+        seq
+    }
+
+    /// Issues `count` ascending keys strictly below everything issued so far and
+    /// returns the smallest; the block sorts before all existing rows and after any
+    /// later (older-history) block.
+    fn alloc_head_order_seq_block(&mut self, count: usize) -> i64 {
+        let step = super::transcript::ORDER_SEQ_STEP;
+        if count == 0 {
+            return self.next_head_order_seq;
+        }
+        let span = (count as i64 - 1)
+            .checked_mul(step)
+            .expect("order_seq head space exhausted");
+        let base = self
+            .next_head_order_seq
+            .checked_sub(span)
+            .expect("order_seq head space exhausted");
+        self.next_head_order_seq = base
+            .checked_sub(step)
+            .expect("order_seq head space exhausted");
+        base
+    }
+
+    /// For a runtime whose transcript was installed wholesale (the legacy-mirror copy):
+    /// re-derive both cursors so nothing already present can be reissued.
+    pub(crate) fn reset_order_seq_cursors_from_transcript(&mut self) {
+        let step = super::transcript::ORDER_SEQ_STEP;
+        let max = self.transcript.iter().map(|record| record.order_seq).max();
+        let min = self.transcript.iter().map(|record| record.order_seq).min();
+        self.next_tail_order_seq = max
+            .map(|max| {
+                max.checked_add(step)
+                    .expect("order_seq tail space exhausted")
+            })
+            .unwrap_or(0);
+        self.next_head_order_seq = min
+            .map(|min| {
+                min.min(0)
+                    .checked_sub(step)
+                    .expect("order_seq head space exhausted")
+            })
+            .unwrap_or(-step);
+    }
+
     pub(crate) fn prepend_provider_history(
         &mut self,
         entries: Vec<TranscriptEntryView>,
@@ -468,6 +534,8 @@ impl ThreadRuntime {
                 status: entry.status,
                 turn_id: entry.turn_id,
                 tool: entry.tool,
+                // Placeholder: real keys are issued after the merge-away pass below.
+                order_seq: 0,
                 last_live_upsert_revision: None,
             })
             .collect::<Vec<_>>();
@@ -497,6 +565,12 @@ impl ThreadRuntime {
                 true
             }
         });
+        // Numbered AFTER the merge-away pass, so merged duplicates consume no keys.
+        // Issued keys on existing rows never move — that is the whole contract.
+        let base = self.alloc_head_order_seq_block(records.len());
+        for (offset, record) in records.iter_mut().enumerate() {
+            record.order_seq = base + (offset as i64) * super::transcript::ORDER_SEQ_STEP;
+        }
         records.extend(std::mem::take(&mut self.transcript));
         self.transcript = records;
         self.provider_history_cursor = prev_cursor;
@@ -567,6 +641,10 @@ impl ThreadRuntime {
                 }
                 None if self.has_equivalent_user_message(&record) => {}
                 None => {
+                    let mut record = record;
+                    // The incoming record was numbered by ANOTHER runtime's counters
+                    // (a fresh history read); only this runtime's keys are valid here.
+                    record.order_seq = self.alloc_tail_order_seq();
                     self.transcript.push(record);
                     changed = true;
                 }
@@ -625,11 +703,15 @@ fn merge_runtime_entry(existing: &mut TranscriptRecord, incoming: TranscriptReco
         || existing.turn_id != incoming.turn_id
         || !tool_calls_equal(existing.tool.as_ref(), incoming.tool.as_ref());
     if changed {
+        // The row's issued key survives whole-record replacement: assigned once,
+        // never mutated — an incoming history copy carries another counter's number.
+        let order_seq = existing.order_seq;
         let last_live_upsert_revision = incoming
             .last_live_upsert_revision
             .or(existing.last_live_upsert_revision);
         *existing = incoming;
         existing.last_live_upsert_revision = last_live_upsert_revision;
+        existing.order_seq = order_seq;
     }
     changed
 }
@@ -729,6 +811,7 @@ mod tests {
         TranscriptRecord {
             item_id: item_id.to_string(),
             // History-shaped: a re-read carries no live sequence number.
+            order_seq: 0,
             last_live_upsert_revision: None,
             kind: crate::protocol::TranscriptEntryKind::ToolCall,
             text: Some("Reading src/main.rs".to_string()),
@@ -912,6 +995,7 @@ mod tests {
             status: "completed".to_string(),
             turn_id: None,
             tool: None,
+            order_seq: 0,
             last_live_upsert_revision: None,
         });
         let older = vec![TranscriptEntryView {
@@ -970,6 +1054,107 @@ mod tests {
         assert!(
             !rt.is_working(),
             "a read-derived working status with no live turn is a ghost, not liveness"
+        );
+    }
+    /// The order-key contract: issued keys never move, and no key is ever reissued.
+    #[test]
+    fn prepend_never_renumbers_issued_order_seqs() {
+        let mut rt = runtime("t1", "idle");
+        let issued = rt.alloc_tail_order_seq();
+        rt.transcript.push(TranscriptRecord {
+            item_id: "tail-1".to_string(),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some("tail".to_string()),
+            status: "completed".to_string(),
+            turn_id: None,
+            tool: None,
+            order_seq: issued,
+            last_live_upsert_revision: None,
+        });
+        let issued_tail = issued;
+
+        let page = |id: &str| TranscriptEntryView {
+            item_id: Some(id.to_string()),
+            kind: crate::protocol::TranscriptEntryKind::UserText,
+            text: Some(id.to_string()),
+            status: "completed".to_string(),
+            turn_id: None,
+            tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
+        };
+
+        rt.prepend_provider_history(vec![page("older-1"), page("older-2")], Some(10), None);
+        let first_block: Vec<i64> = rt.transcript.iter().map(|r| r.order_seq).collect();
+        assert_eq!(
+            rt.transcript.last().unwrap().order_seq,
+            issued_tail,
+            "prepending history must not renumber an already-published row"
+        );
+        assert!(
+            first_block[0] < first_block[1] && first_block[1] < issued_tail,
+            "the prepended block sorts strictly before the existing rows: {first_block:?}"
+        );
+
+        // An OLDER page arrives later: it must sort before the previous block.
+        rt.prepend_provider_history(vec![page("oldest-1")], Some(5), None);
+        assert!(
+            rt.transcript[0].order_seq < first_block[0],
+            "later-fetched older history sorts before the earlier block"
+        );
+        let mut seqs: Vec<i64> = rt.transcript.iter().map(|r| r.order_seq).collect();
+        let unique = seqs.len();
+        seqs.dedup();
+        assert_eq!(seqs.len(), unique, "order keys must be unique");
+    }
+
+    /// A history merge replaces record content wholesale; the issued key survives, and
+    /// unmatched rows are renumbered by THIS runtime, not the fresh read's counters.
+    #[test]
+    fn merge_preserves_issued_order_seq_and_renumbers_new_rows() {
+        let mut rt = runtime("t1", "idle");
+        let issued = rt.alloc_tail_order_seq();
+        rt.transcript.push(TranscriptRecord {
+            item_id: "row-1".to_string(),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some("short".to_string()),
+            status: "running".to_string(),
+            turn_id: None,
+            tool: None,
+            order_seq: issued,
+            last_live_upsert_revision: None,
+        });
+
+        let incoming = vec![
+            TranscriptRecord {
+                item_id: "row-1".to_string(),
+                kind: crate::protocol::TranscriptEntryKind::AgentText,
+                text: Some("short but different".to_string()),
+                status: "completed".to_string(),
+                turn_id: Some("turn-9".to_string()),
+                tool: None,
+                // A fresh read numbers from zero — colliding with this runtime's keys.
+                order_seq: 0,
+                last_live_upsert_revision: None,
+            },
+            TranscriptRecord {
+                item_id: "row-2".to_string(),
+                kind: crate::protocol::TranscriptEntryKind::AgentText,
+                text: Some("new".to_string()),
+                status: "completed".to_string(),
+                turn_id: None,
+                tool: None,
+                order_seq: 0,
+                last_live_upsert_revision: None,
+            },
+        ];
+        assert!(rt.merge_transcript_records(incoming));
+        assert_eq!(
+            rt.transcript[0].order_seq, issued,
+            "replacement must not adopt the fresh read's key"
+        );
+        assert!(
+            rt.transcript[1].order_seq > issued,
+            "the appended row takes this runtime's next tail key"
         );
     }
 }

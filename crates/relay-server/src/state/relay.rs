@@ -3442,6 +3442,9 @@ impl RelayState {
         runtime.sandbox = self.sandbox.clone();
         runtime.reasoning_effort = self.reasoning_effort.clone();
         runtime.transcript = self.transcript.clone();
+        // The copied rows carry keys the placeholder's fresh cursors know nothing
+        // about; without this the next append reissues an already-published key.
+        runtime.reset_order_seq_cursors_from_transcript();
         runtime.apply_states = self.apply_states.clone();
         runtime.pending_approvals = self
             .pending_approvals

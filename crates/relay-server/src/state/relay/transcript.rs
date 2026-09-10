@@ -40,6 +40,11 @@ impl TranscriptMutationMeta {
     }
 }
 
+/// Spacing between consecutively issued order keys, so a future mid-insert can take a
+/// midpoint without renumbering anything already published. Exhausting a gap is a
+/// fail-fast (checked arithmetic), never a silent reuse.
+pub(crate) const ORDER_SEQ_STEP: i64 = 1 << 20;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct TranscriptRecord {
     pub(crate) item_id: String,
@@ -48,6 +53,11 @@ pub(crate) struct TranscriptRecord {
     pub(crate) status: String,
     pub(crate) turn_id: Option<String>,
     pub(crate) tool: Option<ToolCallView>,
+    /// Where this row sorts within its thread, valid for THIS run only
+    /// (`transcript_generation`). Assigned once at creation, never mutated. Holes are
+    /// legal — continuity is the revision chain's job, never this field's.
+    #[serde(default)]
+    pub(crate) order_seq: i64,
     /// Relay-global clock at the last live upsert. Hydrated/prepended history leaves this
     /// unset, and delta/status writes do NOT touch it — it is not a general write stamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -131,6 +141,7 @@ impl RelayState {
                 index as u64 + 1
             } else {
                 let entry_seq = runtime.transcript.len() as u64 + 1;
+                let order_seq = runtime.alloc_tail_order_seq();
                 runtime.transcript.push(TranscriptRecord {
                     item_id,
                     kind,
@@ -138,6 +149,7 @@ impl RelayState {
                     status,
                     turn_id,
                     tool,
+                    order_seq,
                     last_live_upsert_revision: None,
                 });
                 entry_seq
@@ -182,6 +194,7 @@ impl RelayState {
 
         let entry_seq = self.transcript.len() as u64 + 1;
         let (base_revision, revision) = self.bump_transcript_revision();
+        let order_seq = next_legacy_tail_order_seq(&self.transcript);
         self.transcript.push(TranscriptRecord {
             item_id,
             kind,
@@ -189,6 +202,7 @@ impl RelayState {
             status,
             turn_id,
             tool,
+            order_seq,
             last_live_upsert_revision: Some(revision),
         });
         transcript_mutation_meta(base_revision, revision, entry_seq)
@@ -290,6 +304,7 @@ impl RelayState {
                 (index as u64 + 1, text_offset)
             } else {
                 let entry_seq = runtime.transcript.len() as u64 + 1;
+                let order_seq = runtime.alloc_tail_order_seq();
                 runtime.transcript.push(TranscriptRecord {
                     item_id: item_id.to_string(),
                     kind: TranscriptEntryKind::AgentText,
@@ -297,6 +312,7 @@ impl RelayState {
                     status: "streaming".to_string(),
                     turn_id: Some(turn_id.to_string()),
                     tool: None,
+                    order_seq,
                     last_live_upsert_revision: None,
                 });
                 (entry_seq, 0)
@@ -857,6 +873,7 @@ impl RelayState {
                 index as u64 + 1
             } else {
                 let entry_seq = runtime.transcript.len() as u64 + 1;
+                let order_seq = runtime.alloc_tail_order_seq();
                 runtime.transcript.push(TranscriptRecord {
                     item_id: item_id.to_string(),
                     kind: TranscriptEntryKind::Command,
@@ -864,6 +881,7 @@ impl RelayState {
                     status: "running".to_string(),
                     turn_id: None,
                     tool: None,
+                    order_seq,
                     last_live_upsert_revision: None,
                 });
                 entry_seq
@@ -1121,6 +1139,20 @@ fn is_withdrawable_reservation_row(entry: &TranscriptRecord, reservation_id: &st
     entry.item_id == reservation_id
         && entry.kind == TranscriptEntryKind::UserText
         && entry.turn_id.is_none()
+}
+
+/// The legacy mirror only ever appends and never deletes in place, so deriving from
+/// the last row cannot reissue a key. Runtimes must use their cursors instead.
+fn next_legacy_tail_order_seq(transcript: &[TranscriptRecord]) -> i64 {
+    transcript
+        .last()
+        .map(|record| {
+            record
+                .order_seq
+                .checked_add(ORDER_SEQ_STEP)
+                .expect("order_seq tail space exhausted")
+        })
+        .unwrap_or(0)
 }
 
 fn transcript_mutation_meta(
