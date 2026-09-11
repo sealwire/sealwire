@@ -2905,7 +2905,7 @@ tree would review commits this thread never made"
             bridge.clone()
         };
         let data = bridge.read_thread(thread_id).await.ok()?;
-        latest_agent_entry(&data.transcript)
+        latest_agent_entry(&data.to_views())
     }
 
     /// Acquire the shared session guard for the duration of a user session op.

@@ -965,7 +965,8 @@ pub(crate) fn apply_turn_finished(
                 now,
             ),
             _ => {
-                relay.upsert_transcript_item_for_thread(
+                // Same row as the background arm: relay-synthesized, not an ACP item.
+                relay.upsert_relay_named_item_for_thread(
                     thread_id,
                     item_id,
                     TranscriptEntryKind::Error,
@@ -1501,13 +1502,24 @@ pub(crate) fn sync_data_from_runtime(
     // this field, and an empty or stale one is rejected downstream.
     thread.cwd = runtime.current_cwd.clone();
 
-    // This read is reconstructed from rows the relay already owns, so provenance
-    // is exact rather than re-derived: a row with no provider name never had one.
-    let relay_named_item_ids = runtime
-        .transcript
-        .iter()
-        .filter(|record| record.provider_item_id.is_none())
-        .map(|record| record.row_id.clone())
+    // Reconstructed from rows the relay already owns, so each entry's provenance is
+    // copied rather than re-derived: a row with no provider name never had one.
+    //
+    // `transcript_views` is 1:1 over the records by construction. Asserted because
+    // `zip` would otherwise TRUNCATE silently if it ever started filtering, quietly
+    // dropping the tail of a live thread's read.
+    debug_assert_eq!(
+        transcript.len(),
+        runtime.transcript.len(),
+        "transcript_views must stay 1:1 with the records it renders"
+    );
+    let transcript = transcript
+        .into_iter()
+        .zip(runtime.transcript.iter())
+        .map(|(view, record)| crate::provider::ProviderTranscriptEntry {
+            view,
+            provider_item_id: record.provider_item_id.clone(),
+        })
         .collect::<Vec<_>>();
 
     Some(crate::provider::ThreadSyncData {
@@ -1515,7 +1527,6 @@ pub(crate) fn sync_data_from_runtime(
         status: runtime.current_status.clone(),
         active_flags: runtime.active_flags.clone(),
         transcript,
-        relay_named_item_ids,
     })
 }
 

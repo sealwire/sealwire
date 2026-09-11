@@ -312,7 +312,8 @@ impl ThreadTranscript {
         let outcome = edit(&mut self.rows[index]);
         identity.restore(&mut self.rows[index]);
         if let Some(provider_item_id) = self.rows[index].provider_item_id.clone() {
-            self.bind_provider_item_id(&identity.row_id.clone(), &provider_item_id);
+            let row_id = identity.row_id.clone();
+            self.bind_provider_item_id(&row_id, &provider_item_id);
         }
         Some(outcome)
     }
@@ -329,39 +330,32 @@ impl ThreadTranscript {
     }
 
     /// Insert a run of rows immediately before `index`, minting ids as needed.
-    pub(crate) fn insert_before(&mut self, index: usize, records: Vec<TranscriptRecord>) {
+    ///
+    /// Returns the id each row actually landed under, in the order given. A caller
+    /// that echoes the ids it passed in would be reporting names that may have been
+    /// minted away — `insert_before` is where a collision is resolved, so it is the
+    /// only place that knows.
+    #[must_use]
+    pub(crate) fn insert_before(
+        &mut self,
+        index: usize,
+        records: Vec<TranscriptRecord>,
+    ) -> Vec<String> {
         let mut records = records;
         for record in records.iter_mut() {
             record.row_id = self.mint_row_id(&record.row_id);
             // Claim it immediately so two rows in one batch cannot mint the same id.
             self.by_row_id.insert(record.row_id.clone(), usize::MAX);
         }
+        let minted = records
+            .iter()
+            .map(|record| record.row_id.clone())
+            .collect::<Vec<_>>();
         for (offset, record) in records.into_iter().enumerate() {
             self.rows.insert(index + offset, record);
         }
         self.reindex();
-    }
-
-    /// Replace every row wholesale (history prepend rebuilds the vector).
-    ///
-    /// Goes through `push` so a duplicate id inside `rows` is re-minted rather
-    /// than silently collapsing two rows into one index entry.
-    pub(crate) fn replace_all(&mut self, rows: Vec<TranscriptRecord>) {
-        let aliases = std::mem::take(&mut self.row_id_by_provider_item_id);
-        self.rows = Vec::with_capacity(rows.len());
-        self.by_row_id.clear();
-        for row in rows {
-            self.push(row);
-        }
-        // Aliases outlive the rebuild when their row came along with it — a
-        // prepend must not forget that a provider id already names a live row.
-        for (provider_item_id, row_id) in aliases {
-            if self.by_row_id.contains_key(&row_id) {
-                self.row_id_by_provider_item_id
-                    .entry(provider_item_id)
-                    .or_insert(row_id);
-            }
-        }
+        minted
     }
 
     pub(crate) fn clear(&mut self) {
@@ -591,8 +585,9 @@ mod tests {
         store.push(row("c", "c"));
         store.assert_indexes_consistent();
 
-        store.insert_before(1, vec![row("b1", "b1"), row("b2", "b2")]);
+        let minted = store.insert_before(1, vec![row("b1", "b1"), row("b2", "b2")]);
         store.assert_indexes_consistent();
+        assert_eq!(minted, ["b1", "b2"], "uncontested ids are kept");
         assert_eq!(
             store.iter().map(|r| r.row_id.as_str()).collect::<Vec<_>>(),
             ["a", "b1", "b2", "c"]
@@ -601,15 +596,7 @@ mod tests {
         let head = store.push(row("d", "d"));
         assert!(store.bind_provider_item_id(&head, "prov-d"));
         store.assert_indexes_consistent();
-
-        let snapshot = store.rows().to_vec();
-        store.replace_all(snapshot);
-        store.assert_indexes_consistent();
-        assert_eq!(
-            store.resolve_provider("prov-d"),
-            Some("d"),
-            "a wholesale replace keeps aliases whose row came along"
-        );
+        assert_eq!(store.resolve_provider("prov-d"), Some("d"));
 
         store.update_all(|record| record.withdrawn = true);
         store.assert_indexes_consistent();

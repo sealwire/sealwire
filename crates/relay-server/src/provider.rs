@@ -21,14 +21,45 @@ pub struct ThreadSyncData {
     pub thread: ThreadSummaryView,
     pub status: String,
     pub active_flags: Vec<String>,
-    pub transcript: Vec<TranscriptEntryView>,
-    /// Ids in `transcript` that the RELAY synthesized while parsing this read, not
-    /// names the provider issued — per-turn diff summaries, re-derived turn
-    /// failures. Provenance has to travel with the read: once these become rows,
-    /// nothing downstream can tell them apart from provider-named ones without
-    /// guessing at the id's spelling, and a fork or detail request would then
-    /// address the provider with a string it has never seen instead of degrading.
-    pub relay_named_item_ids: Vec<String>,
+    pub transcript: Vec<ProviderTranscriptEntry>,
+}
+
+/// One entry of a provider read, carrying its own provenance.
+///
+/// Provenance is paired with the ENTRY rather than looked up by its id, because
+/// the id is exactly the thing that can be ambiguous: a read may contain a
+/// provider item called `x` and an adapter-synthesized row keyed `x`, and a set of
+/// names would classify both the same way — re-creating the collision the row /
+/// provider split exists to represent.
+#[derive(Clone, Debug)]
+pub struct ProviderTranscriptEntry {
+    pub view: TranscriptEntryView,
+    /// What the PROVIDER calls this entry, or `None` when the adapter invented it
+    /// while parsing the read (a per-turn diff summary, a re-derived turn failure).
+    /// Those have no provider-side identity and must never be sent back as one.
+    pub provider_item_id: Option<String>,
+}
+
+impl ProviderTranscriptEntry {
+    /// The provider named this entry, so its own id is how to address it back.
+    pub fn provider_named(view: TranscriptEntryView) -> Self {
+        Self {
+            provider_item_id: view.item_id.clone(),
+            view,
+        }
+    }
+
+    /// The adapter synthesized this entry while parsing the read.
+    pub fn relay_named(view: TranscriptEntryView) -> Self {
+        Self {
+            view,
+            provider_item_id: None,
+        }
+    }
+
+    pub fn all_provider_named(views: Vec<TranscriptEntryView>) -> Vec<Self> {
+        views.into_iter().map(Self::provider_named).collect()
+    }
 }
 
 impl ThreadSyncData {
@@ -43,9 +74,23 @@ impl ThreadSyncData {
             thread,
             status,
             active_flags,
-            transcript,
-            relay_named_item_ids: Vec::new(),
+            transcript: ProviderTranscriptEntry::all_provider_named(transcript),
         }
+    }
+
+    pub fn views(&self) -> impl Iterator<Item = &TranscriptEntryView> + '_ {
+        self.transcript.iter().map(|entry| &entry.view)
+    }
+
+    pub fn to_views(&self) -> Vec<TranscriptEntryView> {
+        self.views().cloned().collect()
+    }
+
+    pub fn into_views(self) -> Vec<TranscriptEntryView> {
+        self.transcript
+            .into_iter()
+            .map(|entry| entry.view)
+            .collect()
     }
 }
 

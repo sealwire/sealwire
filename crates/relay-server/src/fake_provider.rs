@@ -679,8 +679,9 @@ impl ProviderBridge for FakeProviderBridge {
             active_flags: Vec::new(),
             // The fake provider stores exactly what it emitted, so it can resolve
             // every id in here — they are all its own names.
-            relay_named_item_ids: Vec::new(),
-            transcript: thread.transcript.clone(),
+            transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(
+                thread.transcript.clone(),
+            ),
         })
     }
 
@@ -2275,7 +2276,7 @@ mod tests {
         assert_eq!(restored.thread.cwd, "/tmp/project");
         assert_eq!(restored.transcript.len(), 1);
         assert_eq!(
-            restored.transcript[0].text.as_deref(),
+            restored.transcript[0].view.text.as_deref(),
             Some("before restart")
         );
 
@@ -2305,8 +2306,7 @@ mod tests {
         for _ in 0..20 {
             let data = bridge.read_thread(thread_id).await.expect("thread data");
             if data
-                .transcript
-                .iter()
+                .views()
                 .any(|entry| entry.text.as_deref() == Some(expected))
             {
                 return true;
@@ -2634,8 +2634,8 @@ mod tests {
         let saved_reasoning: Vec<&str> = saved
             .transcript
             .iter()
-            .filter(|entry| entry.kind == TranscriptEntryKind::Reasoning)
-            .filter_map(|entry| entry.item_id.as_deref())
+            .filter(|entry| entry.view.kind == TranscriptEntryKind::Reasoning)
+            .filter_map(|entry| entry.view.item_id.as_deref())
             .collect();
         assert_eq!(
             saved_reasoning.len(),
@@ -2649,7 +2649,7 @@ mod tests {
             "saved ids collided: {saved_reasoning:?}"
         );
         assert_thought_follows_tool(
-            &work_kinds(saved.transcript.iter().map(|entry| entry.kind)),
+            &work_kinds(saved.transcript.iter().map(|entry| entry.view.kind)),
             "saved",
         );
     }
@@ -2767,12 +2767,13 @@ mod tests {
         let tools = stored
             .transcript
             .iter()
-            .filter(|entry| entry.kind == TranscriptEntryKind::ToolCall)
+            .filter(|entry| entry.view.kind == TranscriptEntryKind::ToolCall)
             .collect::<Vec<_>>();
         assert_eq!(tools.len(), 2);
-        assert!(tools.iter().all(|entry| entry.status == "completed"));
+        assert!(tools.iter().all(|entry| entry.view.status == "completed"));
         assert!(tools.iter().all(|entry| {
             entry
+                .view
                 .tool
                 .as_ref()
                 .and_then(|tool| tool.result_preview.as_deref())
@@ -2782,7 +2783,7 @@ mod tests {
             stored
                 .transcript
                 .last()
-                .and_then(|entry| entry.text.as_deref()),
+                .and_then(|entry| entry.view.text.as_deref()),
             Some("done"),
             "the assistant reply should follow the streamed tool calls"
         );
@@ -2847,19 +2848,22 @@ mod tests {
         let commands = stored
             .transcript
             .iter()
-            .filter(|entry| entry.kind == TranscriptEntryKind::Command)
+            .filter(|entry| entry.view.kind == TranscriptEntryKind::Command)
             .collect::<Vec<_>>();
         assert_eq!(commands.len(), 2, "both commands should be recorded");
         assert!(
-            commands.iter().all(|entry| entry.status == "completed"),
+            commands
+                .iter()
+                .all(|entry| entry.view.status == "completed"),
             "commands settle as completed"
         );
         assert!(
-            commands.iter().all(|entry| entry.tool.is_none()),
+            commands.iter().all(|entry| entry.view.tool.is_none()),
             "command entries carry no ToolCallView"
         );
         assert!(
             commands.iter().all(|entry| entry
+                .view
                 .text
                 .as_deref()
                 .is_some_and(|t| t.contains("fake-command"))),
@@ -2869,7 +2873,7 @@ mod tests {
             !stored
                 .transcript
                 .iter()
-                .any(|entry| entry.kind == TranscriptEntryKind::ToolCall),
+                .any(|entry| entry.view.kind == TranscriptEntryKind::ToolCall),
             "no tool_call entries when tool_kind is command"
         );
     }
@@ -3614,6 +3618,7 @@ mod tests {
             .iter()
             .position(|entry| {
                 entry
+                    .view
                     .tool
                     .as_ref()
                     .is_some_and(|tool| tool.name == "AskUserQuestion")
@@ -3624,6 +3629,7 @@ mod tests {
             .iter()
             .position(|entry| {
                 entry
+                    .view
                     .text
                     .as_deref()
                     .is_some_and(|t| t.contains("Meanwhile"))
@@ -3747,7 +3753,7 @@ mod tests {
             .expect("thread")
             .transcript
             .iter()
-            .any(|entry| entry.text.as_deref() == Some("must-not-land")));
+            .any(|entry| entry.view.text.as_deref() == Some("must-not-land")));
         assert!(wait_for_scenario_event(&harness, "stop_requested").await);
     }
 
@@ -3859,7 +3865,7 @@ mod tests {
             !before
                 .transcript
                 .iter()
-                .any(|entry| entry.text.as_deref() == Some("pong")),
+                .any(|entry| entry.view.text.as_deref() == Some("pong")),
             "reply must not arrive while the turn is parked on approval",
         );
 
@@ -3908,7 +3914,7 @@ mod tests {
             !data
                 .transcript
                 .iter()
-                .any(|entry| entry.text.as_deref() == Some("pong")),
+                .any(|entry| entry.view.text.as_deref() == Some("pong")),
             "a denied turn must not reply",
         );
         assert!(

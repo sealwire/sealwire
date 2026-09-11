@@ -4,8 +4,9 @@ use crate::protocol::{TranscriptEntryKind, TranscriptEntryView};
 use crate::state::relay::relay_thread_is_busy;
 
 const FORK_BUSY_SOURCE_MSG: &str = "cannot fork a thread while a turn is in progress";
-/// The row exists, but only the relay ever named it, so there is no provider-side
-/// message to branch from. Refusing by name beats branching at a guessed message.
+/// Neither the provider nor the materialized read can locate the requested row —
+/// an unbound send reservation is the real case. Refusing by name beats branching
+/// at a guessed message. A row the READ can locate is replayed instead, not refused.
 const FORK_POINT_NOT_PROVIDER_ADDRESSABLE_MSG: &str =
     "this message cannot be used as a fork point: the provider never assigned it an id";
 // Only the replay path needs a first message (the transcript IS the prompt).
@@ -66,29 +67,45 @@ impl AppState {
             .unwrap_or_else(|| defaults.current_cwd.clone());
         let cwd = normalize_cwd(&non_empty(input.cwd).unwrap_or(source_cwd.clone()));
         let client_fork_point = non_empty(input.up_to_item_id);
-        // Translate at the boundary: everything below compares against the
-        // PROVIDER's transcript, so it must be holding the provider's id.
-        let requested_fork_point = {
-            let relay = self.relay.read().await;
-            provider_fork_point(
-                relay
-                    .runtime_for_thread(&source_thread_id)
-                    .map(|runtime| &runtime.transcript),
-                client_fork_point.as_deref(),
-            )
+        // A NATIVE fork is described to the provider, so it can only be expressed
+        // with an id the provider issued. Resolve at the boundary, against both the
+        // runtime (where a locally created send learns its provider name) and the
+        // materialized read (which can answer for a thread with no runtime).
+        let fork_point = match client_fork_point.as_deref() {
+            Some(requested) => {
+                let relay = self.relay.read().await;
+                Some(resolve_fork_point(
+                    relay
+                        .runtime_for_thread(&source_thread_id)
+                        .map(|runtime| &runtime.transcript),
+                    &source_data.transcript,
+                    requested,
+                ))
+            }
+            None => None,
         };
-        // A row the provider never named has no branch point to send. Replay the
-        // whole thread rather than refusing, which is what naming an id the
-        // provider cannot match amounted to.
-        if client_fork_point.is_some() && requested_fork_point.is_none() {
-            return Err(FORK_POINT_NOT_PROVIDER_ADDRESSABLE_MSG.to_string());
-        }
-        // Validate against the real transcript BEFORE normalizing, so a bogus
-        // id is still an error rather than being silently collapsed away.
-        let forked_transcript =
-            truncate_transcript_at(&source_data.transcript, requested_fork_point.as_deref())?;
-        let up_to_item_id =
-            normalize_fork_point(&source_data.transcript, requested_fork_point.as_deref());
+        // A branch point the relay can locate but the provider cannot name is still a
+        // real branch point — it just has to be REPLAYED rather than described. Going
+        // native with no id would fork the whole thread, handing the branch
+        // everything the user chose to cut.
+        let native_fork_possible = !matches!(fork_point, Some(ForkPoint::RelayOnly(_)));
+        // Truncation for replay matches against the materialized read, so it uses
+        // whichever name that read carries. Validated BEFORE normalizing, so a bogus
+        // id is an error rather than a silent whole-thread fork.
+        let truncate_at = match &fork_point {
+            None => None,
+            Some(ForkPoint::Provider(id)) | Some(ForkPoint::RelayOnly(id)) => Some(id.clone()),
+            Some(ForkPoint::Unlocatable) => {
+                return Err(FORK_POINT_NOT_PROVIDER_ADDRESSABLE_MSG.to_string())
+            }
+        };
+        let source_views = source_data.to_views();
+        let forked_transcript = truncate_transcript_at(&source_views, truncate_at.as_deref())?;
+        // Only a provider-named point may be described to the provider.
+        let up_to_item_id = match &fork_point {
+            Some(ForkPoint::Provider(id)) => normalize_fork_point(&source_views, Some(id)),
+            _ => None,
+        };
 
         let (source_settings, source_project_id) = {
             let relay = self.relay.read().await;
@@ -200,7 +217,7 @@ impl AppState {
             .unwrap_or_else(|| defaults.sandbox.clone());
         let user_prompt = non_empty(input.initial_prompt);
 
-        if source_provider_name == target_provider_name {
+        if source_provider_name == target_provider_name && native_fork_possible {
             let request = ProviderForkRequest {
                 source_thread_id: source_thread_id.clone(),
                 up_to_item_id: up_to_item_id.clone(),
@@ -234,7 +251,10 @@ impl AppState {
         // reaches the target provider as the body of a message.
         let replay_task = user_prompt.unwrap_or_else(|| REPLAY_FORK_FALLBACK_PROMPT.to_string());
         let replay_source = ThreadSyncData {
-            transcript: forked_transcript,
+            // Replay only renders text, so provenance is irrelevant past this point.
+            transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(
+                forked_transcript,
+            ),
             ..source_data
         };
         let replay_prompt = build_fork_replay_prompt(
@@ -471,7 +491,7 @@ fn build_fork_replay_prompt(
     source: &ThreadSyncData,
     user_prompt: &str,
 ) -> String {
-    let transcript = &source.transcript;
+    let transcript = source.to_views();
     let tail_start = transcript.len().saturating_sub(RECENT_RAW_ENTRY_COUNT);
     let summary_lines = transcript[..tail_start]
         .iter()
@@ -519,30 +539,60 @@ fn build_fork_replay_prompt(
     }
 }
 
-/// Translate a fork point the CLIENT named into the id the PROVIDER knows.
+/// What a requested fork point turns out to be.
+enum ForkPoint {
+    /// The provider issued this id, so a native fork can be described with it.
+    Provider(String),
+    /// Only the relay ever named this row, but the materialized read does contain
+    /// it — a real branch point that cannot be described to the provider, so the
+    /// branch has to be replayed truncated there.
+    RelayOnly(String),
+    /// Neither the runtime nor the read can locate it. An unbound send reservation
+    /// is the real case: the provider never acknowledged it, so there is nothing on
+    /// either side to branch from.
+    Unlocatable,
+}
+
+/// Resolve a fork point the CLIENT named.
 ///
 /// The client can only send back the id it rendered, which is the relay's key for
-/// the row. For anything the relay named first — a send published before the
-/// provider acknowledged it — that key exists nowhere provider-side, so matching it
-/// against the provider's transcript refused the fork outright.
-///
-/// `None` out is meaningful and not a failure: the row has no provider name, so
-/// there is no branch point to send, and the caller degrades to replay rather than
-/// naming a message the provider cannot find. A row the relay never saw (no runtime
-/// loaded) passes through — the id came from a provider read in the first place.
-fn provider_fork_point(
+/// the row. Two sources can say what that row is: the thread's runtime, if it is
+/// loaded, and the materialized read itself — which now carries each entry's
+/// provenance, so it can answer even for a thread with no runtime.
+fn resolve_fork_point(
     transcript: Option<&crate::state::relay::ThreadTranscript>,
-    requested: Option<&str>,
-) -> Option<String> {
-    let requested = requested?;
-    let Some(transcript) = transcript else {
-        return Some(requested.to_string());
-    };
-    if transcript.get_row(requested).is_none() {
-        // Not a row this runtime holds; it can only have come from a provider read.
-        return Some(requested.to_string());
+    read: &[crate::provider::ProviderTranscriptEntry],
+    requested: &str,
+) -> ForkPoint {
+    // The runtime is authoritative when it holds the row: it is where a locally
+    // created send learns the provider's name for it.
+    if let Some(transcript) = transcript {
+        if transcript.get_row(requested).is_some() {
+            return match transcript.provider_item_id(requested) {
+                Some(provider_item_id) => ForkPoint::Provider(provider_item_id.to_string()),
+                None if read_contains(read, requested) => {
+                    ForkPoint::RelayOnly(requested.to_string())
+                }
+                None => ForkPoint::Unlocatable,
+            };
+        }
     }
-    transcript.provider_item_id(requested).map(str::to_string)
+    // No runtime row: the read is the only thing that can name it.
+    match read
+        .iter()
+        .find(|entry| entry.view.item_id.as_deref() == Some(requested))
+    {
+        Some(entry) => match entry.provider_item_id.as_deref() {
+            Some(provider_item_id) => ForkPoint::Provider(provider_item_id.to_string()),
+            None => ForkPoint::RelayOnly(requested.to_string()),
+        },
+        None => ForkPoint::Unlocatable,
+    }
+}
+
+fn read_contains(read: &[crate::provider::ProviderTranscriptEntry], row_id: &str) -> bool {
+    read.iter()
+        .any(|entry| entry.view.item_id.as_deref() == Some(row_id))
 }
 
 // A fork point that is the transcript's FINAL entry drops nothing, so it names
@@ -781,7 +831,6 @@ mod tests {
 
     fn source_with_transcript(transcript: Vec<TranscriptEntryView>) -> ThreadSyncData {
         ThreadSyncData {
-            relay_named_item_ids: Vec::new(),
             thread: crate::protocol::ThreadSummaryView {
                 workspace_trusted: false,
                 id: "source-thread".to_string(),
@@ -799,7 +848,7 @@ mod tests {
             },
             status: "idle".to_string(),
             active_flags: Vec::new(),
-            transcript,
+            transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(transcript),
         }
     }
 
@@ -958,9 +1007,10 @@ mod tests {
 }
 
 #[cfg(test)]
-mod fork_point_translation_tests {
+mod fork_point_resolution_tests {
     use super::*;
     use crate::protocol::TranscriptEntryKind;
+    use crate::provider::ProviderTranscriptEntry;
     use crate::state::relay::{ThreadTranscript, TranscriptRecord};
 
     fn user_row(row_id: &str, text: &str) -> TranscriptRecord {
@@ -978,7 +1028,7 @@ mod fork_point_translation_tests {
         }
     }
 
-    fn provider_entry(item_id: &str, text: &str) -> TranscriptEntryView {
+    fn view(item_id: &str, text: &str) -> TranscriptEntryView {
         TranscriptEntryView {
             order_seq: None,
             withdrawn: false,
@@ -992,178 +1042,88 @@ mod fork_point_translation_tests {
         }
     }
 
-    /// Forking at a locally-created send used to be impossible.
-    ///
-    /// The client renders the row under the relay's key — the send was published
-    /// before Codex answered, so that key is all it has — and sends it back as the
-    /// fork point. The relay then matched it against Codex's OWN transcript, where
-    /// that string does not and cannot appear, and refused the fork outright.
+    /// Forking at a locally-created send used to be impossible: the client can only
+    /// send back the relay's key, which was then matched against the provider's own
+    /// transcript where that string cannot appear.
     #[test]
-    fn a_fork_point_named_by_a_relay_row_id_reaches_the_provider_as_the_provider_id() {
-        let provider_transcript = vec![
-            provider_entry("codex-item-1", "the send"),
-            provider_entry("codex-item-2", "the reply"),
+    fn a_locally_named_send_resolves_to_the_id_the_provider_later_gave_it() {
+        let read = vec![
+            ProviderTranscriptEntry::provider_named(view("codex-item-1", "the send")),
+            ProviderTranscriptEntry::provider_named(view("codex-item-2", "the reply")),
         ];
-
         let mut store = ThreadTranscript::new();
         let row_id = store.push(user_row("codex:user-reserve:gen-1:thread-1:1", "the send"));
         store.bind_provider_item_id(&row_id, "codex-item-1");
 
-        // The defect, stated: the client's id is not addressable provider-side.
+        // The defect, stated: the client's key is not addressable provider-side.
         assert!(
-            truncate_transcript_at(&provider_transcript, Some(&row_id)).is_err(),
-            "a relay row id must not be matchable against the provider's transcript — \
-             if this ever passes, the two id spaces have been conflated again"
+            truncate_transcript_at(
+                &read.iter().map(|e| e.view.clone()).collect::<Vec<_>>(),
+                Some(&row_id)
+            )
+            .is_err(),
+            "a relay row key must not be matchable against the provider's transcript"
         );
 
-        let translated = provider_fork_point(Some(&store), Some(row_id.as_str()));
-
-        assert_eq!(
-            translated.as_deref(),
-            Some("codex-item-1"),
-            "the fork point must leave as the id the provider knows"
-        );
-        assert!(
-            truncate_transcript_at(&provider_transcript, translated.as_deref()).is_ok(),
-            "and that id must resolve against the provider's transcript"
-        );
+        match resolve_fork_point(Some(&store), &read, &row_id) {
+            ForkPoint::Provider(id) => assert_eq!(id, "codex-item-1"),
+            _ => panic!("a bound send must resolve to the provider's own id"),
+        }
     }
 
-    /// A provider-born row is already named the way the provider names it, so
-    /// translation is a no-op. This is the overwhelmingly common path and it must
-    /// not change.
+    /// A provider-named row is already spelled the way the provider spells it.
     #[test]
-    fn a_provider_named_row_passes_through_translation_unchanged() {
+    fn a_provider_named_row_resolves_to_itself_with_or_without_a_runtime() {
+        let read = vec![ProviderTranscriptEntry::provider_named(view(
+            "codex-item-1",
+            "the send",
+        ))];
         let mut store = ThreadTranscript::new();
-        // How the writers build a provider-born row: its key IS the provider's
-        // name for it, and that name is recorded rather than inferred.
         store.push(TranscriptRecord {
             provider_item_id: Some("codex-item-1".to_string()),
             ..user_row("codex-item-1", "the send")
         });
 
-        assert_eq!(
-            provider_fork_point(Some(&store), Some("codex-item-1")).as_deref(),
-            Some("codex-item-1")
-        );
-        // And with no runtime loaded at all, the id the client sent is all there is.
-        assert_eq!(
-            provider_fork_point(None, Some("codex-item-1")).as_deref(),
-            Some("codex-item-1")
-        );
-        assert_eq!(provider_fork_point(None, None), None);
-    }
-
-    /// A row the provider has never named — a synthetic turn-diff, a reservation it
-    /// never echoed — has no provider id. Passing the relay's key through would ask
-    /// the provider to branch at a message it cannot find; the caller must see the
-    /// absence and fall back to replay.
-    #[test]
-    fn a_row_the_provider_never_named_translates_to_nothing() {
-        let mut store = ThreadTranscript::new();
-        let row_id = store.push(user_row("turn-diff:turn-7", "synthetic"));
-
-        assert_eq!(
-            provider_fork_point(Some(&store), Some(row_id.as_str())),
-            None,
-            "no provider name means no provider-addressable fork point"
-        );
-    }
-}
-
-#[cfg(test)]
-mod production_fork_point_tests {
-    use super::*;
-    use crate::protocol::TranscriptEntryKind;
-    use crate::state::relay::RelayState;
-    use crate::state::SecurityProfile;
-    use tokio::sync::watch;
-
-    fn relay() -> RelayState {
-        let (change_tx, _) = watch::channel(0_u64);
-        RelayState::new(
-            "/tmp/project".to_string(),
-            change_tx,
-            SecurityProfile::private(),
-        )
-    }
-
-    /// Rows built by the REAL writers, not hand-assembled: a relay-synthesized
-    /// turn-diff must degrade to replay, and a genuine provider item must not.
-    ///
-    /// This is the assertion the unit test on a constructed store cannot make — it
-    /// is the live path's provenance that decides which way a fork goes.
-    #[test]
-    fn a_turn_diff_row_built_by_the_live_path_is_not_a_provider_fork_point() {
-        let mut relay = relay();
-        let thread = "thread-fork";
-        let now = crate::state::unix_now();
-
-        relay.bg_upsert_turn_diff_item(
-            thread,
-            "turn-diff:turn-1".to_string(),
-            Some("2 files".to_string()),
-            "completed".to_string(),
-            Some("turn-1".to_string()),
-            None,
-            now,
-        );
-        relay.upsert_transcript_item_for_thread(
-            thread,
-            "codex-item-1".to_string(),
-            TranscriptEntryKind::AgentText,
-            Some("hello".to_string()),
-            "completed".to_string(),
-            Some("turn-1".to_string()),
-            None,
-        );
-
-        let runtime = relay.runtime_for_thread(thread).expect("runtime");
-        let transcript = Some(&runtime.transcript);
-
-        assert_eq!(
-            provider_fork_point(transcript, Some("turn-diff:turn-1")),
-            None,
-            "the relay's own summary row has no provider-side message to branch at"
-        );
-        assert_eq!(
-            provider_fork_point(transcript, Some("codex-item-1")).as_deref(),
-            Some("codex-item-1"),
-            "a genuine provider item is addressable and must keep forking natively"
-        );
-    }
-
-    /// The locally-reserved send, end to end: before the echo it cannot be a fork
-    /// point at all, and after it the fork leaves as the id Codex actually knows.
-    #[test]
-    fn a_reserved_send_becomes_a_provider_fork_point_only_once_codex_names_it() {
-        let mut relay = relay();
-        let thread = "thread-fork-send";
-        let reservation = relay
-            .begin_codex_user_turn(thread, "the send")
-            .expect("reserve");
-
-        {
-            let runtime = relay.runtime_for_thread(thread).expect("runtime");
-            assert_eq!(
-                provider_fork_point(Some(&runtime.transcript), Some(&reservation)),
-                None,
-                "before the echo there is nothing provider-side to branch at"
-            );
+        for transcript in [Some(&store), None] {
+            match resolve_fork_point(transcript, &read, "codex-item-1") {
+                ForkPoint::Provider(id) => assert_eq!(id, "codex-item-1"),
+                _ => panic!("a provider-named row is natively forkable"),
+            }
         }
+    }
 
-        relay.upsert_user_message_for_thread(
-            thread,
-            "codex-user-9".to_string(),
-            "the send".to_string(),
-            "turn-1".to_string(),
-        );
+    /// A row the adapter synthesized INTO the read is a real branch point that the
+    /// provider cannot name. It must replay, not refuse — and not go native.
+    #[test]
+    fn a_relay_synthesized_row_present_in_the_read_is_replayable_not_refused() {
+        let read = vec![
+            ProviderTranscriptEntry::provider_named(view("codex-item-1", "before")),
+            ProviderTranscriptEntry::relay_named(view("turn-diff:turn-1", "the summary")),
+        ];
 
-        let runtime = relay.runtime_for_thread(thread).expect("runtime");
-        assert_eq!(
-            provider_fork_point(Some(&runtime.transcript), Some(&reservation)).as_deref(),
-            Some("codex-user-9"),
-            "after the echo the client's row id translates to Codex's own"
-        );
+        match resolve_fork_point(None, &read, "turn-diff:turn-1") {
+            ForkPoint::RelayOnly(id) => assert_eq!(id, "turn-diff:turn-1"),
+            _ => panic!("a synthesized row the read contains must be replayable"),
+        }
+    }
+
+    /// A row neither side can locate — an unbound send reservation — is refused.
+    #[test]
+    fn a_row_no_source_can_locate_is_unlocatable() {
+        let read = vec![ProviderTranscriptEntry::provider_named(view(
+            "codex-item-1",
+            "before",
+        ))];
+        let mut store = ThreadTranscript::new();
+        let row_id = store.push(user_row("codex:user-reserve:gen-1:t:1", "unacknowledged"));
+
+        assert!(matches!(
+            resolve_fork_point(Some(&store), &read, &row_id),
+            ForkPoint::Unlocatable
+        ));
+        assert!(matches!(
+            resolve_fork_point(None, &read, "never-heard-of-it"),
+            ForkPoint::Unlocatable
+        ));
     }
 }

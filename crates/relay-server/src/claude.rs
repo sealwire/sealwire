@@ -695,8 +695,7 @@ impl ProviderBridge for ClaudeCodeBridge {
                 },
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
-                transcript: Vec::new(),
-                relay_named_item_ids: Vec::new(),
+                transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(Vec::new()),
             });
         };
         let cwd = self.cwd_for_thread(thread_id).await;
@@ -723,13 +722,11 @@ impl ProviderBridge for ClaudeCodeBridge {
                     .collect::<Vec<TranscriptEntryView>>()
             })
             .unwrap_or_default();
-        let (transcript, relay_named_item_ids) = inject_turn_diff_entries(transcript);
         Ok(ThreadSyncData {
             thread,
             status: "idle".to_string(),
             active_flags: Vec::new(),
-            transcript,
-            relay_named_item_ids,
+            transcript: inject_turn_diff_entries(transcript),
         })
     }
 
@@ -764,14 +761,12 @@ impl ProviderBridge for ClaudeCodeBridge {
                     .collect::<Vec<TranscriptEntryView>>()
             })
             .unwrap_or_default();
-        let (transcript, relay_named_item_ids) = inject_turn_diff_entries(transcript);
         Ok(Some(ThreadTranscriptPageData {
             sync: ThreadSyncData {
                 thread,
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
-                transcript,
-                relay_named_item_ids,
+                transcript: inject_turn_diff_entries(transcript),
             },
             prev_cursor: value_at(&result, &["prev_cursor"])
                 .and_then(Value::as_u64)
@@ -1803,7 +1798,8 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                             );
                         }
                         relay.enqueue_error_push(&tid, reason.clone());
-                        relay.upsert_transcript_item_for_thread(
+                        // Relay-synthesized from the terminal, not an SDK item.
+                        relay.upsert_relay_named_item_for_thread(
                             &tid,
                             claude_turn_error_item_id(turn_id.as_deref()),
                             TranscriptEntryKind::Error,
@@ -2083,20 +2079,18 @@ fn completion_matches_turn(active_turn_id: Option<&str>, event_turn_id: Option<&
 /// least one `fileChange` tool item. Mirrors what codex `parse_transcript`
 /// does at hydration time so reopening an old thread shows the same
 /// per-turn diff summary that lived on the wire.
-/// Returns the entries and the ids of the `turn-diff:*` rows THIS FUNCTION
-/// invented. The SDK never issued them, so they carry no provider identity.
+/// Each returned entry says whether the SDK named it. The `turn-diff:*` rows are
+/// this function's own invention and the SDK cannot match them.
 fn inject_turn_diff_entries(
     transcript: Vec<TranscriptEntryView>,
-) -> (Vec<TranscriptEntryView>, Vec<String>) {
-    let mut out: Vec<TranscriptEntryView> = Vec::with_capacity(transcript.len() + 4);
+) -> Vec<crate::provider::ProviderTranscriptEntry> {
+    use crate::provider::ProviderTranscriptEntry;
+    let mut out: Vec<ProviderTranscriptEntry> = Vec::with_capacity(transcript.len() + 4);
     let mut current_turn: Option<String> = None;
     let mut current_changes: Vec<crate::protocol::FileChangeDiffView> = Vec::new();
 
-    let mut relay_named: Vec<String> = Vec::new();
-
     fn flush(
-        out: &mut Vec<TranscriptEntryView>,
-        relay_named: &mut Vec<String>,
+        out: &mut Vec<crate::provider::ProviderTranscriptEntry>,
         turn_id: Option<String>,
         mut changes: Vec<crate::protocol::FileChangeDiffView>,
     ) {
@@ -2115,17 +2109,13 @@ fn inject_turn_diff_entries(
             merged,
             "Claude",
         );
-        if let Some(item_id) = entry.item_id.clone() {
-            relay_named.push(item_id);
-        }
-        out.push(entry);
+        out.push(crate::provider::ProviderTranscriptEntry::relay_named(entry));
     }
 
     for entry in transcript {
         if current_turn.as_deref() != entry.turn_id.as_deref() {
             flush(
                 &mut out,
-                &mut relay_named,
                 current_turn.take(),
                 std::mem::take(&mut current_changes),
             );
@@ -2154,10 +2144,10 @@ fn inject_turn_diff_entries(
                 }
             }
         }
-        out.push(entry);
+        out.push(ProviderTranscriptEntry::provider_named(entry));
     }
-    flush(&mut out, &mut relay_named, current_turn, current_changes);
-    (out, relay_named)
+    flush(&mut out, current_turn, current_changes);
+    out
 }
 
 /// Build (or refresh) the synthetic `turn-diff:<turn_id>` transcript entry
@@ -2434,7 +2424,7 @@ mod tests {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
         loop {
             if let Ok(data) = bridge.read_thread(thread_id).await {
-                let found = data.transcript.iter().any(|entry| {
+                let found = data.views().any(|entry| {
                     entry.kind == TranscriptEntryKind::AgentText
                         && entry
                             .text
@@ -3755,19 +3745,20 @@ mod tests {
         let out = inject_turn_diff_entries(vec![
             file_change_entry("tool:ok", "good.rs", "-old\n+new\n", "completed"),
             file_change_entry("tool:bad", "bad.rs", "", "failed"),
-        ])
-        .0;
+        ]);
 
         let summary = out
             .iter()
             .find(|entry| {
                 entry
+                    .view
                     .tool
                     .as_ref()
                     .is_some_and(|tool| tool.item_type == "turnDiff")
             })
             .expect("the landed edit still needs a turn diff");
         let paths: Vec<&str> = summary
+            .view
             .tool
             .as_ref()
             .unwrap()
