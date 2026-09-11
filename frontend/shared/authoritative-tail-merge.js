@@ -8,6 +8,13 @@
 // Pure: takes an id order + id->entry lookup, returns the next ones. No
 // `state`, no DOM, no fetch, and none of its inputs are mutated.
 
+import { transcriptRowKey } from "./transcript-row-key.js";
+import {
+  mergeWindowRowsInPlace,
+  rowsAreOrderKeyed,
+  windowIsOrderKeyed,
+} from "./transcript-window-reducer.js";
+
 /**
  * @param {object} input
  * @param {string[]} input.order - item_ids currently visible, in order.
@@ -32,17 +39,40 @@ export function reconcileAuthoritativeTail({
   prevCursor = null,
   mergeEntry = defaultMergeEntry,
 }) {
+  const addressable = (pageEntries || []).filter((entry) => entry?.item_id);
+  const revision = maxRevision(currentRevision, pageRevision, targetRevision);
+  const tail = {
+    revision,
+    truncated: prevCursor != null,
+    olderCursor: prevCursor ?? null,
+  };
+
+  // Numbered on both sides: place by number. mergeTailPageOrder below can only
+  // split the window at the page's first known id, so it has no answer for a
+  // live row whose number falls BETWEEN two page rows, and none at all when the
+  // page and window share no id — there it has to guess which side the window
+  // sits on. The caller's own mergeEntry still decides CONTENT either way.
+  if (rowsAreOrderKeyed(addressable) && windowIsOrderKeyed(order, entries)) {
+    const draft = { order: [...order], entries: new Map(entries) };
+    mergeWindowRowsInPlace(draft, addressable, { mergeRow: mergeEntry });
+    return {
+      ...tail,
+      order: draft.order,
+      entries: draft.entries,
+      repaired: addressable
+        .map((entry) => draft.entries.get(transcriptRowKey(entry)))
+        .filter(Boolean),
+    };
+  }
+
   const nextEntries = new Map(entries);
   const pageItemIds = [];
   const repaired = [];
 
-  for (const entry of pageEntries || []) {
-    const itemId = entry?.item_id;
-    if (!itemId) {
-      // Not addressable by id — the page cannot be authoritative for
-      // something it can't name, so there is nothing to merge it onto.
-      continue;
-    }
+  for (const entry of addressable) {
+    // Entries with no item_id are dropped above: the page cannot be
+    // authoritative for something it cannot name.
+    const itemId = entry.item_id;
     const merged = mergeEntry(nextEntries.get(itemId), entry);
     nextEntries.set(itemId, merged);
     pageItemIds.push(itemId);
@@ -50,12 +80,10 @@ export function reconcileAuthoritativeTail({
   }
 
   return {
+    ...tail,
     order: mergeTailPageOrder(order, pageItemIds),
     entries: nextEntries,
     repaired,
-    revision: maxRevision(currentRevision, pageRevision, targetRevision),
-    truncated: prevCursor != null,
-    olderCursor: prevCursor ?? null,
   };
 }
 

@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import {
   __readWindowInsertionProbeCount,
+  __resetUnsortedPageWarning,
   __readWindowOrderWriteCount,
   __resetWindowInsertionProbeCount,
   __resetWindowOrderWriteCount,
@@ -176,4 +177,20 @@ test("a page that arrives out of order still merges into full order", () => {
   assert.equal(mergeWindowRowsInPlace(draft, scrambled), true);
 
   assert.deepEqual(draft.order, ["a", "b", "held", "c", "d"]);
+});
+
+test("the sort fallback reports the broken relay contract, once", () => {
+  __resetUnsortedPageWarning();
+  const warnings = [];
+  const realWarn = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  try {
+    mergeWindowRowsInPlace(draftOf(row("held", 0)), [row("b", 2 * S), row("a", S)]);
+    mergeWindowRowsInPlace(draftOf(row("held", 0)), [row("d", 4 * S), row("c", 3 * S)]);
+    mergeWindowRowsInPlace(draftOf(row("held", 0)), [row("e", 5 * S), row("f", 6 * S)]);
+  } finally {
+    console.warn = realWarn;
+  }
+  assert.equal(warnings.length, 1, "once, not per page — this fires on every scroll-up otherwise");
+  assert.match(warnings[0], /out of order_seq order/);
 });
