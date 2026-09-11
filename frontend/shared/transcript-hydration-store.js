@@ -8,7 +8,9 @@ import {
   uniqueItemIds,
 } from "./authoritative-tail-merge.js";
 import {
+  keyedInsertionIndex,
   mergeWindowRowsInPlace,
+  rowHasOrderKey,
   rowsAreOrderKeyed,
   upsertWindowRowInPlace,
   windowIsOrderKeyed,
@@ -29,6 +31,14 @@ export function createClearedTranscriptHydrationPatch() {
     transcriptHydrationTailReady: false,
     transcriptHydrationThreadId: null,
     transcriptHydrationGeneration: null,
+    // PROVEN-KEYED invariant: every row numbered AND the order non-decreasing.
+    // Cached, not recomputed, because the snapshot and projection paths consult
+    // it on every frame and must stay proportional to the tail — an O(window)
+    // check there is the freeze this file documents. Established by the
+    // user-paced page merges (which already walk the window) and preserved by
+    // every cheaper write; anything that cannot preserve it clears it, and the
+    // next page merge re-establishes it. An empty window is trivially both.
+    transcriptHydrationKeyed: true,
   };
 }
 
@@ -76,6 +86,7 @@ export function stashTranscriptHydrationForThread(state, extra = null) {
     signature: state.transcriptHydrationSignature ?? null,
     tailReady: Boolean(state.transcriptHydrationTailReady),
     generation: state.transcriptHydrationGeneration ?? null,
+    keyed: state.transcriptHydrationKeyed === true,
     ...(extra ? { extra } : {}),
   });
   while (cache.size > MAX_RETAINED_HYDRATION_THREADS) {
@@ -119,6 +130,9 @@ export function restoreTranscriptHydrationForThread(state, threadId) {
     transcriptHydrationTailReady: Boolean(stash.tailReady),
     transcriptHydrationThreadId: threadId,
     transcriptHydrationGeneration: stash.generation ?? null,
+    // A restored window keeps the proof it was stashed with; a stash written
+    // before this field existed restores as unproven, not as trusted.
+    transcriptHydrationKeyed: stash.keyed === true,
     // Leave status idle: the next snapshot's prepareTranscriptHydration recomputes
     // whether the tail still needs a fetch, merging onto the restored window.
     transcriptHydrationStatus: "idle",
@@ -597,6 +611,7 @@ export function createMergedTranscriptHydrationPagePatch(
   // numbers. The legacy concat below outranks every held row by position alone,
   // which is only right when the page is strictly older than everything held.
   let nextOrderValue;
+  let nextKeyed = false;
   if (
     rowsAreOrderKeyed(preparedPageRows)
     && windowIsOrderKeyed(state.transcriptHydrationOrder, state.transcriptHydrationEntries)
@@ -604,6 +619,7 @@ export function createMergedTranscriptHydrationPagePatch(
     const draft = { order: nextOrder, entries: nextEntries };
     mergeWindowRowsInPlace(draft, preparedPageRows, { mergeRow: mergeTranscriptEntry });
     nextOrderValue = draft.order;
+    nextKeyed = true;
   } else {
     for (const pageRow of preparedPageRows) {
       nextEntries.set(
@@ -628,6 +644,9 @@ export function createMergedTranscriptHydrationPagePatch(
     transcriptHydrationOlderCursor: page.prev_cursor ?? null,
     transcriptHydrationStatus: nextStatus,
     transcriptHydrationTailReady: nextOrderValue.length > 0,
+    // A page merge is user-paced and already walks the window, so it is the one
+    // cheap place to (re-)establish the proof the per-frame paths depend on.
+    transcriptHydrationKeyed: nextKeyed,
   };
 }
 
@@ -699,6 +718,7 @@ function createMergedTailPagePatch(state, page, prepareEntry) {
     transcriptHydrationOlderCursor: page.prev_cursor ?? null,
     transcriptHydrationStatus: nextStatus,
     transcriptHydrationTailReady: nextOrder.length > 0,
+    transcriptHydrationKeyed: result.keyed === true,
   };
 }
 
@@ -720,6 +740,51 @@ function createMergedTailPagePatch(state, page, prepareEntry) {
 //
 // With `copyOnWrite`, `order` is never mutated — a copy is taken lazily, and only
 // if something actually has to be inserted. Returns the array to use.
+/**
+ * Place new ids into a window's order, by NUMBER when the window is proven keyed
+ * and every incoming row carries one, and positionally (placeOrderedTailIds)
+ * otherwise. `rowFor` resolves an id to the row the number lives on.
+ *
+ * Cost is the same shape as the positional path it replaces: ids already in the
+ * order are skipped entirely, and a new row costs its distance from the tail —
+ * so the steady-state snapshot (nothing new) touches nothing, and a new tail row
+ * is O(1). Neither branch scans or copies the whole window; `copyOnWrite` keeps
+ * the untouched case returning `order` itself.
+ */
+function newTailIdsAreNumbered(tailIds, unorderedIds, rowFor) {
+  // Only the ids being PLACED need a number; ids already in the order are not
+  // moved, so their rows are irrelevant here. Bounded by the tail, not the window.
+  for (const itemId of tailIds) {
+    if (unorderedIds.has(itemId) && !rowHasOrderKey(rowFor(itemId))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function placeTailIds(order, entries, tailIds, unorderedIds, rowFor, options = {}) {
+  if (options.keyed !== true) {
+    return placeOrderedTailIds(order, tailIds, unorderedIds, options);
+  }
+  const { copyOnWrite = false } = options;
+  let working = order;
+  for (const itemId of tailIds) {
+    if (!unorderedIds.has(itemId)) {
+      continue;
+    }
+    const at = keyedInsertionIndex(working, entries, rowFor(itemId));
+    if (copyOnWrite && working === order) {
+      working = [...order];
+    }
+    if (at >= working.length) {
+      working.push(itemId);
+    } else {
+      working.splice(at, 0, itemId);
+    }
+  }
+  return working;
+}
+
 function placeOrderedTailIds(order, tailIds, unorderedIds, { copyOnWrite = false } = {}) {
   let working = order;
   // Index in `working` of the last tail id we located or placed.
@@ -859,7 +924,28 @@ function buildHydratedTranscriptSnapshot(
 
   // Copy-on-write: the steady-state snapshot (every tail id already ordered)
   // returns `baseOrder` untouched, so no per-snapshot full-window copy.
-  const order = placeOrderedTailIds(baseOrder, tailIds, unorderedIds, { copyOnWrite: true });
+  //
+  // Same numbered placement as the window merge below — this is the projection
+  // half of the same snapshot and would otherwise report a different order than
+  // the window it writes into.
+  const overlayRowFor = (itemId) =>
+    (overlay && overlay.has(itemId) ? overlay.get(itemId) : baseEntries.get(itemId));
+  const placeKeyed = state.transcriptHydrationKeyed === true
+    && newTailIdsAreNumbered(tailIds, unorderedIds, overlayRowFor);
+  // Neighbours must be resolved through the overlay too. `baseEntries` does not
+  // receive this snapshot's rows until the write-back below, so looking a
+  // neighbour up there returns undefined for a row placed moments earlier in
+  // this same loop — which reads as "unnumbered", gets walked over, and lets the
+  // SECOND row of a pair land above the first. That is how an answered ask-user
+  // card ended up below the message the relay published alongside it.
+  const order = placeTailIds(
+    baseOrder,
+    { get: overlayRowFor },
+    tailIds,
+    unorderedIds,
+    overlayRowFor,
+    { copyOnWrite: true, keyed: placeKeyed }
+  );
   const transcript = order
     .map((itemId) => (overlay && overlay.has(itemId) ? overlay.get(itemId) : baseEntries.get(itemId)))
     .filter(Boolean);
@@ -890,6 +976,9 @@ function buildHydratedTranscriptSnapshot(
     }
     if (order !== baseOrder) {
       state.transcriptHydrationOrder = order;
+      // This write is the window's order now, so the proof has to track the
+      // placement that produced it or the next frame trusts a stale answer.
+      state.transcriptHydrationKeyed = placeKeyed;
     }
   }
 
@@ -1029,6 +1118,15 @@ export function applyTranscriptDeltaToWindow(state, delta) {
   // Still O(1) for the ordinary case this path exists for — a genuinely-new tail
   // row stops at the first neighbour it is compared against, so the per-token
   // delta path does not become O(window) (markdown/transcript-perf-freeze-analysis.md).
+  // An unnumbered row breaks the proof: the window still has an order, but it is
+  // no longer derivable from the numbers, so the per-frame paths must go back to
+  // positional placement until a page merge re-establishes it. A NUMBERED row
+  // preserves it — the reducer inserts at the sorted slot, so a sorted window
+  // stays sorted. (A keyed window never back-fills a number onto a held row
+  // either: every row already has one, so that branch cannot fire.)
+  if (!Number.isSafeInteger(delta.order_seq)) {
+    state.transcriptHydrationKeyed = false;
+  }
   upsertWindowRowInPlace(
     { entries, order },
     {
@@ -1192,9 +1290,20 @@ export function renderedTranscriptFromWindow(state, session) {
   // so a patch-introduced item lands in a sensible position instead of
   // always at the very end. copyOnWrite: the common case (no array-only
   // ids) returns `windowOrder` itself, untouched.
-  const order = arrayOnlyIds.length
-    ? placeOrderedTailIds(windowOrder, arrayOnlyIds, new Set(arrayOnlyIds), { copyOnWrite: true })
-    : windowOrder;
+  // An entry patch for an item the window has never tracked stays array-only by
+  // design (transcript-event-reducer.js, "invalidate; do not write"), so this is
+  // where such a row gets its position — and it must come from the number when
+  // there is one, exactly like every other placement.
+  let order = windowOrder;
+  if (arrayOnlyIds.length) {
+    const arrayOnly = new Set(arrayOnlyIds);
+    const rowFor = (itemId) => arrayByItemId.get(itemId);
+    order = placeTailIds(windowOrder, entries, arrayOnlyIds, arrayOnly, rowFor, {
+      copyOnWrite: true,
+      keyed: state.transcriptHydrationKeyed === true
+        && newTailIdsAreNumbered(arrayOnlyIds, arrayOnly, rowFor),
+    });
+  }
 
   return order
     .map((itemId) => {
@@ -1241,15 +1350,22 @@ function createMergedSnapshotTailPatch(state, snapshot, signature) {
     tailIds.push(itemId);
   }
   // In place: an id that is not ordered yet — genuinely new, or orphaned out of
-  // the order by an older build — goes where THIS snapshot says it belongs.
-  placeOrderedTailIds(order, tailIds, unorderedIds);
+  // the order by an older build — goes where its NUMBER says, or where this
+  // snapshot's own run of ids says when the numbers are not all there.
+  const rowFor = (itemId) => entries.get(itemId);
+  const keyed = state.transcriptHydrationKeyed === true
+    && newTailIdsAreNumbered(tailIds, unorderedIds, rowFor);
+  const placed = placeTailIds(order, entries, tailIds, unorderedIds, rowFor, { keyed });
 
   return {
     transcriptHydrationBaseSnapshot: snapshot,
     transcriptHydrationEntries: entries,
-    transcriptHydrationOrder: order,
+    transcriptHydrationOrder: placed,
     transcriptHydrationSignature: signature,
     transcriptHydrationThreadId: snapshot.active_thread_id,
+    // Numbered placement into a proven window leaves it proven; a positional
+    // placement — taken whenever any new id arrived unnumbered — does not.
+    transcriptHydrationKeyed: keyed,
   };
 }
 

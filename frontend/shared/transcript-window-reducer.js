@@ -295,6 +295,19 @@ function slotFits(order, entries, row, at) {
   return true;
 }
 
+/**
+ * Where `row` belongs in an ALREADY-ORDERED window. Exported for the snapshot and
+ * projection paths, which merge their entries themselves and need only the slot.
+ *
+ * Costs its distance from the tail, so a tail row is O(1) and the per-snapshot
+ * path stays proportional to the tail rather than the window. Callers must have
+ * proven the window is keyed and in order (transcriptHydrationKeyed) — this
+ * searches, it does not verify.
+ */
+export function keyedInsertionIndex(order, entries, row) {
+  return windowInsertionIndex(order, entries, row);
+}
+
 // Walk from the tail: new rows overwhelmingly belong at or near the end. A keyed
 // row lands after the last row whose key is <= its own; unkeyed neighbours (a
 // mixed transient) hold their positions and are walked over.
