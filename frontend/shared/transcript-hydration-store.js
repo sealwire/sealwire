@@ -7,6 +7,12 @@ import {
   selectTranscriptText,
   uniqueItemIds,
 } from "./authoritative-tail-merge.js";
+import {
+  mergeWindowRowsInPlace,
+  rowsAreOrderKeyed,
+  upsertWindowRowInPlace,
+  windowIsOrderKeyed,
+} from "./transcript-window-reducer.js";
 
 export function createClearedTranscriptHydrationPatch() {
   return {
@@ -559,6 +565,7 @@ export function createMergedTranscriptHydrationPagePatch(
   const nextEntries = new Map(state.transcriptHydrationEntries);
   const nextOrder = [...state.transcriptHydrationOrder];
   const pageItemIds = [];
+  const preparedPageRows = [];
 
   for (const entry of page.entries || []) {
     const itemId = entry?.item_id;
@@ -582,14 +589,30 @@ export function createMergedTranscriptHydrationPagePatch(
       };
     }
 
-    nextEntries.set(
-      itemId,
-      mergeTranscriptEntry(nextEntries.get(itemId), toTranscriptEntry(prepared.entry || entry))
-    );
+    preparedPageRows.push(toTranscriptEntry(prepared.entry || entry));
     pageItemIds.push(itemId);
   }
 
-  const nextOrderValue = uniqueItemIds([...pageItemIds, ...nextOrder]);
+  // Numbered on both sides: place every page row against the window's own
+  // numbers. The legacy concat below outranks every held row by position alone,
+  // which is only right when the page is strictly older than everything held.
+  let nextOrderValue;
+  if (
+    rowsAreOrderKeyed(preparedPageRows)
+    && windowIsOrderKeyed(state.transcriptHydrationOrder, state.transcriptHydrationEntries)
+  ) {
+    const draft = { order: nextOrder, entries: nextEntries };
+    mergeWindowRowsInPlace(draft, preparedPageRows, { mergeRow: mergeTranscriptEntry });
+    nextOrderValue = draft.order;
+  } else {
+    for (const pageRow of preparedPageRows) {
+      nextEntries.set(
+        pageRow.item_id,
+        mergeTranscriptEntry(nextEntries.get(pageRow.item_id), pageRow)
+      );
+    }
+    nextOrderValue = uniqueItemIds([...pageItemIds, ...nextOrder]);
+  }
   const nextStatus =
     page.prev_cursor == null
       ? "complete"
@@ -973,6 +996,12 @@ export function applyTranscriptDeltaToWindow(state, delta) {
       entry_seq: Number.isSafeInteger(delta.entry_seq) && !Number.isSafeInteger(existing.entry_seq)
         ? delta.entry_seq
         : existing.entry_seq,
+      // Same first-wins rule, and it heals a row some other path created without
+      // one: recording the number keeps the window eligible for the keyed merge.
+      // Position is NOT revisited — a row's slot is decided when it is placed.
+      ...(Number.isSafeInteger(delta.order_seq) && !Number.isSafeInteger(existing.order_seq)
+        ? { order_seq: delta.order_seq }
+        : {}),
       content_state: CONTENT_STATE_FULL,
     });
     return true;
@@ -986,23 +1015,27 @@ export function applyTranscriptDeltaToWindow(state, delta) {
   const startsAtZero =
     delta.text_offset == null
     || (Number.isSafeInteger(delta.text_offset) && delta.text_offset === 0);
-  entries.set(itemId, {
-    item_id: itemId,
-    kind,
-    text: startsAtZero ? appendText : "",
-    status: "running",
-    turn_id: delta.turn_id || null,
-    tool: null,
-    entry_seq: Number.isSafeInteger(delta.entry_seq) ? delta.entry_seq : null,
-    content_state: startsAtZero ? CONTENT_STATE_FULL : CONTENT_STATE_PREVIEW,
-  });
-  // We only reach here when `entries.get(itemId)` was undefined above, and
-  // `entries`/`order` are always written as a pair (clear, stash/restore, tail
-  // and snapshot merge all keep them in sync — see placeOrderedTailIds' "an id
-  // we have never seen cannot be in the order" above) — so `itemId` cannot
-  // already be in `order`. Push is O(1); the `includes` scan this replaced
-  // was the one O(window) step left in the per-token delta path.
-  order.push(itemId);
+  // Placed by its birth number, not by arrival: two rows can stream at once, and
+  // the earlier-born one may emit its first delta second. An unnumbered delta
+  // still appends, so an old relay degrades to arrival order instead of breaking.
+  //
+  // Still O(1) for the ordinary case this path exists for — a genuinely-new tail
+  // row stops at the first neighbour it is compared against, so the per-token
+  // delta path does not become O(window) (markdown/transcript-perf-freeze-analysis.md).
+  upsertWindowRowInPlace(
+    { entries, order },
+    {
+      item_id: itemId,
+      kind,
+      text: startsAtZero ? appendText : "",
+      status: "running",
+      turn_id: delta.turn_id || null,
+      tool: null,
+      entry_seq: Number.isSafeInteger(delta.entry_seq) ? delta.entry_seq : null,
+      ...(Number.isSafeInteger(delta.order_seq) ? { order_seq: delta.order_seq } : {}),
+      content_state: startsAtZero ? CONTENT_STATE_FULL : CONTENT_STATE_PREVIEW,
+    }
+  );
   return startsAtZero;
 }
 
