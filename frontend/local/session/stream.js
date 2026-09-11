@@ -604,6 +604,14 @@ export function createStreamController(ctx) {
     };
     entries.set(itemId, nextEntry);
     if (!existing) {
+      // Unreachable for the keyed proof, and deliberately left as a backstop.
+      // This runs only when appendTranscriptDelta above returned false, and for
+      // an item the window does not hold that call returns `startsAtZero` —
+      // which this function's own guard has already pinned true by requiring
+      // text_offset == null. So a row that is NEW here has always just been
+      // created (and placed by its birth key, and had the proof revoked if it
+      // had none) by the store's own writer. There is no path by which this
+      // push adds an unnumbered row to a window still claiming to be keyed.
       order.push(itemId);
     }
     return true;

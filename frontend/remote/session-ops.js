@@ -780,6 +780,14 @@ function nextAddressableItemId(transcript, fromIndex) {
 // mutates `transcriptHydrationOrder`, so a partial Map write here can never
 // make an unloaded window look loaded (the same invariant
 // invalidateTranscriptWindowEntryForPatch holds for a patch).
+// Exposed for the regression that a repaired copy cannot move a placed row or
+// poison the window's keyed proof. repairActiveTranscriptTail itself fetches
+// through the broker/E2EE stack, which no unit harness stands up; this runs the
+// real seam against the real module state, which is where the invariant lives.
+export function __syncTranscriptWindowWithRepairedEntriesForTest(threadId, repairedEntries) {
+  return syncTranscriptWindowWithRepairedEntries(state, threadId, repairedEntries);
+}
+
 function syncTranscriptWindowWithRepairedEntries(state, threadId, repairedEntries) {
   if (state.transcriptHydrationThreadId !== threadId) {
     return;
@@ -793,10 +801,19 @@ function syncTranscriptWindowWithRepairedEntries(state, threadId, repairedEntrie
     if (!itemId || !entries.has(itemId)) {
       continue;
     }
+    const held = entries.get(itemId);
     entries.set(itemId, {
-      ...entries.get(itemId),
+      ...held,
       ...entry,
       content_state: "full",
+      // First valid birth key wins. A repaired copy is authoritative for CONTENT,
+      // never for where a row already sits: rewriting the number here would move
+      // nothing and clear nothing, leaving transcriptHydrationKeyed still
+      // claiming "numbered and in order" over a window that no longer is.
+      ...(Number.isSafeInteger(held?.order_seq) ? { order_seq: held.order_seq } : {}),
+      // Absorbing, for the same reason it is everywhere else: a page built before
+      // the withdrawal carries withdrawn:false and must not resurrect the row.
+      ...(held?.withdrawn === true || entry.withdrawn === true ? { withdrawn: true } : {}),
     });
   }
 }
