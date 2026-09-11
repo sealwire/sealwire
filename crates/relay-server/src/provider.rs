@@ -22,6 +22,31 @@ pub struct ThreadSyncData {
     pub status: String,
     pub active_flags: Vec<String>,
     pub transcript: Vec<TranscriptEntryView>,
+    /// Ids in `transcript` that the RELAY synthesized while parsing this read, not
+    /// names the provider issued — per-turn diff summaries, re-derived turn
+    /// failures. Provenance has to travel with the read: once these become rows,
+    /// nothing downstream can tell them apart from provider-named ones without
+    /// guessing at the id's spelling, and a fork or detail request would then
+    /// address the provider with a string it has never seen instead of degrading.
+    pub relay_named_item_ids: Vec<String>,
+}
+
+impl ThreadSyncData {
+    /// A read whose every entry the provider named itself.
+    pub fn provider_named(
+        thread: ThreadSummaryView,
+        status: String,
+        active_flags: Vec<String>,
+        transcript: Vec<TranscriptEntryView>,
+    ) -> Self {
+        Self {
+            thread,
+            status,
+            active_flags,
+            transcript,
+            relay_named_item_ids: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone)]

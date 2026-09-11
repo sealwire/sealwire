@@ -4,6 +4,7 @@ use crate::protocol::{
     FileChangeApplyState, LogEntryView, ToolCallView, TranscriptEntryKind, TranscriptEntryView,
 };
 
+use super::transcript_store::IdSpace;
 use super::RelayState;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,26 +45,6 @@ impl TranscriptMutationMeta {
             format!("\n{delta}")
         } else {
             delta.to_string()
-        }
-    }
-}
-
-/// Whose name `item_id` is at a row's birth.
-///
-/// The distinction only matters once — a row is named once and keeps that name —
-/// but getting it wrong is invisible until something tries to address the row
-/// provider-side and finds a string the provider has never issued.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProviderNamed {
-    Yes,
-    No,
-}
-
-impl ProviderNamed {
-    fn name_of(self, item_id: &str) -> Option<String> {
-        match self {
-            Self::Yes => Some(item_id.to_string()),
-            Self::No => None,
         }
     }
 }
@@ -179,12 +160,30 @@ impl RelayState {
         self.upsert_item_for_thread(
             thread_id,
             item_id,
-            ProviderNamed::Yes,
+            IdSpace::Provider,
             kind,
             text,
             status,
             turn_id,
             tool,
+        )
+    }
+
+    /// Active-thread convenience for a row the RELAY named.
+    pub(crate) fn upsert_relay_named_item(
+        &mut self,
+        item_id: String,
+        kind: TranscriptEntryKind,
+        text: Option<String>,
+        status: String,
+        turn_id: Option<String>,
+        tool: Option<ToolCallView>,
+    ) -> TranscriptMutationMeta {
+        let Some(thread_id) = self.active_thread_id.clone() else {
+            return self.upsert_transcript_item_legacy(item_id, kind, text, status, turn_id, tool);
+        };
+        self.upsert_relay_named_item_for_thread(
+            &thread_id, item_id, kind, text, status, turn_id, tool,
         )
     }
 
@@ -204,7 +203,7 @@ impl RelayState {
         self.upsert_item_for_thread(
             thread_id,
             item_id,
-            ProviderNamed::No,
+            IdSpace::Row,
             kind,
             text,
             status,
@@ -214,11 +213,11 @@ impl RelayState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn upsert_item_for_thread(
+    pub(crate) fn upsert_item_for_thread(
         &mut self,
         thread_id: &str,
         item_id: String,
-        provider_named: ProviderNamed,
+        space: IdSpace,
         kind: TranscriptEntryKind,
         text: Option<String>,
         status: String,
@@ -229,7 +228,7 @@ impl RelayState {
             let runtime = self.ensure_runtime_for_thread(thread_id);
             // One resolve, up front: from here on the row is addressed by the
             // relay's own key, never by whatever the caller named it.
-            if let Some(index) = runtime.transcript.resolve_index(&item_id) {
+            if let Some(index) = runtime.transcript.resolve_index_in(space, &item_id) {
                 let row_id = runtime.transcript[index].row_id.clone();
                 let order_seq = runtime.transcript[index].order_seq;
                 runtime.transcript.update_row(&row_id, |entry| {
@@ -247,7 +246,7 @@ impl RelayState {
             } else {
                 let entry_seq = runtime.transcript.len() as u64 + 1;
                 let order_seq = runtime.alloc_tail_order_seq();
-                let provider_item_id = provider_named.name_of(&item_id);
+                let provider_item_id = space.provider_name_of(&item_id);
                 let row_id = runtime.transcript.push(TranscriptRecord {
                     row_id: item_id,
                     provider_item_id,
@@ -280,7 +279,10 @@ impl RelayState {
         turn_id: Option<String>,
         tool: Option<ToolCallView>,
     ) -> TranscriptMutationMeta {
-        if let Some(index) = self.transcript.resolve_index(&item_id) {
+        if let Some(index) = self
+            .transcript
+            .resolve_index_in(IdSpace::Provider, &item_id)
+        {
             let (base_revision, revision) = self.bump_transcript_revision();
             let row_id = self.transcript[index].row_id.clone();
             let order_seq = self.transcript[index].order_seq;
@@ -308,9 +310,12 @@ impl RelayState {
         let entry_seq = self.transcript.len() as u64 + 1;
         let (base_revision, revision) = self.bump_transcript_revision();
         let order_seq = next_legacy_tail_order_seq(&self.transcript);
+        // The legacy mirror is fed only by provider bridges, and the row must record
+        // that name or the item's own completion resolves to nothing and mints a twin.
+        let provider_item_id = IdSpace::Provider.provider_name_of(&item_id);
         let row_id = self.transcript.push(TranscriptRecord {
             row_id: item_id,
-            provider_item_id: None,
+            provider_item_id,
             kind,
             text,
             status,
@@ -403,7 +408,10 @@ impl RelayState {
     ) -> TranscriptMutationMeta {
         let (row_id, entry_seq, order_seq, text_offset) = {
             let runtime = self.ensure_runtime_for_thread(thread_id);
-            if let Some(index) = runtime.transcript.resolve_index(item_id) {
+            if let Some(index) = runtime
+                .transcript
+                .resolve_index_in(IdSpace::Provider, item_id)
+            {
                 let row_id = runtime.transcript[index].row_id.clone();
                 let order_seq = runtime.transcript[index].order_seq;
                 let text_offset = runtime
@@ -462,7 +470,7 @@ impl RelayState {
         delta: &str,
         turn_id: &str,
     ) -> TranscriptMutationMeta {
-        if let Some(index) = self.transcript.resolve_index(item_id) {
+        if let Some(index) = self.transcript.resolve_index_in(IdSpace::Provider, item_id) {
             let (base_revision, revision) = self.bump_transcript_revision();
             let row_id = self.transcript[index].row_id.clone();
             let order_seq = self.transcript[index].order_seq;
@@ -785,7 +793,11 @@ impl RelayState {
     }
 
     fn upsert_user_message_legacy(&mut self, item_id: String, text: String, turn_id: String) {
-        if let Some(row_id) = self.transcript.resolve(&item_id).map(str::to_string) {
+        if let Some(row_id) = self
+            .transcript
+            .resolve_in(IdSpace::Provider, &item_id)
+            .map(str::to_string)
+        {
             self.bump_transcript_revision();
             self.transcript.update_row(&row_id, |entry| {
                 entry.kind = TranscriptEntryKind::UserText;
@@ -833,7 +845,11 @@ impl RelayState {
     }
 
     fn complete_agent_message_legacy(&mut self, item_id: String, text: String, turn_id: String) {
-        if let Some(row_id) = self.transcript.resolve(&item_id).map(str::to_string) {
+        if let Some(row_id) = self
+            .transcript
+            .resolve_in(IdSpace::Provider, &item_id)
+            .map(str::to_string)
+        {
             self.bump_transcript_revision();
             self.transcript.update_row(&row_id, |entry| {
                 entry.kind = TranscriptEntryKind::AgentText;
@@ -881,7 +897,11 @@ impl RelayState {
             return;
         }
 
-        if let Some(row_id) = self.transcript.resolve(&item_id).map(str::to_string) {
+        if let Some(row_id) = self
+            .transcript
+            .resolve_in(IdSpace::Provider, &item_id)
+            .map(str::to_string)
+        {
             self.bump_transcript_revision();
             self.transcript.update_row(&row_id, |entry| {
                 entry.kind = TranscriptEntryKind::Command;
@@ -942,7 +962,11 @@ impl RelayState {
         status: String,
         turn_id: String,
     ) {
-        if let Some(row_id) = self.transcript.resolve(&item_id).map(str::to_string) {
+        if let Some(row_id) = self
+            .transcript
+            .resolve_in(IdSpace::Provider, &item_id)
+            .map(str::to_string)
+        {
             self.bump_transcript_revision();
             self.transcript.update_row(&row_id, |entry| {
                 entry.kind = TranscriptEntryKind::Command;
@@ -980,7 +1004,10 @@ impl RelayState {
         let mut separator_inserted = false;
         let (row_id, entry_seq, order_seq) = {
             let runtime = self.ensure_runtime_for_thread(thread_id);
-            if let Some(index) = runtime.transcript.resolve_index(item_id) {
+            if let Some(index) = runtime
+                .transcript
+                .resolve_index_in(IdSpace::Provider, item_id)
+            {
                 let row_id = runtime.transcript[index].row_id.clone();
                 let order_seq = runtime.transcript[index].order_seq;
                 separator_inserted = runtime
@@ -1037,7 +1064,7 @@ impl RelayState {
         item_id: &str,
         delta: &str,
     ) -> TranscriptMutationMeta {
-        if let Some(index) = self.transcript.resolve_index(item_id) {
+        if let Some(index) = self.transcript.resolve_index_in(IdSpace::Provider, item_id) {
             let (base_revision, revision) = self.bump_transcript_revision();
             let row_id = self.transcript[index].row_id.clone();
             let order_seq = self.transcript[index].order_seq;
@@ -1079,9 +1106,9 @@ impl RelayState {
         state: FileChangeApplyState,
     ) -> bool {
         let runtime = self.ensure_runtime_for_thread(thread_id);
-        // `apply_states` is keyed by ROW id, so an alias must be resolved first or
+        // Client-supplied, so a ROW key. `apply_states` is keyed the same way, or
         // the overlay lands under a key `transcript_views` never looks up.
-        let Some(row_id) = runtime.transcript.resolve(item_id).map(str::to_string) else {
+        let Some(row_id) = runtime.transcript.resolve_row(item_id).map(str::to_string) else {
             return false;
         };
         runtime.apply_states.insert(row_id, state);
@@ -1092,23 +1119,32 @@ impl RelayState {
         true
     }
 
-    pub fn set_transcript_item_status(&mut self, item_id: &str, status: &str) -> bool {
+    /// `space` says whether `item_id` is the provider's name for the item or the
+    /// relay's own key — a `turn-diff:*` row has no provider name at all, so looking
+    /// it up in the provider namespace finds nothing.
+    pub fn set_transcript_item_status(
+        &mut self,
+        space: IdSpace,
+        item_id: &str,
+        status: &str,
+    ) -> bool {
         let Some(thread_id) = self.active_thread_id.clone() else {
-            return self.set_transcript_item_status_legacy(item_id, status);
+            return self.set_transcript_item_status_legacy(space, item_id, status);
         };
-        self.set_transcript_item_status_for_thread(&thread_id, item_id, status)
+        self.set_transcript_item_status_for_thread(&thread_id, space, item_id, status)
     }
 
     pub fn set_transcript_item_status_for_thread(
         &mut self,
         thread_id: &str,
+        space: IdSpace,
         item_id: &str,
         status: &str,
     ) -> bool {
         let Some(row_id) = self
             .ensure_runtime_for_thread(thread_id)
             .transcript
-            .resolve(item_id)
+            .resolve_in(space, item_id)
             .map(str::to_string)
         else {
             return false;
@@ -1123,8 +1159,17 @@ impl RelayState {
         true
     }
 
-    fn set_transcript_item_status_legacy(&mut self, item_id: &str, status: &str) -> bool {
-        let Some(row_id) = self.transcript.resolve(item_id).map(str::to_string) else {
+    fn set_transcript_item_status_legacy(
+        &mut self,
+        space: IdSpace,
+        item_id: &str,
+        status: &str,
+    ) -> bool {
+        let Some(row_id) = self
+            .transcript
+            .resolve_in(space, item_id)
+            .map(str::to_string)
+        else {
             return false;
         };
         self.bump_transcript_revision();

@@ -2823,6 +2823,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                         tool: Some(file_tool(&[&edited])),
                         content_state: crate::protocol::TranscriptContentState::Full,
                     }],
+                    &[],
                     Some(1),
                     None,
                 );
@@ -2870,6 +2871,7 @@ is also what keeps the refusal from confirming it exists: {error}"
             relay.apply_persisted(&persisted);
             relay.load_thread_data(
                 crate::provider::ThreadSyncData {
+                    relay_named_item_ids: Vec::new(),
                     thread: crate::protocol::ThreadSummaryView {
                         workspace_trusted: false,
                         id: "thread-a".to_string(),
@@ -6223,6 +6225,7 @@ tree; got {}",
                 .cloned()
                 .unwrap_or_default();
             Ok(crate::provider::ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread,
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -7304,6 +7307,7 @@ tree; got {}",
                 (thread.id.clone(), None),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
+                        relay_named_item_ids: Vec::new(),
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
@@ -7318,6 +7322,7 @@ tree; got {}",
                 (thread.id.clone(), Some(7)),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
+                        relay_named_item_ids: Vec::new(),
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
@@ -7423,6 +7428,7 @@ tree; got {}",
                 (thread.id.clone(), None),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
+                        relay_named_item_ids: Vec::new(),
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
@@ -7436,6 +7442,7 @@ tree; got {}",
                 (thread.id.clone(), Some(123)),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
+                        relay_named_item_ids: Vec::new(),
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
@@ -7511,6 +7518,7 @@ tree; got {}",
                 (thread.id.clone(), None),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
+                        relay_named_item_ids: Vec::new(),
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
@@ -7590,6 +7598,7 @@ tree; got {}",
                 (thread.id.clone(), None),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
+                        relay_named_item_ids: Vec::new(),
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
@@ -9277,6 +9286,7 @@ tree; got {}",
                 .ok_or_else(|| format!("unknown thread {thread_id}"))?;
             let running = self.running.lock().unwrap().contains(thread_id);
             Ok(ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread,
                 status: if running {
                     "active".to_string()
@@ -9552,6 +9562,7 @@ tree; got {}",
                 .get(thread_id)
                 .ok_or_else(|| format!("consumed-initial thread '{thread_id}' was not found"))?;
             Ok(crate::provider::ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread: thread.summary.clone(),
                 status: thread.summary.status.clone(),
                 active_flags: Vec::new(),
@@ -12004,6 +12015,7 @@ tree; got {}",
                 .cloned()
                 .ok_or_else(|| format!("thread '{thread_id}' not found"))?;
             Ok(crate::provider::ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread,
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -13799,6 +13811,7 @@ mod review_tests {
                 .cloned()
                 .unwrap_or_default();
             Ok(crate::provider::ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread,
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -14387,6 +14400,7 @@ mod review_tests {
                             );
                             relay.bg_upsert_transcript_item(
                                 &thread_id,
+                                crate::state::IdSpace::Row,
                                 format!("turn-error:{turn}"),
                                 TranscriptEntryKind::Error,
                                 Some(reason),
@@ -24807,6 +24821,7 @@ mod late_catalog_tests {
                 .cloned()
                 .ok_or_else(|| format!("thread '{thread_id}' not found"))?;
             Ok(crate::provider::ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread,
                 status: "idle".to_string(),
                 active_flags: Vec::new(),

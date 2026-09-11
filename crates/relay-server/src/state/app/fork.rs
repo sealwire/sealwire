@@ -538,7 +538,7 @@ fn provider_fork_point(
     let Some(transcript) = transcript else {
         return Some(requested.to_string());
     };
-    if transcript.get(requested).is_none() {
+    if transcript.get_row(requested).is_none() {
         // Not a row this runtime holds; it can only have come from a provider read.
         return Some(requested.to_string());
     }
@@ -781,6 +781,7 @@ mod tests {
 
     fn source_with_transcript(transcript: Vec<TranscriptEntryView>) -> ThreadSyncData {
         ThreadSyncData {
+            relay_named_item_ids: Vec::new(),
             thread: crate::protocol::ThreadSummaryView {
                 workspace_trusted: false,
                 id: "source-thread".to_string(),
@@ -1066,6 +1067,103 @@ mod fork_point_translation_tests {
             provider_fork_point(Some(&store), Some(row_id.as_str())),
             None,
             "no provider name means no provider-addressable fork point"
+        );
+    }
+}
+
+#[cfg(test)]
+mod production_fork_point_tests {
+    use super::*;
+    use crate::protocol::TranscriptEntryKind;
+    use crate::state::relay::RelayState;
+    use crate::state::SecurityProfile;
+    use tokio::sync::watch;
+
+    fn relay() -> RelayState {
+        let (change_tx, _) = watch::channel(0_u64);
+        RelayState::new(
+            "/tmp/project".to_string(),
+            change_tx,
+            SecurityProfile::private(),
+        )
+    }
+
+    /// Rows built by the REAL writers, not hand-assembled: a relay-synthesized
+    /// turn-diff must degrade to replay, and a genuine provider item must not.
+    ///
+    /// This is the assertion the unit test on a constructed store cannot make — it
+    /// is the live path's provenance that decides which way a fork goes.
+    #[test]
+    fn a_turn_diff_row_built_by_the_live_path_is_not_a_provider_fork_point() {
+        let mut relay = relay();
+        let thread = "thread-fork";
+        let now = crate::state::unix_now();
+
+        relay.bg_upsert_turn_diff_item(
+            thread,
+            "turn-diff:turn-1".to_string(),
+            Some("2 files".to_string()),
+            "completed".to_string(),
+            Some("turn-1".to_string()),
+            None,
+            now,
+        );
+        relay.upsert_transcript_item_for_thread(
+            thread,
+            "codex-item-1".to_string(),
+            TranscriptEntryKind::AgentText,
+            Some("hello".to_string()),
+            "completed".to_string(),
+            Some("turn-1".to_string()),
+            None,
+        );
+
+        let runtime = relay.runtime_for_thread(thread).expect("runtime");
+        let transcript = Some(&runtime.transcript);
+
+        assert_eq!(
+            provider_fork_point(transcript, Some("turn-diff:turn-1")),
+            None,
+            "the relay's own summary row has no provider-side message to branch at"
+        );
+        assert_eq!(
+            provider_fork_point(transcript, Some("codex-item-1")).as_deref(),
+            Some("codex-item-1"),
+            "a genuine provider item is addressable and must keep forking natively"
+        );
+    }
+
+    /// The locally-reserved send, end to end: before the echo it cannot be a fork
+    /// point at all, and after it the fork leaves as the id Codex actually knows.
+    #[test]
+    fn a_reserved_send_becomes_a_provider_fork_point_only_once_codex_names_it() {
+        let mut relay = relay();
+        let thread = "thread-fork-send";
+        let reservation = relay
+            .begin_codex_user_turn(thread, "the send")
+            .expect("reserve");
+
+        {
+            let runtime = relay.runtime_for_thread(thread).expect("runtime");
+            assert_eq!(
+                provider_fork_point(Some(&runtime.transcript), Some(&reservation)),
+                None,
+                "before the echo there is nothing provider-side to branch at"
+            );
+        }
+
+        relay.upsert_user_message_for_thread(
+            thread,
+            "codex-user-9".to_string(),
+            "the send".to_string(),
+            "turn-1".to_string(),
+        );
+
+        let runtime = relay.runtime_for_thread(thread).expect("runtime");
+        assert_eq!(
+            provider_fork_point(Some(&runtime.transcript), Some(&reservation)).as_deref(),
+            Some("codex-user-9"),
+            "after the echo the client's row id translates to Codex's own"
         );
     }
 }

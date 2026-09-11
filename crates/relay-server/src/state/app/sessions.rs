@@ -958,10 +958,11 @@ impl AppState {
             plan.recorded_cwd
         );
         let mut relay = self.relay.write().await;
-        relay.upsert_transcript_item_for_thread(
+        relay.upsert_relay_named_item_for_thread(
             thread_id,
             // Unique per attempt, so pressing send twice leaves two records rather than
             // one that silently overwrites the first.
+            // Relay-authored: no provider ever saw this row.
             format!(
                 "workspace-missing:{}-{}",
                 unix_now(),

@@ -677,6 +677,9 @@ impl ProviderBridge for FakeProviderBridge {
             thread: thread.summary.clone(),
             status: thread.summary.status.clone(),
             active_flags: Vec::new(),
+            // The fake provider stores exactly what it emitted, so it can resolve
+            // every id in here — they are all its own names.
+            relay_named_item_ids: Vec::new(),
             transcript: thread.transcript.clone(),
         })
     }
@@ -1629,6 +1632,7 @@ impl ProviderBridge for FakeProviderBridge {
                         let mut relay = state.write().await;
                         relay.set_transcript_item_status_for_thread(
                             &thread_id,
+                            crate::state::IdSpace::Provider,
                             &assistant_item_id,
                             "failed",
                         );

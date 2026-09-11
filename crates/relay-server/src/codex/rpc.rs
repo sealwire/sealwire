@@ -524,6 +524,8 @@ async fn handle_notification_for_provider(
                         // broker-bound snapshot). Mirrors the Claude bg path.
                         relay.bg_upsert_transcript_item(
                             &bg_thread_id,
+                            // Relay-synthesized from the turn's error, not a Codex item.
+                            crate::state::IdSpace::Row,
                             codex_turn_error_item_id(completed_turn.as_deref()),
                             crate::protocol::TranscriptEntryKind::Error,
                             Some(reason),
@@ -537,6 +539,8 @@ async fn handle_notification_for_provider(
                 if let Some(turn_id) = completed_turn.as_deref() {
                     relay.bg_set_transcript_item_status(
                         &bg_thread_id,
+                        // Relay-synthesized: the provider never named it.
+                        crate::state::IdSpace::Row,
                         &format!("turn-diff:{turn_id}"),
                         "completed",
                         now,
@@ -618,7 +622,7 @@ async fn handle_notification_for_provider(
                             // from broker-bound snapshots, so a log line alone
                             // would let a remote/mobile client see the failed turn
                             // settle as a clean success. Mirrors the Claude path.
-                            relay.upsert_transcript_item_for_thread(
+                            relay.upsert_relay_named_item_for_thread(
                                 &thread_id,
                                 codex_turn_error_item_id(completed_turn.as_deref()),
                                 crate::protocol::TranscriptEntryKind::Error,
@@ -632,8 +636,11 @@ async fn handle_notification_for_provider(
                     changed = true;
                 }
                 if let Some(turn_id) = completed_turn.as_deref() {
-                    changed |= relay
-                        .set_transcript_item_status(&format!("turn-diff:{turn_id}"), "completed");
+                    changed |= relay.set_transcript_item_status(
+                        crate::state::IdSpace::Row,
+                        &format!("turn-diff:{turn_id}"),
+                        "completed",
+                    );
                     if let Some(completed_thread) = completed_thread {
                         relay.finish_codex_start_reservation(&completed_thread, turn_id);
                         changed = true;
@@ -665,7 +672,7 @@ async fn handle_notification_for_provider(
                         );
                         changed = true;
                     } else {
-                        relay.upsert_transcript_item(
+                        relay.upsert_relay_named_item(
                             item_id,
                             entry.kind,
                             entry.text,
@@ -778,6 +785,7 @@ async fn handle_notification_for_provider(
                         if let Some(item_id) = entry.item_id {
                             relay.bg_upsert_transcript_item(
                                 &bg_thread_id,
+                                crate::state::IdSpace::Provider,
                                 item_id,
                                 entry.kind,
                                 entry.text,
@@ -970,6 +978,7 @@ async fn handle_notification_for_provider(
                         if let Some(item_id) = entry.item_id {
                             relay.bg_upsert_transcript_item(
                                 &bg_thread_id,
+                                crate::state::IdSpace::Provider,
                                 item_id,
                                 entry.kind,
                                 entry.text,

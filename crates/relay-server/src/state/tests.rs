@@ -1383,6 +1383,7 @@ fn load_thread_data_sets_active_controller_on_resume() {
     let mut relay = test_state();
     relay.load_thread_data(
         ThreadSyncData {
+            relay_named_item_ids: Vec::new(),
             thread: test_thread("thread-9", "/tmp/project"),
             status: "running".to_string(),
             active_flags: vec!["busy".to_string()],
@@ -1441,6 +1442,7 @@ fn load_thread_data_preserves_pending_requests_from_other_threads() {
 
     relay.load_thread_data(
         ThreadSyncData {
+            relay_named_item_ids: Vec::new(),
             thread: test_thread("thread-2", "/tmp/project"),
             status: "idle".to_string(),
             active_flags: Vec::new(),
@@ -1698,6 +1700,7 @@ fn thread_switch_back_keeps_single_user_message_when_ids_agree() {
     // in its per-thread runtime.
     relay.load_thread_data(
         ThreadSyncData {
+            relay_named_item_ids: Vec::new(),
             thread: test_thread("thread-2", "/tmp/project"),
             status: "idle".to_string(),
             active_flags: Vec::new(),
@@ -1714,6 +1717,7 @@ fn thread_switch_back_keeps_single_user_message_when_ids_agree() {
     // worker stamped onto the SDK message, so it matches the runtime live copy.
     relay.load_thread_data(
         ThreadSyncData {
+            relay_named_item_ids: Vec::new(),
             thread: test_thread("thread-1", "/tmp/project"),
             status: "active".to_string(),
             active_flags: vec!["waitingOnAskUser".to_string()],
@@ -2815,6 +2819,7 @@ fn restore_thread_data_keeps_persisted_controller_and_settings() {
     );
     relay.restore_thread_data(
         ThreadSyncData {
+            relay_named_item_ids: Vec::new(),
             thread: test_thread("thread-1", "/tmp/project"),
             status: "running".to_string(),
             active_flags: vec!["busy".to_string()],
@@ -5242,11 +5247,13 @@ mod paged_history_merge_tests {
         let mut runtime = make_runtime();
         runtime.prepend_provider_history(
             vec![view("tool:t1", "completed", blank_tool("toolCall", "tool"))],
+            &[],
             None,
             None,
         );
         runtime.prepend_provider_history(
             vec![view("tool:t1", "running", blank_tool("fileChange", "Edit"))],
+            &[],
             None,
             None,
         );
@@ -5298,6 +5305,7 @@ mod paged_history_merge_tests {
         // Newest page first: only the tool_result was on it.
         runtime.prepend_provider_history(
             vec![view("tool:t1", "completed", blank_tool("toolCall", "tool"))],
+            &[],
             None,
             None,
         );
@@ -5310,7 +5318,7 @@ mod paged_history_merge_tests {
             change_type: "update".to_string(),
             diff: "--- a/src/x.rs\n+++ b/src/x.rs\n@@ -1 +1 @@\n-a\n+b\n".to_string(),
         }];
-        runtime.prepend_provider_history(vec![view("tool:t1", "running", rich)], None, None);
+        runtime.prepend_provider_history(vec![view("tool:t1", "running", rich)], &[], None, None);
 
         let record = runtime
             .transcript
@@ -6484,6 +6492,7 @@ fn rehydrating_a_thread_does_not_rewind_its_transcript_revision() {
     relay.runtimes.remove("thread-1");
     relay.load_thread_data(
         ThreadSyncData {
+            relay_named_item_ids: Vec::new(),
             thread: test_thread("thread-1", "/tmp/project"),
             status: "idle".to_string(),
             active_flags: Vec::new(),
@@ -6537,6 +6546,7 @@ fn merging_fresh_history_draws_from_the_shared_revision_clock() {
     // forward relative to everything issued so far.
     relay.load_thread_data(
         ThreadSyncData {
+            relay_named_item_ids: Vec::new(),
             thread: test_thread("thread-1", "/tmp/project"),
             status: "idle".to_string(),
             active_flags: Vec::new(),
@@ -6748,6 +6758,7 @@ fn restore_thread_data_resumes_the_clock_before_it_draws_from_it() {
 
     relay.restore_thread_data(
         ThreadSyncData {
+            relay_named_item_ids: Vec::new(),
             thread: test_thread("thread-1", "/tmp/project"),
             status: "idle".to_string(),
             active_flags: Vec::new(),
@@ -7106,6 +7117,7 @@ fn a_definitively_failed_send_leaves_a_withdrawn_tombstone() {
 /// the resulting order is keyed [D, A, B, C] permanently.
 fn delta_birth_stale_history() -> ThreadSyncData {
     ThreadSyncData {
+        relay_named_item_ids: Vec::new(),
         thread: test_thread("delta-birth", "/tmp/project"),
         status: "idle".to_string(),
         active_flags: Vec::new(),
@@ -7289,10 +7301,24 @@ mod row_identity_tests {
             row_id
         };
 
-        for named in ["row-1", "prov-1", "prov-1-result"] {
+        assert!(
+            relay.set_transcript_item_status_for_thread(
+                thread,
+                crate::state::IdSpace::Row,
+                "row-1",
+                "completed"
+            ),
+            "the row's own key must find it"
+        );
+        for named in ["prov-1", "prov-1-result"] {
             assert!(
-                relay.set_transcript_item_status_for_thread(thread, named, "completed"),
-                "`{named}` must find the row"
+                relay.set_transcript_item_status_for_thread(
+                    thread,
+                    crate::state::IdSpace::Provider,
+                    named,
+                    "completed"
+                ),
+                "provider id `{named}` must find the row"
             );
         }
 
@@ -7383,6 +7409,158 @@ mod row_identity_tests {
         assert_eq!(
             runtime.transcript[0].row_id, reservation,
             "and the row's own key is untouched by the translation becoming possible"
+        );
+    }
+
+    /// THE collision, on the production writers.
+    ///
+    /// A relay-owned row keyed `x` and a provider item that calls itself `x` are
+    /// two different things. With one blended resolver the provider event resolved
+    /// to the relay row and overwrote it, and the alias could never be recorded
+    /// because it shadowed a row key — so this state was unreachable.
+    #[test]
+    fn a_provider_event_cannot_overwrite_a_relay_row_that_shares_its_spelling() {
+        let mut relay = test_state();
+        let thread = "thread-collide";
+
+        relay.upsert_relay_named_item_for_thread(
+            thread,
+            "x".to_string(),
+            TranscriptEntryKind::Error,
+            Some("the relay's row".to_string()),
+            "failed".to_string(),
+            None,
+            None,
+        );
+        relay.upsert_transcript_item_for_thread(
+            thread,
+            "x".to_string(),
+            TranscriptEntryKind::AgentText,
+            Some("the provider's row".to_string()),
+            "completed".to_string(),
+            Some("turn-1".to_string()),
+            None,
+        );
+
+        let provider_row_id = {
+            let runtime = relay.runtime_for_thread(thread).expect("runtime");
+            assert_eq!(
+                runtime.transcript.len(),
+                2,
+                "a provider item that shares a relay row's spelling is still its own row, got {:?}",
+                runtime
+                    .transcript
+                    .iter()
+                    .map(|r| (r.row_id.clone(), r.text.clone()))
+                    .collect::<Vec<_>>()
+            );
+            runtime
+                .transcript
+                .resolve_provider("x")
+                .expect("the provider namespace knows `x`")
+                .to_string()
+        };
+        assert_ne!(
+            provider_row_id, "x",
+            "the provider row had to mint its own key"
+        );
+
+        // A LATER provider event under the same name updates only the provider row.
+        relay.upsert_transcript_item_for_thread(
+            thread,
+            "x".to_string(),
+            TranscriptEntryKind::AgentText,
+            Some("the provider's row, revised".to_string()),
+            "completed".to_string(),
+            Some("turn-1".to_string()),
+            None,
+        );
+
+        let runtime = relay.runtime_for_thread(thread).expect("runtime");
+        assert_eq!(runtime.transcript.len(), 2, "still two rows");
+        assert_eq!(
+            runtime
+                .transcript
+                .get_row("x")
+                .and_then(|r| r.text.clone())
+                .as_deref(),
+            Some("the relay's row"),
+            "row lookup `x` must still find the relay's row, untouched"
+        );
+        assert_eq!(
+            runtime
+                .transcript
+                .get_by_provider("x")
+                .and_then(|r| r.text.clone())
+                .as_deref(),
+            Some("the provider's row, revised"),
+            "provider lookup `x` must find the provider's row"
+        );
+        assert_eq!(
+            runtime.transcript.provider_item_id("x"),
+            None,
+            "the relay's row is unreachable from the provider namespace"
+        );
+    }
+
+    /// Every live path that invents a row must leave it with no provider name, or a
+    /// fork/detail request addresses the provider with a string it never issued.
+    #[test]
+    fn live_relay_synthesized_rows_carry_no_provider_name() {
+        let mut relay = test_state();
+        let thread = "thread-synthetic";
+        let now = crate::state::unix_now();
+
+        relay.bg_upsert_turn_diff_item(
+            thread,
+            "turn-diff:turn-1".to_string(),
+            Some("2 files".to_string()),
+            "completed".to_string(),
+            Some("turn-1".to_string()),
+            None,
+            now,
+        );
+        relay.bg_upsert_transcript_item(
+            thread,
+            crate::state::IdSpace::Row,
+            "turn-error:turn-1".to_string(),
+            TranscriptEntryKind::Error,
+            Some("it failed".to_string()),
+            "failed".to_string(),
+            Some("turn-1".to_string()),
+            None,
+            now,
+        );
+        // A real provider item, for contrast.
+        relay.bg_upsert_transcript_item(
+            thread,
+            crate::state::IdSpace::Provider,
+            "codex-item-1".to_string(),
+            TranscriptEntryKind::AgentText,
+            Some("hello".to_string()),
+            "completed".to_string(),
+            Some("turn-1".to_string()),
+            None,
+            now,
+        );
+
+        let runtime = relay.runtime_for_thread(thread).expect("runtime");
+        for relay_named in ["turn-diff:turn-1", "turn-error:turn-1"] {
+            assert_eq!(
+                runtime.transcript.provider_item_id(relay_named),
+                None,
+                "`{relay_named}` is the relay's own row and has no provider name"
+            );
+            assert_eq!(
+                runtime.transcript.resolve_provider(relay_named),
+                None,
+                "`{relay_named}` must be invisible in the provider namespace"
+            );
+        }
+        assert_eq!(
+            runtime.transcript.provider_item_id("codex-item-1"),
+            Some("codex-item-1"),
+            "a real provider item stays addressable"
         );
     }
 

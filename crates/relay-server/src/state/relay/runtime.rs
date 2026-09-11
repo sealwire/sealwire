@@ -301,6 +301,11 @@ impl ThreadRuntime {
         now: u64,
         transcript_revision: u64,
     ) -> Self {
+        let relay_named = data
+            .relay_named_item_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
         let transcript = data
             .transcript
             .into_iter()
@@ -310,22 +315,34 @@ impl ThreadRuntime {
                     .item_id
                     .clone()
                     .unwrap_or_else(|| format!("history-{index}")),
-                // A read is the provider naming its own rows, so the id it gave
-                // is a provider id as well as this row's key. Recording it is
-                // what lets a fork or detail request translate back.
-                provider_item_id: entry.item_id,
+                // A read is mostly the provider naming its own rows, and recording
+                // that name is what lets a fork or detail request translate back.
+                // The adapter tells us which entries it synthesized itself; those
+                // have no provider-side identity and must not pretend to.
+                provider_item_id: entry
+                    .item_id
+                    .filter(|item_id| !relay_named.contains(item_id)),
                 kind: entry.kind,
                 text: entry.text,
                 status: entry.status,
                 turn_id: entry.turn_id,
                 tool: entry.tool,
-                order_seq: (index as i64)
-                    .checked_mul(super::transcript::ORDER_SEQ_STEP)
-                    .expect("order_seq tail space exhausted"),
+                // Renumbered below, after duplicates have been merged away.
+                order_seq: 0,
                 withdrawn: false,
                 last_live_upsert_revision: None,
             })
             .collect::<Vec<_>>();
+        // One provider read can name an id twice — a tool's request and its result
+        // are two entries describing one row. The paged path has always
+        // content-merged those; the cold/full import must do the same or the two
+        // copies mint `id` and `id#row1` and render as visible twins.
+        let mut transcript = merge_duplicate_provider_rows(transcript);
+        for (index, record) in transcript.iter_mut().enumerate() {
+            record.order_seq = (index as i64)
+                .checked_mul(super::transcript::ORDER_SEQ_STEP)
+                .expect("order_seq tail space exhausted");
+        }
 
         // A read/restore is history, not liveness: this constructor always sets
         // active_turn_id = None (turn ids are never persisted nor surfaced by a read),
@@ -530,9 +547,14 @@ impl ThreadRuntime {
     pub(crate) fn prepend_provider_history(
         &mut self,
         entries: Vec<TranscriptEntryView>,
+        relay_named_item_ids: &[String],
         requested_cursor: Option<usize>,
         prev_cursor: Option<usize>,
     ) -> Vec<TranscriptEntryView> {
+        let relay_named = relay_named_item_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
         let fallback_page = requested_cursor
             .map(|cursor| cursor.to_string())
             .unwrap_or_else(|| "tail".to_string());
@@ -544,7 +566,9 @@ impl ThreadRuntime {
                     .item_id
                     .clone()
                     .unwrap_or_else(|| format!("provider-history-{fallback_page}-{index}")),
-                provider_item_id: entry.item_id,
+                provider_item_id: entry
+                    .item_id
+                    .filter(|item_id| !relay_named.contains(item_id)),
                 kind: entry.kind,
                 text: entry.text,
                 status: entry.status,
@@ -589,7 +613,7 @@ impl ThreadRuntime {
         // Resolved through the store, so a page that names a row by a provider id
         // the relay already bound merges into it instead of appearing twice.
         let mut absorbed: Vec<(String, TranscriptRecord)> = Vec::new();
-        records.retain(|record| match self.transcript.resolve(&record.row_id) {
+        records.retain(|record| match self.transcript.resolve_incoming(record) {
             Some(existing_row_id) => {
                 absorbed.push((existing_row_id.to_string(), record.clone()));
                 false
@@ -613,7 +637,11 @@ impl ThreadRuntime {
         self.provider_history_cursor = prev_cursor;
         page_item_ids
             .iter()
-            .filter_map(|item_id| self.transcript.get(item_id).map(TranscriptRecord::to_view))
+            .filter_map(|row_id| {
+                self.transcript
+                    .get_row(row_id)
+                    .map(TranscriptRecord::to_view)
+            })
             .collect()
     }
 
@@ -709,11 +737,11 @@ impl ThreadRuntime {
         // walk-back below treats the live row as unknown and inserts before it.
         let incoming_ids = records
             .iter()
-            .filter_map(|record| {
+            .map(|record| {
                 self.transcript
-                    .resolve(&record.row_id)
+                    .resolve_incoming(record)
                     .map(str::to_string)
-                    .or_else(|| Some(record.row_id.clone()))
+                    .unwrap_or_else(|| record.row_id.clone())
             })
             .collect::<std::collections::HashSet<_>>();
         // Unknown rows are held until the next incoming row that IS known — that
@@ -723,10 +751,14 @@ impl ThreadRuntime {
         let mut pending: Vec<TranscriptRecord> = Vec::new();
         let mut tail_pending_floor = 0;
         for record in records {
-            // THE resolve: a row id, or any provider id bound to one. The row
-            // this lands on is addressed by its own key from here on, so a
-            // history copy that names it differently still merges in place.
-            match self.transcript.resolve(&record.row_id).map(str::to_string) {
+            // Resolved in the namespace the record's own provenance names. The row
+            // it lands on is addressed by its own key from here on, so a history
+            // copy that spells it differently still merges in place.
+            match self
+                .transcript
+                .resolve_incoming(&record)
+                .map(str::to_string)
+            {
                 Some(row_id) => {
                     if !pending.is_empty() {
                         let anchor = self
@@ -837,6 +869,33 @@ impl ThreadRuntime {
                 && candidate.provider_item_id.is_none()
         })
     }
+}
+
+/// Collapse entries of one provider read that share a provider id into one row.
+///
+/// Two entries under one provider id are two DESCRIPTIONS of one row (a tool's
+/// request and its result), not two messages — the opposite of the collision rule,
+/// which only fires when nothing ties the rows together. Entries with no provider
+/// id are left alone: they are relay-synthesized and their row keys are already
+/// distinct by construction.
+fn merge_duplicate_provider_rows(records: Vec<TranscriptRecord>) -> Vec<TranscriptRecord> {
+    let mut first_by_provider_id: HashMap<String, usize> = HashMap::new();
+    let mut merged: Vec<TranscriptRecord> = Vec::with_capacity(records.len());
+    for record in records {
+        let provider_item_id = record.provider_item_id.clone();
+        match provider_item_id.and_then(|id| first_by_provider_id.get(&id).copied()) {
+            Some(kept) => {
+                let _ = merge_runtime_entry(&mut merged[kept], record);
+            }
+            None => {
+                if let Some(id) = record.provider_item_id.clone() {
+                    first_by_provider_id.insert(id, merged.len());
+                }
+                merged.push(record);
+            }
+        }
+    }
+    merged
 }
 
 fn merge_runtime_entry(existing: &mut TranscriptRecord, incoming: TranscriptRecord) -> bool {
@@ -1235,8 +1294,8 @@ mod tests {
             content_state: crate::protocol::TranscriptContentState::Full,
         }];
 
-        rt.prepend_provider_history(older.clone(), Some(4096), Some(2048));
-        rt.prepend_provider_history(older, Some(4096), Some(2048));
+        rt.prepend_provider_history(older.clone(), &[], Some(4096), Some(2048));
+        rt.prepend_provider_history(older, &[], Some(4096), Some(2048));
 
         assert_eq!(
             rt.transcript
@@ -1266,6 +1325,7 @@ mod tests {
     #[test]
     fn from_sync_data_does_not_resurrect_working_status_without_a_turn() {
         let data = ThreadSyncData {
+            relay_named_item_ids: Vec::new(),
             thread: summary("t1", "active"),
             status: "active".to_string(),
             active_flags: Vec::new(),
@@ -1314,7 +1374,7 @@ mod tests {
             content_state: crate::protocol::TranscriptContentState::Full,
         };
 
-        rt.prepend_provider_history(vec![page("older-1"), page("older-2")], Some(10), None);
+        rt.prepend_provider_history(vec![page("older-1"), page("older-2")], &[], Some(10), None);
         let first_block: Vec<i64> = rt.transcript.iter().map(|r| r.order_seq).collect();
         assert_eq!(
             rt.transcript.last().unwrap().order_seq,
@@ -1327,7 +1387,7 @@ mod tests {
         );
 
         // An OLDER page arrives later: it must sort before the previous block.
-        rt.prepend_provider_history(vec![page("oldest-1")], Some(5), None);
+        rt.prepend_provider_history(vec![page("oldest-1")], &[], Some(5), None);
         assert!(
             rt.transcript[0].order_seq < first_block[0],
             "later-fetched older history sorts before the earlier block"
@@ -1521,6 +1581,7 @@ mod tests {
                 page_entry("dup", "second"),
                 page_entry("solo", "x"),
             ],
+            &[],
             Some(3),
             None,
         );
@@ -1621,6 +1682,7 @@ mod tests {
                 page_entry("first", "running"),
                 page_entry("second, fuller text", "completed"),
             ],
+            &[],
             Some(3),
             None,
         );
@@ -1703,6 +1765,7 @@ mod tests {
                     result_tool,
                 ),
             ],
+            &[],
             Some(3),
             None,
         );
@@ -1741,6 +1804,178 @@ mod tests {
         assert_eq!(
             page_tool.result_preview.as_deref(),
             Some("Applied edit and formatted file")
+        );
+    }
+}
+
+#[cfg(test)]
+mod cold_import_tests {
+    use super::*;
+    use crate::protocol::{TranscriptContentState, TranscriptEntryKind};
+
+    fn summary_for(id: &str) -> ThreadSummaryView {
+        ThreadSummaryView {
+            workspace_trusted: false,
+            id: id.to_string(),
+            name: None,
+            preview: String::new(),
+            cwd: "/cwd".to_string(),
+            updated_at: 0,
+            source: "test".to_string(),
+            status: "idle".to_string(),
+            model_provider: "codex".to_string(),
+            provider: "codex".to_string(),
+            forked_from: None,
+            renamed: false,
+            flagged: false,
+        }
+    }
+
+    fn tool_entry(item_id: &str, status: &str, tool: ToolCallView) -> TranscriptEntryView {
+        TranscriptEntryView {
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some(item_id.to_string()),
+            kind: TranscriptEntryKind::ToolCall,
+            text: None,
+            status: status.to_string(),
+            turn_id: Some("turn-1".to_string()),
+            tool: Some(tool),
+            content_state: TranscriptContentState::Full,
+        }
+    }
+
+    fn tool(path: Option<&str>, diff: Option<&str>) -> ToolCallView {
+        ToolCallView {
+            item_type: "fileChange".to_string(),
+            name: "Edit".to_string(),
+            title: "Editing src/lib.rs".to_string(),
+            kind: None,
+            detail: None,
+            query: None,
+            path: path.map(str::to_string),
+            url: None,
+            command: None,
+            input_preview: None,
+            result_preview: None,
+            diff: diff.map(str::to_string),
+            file_changes: Vec::new(),
+            apply_state: None,
+            file_changes_omitted: false,
+            can_apply: None,
+        }
+    }
+
+    /// A cold read can name one row twice — a tool's request describes the change,
+    /// its result settles the status. The paged path has always content-merged
+    /// those; the full import must too, or the second copy mints `id#row1` and the
+    /// user sees the same edit listed twice.
+    #[test]
+    fn a_cold_read_merges_two_entries_that_share_a_provider_id_into_one_row() {
+        let data = ThreadSyncData {
+            thread: summary_for("t1"),
+            status: "idle".to_string(),
+            active_flags: Vec::new(),
+            relay_named_item_ids: Vec::new(),
+            transcript: vec![
+                tool_entry(
+                    "call-1",
+                    "running",
+                    tool(Some("src/lib.rs"), Some("@@ -1 +1 @@")),
+                ),
+                tool_entry("call-1", "completed", tool(None, None)),
+            ],
+        };
+
+        let rt = ThreadRuntime::from_sync_data(data, "untrusted", "ro", "high", "model", 0, 0);
+
+        assert_eq!(
+            rt.transcript.len(),
+            1,
+            "one provider id is one row, got {:?}",
+            rt.transcript
+                .iter()
+                .map(|r| r.row_id.clone())
+                .collect::<Vec<_>>()
+        );
+        let row = &rt.transcript[0];
+        assert_eq!(
+            row.row_id, "call-1",
+            "and it keeps the id the provider gave"
+        );
+        assert_eq!(
+            row.status, "completed",
+            "the settled copy supplies the status"
+        );
+        let tool = row.tool.as_ref().expect("the tool survives");
+        assert_eq!(
+            tool.path.as_deref(),
+            Some("src/lib.rs"),
+            "the request copy supplies the change it describes"
+        );
+        assert_eq!(tool.diff.as_deref(), Some("@@ -1 +1 @@"));
+        assert_eq!(
+            rt.next_tail_order_seq,
+            super::super::transcript::ORDER_SEQ_STEP,
+            "a merged duplicate consumes no order key"
+        );
+    }
+
+    /// The opposite case must still hold: rows with nothing tying them together are
+    /// two messages even when their ids collide, so they get distinct row keys.
+    #[test]
+    fn a_cold_read_keeps_rows_with_no_provider_id_distinct() {
+        let mut entry_a = tool_entry("x", "completed", tool(None, None));
+        entry_a.item_id = None;
+        let mut entry_b = tool_entry("x", "completed", tool(None, None));
+        entry_b.item_id = None;
+        let data = ThreadSyncData {
+            thread: summary_for("t1"),
+            status: "idle".to_string(),
+            active_flags: Vec::new(),
+            relay_named_item_ids: Vec::new(),
+            transcript: vec![entry_a, entry_b],
+        };
+
+        let rt = ThreadRuntime::from_sync_data(data, "untrusted", "ro", "high", "model", 0, 0);
+
+        assert_eq!(rt.transcript.len(), 2, "nothing ties these two together");
+        assert_ne!(rt.transcript[0].row_id, rt.transcript[1].row_id);
+    }
+
+    /// An entry the ADAPTER synthesized while parsing the read has no provider-side
+    /// identity. Marking it provider-named would let a fork or detail request
+    /// address the provider with a string it never issued.
+    #[test]
+    fn a_relay_synthesized_entry_is_not_recorded_as_provider_named() {
+        let data = ThreadSyncData {
+            thread: summary_for("t1"),
+            status: "idle".to_string(),
+            active_flags: Vec::new(),
+            relay_named_item_ids: vec!["turn-diff:turn-1".to_string()],
+            transcript: vec![
+                tool_entry("call-1", "completed", tool(Some("src/lib.rs"), None)),
+                tool_entry("turn-diff:turn-1", "completed", tool(None, None)),
+            ],
+        };
+
+        let rt = ThreadRuntime::from_sync_data(data, "untrusted", "ro", "high", "model", 0, 0);
+
+        assert_eq!(rt.transcript.len(), 2);
+        assert_eq!(
+            rt.transcript.provider_item_id("call-1"),
+            Some("call-1"),
+            "a provider-named row stays addressable"
+        );
+        assert_eq!(
+            rt.transcript.provider_item_id("turn-diff:turn-1"),
+            None,
+            "the relay's own summary row has no provider name"
+        );
+        assert_eq!(
+            rt.transcript.resolve_provider("turn-diff:turn-1"),
+            None,
+            "and it is invisible in the provider namespace"
         );
     }
 }
