@@ -113,6 +113,15 @@ fn test_persisted_state() -> PersistedRelayState {
     }
 }
 
+/// Wrap plain views as a provider read. Test fixtures stand in for a provider
+/// naming its own rows; the cases that need relay-synthesized entries build them
+/// with `ProviderTranscriptEntry::relay_named` explicitly.
+fn provider_entries(
+    views: Vec<TranscriptEntryView>,
+) -> Vec<crate::provider::ProviderTranscriptEntry> {
+    crate::provider::ProviderTranscriptEntry::all_provider_named(views)
+}
+
 fn test_state() -> RelayState {
     let (change_tx, _) = watch::channel(0_u64);
     RelayState::new(
@@ -1383,11 +1392,10 @@ fn load_thread_data_sets_active_controller_on_resume() {
     let mut relay = test_state();
     relay.load_thread_data(
         ThreadSyncData {
-            relay_named_item_ids: Vec::new(),
             thread: test_thread("thread-9", "/tmp/project"),
             status: "running".to_string(),
             active_flags: vec!["busy".to_string()],
-            transcript: Vec::new(),
+            transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(Vec::new()),
         },
         DEFAULT_APPROVAL_POLICY,
         DEFAULT_SANDBOX,
@@ -1442,11 +1450,10 @@ fn load_thread_data_preserves_pending_requests_from_other_threads() {
 
     relay.load_thread_data(
         ThreadSyncData {
-            relay_named_item_ids: Vec::new(),
             thread: test_thread("thread-2", "/tmp/project"),
             status: "idle".to_string(),
             active_flags: Vec::new(),
-            transcript: Vec::new(),
+            transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(Vec::new()),
         },
         DEFAULT_APPROVAL_POLICY,
         DEFAULT_SANDBOX,
@@ -1700,11 +1707,10 @@ fn thread_switch_back_keeps_single_user_message_when_ids_agree() {
     // in its per-thread runtime.
     relay.load_thread_data(
         ThreadSyncData {
-            relay_named_item_ids: Vec::new(),
             thread: test_thread("thread-2", "/tmp/project"),
             status: "idle".to_string(),
             active_flags: Vec::new(),
-            transcript: Vec::new(),
+            transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(Vec::new()),
         },
         DEFAULT_APPROVAL_POLICY,
         DEFAULT_SANDBOX,
@@ -1717,11 +1723,10 @@ fn thread_switch_back_keeps_single_user_message_when_ids_agree() {
     // worker stamped onto the SDK message, so it matches the runtime live copy.
     relay.load_thread_data(
         ThreadSyncData {
-            relay_named_item_ids: Vec::new(),
             thread: test_thread("thread-1", "/tmp/project"),
             status: "active".to_string(),
             active_flags: vec!["waitingOnAskUser".to_string()],
-            transcript: vec![TranscriptEntryView {
+            transcript: provider_entries(vec![TranscriptEntryView {
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some(user_item_id.to_string()),
@@ -1731,7 +1736,7 @@ fn thread_switch_back_keeps_single_user_message_when_ids_agree() {
                 turn_id: Some("7b3c1d04-1111-4222-8333-444455556666".to_string()),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
-            }],
+            }]),
         },
         DEFAULT_APPROVAL_POLICY,
         DEFAULT_SANDBOX,
@@ -2819,11 +2824,10 @@ fn restore_thread_data_keeps_persisted_controller_and_settings() {
     );
     relay.restore_thread_data(
         ThreadSyncData {
-            relay_named_item_ids: Vec::new(),
             thread: test_thread("thread-1", "/tmp/project"),
             status: "running".to_string(),
             active_flags: vec!["busy".to_string()],
-            transcript: vec![TranscriptEntryView {
+            transcript: provider_entries(vec![TranscriptEntryView {
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some("history-1".to_string()),
@@ -2833,7 +2837,7 @@ fn restore_thread_data_keeps_persisted_controller_and_settings() {
                 turn_id: Some("turn-2".to_string()),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
-            }],
+            }]),
         },
         &persisted,
     );
@@ -5171,6 +5175,7 @@ fn pairing_start_input_deserializes_path_scope() {
 
 #[cfg(test)]
 mod paged_history_merge_tests {
+    use super::provider_entries;
     use crate::protocol::{
         FileChangeDiffView, ToolCallView, TranscriptContentState, TranscriptEntryKind,
         TranscriptEntryView,
@@ -5246,14 +5251,20 @@ mod paged_history_merge_tests {
     fn an_older_page_never_downgrades_a_settled_status() {
         let mut runtime = make_runtime();
         runtime.prepend_provider_history(
-            vec![view("tool:t1", "completed", blank_tool("toolCall", "tool"))],
-            &[],
+            provider_entries(vec![view(
+                "tool:t1",
+                "completed",
+                blank_tool("toolCall", "tool"),
+            )]),
             None,
             None,
         );
         runtime.prepend_provider_history(
-            vec![view("tool:t1", "running", blank_tool("fileChange", "Edit"))],
-            &[],
+            provider_entries(vec![view(
+                "tool:t1",
+                "running",
+                blank_tool("fileChange", "Edit"),
+            )]),
             None,
             None,
         );
@@ -5304,8 +5315,11 @@ mod paged_history_merge_tests {
 
         // Newest page first: only the tool_result was on it.
         runtime.prepend_provider_history(
-            vec![view("tool:t1", "completed", blank_tool("toolCall", "tool"))],
-            &[],
+            provider_entries(vec![view(
+                "tool:t1",
+                "completed",
+                blank_tool("toolCall", "tool"),
+            )]),
             None,
             None,
         );
@@ -5318,7 +5332,11 @@ mod paged_history_merge_tests {
             change_type: "update".to_string(),
             diff: "--- a/src/x.rs\n+++ b/src/x.rs\n@@ -1 +1 @@\n-a\n+b\n".to_string(),
         }];
-        runtime.prepend_provider_history(vec![view("tool:t1", "running", rich)], &[], None, None);
+        runtime.prepend_provider_history(
+            provider_entries(vec![view("tool:t1", "running", rich)]),
+            None,
+            None,
+        );
 
         let record = runtime
             .transcript
@@ -6492,11 +6510,10 @@ fn rehydrating_a_thread_does_not_rewind_its_transcript_revision() {
     relay.runtimes.remove("thread-1");
     relay.load_thread_data(
         ThreadSyncData {
-            relay_named_item_ids: Vec::new(),
             thread: test_thread("thread-1", "/tmp/project"),
             status: "idle".to_string(),
             active_flags: Vec::new(),
-            transcript: vec![TranscriptEntryView {
+            transcript: provider_entries(vec![TranscriptEntryView {
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some("item-1".to_string()),
@@ -6506,7 +6523,7 @@ fn rehydrating_a_thread_does_not_rewind_its_transcript_revision() {
                 turn_id: Some("turn-1".to_string()),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
-            }],
+            }]),
         },
         DEFAULT_APPROVAL_POLICY,
         DEFAULT_SANDBOX,
@@ -6546,11 +6563,10 @@ fn merging_fresh_history_draws_from_the_shared_revision_clock() {
     // forward relative to everything issued so far.
     relay.load_thread_data(
         ThreadSyncData {
-            relay_named_item_ids: Vec::new(),
             thread: test_thread("thread-1", "/tmp/project"),
             status: "idle".to_string(),
             active_flags: Vec::new(),
-            transcript: vec![TranscriptEntryView {
+            transcript: provider_entries(vec![TranscriptEntryView {
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some("fresh-item".to_string()),
@@ -6560,7 +6576,7 @@ fn merging_fresh_history_draws_from_the_shared_revision_clock() {
                 turn_id: Some("turn-2".to_string()),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
-            }],
+            }]),
         },
         DEFAULT_APPROVAL_POLICY,
         DEFAULT_SANDBOX,
@@ -6758,11 +6774,10 @@ fn restore_thread_data_resumes_the_clock_before_it_draws_from_it() {
 
     relay.restore_thread_data(
         ThreadSyncData {
-            relay_named_item_ids: Vec::new(),
             thread: test_thread("thread-1", "/tmp/project"),
             status: "idle".to_string(),
             active_flags: Vec::new(),
-            transcript: Vec::new(),
+            transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(Vec::new()),
         },
         &persisted,
     );
@@ -7117,7 +7132,6 @@ fn a_definitively_failed_send_leaves_a_withdrawn_tombstone() {
 /// the resulting order is keyed [D, A, B, C] permanently.
 fn delta_birth_stale_history() -> ThreadSyncData {
     ThreadSyncData {
-        relay_named_item_ids: Vec::new(),
         thread: test_thread("delta-birth", "/tmp/project"),
         status: "idle".to_string(),
         active_flags: Vec::new(),
@@ -7134,6 +7148,7 @@ fn delta_birth_stale_history() -> ThreadSyncData {
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
             })
+            .map(crate::provider::ProviderTranscriptEntry::provider_named)
             .collect(),
     }
 }

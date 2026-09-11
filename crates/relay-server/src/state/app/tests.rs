@@ -2812,18 +2812,19 @@ is also what keeps the refusal from confirming it exists: {error}"
             relay
                 .ensure_runtime_for_thread("thread-a")
                 .prepend_provider_history(
-                    vec![crate::protocol::TranscriptEntryView {
-                        order_seq: None,
-                        withdrawn: false,
-                        item_id: Some("old-write".to_string()),
-                        kind: crate::protocol::TranscriptEntryKind::ToolCall,
-                        text: None,
-                        status: "completed".to_string(),
-                        turn_id: Some("turn-old".to_string()),
-                        tool: Some(file_tool(&[&edited])),
-                        content_state: crate::protocol::TranscriptContentState::Full,
-                    }],
-                    &[],
+                    crate::provider::ProviderTranscriptEntry::all_provider_named(vec![
+                        crate::protocol::TranscriptEntryView {
+                            order_seq: None,
+                            withdrawn: false,
+                            item_id: Some("old-write".to_string()),
+                            kind: crate::protocol::TranscriptEntryKind::ToolCall,
+                            text: None,
+                            status: "completed".to_string(),
+                            turn_id: Some("turn-old".to_string()),
+                            tool: Some(file_tool(&[&edited])),
+                            content_state: crate::protocol::TranscriptContentState::Full,
+                        },
+                    ]),
                     Some(1),
                     None,
                 );
@@ -2871,7 +2872,6 @@ is also what keeps the refusal from confirming it exists: {error}"
             relay.apply_persisted(&persisted);
             relay.load_thread_data(
                 crate::provider::ThreadSyncData {
-                    relay_named_item_ids: Vec::new(),
                     thread: crate::protocol::ThreadSummaryView {
                         workspace_trusted: false,
                         id: "thread-a".to_string(),
@@ -2889,17 +2889,19 @@ is also what keeps the refusal from confirming it exists: {error}"
                     },
                     status: "idle".to_string(),
                     active_flags: Vec::new(),
-                    transcript: vec![crate::protocol::TranscriptEntryView {
-                        order_seq: None,
-                        withdrawn: false,
-                        item_id: Some("tail".to_string()),
-                        kind: crate::protocol::TranscriptEntryKind::AgentText,
-                        text: Some("bounded rebuilt tail".to_string()),
-                        status: "completed".to_string(),
-                        turn_id: Some("turn-tail".to_string()),
-                        tool: None,
-                        content_state: crate::protocol::TranscriptContentState::Full,
-                    }],
+                    transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(vec![
+                        crate::protocol::TranscriptEntryView {
+                            order_seq: None,
+                            withdrawn: false,
+                            item_id: Some("tail".to_string()),
+                            kind: crate::protocol::TranscriptEntryKind::AgentText,
+                            text: Some("bounded rebuilt tail".to_string()),
+                            status: "completed".to_string(),
+                            turn_id: Some("turn-tail".to_string()),
+                            tool: None,
+                            content_state: crate::protocol::TranscriptContentState::Full,
+                        },
+                    ]),
                 },
                 DEFAULT_APPROVAL_POLICY,
                 DEFAULT_SANDBOX,
@@ -5994,6 +5996,12 @@ tree; got {}",
         // path. Flipped on to cover the native branch, whose "no fork prompt →
         // stay idle" early return must not swallow pasted images.
         native_fork: Arc<AtomicBool>,
+        /// Item ids that `read_thread` reports as ADAPTER-synthesized rather than
+        /// provider-named — the `turn-diff:*` / `turn-error:*` rows a real adapter
+        /// invents while parsing a read.
+        relay_named_read_ids: Arc<Mutex<std::collections::HashSet<String>>>,
+        /// Every `up_to_item_id` a native fork was actually asked for.
+        fork_points: Arc<Mutex<Vec<Option<String>>>>,
         // Models a provider (Claude, real Codex) that turns the initial prompt
         // into the first turn at creation time. Default-off keeps existing
         // tests on the "relay re-sends the prompt" branch; switching it on is
@@ -6045,6 +6053,8 @@ tree; got {}",
                 list_models_should_fail: Arc::new(AtomicBool::new(false)),
                 list_models_returns_empty: Arc::new(AtomicBool::new(false)),
                 native_fork: Arc::new(AtomicBool::new(false)),
+                relay_named_read_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+                fork_points: Arc::new(Mutex::new(Vec::new())),
                 consumes_initial_prompt: Arc::new(AtomicBool::new(false)),
                 start_turn_should_fail: Arc::new(AtomicBool::new(false)),
                 list_threads_should_fail: Arc::new(AtomicBool::new(false)),
@@ -6142,6 +6152,10 @@ tree; got {}",
             &self,
             request: crate::provider::ProviderForkRequest,
         ) -> Result<Option<crate::provider::StartThreadResult>, String> {
+            self.fork_points
+                .lock()
+                .await
+                .push(request.up_to_item_id.clone());
             if !self.native_fork.load(Ordering::Relaxed) {
                 return Ok(None);
             }
@@ -6224,8 +6238,22 @@ tree; got {}",
                 .get(thread_id)
                 .cloned()
                 .unwrap_or_default();
+            let relay_named = self.relay_named_read_ids.lock().await.clone();
+            let transcript = transcript
+                .into_iter()
+                .map(|view| {
+                    let synthesized = view
+                        .item_id
+                        .as_deref()
+                        .is_some_and(|id| relay_named.contains(id));
+                    if synthesized {
+                        crate::provider::ProviderTranscriptEntry::relay_named(view)
+                    } else {
+                        crate::provider::ProviderTranscriptEntry::provider_named(view)
+                    }
+                })
+                .collect();
             Ok(crate::provider::ThreadSyncData {
-                relay_named_item_ids: Vec::new(),
                 thread,
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -7307,12 +7335,13 @@ tree; got {}",
                 (thread.id.clone(), None),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
-                        relay_named_item_ids: Vec::new(),
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
                         // One id-less row: the exact shape that used to bypass.
-                        transcript: vec![entry(Some("tail"), "tail"), entry(None, "no id")],
+                        transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(
+                            vec![entry(Some("tail"), "tail"), entry(None, "no id")],
+                        ),
                     },
                     prev_cursor: Some(7),
                     paged: true,
@@ -7322,14 +7351,12 @@ tree; got {}",
                 (thread.id.clone(), Some(7)),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
-                        relay_named_item_ids: Vec::new(),
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
-                        transcript: vec![
-                            entry(None, "older, no id"),
-                            entry(Some("older"), "older"),
-                        ],
+                        transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(
+                            vec![entry(None, "older, no id"), entry(Some("older"), "older")],
+                        ),
                     },
                     prev_cursor: None,
                     paged: true,
@@ -7428,11 +7455,12 @@ tree; got {}",
                 (thread.id.clone(), None),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
-                        relay_named_item_ids: Vec::new(),
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
-                        transcript: vec![entry("tail", "tail")],
+                        transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(
+                            vec![entry("tail", "tail")],
+                        ),
                     },
                     prev_cursor: Some(123),
                     paged: true,
@@ -7442,11 +7470,12 @@ tree; got {}",
                 (thread.id.clone(), Some(123)),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
-                        relay_named_item_ids: Vec::new(),
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
-                        transcript: vec![entry("older", "older")],
+                        transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(
+                            vec![entry("older", "older")],
+                        ),
                     },
                     prev_cursor: None,
                     paged: true,
@@ -7518,21 +7547,22 @@ tree; got {}",
                 (thread.id.clone(), None),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
-                        relay_named_item_ids: Vec::new(),
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
-                        transcript: vec![crate::protocol::TranscriptEntryView {
-                            order_seq: None,
-                            withdrawn: false,
-                            item_id: Some("tail".to_string()),
-                            kind: crate::protocol::TranscriptEntryKind::AgentText,
-                            text: Some("tail".to_string()),
-                            status: "completed".to_string(),
-                            turn_id: Some("tail".to_string()),
-                            tool: None,
-                            content_state: crate::protocol::TranscriptContentState::Full,
-                        }],
+                        transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(
+                            vec![crate::protocol::TranscriptEntryView {
+                                order_seq: None,
+                                withdrawn: false,
+                                item_id: Some("tail".to_string()),
+                                kind: crate::protocol::TranscriptEntryKind::AgentText,
+                                text: Some("tail".to_string()),
+                                status: "completed".to_string(),
+                                turn_id: Some("tail".to_string()),
+                                tool: None,
+                                content_state: crate::protocol::TranscriptContentState::Full,
+                            }],
+                        ),
                     },
                     prev_cursor: Some(123),
                     paged: true,
@@ -7598,21 +7628,22 @@ tree; got {}",
                 (thread.id.clone(), None),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
-                        relay_named_item_ids: Vec::new(),
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
-                        transcript: vec![crate::protocol::TranscriptEntryView {
-                            order_seq: None,
-                            withdrawn: false,
-                            item_id: Some("stale-tail".to_string()),
-                            kind: crate::protocol::TranscriptEntryKind::AgentText,
-                            text: Some("stale".to_string()),
-                            status: "completed".to_string(),
-                            turn_id: Some("stale-tail".to_string()),
-                            tool: None,
-                            content_state: crate::protocol::TranscriptContentState::Full,
-                        }],
+                        transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(
+                            vec![crate::protocol::TranscriptEntryView {
+                                order_seq: None,
+                                withdrawn: false,
+                                item_id: Some("stale-tail".to_string()),
+                                kind: crate::protocol::TranscriptEntryKind::AgentText,
+                                text: Some("stale".to_string()),
+                                status: "completed".to_string(),
+                                turn_id: Some("stale-tail".to_string()),
+                                tool: None,
+                                content_state: crate::protocol::TranscriptContentState::Full,
+                            }],
+                        ),
                     },
                     prev_cursor: Some(123),
                     paged: true,
@@ -9286,7 +9317,6 @@ tree; got {}",
                 .ok_or_else(|| format!("unknown thread {thread_id}"))?;
             let running = self.running.lock().unwrap().contains(thread_id);
             Ok(ThreadSyncData {
-                relay_named_item_ids: Vec::new(),
                 thread,
                 status: if running {
                     "active".to_string()
@@ -9294,7 +9324,7 @@ tree; got {}",
                     self.read_status.clone()
                 },
                 active_flags: Vec::new(),
-                transcript: Vec::new(),
+                transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(Vec::new()),
             })
         }
 
@@ -9562,11 +9592,12 @@ tree; got {}",
                 .get(thread_id)
                 .ok_or_else(|| format!("consumed-initial thread '{thread_id}' was not found"))?;
             Ok(crate::provider::ThreadSyncData {
-                relay_named_item_ids: Vec::new(),
                 thread: thread.summary.clone(),
                 status: thread.summary.status.clone(),
                 active_flags: Vec::new(),
-                transcript: thread.transcript.clone(),
+                transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(
+                    thread.transcript.clone(),
+                ),
             })
         }
 
@@ -10359,6 +10390,201 @@ tree; got {}",
 
     // A fork with neither prompt nor images keeps the existing behaviour: the
     // native branch stays idle and waits for the user.
+
+    /// Fork coverage at the `fork_session` level, not just the id translator.
+    ///
+    /// A branch point only the RELAY ever named — an adapter-synthesized turn diff —
+    /// is still a real point in the materialized read. It cannot be described to the
+    /// provider, so the fork must REPLAY truncated there, and must never hand the
+    /// provider a key it never issued.
+    #[tokio::test]
+    async fn a_fork_at_a_relay_named_row_replays_instead_of_going_native() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        codex.native_fork.store(true, Ordering::Relaxed);
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = codex.thread_summary("codex-source", cwd);
+        {
+            let mut threads = codex.threads.lock().await;
+            threads.insert(source.id.clone(), source.clone());
+        }
+        let entry = |item_id: &str, text: &str| crate::protocol::TranscriptEntryView {
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some(item_id.to_string()),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some(text.to_string()),
+            status: "completed".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
+        };
+        {
+            let mut transcripts = codex.thread_transcripts.lock().await;
+            transcripts.insert(
+                source.id.clone(),
+                vec![
+                    entry("codex-item-1", "kept before the branch"),
+                    entry("turn-diff:turn-1", "the relay's own summary"),
+                    entry("codex-item-2", "cut after the branch"),
+                ],
+            );
+        }
+        // The adapter invented the turn-diff row while parsing the read.
+        {
+            let mut relay_named = codex.relay_named_read_ids.lock().await;
+            relay_named.insert("turn-diff:turn-1".to_string());
+        }
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.threads = vec![source.clone()];
+        }
+
+        app.fork_session(ForkSessionInput {
+            source_thread_id: source.id.clone(),
+            up_to_item_id: Some("turn-diff:turn-1".to_string()),
+            cwd: Some(cwd.to_string()),
+            initial_prompt: Some("carry on".to_string()),
+            model: Some("codex-model".to_string()),
+            approval_policy: None,
+            sandbox: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            provider: Some("codex".to_string()),
+            project_id: None,
+        })
+        .await
+        .expect("forking at a relay-named row must succeed by replaying");
+
+        assert!(
+            codex.fork_points.lock().await.is_empty(),
+            "native fork must not be attempted for a point the provider cannot name"
+        );
+        let replayed = codex.turn_texts.lock().await.clone();
+        let replayed = replayed.last().cloned().unwrap_or_default();
+        assert!(
+            replayed.contains("kept before the branch"),
+            "replay must carry the context before the branch point: {replayed}"
+        );
+        assert!(
+            !replayed.contains("cut after the branch"),
+            "replay must stop AT the branch point: {replayed}"
+        );
+    }
+
+    /// The contrast: a provider-named point still forks natively, and the id the
+    /// provider receives is its own.
+    #[tokio::test]
+    async fn a_fork_at_a_provider_named_row_still_goes_native_with_the_provider_id() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        codex.native_fork.store(true, Ordering::Relaxed);
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = codex.thread_summary("codex-source", cwd);
+        {
+            let mut threads = codex.threads.lock().await;
+            threads.insert(source.id.clone(), source.clone());
+        }
+        let entry = |item_id: &str| crate::protocol::TranscriptEntryView {
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some(item_id.to_string()),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some(item_id.to_string()),
+            status: "completed".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
+        };
+        {
+            let mut transcripts = codex.thread_transcripts.lock().await;
+            transcripts.insert(
+                source.id.clone(),
+                vec![entry("codex-item-1"), entry("codex-item-2")],
+            );
+        }
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.threads = vec![source.clone()];
+        }
+
+        app.fork_session(ForkSessionInput {
+            source_thread_id: source.id.clone(),
+            up_to_item_id: Some("codex-item-1".to_string()),
+            cwd: Some(cwd.to_string()),
+            initial_prompt: None,
+            model: Some("codex-model".to_string()),
+            approval_policy: None,
+            sandbox: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            provider: Some("codex".to_string()),
+            project_id: None,
+        })
+        .await
+        .expect("a provider-named fork point is native");
+
+        assert_eq!(
+            codex.fork_points.lock().await.clone(),
+            vec![Some("codex-item-1".to_string())],
+            "the provider must be asked to branch at its own id"
+        );
+    }
+
+    /// A point neither side can locate — an unbound send reservation — is refused
+    /// by name rather than silently widened into a whole-thread fork.
+    #[tokio::test]
+    async fn a_fork_at_a_row_no_one_can_locate_is_refused() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        codex.native_fork.store(true, Ordering::Relaxed);
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = codex.thread_summary("codex-source", cwd);
+        {
+            let mut threads = codex.threads.lock().await;
+            threads.insert(source.id.clone(), source.clone());
+        }
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.threads = vec![source.clone()];
+        }
+
+        let error = app
+            .fork_session(ForkSessionInput {
+                source_thread_id: source.id.clone(),
+                up_to_item_id: Some("codex:user-reserve:gen:codex-source:1".to_string()),
+                cwd: Some(cwd.to_string()),
+                initial_prompt: None,
+                model: Some("codex-model".to_string()),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("codex".to_string()),
+                project_id: None,
+            })
+            .await
+            .expect_err("a point nothing can locate must not silently widen the fork");
+
+        assert!(
+            error.contains("never assigned it an id"),
+            "the refusal must say why, got: {error}"
+        );
+        assert!(
+            codex.fork_points.lock().await.is_empty(),
+            "and nothing may have been sent to the provider"
+        );
+    }
+
     #[tokio::test]
     async fn a_native_fork_without_prompt_or_images_stays_idle() {
         let project = TempDir::new().expect("project tempdir");
@@ -12015,11 +12241,10 @@ tree; got {}",
                 .cloned()
                 .ok_or_else(|| format!("thread '{thread_id}' not found"))?;
             Ok(crate::provider::ThreadSyncData {
-                relay_named_item_ids: Vec::new(),
                 thread,
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
-                transcript: Vec::new(),
+                transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(Vec::new()),
             })
         }
 
@@ -13811,11 +14036,12 @@ mod review_tests {
                 .cloned()
                 .unwrap_or_default();
             Ok(crate::provider::ThreadSyncData {
-                relay_named_item_ids: Vec::new(),
                 thread,
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
-                transcript,
+                transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(
+                    transcript,
+                ),
             })
         }
 
@@ -24821,11 +25047,10 @@ mod late_catalog_tests {
                 .cloned()
                 .ok_or_else(|| format!("thread '{thread_id}' not found"))?;
             Ok(crate::provider::ThreadSyncData {
-                relay_named_item_ids: Vec::new(),
                 thread,
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
-                transcript: Vec::new(),
+                transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(Vec::new()),
             })
         }
 

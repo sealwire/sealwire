@@ -1030,7 +1030,6 @@ impl AcpBridge {
 /// A thread row for a session that exists but has no content yet.
 fn empty_thread_sync(thread_id: &str, cwd: &str, provider_key: &'static str) -> ThreadSyncData {
     ThreadSyncData {
-        relay_named_item_ids: Vec::new(),
         thread: ThreadSummaryView {
             workspace_trusted: false,
             id: thread_id.to_string(),
@@ -1441,10 +1440,6 @@ impl ProviderBridge for AcpBridge {
             .unwrap_or_default();
 
         Ok(ThreadSyncData {
-            // ACP ordinals are minted by this adapter and are replay-stable, and it
-            // resolves them itself in `read_thread_entry_detail` — so from the core's
-            // side every row here is provider-addressable.
-            relay_named_item_ids: Vec::new(),
             thread: ThreadSummaryView {
                 workspace_trusted: false,
                 id: thread_id.to_string(),
@@ -1462,7 +1457,10 @@ impl ProviderBridge for AcpBridge {
             },
             status: "idle".to_string(),
             active_flags: Vec::new(),
-            transcript,
+            // ACP ordinals are minted by this adapter and are replay-stable, and it
+            // resolves them itself in `read_thread_entry_detail` below — so from the
+            // core's side every row here is provider-addressable.
+            transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(transcript),
         })
     }
 
@@ -1475,7 +1473,7 @@ impl ProviderBridge for AcpBridge {
         // and pick the item out of the replay.
         let data = self.read_thread(thread_id).await?;
         Ok(data
-            .transcript
+            .into_views()
             .into_iter()
             .find(|entry| entry.item_id.as_deref() == Some(item_id)))
     }

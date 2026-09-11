@@ -849,7 +849,10 @@ async fn reading_a_thread_mid_turn_serves_the_relay_and_never_touches_the_wire()
         .expect("a thread with a live turn is readable");
 
     assert_eq!(data.transcript.len(), 1);
-    assert_eq!(data.transcript[0].item_id.as_deref(), Some("acp-user-1"));
+    assert_eq!(
+        data.transcript[0].view.item_id.as_deref(),
+        Some("acp-user-1")
+    );
     assert_eq!(data.thread.cwd, "/tmp/project");
 
     // Nothing was written: no `session/load`, so no replay to swallow the live

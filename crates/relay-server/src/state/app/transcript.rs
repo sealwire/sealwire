@@ -44,18 +44,13 @@ impl AppState {
                     )?;
                 }
                 let entries = page.sync.transcript;
-                let relay_named_item_ids = page.sync.relay_named_item_ids;
                 let mut relay = self.relay.write().await;
                 let runtime = relay.ensure_runtime_for_thread(&input.thread_id);
                 // The MERGED records, never the raw page: a page holding only a tool's
                 // request would let the client overwrite the settled entry it already
                 // has, and an id-less raw row would bypass id and order-key assignment.
-                let entries = runtime.prepend_provider_history(
-                    entries,
-                    &relay_named_item_ids,
-                    input.before,
-                    page.prev_cursor,
-                );
+                let entries =
+                    runtime.prepend_provider_history(entries, input.before, page.prev_cursor);
                 return Ok(ThreadTranscriptResponse::from_provider_page(
                     input.thread_id,
                     entries,
@@ -331,7 +326,7 @@ impl AppState {
 
         Ok(ThreadEntriesResponse::from_item_ids(
             input.thread_id,
-            thread_data.transcript,
+            thread_data.into_views(),
             input.item_ids,
         ))
     }

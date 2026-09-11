@@ -301,32 +301,23 @@ impl ThreadRuntime {
         now: u64,
         transcript_revision: u64,
     ) -> Self {
-        let relay_named = data
-            .relay_named_item_ids
-            .iter()
-            .cloned()
-            .collect::<std::collections::HashSet<_>>();
         let transcript = data
             .transcript
             .into_iter()
             .enumerate()
             .map(|(index, entry)| TranscriptRecord {
                 row_id: entry
+                    .view
                     .item_id
-                    .clone()
                     .unwrap_or_else(|| format!("history-{index}")),
-                // A read is mostly the provider naming its own rows, and recording
-                // that name is what lets a fork or detail request translate back.
-                // The adapter tells us which entries it synthesized itself; those
-                // have no provider-side identity and must not pretend to.
-                provider_item_id: entry
-                    .item_id
-                    .filter(|item_id| !relay_named.contains(item_id)),
-                kind: entry.kind,
-                text: entry.text,
-                status: entry.status,
-                turn_id: entry.turn_id,
-                tool: entry.tool,
+                // Provenance travels ON the entry, so a synthesized row and a
+                // provider row that happen to share a spelling stay distinguishable.
+                provider_item_id: entry.provider_item_id,
+                kind: entry.view.kind,
+                text: entry.view.text,
+                status: entry.view.status,
+                turn_id: entry.view.turn_id,
+                tool: entry.view.tool,
                 // Renumbered below, after duplicates have been merged away.
                 order_seq: 0,
                 withdrawn: false,
@@ -546,15 +537,10 @@ impl ThreadRuntime {
     /// numberer entirely.
     pub(crate) fn prepend_provider_history(
         &mut self,
-        entries: Vec<TranscriptEntryView>,
-        relay_named_item_ids: &[String],
+        entries: Vec<crate::provider::ProviderTranscriptEntry>,
         requested_cursor: Option<usize>,
         prev_cursor: Option<usize>,
     ) -> Vec<TranscriptEntryView> {
-        let relay_named = relay_named_item_ids
-            .iter()
-            .cloned()
-            .collect::<std::collections::HashSet<_>>();
         let fallback_page = requested_cursor
             .map(|cursor| cursor.to_string())
             .unwrap_or_else(|| "tail".to_string());
@@ -563,17 +549,15 @@ impl ThreadRuntime {
             .enumerate()
             .map(|(index, entry)| TranscriptRecord {
                 row_id: entry
+                    .view
                     .item_id
-                    .clone()
                     .unwrap_or_else(|| format!("provider-history-{fallback_page}-{index}")),
-                provider_item_id: entry
-                    .item_id
-                    .filter(|item_id| !relay_named.contains(item_id)),
-                kind: entry.kind,
-                text: entry.text,
-                status: entry.status,
-                turn_id: entry.turn_id,
-                tool: entry.tool,
+                provider_item_id: entry.provider_item_id,
+                kind: entry.view.kind,
+                text: entry.view.text,
+                status: entry.view.status,
+                turn_id: entry.view.turn_id,
+                tool: entry.view.tool,
                 // Placeholder: real keys are issued after the merge-away pass below.
                 order_seq: 0,
                 withdrawn: false,
@@ -582,44 +566,50 @@ impl ThreadRuntime {
             .collect::<Vec<_>>();
         // One provider page can name an id twice (a tool's request and its result).
         // Merge those FIRST — the against-existing pass below assumes unique page ids.
-        let mut first_by_id: HashMap<String, usize> = HashMap::new();
+        // Keyed by NAMESPACE as well as spelling: a provider item and a
+        // relay-synthesized row that happen to share a name are two rows, and
+        // folding them together here would lose one of them outright.
+        let mut first_by_identity: HashMap<PageIdentity, usize> = HashMap::new();
         let mut deduped: Vec<TranscriptRecord> = Vec::with_capacity(records.len());
         for record in records {
-            match first_by_id.get(&record.row_id) {
+            match first_by_identity.get(&PageIdentity::of(&record)) {
                 Some(&kept_index) => {
                     // Full-content merge: the second copy can carry the settled
                     // status and fuller text, not just the tool payload.
                     let _ = merge_runtime_entry(&mut deduped[kept_index], record);
                 }
                 None => {
-                    first_by_id.insert(record.row_id.clone(), deduped.len());
+                    first_by_identity.insert(PageIdentity::of(&record), deduped.len());
                     deduped.push(record);
                 }
             }
         }
-        let mut records = deduped;
-        // In page order, with assigned ids — a merged duplicate resolves to the
-        // record that absorbed it.
-        let page_item_ids = records
-            .iter()
-            .map(|record| record.row_id.clone())
-            .collect::<Vec<_>>();
         // Paging can split a tool's request from its result across pages. The newer page
         // then holds a RESULT-only stub (no path, no diff) while the older page holds the
         // request that actually describes the change — so dropping the older record as a
         // duplicate loses that edit outright. Merge into the existing entry instead: the
         // older page supplies the tool metadata, the newer one keeps the settled status
         // it already recorded.
-        // Resolved through the store, so a page that names a row by a provider id
-        // the relay already bound merges into it instead of appearing twice.
+        //
+        // Split in page order so the response can be rebuilt from the row each entry
+        // FINALLY lands in. The page's own spellings are not answers: one may be
+        // absorbed by a row under a different key, and another may have to mint.
+        let mut landed: Vec<PageLanding> = Vec::with_capacity(deduped.len());
+        let mut fresh: Vec<TranscriptRecord> = Vec::new();
         let mut absorbed: Vec<(String, TranscriptRecord)> = Vec::new();
-        records.retain(|record| match self.transcript.resolve_incoming(record) {
-            Some(existing_row_id) => {
-                absorbed.push((existing_row_id.to_string(), record.clone()));
-                false
+        for record in deduped {
+            match self.transcript.resolve_incoming(&record) {
+                Some(existing_row_id) => {
+                    let existing_row_id = existing_row_id.to_string();
+                    landed.push(PageLanding::Existing(existing_row_id.clone()));
+                    absorbed.push((existing_row_id, record));
+                }
+                None => {
+                    landed.push(PageLanding::Fresh(fresh.len()));
+                    fresh.push(record);
+                }
             }
-            None => true,
-        });
+        }
         for (row_id, record) in absorbed {
             self.transcript.update_row(&row_id, |existing| {
                 let _ = merge_tool_call_into(&mut existing.tool, record.tool.clone());
@@ -627,17 +617,24 @@ impl ThreadRuntime {
             });
         }
         // Numbered AFTER the merge-away pass, so merged duplicates consume no keys.
-        // Issued keys on existing rows never move — that is the whole contract.
-        let base = self.alloc_head_order_seq_block(records.len());
-        for (offset, record) in records.iter_mut().enumerate() {
+        let base = self.alloc_head_order_seq_block(fresh.len());
+        for (offset, record) in fresh.iter_mut().enumerate() {
             record.order_seq = base + (offset as i64) * super::transcript::ORDER_SEQ_STEP;
         }
-        records.extend(self.transcript.rows().to_vec());
-        self.transcript.replace_all(records);
+        // Inserted INTO the existing store rather than rebuilt around it. Rebuilding
+        // put the page ahead of the rows already there, so an incoming id claimed a
+        // key an existing row already held and that row was silently re-minted —
+        // renaming something clients were already showing. Minting now falls on the
+        // arriving row, which nobody has seen yet.
+        let minted = self.transcript.insert_before(0, fresh);
         self.provider_history_cursor = prev_cursor;
-        page_item_ids
+        landed
             .iter()
-            .filter_map(|row_id| {
+            .filter_map(|slot| {
+                let row_id = match slot {
+                    PageLanding::Existing(row_id) => row_id.as_str(),
+                    PageLanding::Fresh(index) => minted.get(*index)?.as_str(),
+                };
                 self.transcript
                     .get_row(row_id)
                     .map(TranscriptRecord::to_view)
@@ -732,17 +729,18 @@ impl ThreadRuntime {
         read_started_at_revision: Option<u64>,
     ) -> bool {
         let mut changed = false;
-        // Resolved against the store: an incoming row named by a provider id the
-        // relay already bound must count as "the read knows this row", or the
-        // walk-back below treats the live row as unknown and inserts before it.
+        // ROW ids the read demonstrably knows — only rows it actually resolved to.
+        //
+        // An incoming record the store cannot place has no row id yet, and its own
+        // spelling is a PROVIDER name. Falling back to that name put a provider
+        // string into a set compared against row keys below, so an unplaced provider
+        // record called `x` made the read look like it knew a live relay row keyed
+        // `x` — and stale history was then appended past a row born after the read
+        // began. An unresolved record contributes nothing here, which is the truth.
         let incoming_ids = records
             .iter()
-            .map(|record| {
-                self.transcript
-                    .resolve_incoming(record)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| record.row_id.clone())
-            })
+            .filter_map(|record| self.transcript.resolve_incoming(record))
+            .map(str::to_string)
             .collect::<std::collections::HashSet<_>>();
         // Unknown rows are held until the next incoming row that IS known — that
         // anchor says where they belong. Tail keys here would re-order history the
@@ -878,6 +876,35 @@ impl ThreadRuntime {
 /// which only fires when nothing ties the rows together. Entries with no provider
 /// id are left alone: they are relay-synthesized and their row keys are already
 /// distinct by construction.
+/// How a page entry is identified while deduping WITHIN one page.
+///
+/// Namespace-tagged on purpose: two entries are the same row only when they are
+/// named in the same space. A provider item called `x` and a relay-synthesized row
+/// keyed `x` are two rows that merely share a spelling.
+#[derive(PartialEq, Eq, Hash)]
+enum PageIdentity {
+    Provider(String),
+    Row(String),
+}
+
+impl PageIdentity {
+    fn of(record: &TranscriptRecord) -> Self {
+        match record.provider_item_id.as_deref() {
+            Some(provider_item_id) => Self::Provider(provider_item_id.to_string()),
+            None => Self::Row(record.row_id.clone()),
+        }
+    }
+}
+
+/// Where a page entry ended up, so the response can be built from real row ids
+/// rather than from the spellings the page arrived with.
+enum PageLanding {
+    /// Merged into a row this runtime already held, under that row's key.
+    Existing(String),
+    /// Newly inserted; index into the freshly minted ids.
+    Fresh(usize),
+}
+
 fn merge_duplicate_provider_rows(records: Vec<TranscriptRecord>) -> Vec<TranscriptRecord> {
     let mut first_by_provider_id: HashMap<String, usize> = HashMap::new();
     let mut merged: Vec<TranscriptRecord> = Vec::with_capacity(records.len());
@@ -1055,6 +1082,10 @@ fn tool_calls_equal(left: Option<&ToolCallView>, right: Option<&ToolCallView>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entries(views: Vec<TranscriptEntryView>) -> Vec<crate::provider::ProviderTranscriptEntry> {
+        crate::provider::ProviderTranscriptEntry::all_provider_named(views)
+    }
 
     fn summary(id: &str, status: &str) -> ThreadSummaryView {
         ThreadSummaryView {
@@ -1294,8 +1325,8 @@ mod tests {
             content_state: crate::protocol::TranscriptContentState::Full,
         }];
 
-        rt.prepend_provider_history(older.clone(), &[], Some(4096), Some(2048));
-        rt.prepend_provider_history(older, &[], Some(4096), Some(2048));
+        rt.prepend_provider_history(entries(older.clone()), Some(4096), Some(2048));
+        rt.prepend_provider_history(entries(older), Some(4096), Some(2048));
 
         assert_eq!(
             rt.transcript
@@ -1325,7 +1356,6 @@ mod tests {
     #[test]
     fn from_sync_data_does_not_resurrect_working_status_without_a_turn() {
         let data = ThreadSyncData {
-            relay_named_item_ids: Vec::new(),
             thread: summary("t1", "active"),
             status: "active".to_string(),
             active_flags: Vec::new(),
@@ -1374,7 +1404,11 @@ mod tests {
             content_state: crate::protocol::TranscriptContentState::Full,
         };
 
-        rt.prepend_provider_history(vec![page("older-1"), page("older-2")], &[], Some(10), None);
+        rt.prepend_provider_history(
+            entries(vec![page("older-1"), page("older-2")]),
+            Some(10),
+            None,
+        );
         let first_block: Vec<i64> = rt.transcript.iter().map(|r| r.order_seq).collect();
         assert_eq!(
             rt.transcript.last().unwrap().order_seq,
@@ -1387,7 +1421,7 @@ mod tests {
         );
 
         // An OLDER page arrives later: it must sort before the previous block.
-        rt.prepend_provider_history(vec![page("oldest-1")], &[], Some(5), None);
+        rt.prepend_provider_history(entries(vec![page("oldest-1")]), Some(5), None);
         assert!(
             rt.transcript[0].order_seq < first_block[0],
             "later-fetched older history sorts before the earlier block"
@@ -1576,12 +1610,11 @@ mod tests {
             content_state: crate::protocol::TranscriptContentState::Full,
         };
         let views = rt.prepend_provider_history(
-            vec![
+            entries(vec![
                 page_entry("dup", "first"),
                 page_entry("dup", "second"),
                 page_entry("solo", "x"),
-            ],
-            &[],
+            ]),
             Some(3),
             None,
         );
@@ -1678,11 +1711,10 @@ mod tests {
             content_state: crate::protocol::TranscriptContentState::Full,
         };
         rt.prepend_provider_history(
-            vec![
+            entries(vec![
                 page_entry("first", "running"),
                 page_entry("second, fuller text", "completed"),
-            ],
-            &[],
+            ]),
             Some(3),
             None,
         );
@@ -1757,15 +1789,14 @@ mod tests {
         };
 
         let views = rt.prepend_provider_history(
-            vec![
+            entries(vec![
                 page_entry("Editing src/lib.rs", "running", request_tool),
                 page_entry(
                     "Edited src/lib.rs successfully and ran formatter",
                     "completed",
                     result_tool,
                 ),
-            ],
-            &[],
+            ]),
             Some(3),
             None,
         );
@@ -1806,12 +1837,152 @@ mod tests {
             Some("Applied edit and formatted file")
         );
     }
+
+    fn plain_record(row_id: &str, text: &str, order_seq: i64) -> TranscriptRecord {
+        TranscriptRecord {
+            row_id: row_id.to_string(),
+            provider_item_id: None,
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some(text.to_string()),
+            status: "completed".to_string(),
+            turn_id: None,
+            tool: None,
+            order_seq,
+            withdrawn: false,
+            last_live_upsert_revision: None,
+        }
+    }
+
+    fn plain_view(item_id: &str, text: &str) -> TranscriptEntryView {
+        TranscriptEntryView {
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some(item_id.to_string()),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some(text.to_string()),
+            status: "completed".to_string(),
+            turn_id: None,
+            tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
+        }
+    }
+
+    /// An older page whose provider names an item `x` must not disturb a row the
+    /// relay already keyed `x` and already published.
+    ///
+    /// Prepend used to rebuild the vector with the page in front, so `push` handed
+    /// the key to the arriving row and re-minted the row clients were already
+    /// showing. Minting belongs to the row nobody has seen yet.
+    #[test]
+    fn an_older_page_never_renames_a_row_the_client_already_holds() {
+        let mut rt = runtime("t1", "idle");
+        let issued = rt.alloc_tail_order_seq();
+        rt.transcript
+            .push(plain_record("x", "the relay's row", issued));
+
+        let views = rt.prepend_provider_history(
+            vec![crate::provider::ProviderTranscriptEntry::provider_named(
+                plain_view("x", "the provider's row"),
+            )],
+            Some(10),
+            None,
+        );
+
+        assert_eq!(
+            rt.transcript.len(),
+            2,
+            "two rows, got {:?}",
+            rt.transcript
+                .iter()
+                .map(|r| (r.row_id.clone(), r.text.clone()))
+                .collect::<Vec<_>>()
+        );
+
+        let existing = rt.transcript.get_row("x").expect("row `x` still exists");
+        assert_eq!(
+            existing.text.as_deref(),
+            Some("the relay's row"),
+            "row key `x` must still be the row that owned it"
+        );
+        assert_eq!(
+            existing.order_seq, issued,
+            "and its issued order key must not move"
+        );
+
+        let provider_row = rt
+            .transcript
+            .get_by_provider("x")
+            .expect("the provider namespace knows `x`");
+        assert_ne!(
+            provider_row.row_id, "x",
+            "the arriving row is the one that mints"
+        );
+        assert_eq!(provider_row.text.as_deref(), Some("the provider's row"));
+
+        assert_eq!(views.len(), 1, "the page reports one row");
+        assert_eq!(
+            views[0].item_id.as_deref(),
+            Some(provider_row.row_id.as_str()),
+            "the page must report the id the row actually landed under"
+        );
+        assert_eq!(
+            views[0].text.as_deref(),
+            Some("the provider's row"),
+            "and it must be the page's row, not the relay row that shared its name"
+        );
+    }
+
+    /// The read-race boundary is a ROW-namespace comparison. An unplaced provider
+    /// record called `x` is not evidence that the read knows a live relay row keyed
+    /// `x`; treating it as such appended stale history past a row born mid-read.
+    #[test]
+    fn stale_history_cannot_claim_a_live_row_by_sharing_its_spelling() {
+        let mut rt = runtime("t1", "idle");
+        let live_key = rt.alloc_tail_order_seq();
+        let mut live = plain_record("x", "born while the read was in flight", live_key);
+        live.last_live_upsert_revision = Some(50);
+        rt.transcript.push(live);
+
+        // The read began at revision 10 and returns one row this runtime has never
+        // seen, which the PROVIDER happens to call `x`.
+        let mut stale = plain_record("x", "older history", 0);
+        stale.provider_item_id = Some("x".to_string());
+        assert!(rt.merge_transcript_records_after_read_start(vec![stale], Some(10)));
+
+        assert_eq!(rt.transcript.len(), 2);
+        let order = rt
+            .transcript
+            .iter()
+            .map(|r| r.text.clone().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            order,
+            [
+                "older history".to_string(),
+                "born while the read was in flight".to_string()
+            ],
+            "stale history must land BEFORE the row born after the read started"
+        );
+        assert!(
+            rt.transcript[0].order_seq < rt.transcript[1].order_seq,
+            "and its order key must sort before it too: {:?}",
+            rt.transcript
+                .iter()
+                .map(|r| r.order_seq)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            rt.transcript[1].row_id, "x",
+            "the live row keeps the key it published"
+        );
+    }
 }
 
 #[cfg(test)]
 mod cold_import_tests {
     use super::*;
     use crate::protocol::{TranscriptContentState, TranscriptEntryKind};
+    use crate::provider::ProviderTranscriptEntry;
 
     fn summary_for(id: &str) -> ThreadSummaryView {
         ThreadSummaryView {
@@ -1866,26 +2037,33 @@ mod cold_import_tests {
         }
     }
 
+    fn sync(transcript: Vec<ProviderTranscriptEntry>) -> ThreadSyncData {
+        ThreadSyncData {
+            thread: summary_for("t1"),
+            status: "idle".to_string(),
+            active_flags: Vec::new(),
+            transcript,
+        }
+    }
+
     /// A cold read can name one row twice — a tool's request describes the change,
     /// its result settles the status. The paged path has always content-merged
     /// those; the full import must too, or the second copy mints `id#row1` and the
     /// user sees the same edit listed twice.
     #[test]
     fn a_cold_read_merges_two_entries_that_share_a_provider_id_into_one_row() {
-        let data = ThreadSyncData {
-            thread: summary_for("t1"),
-            status: "idle".to_string(),
-            active_flags: Vec::new(),
-            relay_named_item_ids: Vec::new(),
-            transcript: vec![
-                tool_entry(
-                    "call-1",
-                    "running",
-                    tool(Some("src/lib.rs"), Some("@@ -1 +1 @@")),
-                ),
-                tool_entry("call-1", "completed", tool(None, None)),
-            ],
-        };
+        let data = sync(vec![
+            ProviderTranscriptEntry::provider_named(tool_entry(
+                "call-1",
+                "running",
+                tool(Some("src/lib.rs"), Some("@@ -1 +1 @@")),
+            )),
+            ProviderTranscriptEntry::provider_named(tool_entry(
+                "call-1",
+                "completed",
+                tool(None, None),
+            )),
+        ]);
 
         let rt = ThreadRuntime::from_sync_data(data, "untrusted", "ro", "high", "model", 0, 0);
 
@@ -1929,13 +2107,10 @@ mod cold_import_tests {
         entry_a.item_id = None;
         let mut entry_b = tool_entry("x", "completed", tool(None, None));
         entry_b.item_id = None;
-        let data = ThreadSyncData {
-            thread: summary_for("t1"),
-            status: "idle".to_string(),
-            active_flags: Vec::new(),
-            relay_named_item_ids: Vec::new(),
-            transcript: vec![entry_a, entry_b],
-        };
+        let data = sync(vec![
+            ProviderTranscriptEntry::provider_named(entry_a),
+            ProviderTranscriptEntry::provider_named(entry_b),
+        ]);
 
         let rt = ThreadRuntime::from_sync_data(data, "untrusted", "ro", "high", "model", 0, 0);
 
@@ -1948,16 +2123,18 @@ mod cold_import_tests {
     /// address the provider with a string it never issued.
     #[test]
     fn a_relay_synthesized_entry_is_not_recorded_as_provider_named() {
-        let data = ThreadSyncData {
-            thread: summary_for("t1"),
-            status: "idle".to_string(),
-            active_flags: Vec::new(),
-            relay_named_item_ids: vec!["turn-diff:turn-1".to_string()],
-            transcript: vec![
-                tool_entry("call-1", "completed", tool(Some("src/lib.rs"), None)),
-                tool_entry("turn-diff:turn-1", "completed", tool(None, None)),
-            ],
-        };
+        let data = sync(vec![
+            ProviderTranscriptEntry::provider_named(tool_entry(
+                "call-1",
+                "completed",
+                tool(Some("src/lib.rs"), None),
+            )),
+            ProviderTranscriptEntry::relay_named(tool_entry(
+                "turn-diff:turn-1",
+                "completed",
+                tool(None, None),
+            )),
+        ]);
 
         let rt = ThreadRuntime::from_sync_data(data, "untrusted", "ro", "high", "model", 0, 0);
 
@@ -1976,6 +2153,66 @@ mod cold_import_tests {
             rt.transcript.resolve_provider("turn-diff:turn-1"),
             None,
             "and it is invisible in the provider namespace"
+        );
+    }
+
+    /// The cold-read mirror of the live collision: ONE read containing both the
+    /// adapter's own row keyed `x` and a genuine provider item that also calls
+    /// itself `x`.
+    ///
+    /// Provenance keyed by id string classified both the same way, which is the
+    /// whole reason it had to move onto the entry. They are two rows, and the
+    /// provider namespace must reach only the provider's one.
+    #[test]
+    fn a_cold_read_keeps_a_synthetic_row_and_a_provider_item_of_the_same_name_apart() {
+        let data = sync(vec![
+            ProviderTranscriptEntry::relay_named(tool_entry("x", "completed", tool(None, None))),
+            ProviderTranscriptEntry::provider_named(tool_entry(
+                "x",
+                "completed",
+                tool(Some("src/lib.rs"), None),
+            )),
+        ]);
+
+        let rt = ThreadRuntime::from_sync_data(data, "untrusted", "ro", "high", "model", 0, 0);
+
+        assert_eq!(
+            rt.transcript.len(),
+            2,
+            "a shared spelling across namespaces is still two rows, got {:?}",
+            rt.transcript
+                .iter()
+                .map(|r| (r.row_id.clone(), r.provider_item_id.clone()))
+                .collect::<Vec<_>>()
+        );
+
+        let synthetic = rt.transcript.get_row("x").expect("row namespace knows `x`");
+        assert_eq!(
+            synthetic.provider_item_id, None,
+            "the adapter's own row never gains a provider name"
+        );
+        assert_eq!(
+            synthetic.tool.as_ref().and_then(|t| t.path.clone()),
+            None,
+            "row lookup `x` must be the synthetic row, not the provider's"
+        );
+
+        let provider_row = rt
+            .transcript
+            .get_by_provider("x")
+            .expect("provider namespace knows `x`");
+        assert_ne!(
+            provider_row.row_id, "x",
+            "the provider item had to mint its own key"
+        );
+        assert_eq!(
+            provider_row
+                .tool
+                .as_ref()
+                .and_then(|t| t.path.clone())
+                .as_deref(),
+            Some("src/lib.rs"),
+            "provider lookup `x` must reach only the provider's row"
         );
     }
 }
