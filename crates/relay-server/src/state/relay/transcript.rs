@@ -331,6 +331,10 @@ impl RelayState {
             }
         };
         let (base_revision, revision) = self.bump_thread_transcript_revision(thread_id);
+        // A delta births rows too, so it owes the same birth stamp an upsert pays.
+        // Without it the resume read-race merge cannot see that this row appeared
+        // AFTER the provider read began, and stale history is appended past it.
+        self.stamp_transcript_item_seq(thread_id, item_id, revision);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
         }
@@ -905,6 +909,8 @@ impl RelayState {
             }
         };
         let (base_revision, revision) = self.bump_thread_transcript_revision(thread_id);
+        // Same birth stamp as the agent-text delta above, for the same reason.
+        self.stamp_transcript_item_seq(thread_id, item_id, revision);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
         }

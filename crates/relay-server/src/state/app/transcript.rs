@@ -60,9 +60,15 @@ impl AppState {
             }
         }
 
-        let runtime_missing = {
+        // Sampled together, BEFORE the provider await below: the floor is what
+        // lets the merge afterwards tell a row a live event created during the
+        // read from history the read itself covered.
+        let (runtime_missing, read_started_at_revision) = {
             let relay = self.relay.read().await;
-            relay.runtime_for_thread(&input.thread_id).is_none()
+            (
+                relay.runtime_for_thread(&input.thread_id).is_none(),
+                relay.transcript_revision_floor(),
+            )
         };
         if runtime_missing && input.before.is_none() {
             let (provider_name, bridge) = self.find_thread_provider(&input.thread_id).await?;
@@ -114,39 +120,36 @@ impl AppState {
                 // A page has to carry the revision of the runtime it was built from,
                 // or the client cannot chain the deltas that follow it.
                 let hydrated_revision;
-                // `runtime_missing` was decided before the provider await above, so a
-                // stream event may have built the runtime in the meantime — making the
-                // page we just fetched stale relative to it.
-                let lost_hydration_race;
                 // Materialized under the SAME lock that captured the revision, from the
                 // runtime hydration just built — so ids and order keys are the numbered
                 // ones, never the raw provider parse (which carries neither).
                 let materialized;
                 {
                     let mut relay = self.relay.write().await;
-                    lost_hydration_race = relay.runtime_for_thread(&input.thread_id).is_some();
-                    if settings.is_some() {
-                        relay.hydrate_background_runtime(
-                            page.sync,
-                            &approval_policy,
-                            &sandbox,
-                            &effort,
-                            &model,
-                        );
-                    } else {
-                        relay.hydrate_background_runtime_without_remembering_settings(
-                            page.sync,
-                            &approval_policy,
-                            &sandbox,
-                            &effort,
-                            &model,
-                        );
-                    }
+                    // `runtime_missing` was decided before the provider await, so a
+                    // stream event may have built the runtime in the meantime. That
+                    // does not make the fetched page worthless — it is still this
+                    // thread's history — so it is MERGED under the read-start
+                    // boundary rather than dropped. Dropping it while still
+                    // recording its cursor below is what made fetched history
+                    // disappear: the cursor claimed coverage nothing absorbed.
+                    relay.hydrate_background_runtime_after_read_start(
+                        page.sync,
+                        &approval_policy,
+                        &sandbox,
+                        &effort,
+                        &model,
+                        settings.is_some(),
+                        read_started_at_revision,
+                    );
                     let runtime = relay.ensure_runtime_for_thread(&input.thread_id);
                     runtime.provider_history_paged = paged;
                     runtime.provider_history_cursor = prev_cursor;
                     hydrated_revision = runtime.transcript_revision;
-                    materialized = (paged && !lost_hydration_race).then(|| {
+                    // Always from the runtime now: after the merge it holds the
+                    // fetched history AND anything born during the read, so there is
+                    // no longer a state the page could describe that it does not.
+                    materialized = paged.then(|| {
                         runtime
                             .transcript
                             .iter()
