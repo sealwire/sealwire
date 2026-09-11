@@ -112,6 +112,16 @@ impl ThreadTranscript {
         self.resolve_index(id).map(|index| &self.rows[index])
     }
 
+    /// The id the PROVIDER knows this row by, for an operation addressed to the
+    /// provider (a fork point, a detail fetch).
+    ///
+    /// `None` means only the relay has ever named this row, so there is nothing the
+    /// provider could match — the caller must degrade deliberately rather than send
+    /// a string the provider has never issued.
+    pub(crate) fn provider_item_id(&self, id: &str) -> Option<&str> {
+        self.get(id)?.provider_item_id.as_deref()
+    }
+
     /// A row id that is free right now, preferring `candidate`.
     ///
     /// Adopting the first id a row is seen under is what keeps the wire value

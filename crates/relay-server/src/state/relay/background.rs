@@ -11,10 +11,13 @@ impl RelayState {
     /// thread that wasn't the single globally-active one could only be read by polling
     /// a snapshot. Streaming them is affordable because this is gated on an actual
     /// watcher: a thread nobody has on screen still costs nothing.
+    /// `mutation.row_id` is deliberately the id on the wire, not the `item_id` the
+    /// bridge passed in: clients apply a delta by looking that id up among the rows
+    /// they hold, and for anything the relay named first the provider's spelling
+    /// matches nothing there.
     fn queue_background_transcript_delta(
         &mut self,
         thread_id: &str,
-        item_id: &str,
         delta: &str,
         turn_id: Option<&str>,
         kind: TranscriptDeltaKind,
@@ -31,7 +34,7 @@ impl RelayState {
                 entry_seq: mutation.entry_seq,
                 order_seq: mutation.order_seq,
                 server_time: mutation.server_time,
-                item_id: item_id.to_string(),
+                item_id: mutation.row_id.clone(),
                 turn_id: turn_id.map(|id| id.to_string()),
                 delta: delta.to_string(),
                 kind,
@@ -82,7 +85,6 @@ impl RelayState {
         let mutation = self.append_agent_delta_for_thread(thread_id, item_id, delta, turn_id);
         self.queue_background_transcript_delta(
             thread_id,
-            item_id,
             delta,
             Some(turn_id),
             TranscriptDeltaKind::AgentText,
@@ -151,7 +153,6 @@ impl RelayState {
         let wire_delta = mutation.wire_delta(delta);
         self.queue_background_transcript_delta(
             thread_id,
-            item_id,
             &wire_delta,
             None,
             TranscriptDeltaKind::CommandOutput,

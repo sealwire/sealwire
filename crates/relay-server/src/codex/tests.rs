@@ -4866,3 +4866,65 @@ async fn a_reservation_id_is_never_reissued_by_the_next_relay_generation() {
         .expect("reserve");
     assert_ne!(one, two);
 }
+
+/// The echo tells the relay what Codex calls the row it already published. Binding
+/// that id is what lets every LATER event about the same message find the row: the
+/// relay's key was minted before Codex had said anything, so Codex will never use it.
+///
+/// Without the bind, the next `item/*` for this message resolves to nothing and the
+/// generic item path mints a twin — one send, two rows.
+#[tokio::test]
+async fn a_codex_user_echo_binds_its_item_id_to_the_row_the_relay_already_published() {
+    let state = codex_test_state_with_thread("thread-bind").await;
+    let reservation = {
+        let mut relay = state.write().await;
+        relay
+            .begin_codex_user_turn("thread-bind", "hello")
+            .expect("reserve the send")
+    };
+
+    handle_notification(
+        json!({
+            "method": "item/completed",
+            "params": {
+                "turnId": "turn-bind",
+                "item": { "id": "codex-user-77", "type": "userMessage",
+                          "content": [{ "text": "hello" }] }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let mut relay = state.write().await;
+    let runtime = relay
+        .runtime_for_thread("thread-bind")
+        .expect("thread runtime");
+    assert_eq!(
+        runtime.transcript.len(),
+        1,
+        "the echo must not add a row: {:?}",
+        runtime
+            .transcript
+            .iter()
+            .map(|entry| entry.row_id.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        runtime.transcript.resolve("codex-user-77"),
+        Some(reservation.as_str()),
+        "Codex's id for this message must resolve to the row the relay published"
+    );
+
+    // The proof that matters: a later provider event naming Codex's id lands on the
+    // existing row rather than creating a second one.
+    assert!(
+        relay.set_transcript_item_status_for_thread("thread-bind", "codex-user-77", "completed"),
+        "a later event addressed by the provider id must find the row"
+    );
+    let runtime = relay
+        .runtime_for_thread("thread-bind")
+        .expect("thread runtime");
+    assert_eq!(runtime.transcript.len(), 1, "still one row");
+    assert_eq!(runtime.transcript[0].row_id, reservation);
+}

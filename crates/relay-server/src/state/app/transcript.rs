@@ -406,10 +406,32 @@ impl AppState {
                 )?;
             }
 
+            // The client can only name a row the way the relay published it. The
+            // provider matches on its OWN id, so translate before crossing that
+            // boundary — a relay-minted key reaches the provider as a string it
+            // never issued and the detail comes back empty.
+            let provider_item_id = {
+                let relay = self.relay.read().await;
+                match relay.runtime_for_thread(&input.thread_id) {
+                    Some(runtime) => runtime
+                        .transcript
+                        .provider_item_id(&input.item_id)
+                        .map(str::to_string),
+                    // No runtime: the id can only have come from a provider read.
+                    None => Some(input.item_id.clone()),
+                }
+            };
+            let provider_item_id = provider_item_id.ok_or_else(|| {
+                format!(
+                    "thread entry `{}` has no provider id, so its detail cannot be fetched from the provider",
+                    input.item_id
+                )
+            })?;
+
             self.find_thread_provider(&input.thread_id)
                 .await?
                 .1
-                .read_thread_entry_detail(&input.thread_id, &input.item_id)
+                .read_thread_entry_detail(&input.thread_id, &provider_item_id)
                 .await?
                 .ok_or_else(|| {
                     format!(

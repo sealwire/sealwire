@@ -1523,7 +1523,7 @@ impl ProviderBridge for FakeProviderBridge {
                         entry_seq: mutation.entry_seq,
                         order_seq: mutation.order_seq,
                         server_time: mutation.server_time,
-                        item_id: assistant_item_id.clone(),
+                        item_id: mutation.row_id.clone(),
                         turn_id: Some(turn_id_for_task.clone()),
                         delta: chunk.clone(),
                         kind: TranscriptDeltaKind::AgentText,
