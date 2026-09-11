@@ -7069,3 +7069,240 @@ test("viewRemoteThread settles the outgoing live window before switching hydrati
   state.pendingActions.clear();
   remoteQueryClient.clear();
 });
+
+// ---------------------------------------------------------------------------
+// B5: the remote view-only generation transition, over the real broker harness.
+//
+// applySessionSnapshot projects a pin by SPREADING the incoming snapshot and
+// injecting the previously rendered entries, so relabelling one across a run
+// change hands the old run's ids the new run's generation and nothing
+// downstream can tell. The pin must be released and REFETCHED — and a refetch
+// that never lands is not convergence, so this counts the dispatches and waits
+// for the re-pin instead of inferring it from a cleared pin.
+// ---------------------------------------------------------------------------
+
+function transitionEntry(itemId, text) {
+  return {
+    item_id: itemId,
+    kind: "agent_text",
+    text,
+    status: "completed",
+    turn_id: "turn-x",
+    tool: null,
+    order_seq: 1 << 20,
+  };
+}
+
+async function settle(times = 6) {
+  for (let i = 0; i < times; i += 1) {
+    await Promise.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+test("a run change releases the view-only pin, refetches once, and re-pins under the new run", async () => {
+  activeBrowser = installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { applySessionSnapshot, viewRemoteThread } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-gen-transition",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  seedTranscriptHydrationState(state);
+
+  // The live thread is never the viewed one, so the pin stays a pin.
+  const liveUnder = (generation) => ({
+    active_thread_id: "live-thread",
+    transcript_generation: generation,
+    transcript_revision: 9,
+    transcript: [transitionEntry(`${generation}-live`, "live row")],
+    thread_activity: [],
+  });
+
+  let generationForPages = "gen-a";
+  const transcriptFetches = [];
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      const request = frame.payload.request;
+      if (request?.type !== "fetch_thread_transcript") {
+        return;
+      }
+      transcriptFetches.push(request.thread_id ?? request.threadId ?? null);
+      const generation = generationForPages;
+      setImmediate(() => {
+        void handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: true,
+          snapshot: {},
+          thread_transcript: {
+            thread_id: "viewed-thread",
+            transcript_generation: generation,
+            entries: [transitionEntry(`${generation}-viewed`, `${generation} viewed body`)],
+            prev_cursor: null,
+          },
+        });
+      });
+    },
+  };
+
+  state.session = liveUnder("gen-a");
+  state.realSession = liveUnder("gen-a");
+
+  // Seed the gen-A pin the production way.
+  await viewRemoteThread("viewed-thread");
+  await settle();
+  const fetchesAfterPin = transcriptFetches.length;
+  assert.ok(fetchesAfterPin >= 1, "the pin was established by a real fetch");
+  assert.ok(
+    (state.session.transcript || []).some((entry) => entry.item_id === "gen-a-viewed"),
+    "the gen-a viewed row is on screen"
+  );
+
+  // The relay restarts: same viewed thread, new run.
+  generationForPages = "gen-b";
+  applySessionSnapshot(liveUnder("gen-b"));
+  await settle();
+
+  assert.equal(
+    transcriptFetches.length,
+    fetchesAfterPin + 1,
+    "exactly one refetch is dispatched for the transition"
+  );
+  const ids = (state.session.transcript || []).map((entry) => entry.item_id);
+  assert.ok(ids.includes("gen-b-viewed"), `the gen-b viewed row is rendered: ${ids.join(",")}`);
+  assert.ok(
+    !ids.some((id) => String(id).startsWith("gen-a-")),
+    `no gen-a id survives the transition: ${ids.join(",")}`
+  );
+  assert.equal(new Set(ids).size, ids.length, "and nothing is duplicated");
+
+  // Further snapshots under the SAME run are ordinary renders.
+  applySessionSnapshot(liveUnder("gen-b"));
+  applySessionSnapshot(liveUnder("gen-b"));
+  await settle();
+
+  assert.equal(
+    transcriptFetches.length,
+    fetchesAfterPin + 1,
+    "no further transition fetch — it converged instead of refetching forever"
+  );
+  assert.ok(
+    (state.session.transcript || []).some((entry) => entry.item_id === "gen-b-viewed"),
+    "and the pin is still held under gen-b"
+  );
+});
+
+// An old relay stamps nothing and a new one does, so "" <-> "gen-x" is the same
+// rename in either direction. Both must refetch and re-pin for real — a released
+// pin that never comes back is not convergence.
+for (const [fromGeneration, toGeneration, label] of [
+  ["", "gen-b", "empty -> stamped (relay gained stamping)"],
+  ["gen-a", "", "stamped -> empty (relay lost stamping)"],
+]) {
+  test(`the one-sided-empty boundary refetches and re-pins: ${label}`, async () => {
+    activeBrowser = installBrowserStubs();
+
+    const { state, saveRemoteAuth } = await import("./state.js");
+    const { handleRemoteBrokerPayload } = await import("./actions.js");
+    const { applySessionSnapshot, viewRemoteThread } = await import("./session-ops.js");
+
+    seedRemoteAuth(state, saveRemoteAuth, {
+      relayId: `relay-boundary-${fromGeneration || "empty"}`,
+      brokerUrl: "wss://broker.example.test",
+      brokerChannelId: "room-a",
+      relayPeerId: "relay-1",
+      securityMode: "managed",
+      deviceId: "device-1",
+      deviceLabel: "Primary Phone",
+      payloadSecret: "payload-secret-1",
+      deviceRefreshMode: "cookie",
+      deviceRefreshToken: null,
+      deviceJoinTicket: "device-ws-token",
+      deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+      sessionClaim: null,
+      sessionClaimExpiresAt: null,
+    });
+    seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+    state.pendingActions.clear();
+    seedTranscriptHydrationState(state);
+
+    const tag = (generation) => `${generation || "none"}-viewed`;
+    const liveUnder = (generation) => ({
+      active_thread_id: "live-thread",
+      transcript_generation: generation,
+      transcript_revision: 9,
+      transcript: [transitionEntry(`${generation || "none"}-live`, "live row")],
+      thread_activity: [],
+    });
+
+    let generationForPages = fromGeneration;
+    const transcriptFetches = [];
+    state.socket = {
+      readyState: 1,
+      send(frameText) {
+        const frame = JSON.parse(frameText);
+        if (frame.payload.request?.type !== "fetch_thread_transcript") {
+          return;
+        }
+        transcriptFetches.push(1);
+        const generation = generationForPages;
+        setImmediate(() => {
+          void handleRemoteBrokerPayload({
+            kind: "remote_action_result",
+            action_id: frame.payload.action_id,
+            action: "fetch_thread_transcript",
+            ok: true,
+            snapshot: {},
+            thread_transcript: {
+              thread_id: "viewed-thread",
+              transcript_generation: generation,
+              entries: [transitionEntry(tag(generation), "viewed body")],
+              prev_cursor: null,
+            },
+          });
+        });
+      },
+    };
+
+    state.session = liveUnder(fromGeneration);
+    state.realSession = liveUnder(fromGeneration);
+
+    await viewRemoteThread("viewed-thread");
+    await settle();
+    const before = transcriptFetches.length;
+    assert.ok(before >= 1, "pinned under the starting run");
+
+    generationForPages = toGeneration;
+    applySessionSnapshot(liveUnder(toGeneration));
+    await settle();
+
+    assert.equal(transcriptFetches.length, before + 1, "the boundary dispatched exactly one refetch");
+    const ids = (state.session.transcript || []).map((entry) => entry.item_id);
+    assert.ok(ids.includes(tag(toGeneration)), `re-pinned under the new run: ${ids.join(",")}`);
+    assert.ok(
+      !ids.includes(tag(fromGeneration)),
+      `no row from the old run survives: ${ids.join(",")}`
+    );
+  });
+}

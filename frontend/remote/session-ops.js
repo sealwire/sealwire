@@ -899,19 +899,6 @@ export function applyTranscriptEvent(event) {
   }
 }
 
-// Pin setup only. The generation TRANSITION itself — the thing under test — runs
-// as production does, inside applySessionSnapshot below. Setting the pin the real
-// way means viewRemoteThread, which fetches through the broker/E2EE stack that no
-// unit harness stands up.
-export function __setViewOnlyPinForTest(threadId, generation) {
-  viewOnlyThreadId = threadId;
-  viewOnlyRelayGeneration = generation ?? "";
-}
-
-export function __readViewOnlyPinForTest() {
-  return { threadId: viewOnlyThreadId, generation: viewOnlyRelayGeneration };
-}
-
 export function applySessionSnapshot(snapshot) {
   if (typeof window !== "undefined" && typeof window.__snapshotCount === "number") {
     window.__snapshotCount++;
