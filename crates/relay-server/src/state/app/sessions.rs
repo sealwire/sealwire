@@ -273,6 +273,10 @@ impl AppState {
             .map(|settings| settings.model.clone())
             .filter(|model| !model.is_empty());
         let model = remembered_model.clone().unwrap_or(defaults.model);
+        let read_started_at_revision = {
+            let relay = self.relay.read().await;
+            relay.transcript_clock()
+        };
         // Armed BEFORE the provider is asked anything, from the cached thread row, so the
         // verdict is already on the runtime no matter how the read below goes.
         let cached_cwd = {
@@ -404,13 +408,14 @@ impl AppState {
             } else {
                 relay.seed_thread_last_activity(&input.thread_id, preview.thread.updated_at);
             }
-            relay.load_thread_data(
+            relay.load_thread_data_after_read_start(
                 thread_data,
                 &approval_policy,
                 &sandbox,
                 &effort,
                 &model,
                 &device_id,
+                read_started_at_revision,
             );
             relay.push_log(
                 "info",

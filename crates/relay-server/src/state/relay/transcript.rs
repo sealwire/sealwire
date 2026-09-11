@@ -1108,18 +1108,21 @@ pub(super) fn merge_tool_call_view(
         (Some(existing), None) => Some(existing),
         (None, Some(incoming)) => Some(incoming),
         (Some(existing), Some(incoming)) => {
+            let merge_file_changes =
+                should_merge_tool_file_changes(&existing.item_type, &incoming.item_type);
             let name = if incoming.name.trim().is_empty() {
                 existing.name.clone()
             } else {
                 incoming.name.clone()
             };
+            let file_changes = merge_tool_file_changes(
+                existing.file_changes,
+                incoming.file_changes,
+                merge_file_changes,
+            );
 
             Some(ToolCallView {
-                item_type: if incoming.item_type.trim().is_empty() {
-                    existing.item_type
-                } else {
-                    incoming.item_type
-                },
+                item_type: select_tool_item_type(&existing.item_type, &incoming.item_type),
                 name: name.clone(),
                 title: select_tool_title(&existing.title, &incoming.title, &name),
                 kind: incoming.kind.or(existing.kind),
@@ -1131,11 +1134,7 @@ pub(super) fn merge_tool_call_view(
                 input_preview: incoming.input_preview.or(existing.input_preview),
                 result_preview: incoming.result_preview.or(existing.result_preview),
                 diff: incoming.diff.or(existing.diff),
-                file_changes: if incoming.file_changes.is_empty() {
-                    existing.file_changes
-                } else {
-                    incoming.file_changes
-                },
+                file_changes,
                 apply_state: incoming.apply_state.or(existing.apply_state),
                 file_changes_omitted: incoming.file_changes_omitted
                     || existing.file_changes_omitted,
@@ -1143,6 +1142,31 @@ pub(super) fn merge_tool_call_view(
             })
         }
     }
+}
+
+fn merge_tool_file_changes(
+    existing: Vec<crate::protocol::FileChangeDiffView>,
+    incoming: Vec<crate::protocol::FileChangeDiffView>,
+    merge_file_changes: bool,
+) -> Vec<crate::protocol::FileChangeDiffView> {
+    if !merge_file_changes {
+        return if incoming.is_empty() {
+            existing
+        } else {
+            incoming
+        };
+    }
+
+    let mut file_changes = existing;
+    for change in incoming {
+        crate::file_changes::merge_file_change_view(&mut file_changes, change);
+    }
+    file_changes
+}
+
+fn should_merge_tool_file_changes(existing_item_type: &str, incoming_item_type: &str) -> bool {
+    !existing_item_type.eq_ignore_ascii_case("turnDiff")
+        && !incoming_item_type.eq_ignore_ascii_case("turnDiff")
 }
 
 /// Whether a reservation's row may still be withdrawn.
@@ -1228,6 +1252,19 @@ fn select_tool_title(existing: &str, incoming: &str, name: &str) -> String {
         return incoming.to_string();
     }
     if is_generic_tool_title(incoming, name) && !is_generic_tool_title(existing, name) {
+        return existing.to_string();
+    }
+    incoming.to_string()
+}
+
+fn select_tool_item_type(existing: &str, incoming: &str) -> String {
+    if incoming.trim().is_empty() {
+        return existing.to_string();
+    }
+    if existing.trim().is_empty() {
+        return incoming.to_string();
+    }
+    if incoming.eq_ignore_ascii_case("toolCall") && !existing.eq_ignore_ascii_case("toolCall") {
         return existing.to_string();
     }
     incoming.to_string()

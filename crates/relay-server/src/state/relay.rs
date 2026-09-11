@@ -4025,6 +4025,48 @@ impl RelayState {
         model: &str,
         device_id: &str,
     ) {
+        self.load_thread_data_inner(
+            data,
+            approval_policy,
+            sandbox,
+            effort,
+            model,
+            device_id,
+            None,
+        );
+    }
+
+    pub(crate) fn load_thread_data_after_read_start(
+        &mut self,
+        data: ThreadSyncData,
+        approval_policy: &str,
+        sandbox: &str,
+        effort: &str,
+        model: &str,
+        device_id: &str,
+        read_started_at_revision: u64,
+    ) {
+        self.load_thread_data_inner(
+            data,
+            approval_policy,
+            sandbox,
+            effort,
+            model,
+            device_id,
+            Some(read_started_at_revision),
+        );
+    }
+
+    fn load_thread_data_inner(
+        &mut self,
+        data: ThreadSyncData,
+        approval_policy: &str,
+        sandbox: &str,
+        effort: &str,
+        model: &str,
+        device_id: &str,
+        read_started_at_revision: Option<u64>,
+    ) {
         let now = unix_now();
         let thread_id = data.thread.id.clone();
         let model_for_runtime = if model.is_empty() {
@@ -4050,7 +4092,12 @@ impl RelayState {
         // that sees it advance repairs the gap, whereas one that sees it rewind
         // silently discards every delta until the counter climbs back.
         let changed = match self.runtimes.get_mut(&thread_id) {
-            Some(existing) => existing.merge_fresh_history(runtime),
+            Some(existing) => match read_started_at_revision {
+                Some(read_started_at_revision) => {
+                    existing.merge_fresh_history_after_read_start(runtime, read_started_at_revision)
+                }
+                None => existing.merge_fresh_history(runtime),
+            },
             None => {
                 self.runtimes.insert(thread_id.clone(), runtime);
                 false
