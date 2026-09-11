@@ -670,28 +670,53 @@ function createMergedTailPagePatch(state, page, prepareEntry) {
     preparedPageEntries.push(toTranscriptEntry(prepared.entry || entry));
   }
 
-  const result = reconcileAuthoritativeTail({
-    order: state.transcriptHydrationOrder,
-    entries: state.transcriptHydrationEntries,
-    pageEntries: preparedPageEntries,
-    // This layer does not own the session revision (that lives on the
-    // rendered session, not the hydration window) — no revision inputs are
-    // supplied, and `result.revision` below is deliberately ignored; that is
-    // not a dropped result.
-    prevCursor: page.prev_cursor,
-    mergeEntry: mergeTranscriptEntry,
-  });
+  // Numbered on both sides: place by number. The shared primitive splits the
+  // window at the page's first known id, which has no answer for a live row that
+  // belongs BETWEEN two page rows, and none at all when page and window share no
+  // id — there it declares the whole window newer and pushes it below the page.
+  // The merge rules (never-shorten text, tool/content_state rank, withdrawal)
+  // are mergeTranscriptEntry's either way; only the ORDERING differs.
+  let nextEntries;
+  let nextOrder;
+  if (
+    rowsAreOrderKeyed(preparedPageEntries)
+    && windowIsOrderKeyed(state.transcriptHydrationOrder, state.transcriptHydrationEntries)
+  ) {
+    const draft = {
+      order: [...state.transcriptHydrationOrder],
+      entries: new Map(state.transcriptHydrationEntries),
+    };
+    mergeWindowRowsInPlace(draft, preparedPageEntries, { mergeRow: mergeTranscriptEntry });
+    nextEntries = draft.entries;
+    nextOrder = draft.order;
+  } else {
+    const result = reconcileAuthoritativeTail({
+      order: state.transcriptHydrationOrder,
+      entries: state.transcriptHydrationEntries,
+      pageEntries: preparedPageEntries,
+      // This layer does not own the session revision (that lives on the
+      // rendered session, not the hydration window) — no revision inputs are
+      // supplied, and `result.revision` below is deliberately ignored; that is
+      // not a dropped result.
+      prevCursor: page.prev_cursor,
+      mergeEntry: mergeTranscriptEntry,
+    });
+    nextEntries = result.entries;
+    nextOrder = result.order;
+  }
 
   const nextStatus = page.prev_cursor == null ? "complete" : "idle";
 
   return {
     ...(accumulatedPatch || {}),
-    transcriptHydrationEntries: result.entries,
+    transcriptHydrationEntries: nextEntries,
     transcriptHydrationLastFetchAt: Date.now(),
-    transcriptHydrationOrder: result.order,
-    transcriptHydrationOlderCursor: result.olderCursor,
+    transcriptHydrationOrder: nextOrder,
+    // Always the page's own cursor, on both paths — reconcileAuthoritativeTail
+    // returns exactly this and the keyed branch must not diverge from it.
+    transcriptHydrationOlderCursor: page.prev_cursor ?? null,
     transcriptHydrationStatus: nextStatus,
-    transcriptHydrationTailReady: result.order.length > 0,
+    transcriptHydrationTailReady: nextOrder.length > 0,
   };
 }
 
