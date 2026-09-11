@@ -62,6 +62,9 @@ export function reconcileAuthoritativeTail({
       repaired: addressable
         .map((entry) => draft.entries.get(transcriptRowKey(entry)))
         .filter(Boolean),
+      // The result is numbered and in order; a caller that caches that proof
+      // (the hydration window) can take it from here rather than re-walking.
+      keyed: true,
     };
   }
 
@@ -84,6 +87,8 @@ export function reconcileAuthoritativeTail({
     order: mergeTailPageOrder(order, pageItemIds),
     entries: nextEntries,
     repaired,
+    // Placed positionally, so nothing downstream may treat this as numbered.
+    keyed: false,
   };
 }
 

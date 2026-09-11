@@ -7,9 +7,20 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  __readWindowInsertionProbeCount,
+  __resetWindowInsertionProbeCount,
+} from "./shared/transcript-window-reducer.js";
+import {
+  __readTranscriptFullWindowCopyCount,
+  __resetTranscriptFullWindowCopyCount,
   applyTranscriptDeltaToWindow,
+  createClearedTranscriptHydrationPatch,
   createMergedTranscriptHydrationPagePatch,
   prepareTranscriptHydrationState,
+  renderedTranscriptFromWindow,
+  restoreHydratedTranscriptSnapshot,
+  restoreTranscriptHydrationForThread,
+  stashTranscriptHydrationForThread,
 } from "./shared/transcript-hydration-store.js";
 
 const S = 1 << 20;
@@ -27,11 +38,25 @@ function row(itemId, orderSeq, extra = {}) {
   };
 }
 
+// Derives the cached proof from the fixture rather than asserting it, so a
+// fixture with an unnumbered or out-of-order row cannot quietly claim to be
+// keyed — which is exactly the state these tests exist to distinguish.
+function fixtureIsKeyed(rows) {
+  let previous = null;
+  for (const entry of rows) {
+    if (!Number.isSafeInteger(entry.order_seq)) return false;
+    if (previous != null && entry.order_seq < previous) return false;
+    previous = entry.order_seq;
+  }
+  return true;
+}
+
 function windowState(...rows) {
   return {
     transcriptHydrationThreadId: "thread-1",
     transcriptHydrationEntries: new Map(rows.map((entry) => [entry.item_id, entry])),
     transcriptHydrationOrder: rows.map((entry) => entry.item_id),
+    transcriptHydrationKeyed: fixtureIsKeyed(rows),
   };
 }
 
@@ -236,17 +261,11 @@ test("an out-of-order window is repaired once the authoritative tail covers it",
   assert.deepEqual(patch.transcriptHydrationOrder, ["a", "b", "c"]);
 });
 
-// AUDIT FINDING — the snapshot tail merge is the one numbered path still placing
-// rows positionally. `createMergedSnapshotTailPatch` anchors a new tail id
-// against ids it already holds (placeOrderedTailIds), which cannot see that a
-// live row the tail does not carry belongs BETWEEN two tail rows.
-//
-// Left unmigrated deliberately: that function runs on EVERY snapshot and is
-// explicitly optimised to touch only the tail, never the whole window
-// (markdown/transcript-perf-freeze-analysis.md). The O(window) `windowIsOrderKeyed`
-// gate the other paths use would reintroduce exactly the freeze it documents, so
-// this needs a cheaper keyed check of its own rather than a copy of that gate.
-test("snapshot tail merge still orders positionally (known gap)", { skip: "audit finding — needs a per-snapshot-cheap gate" }, () => {
+// The snapshot tail merge anchors a new tail id against ids it already holds,
+// which cannot see that a live row the tail does NOT carry belongs between two
+// tail rows. It runs on every snapshot, so the keyed gate here is the cached
+// `transcriptHydrationKeyed` proof rather than an O(window) re-scan.
+test("a snapshot tail places a new row by number, around a live row it does not carry", () => {
   const state = {
     ...pageState(row("a", 0), row("live", 2 * S, { status: "running" })),
     session: { active_thread_id: "thread-1", transcript_revision: 10 },
@@ -266,4 +285,172 @@ test("snapshot tail merge still orders positionally (known gap)", { skip: "audit
   Object.assign(state, prepared.patch);
 
   assert.deepEqual(state.transcriptHydrationOrder, ["a", "b", "live", "c"]);
+});
+
+test("the restore projection reports the same numbered order it writes into the window", () => {
+  // buildHydratedTranscriptSnapshot is the projection half of the same snapshot
+  // and places tail ids independently. Left positional it returned one order to
+  // the renderer while the window merge stored another.
+  const state = {
+    ...pageState(row("a", 0), row("live", 2 * S, { status: "running" })),
+    session: { active_thread_id: "thread-1", transcript_revision: 10 },
+    transcriptHydrationBaseSnapshot: { active_thread_id: "thread-1" },
+    transcriptHydrationSignature: "thread-1|turn-1|stale",
+    transcriptHydrationStatus: "complete",
+    transcriptHydrationOlderCursor: null,
+  };
+
+  const rendered = restoreHydratedTranscriptSnapshot(state, {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-2",
+    transcript_revision: 11,
+    transcript_truncated: true,
+    transcript: [row("b", S), row("c", 3 * S)],
+  });
+
+  assert.deepEqual(rendered.transcript.map((entry) => entry.item_id), ["a", "b", "live", "c"]);
+  assert.deepEqual(
+    state.transcriptHydrationOrder,
+    ["a", "b", "live", "c"],
+    "the window it wrote into must agree with what it rendered"
+  );
+});
+
+test("a patch-introduced array-only row projects by number, not at the end", () => {
+  // reduceTranscriptEntryPatchEvent deliberately leaves an untracked patch row
+  // array-only, so renderedTranscriptFromWindow is where it gets a position.
+  const state = pageState(row("a", 0), row("live", 2 * S));
+  const session = {
+    active_thread_id: "thread-1",
+    transcript: [row("a", 0), row("b", S), row("live", 2 * S)],
+  };
+
+  const rendered = renderedTranscriptFromWindow(state, session);
+
+  assert.deepEqual(rendered.map((entry) => entry.item_id), ["a", "b", "live"]);
+});
+
+test("an unnumbered array-only row still projects positionally", () => {
+  const unnumbered = { item_id: "b", kind: "agent_text", text: "b", status: "completed" };
+  const state = pageState(row("a", 0), row("live", 2 * S));
+  const session = {
+    active_thread_id: "thread-1",
+    transcript: [row("a", 0), unnumbered, row("live", 2 * S)],
+  };
+
+  const rendered = renderedTranscriptFromWindow(state, session);
+
+  assert.deepEqual(
+    rendered.map((entry) => entry.item_id),
+    ["a", "live", "b"],
+    "with no number to place it by, the legacy anchor-then-append is all there is"
+  );
+});
+
+test("the cached proof cannot go stale across the window lifecycle", () => {
+  // The proof is only useful if it is impossible to carry a true value onto a
+  // window that no longer earns it. Each transition is checked explicitly.
+  assert.equal(
+    createClearedTranscriptHydrationPatch().transcriptHydrationKeyed,
+    true,
+    "an empty window is trivially keyed"
+  );
+
+  // An unnumbered live row revokes it.
+  const live = windowState(row("a", 0));
+  assert.equal(live.transcriptHydrationKeyed, true);
+  applyTranscriptDeltaToWindow(live, { ...delta("b", undefined, "no number"), order_seq: undefined });
+  assert.equal(live.transcriptHydrationKeyed, false, "an unnumbered row revokes the proof");
+
+  // A numbered one does not.
+  const keyed = windowState(row("a", 0));
+  applyTranscriptDeltaToWindow(keyed, delta("b", S, "numbered"));
+  assert.equal(keyed.transcriptHydrationKeyed, true, "a numbered row preserves it");
+
+  // Stash/restore round-trips the proof rather than assuming it.
+  const stashState = { ...windowState(row("a", 0)), transcriptHydrationThreadId: "t1" };
+  stashState.transcriptHydrationKeyed = false;
+  stashTranscriptHydrationForThread(stashState);
+  const restored = restoreTranscriptHydrationForThread(stashState, "t1");
+  assert.equal(restored.transcriptHydrationKeyed, false, "an unproven window restores unproven");
+});
+
+test("the keyed snapshot path costs the tail, not the window", () => {
+  // The reason the proof is cached rather than recomputed. A per-snapshot
+  // windowIsOrderKeyed (or a full-window copy) would be O(window) on the hottest
+  // path in the app — the freeze markdown/transcript-perf-freeze-analysis.md
+  // documents. Asserted with the counters, not a clock.
+  const windowSize = 4000;
+  const held = Array.from({ length: windowSize }, (_, i) => row(`w${i}`, i * S));
+  const state = {
+    ...pageState(...held),
+    session: { active_thread_id: "thread-1", transcript_revision: 10 },
+    transcriptHydrationBaseSnapshot: { active_thread_id: "thread-1" },
+    transcriptHydrationSignature: "thread-1|turn-1|stale",
+    transcriptHydrationStatus: "complete",
+    transcriptHydrationOlderCursor: null,
+  };
+  const orderBefore = state.transcriptHydrationOrder;
+
+  __resetTranscriptFullWindowCopyCount();
+  __resetWindowInsertionProbeCount();
+  // A steady-state snapshot: every tail id is already ordered, plus one new row
+  // at the very end — the ordinary streaming case.
+  const prepared = prepareTranscriptHydrationState(state, {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-2",
+    transcript_revision: 11,
+    transcript_truncated: true,
+    transcript: [
+      held[windowSize - 2],
+      held[windowSize - 1],
+      row("fresh", windowSize * S),
+    ],
+  });
+  Object.assign(state, prepared.patch);
+
+  assert.equal(state.transcriptHydrationOrder[windowSize], "fresh", "the new row is placed");
+  assert.equal(state.transcriptHydrationKeyed, true, "and the window is still proven");
+  assert.equal(
+    __readTranscriptFullWindowCopyCount(),
+    0,
+    "no per-snapshot full-window copy"
+  );
+  assert.ok(
+    __readWindowInsertionProbeCount() < 16,
+    `a tail row costs O(1), not O(window): ${__readWindowInsertionProbeCount()} probes`
+  );
+  assert.equal(state.transcriptHydrationOrder, orderBefore, "the order array is mutated, not rebuilt");
+});
+
+test("two new rows in ONE restore snapshot keep their relative order", () => {
+  // The relay publishes an ask-user card and the message after it under one
+  // write lock, so both are new to the window in the same snapshot. The restore
+  // projection merges them into an `overlay` that `baseEntries` does not receive
+  // until afterwards, so resolving a neighbour against `baseEntries` reported
+  // "unnumbered" for the row placed one iteration earlier — and the second row
+  // was walked over it. The card rendered BELOW its own trailing message.
+  const state = {
+    ...pageState(row("a", 0)),
+    session: { active_thread_id: "thread-1", transcript_revision: 10 },
+    transcriptHydrationBaseSnapshot: { active_thread_id: "thread-1" },
+    transcriptHydrationSignature: "thread-1|turn-1|stale",
+    transcriptHydrationStatus: "complete",
+    transcriptHydrationOlderCursor: null,
+  };
+
+  const rendered = restoreHydratedTranscriptSnapshot(state, {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-2",
+    transcript_revision: 11,
+    transcript_truncated: true,
+    transcript: [row("ask", S), row("trailing", 2 * S)],
+  });
+
+  assert.deepEqual(
+    rendered.transcript.map((entry) => entry.item_id),
+    ["a", "ask", "trailing"],
+    "the card stays above the message published alongside it"
+  );
+  assert.deepEqual(state.transcriptHydrationOrder, ["a", "ask", "trailing"]);
 });
