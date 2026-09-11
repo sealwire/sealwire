@@ -926,9 +926,14 @@ test("a remote delta for a mid-numbered row lands in its slot, not at the tail",
 // for CONTENT, never for where a row already sits — rewriting a birth key here
 // moves nothing and clears nothing, so the cached keyed proof would keep
 // claiming "numbered and in order" over a window that no longer is.
+//
+// INVARIANT HARDENING, not a reachable production bug: repairActiveTranscriptTail
+// rejects a page from another generation before this runs, and Rust omits
+// `withdrawn` when false, so neither conflicting input is on the wire today. The
+// inputs below are constructed to violate the invariant directly.
 // ---------------------------------------------------------------------------
 
-test("a repaired copy cannot move a placed row, renumber it, or resurrect it", async () => {
+test("a conflicting or stale repaired copy cannot move, renumber, or resurrect a row", async () => {
   activeBrowser || installBrowserStubs();
   const state = await keyedRemoteWindow();
   state.transcriptHydrationEntries.set("item-2", {
@@ -944,8 +949,8 @@ test("a repaired copy cannot move a placed row, renumber it, or resurrect it", a
   const { __syncTranscriptWindowWithRepairedEntriesForTest } = await import("./session-ops.js");
 
   __syncTranscriptWindowWithRepairedEntriesForTest("thread-1", [
-    // A page built by another run: a conflicting number, and a copy serialized
-    // before the withdrawal.
+    // Constructed to violate the invariant: a conflicting number, and an
+    // explicit withdrawn:false of the kind the wire does not currently produce.
     { item_id: "item-2", text: "repaired body", order_seq: 99 * ORDER_STEP, withdrawn: false },
   ]);
 

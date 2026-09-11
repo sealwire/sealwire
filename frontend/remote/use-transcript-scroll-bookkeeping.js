@@ -28,6 +28,11 @@ export function useRemoteTranscriptScrollBookkeeping({
   const engine = engineRef.current;
   const renderedScrollKeyRef = useRef(null);
 
+  // Before anything retained is read: the relay-scoped scroll key does not carry
+  // the generation, so a reconnect that renumbers the same thread would restore
+  // a position anchored to ids the new run never issued.
+  engine.syncGeneration(session?.transcript_generation);
+
   const remoteThreadId = threadId || null;
   const remoteScrollKey = remoteThreadId
     ? `${currentState.activeRelayId || "-"}:${remoteThreadId}`

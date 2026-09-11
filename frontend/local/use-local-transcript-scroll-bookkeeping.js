@@ -28,6 +28,11 @@ export function useLocalTranscriptScrollBookkeeping({
   // itself would read as a reset if the caller's epoch already started > 0.
   const seenResetEpochRef = useRef(resetEpoch);
 
+  // Before anything retained is read or rekeyed: a new run renames the same
+  // messages, so a snapshot/position/anchor set from the old one anchors to ids
+  // that no longer exist. Same-generation promotion below is untouched.
+  engine.syncGeneration(session?.transcript_generation);
+
   // One-shot by IDENTITY: the caller never clears this field, so every render
   // until the next promotion hands back the same object, and re-running the
   // rekey against a since-reused `from` id would move someone else's data.

@@ -806,13 +806,16 @@ function syncTranscriptWindowWithRepairedEntries(state, threadId, repairedEntrie
       ...held,
       ...entry,
       content_state: "full",
-      // First valid birth key wins. A repaired copy is authoritative for CONTENT,
-      // never for where a row already sits: rewriting the number here would move
-      // nothing and clear nothing, leaving transcriptHydrationKeyed still
-      // claiming "numbered and in order" over a window that no longer is.
+      // Hardening, not a fix for a reachable production path: repairActiveTranscriptTail
+      // already rejects a page from another generation before calling this, so a
+      // conflicting number should not arrive today. Held key still wins, because
+      // rewriting it here would move nothing and clear nothing — leaving
+      // transcriptHydrationKeyed claiming "numbered and in order" over a window
+      // that no longer is. Cheap, and it keeps this seam agreeing with the reducer.
       ...(Number.isSafeInteger(held?.order_seq) ? { order_seq: held.order_seq } : {}),
-      // Absorbing, for the same reason it is everywhere else: a page built before
-      // the withdrawal carries withdrawn:false and must not resurrect the row.
+      // Same standing: Rust omits `withdrawn` when false, so a stale explicit
+      // false is not on the wire today. Absorbing anyway, so a tombstone cannot
+      // be undone by a copy that predates it.
       ...(held?.withdrawn === true || entry.withdrawn === true ? { withdrawn: true } : {}),
     });
   }

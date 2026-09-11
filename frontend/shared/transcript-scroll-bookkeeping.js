@@ -16,6 +16,9 @@ export function createTranscriptScrollBookkeeping() {
   let previousSnapshot = null;
   const positions = new Map();
   const anchors = new Map();
+  // `undefined` until the first sync: mount adopts whatever generation is live
+  // rather than reading itself as a change.
+  let generation;
 
   function anchorsFor(key) {
     return anchors.get(key) || new Set();
@@ -99,6 +102,35 @@ export function createTranscriptScrollBookkeeping() {
     anchors.clear();
   }
 
+  /**
+   * Drop everything retained when the relay's run changes. Returns whether it
+   * reset.
+   *
+   * All three retained things are keyed by item ids — the snapshot's entry ids,
+   * the anchored-id sets — and a new run renames the same messages
+   * (shared/transcript-generation.js). Applying them across that boundary
+   * anchors to ids the new run has never issued, which scrolls to the wrong
+   * place on the first frame after an upgrade.
+   *
+   * Both directions count, empty included: "" -> "gen-a" is a relay that gained
+   * stamping and "gen-a" -> "" is one that lost it, and both renumber. A relay
+   * that never stamps holds "" forever, so it never resets after mount — which
+   * is also what makes this terminate instead of resetting every render.
+   */
+  function syncGeneration(nextGeneration) {
+    const normalized = String(nextGeneration ?? "");
+    if (generation === undefined) {
+      generation = normalized;
+      return false;
+    }
+    if (generation === normalized) {
+      return false;
+    }
+    generation = normalized;
+    reset();
+    return true;
+  }
+
   // Rekey the promoted key/thread-id pair (the deferred-Claude case: a
   // synthetic `claude-pending-*` id promoted to its real session id on first
   // send) across all three retained things in one step. Returns true if
@@ -148,5 +180,6 @@ export function createTranscriptScrollBookkeeping() {
     rememberView,
     reset,
     retarget,
+    syncGeneration,
   };
 }
