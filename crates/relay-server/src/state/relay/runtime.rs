@@ -584,10 +584,7 @@ impl ThreadRuntime {
         records.retain(|record| match index_by_item_id.get(&record.item_id) {
             Some(&existing_index) => {
                 let existing = &mut self.transcript[existing_index];
-                existing.tool = super::transcript::merge_tool_call_view(
-                    existing.tool.take(),
-                    record.tool.clone(),
-                );
+                let _ = merge_tool_call_into(&mut existing.tool, record.tool.clone());
                 existing.withdrawn |= record.withdrawn;
                 false
             }
@@ -657,6 +654,32 @@ impl ThreadRuntime {
         self.merge_transcript_records(fresh.transcript)
     }
 
+    #[must_use]
+    pub(crate) fn merge_fresh_history_after_read_start(
+        &mut self,
+        fresh: ThreadRuntime,
+        read_started_at_revision: u64,
+    ) -> bool {
+        self.summary = fresh.summary;
+        self.current_cwd = fresh.current_cwd;
+        self.approval_policy = fresh.approval_policy;
+        self.sandbox = fresh.sandbox;
+        self.reasoning_effort = fresh.reasoning_effort;
+        if !fresh.model.is_empty() {
+            self.model = fresh.model;
+        }
+        self.current_status = fresh.current_status;
+        self.active_flags = fresh.active_flags;
+        if !fresh.provider_history_paged {
+            self.provider_history_cursor = None;
+            self.provider_history_paged = false;
+        }
+        self.merge_transcript_records_after_read_start(
+            fresh.transcript,
+            Some(read_started_at_revision),
+        )
+    }
+
     /// Returns whether the transcript actually changed. The caller owns the
     /// revision: it must draw a fresh one from `RelayState::next_transcript_revision`
     /// and assign it. This deliberately does NOT bump `transcript_revision` itself —
@@ -664,12 +687,26 @@ impl ThreadRuntime {
     /// thread had already been given.
     #[must_use]
     pub(crate) fn merge_transcript_records(&mut self, records: Vec<TranscriptRecord>) -> bool {
+        self.merge_transcript_records_after_read_start(records, None)
+    }
+
+    #[must_use]
+    fn merge_transcript_records_after_read_start(
+        &mut self,
+        records: Vec<TranscriptRecord>,
+        read_started_at_revision: Option<u64>,
+    ) -> bool {
         let mut changed = false;
+        let incoming_ids = records
+            .iter()
+            .map(|record| record.item_id.clone())
+            .collect::<std::collections::HashSet<_>>();
         // Unknown rows are held until the next incoming row that IS known — that
         // anchor says where they belong. Tail keys here would re-order history the
         // moment anything sorts by key: fresh [A, B, C] into a runtime holding only
         // C must not key A and B past C.
         let mut pending: Vec<TranscriptRecord> = Vec::new();
+        let mut tail_pending_floor = 0;
         for record in records {
             match self
                 .transcript
@@ -694,6 +731,7 @@ impl ThreadRuntime {
                     if merge_runtime_entry(&mut self.transcript[index], record) {
                         changed = true;
                     }
+                    tail_pending_floor = index + 1;
                 }
                 None if self.has_equivalent_user_message(&record) => {}
                 None => pending.push(record),
@@ -703,15 +741,11 @@ impl ThreadRuntime {
         // the read was in flight: walk back over the trailing run of live-upserted
         // rows the read does not know, and insert before it.
         if !pending.is_empty() {
-            let fresh_ids: std::collections::HashSet<&str> = pending
-                .iter()
-                .map(|record| record.item_id.as_str())
-                .collect();
             let mut boundary = self.transcript.len();
-            while boundary > 0 {
+            while boundary > tail_pending_floor {
                 let candidate = &self.transcript[boundary - 1];
-                if candidate.last_live_upsert_revision.is_some()
-                    && !fresh_ids.contains(candidate.item_id.as_str())
+                if live_upserted_after_read_start(candidate, read_started_at_revision)
+                    && !incoming_ids.contains(candidate.item_id.as_str())
                 {
                     boundary -= 1;
                 } else {
@@ -773,23 +807,19 @@ impl ThreadRuntime {
 }
 
 fn merge_runtime_entry(existing: &mut TranscriptRecord, incoming: TranscriptRecord) -> bool {
+    let before = existing.clone();
+    let mut incoming = incoming;
     if existing.kind == incoming.kind
         && text_is_longer(existing.text.as_ref(), incoming.text.as_ref())
     {
-        let mut changed = false;
         if is_completed_status(&incoming.status) && existing.status != incoming.status {
             existing.status = incoming.status;
-            changed = true;
         }
         if existing.turn_id.is_none() && incoming.turn_id.is_some() {
             existing.turn_id = incoming.turn_id;
-            changed = true;
         }
-        if existing.tool.is_none() && incoming.tool.is_some() {
-            existing.tool = incoming.tool;
-            changed = true;
-        }
-        return changed;
+        let _ = merge_tool_call_into(&mut existing.tool, incoming.tool.take());
+        return runtime_records_differ(&before, existing);
     }
 
     if is_completed_status(&existing.status) && !is_completed_status(&incoming.status) {
@@ -797,15 +827,15 @@ fn merge_runtime_entry(existing: &mut TranscriptRecord, incoming: TranscriptReco
             && text_is_longer(incoming.text.as_ref(), existing.text.as_ref())
         {
             existing.text = incoming.text;
-            return true;
+            let _ = merge_tool_call_into(&mut existing.tool, incoming.tool.take());
+            return runtime_records_differ(&before, existing);
         }
-        if existing.tool.is_none() && incoming.tool.is_some() {
-            existing.tool = incoming.tool;
-            return true;
-        }
-        return false;
+        let _ = merge_tool_call_into(&mut existing.tool, incoming.tool.take());
+        return runtime_records_differ(&before, existing);
     }
 
+    let merged_tool = super::transcript::merge_tool_call_view(existing.tool.clone(), incoming.tool);
+    incoming.tool = merged_tool;
     let changed = existing.kind != incoming.kind
         || existing.text != incoming.text
         || existing.status != incoming.status
@@ -827,6 +857,37 @@ fn merge_runtime_entry(existing: &mut TranscriptRecord, incoming: TranscriptReco
         existing.withdrawn = withdrawn;
     }
     changed
+}
+
+fn merge_tool_call_into(
+    existing: &mut Option<ToolCallView>,
+    incoming: Option<ToolCallView>,
+) -> bool {
+    let before = existing.clone();
+    *existing = super::transcript::merge_tool_call_view(existing.take(), incoming);
+    !tool_calls_equal(before.as_ref(), existing.as_ref())
+}
+
+fn runtime_records_differ(left: &TranscriptRecord, right: &TranscriptRecord) -> bool {
+    left.kind != right.kind
+        || left.text != right.text
+        || left.status != right.status
+        || left.turn_id != right.turn_id
+        || left.order_seq != right.order_seq
+        || left.withdrawn != right.withdrawn
+        || left.last_live_upsert_revision != right.last_live_upsert_revision
+        || !tool_calls_equal(left.tool.as_ref(), right.tool.as_ref())
+}
+
+fn live_upserted_after_read_start(
+    record: &TranscriptRecord,
+    read_started_at_revision: Option<u64>,
+) -> bool {
+    read_started_at_revision
+        .zip(record.last_live_upsert_revision)
+        .is_some_and(|(read_started_at_revision, live_revision)| {
+            live_revision > read_started_at_revision
+        })
 }
 
 fn text_is_longer(candidate: Option<&String>, baseline: Option<&String>) -> bool {
@@ -1340,6 +1401,49 @@ mod tests {
         );
     }
 
+    /// A persistent live stamp is not proof that a row was born during THIS provider
+    /// read. When the fresh read names that row, it is an anchor: tail rows after it
+    /// belong after it.
+    #[test]
+    fn merge_keeps_terminal_rows_after_a_known_live_stamped_anchor() {
+        let record = |id: &str| TranscriptRecord {
+            item_id: id.to_string(),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some(id.to_string()),
+            status: "completed".to_string(),
+            turn_id: None,
+            tool: None,
+            order_seq: 0,
+            withdrawn: false,
+            last_live_upsert_revision: None,
+        };
+
+        let mut rt = runtime("t1", "idle");
+        let a_key = rt.alloc_tail_order_seq();
+        let d_key = rt.alloc_tail_order_seq();
+        rt.transcript.push(TranscriptRecord {
+            order_seq: a_key,
+            ..record("A")
+        });
+        rt.transcript.push(TranscriptRecord {
+            order_seq: d_key,
+            last_live_upsert_revision: Some(9),
+            ..record("D")
+        });
+
+        assert!(rt.merge_transcript_records(vec![record("A"), record("D"), record("E")]));
+
+        let ids: Vec<&str> = rt.transcript.iter().map(|r| r.item_id.as_str()).collect();
+        assert_eq!(ids, ["A", "D", "E"]);
+        let keys: Vec<i64> = rt.transcript.iter().map(|r| r.order_seq).collect();
+        assert_eq!(keys[0], a_key, "A keeps its issued key");
+        assert_eq!(keys[1], d_key, "D keeps its issued key");
+        assert!(
+            keys.windows(2).all(|pair| pair[0] < pair[1]),
+            "keys stay monotonic in stable Vec order: {keys:?}"
+        );
+    }
+
     /// One provider page can carry the same id twice. That must merge, not panic —
     /// and the returned page must name each row once.
     #[test]
@@ -1395,6 +1499,8 @@ mod tests {
         };
 
         // Left anchor, no right anchor: runtime [A(hist), D(live)], fresh [A, B, C].
+        // D's live revision is after the read-start boundary, so the unanchored
+        // history tail must still land before it.
         let mut rt = runtime("t1", "idle");
         let a = rt.alloc_tail_order_seq();
         let d = rt.alloc_tail_order_seq();
@@ -1407,7 +1513,10 @@ mod tests {
             last_live_upsert_revision: Some(9),
             ..record("D")
         });
-        assert!(rt.merge_transcript_records(vec![record("A"), record("B"), record("C")]));
+        assert!(rt.merge_transcript_records_after_read_start(
+            vec![record("A"), record("B"), record("C")],
+            Some(8)
+        ));
         let ids: Vec<&str> = rt.transcript.iter().map(|r| r.item_id.as_str()).collect();
         assert_eq!(
             ids,
@@ -1418,6 +1527,8 @@ mod tests {
         assert!(keys.windows(2).all(|w| w[0] < w[1]), "keys agree: {keys:?}");
 
         // No overlap at all: runtime [D(live)], fresh [A, B, C].
+        // The read-start revision is the only proof D was born after the stale
+        // provider snapshot began; keep that anchorless race guarantee explicit.
         let mut rt = runtime("t2", "idle");
         let d = rt.alloc_tail_order_seq();
         rt.transcript.push(TranscriptRecord {
@@ -1425,7 +1536,10 @@ mod tests {
             last_live_upsert_revision: Some(9),
             ..record("D")
         });
-        assert!(rt.merge_transcript_records(vec![record("A"), record("B"), record("C")]));
+        assert!(rt.merge_transcript_records_after_read_start(
+            vec![record("A"), record("B"), record("C")],
+            Some(8)
+        ));
         let ids: Vec<&str> = rt.transcript.iter().map(|r| r.item_id.as_str()).collect();
         assert_eq!(ids, ["A", "B", "C", "D"]);
     }
@@ -1461,5 +1575,116 @@ mod tests {
             .expect("merged row");
         assert_eq!(kept.status, "completed", "the settled copy's status wins");
         assert_eq!(kept.text.as_deref(), Some("second, fuller text"));
+    }
+
+    /// Tool request/result pairs can duplicate an id in one provider page. One copy
+    /// carries the request metadata; the other carries the settled result. The merged
+    /// row and the returned page view must preserve the union.
+    #[test]
+    fn prepend_in_page_tool_duplicate_keeps_request_and_result_fields() {
+        let mut rt = runtime("t1", "idle");
+        let mut request_tool = ToolCallView {
+            item_type: "fileChange".to_string(),
+            name: "Edit".to_string(),
+            title: "Edit".to_string(),
+            kind: Some("edit".to_string()),
+            detail: None,
+            query: None,
+            path: Some("/repo/src/lib.rs".to_string()),
+            url: None,
+            command: None,
+            input_preview: Some("{\"path\":\"src/lib.rs\",\"old\":\"a\"}".to_string()),
+            result_preview: None,
+            diff: Some("--- a/src/lib.rs\n+++ b/src/lib.rs\n".to_string()),
+            file_changes: Vec::new(),
+            apply_state: None,
+            file_changes_omitted: false,
+            can_apply: None,
+        };
+        request_tool
+            .file_changes
+            .push(crate::protocol::FileChangeDiffView {
+                path: "/repo/src/lib.rs".to_string(),
+                change_type: "update".to_string(),
+                diff: "-a\n+b\n".to_string(),
+            });
+        let result_tool = ToolCallView {
+            item_type: "toolCall".to_string(),
+            name: "Edit".to_string(),
+            title: "Edit call".to_string(),
+            kind: None,
+            detail: None,
+            query: None,
+            path: None,
+            url: None,
+            command: None,
+            input_preview: None,
+            result_preview: Some("Applied edit and formatted file".to_string()),
+            diff: None,
+            file_changes: Vec::new(),
+            apply_state: Some(crate::protocol::FileChangeApplyState::Applied),
+            file_changes_omitted: false,
+            can_apply: None,
+        };
+        let page_entry = |text: &str, status: &str, tool: ToolCallView| TranscriptEntryView {
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some("tool:edit-1".to_string()),
+            kind: crate::protocol::TranscriptEntryKind::ToolCall,
+            text: Some(text.to_string()),
+            status: status.to_string(),
+            turn_id: Some("turn-1".to_string()),
+            tool: Some(tool),
+            content_state: crate::protocol::TranscriptContentState::Full,
+        };
+
+        let views = rt.prepend_provider_history(
+            vec![
+                page_entry("Editing src/lib.rs", "running", request_tool),
+                page_entry(
+                    "Edited src/lib.rs successfully and ran formatter",
+                    "completed",
+                    result_tool,
+                ),
+            ],
+            Some(3),
+            None,
+        );
+
+        let kept = rt
+            .transcript
+            .iter()
+            .find(|record| record.item_id == "tool:edit-1")
+            .expect("merged tool row");
+        assert_eq!(kept.status, "completed");
+        assert_eq!(
+            kept.text.as_deref(),
+            Some("Edited src/lib.rs successfully and ran formatter")
+        );
+        let tool = kept.tool.as_ref().expect("merged tool payload");
+        assert_eq!(tool.item_type, "fileChange");
+        assert_eq!(tool.path.as_deref(), Some("/repo/src/lib.rs"));
+        assert!(tool.input_preview.is_some(), "request input survives");
+        assert!(tool.diff.is_some(), "request diff survives");
+        assert_eq!(
+            tool.result_preview.as_deref(),
+            Some("Applied edit and formatted file")
+        );
+        assert_eq!(tool.file_changes.len(), 1, "request file change survives");
+        assert!(
+            tool.apply_state.is_some(),
+            "settled result apply state survives"
+        );
+
+        let page_tool = views
+            .iter()
+            .find(|view| view.item_id.as_deref() == Some("tool:edit-1"))
+            .and_then(|view| view.tool.as_ref())
+            .expect("returned page view carries merged tool");
+        assert_eq!(page_tool.path.as_deref(), Some("/repo/src/lib.rs"));
+        assert_eq!(
+            page_tool.result_preview.as_deref(),
+            Some("Applied edit and formatted file")
+        );
     }
 }

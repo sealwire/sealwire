@@ -5973,6 +5973,7 @@ tree; got {}",
         state: Arc<RwLock<RelayState>>,
         mark_active_status_before_return: Arc<AtomicBool>,
         complete_before_return: Arc<AtomicBool>,
+        thread_transcripts: Arc<Mutex<HashMap<String, Vec<crate::protocol::TranscriptEntryView>>>>,
         transcript_pages:
             Arc<Mutex<HashMap<(String, Option<usize>), crate::provider::ThreadTranscriptPageData>>>,
         read_thread_calls: Arc<AtomicUsize>,
@@ -6000,6 +6001,9 @@ tree; got {}",
         // runtime WHILE the relay is awaiting this provider's page read, so the
         // page the relay gets back is already stale by the time it is served.
         advance_runtime_during_page_read: Arc<AtomicBool>,
+        // Same race, but on full `read_thread` resume: a stream event lands while
+        // the relay awaits the provider read that will later merge as stale history.
+        advance_runtime_during_thread_read_call: Arc<AtomicUsize>,
         // When set, `request_turn_stop` returns this error instead of Ok — models a
         // provider that has already dropped the turn the relay still tracks.
         interrupt_error: Arc<Mutex<Option<String>>>,
@@ -6026,6 +6030,7 @@ tree; got {}",
                 state,
                 mark_active_status_before_return: Arc::new(AtomicBool::new(false)),
                 complete_before_return: Arc::new(AtomicBool::new(false)),
+                thread_transcripts: Arc::new(Mutex::new(HashMap::new())),
                 transcript_pages: Arc::new(Mutex::new(HashMap::new())),
                 read_thread_calls: Arc::new(AtomicUsize::new(0)),
                 list_models_calls: Arc::new(AtomicUsize::new(0)),
@@ -6036,6 +6041,7 @@ tree; got {}",
                 start_turn_should_fail: Arc::new(AtomicBool::new(false)),
                 list_threads_should_fail: Arc::new(AtomicBool::new(false)),
                 advance_runtime_during_page_read: Arc::new(AtomicBool::new(false)),
+                advance_runtime_during_thread_read_call: Arc::new(AtomicUsize::new(0)),
                 interrupt_error: Arc::new(Mutex::new(None)),
                 interrupt_replace_turn: Arc::new(Mutex::new(None)),
             }
@@ -6179,7 +6185,7 @@ tree; got {}",
             &self,
             thread_id: &str,
         ) -> Result<crate::provider::ThreadSyncData, String> {
-            self.read_thread_calls.fetch_add(1, Ordering::Relaxed);
+            let call_index = self.read_thread_calls.fetch_add(1, Ordering::Relaxed) + 1;
             let thread = self
                 .threads
                 .lock()
@@ -6187,11 +6193,34 @@ tree; got {}",
                 .get(thread_id)
                 .cloned()
                 .ok_or_else(|| format!("{} thread '{thread_id}' was not found", self.name))?;
+            if self
+                .advance_runtime_during_thread_read_call
+                .load(Ordering::Relaxed)
+                == call_index
+            {
+                let mut relay = self.state.write().await;
+                relay.upsert_transcript_item_for_thread(
+                    thread_id,
+                    "D".to_string(),
+                    crate::protocol::TranscriptEntryKind::AgentText,
+                    Some("streamed while the full read was in flight".to_string()),
+                    "completed".to_string(),
+                    Some("live-turn".to_string()),
+                    None,
+                );
+            }
+            let transcript = self
+                .thread_transcripts
+                .lock()
+                .await
+                .get(thread_id)
+                .cloned()
+                .unwrap_or_default();
             Ok(crate::provider::ThreadSyncData {
                 thread,
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
-                transcript: Vec::new(),
+                transcript,
             })
         }
 
@@ -8106,7 +8135,89 @@ tree; got {}",
             after.active_turn_id.is_some(),
             "resuming a running thread must not drop its in-flight turn — a provider \
              that reports idle (Claude) on read_thread must not settle a live turn to \
-             idle, or the thread shows as not-running while still working"
+            idle, or the thread shows as not-running while still working"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_merge_keeps_live_rows_born_during_the_provider_read_at_the_tail() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let thread = claude.thread_summary("claude-read-race-thread", cwd);
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        let entry = |id: &str| crate::protocol::TranscriptEntryView {
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some(id.to_string()),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some(id.to_string()),
+            status: "completed".to_string(),
+            turn_id: Some(format!("turn-{id}")),
+            tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
+        };
+        claude
+            .thread_transcripts
+            .lock()
+            .await
+            .insert(thread.id.clone(), vec![entry("A"), entry("B"), entry("C")]);
+        // Resume reads twice: a preview for validation, then the read whose transcript
+        // is merged. Fire the live upsert during the merged read.
+        claude
+            .advance_runtime_during_thread_read_call
+            .store(2, Ordering::Relaxed);
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some(thread.id.clone());
+            relay.threads = vec![thread.clone()];
+            relay.assign_active_controller("device-1", unix_now());
+            let runtime = relay.ensure_runtime_for_thread(&thread.id);
+            runtime.summary = Some(thread.clone());
+            runtime.current_cwd = cwd.to_string();
+            runtime.current_status = "idle".to_string();
+        }
+
+        app.resume_session(ResumeSessionInput {
+            thread_id: thread.id.clone(),
+            approval_policy: None,
+            sandbox: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            provider: Some("claude_code".to_string()),
+        })
+        .await
+        .expect("resume should succeed");
+
+        let relay = app.relay.read().await;
+        let runtime = relay
+            .runtime_for_thread(&thread.id)
+            .expect("runtime after resume");
+        let ids: Vec<&str> = runtime
+            .transcript
+            .iter()
+            .map(|record| record.item_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["A", "B", "C", "D"],
+            "stale history from the read belongs before the live row born during it"
+        );
+        let keys: Vec<i64> = runtime
+            .transcript
+            .iter()
+            .map(|record| record.order_seq)
+            .collect();
+        assert!(
+            keys.windows(2).all(|pair| pair[0] < pair[1]),
+            "order keys must match merged runtime order: {keys:?}"
         );
     }
 
@@ -10216,6 +10327,98 @@ tree; got {}",
         assert!(
             codex.turn_images.lock().await.is_empty(),
             "a native fork with nothing to send must not open a turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_fork_merge_keeps_live_rows_born_during_the_cold_provider_read_at_the_tail() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        codex.native_fork.store(true, Ordering::Relaxed);
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = codex.thread_summary("codex-source", cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(source.id.clone(), source.clone());
+        let forked_thread_id = "codex-fork-2".to_string();
+        let entry = |id: &str| crate::protocol::TranscriptEntryView {
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some(id.to_string()),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some(id.to_string()),
+            status: "completed".to_string(),
+            turn_id: Some(format!("turn-{id}")),
+            tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
+        };
+        codex.thread_transcripts.lock().await.insert(
+            forked_thread_id.clone(),
+            vec![entry("A"), entry("B"), entry("C")],
+        );
+        // Fork reads the source thread first, then the new native-fork target. Fire
+        // a live background upsert while the cold target read is in flight.
+        codex
+            .advance_runtime_during_thread_read_call
+            .store(2, Ordering::Relaxed);
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(source.id.clone());
+            relay.threads = vec![source.clone()];
+            relay.assign_active_controller("device-1", unix_now());
+            let source_runtime = relay.ensure_runtime_for_thread(&source.id);
+            source_runtime.summary = Some(source.clone());
+            source_runtime.current_cwd = cwd.to_string();
+            source_runtime.current_status = "idle".to_string();
+            assert!(
+                relay.runtime_for_thread(&forked_thread_id).is_none(),
+                "precondition: the fork target has no runtime at read-boundary capture"
+            );
+        }
+
+        app.fork_session(ForkSessionInput {
+            source_thread_id: source.id.clone(),
+            up_to_item_id: None,
+            cwd: Some(cwd.to_string()),
+            initial_prompt: None,
+            model: Some("codex-model".to_string()),
+            approval_policy: None,
+            sandbox: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            provider: Some("codex".to_string()),
+            project_id: None,
+        })
+        .await
+        .expect("native fork should succeed");
+
+        let relay = app.relay.read().await;
+        let runtime = relay
+            .runtime_for_thread(&forked_thread_id)
+            .expect("fork target runtime");
+        let ids: Vec<&str> = runtime
+            .transcript
+            .iter()
+            .map(|record| record.item_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["A", "B", "C", "D"],
+            "stale history from the cold read belongs before the live row born during it"
+        );
+        let keys: Vec<i64> = runtime
+            .transcript
+            .iter()
+            .map(|record| record.order_seq)
+            .collect();
+        assert!(
+            keys.windows(2).all(|pair| pair[0] < pair[1]),
+            "order keys must match merged runtime order: {keys:?}"
         );
     }
 

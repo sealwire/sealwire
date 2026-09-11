@@ -257,6 +257,10 @@ impl AppState {
         images: Vec<ProviderImage>,
     ) -> Result<SessionSnapshot, String> {
         let forked_thread_id = start_result.thread.id.clone();
+        let read_started_at_revision = {
+            let relay = self.relay.read().await;
+            relay.transcript_clock()
+        };
         let thread_data = target_bridge.read_thread(&forked_thread_id).await?;
         {
             let mut relay = self.relay.write().await;
@@ -264,13 +268,14 @@ impl AppState {
             if let Some(models) = provider_models {
                 relay.set_available_models(models);
             }
-            relay.load_thread_data(
+            relay.load_thread_data_after_read_start(
                 thread_data,
                 approval_policy,
                 sandbox,
                 effort,
                 model,
                 device_id,
+                read_started_at_revision,
             );
             relay.set_thread_forked_from(&forked_thread_id, source_thread_id);
             if let Some(project_id) = project_id {
