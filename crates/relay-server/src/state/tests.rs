@@ -624,7 +624,7 @@ fn snapshot_strips_file_change_diffs_but_keeps_stored_diffs() {
         .expect("runtime")
         .transcript
         .iter()
-        .find(|record| record.item_id == "turn-diff:turn-1")
+        .find(|record| record.row_id == "turn-diff:turn-1")
         .expect("stored record");
     let stored_tool = stored.tool.as_ref().expect("stored tool");
     assert!(!stored_tool.file_changes_omitted);
@@ -1977,7 +1977,8 @@ fn persisted_state_round_trip_drops_ephemeral_fields() {
     relay.active_turn_id = Some("turn-ephemeral".to_string());
     relay.allowed_roots = vec!["/tmp/project".to_string()];
     relay.transcript.push(TranscriptRecord {
-        item_id: "history-0".to_string(),
+        row_id: "history-0".to_string(),
+        provider_item_id: None,
         kind: TranscriptEntryKind::AgentText,
         text: Some("hello".to_string()),
         status: "completed".to_string(),
@@ -5253,7 +5254,7 @@ mod paged_history_merge_tests {
         let record = runtime
             .transcript
             .iter()
-            .find(|record| record.item_id == "tool:t1")
+            .find(|record| record.row_id == "tool:t1")
             .expect("entry");
         assert_eq!(
             record.status, "completed",
@@ -5314,7 +5315,7 @@ mod paged_history_merge_tests {
         let record = runtime
             .transcript
             .iter()
-            .find(|record| record.item_id == "tool:t1")
+            .find(|record| record.row_id == "tool:t1")
             .expect("the tool entry must survive");
         let tool = record.tool.as_ref().expect("tool");
         assert_eq!(
@@ -5330,7 +5331,7 @@ mod paged_history_merge_tests {
             runtime
                 .transcript
                 .iter()
-                .filter(|r| r.item_id == "tool:t1")
+                .filter(|r| r.row_id == "tool:t1")
                 .count(),
             1,
             "still exactly one entry"
@@ -6157,7 +6158,7 @@ mod watched_threads {
         let stored = runtime
             .transcript
             .iter()
-            .find(|entry| entry.item_id == "cmd-1")
+            .find(|entry| entry.row_id == "cmd-1")
             .and_then(|entry| entry.text.clone())
             .expect("command text");
         assert_eq!(published.concat(), stored);
@@ -6696,9 +6697,10 @@ fn promoting_a_background_thread_does_not_rewind_the_real_threads_revision() {
         .runtimes
         .get_mut("claude-pending-1")
         .expect("pending runtime")
-        .transcript = vec![
+        .transcript = crate::state::relay::ThreadTranscript::from_rows(vec![
         TranscriptRecord {
-            item_id: "a".to_string(),
+            row_id: "a".to_string(),
+            provider_item_id: None,
             kind: TranscriptEntryKind::AgentText,
             text: Some("a".to_string()),
             status: "completed".to_string(),
@@ -6709,7 +6711,8 @@ fn promoting_a_background_thread_does_not_rewind_the_real_threads_revision() {
             last_live_upsert_revision: None,
         },
         TranscriptRecord {
-            item_id: "b".to_string(),
+            row_id: "b".to_string(),
+            provider_item_id: None,
             kind: TranscriptEntryKind::AgentText,
             text: Some("b".to_string()),
             status: "completed".to_string(),
@@ -6719,7 +6722,7 @@ fn promoting_a_background_thread_does_not_rewind_the_real_threads_revision() {
             withdrawn: false,
             last_live_upsert_revision: None,
         },
-    ];
+    ]);
 
     relay.promote_background_thread("claude-pending-1", "real-id");
 
@@ -6959,7 +6962,7 @@ fn order_seq_appends_increase_and_survive_withdrawal() {
             .unwrap()
             .transcript
             .iter()
-            .find(|r| r.item_id == id)
+            .find(|r| r.row_id == id)
             .map(|r| r.order_seq)
     };
     let seq_a = seq_of(&relay, "a").expect("row a");
@@ -7061,7 +7064,7 @@ fn a_definitively_failed_send_leaves_a_withdrawn_tombstone() {
         .unwrap()
         .transcript
         .iter()
-        .find(|record| record.item_id == reservation)
+        .find(|record| record.row_id == reservation)
         .expect("the row must SURVIVE withdrawal as a tombstone");
     assert!(row.withdrawn, "the surviving row is marked withdrawn");
 
@@ -7076,7 +7079,7 @@ fn a_definitively_failed_send_leaves_a_withdrawn_tombstone() {
         .unwrap()
         .transcript
         .iter()
-        .find(|record| record.item_id == second)
+        .find(|record| record.row_id == second)
         .expect("abandon leaves a tombstone too");
     assert!(row.withdrawn);
 
@@ -7130,7 +7133,7 @@ fn assert_delta_born_row_stays_at_the_tail(relay: &RelayState, label: &str) {
     let order = runtime
         .transcript
         .iter()
-        .map(|record| record.item_id.as_str())
+        .map(|record| record.row_id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(
         order,

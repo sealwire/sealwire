@@ -381,7 +381,7 @@ the trees the relay listed for it"
             let entry = runtime
                 .transcript
                 .iter()
-                .find(|entry| entry.item_id == item_id)
+                .find(|entry| entry.row_id == item_id)
                 .ok_or_else(|| format!("file change `{item_id}` was not found"))?;
             let tool = entry
                 .tool

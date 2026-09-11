@@ -1284,7 +1284,7 @@ mod disconnect_tests {
         let placeholder = runtime
             .transcript
             .iter()
-            .find(|entry| entry.item_id == reservation_id)
+            .find(|entry| entry.row_id == reservation_id)
             .expect("provider exit leaves the unbound placeholder as a tombstone");
         assert!(
             placeholder.withdrawn,

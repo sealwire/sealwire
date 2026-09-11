@@ -5,6 +5,7 @@ mod device;
 mod push;
 mod runtime;
 mod transcript;
+mod transcript_store;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -42,6 +43,7 @@ pub(crate) use self::runtime::{
     CodexStartReservation, ThreadRuntime, TurnFailure, TurnFailureKind, TurnSpend,
 };
 pub(crate) use self::transcript::TranscriptRecord;
+pub(crate) use self::transcript_store::ThreadTranscript;
 
 const REMOTE_ACTION_REPLAY_TTL_SECS: u64 = 600;
 const MAX_REMOTE_ACTION_REPLAY_ENTRIES: usize = 512;
@@ -490,7 +492,7 @@ pub struct RelayState {
     /// they were asked in; see `add_pending_ask_user_question`.
     next_ask_user_arrival_seq: u64,
     pub(super) runtimes: HashMap<String, ThreadRuntime>,
-    pub(super) transcript: Vec<TranscriptRecord>,
+    pub(super) transcript: ThreadTranscript,
     pub(super) logs: Vec<LogEntryView>,
     /// In-memory file-change apply state keyed by transcript `item_id`
     /// (typically `turn-diff:<turn_id>`). Never persisted: lost on relay
@@ -664,7 +666,7 @@ impl RelayState {
             pending_ask_user_questions: HashMap::new(),
             next_ask_user_arrival_seq: 0,
             runtimes: HashMap::new(),
-            transcript: Vec::new(),
+            transcript: ThreadTranscript::new(),
             logs: Vec::new(),
             apply_states: HashMap::new(),
             recent_remote_actions: HashMap::new(),

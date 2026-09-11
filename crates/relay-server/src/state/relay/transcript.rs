@@ -6,11 +6,17 @@ use crate::protocol::{
 
 use super::RelayState;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TranscriptMutationMeta {
     pub(crate) base_revision: u64,
     pub(crate) revision: u64,
     pub(crate) entry_seq: u64,
+    /// The row this mutation landed on, as the relay names it.
+    ///
+    /// Callers published the id THEY passed in, which for anything provider-named
+    /// is not necessarily the row's key — a delta addressed to a provider id no
+    /// client row carries is a delta no client can apply. Publish this instead.
+    pub(crate) row_id: String,
     /// The mutated row's birth-time order key (see `TranscriptRecord::order_seq`).
     pub(crate) order_seq: i64,
     pub(crate) server_time: u64,
@@ -49,7 +55,27 @@ pub(crate) const ORDER_SEQ_STEP: i64 = 1 << 20;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct TranscriptRecord {
-    pub(crate) item_id: String,
+    /// The relay's own name for this row. Minted once when the row is born and
+    /// never changed — a snapshot merge can only add and update, so a rename
+    /// would leave every client holding the old id beside the new one and show
+    /// one message twice.
+    ///
+    /// For a provider-born row the minted value is the id it was FIRST seen
+    /// under, which is what keeps the published `item_id` stable across this
+    /// change. That makes the value sometimes equal to a provider id, so it is
+    /// still never safe to hand this to a provider: translate through
+    /// `provider_item_id` at the boundary.
+    #[serde(rename = "item_id")]
+    pub(crate) row_id: String,
+    /// What the provider calls this row, once it has told us. `None` for a row
+    /// the relay created on its own (a send's reservation, `turn-diff:*`) that
+    /// the provider has not yet acknowledged, or never will.
+    ///
+    /// Further provider ids for the same row are held as aliases by
+    /// `ThreadTranscript`; this field is the first one bound, and exists so a
+    /// rebuilt store can recover the mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_item_id: Option<String>,
     pub(crate) kind: TranscriptEntryKind,
     pub(crate) text: Option<String>,
     pub(crate) status: String,
@@ -73,7 +99,10 @@ pub(crate) struct TranscriptRecord {
 impl TranscriptRecord {
     pub(crate) fn to_view(&self) -> TranscriptEntryView {
         TranscriptEntryView {
-            item_id: Some(self.item_id.clone()),
+            // The compatibility field: clients still call this `item_id`, and it
+            // still carries the relay's stable row identity — never the mutable
+            // provider id. Adding an explicit `row_id` to the wire is R3.
+            item_id: Some(self.row_id.clone()),
             order_seq: Some(self.order_seq),
             withdrawn: self.withdrawn,
             kind: self.kind,
@@ -108,13 +137,9 @@ impl RelayState {
 
     fn stamp_transcript_item_seq(&mut self, thread_id: &str, item_id: &str, revision: u64) {
         if let Some(runtime) = self.runtimes.get_mut(thread_id) {
-            if let Some(entry) = runtime
-                .transcript
-                .iter_mut()
-                .find(|entry| entry.item_id == item_id)
-            {
+            runtime.transcript.update_row(item_id, |entry| {
                 entry.last_live_upsert_revision = Some(revision);
-            }
+            });
         }
     }
 
@@ -128,30 +153,31 @@ impl RelayState {
         turn_id: Option<String>,
         tool: Option<ToolCallView>,
     ) -> TranscriptMutationMeta {
-        let stamp_id = item_id.clone();
-        let (entry_seq, order_seq) = {
+        let (stamp_id, entry_seq, order_seq) = {
             let runtime = self.ensure_runtime_for_thread(thread_id);
-            if let Some(index) = runtime
-                .transcript
-                .iter()
-                .position(|entry| entry.item_id == item_id)
-            {
-                let entry = &mut runtime.transcript[index];
-                entry.kind = kind;
-                entry.text = text.or(entry.text.take());
-                entry.status = status;
-                entry.turn_id = turn_id;
-                entry.tool = if kind == TranscriptEntryKind::ToolCall {
-                    merge_tool_call_view(entry.tool.take(), tool)
-                } else {
-                    tool
-                };
-                (index as u64 + 1, entry.order_seq)
+            // One resolve, up front: from here on the row is addressed by the
+            // relay's own key, never by whatever the caller named it.
+            if let Some(index) = runtime.transcript.resolve_index(&item_id) {
+                let row_id = runtime.transcript[index].row_id.clone();
+                let order_seq = runtime.transcript[index].order_seq;
+                runtime.transcript.update_row(&row_id, |entry| {
+                    entry.kind = kind;
+                    entry.text = text.or(entry.text.take());
+                    entry.status = status;
+                    entry.turn_id = turn_id;
+                    entry.tool = if kind == TranscriptEntryKind::ToolCall {
+                        merge_tool_call_view(entry.tool.take(), tool)
+                    } else {
+                        tool
+                    };
+                });
+                (row_id, index as u64 + 1, order_seq)
             } else {
                 let entry_seq = runtime.transcript.len() as u64 + 1;
                 let order_seq = runtime.alloc_tail_order_seq();
-                runtime.transcript.push(TranscriptRecord {
-                    item_id,
+                let row_id = runtime.transcript.push(TranscriptRecord {
+                    row_id: item_id,
+                    provider_item_id: None,
                     kind,
                     text,
                     status,
@@ -161,7 +187,7 @@ impl RelayState {
                     withdrawn: false,
                     last_live_upsert_revision: None,
                 });
-                (entry_seq, order_seq)
+                (row_id, entry_seq, order_seq)
             }
         };
         let (base_revision, revision) = self.bump_thread_transcript_revision(thread_id);
@@ -169,7 +195,7 @@ impl RelayState {
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
         }
-        transcript_mutation_meta(base_revision, revision, entry_seq, order_seq)
+        transcript_mutation_meta(base_revision, revision, entry_seq, order_seq, stamp_id)
     }
 
     fn upsert_transcript_item_legacy(
@@ -181,32 +207,37 @@ impl RelayState {
         turn_id: Option<String>,
         tool: Option<ToolCallView>,
     ) -> TranscriptMutationMeta {
-        if let Some(index) = self
-            .transcript
-            .iter()
-            .position(|entry| entry.item_id == item_id)
-        {
+        if let Some(index) = self.transcript.resolve_index(&item_id) {
             let (base_revision, revision) = self.bump_transcript_revision();
-            let entry = &mut self.transcript[index];
-            entry.kind = kind;
-            entry.text = text.or(entry.text.take());
-            entry.status = status;
-            entry.turn_id = turn_id;
-            entry.tool = if kind == TranscriptEntryKind::ToolCall {
-                merge_tool_call_view(entry.tool.take(), tool)
-            } else {
-                tool
-            };
-            entry.last_live_upsert_revision = Some(revision);
-            let order_seq = entry.order_seq;
-            return transcript_mutation_meta(base_revision, revision, index as u64 + 1, order_seq);
+            let row_id = self.transcript[index].row_id.clone();
+            let order_seq = self.transcript[index].order_seq;
+            self.transcript.update_row(&row_id, |entry| {
+                entry.kind = kind;
+                entry.text = text.or(entry.text.take());
+                entry.status = status;
+                entry.turn_id = turn_id;
+                entry.tool = if kind == TranscriptEntryKind::ToolCall {
+                    merge_tool_call_view(entry.tool.take(), tool)
+                } else {
+                    tool
+                };
+                entry.last_live_upsert_revision = Some(revision);
+            });
+            return transcript_mutation_meta(
+                base_revision,
+                revision,
+                index as u64 + 1,
+                order_seq,
+                row_id,
+            );
         }
 
         let entry_seq = self.transcript.len() as u64 + 1;
         let (base_revision, revision) = self.bump_transcript_revision();
         let order_seq = next_legacy_tail_order_seq(&self.transcript);
-        self.transcript.push(TranscriptRecord {
-            item_id,
+        let row_id = self.transcript.push(TranscriptRecord {
+            row_id: item_id,
+            provider_item_id: None,
             kind,
             text,
             status,
@@ -216,7 +247,7 @@ impl RelayState {
             withdrawn: false,
             last_live_upsert_revision: Some(revision),
         });
-        transcript_mutation_meta(base_revision, revision, entry_seq, order_seq)
+        transcript_mutation_meta(base_revision, revision, entry_seq, order_seq, row_id)
     }
 
     pub fn push_log(&mut self, kind: &str, message: impl Into<String>) {
@@ -297,27 +328,31 @@ impl RelayState {
         delta: &str,
         turn_id: &str,
     ) -> TranscriptMutationMeta {
-        let (entry_seq, order_seq, text_offset) = {
+        let (row_id, entry_seq, order_seq, text_offset) = {
             let runtime = self.ensure_runtime_for_thread(thread_id);
-            if let Some(index) = runtime
-                .transcript
-                .iter()
-                .position(|entry| entry.item_id == item_id)
-            {
-                let entry = &mut runtime.transcript[index];
-                entry.kind = TranscriptEntryKind::AgentText;
-                let text = entry.text.get_or_insert_with(String::new);
-                let text_offset = text.encode_utf16().count() as u64;
-                text.push_str(delta);
-                entry.status = "streaming".to_string();
-                entry.turn_id.get_or_insert_with(|| turn_id.to_string());
-                entry.tool = None;
-                (index as u64 + 1, entry.order_seq, text_offset)
+            if let Some(index) = runtime.transcript.resolve_index(item_id) {
+                let row_id = runtime.transcript[index].row_id.clone();
+                let order_seq = runtime.transcript[index].order_seq;
+                let text_offset = runtime
+                    .transcript
+                    .update_row(&row_id, |entry| {
+                        entry.kind = TranscriptEntryKind::AgentText;
+                        let text = entry.text.get_or_insert_with(String::new);
+                        let text_offset = text.encode_utf16().count() as u64;
+                        text.push_str(delta);
+                        entry.status = "streaming".to_string();
+                        entry.turn_id.get_or_insert_with(|| turn_id.to_string());
+                        entry.tool = None;
+                        text_offset
+                    })
+                    .unwrap_or(0);
+                (row_id, index as u64 + 1, order_seq, text_offset)
             } else {
                 let entry_seq = runtime.transcript.len() as u64 + 1;
                 let order_seq = runtime.alloc_tail_order_seq();
-                runtime.transcript.push(TranscriptRecord {
-                    item_id: item_id.to_string(),
+                let row_id = runtime.transcript.push(TranscriptRecord {
+                    row_id: item_id.to_string(),
+                    provider_item_id: None,
                     kind: TranscriptEntryKind::AgentText,
                     text: Some(delta.to_string()),
                     status: "streaming".to_string(),
@@ -327,7 +362,7 @@ impl RelayState {
                     withdrawn: false,
                     last_live_upsert_revision: None,
                 });
-                (entry_seq, order_seq, 0)
+                (row_id, entry_seq, order_seq, 0)
             }
         };
         let (base_revision, revision) = self.bump_thread_transcript_revision(thread_id);
@@ -343,6 +378,7 @@ impl RelayState {
             revision,
             entry_seq,
             order_seq,
+            row_id,
             text_offset,
         )
     }
@@ -353,25 +389,28 @@ impl RelayState {
         delta: &str,
         turn_id: &str,
     ) -> TranscriptMutationMeta {
-        if let Some(index) = self
-            .transcript
-            .iter()
-            .position(|entry| entry.item_id == item_id)
-        {
+        if let Some(index) = self.transcript.resolve_index(item_id) {
             let (base_revision, revision) = self.bump_transcript_revision();
-            let entry = &mut self.transcript[index];
-            entry.kind = TranscriptEntryKind::AgentText;
-            let text = entry.text.get_or_insert_with(String::new);
-            let text_offset = text.encode_utf16().count() as u64;
-            text.push_str(delta);
-            entry.status = "streaming".to_string();
-            entry.tool = None;
-            let order_seq = entry.order_seq;
+            let row_id = self.transcript[index].row_id.clone();
+            let order_seq = self.transcript[index].order_seq;
+            let text_offset = self
+                .transcript
+                .update_row(&row_id, |entry| {
+                    entry.kind = TranscriptEntryKind::AgentText;
+                    let text = entry.text.get_or_insert_with(String::new);
+                    let text_offset = text.encode_utf16().count() as u64;
+                    text.push_str(delta);
+                    entry.status = "streaming".to_string();
+                    entry.tool = None;
+                    text_offset
+                })
+                .unwrap_or(0);
             return transcript_mutation_meta_with_text_offset(
                 base_revision,
                 revision,
                 index as u64 + 1,
                 order_seq,
+                row_id,
                 text_offset,
             );
         }
@@ -441,7 +480,7 @@ impl RelayState {
         );
         if let Some(runtime) = self.runtimes.get_mut(thread_id) {
             runtime.codex_start_reservation = Some(super::CodexStartReservation {
-                item_id: item_id.clone(),
+                row_id: item_id.clone(),
                 turn_id: None,
             });
         }
@@ -461,20 +500,16 @@ impl RelayState {
         let Some(reservation) = runtime.codex_start_reservation.as_mut() else {
             return;
         };
-        if reservation.item_id != reservation_id {
+        if reservation.row_id != reservation_id {
             return;
         }
         if reservation.turn_id.is_some() {
             return;
         }
         reservation.turn_id = Some(turn_id.to_string());
-        if let Some(entry) = runtime
-            .transcript
-            .iter_mut()
-            .find(|entry| entry.item_id == reservation_id)
-        {
+        runtime.transcript.update_row(reservation_id, |entry| {
             entry.turn_id = Some(turn_id.to_string());
-        }
+        });
         let _ = self.bump_thread_transcript_revision(thread_id);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
@@ -500,7 +535,7 @@ impl RelayState {
             if reservation.turn_id.is_some() {
                 return true;
             }
-            let reservation_id = reservation.item_id.clone();
+            let reservation_id = reservation.row_id.clone();
             self.bind_codex_user_reservation(thread_id, &reservation_id, turn_id);
             return true;
         }
@@ -520,7 +555,7 @@ impl RelayState {
         let Some(reservation) = runtime.codex_start_reservation.as_ref() else {
             return;
         };
-        if reservation.item_id != reservation_id {
+        if reservation.row_id != reservation_id {
             return;
         }
         // A lifecycle event outranks a contradictory error response: Codex has
@@ -549,7 +584,7 @@ impl RelayState {
         };
         if reservation.turn_id.is_none() {
             if let Some(runtime) = self.runtimes.get_mut(thread_id) {
-                mark_reservation_row_withdrawn(&mut runtime.transcript, &reservation.item_id);
+                mark_reservation_row_withdrawn(&mut runtime.transcript, &reservation.row_id);
             }
             let _ = self.bump_thread_transcript_revision(thread_id);
             if self.active_thread_id.as_deref() == Some(thread_id) {
@@ -589,7 +624,7 @@ impl RelayState {
                     entry.kind == TranscriptEntryKind::UserText
                         && entry.turn_id.as_deref() == Some(turn_id.as_str())
                 })
-                .map(|entry| entry.item_id.clone())
+                .map(|entry| entry.row_id.clone())
         });
 
         // An early echo may provide the first identity for the sole outstanding
@@ -598,7 +633,7 @@ impl RelayState {
             if let Some(runtime) = self.runtimes.get(thread_id) {
                 if let Some(reservation) = runtime.codex_start_reservation.as_ref() {
                     if reservation.can_claim_turn(&runtime.transcript, &turn_id) {
-                        local_id = Some(reservation.item_id.clone());
+                        local_id = Some(reservation.row_id.clone());
                     }
                 }
             }
@@ -610,30 +645,31 @@ impl RelayState {
             return false;
         };
         if let Some(reservation) = runtime.codex_start_reservation.as_mut() {
-            if reservation.item_id == local_id && reservation.turn_id.is_none() {
+            if reservation.row_id == local_id && reservation.turn_id.is_none() {
                 reservation.turn_id = Some(turn_id.clone());
             }
         }
-        let Some(entry) = runtime
-            .transcript
-            .iter_mut()
-            .find(|entry| entry.item_id == local_id)
-        else {
-            return false;
-        };
         // The relay's own id STAYS this row's id. It was published to clients the
         // moment the send was accepted, and a snapshot merge can only add and update —
         // it cannot express a rename, so every client already holding the old id would
         // keep it beside the new one and show one send twice.
-        entry.kind = TranscriptEntryKind::UserText;
-        entry.text = if text.is_empty() {
-            entry.text.take()
-        } else {
-            Some(text)
-        };
-        entry.status = "completed".to_string();
-        entry.turn_id = Some(turn_id.clone());
-        entry.tool = None;
+        let reconciled = runtime
+            .transcript
+            .update_row(&local_id, |entry| {
+                entry.kind = TranscriptEntryKind::UserText;
+                entry.text = if text.is_empty() {
+                    entry.text.take()
+                } else {
+                    Some(text)
+                };
+                entry.status = "completed".to_string();
+                entry.turn_id = Some(turn_id.clone());
+                entry.tool = None;
+            })
+            .is_some();
+        if !reconciled {
+            return false;
+        }
         let _ = self.bump_thread_transcript_revision(thread_id);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
@@ -666,17 +702,14 @@ impl RelayState {
     }
 
     fn upsert_user_message_legacy(&mut self, item_id: String, text: String, turn_id: String) {
-        if let Some(index) = self
-            .transcript
-            .iter()
-            .position(|entry| entry.item_id == item_id)
-        {
+        if let Some(row_id) = self.transcript.resolve(&item_id).map(str::to_string) {
             self.bump_transcript_revision();
-            let entry = &mut self.transcript[index];
-            entry.kind = TranscriptEntryKind::UserText;
-            entry.text = Some(text);
-            entry.status = "completed".to_string();
-            entry.tool = None;
+            self.transcript.update_row(&row_id, |entry| {
+                entry.kind = TranscriptEntryKind::UserText;
+                entry.text = Some(text);
+                entry.status = "completed".to_string();
+                entry.tool = None;
+            });
             return;
         }
 
@@ -717,17 +750,14 @@ impl RelayState {
     }
 
     fn complete_agent_message_legacy(&mut self, item_id: String, text: String, turn_id: String) {
-        if let Some(index) = self
-            .transcript
-            .iter()
-            .position(|entry| entry.item_id == item_id)
-        {
+        if let Some(row_id) = self.transcript.resolve(&item_id).map(str::to_string) {
             self.bump_transcript_revision();
-            let entry = &mut self.transcript[index];
-            entry.kind = TranscriptEntryKind::AgentText;
-            entry.text = Some(text);
-            entry.status = "completed".to_string();
-            entry.tool = None;
+            self.transcript.update_row(&row_id, |entry| {
+                entry.kind = TranscriptEntryKind::AgentText;
+                entry.text = Some(text);
+                entry.status = "completed".to_string();
+                entry.tool = None;
+            });
             return;
         }
 
@@ -768,17 +798,14 @@ impl RelayState {
             return;
         }
 
-        if let Some(index) = self
-            .transcript
-            .iter()
-            .position(|entry| entry.item_id == item_id)
-        {
+        if let Some(row_id) = self.transcript.resolve(&item_id).map(str::to_string) {
             self.bump_transcript_revision();
-            let entry = &mut self.transcript[index];
-            entry.kind = TranscriptEntryKind::Command;
-            entry.text = Some(text);
-            entry.status = status;
-            entry.tool = None;
+            self.transcript.update_row(&row_id, |entry| {
+                entry.kind = TranscriptEntryKind::Command;
+                entry.text = Some(text);
+                entry.status = status;
+                entry.tool = None;
+            });
             return;
         }
 
@@ -832,18 +859,15 @@ impl RelayState {
         status: String,
         turn_id: String,
     ) {
-        if let Some(index) = self
-            .transcript
-            .iter()
-            .position(|entry| entry.item_id == item_id)
-        {
+        if let Some(row_id) = self.transcript.resolve(&item_id).map(str::to_string) {
             self.bump_transcript_revision();
-            let entry = &mut self.transcript[index];
-            entry.kind = TranscriptEntryKind::Command;
-            entry.text = Some(command);
-            entry.status = status;
-            entry.turn_id = Some(turn_id);
-            entry.tool = None;
+            self.transcript.update_row(&row_id, |entry| {
+                entry.kind = TranscriptEntryKind::Command;
+                entry.text = Some(command);
+                entry.status = status;
+                entry.turn_id = Some(turn_id);
+                entry.tool = None;
+            });
             return;
         }
 
@@ -871,31 +895,36 @@ impl RelayState {
         delta: &str,
     ) -> TranscriptMutationMeta {
         let mut separator_inserted = false;
-        let (entry_seq, order_seq) = {
+        let (row_id, entry_seq, order_seq) = {
             let runtime = self.ensure_runtime_for_thread(thread_id);
-            if let Some(index) = runtime
-                .transcript
-                .iter()
-                .position(|entry| entry.item_id == item_id)
-            {
-                let entry = &mut runtime.transcript[index];
-                entry.kind = TranscriptEntryKind::Command;
-                let text = entry.text.get_or_insert_with(String::new);
-                if !text.is_empty() && !text.ends_with('\n') && !delta.starts_with('\n') {
-                    text.push('\n');
-                    separator_inserted = true;
-                }
-                text.push_str(delta);
-                if entry.status.trim().is_empty() || entry.status == "completed" {
-                    entry.status = "running".to_string();
-                }
-                entry.tool = None;
-                (index as u64 + 1, entry.order_seq)
+            if let Some(index) = runtime.transcript.resolve_index(item_id) {
+                let row_id = runtime.transcript[index].row_id.clone();
+                let order_seq = runtime.transcript[index].order_seq;
+                separator_inserted = runtime
+                    .transcript
+                    .update_row(&row_id, |entry| {
+                        entry.kind = TranscriptEntryKind::Command;
+                        let text = entry.text.get_or_insert_with(String::new);
+                        let mut inserted = false;
+                        if !text.is_empty() && !text.ends_with('\n') && !delta.starts_with('\n') {
+                            text.push('\n');
+                            inserted = true;
+                        }
+                        text.push_str(delta);
+                        if entry.status.trim().is_empty() || entry.status == "completed" {
+                            entry.status = "running".to_string();
+                        }
+                        entry.tool = None;
+                        inserted
+                    })
+                    .unwrap_or(false);
+                (row_id, index as u64 + 1, order_seq)
             } else {
                 let entry_seq = runtime.transcript.len() as u64 + 1;
                 let order_seq = runtime.alloc_tail_order_seq();
-                runtime.transcript.push(TranscriptRecord {
-                    item_id: item_id.to_string(),
+                let row_id = runtime.transcript.push(TranscriptRecord {
+                    row_id: item_id.to_string(),
+                    provider_item_id: None,
                     kind: TranscriptEntryKind::Command,
                     text: Some(delta.to_string()),
                     status: "running".to_string(),
@@ -905,7 +934,7 @@ impl RelayState {
                     withdrawn: false,
                     last_live_upsert_revision: None,
                 });
-                (entry_seq, order_seq)
+                (row_id, entry_seq, order_seq)
             }
         };
         let (base_revision, revision) = self.bump_thread_transcript_revision(thread_id);
@@ -916,7 +945,7 @@ impl RelayState {
         }
         TranscriptMutationMeta {
             separator_inserted,
-            ..transcript_mutation_meta(base_revision, revision, entry_seq, order_seq)
+            ..transcript_mutation_meta(base_revision, revision, entry_seq, order_seq, row_id)
         }
     }
 
@@ -925,25 +954,29 @@ impl RelayState {
         item_id: &str,
         delta: &str,
     ) -> TranscriptMutationMeta {
-        if let Some(index) = self
-            .transcript
-            .iter()
-            .position(|entry| entry.item_id == item_id)
-        {
+        if let Some(index) = self.transcript.resolve_index(item_id) {
             let (base_revision, revision) = self.bump_transcript_revision();
-            let entry = &mut self.transcript[index];
-            entry.kind = TranscriptEntryKind::Command;
-            let text = entry.text.get_or_insert_with(String::new);
-            if !text.is_empty() && !text.ends_with('\n') && !delta.starts_with('\n') {
-                text.push('\n');
-            }
-            text.push_str(delta);
-            if entry.status.trim().is_empty() || entry.status == "completed" {
-                entry.status = "running".to_string();
-            }
-            entry.tool = None;
-            let order_seq = entry.order_seq;
-            return transcript_mutation_meta(base_revision, revision, index as u64 + 1, order_seq);
+            let row_id = self.transcript[index].row_id.clone();
+            let order_seq = self.transcript[index].order_seq;
+            self.transcript.update_row(&row_id, |entry| {
+                entry.kind = TranscriptEntryKind::Command;
+                let text = entry.text.get_or_insert_with(String::new);
+                if !text.is_empty() && !text.ends_with('\n') && !delta.starts_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(delta);
+                if entry.status.trim().is_empty() || entry.status == "completed" {
+                    entry.status = "running".to_string();
+                }
+                entry.tool = None;
+            });
+            return transcript_mutation_meta(
+                base_revision,
+                revision,
+                index as u64 + 1,
+                order_seq,
+                row_id,
+            );
         }
 
         self.upsert_transcript_item(
@@ -963,14 +996,12 @@ impl RelayState {
         state: FileChangeApplyState,
     ) -> bool {
         let runtime = self.ensure_runtime_for_thread(thread_id);
-        if !runtime
-            .transcript
-            .iter()
-            .any(|entry| entry.item_id == item_id)
-        {
+        // `apply_states` is keyed by ROW id, so an alias must be resolved first or
+        // the overlay lands under a key `transcript_views` never looks up.
+        let Some(row_id) = runtime.transcript.resolve(item_id).map(str::to_string) else {
             return false;
-        }
-        runtime.apply_states.insert(item_id.to_string(), state);
+        };
+        runtime.apply_states.insert(row_id, state);
         self.bump_thread_transcript_revision(thread_id);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
@@ -991,18 +1022,17 @@ impl RelayState {
         item_id: &str,
         status: &str,
     ) -> bool {
-        let Some(index) = self
+        let Some(row_id) = self
             .ensure_runtime_for_thread(thread_id)
             .transcript
-            .iter()
-            .position(|entry| entry.item_id == item_id)
+            .resolve(item_id)
+            .map(str::to_string)
         else {
             return false;
         };
-        {
-            let runtime = self.ensure_runtime_for_thread(thread_id);
-            runtime.transcript[index].status = status.to_string();
-        }
+        self.ensure_runtime_for_thread(thread_id)
+            .transcript
+            .update_row(&row_id, |entry| entry.status = status.to_string());
         self.bump_thread_transcript_revision(thread_id);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
@@ -1011,16 +1041,12 @@ impl RelayState {
     }
 
     fn set_transcript_item_status_legacy(&mut self, item_id: &str, status: &str) -> bool {
-        let Some(index) = self
-            .transcript
-            .iter()
-            .position(|entry| entry.item_id == item_id)
-        else {
+        let Some(row_id) = self.transcript.resolve(item_id).map(str::to_string) else {
             return false;
         };
         self.bump_transcript_revision();
-        let entry = &mut self.transcript[index];
-        entry.status = status.to_string();
+        self.transcript
+            .update_row(&row_id, |entry| entry.status = status.to_string());
         true
     }
 
@@ -1052,8 +1078,8 @@ impl RelayState {
 
         let entries = self
             .selected_runtime()
-            .map(|runtime| runtime.transcript.as_slice())
-            .unwrap_or(self.transcript.as_slice());
+            .map(|runtime| runtime.transcript.rows())
+            .unwrap_or(self.transcript.rows());
 
         for entry in entries {
             if entry.turn_id.as_deref() != Some(turn_id) {
@@ -1187,16 +1213,16 @@ fn should_merge_tool_file_changes(existing_item_type: &str, incoming_item_type: 
 /// deleted row lives on in every client that saw it. The marked row travels the
 /// ordinary update channel instead. Withdrawal never rewinds the order cursors,
 /// so the key stays spent either way.
-fn mark_reservation_row_withdrawn(transcript: &mut [TranscriptRecord], reservation_id: &str) {
-    for entry in transcript.iter_mut() {
+fn mark_reservation_row_withdrawn(transcript: &mut super::ThreadTranscript, reservation_id: &str) {
+    transcript.update_all(|entry| {
         if is_withdrawable_reservation_row(entry, reservation_id) {
             entry.withdrawn = true;
         }
-    }
+    });
 }
 
 fn is_withdrawable_reservation_row(entry: &TranscriptRecord, reservation_id: &str) -> bool {
-    entry.item_id == reservation_id
+    entry.row_id == reservation_id
         && entry.kind == TranscriptEntryKind::UserText
         && entry.turn_id.is_none()
 }
@@ -1220,12 +1246,14 @@ fn transcript_mutation_meta(
     revision: u64,
     entry_seq: u64,
     order_seq: i64,
+    row_id: String,
 ) -> TranscriptMutationMeta {
     TranscriptMutationMeta {
         base_revision,
         revision,
         entry_seq,
         order_seq,
+        row_id,
         server_time: super::super::unix_now(),
         text_offset: None,
         separator_inserted: false,
@@ -1237,6 +1265,7 @@ fn transcript_mutation_meta_with_text_offset(
     revision: u64,
     entry_seq: u64,
     order_seq: i64,
+    row_id: String,
     text_offset: u64,
 ) -> TranscriptMutationMeta {
     TranscriptMutationMeta {
@@ -1244,6 +1273,7 @@ fn transcript_mutation_meta_with_text_offset(
         revision,
         entry_seq,
         order_seq,
+        row_id,
         server_time: super::super::unix_now(),
         text_offset: Some(text_offset),
         separator_inserted: false,

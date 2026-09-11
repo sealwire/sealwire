@@ -968,7 +968,7 @@ async fn background_turn_completed_with_error_injects_transcript_error_entry() {
         .find(|entry| entry.kind == TranscriptEntryKind::Error)
         .expect("a failed background codex turn must inject an Error transcript entry");
     assert_eq!(entry.status, "failed");
-    assert_eq!(entry.item_id, "turn-error:turn-bg");
+    assert_eq!(entry.row_id, "turn-error:turn-bg");
     assert_eq!(entry.text.as_deref(), Some("Usage limit reached"));
 }
 
@@ -2834,9 +2834,9 @@ async fn codex_reservation_keeps_late_user_echo_before_output() {
     // The relay's own id, not Codex's: the row was published under it at the send
     // boundary and is never renamed.
     assert!(
-        turn_entries[0].item_id.starts_with("codex:user-reserve:"),
+        turn_entries[0].row_id.starts_with("codex:user-reserve:"),
         "{}",
-        turn_entries[0].item_id
+        turn_entries[0].row_id
     );
     assert_eq!(turn_entries[1].kind, TranscriptEntryKind::AgentText);
 }
@@ -2975,7 +2975,7 @@ async fn stale_codex_turn_started_cannot_claim_the_next_reservation() {
             .codex_start_reservation
             .as_ref()
             .expect("B reservation must survive stale A");
-        assert_eq!(reservation.item_id, b_reservation);
+        assert_eq!(reservation.row_id, b_reservation);
         assert!(reservation.turn_id.is_none());
     }
 
@@ -4689,13 +4689,13 @@ async fn codex_user_message_started_then_completed_stays_one_row_under_the_relay
                 1,
                 "one send must be one row, got {:?}",
                 rows.iter()
-                    .map(|entry| (entry.item_id.clone(), entry.status.clone()))
+                    .map(|entry| (entry.row_id.clone(), entry.status.clone()))
                     .collect::<Vec<_>>()
             );
             let mut ids = runtime
                 .transcript
                 .iter()
-                .map(|entry| entry.item_id.clone())
+                .map(|entry| entry.row_id.clone())
                 .collect::<Vec<_>>();
             let total = ids.len();
             ids.sort();
@@ -4712,7 +4712,7 @@ async fn codex_user_message_started_then_completed_stays_one_row_under_the_relay
     .await;
     let started = only_user_row(&state).await;
     assert_eq!(
-        started.item_id, reservation,
+        started.row_id, reservation,
         "the published id must not change"
     );
     assert_eq!(started.text.as_deref(), Some("啥叫snapshot SHA？"));
@@ -4729,7 +4729,7 @@ async fn codex_user_message_started_then_completed_stays_one_row_under_the_relay
     .await;
     let settled = only_user_row(&state).await;
     assert_eq!(
-        settled.item_id, reservation,
+        settled.row_id, reservation,
         "the published id must not change"
     );
     assert_eq!(settled.status, "completed");

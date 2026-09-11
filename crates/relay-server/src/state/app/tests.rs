@@ -2477,7 +2477,8 @@ is also what keeps the refusal from confirming it exists: {error}"
             runtime
                 .transcript
                 .push(crate::state::relay::TranscriptRecord {
-                    item_id: format!("item-{index}"),
+                    row_id: format!("item-{index}"),
+                    provider_item_id: None,
                     kind: crate::protocol::TranscriptEntryKind::ToolCall,
                     text: None,
                     status: status.to_string(),
@@ -2500,7 +2501,8 @@ is also what keeps the refusal from confirming it exists: {error}"
             runtime
                 .transcript
                 .push(crate::state::relay::TranscriptRecord {
-                    item_id: format!("item-{index}"),
+                    row_id: format!("item-{index}"),
+                    provider_item_id: None,
                     kind: crate::protocol::TranscriptEntryKind::ToolCall,
                     text: None,
                     status: "completed".to_string(),
@@ -2850,7 +2852,8 @@ is also what keeps the refusal from confirming it exists: {error}"
                 runtime
                     .transcript
                     .push(crate::state::relay::TranscriptRecord {
-                        item_id: format!("history-{index}"),
+                        row_id: format!("history-{index}"),
+                        provider_item_id: None,
                         kind: crate::protocol::TranscriptEntryKind::AgentText,
                         text: Some("older tail that will not be rebuilt".to_string()),
                         status: "completed".to_string(),
@@ -3120,7 +3123,8 @@ is also what keeps the refusal from confirming it exists: {error}"
             runtime
                 .transcript
                 .push(crate::state::relay::TranscriptRecord {
-                    item_id: "inserted-first-finished-last".to_string(),
+                    row_id: "inserted-first-finished-last".to_string(),
+                    provider_item_id: None,
                     kind: crate::protocol::TranscriptEntryKind::ToolCall,
                     text: None,
                     status: "completed".to_string(),
@@ -3133,7 +3137,8 @@ is also what keeps the refusal from confirming it exists: {error}"
             runtime
                 .transcript
                 .push(crate::state::relay::TranscriptRecord {
-                    item_id: "inserted-second-finished-first".to_string(),
+                    row_id: "inserted-second-finished-first".to_string(),
+                    provider_item_id: None,
                     kind: crate::protocol::TranscriptEntryKind::ToolCall,
                     text: None,
                     status: "completed".to_string(),
@@ -3480,7 +3485,8 @@ is also what keeps the refusal from confirming it exists: {error}"
                 runtime
                     .transcript
                     .push(crate::state::relay::TranscriptRecord {
-                        item_id: format!("chatter-{index}"),
+                        row_id: format!("chatter-{index}"),
+                        provider_item_id: None,
                         kind: crate::protocol::TranscriptEntryKind::AgentText,
                         text: Some("still working, no files touched".to_string()),
                         status: "completed".to_string(),
@@ -7470,8 +7476,8 @@ tree; got {}",
         let relay = app.relay.read().await;
         let runtime = relay.runtime_for_thread(&thread.id).expect("paged runtime");
         assert_eq!(runtime.transcript.len(), 2);
-        assert_eq!(runtime.transcript[0].item_id, "older");
-        assert_eq!(runtime.transcript[1].item_id, "tail");
+        assert_eq!(runtime.transcript[0].row_id, "older");
+        assert_eq!(runtime.transcript[1].row_id, "tail");
         assert_eq!(
             runtime
                 .summary
@@ -7665,7 +7671,7 @@ tree; got {}",
                 runtime
                     .transcript
                     .iter()
-                    .map(|record| record.item_id.clone())
+                    .map(|record| record.row_id.clone())
                     .collect::<Vec<_>>(),
                 runtime
                     .transcript
@@ -8256,7 +8262,7 @@ tree; got {}",
         let ids: Vec<&str> = runtime
             .transcript
             .iter()
-            .map(|record| record.item_id.as_str())
+            .map(|record| record.row_id.as_str())
             .collect();
         assert_eq!(
             ids,
@@ -10457,7 +10463,7 @@ tree; got {}",
         let ids: Vec<&str> = runtime
             .transcript
             .iter()
-            .map(|record| record.item_id.as_str())
+            .map(|record| record.row_id.as_str())
             .collect();
         assert_eq!(
             ids,
@@ -19706,7 +19712,8 @@ settings update: {error}"
         runtime
             .transcript
             .push(crate::state::relay::TranscriptRecord {
-                item_id,
+                row_id: item_id,
+                provider_item_id: None,
                 kind: crate::protocol::TranscriptEntryKind::ToolCall,
                 text: None,
                 status: "completed".to_string(),
@@ -19741,7 +19748,8 @@ settings update: {error}"
             runtime
                 .transcript
                 .push(crate::state::relay::TranscriptRecord {
-                    item_id,
+                    row_id: item_id,
+                    provider_item_id: None,
                     kind: crate::protocol::TranscriptEntryKind::AgentText,
                     text: Some("still working, no files touched".to_string()),
                     status: "completed".to_string(),
