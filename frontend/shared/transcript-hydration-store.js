@@ -670,40 +670,22 @@ function createMergedTailPagePatch(state, page, prepareEntry) {
     preparedPageEntries.push(toTranscriptEntry(prepared.entry || entry));
   }
 
-  // Numbered on both sides: place by number. The shared primitive splits the
-  // window at the page's first known id, which has no answer for a live row that
-  // belongs BETWEEN two page rows, and none at all when page and window share no
-  // id — there it declares the whole window newer and pushes it below the page.
-  // The merge rules (never-shorten text, tool/content_state rank, withdrawal)
-  // are mergeTranscriptEntry's either way; only the ORDERING differs.
-  let nextEntries;
-  let nextOrder;
-  if (
-    rowsAreOrderKeyed(preparedPageEntries)
-    && windowIsOrderKeyed(state.transcriptHydrationOrder, state.transcriptHydrationEntries)
-  ) {
-    const draft = {
-      order: [...state.transcriptHydrationOrder],
-      entries: new Map(state.transcriptHydrationEntries),
-    };
-    mergeWindowRowsInPlace(draft, preparedPageEntries, { mergeRow: mergeTranscriptEntry });
-    nextEntries = draft.entries;
-    nextOrder = draft.order;
-  } else {
-    const result = reconcileAuthoritativeTail({
-      order: state.transcriptHydrationOrder,
-      entries: state.transcriptHydrationEntries,
-      pageEntries: preparedPageEntries,
-      // This layer does not own the session revision (that lives on the
-      // rendered session, not the hydration window) — no revision inputs are
-      // supplied, and `result.revision` below is deliberately ignored; that is
-      // not a dropped result.
-      prevCursor: page.prev_cursor,
-      mergeEntry: mergeTranscriptEntry,
-    });
-    nextEntries = result.entries;
-    nextOrder = result.order;
-  }
+  // Ordering — keyed by order_seq when both sides allow it, legacy splice
+  // otherwise — belongs to the shared primitive, which Remote's tail repair
+  // uses too. This layer keeps only what is genuinely store state.
+  const result = reconcileAuthoritativeTail({
+    order: state.transcriptHydrationOrder,
+    entries: state.transcriptHydrationEntries,
+    pageEntries: preparedPageEntries,
+    // This layer does not own the session revision (that lives on the
+    // rendered session, not the hydration window) — no revision inputs are
+    // supplied, and `result.revision` below is deliberately ignored; that is
+    // not a dropped result.
+    prevCursor: page.prev_cursor,
+    mergeEntry: mergeTranscriptEntry,
+  });
+  const nextEntries = result.entries;
+  const nextOrder = result.order;
 
   const nextStatus = page.prev_cursor == null ? "complete" : "idle";
 

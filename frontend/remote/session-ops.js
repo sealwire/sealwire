@@ -339,6 +339,7 @@ export function applyTranscriptDelta({
   base_revision,
   revision,
   entry_seq,
+  order_seq,
   server_time,
   item_id,
   turn_id,
@@ -406,6 +407,7 @@ export function applyTranscriptDelta({
     base_revision,
     revision,
     entry_seq,
+    order_seq,
     server_time,
     item_id,
     turn_id,
@@ -490,6 +492,10 @@ function commitTranscriptDeltaAppend({
       delta_kind: event.delta_kind,
       turn_id: event.turn_id,
       entry_seq: event.entry_seq,
+      // The window places rows by this. Rebuilding the payload by hand is
+      // exactly how it went missing; forwarding it is what keeps a live remote
+      // thread eligible for the keyed merge at all.
+      order_seq: event.order_seq,
       text_offset: event.text_offset,
     });
     markTranscriptWindowProjectionPending(state);

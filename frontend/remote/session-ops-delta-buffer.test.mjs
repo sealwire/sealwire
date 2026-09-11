@@ -844,3 +844,79 @@ test("with a loaded hydration window, a brand-new item's entry_seq is recorded",
   assert.equal(created?.text, "a brand new message");
   assert.equal(created?.entry_seq, 42);
 });
+
+// ---------------------------------------------------------------------------
+// Birth numbers on the remote delta path. The window writer places rows by
+// order_seq, but remote hand-builds the payload it hands over, so the number has
+// to actually be forwarded — dropping it leaves every remote-created row
+// unnumbered and the whole window ineligible for the keyed merge.
+// ---------------------------------------------------------------------------
+
+const ORDER_STEP = 1 << 20;
+
+async function keyedRemoteWindow() {
+  const state = await freshRemoteSessionWithWindow();
+  state.transcriptHydrationEntries.set("item-1", {
+    ...state.transcriptHydrationEntries.get("item-1"),
+    order_seq: 0,
+  });
+  return state;
+}
+
+test("a remote delta forwards the row's birth number into the window", async () => {
+  activeBrowser || installBrowserStubs();
+  const state = await keyedRemoteWindow();
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 5,
+    revision: 6,
+    item_id: "item-2",
+    turn_id: "turn-1",
+    delta: "second row",
+    delta_kind: "agent_text",
+    text_offset: 0,
+    order_seq: ORDER_STEP,
+  });
+
+  assert.equal(
+    state.transcriptHydrationEntries.get("item-2").order_seq,
+    ORDER_STEP,
+    "remote must not strip order_seq while relaying the delta to the window"
+  );
+});
+
+test("a remote delta for a mid-numbered row lands in its slot, not at the tail", async () => {
+  activeBrowser || installBrowserStubs();
+  const state = await keyedRemoteWindow();
+  state.transcriptHydrationEntries.set("item-3", {
+    item_id: "item-3",
+    kind: "agent_text",
+    text: "later row",
+    status: "completed",
+    turn_id: "turn-1",
+    tool: null,
+    order_seq: 2 * ORDER_STEP,
+  });
+  state.transcriptHydrationOrder = ["item-1", "item-3"];
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 5,
+    revision: 6,
+    item_id: "item-2",
+    turn_id: "turn-1",
+    delta: "born earlier, streamed later",
+    delta_kind: "agent_text",
+    text_offset: 0,
+    order_seq: ORDER_STEP,
+  });
+
+  assert.deepEqual(
+    state.transcriptHydrationOrder,
+    ["item-1", "item-2", "item-3"],
+    "arrival order must not outrank the server's numbering on the remote surface either"
+  );
+});

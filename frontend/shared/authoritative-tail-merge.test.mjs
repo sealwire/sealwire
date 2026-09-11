@@ -206,3 +206,80 @@ test("a custom mergeEntry override replaces the default never-shorten overlay", 
   assert.equal(result.entries.get("a").merged, true);
   assert.equal(result.repaired[0].merged, true);
 });
+
+// ---------------------------------------------------------------------------
+// Keyed ordering: when every row carries a birth number and the window is in
+// number order, the split-point guesses above are not needed at all.
+// ---------------------------------------------------------------------------
+
+const S = 1 << 20;
+
+function keyed(itemId, orderSeq, overrides = {}) {
+  return {
+    item_id: itemId,
+    order_seq: orderSeq,
+    text: itemId,
+    kind: "agent_text",
+    status: "completed",
+    ...overrides,
+  };
+}
+
+function keyedWindow(...rows) {
+  return {
+    order: rows.map((row) => row.item_id),
+    entries: new Map(rows.map((row) => [row.item_id, row])),
+  };
+}
+
+test("a keyed page with NO shared id places the window by number instead of guessing", () => {
+  // The legacy answer here is "the window cannot be older, so put it below the
+  // page". That is a documented guess. The numbers make it a fact, and the fact
+  // is different: `a` is older than the page and `live` sits inside it.
+  const result = reconcileAuthoritativeTail({
+    ...keyedWindow(keyed("a", 0), keyed("live", 2 * S)),
+    pageEntries: [keyed("b", S), keyed("c", 3 * S)],
+    prevCursor: "older",
+  });
+
+  assert.deepEqual(result.order, ["a", "b", "live", "c"]);
+  assert.equal(result.truncated, true);
+  assert.equal(result.olderCursor, "older");
+});
+
+test("a keyed merge still reports `repaired` for exactly the page's rows", () => {
+  // Remote feeds `repaired` into syncTranscriptWindowWithRepairedEntries, so a
+  // keyed merge that forgot it would silently stop resyncing the window.
+  const result = reconcileAuthoritativeTail({
+    ...keyedWindow(keyed("a", 0)),
+    pageEntries: [keyed("b", S, { text: "fresh b" }), keyed("c", 2 * S)],
+    prevCursor: null,
+  });
+
+  assert.deepEqual(result.repaired.map((row) => row.item_id), ["b", "c"]);
+  assert.equal(result.repaired[0].text, "fresh b");
+  assert.equal(result.truncated, false);
+});
+
+test("a keyed merge keeps never-shorten text and absorbs a tombstone", () => {
+  const result = reconcileAuthoritativeTail({
+    ...keyedWindow(
+      keyed("a", 0, { text: "a much longer body already on screen" }),
+      keyed("w", S, { withdrawn: true })
+    ),
+    pageEntries: [keyed("a", 0, { text: "short" }), keyed("w", S, { withdrawn: false })],
+  });
+
+  assert.equal(result.entries.get("a").text, "a much longer body already on screen");
+  assert.equal(result.entries.get("w").withdrawn, true);
+});
+
+test("an unnumbered page keeps the legacy split-point behaviour exactly", () => {
+  const result = reconcileAuthoritativeTail({
+    order: ["live"],
+    entries: new Map([["live", entry("live", "streaming now")]]),
+    pageEntries: [entry("p1", "page one"), entry("p2", "page two")],
+  });
+
+  assert.deepEqual(result.order, ["p1", "p2", "live"]);
+});

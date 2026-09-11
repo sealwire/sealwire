@@ -160,6 +160,28 @@ export function mergeWindowRowsInPlace(window, rows, options = {}) {
   return changed;
 }
 
+// Sorting here is correct but it means the relay broke its own contract: it
+// builds pages from an ascending transcript. Say so once — a silent sort turns a
+// server-side ordering bug into a client-side cost nobody ever looks at. Once,
+// not per page, because this would otherwise fire on every scroll-up.
+let warnedAboutUnsortedPage = false;
+
+function warnOnceAboutUnsortedPage() {
+  if (warnedAboutUnsortedPage) {
+    return;
+  }
+  warnedAboutUnsortedPage = true;
+  // eslint-disable-next-line no-console
+  console?.warn?.(
+    "transcript page arrived out of order_seq order; sorting it. This is a relay-side "
+      + "contract violation, not a client fallback that should be relied on."
+  );
+}
+
+export function __resetUnsortedPageWarning() {
+  warnedAboutUnsortedPage = false;
+}
+
 function isAscendingByOrderSeq(rows) {
   for (let index = 1; index < rows.length; index += 1) {
     windowInsertionProbeCount += 1;
@@ -180,9 +202,11 @@ function mergeKeyedRowsLinearly(window, rows, { mergeRow = defaultMergeRow } = {
   // correctly, and sorting is the only honest answer for it. The check's own
   // comparisons are counted, so the linearity test cannot be fooled by work
   // hidden in a sort.
-  const sorted = isAscendingByOrderSeq(rows)
-    ? rows
-    : [...rows].sort((left, right) => left.order_seq - right.order_seq);
+  let sorted = rows;
+  if (!isAscendingByOrderSeq(rows)) {
+    warnOnceAboutUnsortedPage();
+    sorted = [...rows].sort((left, right) => left.order_seq - right.order_seq);
+  }
   const order = window.order;
   const merged = [];
   let changed = false;
