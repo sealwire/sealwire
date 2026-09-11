@@ -25,6 +25,53 @@ import {
   serverTimeSeconds,
 } from "../shared/session-view-model.js";
 import { reduceTranscriptDeltaEvent } from "../shared/transcript-event-reducer.js";
+import { transcriptRowKey } from "../shared/transcript-row-key.js";
+import {
+  mergeWindowRowsInPlace,
+  rowHasOrderKey,
+  rowsAreOrderKeyed,
+} from "../shared/transcript-window-reducer.js";
+
+// The pin keeps its rows as an array; the reducer works on {order, entries}.
+// Nothing else about the pin changes, so this is the whole adapter.
+function pinDraft(entries) {
+  const order = [];
+  const byKey = new Map();
+  for (const entry of entries) {
+    const key = transcriptRowKey(entry);
+    if (!key || byKey.has(key)) {
+      continue;
+    }
+    order.push(key);
+    byKey.set(key, entry);
+  }
+  return { order, entries: byKey };
+}
+
+function draftRows(draft) {
+  return draft.order.map((key) => draft.entries.get(key));
+}
+
+// Keyed AND already in number order. An empty pin is trivially both. Same rule
+// as the hydration window: a number on every row is not enough, because a row
+// the legacy path placed and something numbered afterwards would otherwise let
+// the reducer measure against neighbours that are themselves misplaced.
+function pinRowsAreKeyedInOrder(entries) {
+  let previous = null;
+  for (const entry of entries) {
+    if (!transcriptRowKey(entry) || !rowHasOrderKey(entry)) {
+      return false;
+    }
+    if (previous != null && entry.order_seq < previous) {
+      return false;
+    }
+    previous = entry.order_seq;
+  }
+  return true;
+}
+
+const keepHeldRow = (existing, incoming) => existing ?? incoming;
+const takeIncomingRow = (_existing, incoming) => incoming;
 
 // Any non-active thread can be viewed read-only. (The active thread is live —
 // projecting it would hide approvals/streaming, so it is never eligible.)
@@ -281,8 +328,23 @@ export function mergeOlderViewOnlyPage(pin, page) {
   if (!pin || !page || page.thread_id !== pin.threadId) {
     return pin;
   }
+  const priorEntries = pin.entries || [];
+  const pageEntries = page.entries || [];
+  // Numbered on both sides: place by number. The overlap rule is unchanged —
+  // the pin's copy of a shared id wins, and only the tombstone rides across.
+  if (rowsAreOrderKeyed(pageEntries) && pinRowsAreKeyedInOrder(priorEntries)) {
+    const draft = pinDraft(priorEntries);
+    mergeWindowRowsInPlace(draft, pageEntries, { mergeRow: keepHeldRow });
+    return {
+      ...pin,
+      entries: draftRows(draft),
+      historyExtended: true,
+      olderCursor: page.prev_cursor ?? null,
+    };
+  }
+
   const existingIds = new Set(
-    (pin.entries || []).map((entry) => entry?.item_id).filter(Boolean)
+    priorEntries.map((entry) => entry?.item_id).filter(Boolean)
   );
   const older = (page.entries || []).filter(
     (entry) => !entry?.item_id || !existingIds.has(entry.item_id)
@@ -336,6 +398,27 @@ export function mergeRefreshedViewOnlyPage(pin, page) {
     // Nothing retained, so no history is being held open any more.
     return { entries: freshEntries, historyExtended: false, olderCursor: page.prev_cursor ?? null };
   }
+  // Numbered on both sides: place by number instead of localizing the page by
+  // id-intersection, then by entry_seq, then giving up and taking the page alone
+  // — that last fallback discards the reader's paged-in history AND any live row
+  // below the page, which is the worst outcome of the three.
+  if (rowsAreOrderKeyed(freshEntries) && pinRowsAreKeyedInOrder(priorEntries)) {
+    const freshMin = Math.min(...freshEntries.map((entry) => entry.order_seq));
+    // The bound `historyExtended` has always been for: a reader who never
+    // scrolled must not accumulate every older page forever. Numbers make the
+    // "older than this page" test exact instead of positional.
+    const retained = historyExtended
+      ? priorEntries
+      : priorEntries.filter((entry) => entry.order_seq >= freshMin);
+    const draft = pinDraft(retained);
+    mergeWindowRowsInPlace(draft, freshEntries, { mergeRow: takeIncomingRow });
+    return {
+      entries: draftRows(draft),
+      historyExtended: historyExtended && retained.some((entry) => entry.order_seq < freshMin),
+      olderCursor: historyExtended ? pin?.olderCursor ?? null : page.prev_cursor ?? null,
+    };
+  }
+
   // The page's copies replace the pin's; a tombstone only the pin knows must ride along.
   const freshAbsorbed = absorbWithdrawnById(freshEntries, priorEntries);
 
