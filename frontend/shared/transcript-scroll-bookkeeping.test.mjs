@@ -689,3 +689,97 @@ test("hasPosition is a pure existence check that does not refresh LRU recency", 
   assert.equal(engine.hasPosition("a"), false, "the untouched-by-hasPosition key was evicted first");
   assert.equal(engine.hasPosition("b"), true);
 });
+
+// ---------------------------------------------------------------------------
+// Generation ownership. Everything retained here is keyed by ITEM IDS, and a new
+// relay run renames the same messages, so nothing retained under one run may be
+// applied under another.
+// ---------------------------------------------------------------------------
+
+function seeded(generation) {
+  const engine = createTranscriptScrollBookkeeping();
+  engine.syncGeneration(generation);
+  engine.commitSnapshot({
+    key: "T",
+    threadId: "T",
+    entries: [userEntry("u1")],
+    scrollElement: { scrollTop: 40, scrollHeight: 400, clientHeight: 100 },
+  });
+  engine.rememberView("T", { scrollTop: 40, scrollHeight: 400, clientHeight: 100 });
+  engine.applyRestore({
+    key: "T",
+    nextEntries: [userEntry("u1")],
+    nextThreadId: "T",
+    pendingInputRequestIds: [],
+    restoredScrollPosition: null,
+    scrollElement: { scrollTop: 40, scrollHeight: 400, clientHeight: 100 },
+  });
+  return engine;
+}
+
+test("a generation change drops the snapshot, positions and anchors", () => {
+  const engine = seeded("gen-a");
+  assert.ok(engine.getSnapshot(), "seeded");
+  assert.equal(engine.hasPosition("T"), true, "seeded");
+
+  assert.equal(engine.syncGeneration("gen-b"), true, "the change is reported");
+
+  assert.equal(engine.getSnapshot(), null, "a snapshot naming gen-a ids cannot be applied");
+  assert.equal(engine.hasPosition("T"), false, "nor a position filed against them");
+  assert.equal(engine.anchorsFor("T").size, 0, "nor the anchored-id set");
+});
+
+test("both empty boundaries count as a change", () => {
+  // "" -> "gen-a" is a relay that gained stamping, "gen-a" -> "" is one that
+  // lost it. Both renumber, so both must drop what the other run's ids anchored.
+  const upgrading = seeded("");
+  assert.equal(upgrading.syncGeneration("gen-a"), true, "empty -> stamped resets");
+  assert.equal(upgrading.getSnapshot(), null);
+
+  const downgrading = seeded("gen-a");
+  assert.equal(downgrading.syncGeneration(""), true, "stamped -> empty resets");
+  assert.equal(downgrading.getSnapshot(), null);
+});
+
+test("an old relay's steady empty generation never resets, and repeats do not either", () => {
+  // The termination property: a relay that never stamps holds "" forever, so
+  // this must be a no-op every render rather than wiping the reader's place on
+  // each one. null/undefined normalise to the same "" so they do not flap.
+  const engine = seeded("");
+  for (const value of ["", null, undefined, "", null]) {
+    assert.equal(engine.syncGeneration(value), false, `steady empty: ${String(value)}`);
+  }
+  assert.ok(engine.getSnapshot(), "the reader's place survives");
+  assert.equal(engine.hasPosition("T"), true);
+
+  const stamped = seeded("gen-a");
+  for (let i = 0; i < 5; i += 1) {
+    assert.equal(stamped.syncGeneration("gen-a"), false, "a steady stamped generation is a no-op");
+  }
+  assert.ok(stamped.getSnapshot());
+});
+
+test("mount adopts the live generation instead of reading itself as a change", () => {
+  const engine = createTranscriptScrollBookkeeping();
+  assert.equal(engine.syncGeneration("gen-a"), false, "first sync is adoption, not a reset");
+});
+
+test("same-generation promotion still retargets", () => {
+  // The deferred-Claude rekey must keep working: it is a rename WITHIN one run,
+  // not a run change, and the fence must not eat it.
+  const engine = seeded("gen-a");
+  assert.equal(engine.syncGeneration("gen-a"), false);
+
+  assert.equal(
+    engine.retarget({
+      fromKey: "T",
+      toKey: "T2",
+      fromThreadId: "T",
+      toThreadId: "T2",
+    }),
+    true,
+    "the promoted pair is still rekeyed across all three retained things"
+  );
+  assert.equal(engine.hasPosition("T2"), true);
+  assert.equal(engine.getSnapshot().activeThreadId, "T2");
+});
