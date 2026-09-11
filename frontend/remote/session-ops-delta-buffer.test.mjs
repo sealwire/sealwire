@@ -961,3 +961,92 @@ test("a conflicting or stale repaired copy cannot move, renumber, or resurrect a
   assert.deepEqual(state.transcriptHydrationOrder, ["item-1", "item-2"], "order untouched");
   assert.equal(state.transcriptHydrationKeyed, true, "and the proof still holds");
 });
+
+// ---------------------------------------------------------------------------
+// B5: the remote view-only generation transition, driven directly.
+//
+// The projection SPREADS the incoming snapshot and injects the previously
+// rendered entries, so without the fence the old run's ids would be handed the
+// new run's generation and nothing downstream could tell. The pin must be
+// dropped and refetched, never relabelled.
+//
+// The pin is seeded through a test hook because setting it the real way means
+// viewRemoteThread, which fetches over the broker/E2EE stack; the transition
+// under test is the real applySessionSnapshot path.
+// ---------------------------------------------------------------------------
+
+function genSnapshot(generation, threadId, entries) {
+  return {
+    active_thread_id: threadId,
+    transcript_generation: generation,
+    transcript_revision: 7,
+    transcript: entries,
+    thread_activity: [],
+  };
+}
+
+async function pinnedUnder(generation) {
+  const state = await freshRemoteSession();
+  const ops = await import("./session-ops.js");
+  state.session = { ...genSnapshot(generation, "viewed", [baseEntry()]), view_only: true };
+  state.realSession = genSnapshot(generation, "live-thread", [baseEntry()]);
+  ops.__setViewOnlyPinForTest("viewed", generation);
+  return { state, ops };
+}
+
+test("a gen-B snapshot drops the gen-A pin instead of rewrapping its entries", async () => {
+  activeBrowser || installBrowserStubs();
+  const { state, ops } = await pinnedUnder("gen-a");
+
+  ops.applySessionSnapshot(
+    genSnapshot("gen-b", "live-thread", [
+      { ...baseEntry(), item_id: "gen-b-item", text: "new run" },
+    ])
+  );
+
+  const pin = ops.__readViewOnlyPinForTest();
+  assert.equal(pin.threadId, null, "the gen-a pin is released, not relabelled");
+  assert.equal(pin.generation, "gen-b", "and the new run is recorded");
+  const ids = (state.session.transcript || []).map((entry) => entry.item_id);
+  assert.deepEqual(ids, ["gen-b-item"], "no gen-a id survives into the gen-b render");
+  assert.equal(new Set(ids).size, ids.length, "and nothing is duplicated");
+});
+
+test("the transition happens once and does not loop on later gen-B snapshots", async () => {
+  activeBrowser || installBrowserStubs();
+  const { state, ops } = await pinnedUnder("gen-a");
+
+  ops.applySessionSnapshot(genSnapshot("gen-b", "live-thread", [baseEntry()]));
+  const afterFirst = ops.__readViewOnlyPinForTest();
+
+  // Two more snapshots under the SAME run must be ordinary renders. A fence that
+  // re-fired here would refetch on every snapshot for the rest of the session.
+  ops.applySessionSnapshot(genSnapshot("gen-b", "live-thread", [baseEntry()]));
+  ops.applySessionSnapshot(genSnapshot("gen-b", "live-thread", [baseEntry()]));
+
+  assert.deepEqual(ops.__readViewOnlyPinForTest(), afterFirst, "converged, no repeated reset");
+  assert.equal(state.session.transcript.length, 1, "and the render stays stable");
+});
+
+test("the one-sided-empty boundary transitions in both directions", async () => {
+  // An old relay stamps nothing and a new one does, so "" <-> "gen-x" is a real
+  // upgrade/downgrade — the same rename, and it must not be read as "no change".
+  activeBrowser || installBrowserStubs();
+
+  const upgrading = await pinnedUnder("");
+  upgrading.ops.applySessionSnapshot(genSnapshot("gen-b", "live-thread", [baseEntry()]));
+  assert.equal(upgrading.ops.__readViewOnlyPinForTest().threadId, null, "empty -> stamped releases");
+
+  const downgrading = await pinnedUnder("gen-a");
+  downgrading.ops.applySessionSnapshot(genSnapshot("", "live-thread", [baseEntry()]));
+  assert.equal(downgrading.ops.__readViewOnlyPinForTest().threadId, null, "stamped -> empty releases");
+});
+
+test("a same-generation snapshot keeps the pin", async () => {
+  activeBrowser || installBrowserStubs();
+  const { ops } = await pinnedUnder("gen-a");
+
+  ops.applySessionSnapshot(genSnapshot("gen-a", "live-thread", [baseEntry()]));
+
+  assert.equal(ops.__readViewOnlyPinForTest().threadId, "viewed", "no run change, no release");
+});
