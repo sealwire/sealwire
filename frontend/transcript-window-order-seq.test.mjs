@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import {
   applyTranscriptDeltaToWindow,
   createMergedTranscriptHydrationPagePatch,
+  prepareTranscriptHydrationState,
 } from "./shared/transcript-hydration-store.js";
 
 const S = 1 << 20;
@@ -233,4 +234,36 @@ test("an out-of-order window is repaired once the authoritative tail covers it",
   const patch = createMergedTranscriptHydrationPagePatch(outOfOrder, page, { prepend: false });
 
   assert.deepEqual(patch.transcriptHydrationOrder, ["a", "b", "c"]);
+});
+
+// AUDIT FINDING — the snapshot tail merge is the one numbered path still placing
+// rows positionally. `createMergedSnapshotTailPatch` anchors a new tail id
+// against ids it already holds (placeOrderedTailIds), which cannot see that a
+// live row the tail does not carry belongs BETWEEN two tail rows.
+//
+// Left unmigrated deliberately: that function runs on EVERY snapshot and is
+// explicitly optimised to touch only the tail, never the whole window
+// (markdown/transcript-perf-freeze-analysis.md). The O(window) `windowIsOrderKeyed`
+// gate the other paths use would reintroduce exactly the freeze it documents, so
+// this needs a cheaper keyed check of its own rather than a copy of that gate.
+test("snapshot tail merge still orders positionally (known gap)", { skip: "audit finding — needs a per-snapshot-cheap gate" }, () => {
+  const state = {
+    ...pageState(row("a", 0), row("live", 2 * S, { status: "running" })),
+    session: { active_thread_id: "thread-1", transcript_revision: 10 },
+    transcriptHydrationBaseSnapshot: { active_thread_id: "thread-1" },
+    transcriptHydrationSignature: "thread-1|turn-1|stale",
+    transcriptHydrationStatus: "complete",
+    transcriptHydrationOlderCursor: null,
+    transcriptHydrationPromise: null,
+  };
+  const prepared = prepareTranscriptHydrationState(state, {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-2",
+    transcript_revision: 11,
+    transcript_truncated: true,
+    transcript: [row("b", S), row("c", 3 * S)],
+  });
+  Object.assign(state, prepared.patch);
+
+  assert.deepEqual(state.transcriptHydrationOrder, ["a", "b", "live", "c"]);
 });
