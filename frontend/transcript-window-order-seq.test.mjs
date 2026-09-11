@@ -167,3 +167,70 @@ test("an unnumbered delta still appends, so an old relay degrades instead of bre
 
   assert.deepEqual(state.transcriptHydrationOrder, ["a", "b"]);
 });
+
+test("an authoritative tail page interleaves a live row by number", () => {
+  // The legacy tail merge splits the window at the page's first known id:
+  // everything before stays above the page, everything after stays below. A live
+  // delta row that belongs BETWEEN two page rows has no such split point, and
+  // when the page and window share no id at all the whole window is declared
+  // "newer" and pushed below the page — a guess the numbers make unnecessary.
+  const state = pageState(row("a", 0), row("live", 2 * S));
+  const page = {
+    thread_id: "thread-1",
+    prev_cursor: "older-cursor",
+    entries: [row("b", S), row("c", 3 * S)],
+  };
+
+  const patch = createMergedTranscriptHydrationPagePatch(state, page, { prepend: false });
+
+  assert.deepEqual(patch.transcriptHydrationOrder, ["a", "b", "live", "c"]);
+  assert.equal(patch.transcriptHydrationOlderCursor, "older-cursor", "cursor still comes from the page");
+  assert.equal(patch.transcriptHydrationStatus, "idle");
+  assert.equal(patch.transcriptHydrationTailReady, true);
+});
+
+test("the keyed tail page keeps the never-shorten text rule and the tombstone", () => {
+  // The tail path's whole job is content repair, so the keyed branch has to carry
+  // mergeTranscriptEntry's rules, not just place rows.
+  const held = row("a", 0, { text: "a much longer body already on screen" });
+  const withdrawnRow = row("w", S, { withdrawn: true });
+  const state = pageState(held, withdrawnRow);
+  const page = {
+    thread_id: "thread-1",
+    prev_cursor: null,
+    entries: [row("a", 0, { text: "short" }), row("w", S, { withdrawn: false })],
+  };
+
+  const patch = createMergedTranscriptHydrationPagePatch(state, page, { prepend: false });
+
+  assert.equal(
+    patch.transcriptHydrationEntries.get("a").text,
+    "a much longer body already on screen",
+    "an unexpectedly short page entry must not shorten visible text"
+  );
+  assert.equal(
+    patch.transcriptHydrationEntries.get("w").withdrawn,
+    true,
+    "a page copy serialized before the withdrawal must not resurrect the row"
+  );
+  assert.equal(patch.transcriptHydrationStatus, "complete", "prev_cursor null completes the window");
+});
+
+test("an out-of-order window is repaired once the authoritative tail covers it", () => {
+  // The isolation rule has to have a way out: a window that went out of order is
+  // refused by the keyed gate, but an authoritative page that carries every row
+  // is the whole window, so the page's own order becomes the window's.
+  const outOfOrder = {
+    ...pageState(row("a", 0), row("c", 2 * S), row("b", S)),
+    transcriptHydrationOrder: ["a", "c", "b"],
+  };
+  const page = {
+    thread_id: "thread-1",
+    prev_cursor: null,
+    entries: [row("a", 0), row("b", S), row("c", 2 * S)],
+  };
+
+  const patch = createMergedTranscriptHydrationPagePatch(outOfOrder, page, { prepend: false });
+
+  assert.deepEqual(patch.transcriptHydrationOrder, ["a", "b", "c"]);
+});
