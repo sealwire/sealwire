@@ -364,7 +364,7 @@ impl AppState {
                 runtime
                     .transcript
                     .iter()
-                    .find(|entry| entry.item_id == input.item_id)
+                    .find(|entry| entry.row_id == input.item_id)
                     .filter(|entry| {
                         if entry.kind != crate::protocol::TranscriptEntryKind::ToolCall {
                             return true;

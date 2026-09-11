@@ -2239,7 +2239,7 @@ async fn a_turn_already_settled_elsewhere_is_not_pushed_about_twice() {
         runtime
             .transcript
             .iter()
-            .any(|entry| entry.item_id == "turn-error:acp-turn-1"),
+            .any(|entry| entry.row_id == "turn-error:acp-turn-1"),
         "the failure must still be in the transcript"
     );
 }
@@ -2587,7 +2587,7 @@ async fn a_background_thread_failure_lands_its_transcript_entry_and_its_push() {
     let entry = runtime
         .transcript
         .iter()
-        .find(|entry| entry.item_id == "turn-error:acp-turn-7")
+        .find(|entry| entry.row_id == "turn-error:acp-turn-7")
         .expect("the durable failure entry is the only thing a remote client sees");
     assert_eq!(entry.text.as_deref(), Some("the background turn died"));
     assert_eq!(runtime.active_turn_id, None, "the turn must be settled");

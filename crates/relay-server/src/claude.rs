@@ -4118,7 +4118,7 @@ mod tests {
                 runtime
                     .transcript
                     .iter()
-                    .find(|entry| entry.item_id == "tool:write-b")
+                    .find(|entry| entry.row_id == "tool:write-b")
                     .and_then(|entry| entry.last_live_upsert_revision)
             })
             .expect("completed write should have a seq");

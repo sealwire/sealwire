@@ -2608,7 +2608,7 @@ mod tests {
             .transcript
             .iter()
             .filter(|entry| entry.kind == TranscriptEntryKind::Reasoning)
-            .map(|entry| entry.item_id.as_str())
+            .map(|entry| entry.row_id.as_str())
             .collect();
         assert_eq!(
             reasoning.len(),

@@ -10,7 +10,7 @@ use crate::{
 
 use super::{
     thread_status_is_working, PendingApproval, PendingAskUserQuestion, ThreadSessionSettings,
-    TranscriptRecord,
+    ThreadTranscript, TranscriptRecord,
 };
 
 /// A terminal, sanitized record of the last failed turn on this thread — never
@@ -106,18 +106,20 @@ impl TurnFailureKind {
 /// cannot safely be distinguished from a newer start.
 #[derive(Debug, Clone)]
 pub(crate) struct CodexStartReservation {
-    pub(crate) item_id: String,
+    /// The relay's key for the reserved row — never a provider id. The provider
+    /// has not answered yet when this is minted, and its later echo binds a
+    /// `provider_item_id` to the row rather than renaming it.
+    pub(crate) row_id: String,
     pub(crate) turn_id: Option<String>,
 }
 
 impl CodexStartReservation {
-    pub(crate) fn can_claim_turn(&self, transcript: &[TranscriptRecord], turn_id: &str) -> bool {
+    pub(crate) fn can_claim_turn(&self, transcript: &ThreadTranscript, turn_id: &str) -> bool {
         if let Some(bound) = self.turn_id.as_deref() {
             return bound == turn_id;
         }
         let reservation_index = transcript
-            .iter()
-            .position(|entry| entry.item_id == self.item_id)
+            .index_of_row(&self.row_id)
             .unwrap_or(transcript.len());
         !transcript.iter().enumerate().any(|(index, entry)| {
             entry.turn_id.as_deref() == Some(turn_id)
@@ -160,7 +162,7 @@ pub(crate) struct ThreadRuntime {
     /// client may still hold the old row under it.
     pub(crate) next_tail_order_seq: i64,
     pub(crate) next_head_order_seq: i64,
-    pub(crate) transcript: Vec<TranscriptRecord>,
+    pub(crate) transcript: ThreadTranscript,
     pub(crate) provider_history_cursor: Option<usize>,
     pub(crate) provider_history_paged: bool,
     pub(crate) apply_states: HashMap<String, FileChangeApplyState>,
@@ -231,7 +233,7 @@ impl ThreadRuntime {
             transcript_revision,
             next_tail_order_seq: 0,
             next_head_order_seq: -super::transcript::ORDER_SEQ_STEP,
-            transcript: Vec::new(),
+            transcript: ThreadTranscript::new(),
             provider_history_cursor: None,
             provider_history_paged: false,
             apply_states: HashMap::new(),
@@ -275,7 +277,7 @@ impl ThreadRuntime {
             transcript_revision,
             next_tail_order_seq: 0,
             next_head_order_seq: -super::transcript::ORDER_SEQ_STEP,
-            transcript: Vec::new(),
+            transcript: ThreadTranscript::new(),
             provider_history_cursor: None,
             provider_history_paged: false,
             apply_states: HashMap::new(),
@@ -304,7 +306,14 @@ impl ThreadRuntime {
             .into_iter()
             .enumerate()
             .map(|(index, entry)| TranscriptRecord {
-                item_id: entry.item_id.unwrap_or_else(|| format!("history-{index}")),
+                row_id: entry
+                    .item_id
+                    .clone()
+                    .unwrap_or_else(|| format!("history-{index}")),
+                // A read is the provider naming its own rows, so the id it gave
+                // is a provider id as well as this row's key. Recording it is
+                // what lets a fork or detail request translate back.
+                provider_item_id: entry.item_id,
                 kind: entry.kind,
                 text: entry.text,
                 status: entry.status,
@@ -357,7 +366,7 @@ impl ThreadRuntime {
                 .checked_mul(super::transcript::ORDER_SEQ_STEP)
                 .expect("order_seq tail space exhausted"),
             next_head_order_seq: -super::transcript::ORDER_SEQ_STEP,
-            transcript,
+            transcript: ThreadTranscript::from_rows(transcript),
             provider_history_cursor: None,
             provider_history_paged: false,
             apply_states: HashMap::new(),
@@ -527,13 +536,15 @@ impl ThreadRuntime {
         let fallback_page = requested_cursor
             .map(|cursor| cursor.to_string())
             .unwrap_or_else(|| "tail".to_string());
-        let mut records = entries
+        let records = entries
             .into_iter()
             .enumerate()
             .map(|(index, entry)| TranscriptRecord {
-                item_id: entry
+                row_id: entry
                     .item_id
+                    .clone()
                     .unwrap_or_else(|| format!("provider-history-{fallback_page}-{index}")),
+                provider_item_id: entry.item_id,
                 kind: entry.kind,
                 text: entry.text,
                 status: entry.status,
@@ -550,14 +561,14 @@ impl ThreadRuntime {
         let mut first_by_id: HashMap<String, usize> = HashMap::new();
         let mut deduped: Vec<TranscriptRecord> = Vec::with_capacity(records.len());
         for record in records {
-            match first_by_id.get(&record.item_id) {
+            match first_by_id.get(&record.row_id) {
                 Some(&kept_index) => {
                     // Full-content merge: the second copy can carry the settled
                     // status and fuller text, not just the tool payload.
                     let _ = merge_runtime_entry(&mut deduped[kept_index], record);
                 }
                 None => {
-                    first_by_id.insert(record.item_id.clone(), deduped.len());
+                    first_by_id.insert(record.row_id.clone(), deduped.len());
                     deduped.push(record);
                 }
             }
@@ -567,7 +578,7 @@ impl ThreadRuntime {
         // record that absorbed it.
         let page_item_ids = records
             .iter()
-            .map(|record| record.item_id.clone())
+            .map(|record| record.row_id.clone())
             .collect::<Vec<_>>();
         // Paging can split a tool's request from its result across pages. The newer page
         // then holds a RESULT-only stub (no path, no diff) while the older page holds the
@@ -575,38 +586,34 @@ impl ThreadRuntime {
         // duplicate loses that edit outright. Merge into the existing entry instead: the
         // older page supplies the tool metadata, the newer one keeps the settled status
         // it already recorded.
-        let index_by_item_id = self
-            .transcript
-            .iter()
-            .enumerate()
-            .map(|(index, record)| (record.item_id.clone(), index))
-            .collect::<HashMap<_, _>>();
-        records.retain(|record| match index_by_item_id.get(&record.item_id) {
-            Some(&existing_index) => {
-                let existing = &mut self.transcript[existing_index];
-                let _ = merge_tool_call_into(&mut existing.tool, record.tool.clone());
-                existing.withdrawn |= record.withdrawn;
+        // Resolved through the store, so a page that names a row by a provider id
+        // the relay already bound merges into it instead of appearing twice.
+        let mut absorbed: Vec<(String, TranscriptRecord)> = Vec::new();
+        records.retain(|record| match self.transcript.resolve(&record.row_id) {
+            Some(existing_row_id) => {
+                absorbed.push((existing_row_id.to_string(), record.clone()));
                 false
             }
             None => true,
         });
+        for (row_id, record) in absorbed {
+            self.transcript.update_row(&row_id, |existing| {
+                let _ = merge_tool_call_into(&mut existing.tool, record.tool.clone());
+                existing.withdrawn |= record.withdrawn;
+            });
+        }
         // Numbered AFTER the merge-away pass, so merged duplicates consume no keys.
         // Issued keys on existing rows never move — that is the whole contract.
         let base = self.alloc_head_order_seq_block(records.len());
         for (offset, record) in records.iter_mut().enumerate() {
             record.order_seq = base + (offset as i64) * super::transcript::ORDER_SEQ_STEP;
         }
-        records.extend(std::mem::take(&mut self.transcript));
-        self.transcript = records;
+        records.extend(self.transcript.rows().to_vec());
+        self.transcript.replace_all(records);
         self.provider_history_cursor = prev_cursor;
         page_item_ids
             .iter()
-            .filter_map(|item_id| {
-                self.transcript
-                    .iter()
-                    .find(|record| &record.item_id == item_id)
-                    .map(TranscriptRecord::to_view)
-            })
+            .filter_map(|item_id| self.transcript.get(item_id).map(TranscriptRecord::to_view))
             .collect()
     }
 
@@ -651,7 +658,7 @@ impl ThreadRuntime {
             self.provider_history_cursor = None;
             self.provider_history_paged = false;
         }
-        self.merge_transcript_records(fresh.transcript)
+        self.merge_transcript_records(fresh.transcript.rows().to_vec())
     }
 
     #[must_use]
@@ -675,7 +682,7 @@ impl ThreadRuntime {
             self.provider_history_paged = false;
         }
         self.merge_transcript_records_after_read_start(
-            fresh.transcript,
+            fresh.transcript.rows().to_vec(),
             Some(read_started_at_revision),
         )
     }
@@ -697,9 +704,17 @@ impl ThreadRuntime {
         read_started_at_revision: Option<u64>,
     ) -> bool {
         let mut changed = false;
+        // Resolved against the store: an incoming row named by a provider id the
+        // relay already bound must count as "the read knows this row", or the
+        // walk-back below treats the live row as unknown and inserts before it.
         let incoming_ids = records
             .iter()
-            .map(|record| record.item_id.clone())
+            .filter_map(|record| {
+                self.transcript
+                    .resolve(&record.row_id)
+                    .map(str::to_string)
+                    .or_else(|| Some(record.row_id.clone()))
+            })
             .collect::<std::collections::HashSet<_>>();
         // Unknown rows are held until the next incoming row that IS known — that
         // anchor says where they belong. Tail keys here would re-order history the
@@ -708,28 +723,36 @@ impl ThreadRuntime {
         let mut pending: Vec<TranscriptRecord> = Vec::new();
         let mut tail_pending_floor = 0;
         for record in records {
-            match self
-                .transcript
-                .iter()
-                .position(|entry| entry.item_id == record.item_id)
-            {
-                Some(_) => {
+            // THE resolve: a row id, or any provider id bound to one. The row
+            // this lands on is addressed by its own key from here on, so a
+            // history copy that names it differently still merges in place.
+            match self.transcript.resolve(&record.row_id).map(str::to_string) {
+                Some(row_id) => {
                     if !pending.is_empty() {
                         let anchor = self
                             .transcript
-                            .iter()
-                            .position(|entry| entry.item_id == record.item_id)
+                            .index_of_row(&row_id)
                             .expect("anchor located above");
                         self.insert_records_before(anchor, std::mem::take(&mut pending));
                         changed = true;
                     }
                     let index = self
                         .transcript
-                        .iter()
-                        .position(|entry| entry.item_id == record.item_id)
+                        .index_of_row(&row_id)
                         .expect("anchor survives the insert");
-                    if merge_runtime_entry(&mut self.transcript[index], record) {
+                    let provider_item_id = record.provider_item_id.clone();
+                    let merged = self
+                        .transcript
+                        .update_row(&row_id, |existing| merge_runtime_entry(existing, record))
+                        .unwrap_or(false);
+                    if merged {
                         changed = true;
+                    }
+                    // The history copy may be the first thing to tell us what the
+                    // provider calls this row.
+                    if let Some(provider_item_id) = provider_item_id {
+                        self.transcript
+                            .bind_provider_item_id(&row_id, &provider_item_id);
                     }
                     tail_pending_floor = index + 1;
                 }
@@ -745,7 +768,7 @@ impl ThreadRuntime {
             while boundary > tail_pending_floor {
                 let candidate = &self.transcript[boundary - 1];
                 if live_upserted_after_read_start(candidate, read_started_at_revision)
-                    && !incoming_ids.contains(candidate.item_id.as_str())
+                    && !incoming_ids.contains(candidate.row_id.as_str())
                 {
                     boundary -= 1;
                 } else {
@@ -791,18 +814,28 @@ impl ThreadRuntime {
                 record.order_seq = prev_key + spacing * (offset as i64 + 1);
             }
         }
-        for (offset, record) in records.into_iter().enumerate() {
-            self.transcript.insert(index + offset, record);
-        }
+        self.transcript.insert_before(index, records);
     }
 
+    /// Last-resort dedupe for a user row the resolver could not place.
+    ///
+    /// Text equality is a poor identity and it collapses two genuinely identical
+    /// sends into one row, so it is reached ONLY when nothing has bound a
+    /// provider id to the local row yet. Once the echo binds one, the resolver
+    /// above matches by id and this never runs.
     fn has_equivalent_user_message(&self, entry: &TranscriptRecord) -> bool {
-        entry.kind == crate::protocol::TranscriptEntryKind::UserText
-            && entry.text.is_some()
-            && self.transcript.iter().any(|candidate| {
-                candidate.kind == crate::protocol::TranscriptEntryKind::UserText
-                    && candidate.text == entry.text
-            })
+        if entry.kind != crate::protocol::TranscriptEntryKind::UserText || entry.text.is_none() {
+            return false;
+        }
+        self.transcript.iter().any(|candidate| {
+            candidate.kind == crate::protocol::TranscriptEntryKind::UserText
+                && candidate.text == entry.text
+                // A row the provider has already named is addressable by id; if
+                // this incoming row were the same one, the resolver would have
+                // said so. Matching it on text here is what makes a repeated
+                // identical send vanish.
+                && candidate.provider_item_id.is_none()
+        })
     }
 }
 
@@ -983,7 +1016,8 @@ mod tests {
 
     fn tool_record(item_id: &str, kind: Option<&str>) -> TranscriptRecord {
         TranscriptRecord {
-            item_id: item_id.to_string(),
+            row_id: item_id.to_string(),
+            provider_item_id: None,
             // History-shaped: a re-read carries no live sequence number.
             order_seq: 0,
             withdrawn: false,
@@ -1164,7 +1198,8 @@ mod tests {
     fn prepend_provider_history_is_idempotent_for_retried_pages() {
         let mut rt = runtime("t1", "idle");
         rt.transcript.push(TranscriptRecord {
-            item_id: "tail".to_string(),
+            row_id: "tail".to_string(),
+            provider_item_id: None,
             kind: crate::protocol::TranscriptEntryKind::AgentText,
             text: Some("tail".to_string()),
             status: "completed".to_string(),
@@ -1192,7 +1227,7 @@ mod tests {
         assert_eq!(
             rt.transcript
                 .iter()
-                .map(|record| record.item_id.as_str())
+                .map(|record| record.row_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["older", "tail"]
         );
@@ -1240,7 +1275,8 @@ mod tests {
         let mut rt = runtime("t1", "idle");
         let issued = rt.alloc_tail_order_seq();
         rt.transcript.push(TranscriptRecord {
-            item_id: "tail-1".to_string(),
+            row_id: "tail-1".to_string(),
+            provider_item_id: None,
             kind: crate::protocol::TranscriptEntryKind::AgentText,
             text: Some("tail".to_string()),
             status: "completed".to_string(),
@@ -1295,7 +1331,8 @@ mod tests {
         let mut rt = runtime("t1", "idle");
         let issued = rt.alloc_tail_order_seq();
         rt.transcript.push(TranscriptRecord {
-            item_id: "row-1".to_string(),
+            row_id: "row-1".to_string(),
+            provider_item_id: None,
             kind: crate::protocol::TranscriptEntryKind::AgentText,
             text: Some("short".to_string()),
             status: "running".to_string(),
@@ -1308,7 +1345,8 @@ mod tests {
 
         let incoming = vec![
             TranscriptRecord {
-                item_id: "row-1".to_string(),
+                row_id: "row-1".to_string(),
+                provider_item_id: None,
                 kind: crate::protocol::TranscriptEntryKind::AgentText,
                 text: Some("short but different".to_string()),
                 status: "completed".to_string(),
@@ -1320,7 +1358,8 @@ mod tests {
                 last_live_upsert_revision: None,
             },
             TranscriptRecord {
-                item_id: "row-2".to_string(),
+                row_id: "row-2".to_string(),
+                provider_item_id: None,
                 kind: crate::protocol::TranscriptEntryKind::AgentText,
                 text: Some("new".to_string()),
                 status: "completed".to_string(),
@@ -1346,7 +1385,8 @@ mod tests {
     #[test]
     fn merge_places_prefix_and_interior_rows_between_their_neighbours() {
         let record = |id: &str| TranscriptRecord {
-            item_id: id.to_string(),
+            row_id: id.to_string(),
+            provider_item_id: None,
             kind: crate::protocol::TranscriptEntryKind::AgentText,
             text: Some(id.to_string()),
             status: "completed".to_string(),
@@ -1365,7 +1405,7 @@ mod tests {
             ..record("C")
         });
         assert!(rt.merge_transcript_records(vec![record("A"), record("B"), record("C")]));
-        let ids: Vec<&str> = rt.transcript.iter().map(|r| r.item_id.as_str()).collect();
+        let ids: Vec<&str> = rt.transcript.iter().map(|r| r.row_id.as_str()).collect();
         assert_eq!(ids, ["A", "B", "C"], "Vec order must match history order");
         let keys: Vec<i64> = rt.transcript.iter().map(|r| r.order_seq).collect();
         assert!(
@@ -1387,7 +1427,7 @@ mod tests {
             ..record("C")
         });
         assert!(rt.merge_transcript_records(vec![record("A"), record("B"), record("C")]));
-        let ids: Vec<&str> = rt.transcript.iter().map(|r| r.item_id.as_str()).collect();
+        let ids: Vec<&str> = rt.transcript.iter().map(|r| r.row_id.as_str()).collect();
         assert_eq!(ids, ["A", "B", "C"]);
         let keys: Vec<i64> = rt.transcript.iter().map(|r| r.order_seq).collect();
         assert!(
@@ -1407,7 +1447,8 @@ mod tests {
     #[test]
     fn merge_keeps_terminal_rows_after_a_known_live_stamped_anchor() {
         let record = |id: &str| TranscriptRecord {
-            item_id: id.to_string(),
+            row_id: id.to_string(),
+            provider_item_id: None,
             kind: crate::protocol::TranscriptEntryKind::AgentText,
             text: Some(id.to_string()),
             status: "completed".to_string(),
@@ -1433,7 +1474,7 @@ mod tests {
 
         assert!(rt.merge_transcript_records(vec![record("A"), record("D"), record("E")]));
 
-        let ids: Vec<&str> = rt.transcript.iter().map(|r| r.item_id.as_str()).collect();
+        let ids: Vec<&str> = rt.transcript.iter().map(|r| r.row_id.as_str()).collect();
         assert_eq!(ids, ["A", "D", "E"]);
         let keys: Vec<i64> = rt.transcript.iter().map(|r| r.order_seq).collect();
         assert_eq!(keys[0], a_key, "A keeps its issued key");
@@ -1478,7 +1519,7 @@ mod tests {
             "duplicates merged, named once"
         );
         assert_eq!(
-            rt.transcript.iter().filter(|r| r.item_id == "dup").count(),
+            rt.transcript.iter().filter(|r| r.row_id == "dup").count(),
             1
         );
     }
@@ -1487,7 +1528,8 @@ mod tests {
     #[test]
     fn merge_places_unanchored_history_before_the_live_suffix() {
         let record = |id: &str| TranscriptRecord {
-            item_id: id.to_string(),
+            row_id: id.to_string(),
+            provider_item_id: None,
             kind: crate::protocol::TranscriptEntryKind::AgentText,
             text: Some(id.to_string()),
             status: "completed".to_string(),
@@ -1517,7 +1559,7 @@ mod tests {
             vec![record("A"), record("B"), record("C")],
             Some(8)
         ));
-        let ids: Vec<&str> = rt.transcript.iter().map(|r| r.item_id.as_str()).collect();
+        let ids: Vec<&str> = rt.transcript.iter().map(|r| r.row_id.as_str()).collect();
         assert_eq!(
             ids,
             ["A", "B", "C", "D"],
@@ -1540,7 +1582,7 @@ mod tests {
             vec![record("A"), record("B"), record("C")],
             Some(8)
         ));
-        let ids: Vec<&str> = rt.transcript.iter().map(|r| r.item_id.as_str()).collect();
+        let ids: Vec<&str> = rt.transcript.iter().map(|r| r.row_id.as_str()).collect();
         assert_eq!(ids, ["A", "B", "C", "D"]);
     }
 
@@ -1571,7 +1613,7 @@ mod tests {
         let kept = rt
             .transcript
             .iter()
-            .find(|r| r.item_id == "dup")
+            .find(|r| r.row_id == "dup")
             .expect("merged row");
         assert_eq!(kept.status, "completed", "the settled copy's status wins");
         assert_eq!(kept.text.as_deref(), Some("second, fuller text"));
@@ -1654,7 +1696,7 @@ mod tests {
         let kept = rt
             .transcript
             .iter()
-            .find(|record| record.item_id == "tool:edit-1")
+            .find(|record| record.row_id == "tool:edit-1")
             .expect("merged tool row");
         assert_eq!(kept.status, "completed");
         assert_eq!(
