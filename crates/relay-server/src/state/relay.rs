@@ -900,6 +900,13 @@ impl RelayState {
     /// walk back under a client's cursor, and a client that sees the number rewind
     /// discards content. Saturating instead parks at the ceiling, which costs gap
     /// detection but never data. A real relay reaches neither.
+    /// The revision every row born from here on will exceed. Sampled before a
+    /// provider read so the merge afterwards can tell "arrived while I was
+    /// reading" from "history the read already covered".
+    pub(crate) fn transcript_revision_floor(&self) -> u64 {
+        self.transcript_clock
+    }
+
     pub(super) fn next_transcript_revision(&mut self) -> u64 {
         self.transcript_clock = self.transcript_clock.saturating_add(1);
         self.transcript_clock
@@ -3903,7 +3910,40 @@ impl RelayState {
         effort: &str,
         model: &str,
     ) {
-        self.hydrate_background_runtime_inner(data, approval_policy, sandbox, effort, model, true);
+        self.hydrate_background_runtime_inner(
+            data,
+            approval_policy,
+            sandbox,
+            effort,
+            model,
+            true,
+            None,
+        );
+    }
+
+    /// Same, for a cold page read that may have LOST the hydration race: if a
+    /// live event built the runtime while the provider read was in flight, the
+    /// fetched history is merged into it under `read_started_at_revision`
+    /// instead of being dropped.
+    pub(crate) fn hydrate_background_runtime_after_read_start(
+        &mut self,
+        data: ThreadSyncData,
+        approval_policy: &str,
+        sandbox: &str,
+        effort: &str,
+        model: &str,
+        remember_settings: bool,
+        read_started_at_revision: u64,
+    ) {
+        self.hydrate_background_runtime_inner(
+            data,
+            approval_policy,
+            sandbox,
+            effort,
+            model,
+            remember_settings,
+            Some(read_started_at_revision),
+        );
     }
 
     pub(crate) fn hydrate_background_runtime_without_remembering_settings(
@@ -3914,7 +3954,15 @@ impl RelayState {
         effort: &str,
         model: &str,
     ) {
-        self.hydrate_background_runtime_inner(data, approval_policy, sandbox, effort, model, false);
+        self.hydrate_background_runtime_inner(
+            data,
+            approval_policy,
+            sandbox,
+            effort,
+            model,
+            false,
+            None,
+        );
     }
 
     fn hydrate_background_runtime_inner(
@@ -3925,9 +3973,38 @@ impl RelayState {
         effort: &str,
         model: &str,
         remember_settings: bool,
+        read_started_at_revision: Option<u64>,
     ) {
         let thread_id = data.thread.id.clone();
         if self.runtimes.contains_key(&thread_id) {
+            // A live event built this runtime while the provider read was in
+            // flight. The page we just fetched is still real history — dropping
+            // it here while the caller goes on to record its cursor claims the
+            // runtime covers history it never absorbed. Merge instead, under the
+            // read-start boundary, so rows born during the read keep their place.
+            let Some(read_started_at_revision) = read_started_at_revision else {
+                return;
+            };
+            let transcript_revision = self.next_transcript_revision();
+            let fresh = ThreadRuntime::from_sync_data(
+                data.clone(),
+                approval_policy,
+                sandbox,
+                effort,
+                model,
+                unix_now(),
+                transcript_revision,
+            );
+            if let Some(existing) = self.runtimes.get_mut(&thread_id) {
+                if existing.merge_fresh_history_after_read_start(fresh, read_started_at_revision) {
+                    existing.transcript_revision = transcript_revision;
+                }
+            }
+            if remember_settings {
+                self.remember_thread_settings(&thread_id, approval_policy, sandbox, effort, model);
+            }
+            self.sync_selected_runtime_to_fields();
+            self.upsert_thread(data.thread);
             return;
         }
         let now = unix_now();

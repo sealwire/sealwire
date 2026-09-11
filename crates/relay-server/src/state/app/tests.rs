@@ -7635,6 +7635,59 @@ tree; got {}",
             "the page claims revision {} (runtime is at {runtime_revision}) but omits              the entry that revision includes; the client would believe it is caught              up and never repair",
             page.revision
         );
+
+        // Losing the race must not COST the fetched history. Dropping it while
+        // still recording its cursor left the runtime claiming to cover a page
+        // it never absorbed, and the reader simply lost those messages.
+        let served = page
+            .entries
+            .iter()
+            .filter_map(|entry| entry.item_id.as_deref())
+            .collect::<Vec<_>>();
+        assert!(
+            served.contains(&"stale-tail"),
+            "the fetched history must survive the lost race, got {served:?}"
+        );
+        assert!(
+            served.contains(&"live-entry"),
+            "and so must the row born during the read, got {served:?}"
+        );
+        assert_eq!(
+            served,
+            vec!["stale-tail", "live-entry"],
+            "history first, then what arrived while the read was in flight"
+        );
+
+        let (order, keys, cursor) = {
+            let relay = app.relay.read().await;
+            let runtime = relay.runtime_for_thread(&thread.id).expect("runtime");
+            (
+                runtime
+                    .transcript
+                    .iter()
+                    .map(|record| record.item_id.clone())
+                    .collect::<Vec<_>>(),
+                runtime
+                    .transcript
+                    .iter()
+                    .map(|record| record.order_seq)
+                    .collect::<Vec<_>>(),
+                runtime.provider_history_cursor,
+            )
+        };
+        assert_eq!(
+            order,
+            vec!["stale-tail".to_string(), "live-entry".to_string()],
+            "the runtime holds both, in that order"
+        );
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(keys, sorted, "Vec order and order_seq order must agree");
+        assert_eq!(
+            cursor,
+            Some(123),
+            "the cursor may only describe history the runtime actually absorbed"
+        );
     }
 
     #[tokio::test]

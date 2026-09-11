@@ -7091,3 +7091,110 @@ fn a_definitively_failed_send_leaves_a_withdrawn_tombstone() {
         .expect("snapshot still carries the tombstone");
     assert!(view.withdrawn, "the wire view carries the flag");
 }
+
+/// A row born through a DELTA (streaming agent text / command output) must carry
+/// its birth revision, or the resume read-race merge cannot tell it apart from
+/// history the provider read already covered.
+///
+/// The read starts at revision R. While it is in flight a delta creates D. The
+/// fresh history that comes back is stale — it predates D and does not name it —
+/// so D must stay at the tail. Without the birth stamp D is invisible to the
+/// "born after the read started" walk, the stale rows are appended past it, and
+/// the resulting order is keyed [D, A, B, C] permanently.
+fn delta_birth_stale_history() -> ThreadSyncData {
+    ThreadSyncData {
+        thread: test_thread("delta-birth", "/tmp/project"),
+        status: "idle".to_string(),
+        active_flags: Vec::new(),
+        transcript: ["A", "B", "C"]
+            .into_iter()
+            .map(|item_id| TranscriptEntryView {
+                order_seq: None,
+                withdrawn: false,
+                item_id: Some(item_id.to_string()),
+                kind: crate::protocol::TranscriptEntryKind::AgentText,
+                text: Some(item_id.to_string()),
+                status: "completed".to_string(),
+                turn_id: Some("turn-old".to_string()),
+                tool: None,
+                content_state: crate::protocol::TranscriptContentState::Full,
+            })
+            .collect(),
+    }
+}
+
+fn assert_delta_born_row_stays_at_the_tail(relay: &RelayState, label: &str) {
+    let runtime = relay
+        .runtime_for_thread("delta-birth")
+        .expect("runtime for the delta-born thread");
+    let order = runtime
+        .transcript
+        .iter()
+        .map(|record| record.item_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        order,
+        vec!["A", "B", "C", "D"],
+        "{label}: a row born mid-read must stay after the history the read covered"
+    );
+    let keys = runtime
+        .transcript
+        .iter()
+        .map(|record| record.order_seq)
+        .collect::<Vec<_>>();
+    let mut sorted = keys.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        keys, sorted,
+        "{label}: Vec order and order_seq order must agree"
+    );
+}
+
+#[test]
+fn an_agent_delta_born_mid_read_is_not_reordered_behind_stale_history() {
+    let mut relay = test_state();
+    relay.ensure_runtime_for_thread("delta-birth");
+    let read_started_at_revision = relay
+        .runtime_for_thread("delta-birth")
+        .expect("runtime")
+        .transcript_revision;
+
+    // The real streaming path, not upsert_transcript_item_for_thread.
+    relay.append_agent_delta_for_thread("delta-birth", "D", "live token", "turn-live");
+
+    relay.load_thread_data_after_read_start(
+        delta_birth_stale_history(),
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        DEFAULT_MODEL,
+        "phone-device",
+        read_started_at_revision,
+    );
+
+    assert_delta_born_row_stays_at_the_tail(&relay, "agent delta");
+}
+
+#[test]
+fn a_command_delta_born_mid_read_is_not_reordered_behind_stale_history() {
+    let mut relay = test_state();
+    relay.ensure_runtime_for_thread("delta-birth");
+    let read_started_at_revision = relay
+        .runtime_for_thread("delta-birth")
+        .expect("runtime")
+        .transcript_revision;
+
+    relay.append_command_delta_for_thread("delta-birth", "D", "stdout chunk");
+
+    relay.load_thread_data_after_read_start(
+        delta_birth_stale_history(),
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        DEFAULT_MODEL,
+        "phone-device",
+        read_started_at_revision,
+    );
+
+    assert_delta_born_row_stays_at_the_tail(&relay, "command delta");
+}
