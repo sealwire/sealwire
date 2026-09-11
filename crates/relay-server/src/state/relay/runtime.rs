@@ -879,12 +879,26 @@ fn merge_runtime_entry(existing: &mut TranscriptRecord, incoming: TranscriptReco
         // never mutated — an incoming history copy carries another counter's number.
         // `withdrawn` is absorbing for the same reason: a late old page must not
         // resurrect a row the relay already answered for.
+        //
+        // `row_id` is here for a sharper reason than the other two. The rows were
+        // matched through the resolver, so the incoming copy may legitimately be
+        // named by a PROVIDER id while this row's key is the relay's own — taking
+        // the incoming name would rename a row clients already hold, which the
+        // add-and-update snapshot protocol cannot express. Its provider name is
+        // worth keeping instead.
+        let row_id = std::mem::take(&mut existing.row_id);
+        let provider_item_id = incoming
+            .provider_item_id
+            .clone()
+            .or_else(|| existing.provider_item_id.clone());
         let order_seq = existing.order_seq;
         let withdrawn = existing.withdrawn || incoming.withdrawn;
         let last_live_upsert_revision = incoming
             .last_live_upsert_revision
             .or(existing.last_live_upsert_revision);
         *existing = incoming;
+        existing.row_id = row_id;
+        existing.provider_item_id = provider_item_id;
         existing.last_live_upsert_revision = last_live_upsert_revision;
         existing.order_seq = order_seq;
         existing.withdrawn = withdrawn;

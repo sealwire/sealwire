@@ -1419,7 +1419,8 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                                 entry_seq: mutation.entry_seq,
                                 order_seq: mutation.order_seq,
                                 server_time: mutation.server_time,
-                                item_id,
+                                // The row's key, not the worker's name for it.
+                                item_id: mutation.row_id.clone(),
                                 turn_id: Some(turn_id),
                                 delta: text.clone(),
                                 kind: TranscriptDeltaKind::AgentText,

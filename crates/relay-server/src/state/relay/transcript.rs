@@ -48,6 +48,26 @@ impl TranscriptMutationMeta {
     }
 }
 
+/// Whose name `item_id` is at a row's birth.
+///
+/// The distinction only matters once — a row is named once and keeps that name —
+/// but getting it wrong is invisible until something tries to address the row
+/// provider-side and finds a string the provider has never issued.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderNamed {
+    Yes,
+    No,
+}
+
+impl ProviderNamed {
+    fn name_of(self, item_id: &str) -> Option<String> {
+        match self {
+            Self::Yes => Some(item_id.to_string()),
+            Self::No => None,
+        }
+    }
+}
+
 /// Spacing between consecutively issued order keys, so a future mid-insert can take a
 /// midpoint without renumbering anything already published. Exhausting a gap is a
 /// fail-fast (checked arithmetic), never a silent reuse.
@@ -143,10 +163,62 @@ impl RelayState {
         }
     }
 
+    /// The provider named this item. A row born here records `item_id` as its
+    /// `provider_item_id` too, which is what lets a fork or a detail request
+    /// translate back to something the provider can match.
     pub fn upsert_transcript_item_for_thread(
         &mut self,
         thread_id: &str,
         item_id: String,
+        kind: TranscriptEntryKind,
+        text: Option<String>,
+        status: String,
+        turn_id: Option<String>,
+        tool: Option<ToolCallView>,
+    ) -> TranscriptMutationMeta {
+        self.upsert_item_for_thread(
+            thread_id,
+            item_id,
+            ProviderNamed::Yes,
+            kind,
+            text,
+            status,
+            turn_id,
+            tool,
+        )
+    }
+
+    /// The RELAY named this row and the provider has not acknowledged it — a send's
+    /// reservation. Recording the relay's own key as a provider id would later hand
+    /// the provider a string it has never seen.
+    pub(crate) fn upsert_relay_named_item_for_thread(
+        &mut self,
+        thread_id: &str,
+        item_id: String,
+        kind: TranscriptEntryKind,
+        text: Option<String>,
+        status: String,
+        turn_id: Option<String>,
+        tool: Option<ToolCallView>,
+    ) -> TranscriptMutationMeta {
+        self.upsert_item_for_thread(
+            thread_id,
+            item_id,
+            ProviderNamed::No,
+            kind,
+            text,
+            status,
+            turn_id,
+            tool,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn upsert_item_for_thread(
+        &mut self,
+        thread_id: &str,
+        item_id: String,
+        provider_named: ProviderNamed,
         kind: TranscriptEntryKind,
         text: Option<String>,
         status: String,
@@ -175,9 +247,10 @@ impl RelayState {
             } else {
                 let entry_seq = runtime.transcript.len() as u64 + 1;
                 let order_seq = runtime.alloc_tail_order_seq();
+                let provider_item_id = provider_named.name_of(&item_id);
                 let row_id = runtime.transcript.push(TranscriptRecord {
                     row_id: item_id,
-                    provider_item_id: None,
+                    provider_item_id,
                     kind,
                     text,
                     status,
@@ -352,7 +425,7 @@ impl RelayState {
                 let order_seq = runtime.alloc_tail_order_seq();
                 let row_id = runtime.transcript.push(TranscriptRecord {
                     row_id: item_id.to_string(),
-                    provider_item_id: None,
+                    provider_item_id: Some(item_id.to_string()),
                     kind: TranscriptEntryKind::AgentText,
                     text: Some(delta.to_string()),
                     status: "streaming".to_string(),
@@ -469,7 +542,7 @@ impl RelayState {
                 runtime.codex_user_reservation_seq
             )
         };
-        self.upsert_transcript_item_for_thread(
+        self.upsert_relay_named_item_for_thread(
             thread_id,
             item_id.clone(),
             TranscriptEntryKind::UserText,
@@ -608,9 +681,15 @@ impl RelayState {
         }
     }
 
+    /// `provider_item_id` is what Codex calls this message. The relay minted this
+    /// row's key before Codex had said anything, so Codex will never name the row
+    /// that way — binding its id here is the only chance to learn the mapping, and
+    /// without it every later event about this message resolves to nothing and
+    /// mints a twin.
     fn reconcile_codex_user_reservation(
         &mut self,
         thread_id: &str,
+        provider_item_id: &str,
         text: String,
         turn_id: String,
     ) -> bool {
@@ -670,6 +749,9 @@ impl RelayState {
         if !reconciled {
             return false;
         }
+        runtime
+            .transcript
+            .bind_provider_item_id(&local_id, provider_item_id);
         let _ = self.bump_thread_transcript_revision(thread_id);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
@@ -684,7 +766,8 @@ impl RelayState {
         text: String,
         turn_id: String,
     ) {
-        if self.reconcile_codex_user_reservation(thread_id, text.clone(), turn_id.clone()) {
+        if self.reconcile_codex_user_reservation(thread_id, &item_id, text.clone(), turn_id.clone())
+        {
             return;
         }
         self.upsert_transcript_item_for_thread(
@@ -924,7 +1007,7 @@ impl RelayState {
                 let order_seq = runtime.alloc_tail_order_seq();
                 let row_id = runtime.transcript.push(TranscriptRecord {
                     row_id: item_id.to_string(),
-                    provider_item_id: None,
+                    provider_item_id: Some(item_id.to_string()),
                     kind: TranscriptEntryKind::Command,
                     text: Some(delta.to_string()),
                     status: "running".to_string(),

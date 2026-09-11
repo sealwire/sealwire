@@ -856,7 +856,8 @@ async fn handle_notification_for_provider(
                             entry_seq: mutation.entry_seq,
                             order_seq: mutation.order_seq,
                             server_time: mutation.server_time,
-                            item_id,
+                            // The row's key, not Codex's name for it.
+                            item_id: mutation.row_id.clone(),
                             turn_id: Some(turn_id),
                             delta,
                             kind: TranscriptDeltaKind::AgentText,
@@ -1049,7 +1050,8 @@ async fn handle_notification_for_provider(
                                 entry_seq: mutation.entry_seq,
                                 order_seq: mutation.order_seq,
                                 server_time: mutation.server_time,
-                                item_id,
+                                // The row's key, not Codex's name for it.
+                                item_id: mutation.row_id.clone(),
                                 turn_id: None,
                                 delta: wire_delta,
                                 kind: TranscriptDeltaKind::CommandOutput,

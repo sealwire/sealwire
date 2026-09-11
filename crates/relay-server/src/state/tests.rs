@@ -7201,3 +7201,245 @@ fn a_command_delta_born_mid_read_is_not_reordered_behind_stale_history() {
 
     assert_delta_born_row_stays_at_the_tail(&relay, "command delta");
 }
+
+#[cfg(test)]
+mod row_identity_tests {
+    use super::*;
+    use crate::protocol::TranscriptEntryKind;
+
+    /// A delta is applied by clients keyed on the id it carries. When the row's key
+    /// and the provider's name for it differ — every locally-reserved send — shipping
+    /// the provider's name addresses a row no client has, so the chunk is dropped and
+    /// the message freezes mid-stream.
+    #[test]
+    fn a_delta_for_an_aliased_row_is_published_under_the_row_id() {
+        let mut relay = test_state();
+        relay.broker_configured = true;
+        let thread = "thread-alias-delta";
+        relay.active_thread_id = Some(thread.to_string());
+
+        // A row the relay named, which the provider later calls something else.
+        let row_id = {
+            let runtime = relay.ensure_runtime_for_thread(thread);
+            let order_seq = runtime.alloc_tail_order_seq();
+            let row_id = runtime
+                .transcript
+                .push(crate::state::relay::TranscriptRecord {
+                    row_id: "relay-minted-row".to_string(),
+                    provider_item_id: None,
+                    kind: TranscriptEntryKind::AgentText,
+                    text: Some(String::new()),
+                    status: "streaming".to_string(),
+                    turn_id: Some("turn-1".to_string()),
+                    tool: None,
+                    order_seq,
+                    withdrawn: false,
+                    last_live_upsert_revision: None,
+                });
+            runtime
+                .transcript
+                .bind_provider_item_id(&row_id, "provider-item-9");
+            row_id
+        };
+
+        // The provider streams under ITS id.
+        let mutation =
+            relay.append_agent_delta_for_thread(thread, "provider-item-9", "hi", "turn-1");
+
+        assert_eq!(
+            mutation.row_id, row_id,
+            "the mutation must report the row it actually landed on"
+        );
+        let runtime = relay.runtime_for_thread(thread).expect("runtime");
+        assert_eq!(
+            runtime.transcript.len(),
+            1,
+            "the aliased delta must not mint a second row"
+        );
+        assert_eq!(runtime.transcript[0].text.as_deref(), Some("hi"));
+    }
+
+    /// Resolution must not depend on the caller guessing the right name: a row is
+    /// reachable by its own key and by every provider id bound to it, and neither
+    /// spelling creates a second row.
+    #[test]
+    fn repeated_provider_events_under_either_name_resolve_to_one_row() {
+        let mut relay = test_state();
+        let thread = "thread-repeat";
+        let row_id = {
+            let runtime = relay.ensure_runtime_for_thread(thread);
+            let row_id = runtime
+                .transcript
+                .push(crate::state::relay::TranscriptRecord {
+                    row_id: "row-1".to_string(),
+                    provider_item_id: None,
+                    kind: TranscriptEntryKind::ToolCall,
+                    text: Some("tool".to_string()),
+                    status: "running".to_string(),
+                    turn_id: Some("turn-1".to_string()),
+                    tool: None,
+                    order_seq: 0,
+                    withdrawn: false,
+                    last_live_upsert_revision: None,
+                });
+            runtime.transcript.bind_provider_item_id(&row_id, "prov-1");
+            runtime
+                .transcript
+                .bind_provider_item_id(&row_id, "prov-1-result");
+            row_id
+        };
+
+        for named in ["row-1", "prov-1", "prov-1-result"] {
+            assert!(
+                relay.set_transcript_item_status_for_thread(thread, named, "completed"),
+                "`{named}` must find the row"
+            );
+        }
+
+        let runtime = relay.runtime_for_thread(thread).expect("runtime");
+        assert_eq!(runtime.transcript.len(), 1, "one row, three names");
+        assert_eq!(runtime.transcript[0].row_id, row_id);
+        assert_eq!(runtime.transcript[0].status, "completed");
+    }
+
+    /// Two provider items are two rows, each keyed on its own name, each carrying
+    /// the provider id it came in under. A shared key here would merge two
+    /// different messages and lose one.
+    #[test]
+    fn two_provider_origin_rows_get_distinct_row_ids_and_keep_their_provider_names() {
+        let mut relay = test_state();
+        let thread = "thread-two-rows";
+
+        relay.upsert_transcript_item_for_thread(
+            thread,
+            "codex-item-1".to_string(),
+            TranscriptEntryKind::AgentText,
+            Some("first".to_string()),
+            "completed".to_string(),
+            Some("turn-1".to_string()),
+            None,
+        );
+        relay.upsert_transcript_item_for_thread(
+            thread,
+            "codex-item-2".to_string(),
+            TranscriptEntryKind::AgentText,
+            Some("second".to_string()),
+            "completed".to_string(),
+            Some("turn-1".to_string()),
+            None,
+        );
+
+        let runtime = relay.runtime_for_thread(thread).expect("runtime");
+        assert_eq!(runtime.transcript.len(), 2);
+        assert_ne!(
+            runtime.transcript[0].row_id, runtime.transcript[1].row_id,
+            "two provider items must not share a row key"
+        );
+        assert_eq!(
+            runtime.transcript[0].provider_item_id.as_deref(),
+            Some("codex-item-1"),
+            "a provider-born row records the name it arrived under, so a fork or \
+             detail request can translate back to it"
+        );
+        assert_eq!(
+            runtime.transcript[1].provider_item_id.as_deref(),
+            Some("codex-item-2")
+        );
+    }
+
+    /// A relay-minted key is not addressable provider-side. Translation must answer
+    /// with the provider's id for a bound row, and with nothing for a row the
+    /// provider never named — never by passing the relay's key through.
+    #[test]
+    fn provider_addressing_translates_a_row_key_and_refuses_an_unbound_one() {
+        let mut relay = test_state();
+        let thread = "thread-translate";
+        let reservation = relay
+            .begin_codex_user_turn(thread, "the send")
+            .expect("reserve");
+
+        {
+            let runtime = relay.runtime_for_thread(thread).expect("runtime");
+            assert_eq!(
+                runtime.transcript.provider_item_id(&reservation),
+                None,
+                "before the echo the provider has no name for this row"
+            );
+        }
+
+        relay.upsert_user_message_for_thread(
+            thread,
+            "codex-user-5".to_string(),
+            "the send".to_string(),
+            "turn-1".to_string(),
+        );
+
+        let runtime = relay.runtime_for_thread(thread).expect("runtime");
+        assert_eq!(
+            runtime.transcript.provider_item_id(&reservation),
+            Some("codex-user-5"),
+            "after the echo the row translates to the id Codex knows"
+        );
+        assert_eq!(
+            runtime.transcript[0].row_id, reservation,
+            "and the row's own key is untouched by the translation becoming possible"
+        );
+    }
+
+    /// Stale history must never resurrect a withdrawn send nor move a published row.
+    /// All three fields are carried by hand across the whole-record replace in
+    /// `merge_runtime_entry`, so each one is its own way to lose the invariant.
+    #[test]
+    fn a_history_re_read_preserves_row_id_order_seq_and_the_tombstone() {
+        let mut relay = test_state();
+        let thread = "thread-tombstone";
+        let reservation = relay
+            .begin_codex_user_turn(thread, "doomed send")
+            .expect("reserve");
+        relay.abandon_codex_start_reservation(thread);
+
+        let (before_id, before_seq, before_withdrawn) = {
+            let runtime = relay.runtime_for_thread(thread).expect("runtime");
+            let row = &runtime.transcript[0];
+            (row.row_id.clone(), row.order_seq, row.withdrawn)
+        };
+        assert_eq!(before_id, reservation);
+        assert!(before_withdrawn, "an abandoned send is tombstoned");
+
+        // Provider history knows this message and reports it alive, numbered from 0.
+        {
+            let runtime = relay.runtimes.get_mut(thread).expect("runtime");
+            runtime
+                .transcript
+                .bind_provider_item_id(&reservation, "codex-item-1");
+            let _ = runtime.merge_transcript_records(vec![crate::state::relay::TranscriptRecord {
+                row_id: "codex-item-1".to_string(),
+                provider_item_id: Some("codex-item-1".to_string()),
+                kind: TranscriptEntryKind::UserText,
+                text: Some("doomed send".to_string()),
+                status: "completed".to_string(),
+                turn_id: Some("turn-x".to_string()),
+                tool: None,
+                order_seq: 0,
+                withdrawn: false,
+                last_live_upsert_revision: None,
+            }]);
+        }
+
+        let runtime = relay.runtime_for_thread(thread).expect("runtime");
+        assert_eq!(runtime.transcript.len(), 1, "history must not add a twin");
+        let row = &runtime.transcript[0];
+        assert_eq!(
+            row.row_id, before_id,
+            "the published key survives the merge"
+        );
+        assert_eq!(
+            row.order_seq, before_seq,
+            "the issued order key never moves"
+        );
+        assert!(
+            row.withdrawn,
+            "withdrawn is absorbing: a live history copy must not resurrect the send"
+        );
+    }
+}
