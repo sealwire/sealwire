@@ -252,6 +252,7 @@ export function reduceTranscriptEntryPatchEvent({
   const incoming = event?.entry || {
     item_id: event?.item_id,
     entry_seq: event?.entry_seq,
+    order_seq: event?.order_seq,
     kind: event?.entry_kind || (useEventKindFallback ? event?.kind : undefined),
     status: event?.status,
     text: event?.text,
@@ -281,6 +282,9 @@ export function reduceTranscriptEntryPatchEvent({
     status: incoming.status || defaultStatus || "completed",
     turn_id: incoming.turn_id || event?.turn_id || null,
   };
+  if (Number.isSafeInteger(incoming?.order_seq)) {
+    entryPatch.order_seq = incoming.order_seq;
+  }
   const entryIndex = session.transcript.findIndex(
     (entry) => entry?.item_id === itemId
   );
@@ -303,15 +307,12 @@ export function reduceTranscriptEntryPatchEvent({
             : {}),
         };
       })
-    : [
-        ...session.transcript,
-        {
-          text: entryPatch.text ?? "",
-          tool: entryPatch.tool ?? null,
-          ...entryPatch,
-          kind: entryPatch.kind || "agent_text",
-        },
-      ];
+    : insertRowByOrderSeq(session.transcript, {
+        text: entryPatch.text ?? "",
+        tool: entryPatch.tool ?? null,
+        ...entryPatch,
+        kind: entryPatch.kind || "agent_text",
+      });
   const nextSession = { ...session, transcript: nextTranscript };
   if (eventRevision != null) {
     nextSession.transcript_revision = nextRevision;
@@ -441,11 +442,12 @@ function deltaAppend({
       status: "running",
       tool: null,
       entry_seq: Number.isSafeInteger(event.entry_seq) ? event.entry_seq : null,
+      ...(Number.isSafeInteger(event.order_seq) ? { order_seq: event.order_seq } : {}),
     };
   const nextTranscript = buildTranscript
     ? (hasEntry
         ? transcript.map((candidate, index) => index === entryIndex ? nextEntry : candidate)
-        : [...transcript, nextEntry])
+        : insertRowByOrderSeq(transcript, nextEntry))
     : null;
   const nextSession = buildTranscript
     ? {
@@ -505,4 +507,36 @@ function revisionMismatchDetail(event, currentRevision) {
     current: currentRevision,
     item: event?.item_id || event?.entry?.item_id,
   };
+}
+
+// Place a NEW row in a plain transcript array by its birth number.
+//
+// The array surfaces (the Orchestrator buffer, a view-only pin, an unhydrated
+// remote session) have no window to merge into, so a new row was always pushed
+// to the end — which renders two rows that stream at once in whichever order
+// their first delta happened to arrive.
+//
+// Deliberately gives up and appends the moment it meets an unnumbered
+// neighbour: a mixed array is an old relay's, where position is the only
+// information there is, and reordering against a row that was never numbered
+// would be a guess dressed up as a fact.
+export function insertRowByOrderSeq(transcript, entry) {
+  if (!Number.isSafeInteger(entry?.order_seq)) {
+    return [...transcript, entry];
+  }
+  let index = transcript.length;
+  while (index > 0) {
+    const neighbour = transcript[index - 1];
+    if (!Number.isSafeInteger(neighbour?.order_seq)) {
+      return [...transcript, entry];
+    }
+    if (neighbour.order_seq <= entry.order_seq) {
+      break;
+    }
+    index -= 1;
+  }
+  if (index >= transcript.length) {
+    return [...transcript, entry];
+  }
+  return [...transcript.slice(0, index), entry, ...transcript.slice(index)];
 }
