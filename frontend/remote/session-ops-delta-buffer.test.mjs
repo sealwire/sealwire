@@ -920,3 +920,39 @@ test("a remote delta for a mid-numbered row lands in its slot, not at the tail",
     "arrival order must not outrank the server's numbering on the remote surface either"
   );
 });
+
+// ---------------------------------------------------------------------------
+// The tail repair writes straight into the hydration window. It is authoritative
+// for CONTENT, never for where a row already sits — rewriting a birth key here
+// moves nothing and clears nothing, so the cached keyed proof would keep
+// claiming "numbered and in order" over a window that no longer is.
+// ---------------------------------------------------------------------------
+
+test("a repaired copy cannot move a placed row, renumber it, or resurrect it", async () => {
+  activeBrowser || installBrowserStubs();
+  const state = await keyedRemoteWindow();
+  state.transcriptHydrationEntries.set("item-2", {
+    item_id: "item-2",
+    kind: "agent_text",
+    text: "held",
+    status: "completed",
+    order_seq: ORDER_STEP,
+    withdrawn: true,
+  });
+  state.transcriptHydrationOrder = ["item-1", "item-2"];
+  state.transcriptHydrationKeyed = true;
+  const { __syncTranscriptWindowWithRepairedEntriesForTest } = await import("./session-ops.js");
+
+  __syncTranscriptWindowWithRepairedEntriesForTest("thread-1", [
+    // A page built by another run: a conflicting number, and a copy serialized
+    // before the withdrawal.
+    { item_id: "item-2", text: "repaired body", order_seq: 99 * ORDER_STEP, withdrawn: false },
+  ]);
+
+  const repaired = state.transcriptHydrationEntries.get("item-2");
+  assert.equal(repaired.order_seq, ORDER_STEP, "the held birth key wins");
+  assert.equal(repaired.withdrawn, true, "a stale withdrawn:false must not resurrect the row");
+  assert.equal(repaired.text, "repaired body", "content still repairs");
+  assert.deepEqual(state.transcriptHydrationOrder, ["item-1", "item-2"], "order untouched");
+  assert.equal(state.transcriptHydrationKeyed, true, "and the proof still holds");
+});

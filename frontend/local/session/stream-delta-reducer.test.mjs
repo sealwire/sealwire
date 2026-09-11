@@ -934,3 +934,53 @@ test("a deferred refresh for a thread the pane no longer shows is dropped", () =
   );
   assert.equal(latch.take(), null, "and it is consumed either way");
 });
+
+// stream.js writes the hydration window directly, outside the store, via
+// applyAcceptedEmptyOffsetlessDeltaToWindow — which pushes a new id at the tail.
+// These pin down WHY that cannot break the cached keyed proof: the store's own
+// writer runs first and owns every new row, so the direct writer only ever sees
+// rows the window already holds. Both assertions are about the composed path,
+// which is the thing that actually has to hold.
+test("an offsetless empty delta for an unknown item is placed by number by the store writer", () => {
+  const h = harness({ windowLoaded: true });
+  const S = 1 << 20;
+  h.state.transcriptHydrationEntries.set("item-1", {
+    ...h.state.transcriptHydrationEntries.get("item-1"),
+    order_seq: 0,
+  });
+  h.state.transcriptHydrationEntries.set("item-late", {
+    item_id: "item-late",
+    kind: "agent_text",
+    text: "later",
+    status: "completed",
+    order_seq: 2 * S,
+  });
+  h.state.transcriptHydrationOrder = ["item-1", "item-late"];
+  h.state.transcriptHydrationKeyed = true;
+
+  h.deliver({ item_id: "item-mid", delta: "", order_seq: S, revision: 2 });
+
+  assert.deepEqual(
+    h.state.transcriptHydrationOrder,
+    ["item-1", "item-mid", "item-late"],
+    "a blind tail push would render it below a row it was born before"
+  );
+  assert.equal(h.state.transcriptHydrationKeyed, true, "a numbered row keeps the proof");
+});
+
+test("an offsetless empty delta with NO number still revokes the keyed proof", () => {
+  const h = harness({ windowLoaded: true });
+  h.state.transcriptHydrationEntries.set("item-1", {
+    ...h.state.transcriptHydrationEntries.get("item-1"),
+    order_seq: 0,
+  });
+  h.state.transcriptHydrationKeyed = true;
+
+  h.deliver({ item_id: "item-unnumbered", delta: "", revision: 2 });
+
+  assert.equal(
+    h.state.transcriptHydrationKeyed,
+    false,
+    "an unnumbered row must not sit in a window still claiming to be keyed"
+  );
+});
