@@ -733,6 +733,7 @@ pub(crate) fn apply_op(
             if background {
                 relay.bg_upsert_transcript_item(
                     thread_id,
+                    crate::state::IdSpace::Provider,
                     item_id,
                     entry.0,
                     entry.1,
@@ -773,6 +774,7 @@ pub(crate) fn apply_op(
             if background {
                 relay.bg_upsert_transcript_item(
                     thread_id,
+                    crate::state::IdSpace::Provider,
                     item_id,
                     TranscriptEntryKind::ToolCall,
                     Some(title),
@@ -952,6 +954,8 @@ pub(crate) fn apply_turn_finished(
         match route {
             ThreadRoute::Background => relay.bg_upsert_transcript_item(
                 thread_id,
+                // Relay-synthesized from the turn's failure, not an ACP item.
+                crate::state::IdSpace::Row,
                 item_id,
                 TranscriptEntryKind::Error,
                 Some(reason.clone()),
@@ -1497,11 +1501,21 @@ pub(crate) fn sync_data_from_runtime(
     // this field, and an empty or stale one is rejected downstream.
     thread.cwd = runtime.current_cwd.clone();
 
+    // This read is reconstructed from rows the relay already owns, so provenance
+    // is exact rather than re-derived: a row with no provider name never had one.
+    let relay_named_item_ids = runtime
+        .transcript
+        .iter()
+        .filter(|record| record.provider_item_id.is_none())
+        .map(|record| record.row_id.clone())
+        .collect::<Vec<_>>();
+
     Some(crate::provider::ThreadSyncData {
         thread,
         status: runtime.current_status.clone(),
         active_flags: runtime.active_flags.clone(),
         transcript,
+        relay_named_item_ids,
     })
 }
 

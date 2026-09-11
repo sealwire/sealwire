@@ -43,7 +43,7 @@ pub(crate) use self::runtime::{
     CodexStartReservation, ThreadRuntime, TurnFailure, TurnFailureKind, TurnSpend,
 };
 pub(crate) use self::transcript::TranscriptRecord;
-pub(crate) use self::transcript_store::ThreadTranscript;
+pub(crate) use self::transcript_store::{IdSpace, ThreadTranscript};
 
 const REMOTE_ACTION_REPLAY_TTL_SECS: u64 = 600;
 const MAX_REMOTE_ACTION_REPLAY_ENTRIES: usize = 512;
@@ -7508,6 +7508,7 @@ mod tests {
         // `restore_thread_data` — still pre-migration, because it was read from disk.
         booted.restore_thread_data(
             crate::provider::ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread: test_thread("thread-1", "/work/alpha"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),

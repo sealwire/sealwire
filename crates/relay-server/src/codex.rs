@@ -628,11 +628,13 @@ impl CodexBridge {
         let summary = parse_thread_summary(thread)?;
         let (status, active_flags) = parse_status(value_at(thread, &["status"]));
 
+        let (transcript, relay_named_item_ids) = parse_transcript(thread);
         Ok(ThreadSyncData {
             thread: summary,
             status,
             active_flags,
-            transcript: parse_transcript(thread),
+            transcript,
+            relay_named_item_ids,
         })
     }
 
@@ -1198,11 +1200,15 @@ pub(crate) fn codex_turn_failure_kind(turn: &Value) -> Option<TurnFailureKind> {
     value_at(error, &["codexErrorInfo"]).and_then(codex_error_info_kind)
 }
 
-fn parse_transcript(thread: &Value) -> Vec<TranscriptEntryView> {
+/// Returns the entries and, separately, the ids among them that THIS FUNCTION
+/// invented — the per-turn diff summary and the re-synthesized turn failure. Codex
+/// never issued those, so they must not be treated as provider-addressable.
+fn parse_transcript(thread: &Value) -> (Vec<TranscriptEntryView>, Vec<String>) {
     let mut transcript = Vec::new();
+    let mut relay_named = Vec::new();
     let turns = match value_at(thread, &["turns"]).and_then(Value::as_array) {
         Some(turns) => turns,
-        None => return transcript,
+        None => return (transcript, relay_named),
     };
 
     for turn in turns {
@@ -1219,6 +1225,9 @@ fn parse_transcript(thread: &Value) -> Vec<TranscriptEntryView> {
         }
 
         if let Some(entry) = build_turn_file_summary(turn_id.clone(), items) {
+            if let Some(item_id) = entry.item_id.clone() {
+                relay_named.push(item_id);
+            }
             transcript.push(entry);
         }
 
@@ -1227,6 +1236,7 @@ fn parse_transcript(thread: &Value) -> Vec<TranscriptEntryView> {
         // relay restart stays visible IN THE TRANSCRIPT (not just as a lost live
         // push). Same stable id as the live path, so no duplication when both run.
         if let Some(reason) = codex_turn_failure_reason(turn) {
+            relay_named.push(codex_turn_error_item_id(turn_id.as_deref()));
             transcript.push(TranscriptEntryView {
                 // Numbered when it becomes a runtime record; raw provider parses carry none.
                 order_seq: None,
@@ -1242,7 +1252,7 @@ fn parse_transcript(thread: &Value) -> Vec<TranscriptEntryView> {
         }
     }
 
-    transcript
+    (transcript, relay_named)
 }
 
 fn refresh_turn_diff_entry(relay: &mut RelayState, turn_id: &str) -> bool {
@@ -1270,7 +1280,8 @@ fn refresh_turn_diff_entry(relay: &mut RelayState, turn_id: &str) -> bool {
     let Some(item_id) = entry.item_id.clone() else {
         return false;
     };
-    relay.upsert_transcript_item(
+    // `turn-diff:*` is the relay's own per-turn summary; no provider issued it.
+    relay.upsert_relay_named_item(
         item_id,
         entry.kind,
         entry.text,

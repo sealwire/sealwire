@@ -114,7 +114,7 @@ fn parse_transcript_preserves_tool_and_reasoning_items() {
         ]
     });
 
-    let transcript = parse_transcript(&thread);
+    let transcript = parse_transcript(&thread).0;
 
     assert_eq!(transcript.len(), 4);
     assert_eq!(transcript[1].kind, TranscriptEntryKind::Reasoning);
@@ -145,7 +145,7 @@ fn parse_transcript_keeps_an_image_only_user_turn_visible() {
         }]
     });
 
-    let transcript = parse_transcript(&thread);
+    let transcript = parse_transcript(&thread).0;
     assert_eq!(transcript.len(), 1);
     assert_eq!(transcript[0].kind, TranscriptEntryKind::UserText);
     assert_eq!(transcript[0].text.as_deref(), Some("[Attached image]"));
@@ -173,7 +173,7 @@ fn parse_transcript_marks_images_attached_to_a_text_user_turn() {
         }]
     });
 
-    let transcript = parse_transcript(&thread);
+    let transcript = parse_transcript(&thread).0;
     assert_eq!(transcript.len(), 1);
     assert_eq!(
         transcript[0].text.as_deref(),
@@ -202,7 +202,7 @@ fn parse_transcript_truncates_large_tool_payloads() {
         ]
     });
 
-    let transcript = parse_transcript(&thread);
+    let transcript = parse_transcript(&thread).0;
     let tool_entry = &transcript[0];
     let tool = tool_entry
         .tool
@@ -256,7 +256,7 @@ fn parse_transcript_enriches_file_change_tool_items_with_paths() {
         ]
     });
 
-    let transcript = parse_transcript(&thread);
+    let transcript = parse_transcript(&thread).0;
     let tool = transcript[0]
         .tool
         .as_ref()
@@ -301,7 +301,7 @@ fn parse_transcript_enriches_new_file_changes_with_synthetic_diff() {
         ]
     });
 
-    let transcript = parse_transcript(&thread);
+    let transcript = parse_transcript(&thread).0;
     let tool = transcript[0]
         .tool
         .as_ref()
@@ -344,7 +344,7 @@ fn parse_transcript_builds_turn_summary_from_path_only_file_changes() {
         ]
     });
 
-    let transcript = parse_transcript(&thread);
+    let transcript = parse_transcript(&thread).0;
     let summary = transcript[1]
         .tool
         .as_ref()
@@ -397,7 +397,7 @@ fn parse_transcript_turn_summary_accumulates_multiple_hunks_for_same_file() {
         ]
     });
 
-    let transcript = parse_transcript(&thread);
+    let transcript = parse_transcript(&thread).0;
     let summary = transcript[2]
         .tool
         .as_ref()
@@ -471,7 +471,7 @@ fn parse_transcript_preserves_full_agent_messages() {
         ]
     });
 
-    let transcript = parse_transcript(&thread);
+    let transcript = parse_transcript(&thread).0;
 
     assert_eq!(transcript.len(), 1);
     assert_eq!(transcript[0].kind, TranscriptEntryKind::AgentText);
@@ -1123,7 +1123,7 @@ fn parse_transcript_synthesizes_failed_turn_error_entry() {
         ]
     });
 
-    let transcript = parse_transcript(&thread);
+    let transcript = parse_transcript(&thread).0;
     let entry = transcript
         .iter()
         .find(|entry| entry.kind == TranscriptEntryKind::Error)
@@ -1148,6 +1148,7 @@ fn parse_transcript_synthesizes_failed_turn_error_entry() {
     });
     assert!(
         !parse_transcript(&ok_thread)
+            .0
             .iter()
             .any(|entry| entry.kind == TranscriptEntryKind::Error),
         "a completed history turn must not synthesize an error entry"
@@ -1285,7 +1286,7 @@ fn read_thread_result_envelope_rehydrates_failed_turn_entry() {
     });
 
     let thread = value_at(&result, &["thread"]).expect("thread/read envelope carries a thread");
-    let transcript = parse_transcript(thread);
+    let transcript = parse_transcript(thread).0;
     let entry = transcript
         .iter()
         .find(|entry| entry.kind == TranscriptEntryKind::Error)
@@ -2636,6 +2637,7 @@ impl CodexReplayHarness {
         let mut relay = self.state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread: test_thread_summary(thread_id),
                 status: status.to_string(),
                 active_flags: Vec::new(),
@@ -3201,6 +3203,7 @@ async fn handle_notification_keeps_late_delta_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread: test_thread_summary("thread-B"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -3240,6 +3243,7 @@ async fn handle_notification_keeps_late_delta_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread: test_thread_summary("thread-A"),
                 status: "running".to_string(),
                 active_flags: Vec::new(),
@@ -3321,6 +3325,7 @@ async fn handle_notification_keeps_late_agent_completion_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread: test_thread_summary("thread-B"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -3368,6 +3373,7 @@ async fn handle_notification_keeps_late_agent_completion_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread: test_thread_summary("thread-A"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -3449,6 +3455,7 @@ async fn runtime_merge_does_not_downgrade_fresh_completed_agent_message() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread: test_thread_summary("thread-B"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -3480,6 +3487,7 @@ async fn runtime_merge_does_not_downgrade_fresh_completed_agent_message() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread: test_thread_summary("thread-A"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -3548,6 +3556,7 @@ async fn handle_notification_does_not_leak_late_delta_into_new_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread: test_thread_summary("thread-B"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -3623,6 +3632,7 @@ async fn handle_notification_keeps_late_command_output_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread: test_thread_summary("thread-B"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -3661,6 +3671,7 @@ async fn handle_notification_keeps_late_command_output_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread: test_thread_summary("thread-A"),
                 status: "running".to_string(),
                 active_flags: Vec::new(),
@@ -3716,6 +3727,7 @@ async fn handle_notification_keeps_late_turn_started_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread: test_thread_summary("thread-B"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -3753,6 +3765,7 @@ async fn handle_notification_keeps_late_turn_started_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread: test_thread_summary("thread-A"),
                 status: "thinking".to_string(),
                 active_flags: Vec::new(),
@@ -3797,6 +3810,7 @@ async fn handle_notification_keeps_full_turn_lifecycle_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread: test_thread_summary("thread-B"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -3852,6 +3866,7 @@ async fn handle_notification_keeps_full_turn_lifecycle_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                relay_named_item_ids: Vec::new(),
                 thread: test_thread_summary("thread-A"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -4911,7 +4926,7 @@ async fn a_codex_user_echo_binds_its_item_id_to_the_row_the_relay_already_publis
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        runtime.transcript.resolve("codex-user-77"),
+        runtime.transcript.resolve_provider("codex-user-77"),
         Some(reservation.as_str()),
         "Codex's id for this message must resolve to the row the relay published"
     );
@@ -4919,7 +4934,12 @@ async fn a_codex_user_echo_binds_its_item_id_to_the_row_the_relay_already_publis
     // The proof that matters: a later provider event naming Codex's id lands on the
     // existing row rather than creating a second one.
     assert!(
-        relay.set_transcript_item_status_for_thread("thread-bind", "codex-user-77", "completed"),
+        relay.set_transcript_item_status_for_thread(
+            "thread-bind",
+            crate::state::IdSpace::Provider,
+            "codex-user-77",
+            "completed"
+        ),
         "a later event addressed by the provider id must find the row"
     );
     let runtime = relay

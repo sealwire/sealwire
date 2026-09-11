@@ -220,7 +220,8 @@ impl RelayState {
         if self.drop_bg_event_for_deleted_thread(thread_id) {
             return;
         }
-        self.upsert_transcript_item_for_thread(
+        // `turn-diff:*` is the relay's own summary of a turn; no provider issued it.
+        self.upsert_relay_named_item_for_thread(
             thread_id,
             item_id,
             TranscriptEntryKind::ToolCall,
@@ -235,6 +236,7 @@ impl RelayState {
     pub fn bg_upsert_transcript_item(
         &mut self,
         thread_id: &str,
+        space: crate::state::IdSpace,
         item_id: String,
         kind: TranscriptEntryKind,
         text: Option<String>,
@@ -246,9 +248,7 @@ impl RelayState {
         if self.drop_bg_event_for_deleted_thread(thread_id) {
             return;
         }
-        self.upsert_transcript_item_for_thread(
-            thread_id, item_id, kind, text, status, turn_id, tool,
-        );
+        self.upsert_item_for_thread(thread_id, item_id, space, kind, text, status, turn_id, tool);
         self.touch_bg_progress_at(thread_id, now);
     }
 
@@ -296,6 +296,7 @@ impl RelayState {
     pub fn bg_set_transcript_item_status(
         &mut self,
         thread_id: &str,
+        space: crate::state::IdSpace,
         item_id: &str,
         status: &str,
         now: u64,
@@ -303,7 +304,7 @@ impl RelayState {
         if self.drop_bg_event_for_deleted_thread(thread_id) {
             return;
         }
-        self.set_transcript_item_status_for_thread(thread_id, item_id, status);
+        self.set_transcript_item_status_for_thread(thread_id, space, item_id, status);
         self.touch_bg_progress_at(thread_id, now);
     }
 }

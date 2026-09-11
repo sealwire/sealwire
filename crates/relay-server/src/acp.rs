@@ -1030,6 +1030,7 @@ impl AcpBridge {
 /// A thread row for a session that exists but has no content yet.
 fn empty_thread_sync(thread_id: &str, cwd: &str, provider_key: &'static str) -> ThreadSyncData {
     ThreadSyncData {
+        relay_named_item_ids: Vec::new(),
         thread: ThreadSummaryView {
             workspace_trusted: false,
             id: thread_id.to_string(),
@@ -1440,6 +1441,10 @@ impl ProviderBridge for AcpBridge {
             .unwrap_or_default();
 
         Ok(ThreadSyncData {
+            // ACP ordinals are minted by this adapter and are replay-stable, and it
+            // resolves them itself in `read_thread_entry_detail` — so from the core's
+            // side every row here is provider-addressable.
+            relay_named_item_ids: Vec::new(),
             thread: ThreadSummaryView {
                 workspace_trusted: false,
                 id: thread_id.to_string(),

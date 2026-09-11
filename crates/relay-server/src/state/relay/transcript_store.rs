@@ -3,6 +3,30 @@ use std::ops::Deref;
 
 use super::TranscriptRecord;
 
+/// Which namespace an id belongs to — and, at a row's birth, whose name it is.
+///
+/// These are the same question: an id minted by the provider lives in the provider
+/// namespace, an id minted by the relay lives in the row namespace. Collapsing them
+/// into one lookup is what let a provider event land on an unrelated relay row that
+/// merely shared its spelling, so callers must say which one they hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IdSpace {
+    /// A name the provider issued.
+    Provider,
+    /// The relay's own key for a row.
+    Row,
+}
+
+impl IdSpace {
+    /// What to record as a row's `provider_item_id` when it is born under `item_id`.
+    pub(crate) fn provider_name_of(self, item_id: &str) -> Option<String> {
+        match self {
+            Self::Provider => Some(item_id.to_string()),
+            Self::Row => None,
+        }
+    }
+}
+
 /// One thread's rows plus the indexes that make identity resolution O(1).
 ///
 /// The Vec is the only source of truth; both maps are derived, private, and
@@ -24,6 +48,31 @@ pub(crate) struct ThreadTranscript {
     /// rather than a `Cell` because `RelayState` must stay `Sync`.
     #[cfg(test)]
     probe_visited: std::sync::atomic::AtomicUsize,
+}
+
+/// The fields of a row that a mutation may not change, captured before the edit
+/// and put back after it.
+struct RowIdentity {
+    row_id: String,
+    order_seq: i64,
+    withdrawn: bool,
+}
+
+impl RowIdentity {
+    fn of(record: &TranscriptRecord) -> Self {
+        Self {
+            row_id: record.row_id.clone(),
+            order_seq: record.order_seq,
+            withdrawn: record.withdrawn,
+        }
+    }
+
+    fn restore(&self, record: &mut TranscriptRecord) {
+        record.row_id.clone_from(&self.row_id);
+        record.order_seq = self.order_seq;
+        // Absorbing: set stays set, and a later copy may still set it.
+        record.withdrawn |= self.withdrawn;
+    }
 }
 
 // Hand-written so the test-only probe counter (an atomic, which is not `Clone`)
@@ -66,25 +115,75 @@ impl ThreadTranscript {
         store
     }
 
-    /// THE resolver. Accepts either a row id or any provider id bound to one,
-    /// and answers with the row id — the only key the core may hold.
-    pub(crate) fn resolve(&self, id: &str) -> Option<&str> {
-        if let Some((row_id, _)) = self.by_row_id.get_key_value(id) {
-            return Some(row_id.as_str());
-        }
+    /// Resolve in the ROW namespace: the relay's own key, which is what clients
+    /// hold and what every core operation is addressed by.
+    ///
+    /// Deliberately blind to provider ids. The two namespaces overlap in practice —
+    /// a provider-born row's key IS its provider id — but they are not the same
+    /// space, and a single resolver that fell back from one to the other let a
+    /// provider event land on an unrelated relay row that merely shared its
+    /// spelling.
+    pub(crate) fn resolve_row(&self, row_id: &str) -> Option<&str> {
+        self.by_row_id
+            .get_key_value(row_id)
+            .map(|(id, _)| id.as_str())
+    }
+
+    /// Resolve in the PROVIDER namespace: only ids a provider has actually issued
+    /// for a row. A relay-owned key that was never bound resolves to nothing here,
+    /// even when some other row happens to be keyed by that string.
+    pub(crate) fn resolve_provider(&self, provider_item_id: &str) -> Option<&str> {
         self.row_id_by_provider_item_id
-            .get(id)
+            .get(provider_item_id)
             .map(String::as_str)
             .filter(|row_id| self.by_row_id.contains_key(*row_id))
     }
 
-    pub(crate) fn resolve_index(&self, id: &str) -> Option<usize> {
+    /// Resolve in the namespace the caller says it is holding.
+    pub(crate) fn resolve_in(&self, space: IdSpace, id: &str) -> Option<&str> {
+        match space {
+            IdSpace::Provider => self.resolve_provider(id),
+            IdSpace::Row => self.resolve_row(id),
+        }
+    }
+
+    /// Delegates to `resolve_in` so the namespace choice lives in exactly one
+    /// place — two copies of that `match` is two places for the split to rot.
+    pub(crate) fn resolve_index_in(&self, space: IdSpace, id: &str) -> Option<usize> {
+        #[cfg(test)]
+        self.probe(true);
+        let row_id = self.resolve_in(space, id)?;
+        #[cfg(test)]
+        self.probe(false);
+        self.by_row_id.get(row_id).copied()
+    }
+
+    /// Resolve an incoming history/page record to the row it belongs to.
+    ///
+    /// A record the provider named is matched in the PROVIDER namespace, the only
+    /// space where its identity means anything. A relay-synthesized record — a
+    /// per-turn diff re-derived from a read — carries no provider name and is
+    /// matched by its deterministic row key instead.
+    pub(crate) fn resolve_incoming(&self, record: &TranscriptRecord) -> Option<&str> {
+        match record.provider_item_id.as_deref() {
+            Some(provider_item_id) => self.resolve_provider(provider_item_id),
+            None => self.resolve_row(&record.row_id),
+        }
+    }
+
+    pub(crate) fn resolve_row_index(&self, row_id: &str) -> Option<usize> {
         // Every probe is counted, so `probe_visited` measures the work this does.
         // Reintroducing a scan here means counting per row, and the complexity
         // test below starts growing with transcript length.
         #[cfg(test)]
         self.probe(true);
-        let row_id = self.resolve(id)?;
+        self.by_row_id.get(row_id).copied()
+    }
+
+    pub(crate) fn resolve_provider_index(&self, provider_item_id: &str) -> Option<usize> {
+        #[cfg(test)]
+        self.probe(true);
+        let row_id = self.resolve_provider(provider_item_id)?;
         #[cfg(test)]
         self.probe(false);
         self.by_row_id.get(row_id).copied()
@@ -108,8 +207,14 @@ impl ThreadTranscript {
         self.by_row_id.contains_key(row_id)
     }
 
-    pub(crate) fn get(&self, id: &str) -> Option<&TranscriptRecord> {
-        self.resolve_index(id).map(|index| &self.rows[index])
+    pub(crate) fn get_row(&self, row_id: &str) -> Option<&TranscriptRecord> {
+        self.resolve_row_index(row_id)
+            .map(|index| &self.rows[index])
+    }
+
+    pub(crate) fn get_by_provider(&self, provider_item_id: &str) -> Option<&TranscriptRecord> {
+        self.resolve_provider_index(provider_item_id)
+            .map(|index| &self.rows[index])
     }
 
     /// The id the PROVIDER knows this row by, for an operation addressed to the
@@ -118,8 +223,8 @@ impl ThreadTranscript {
     /// `None` means only the relay has ever named this row, so there is nothing the
     /// provider could match — the caller must degrade deliberately rather than send
     /// a string the provider has never issued.
-    pub(crate) fn provider_item_id(&self, id: &str) -> Option<&str> {
-        self.get(id)?.provider_item_id.as_deref()
+    pub(crate) fn provider_item_id(&self, row_id: &str) -> Option<&str> {
+        self.get_row(row_id)?.provider_item_id.as_deref()
     }
 
     /// A row id that is free right now, preferring `candidate`.
@@ -160,12 +265,10 @@ impl ThreadTranscript {
                 return false;
             }
         }
-        // A provider id equal to some OTHER row's row_id must not become an
-        // alias: `resolve` checks row ids first, so the alias would be dead
-        // weight at best and a cross-row hop at worst.
-        if provider_item_id != row_id && self.by_row_id.contains_key(provider_item_id) {
-            return false;
-        }
+        // A provider id that happens to equal some OTHER row's key is fine and must
+        // be recorded: the namespaces are separate, so provider `x` naming row
+        // `x#row1` while an unrelated relay row owns key `x` is exactly the state
+        // a collision has to be able to reach.
         self.row_id_by_provider_item_id
             .insert(provider_item_id.to_string(), row_id.to_string());
         if let Some(index) = self.by_row_id.get(row_id).copied() {
@@ -191,40 +294,36 @@ impl ThreadTranscript {
         row_id
     }
 
-    /// The one `&mut` door into a row. The closure may touch anything; the id
-    /// index is repaired afterwards, so even a caller that rewrites `row_id`
-    /// cannot leave the map pointing at the wrong place.
+    /// The one `&mut` door into a row, addressed in the ROW namespace.
+    ///
+    /// The closure may touch content freely, but the row's identity is restored
+    /// afterwards: `row_id` because a rename is not expressible on the wire,
+    /// `order_seq` because it is birth-fixed and clients may already be sorting by
+    /// it, and `withdrawn` because it is absorbing. Restoring rather than trusting
+    /// the closure is what makes those invariants unbreakable from outside — the
+    /// whole-record replace inside `merge_runtime_entry` overwrites all three.
     pub(crate) fn update_row<R>(
         &mut self,
-        id: &str,
+        row_id: &str,
         edit: impl FnOnce(&mut TranscriptRecord) -> R,
     ) -> Option<R> {
-        let index = self.resolve_index(id)?;
-        let before = self.rows[index].row_id.clone();
+        let index = self.resolve_row_index(row_id)?;
+        let identity = RowIdentity::of(&self.rows[index]);
         let outcome = edit(&mut self.rows[index]);
-        let after = self.rows[index].row_id.clone();
-        if before != after {
-            self.by_row_id.remove(&before);
-            self.by_row_id.insert(after.clone(), index);
-            for row_id in self.row_id_by_provider_item_id.values_mut() {
-                if *row_id == before {
-                    *row_id = after.clone();
-                }
-            }
-        }
+        identity.restore(&mut self.rows[index]);
         if let Some(provider_item_id) = self.rows[index].provider_item_id.clone() {
-            self.row_id_by_provider_item_id
-                .entry(provider_item_id)
-                .or_insert_with(|| after.clone());
+            self.bind_provider_item_id(&identity.row_id.clone(), &provider_item_id);
         }
         Some(outcome)
     }
 
-    /// Apply `edit` to every row, then rebuild — for the sweeps that cannot name
-    /// their target up front (withdrawal by predicate).
+    /// Apply `edit` to every row — for the sweeps that cannot name their target up
+    /// front (withdrawal by predicate). Same identity rules as `update_row`.
     pub(crate) fn update_all(&mut self, mut edit: impl FnMut(&mut TranscriptRecord)) {
         for row in self.rows.iter_mut() {
+            let identity = RowIdentity::of(row);
             edit(row);
+            identity.restore(row);
         }
         self.reindex();
     }
@@ -355,12 +454,12 @@ mod tests {
 
         assert_eq!(store.len(), 1, "the echo must not add a row");
         assert_eq!(
-            store.resolve("msg_abc"),
+            store.resolve_provider("msg_abc"),
             Some("codex:user-reserve:gen:t1:1"),
             "the provider id resolves to the row it named"
         );
         assert_eq!(
-            store.resolve("codex:user-reserve:gen:t1:1"),
+            store.resolve_row("codex:user-reserve:gen:t1:1"),
             Some("codex:user-reserve:gen:t1:1"),
             "and the row keeps the id already published to clients"
         );
@@ -378,11 +477,16 @@ mod tests {
         assert!(store.bind_provider_item_id(&row_id, "replay-0-1"));
 
         assert_eq!(store.len(), 1);
-        for named in ["tool:call-1", "call-1\nfc_0", "replay-0-1"] {
+        assert_eq!(
+            store.resolve_row("tool:call-1"),
+            Some("tool:call-1"),
+            "the row is reachable by its own key"
+        );
+        for named in ["call-1\nfc_0", "replay-0-1"] {
             assert_eq!(
-                store.resolve(named),
+                store.resolve_provider(named),
                 Some("tool:call-1"),
-                "`{named}` must name the one row"
+                "provider id `{named}` must name the one row"
             );
         }
         store.assert_indexes_consistent();
@@ -401,7 +505,7 @@ mod tests {
             !store.bind_provider_item_id(&second, "prov-1"),
             "the second claim on a live alias must be refused"
         );
-        assert_eq!(store.resolve("prov-1"), Some("row-a"));
+        assert_eq!(store.resolve_provider("prov-1"), Some("row-a"));
         store.assert_indexes_consistent();
     }
 
@@ -416,29 +520,66 @@ mod tests {
         assert_ne!(first, second, "the collision must not reuse the id");
         assert_eq!(store.len(), 2, "two messages stay two rows");
         assert_eq!(
-            store.get(&first).and_then(|r| r.text.clone()).as_deref(),
+            store
+                .get_row(&first)
+                .and_then(|r| r.text.clone())
+                .as_deref(),
             Some("first message")
         );
         assert_eq!(
-            store.get(&second).and_then(|r| r.text.clone()).as_deref(),
+            store
+                .get_row(&second)
+                .and_then(|r| r.text.clone())
+                .as_deref(),
             Some("second message")
         );
         store.assert_indexes_consistent();
     }
 
-    /// A provider id that happens to equal another row's row_id must not become
-    /// an alias — `resolve` prefers row ids, so the hop would cross rows.
+    /// THE collision the split exists for: a relay row owns key `x`, and a
+    /// DIFFERENT provider row arrives calling itself `x`.
+    ///
+    /// With one blended resolver the provider event landed on the relay row and
+    /// overwrote it, and the alias could never be recorded because it shadowed a
+    /// row key — so the collision had no representable state at all. The two
+    /// namespaces must hold both facts at once.
     #[test]
-    fn a_provider_id_that_shadows_another_rows_key_is_refused_as_an_alias() {
+    fn a_provider_id_may_shadow_an_unrelated_row_key_without_crossing_rows() {
         let mut store = ThreadTranscript::new();
-        let first = store.push(row("row-a", "a"));
-        let _second = store.push(row("row-b", "b"));
+        let relay_row = store.push(row("x", "the relay's row"));
 
-        assert!(
-            !store.bind_provider_item_id(&first, "row-b"),
-            "binding a live row id as another row's alias must be refused"
+        // A provider row that calls itself `x` cannot take the key, so it mints.
+        let provider_row = store.push(TranscriptRecord {
+            provider_item_id: Some("x".to_string()),
+            ..row("x", "the provider's row")
+        });
+
+        assert_ne!(relay_row, provider_row, "two rows, two keys");
+        assert_eq!(store.len(), 2);
+        assert_eq!(
+            store.resolve_row("x"),
+            Some("x"),
+            "the row namespace still answers with the relay's row"
         );
-        assert_eq!(store.resolve("row-b"), Some("row-b"));
+        assert_eq!(
+            store.resolve_provider("x"),
+            Some(provider_row.as_str()),
+            "the provider namespace answers with the provider's row"
+        );
+        assert_eq!(
+            store.get_row("x").and_then(|r| r.text.clone()).as_deref(),
+            Some("the relay's row")
+        );
+        assert_eq!(
+            store
+                .get_by_provider("x")
+                .and_then(|r| r.text.clone())
+                .as_deref(),
+            Some("the provider's row")
+        );
+        // A relay row nobody bound is invisible in the provider namespace, which is
+        // what stops a provider event from ever reaching it.
+        assert_eq!(store.provider_item_id(&relay_row), None);
         store.assert_indexes_consistent();
     }
 
@@ -465,7 +606,7 @@ mod tests {
         store.replace_all(snapshot);
         store.assert_indexes_consistent();
         assert_eq!(
-            store.resolve("prov-d"),
+            store.resolve_provider("prov-d"),
             Some("d"),
             "a wholesale replace keeps aliases whose row came along"
         );
@@ -475,10 +616,11 @@ mod tests {
         assert!(store.iter().all(|r| r.withdrawn));
     }
 
-    /// Even a caller that rewrites `row_id` inside the closure cannot leave the
-    /// index pointing at the wrong row.
+    /// `row_id` is the one field a mutation may never touch. A rename is not
+    /// expressible on the wire, so a caller that tries one must find it had no
+    /// effect — not a repaired index pointing somewhere new.
     #[test]
-    fn update_row_repairs_the_index_when_the_closure_rewrites_the_id() {
+    fn a_closure_cannot_rename_a_row_through_update_row() {
         let mut store = ThreadTranscript::new();
         let row_id = store.push(row("before", "text"));
         assert!(store.bind_provider_item_id(&row_id, "prov-1"));
@@ -487,14 +629,89 @@ mod tests {
             .update_row("before", |record| record.row_id = "after".to_string())
             .expect("the row is there");
 
+        assert_eq!(store[0].row_id, "before", "the rename must not take");
+        assert_eq!(store.resolve_row("after"), None);
+        assert_eq!(store.resolve_row("before"), Some("before"));
+        assert_eq!(store.resolve_provider("prov-1"), Some("before"));
         store.assert_indexes_consistent();
-        assert_eq!(store.resolve("after"), Some("after"));
-        assert_eq!(store.resolve("before"), None);
+    }
+
+    /// The sharp version: renaming ONTO a live row would collapse two index
+    /// entries into one and leave a row that is still rendered unreachable by id.
+    #[test]
+    fn an_attempted_rename_onto_a_live_row_cannot_strand_it() {
+        let mut store = ThreadTranscript::new();
+        store.push(row("row-a", "a"));
+        store.push(row("row-b", "b"));
+
+        store
+            .update_row("row-a", |record| record.row_id = "row-b".to_string())
+            .expect("the row is there");
+
+        assert_eq!(store.len(), 2, "both rows still exist");
+        assert_eq!(store.resolve_row("row-a"), Some("row-a"));
+        assert_eq!(store.resolve_row("row-b"), Some("row-b"));
         assert_eq!(
-            store.resolve("prov-1"),
-            Some("after"),
-            "the alias follows the row it named"
+            store
+                .get_row("row-a")
+                .and_then(|r| r.text.clone())
+                .as_deref(),
+            Some("a")
         );
+        assert_eq!(
+            store
+                .get_row("row-b")
+                .and_then(|r| r.text.clone())
+                .as_deref(),
+            Some("b")
+        );
+        store.assert_indexes_consistent();
+    }
+
+    /// `order_seq` is assigned once at birth; a client may already be sorting by it.
+    /// `withdrawn` is absorbing. Neither may be undone by a later mutation.
+    #[test]
+    fn update_row_keeps_order_seq_birth_fixed_and_withdrawn_absorbing() {
+        let mut store = ThreadTranscript::new();
+        let row_id = store.push(TranscriptRecord {
+            order_seq: 4096,
+            withdrawn: true,
+            ..row("row-a", "a")
+        });
+
+        store
+            .update_row(&row_id, |record| {
+                record.order_seq = 17;
+                record.withdrawn = false;
+            })
+            .expect("the row is there");
+
+        assert_eq!(store[0].order_seq, 4096, "an issued order key never moves");
+        assert!(store[0].withdrawn, "a tombstone cannot be cleared");
+    }
+
+    /// The by-predicate sweep has the same identity rules as the targeted door.
+    #[test]
+    fn update_all_cannot_change_identity_or_clear_a_tombstone() {
+        let mut store = ThreadTranscript::new();
+        store.push(TranscriptRecord {
+            withdrawn: true,
+            ..row("row-a", "a")
+        });
+        store.push(row("row-b", "b"));
+
+        store.update_all(|record| {
+            record.row_id = format!("{}-renamed", record.row_id);
+            record.withdrawn = false;
+        });
+
+        assert_eq!(
+            store.iter().map(|r| r.row_id.as_str()).collect::<Vec<_>>(),
+            ["row-a", "row-b"],
+            "a sweep cannot rename rows"
+        );
+        assert!(store[0].withdrawn, "nor resurrect a withdrawn one");
+        store.assert_indexes_consistent();
     }
 
     /// The index exists to remove the linear scan. Resolution cost must not grow
@@ -510,9 +727,9 @@ mod tests {
             large.push(row(&format!("row-{index}"), "x"));
         }
 
-        assert_eq!(small.resolve_index("row-7"), Some(7));
+        assert_eq!(small.resolve_row_index("row-7"), Some(7));
         let small_cost = small.probe_visited();
-        assert_eq!(large.resolve_index("row-19999"), Some(19_999));
+        assert_eq!(large.resolve_row_index("row-19999"), Some(19_999));
         let large_cost = large.probe_visited();
 
         assert_eq!(
