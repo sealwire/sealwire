@@ -762,17 +762,23 @@ function newTailIdsAreNumbered(tailIds, unorderedIds, rowFor) {
   return true;
 }
 
-function placeTailIds(order, entries, tailIds, unorderedIds, rowFor, options = {}) {
+function placeTailIds(order, tailIds, unorderedIds, rowFor, options = {}) {
   if (options.keyed !== true) {
     return placeOrderedTailIds(order, tailIds, unorderedIds, options);
   }
+  // Neighbours resolve through the SAME resolver as the row being placed, and
+  // there is deliberately no second lookup to pass. Every caller merges its rows
+  // somewhere the window map does not see yet (an overlay, the session array),
+  // so a separate `entries` argument only ever meant "the id placed one
+  // iteration ago reads back as unnumbered, and the next row walks over it".
+  const neighbours = { get: rowFor };
   const { copyOnWrite = false } = options;
   let working = order;
   for (const itemId of tailIds) {
     if (!unorderedIds.has(itemId)) {
       continue;
     }
-    const at = keyedInsertionIndex(working, entries, rowFor(itemId));
+    const at = keyedInsertionIndex(working, neighbours, rowFor(itemId));
     if (copyOnWrite && working === order) {
       working = [...order];
     }
@@ -938,14 +944,10 @@ function buildHydratedTranscriptSnapshot(
   // this same loop — which reads as "unnumbered", gets walked over, and lets the
   // SECOND row of a pair land above the first. That is how an answered ask-user
   // card ended up below the message the relay published alongside it.
-  const order = placeTailIds(
-    baseOrder,
-    { get: overlayRowFor },
-    tailIds,
-    unorderedIds,
-    overlayRowFor,
-    { copyOnWrite: true, keyed: placeKeyed }
-  );
+  const order = placeTailIds(baseOrder, tailIds, unorderedIds, overlayRowFor, {
+    copyOnWrite: true,
+    keyed: placeKeyed,
+  });
   const transcript = order
     .map((itemId) => (overlay && overlay.has(itemId) ? overlay.get(itemId) : baseEntries.get(itemId)))
     .filter(Boolean);
@@ -1297,8 +1299,10 @@ export function renderedTranscriptFromWindow(state, session) {
   let order = windowOrder;
   if (arrayOnlyIds.length) {
     const arrayOnly = new Set(arrayOnlyIds);
-    const rowFor = (itemId) => arrayByItemId.get(itemId);
-    order = placeTailIds(windowOrder, entries, arrayOnlyIds, arrayOnly, rowFor, {
+    // Resolves BOTH sides: the array rows being placed, and the window rows they
+    // are placed against. Either alone leaves half the neighbours invisible.
+    const rowFor = (itemId) => arrayByItemId.get(itemId) || entries.get(itemId);
+    order = placeTailIds(windowOrder, arrayOnlyIds, arrayOnly, rowFor, {
       copyOnWrite: true,
       keyed: state.transcriptHydrationKeyed === true
         && newTailIdsAreNumbered(arrayOnlyIds, arrayOnly, rowFor),
@@ -1355,7 +1359,7 @@ function createMergedSnapshotTailPatch(state, snapshot, signature) {
   const rowFor = (itemId) => entries.get(itemId);
   const keyed = state.transcriptHydrationKeyed === true
     && newTailIdsAreNumbered(tailIds, unorderedIds, rowFor);
-  const placed = placeTailIds(order, entries, tailIds, unorderedIds, rowFor, { keyed });
+  const placed = placeTailIds(order, tailIds, unorderedIds, rowFor, { keyed });
 
   return {
     transcriptHydrationBaseSnapshot: snapshot,
@@ -1398,6 +1402,11 @@ function mergeTranscriptEntry(existing, incoming) {
     content_state: mergedContentState,
     // Absorbing: a copy serialized before the withdrawal must not resurrect the row.
     ...(existing.withdrawn === true || incoming.withdrawn === true ? { withdrawn: true } : {}),
+    // First order key wins, the same rule the shared reducer enforces. Without
+    // it a copy numbered by another runtime rewrites the number of a row that
+    // keeps its position — leaving a window whose cached proof still says
+    // "sorted" while the numbers no longer agree with the order.
+    ...(Number.isSafeInteger(existing.order_seq) ? { order_seq: existing.order_seq } : {}),
   };
 }
 

@@ -454,3 +454,47 @@ test("two new rows in ONE restore snapshot keep their relative order", () => {
   );
   assert.deepEqual(state.transcriptHydrationOrder, ["a", "ask", "trailing"]);
 });
+
+test("TWO array-only patch rows keep their order relative to each other", () => {
+  // Same shape as the restore bug, one function over: placeTailIds inserted the
+  // first array-only id into the working order, but neighbours were resolved
+  // through the WINDOW map, which never learns about it. The second row saw the
+  // first as unnumbered and walked over it. Reachable when two entry patches
+  // introduce rows before any snapshot teaches the window about either.
+  const state = pageState(row("a", 0));
+  const session = {
+    active_thread_id: "thread-1",
+    transcript: [row("a", 0), row("b", S), row("c", 2 * S)],
+  };
+
+  const rendered = renderedTranscriptFromWindow(state, session);
+
+  assert.deepEqual(rendered.map((entry) => entry.item_id), ["a", "b", "c"]);
+});
+
+test("an overlay copy cannot rewrite a placed row's number", () => {
+  // mergeTranscriptEntry spreads incoming over existing, so a copy numbered by
+  // another runtime could rewrite order_seq while the row kept its position and
+  // the cached proof stayed true — a window that silently disagrees with itself.
+  // The shared reducer already enforces first-key-wins; this merge must too.
+  const state = pageState(row("a", 0), row("b", S));
+
+  const rendered = restoreHydratedTranscriptSnapshot(state, {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-2",
+    transcript_revision: 11,
+    transcript_truncated: true,
+    transcript: [row("a", 99 * S, { text: "foreign copy of a" })],
+  });
+
+  assert.equal(
+    state.transcriptHydrationEntries.get("a").order_seq,
+    0,
+    "first order key wins, exactly as in the reducer"
+  );
+  assert.deepEqual(
+    rendered.transcript.map((entry) => entry.item_id),
+    ["a", "b"],
+    "and the row does not move"
+  );
+});
