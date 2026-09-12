@@ -78,13 +78,14 @@ test("search is a disclosure; the bell is a toggle", () => {
   );
 });
 
-// Local binds ⌘F; remote (a phone surface) does not. The hint is a prop so the label can
-// tell the truth on each surface rather than promising a shortcut that does not exist.
+// The shortcut hint is optional. Session search used to advertise ⌘F; that key
+// is left to the browser, so surfaces that only open this field from the
+// magnifying glass pass no hint.
 test("the shortcut hint appears only where there is a shortcut", () => {
   const withHint = renderToStaticMarkup(
-    h(SidebarSearchToggle, { open: false, onToggle: noop, shortcutHint: "⌘F" })
+    h(SidebarSearchToggle, { open: false, onToggle: noop, shortcutHint: "⌘K" })
   );
-  assert.match(withHint, /title="Search sessions \(⌘F\)"/);
+  assert.match(withHint, /title="Search sessions \(⌘K\)"/);
 
   const without = renderToStaticMarkup(h(SidebarSearchToggle, { open: false, onToggle: noop }));
   assert.match(without, /title="Search sessions"/);

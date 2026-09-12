@@ -1897,9 +1897,7 @@ export function createSessionRenderer({
         h(SidebarSearchToggle, {
           open: searchUi.open,
           onToggle: onSetSearchOpen,
-          // Local binds ⌘F (app.js); remote has no such key, so the hint is a prop rather
-          // than baked into the label.
-          shortcutHint: "⌘F",
+          // No shortcutHint: ⌘F is left to the browser for transcript Find.
         }),
         h(SidebarBellToggle, {
           on: filter.on,
@@ -1914,12 +1912,13 @@ export function createSessionRenderer({
         query: searchUi.draft,
         onInput: onSearchInput,
         onClose: () => onSetSearchOpen(false),
-        // Local reveals the field from a keyboard shortcut (⌘F), so focusing it is the
-        // point. Remote leaves this off: on a phone, focusing pops the on-screen keyboard
-        // over the list the user just asked to see.
+        // Focusing on open is still the point when the user clicks the magnifying
+        // glass. Remote leaves this off: on a phone, focusing pops the on-screen
+        // keyboard over the list the user just asked to see.
         focusOnOpen: true,
-        // The counter, so ⌘F focuses an ALREADY-OPEN field too. `open` does not change in
-        // that case, so a mount-only `autoFocus` made the shortcut look dead.
+        // The counter, so a repeat open focuses an ALREADY-OPEN field too. `open`
+        // does not change in that case, so a mount-only `autoFocus` made the
+        // control look dead.
         focusSignal: searchUi.focusSignal,
       })
     );
