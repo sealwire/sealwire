@@ -1,5 +1,5 @@
 // Regression: the right-rail's "hide panel" toggle (#rail-top-toggle) must line up
-// with the Changes/Reviewer segmented tabs in the header band — same vertical
+// with the Changes/Agents segmented tabs in the header band — same vertical
 // center, and sitting in its own space to the right of the pill rather than
 // overlapping it. The toggle was pinned to a fixed `top: 12px` calibrated for an
 // older, shorter header; once the tabbed header band grew to --header-band-height
@@ -62,9 +62,9 @@ async function main() {
     await page.waitForSelector("#workspace-changes-rail", { state: "visible" });
     await page.waitForSelector("#rail-top-toggle", { state: "visible" });
 
-    // Switch the rail's right panel to the Reviewer tab (where the screenshot was taken);
+    // Switch the rail's right panel to the Agents tab (where the screenshot was taken);
     // the header band + toggle are identical on the Changes tab, but this mirrors the report.
-    await page.locator("#review-panel-rail-tabs button", { hasText: "Reviewer" }).click();
+    await page.locator("#review-panel-rail-tabs button", { hasText: "Agents" }).click();
     await page.waitForTimeout(150);
 
     const measure = () =>
@@ -91,7 +91,7 @@ async function main() {
 
     const assertAligned = (metrics, at) => {
       assert.ok(metrics.toggle, `[${at}] expected #rail-top-toggle to be present`);
-      assert.ok(metrics.seg, `[${at}] expected the Changes/Reviewer segmented control`);
+      assert.ok(metrics.seg, `[${at}] expected the Changes/Agents segmented control`);
 
       const verticalDiff = Math.abs(metrics.toggle.cy - metrics.seg.cy);
       assert.ok(
