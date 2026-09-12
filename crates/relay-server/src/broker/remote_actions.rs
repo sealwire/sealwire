@@ -7,12 +7,11 @@ use crate::{
     protocol::{
         ApplyFileChangeInput, ApprovalDecisionInput, ApprovalReceipt, AskUserAnswerReceipt,
         AskUserQuestionDetailResponse, DevicesResponse, ForkSessionInput, HeartbeatInput,
-        ModelOptionView, ProjectActionInput, ProjectsResponse, ReadThreadEntriesInput,
-        ReadThreadEntryDetailInput, ReadThreadTranscriptInput, RenameThreadInput,
-        RepairWorkspaceInput, RequestReviewInput, ResolvedWorkspace, ResumeSessionInput,
-        ReviewsResponse, SendMessageInput, SessionSnapshot, SetThreadFlagInput, StartSessionInput,
-        StartWorkflowInput, StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput,
-        ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadSettingsView,
+        ModelOptionView, ProjectActionInput, ProjectsResponse, ReadThreadEntryDetailInput,
+        ReadThreadTranscriptInput, RenameThreadInput, RepairWorkspaceInput, RequestReviewInput,
+        ResolvedWorkspace, ResumeSessionInput, ReviewsResponse, SendMessageInput, SessionSnapshot,
+        SetThreadFlagInput, StartSessionInput, StartWorkflowInput, StopTurnInput,
+        SubmitAskUserAnswerInput, TakeOverInput, ThreadEntryDetailResponse, ThreadSettingsView,
         ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput,
         WatchThreadsInput, WorkflowActionInput, WorkflowsResponse, WorkspaceDiffResponse,
         WorkspaceGitContextView,
@@ -97,9 +96,6 @@ pub(super) enum RemoteActionRequest {
     },
     ListProviderModels {
         provider: String,
-    },
-    FetchThreadEntries {
-        input: ReadThreadEntriesInput,
     },
     FetchThreadEntryDetail {
         input: ReadThreadEntryDetailInput,
@@ -263,7 +259,6 @@ impl RemoteActionRequest {
             Self::ListProviders => RemoteActionKind::ListProviders,
             Self::ListThreads { .. } => RemoteActionKind::ListThreads,
             Self::ListProviderModels { .. } => RemoteActionKind::ListProviderModels,
-            Self::FetchThreadEntries { .. } => RemoteActionKind::FetchThreadEntries,
             Self::FetchThreadEntryDetail { .. } => RemoteActionKind::FetchThreadEntryDetail,
             Self::FetchThreadTranscript { .. } => RemoteActionKind::FetchThreadTranscript,
             Self::DecideApproval { .. } => RemoteActionKind::DecideApproval,
@@ -345,10 +340,6 @@ impl RemoteActionRequest {
                 Self::ListThreads { query }
             }
             Self::ListProviderModels { provider } => Self::ListProviderModels { provider },
-            Self::FetchThreadEntries { mut input } => {
-                input.device_id = Some(device_id);
-                Self::FetchThreadEntries { input }
-            }
             Self::FetchThreadEntryDetail { mut input } => {
                 input.device_id = Some(device_id);
                 Self::FetchThreadEntryDetail { input }
@@ -507,7 +498,6 @@ pub(super) enum RemoteActionKind {
     ListProviders,
     ListThreads,
     ListProviderModels,
-    FetchThreadEntries,
     FetchThreadEntryDetail,
     FetchThreadTranscript,
     DecideApproval,
@@ -553,7 +543,6 @@ impl RemoteActionKind {
             Self::ListProviders => "list_providers",
             Self::ListThreads => "list_threads",
             Self::ListProviderModels => "list_provider_models",
-            Self::FetchThreadEntries => "fetch_thread_entries",
             Self::FetchThreadEntryDetail => "fetch_thread_entry_detail",
             Self::FetchThreadTranscript => "fetch_thread_transcript",
             Self::DecideApproval => "decide_approval",
@@ -597,7 +586,6 @@ struct RemoteActionResultPlaintext {
     providers: Option<Vec<String>>,
     models: Option<Vec<ModelOptionView>>,
     threads: Option<ThreadsResponse>,
-    thread_entries: Option<ThreadEntriesResponse>,
     thread_entry_detail: Option<ThreadEntryDetailResponse>,
     thread_transcript: Option<ThreadTranscriptResponse>,
     workspace_diff: Option<WorkspaceDiffResponse>,
@@ -647,7 +635,6 @@ fn busy_remote_action_result(
         providers: None,
         models: None,
         threads: None,
-        thread_entries: None,
         thread_entry_detail: None,
         thread_transcript: None,
         workspace_diff: None,
@@ -698,7 +685,6 @@ struct RemoteActionResultSizeBreakdown {
     snapshot_bytes: usize,
     receipt_bytes: usize,
     threads_bytes: usize,
-    thread_entries_bytes: usize,
     thread_entry_detail_bytes: usize,
     thread_transcript_bytes: usize,
     workspace_diff_bytes: usize,
@@ -723,7 +709,6 @@ pub(super) struct RemoteActionOutcome {
     pub(super) providers: Option<Vec<String>>,
     pub(super) models: Option<Vec<ModelOptionView>>,
     pub(super) threads: Option<ThreadsResponse>,
-    pub(super) thread_entries: Option<ThreadEntriesResponse>,
     pub(super) thread_entry_detail: Option<ThreadEntryDetailResponse>,
     pub(super) thread_transcript: Option<ThreadTranscriptResponse>,
     pub(super) workspace_diff: Option<WorkspaceDiffResponse>,
@@ -1343,7 +1328,6 @@ async fn execute_remote_action(
             providers: Some(state.available_providers()),
             models: None,
             threads: None,
-            thread_entries: None,
             thread_entry_detail: None,
             thread_transcript: None,
             session_claim: None,
@@ -1366,7 +1350,6 @@ async fn execute_remote_action(
                 receipt: None,
                 models: None,
                 threads: Some(threads),
-                thread_entries: None,
                 thread_entry_detail: None,
                 thread_transcript: None,
                 session_claim: None,
@@ -1380,20 +1363,6 @@ async fn execute_remote_action(
                 receipt: None,
                 models: Some(models),
                 threads: None,
-                thread_entries: None,
-                thread_entry_detail: None,
-                thread_transcript: None,
-                session_claim: None,
-                session_claim_expires_at: None,
-                ..RemoteActionOutcome::default()
-            }),
-        RemoteActionRequest::FetchThreadEntries { input } => state
-            .read_thread_entries(input)
-            .await
-            .map(|thread_entries| RemoteActionOutcome {
-                receipt: None,
-                threads: None,
-                thread_entries: Some(thread_entries),
                 thread_entry_detail: None,
                 thread_transcript: None,
                 session_claim: None,
@@ -1406,7 +1375,6 @@ async fn execute_remote_action(
             .map(|thread_entry_detail| RemoteActionOutcome {
                 receipt: None,
                 threads: None,
-                thread_entries: None,
                 thread_entry_detail: Some(thread_entry_detail),
                 thread_transcript: None,
                 session_claim: None,
@@ -1426,7 +1394,6 @@ async fn execute_remote_action(
                 .map(|thread_transcript| RemoteActionOutcome {
                     receipt: None,
                     threads: None,
-                    thread_entries: None,
                     thread_entry_detail: None,
                     thread_transcript: Some(thread_transcript),
                     session_claim: None,
@@ -1440,7 +1407,6 @@ async fn execute_remote_action(
             .map(|receipt| RemoteActionOutcome {
                 receipt: Some(receipt),
                 threads: None,
-                thread_entries: None,
                 thread_entry_detail: None,
                 thread_transcript: None,
                 session_claim: None,
@@ -1605,7 +1571,6 @@ fn remote_action_emits_info_log(action: RemoteActionKind) -> bool {
         RemoteActionKind::Heartbeat
             | RemoteActionKind::WatchThreads
             | RemoteActionKind::ListThreads
-            | RemoteActionKind::FetchThreadEntries
             | RemoteActionKind::FetchThreadEntryDetail
             | RemoteActionKind::FetchThreadTranscript
             | RemoteActionKind::FetchWorkspaceDiff
@@ -1912,7 +1877,6 @@ async fn publish_plain_remote_action_result(
         ask_user_answer_receipt,
         providers,
         models,
-        thread_entries,
         thread_entry_detail,
         thread_transcript,
         workspace_diff,
@@ -1939,7 +1903,6 @@ async fn publish_plain_remote_action_result(
         providers.as_ref(),
         models.as_ref(),
         threads.as_ref(),
-        thread_entries.as_ref(),
         thread_entry_detail.as_ref(),
         thread_transcript.as_ref(),
         workspace_diff.as_ref(),
@@ -1968,7 +1931,6 @@ async fn publish_plain_remote_action_result(
         providers,
         models,
         threads,
-        thread_entries,
         thread_entry_detail,
         thread_transcript,
         workspace_diff,
@@ -2139,7 +2101,6 @@ fn build_plain_remote_action_result_payload(
                 target_peer_id,
                 action: result.action,
                 ok: result.ok,
-                thread_entries: result.thread_entries.clone(),
                 thread_entry_detail: result.thread_entry_detail.clone(),
                 thread_transcript: result.thread_transcript.clone(),
                 workspace_diff: result.workspace_diff.clone(),
@@ -2178,7 +2139,6 @@ async fn replay_plain_remote_action_result(
             providers: cached.providers,
             models: cached.models,
             threads: cached.threads,
-            thread_entries: cached.thread_entries,
             thread_entry_detail: cached.thread_entry_detail,
             thread_transcript: cached.thread_transcript,
             workspace_diff: cached.workspace_diff,
@@ -2249,7 +2209,6 @@ async fn publish_remote_action_result_private(
         ask_user_answer_receipt,
         providers,
         models,
-        thread_entries,
         thread_entry_detail,
         thread_transcript,
         workspace_diff,
@@ -2280,7 +2239,6 @@ async fn publish_remote_action_result_private(
         providers.as_ref(),
         models.as_ref(),
         threads.as_ref(),
-        thread_entries.as_ref(),
         thread_entry_detail.as_ref(),
         thread_transcript.as_ref(),
         workspace_diff.as_ref(),
@@ -2309,7 +2267,6 @@ async fn publish_remote_action_result_private(
         providers,
         models,
         threads,
-        thread_entries,
         thread_entry_detail,
         thread_transcript,
         workspace_diff,
@@ -2415,7 +2372,6 @@ async fn replay_encrypted_remote_action_result(
             providers: cached.providers,
             models: cached.models,
             threads: cached.threads,
-            thread_entries: cached.thread_entries,
             thread_entry_detail: cached.thread_entry_detail,
             thread_transcript: cached.thread_transcript,
             workspace_diff: cached.workspace_diff,
@@ -2643,7 +2599,6 @@ fn cached_remote_action_result(
         // boundary. Thread transcript responses are already paginated and do not
         // use ThreadsResponseCompactProfile.
         threads: outcome.threads,
-        thread_entries: outcome.thread_entries,
         thread_entry_detail: outcome.thread_entry_detail,
         thread_transcript: outcome.thread_transcript,
         workspace_diff: outcome.workspace_diff,
@@ -2673,7 +2628,6 @@ fn measure_remote_action_result_sizes(
     providers: Option<&Vec<String>>,
     models: Option<&Vec<ModelOptionView>>,
     threads: Option<&ThreadsResponse>,
-    thread_entries: Option<&ThreadEntriesResponse>,
     thread_entry_detail: Option<&ThreadEntryDetailResponse>,
     thread_transcript: Option<&ThreadTranscriptResponse>,
     workspace_diff: Option<&WorkspaceDiffResponse>,
@@ -2701,7 +2655,6 @@ fn measure_remote_action_result_sizes(
         providers,
         models,
         threads,
-        thread_entries,
         thread_entry_detail,
         thread_transcript,
         workspace_diff,
@@ -2724,7 +2677,6 @@ fn measure_remote_action_result_sizes(
         snapshot_bytes: maybe_serialized_json_bytes(snapshot),
         receipt_bytes: maybe_serialized_json_bytes(receipt),
         threads_bytes: maybe_serialized_json_bytes(threads),
-        thread_entries_bytes: maybe_serialized_json_bytes(thread_entries),
         thread_entry_detail_bytes: maybe_serialized_json_bytes(thread_entry_detail),
         thread_transcript_bytes: maybe_serialized_json_bytes(thread_transcript),
         workspace_diff_bytes: maybe_serialized_json_bytes(workspace_diff),
@@ -2769,7 +2721,6 @@ fn log_remote_action_result_sizes(
         snapshot_bytes = breakdown.snapshot_bytes,
         receipt_bytes = breakdown.receipt_bytes,
         threads_bytes = breakdown.threads_bytes,
-        thread_entries_bytes = breakdown.thread_entries_bytes,
         thread_entry_detail_bytes = breakdown.thread_entry_detail_bytes,
         thread_transcript_bytes = breakdown.thread_transcript_bytes,
         workspace_diff_bytes = breakdown.workspace_diff_bytes,
@@ -2790,8 +2741,9 @@ fn log_remote_action_result_sizes(
     if frame_bytes > MAX_BROKER_TEXT_FRAME_BYTES {
         // TODO(remote-action-frame-budget): Use this breakdown to decide which fields should stay
         // in the first response versus move behind detail/chunk loading. In particular, preserve
-        // normal agent/user text when possible, but treat large tool payloads (`thread_transcript`,
-        // `thread_entries`, command/tool detail blobs) as candidates for preview-only transport.
+        // normal agent/user text when possible, but treat large tool payloads
+        // (`thread_transcript`, command/tool detail blobs) as candidates for preview-only
+        // transport.
         // Once the hotspots are confirmed, pair that policy with broker-level chunk fallback at
         // the final publish boundary so oversized action results never tear down the socket.
         warn!(
@@ -2800,7 +2752,6 @@ fn log_remote_action_result_sizes(
             snapshot_bytes = breakdown.snapshot_bytes,
             receipt_bytes = breakdown.receipt_bytes,
             threads_bytes = breakdown.threads_bytes,
-            thread_entries_bytes = breakdown.thread_entries_bytes,
             thread_entry_detail_bytes = breakdown.thread_entry_detail_bytes,
             thread_transcript_bytes = breakdown.thread_transcript_bytes,
             workspace_diff_bytes = breakdown.workspace_diff_bytes,
@@ -2850,7 +2801,6 @@ struct RemoteActionResultPlaintextRef<'a> {
     providers: Option<&'a Vec<String>>,
     models: Option<&'a Vec<ModelOptionView>>,
     threads: Option<&'a ThreadsResponse>,
-    thread_entries: Option<&'a ThreadEntriesResponse>,
     thread_entry_detail: Option<&'a ThreadEntryDetailResponse>,
     thread_transcript: Option<&'a ThreadTranscriptResponse>,
     workspace_diff: Option<&'a WorkspaceDiffResponse>,
@@ -2897,8 +2847,7 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         RemoteActionKind::ListProviders
         | RemoteActionKind::ListThreads
         | RemoteActionKind::ListProviderModels => RemoteActionResultKind::RemoteThreadsResult,
-        RemoteActionKind::FetchThreadEntries
-        | RemoteActionKind::FetchThreadEntryDetail
+        RemoteActionKind::FetchThreadEntryDetail
         | RemoteActionKind::FetchThreadTranscript
         | RemoteActionKind::FetchWorkspaceDiff
         | RemoteActionKind::FetchWorkspaceGitContext

@@ -104,9 +104,10 @@ time:
    `parseFileChangesFromDiff(tool.diff)` keyed on `entry.path === normalized.path` → two
    rows: the empty absolute one, then the real relative one.
 
-A second, independent instance of the same mix: `read_thread_entries` returns entries with
-neither stripping nor externalizing, so a `fileChange` there carries `tool.diff` *and*
-`file_changes[0]` — also two rows, both with counts.
+There used to be a second, independent instance of the same mix in `read_thread_entries`,
+which returned entries with neither stripping nor externalizing. That endpoint has since
+been deleted (it had no caller and named rows in the wrong namespace), so the detail path
+above is now the only one.
 
 **Intermittency.** `claude.rs read_thread` only passes `cwd` into the worker command when
 it has one; without it `patchHeaderPath` leaves the header ABSOLUTE and the two spellings

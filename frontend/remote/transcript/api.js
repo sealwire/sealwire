@@ -16,22 +16,6 @@ export function createTranscriptPageFetcher(dispatchOrRecover) {
   };
 }
 
-export function createTranscriptEntriesFetcher(dispatchOrRecover) {
-  return async function fetchTranscriptEntries({ threadId, itemIds }) {
-    const result = await dispatchOrRecover("fetch_thread_entries", {
-      input: {
-        item_ids: itemIds,
-        thread_id: threadId,
-      },
-    });
-
-    return result.thread_entries || {
-      entries: [],
-      thread_id: threadId,
-    };
-  };
-}
-
 export function createTranscriptEntryDetailFetcher(dispatchOrRecover, { currentGeneration } = {}) {
   return async function fetchTranscriptEntryDetail({ threadId, itemId }) {
     return fetchTranscriptEntryDetailViaRequester({

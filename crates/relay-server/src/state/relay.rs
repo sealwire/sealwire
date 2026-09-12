@@ -15,8 +15,8 @@ use tokio::sync::{broadcast, mpsc, watch};
 use crate::{
     protocol::{
         ApprovalReceipt, FileChangeApplyState, LogEntryView, ModelOptionView, SessionSnapshot,
-        ThreadActivityView, ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadSummaryView,
-        ThreadTranscriptResponse, ThreadsResponse, TranscriptDeltaEvent,
+        ThreadActivityView, ThreadEntryDetailResponse, ThreadSummaryView, ThreadTranscriptResponse,
+        ThreadsResponse, TranscriptDeltaEvent,
     },
     provider::ThreadSyncData,
 };
@@ -205,7 +205,6 @@ pub(crate) struct CachedRemoteActionResult {
     pub(crate) providers: Option<Vec<String>>,
     pub(crate) models: Option<Vec<ModelOptionView>>,
     pub(crate) threads: Option<ThreadsResponse>,
-    pub(crate) thread_entries: Option<ThreadEntriesResponse>,
     pub(crate) thread_entry_detail: Option<ThreadEntryDetailResponse>,
     pub(crate) thread_transcript: Option<ThreadTranscriptResponse>,
     pub(crate) workspace_diff: Option<crate::protocol::WorkspaceDiffResponse>,
