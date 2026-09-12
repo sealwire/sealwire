@@ -447,11 +447,7 @@ impl ThreadRuntime {
             .iter()
             .map(|record| {
                 let mut view = record.to_view();
-                if let (Some(item_id), Some(tool)) = (view.item_id.as_ref(), view.tool.as_mut()) {
-                    if let Some(state) = self.apply_states.get(item_id) {
-                        tool.apply_state = Some(*state);
-                    }
-                }
+                overlay_apply_state(record, &mut view, &self.apply_states);
                 view
             })
             .collect()
@@ -468,12 +464,9 @@ impl ThreadRuntime {
             before,
             self.transcript_revision,
             |index| {
-                let mut view = self.transcript[index].to_view();
-                if let (Some(item_id), Some(tool)) = (view.item_id.as_ref(), view.tool.as_mut()) {
-                    if let Some(state) = self.apply_states.get(item_id) {
-                        tool.apply_state = Some(*state);
-                    }
-                }
+                let record = &self.transcript[index];
+                let mut view = record.to_view();
+                overlay_apply_state(record, &mut view, &self.apply_states);
                 view
             },
         );
@@ -918,6 +911,26 @@ enum PageLanding {
     Fresh(usize),
 }
 
+/// Overlay the client's apply/undo verdict onto a materialized row.
+///
+/// Keyed by the ROW id, which is what the client sends and what
+/// `set_file_change_apply_state_for_thread` resolves to before inserting. Taking the
+/// key back off `view.item_id` read the COMPATIBILITY alias, and agreed with the
+/// write only while the two carried the same value — so a row whose key had been
+/// minted away would have lost its Undo affordance.
+pub(crate) fn overlay_apply_state(
+    record: &TranscriptRecord,
+    view: &mut TranscriptEntryView,
+    apply_states: &HashMap<String, crate::protocol::FileChangeApplyState>,
+) {
+    let Some(tool) = view.tool.as_mut() else {
+        return;
+    };
+    if let Some(state) = apply_states.get(&record.row_id) {
+        tool.apply_state = Some(*state);
+    }
+}
+
 fn merge_duplicate_provider_rows(records: Vec<TranscriptRecord>) -> Vec<TranscriptRecord> {
     let mut first_by_provider_id: HashMap<String, usize> = HashMap::new();
     let mut merged: Vec<TranscriptRecord> = Vec::with_capacity(records.len());
@@ -1175,6 +1188,56 @@ mod tests {
                 can_apply: None,
             }),
         }
+    }
+
+    /// The client's Undo verdict is stored under the ROW id and must be read back
+    /// under it. Divergent fixtures on purpose: the row's key is `turn-diff:t1#row1`
+    /// while its relay source name is `turn-diff:t1`, so a read that took the key
+    /// off the compatibility alias — or off the source name — finds nothing and the
+    /// row silently loses its Undo affordance.
+    #[test]
+    fn the_apply_state_overlay_is_keyed_by_row_id() {
+        let mut rt = runtime("t1", "idle");
+        let row_id = rt.transcript.push(TranscriptRecord {
+            row_id: "turn-diff:t1#row1".to_string(),
+            relay_item_id: Some("turn-diff:t1".to_string()),
+            ..tool_record("turn-diff:t1#row1", Some("edit"))
+        });
+        assert_ne!(row_id, "turn-diff:t1", "the fixtures must diverge");
+        rt.apply_states.insert(
+            row_id.clone(),
+            crate::protocol::FileChangeApplyState::RolledBack,
+        );
+
+        for (label, view) in [
+            ("transcript_views", rt.transcript_views().remove(0)),
+            (
+                "transcript_page",
+                rt.transcript_page("t1", None).entries.remove(0),
+            ),
+        ] {
+            assert_eq!(
+                view.tool.expect("tool row").apply_state,
+                Some(crate::protocol::FileChangeApplyState::RolledBack),
+                "{label} must carry the verdict stored under the row id"
+            );
+        }
+
+        // And a verdict filed under the SOURCE name reaches nothing, which is what
+        // keeps the two spaces from standing in for each other.
+        rt.apply_states.clear();
+        rt.apply_states.insert(
+            "turn-diff:t1".to_string(),
+            crate::protocol::FileChangeApplyState::RolledBack,
+        );
+        assert_eq!(
+            rt.transcript_views()
+                .remove(0)
+                .tool
+                .expect("tool")
+                .apply_state,
+            None
+        );
     }
 
     // History re-read is the self-heal path: a field missing from equality makes

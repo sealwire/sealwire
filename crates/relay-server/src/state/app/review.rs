@@ -3454,9 +3454,13 @@ fn latest_agent_entry(views: &[TranscriptEntryView]) -> Option<(String, String)>
             .as_ref()
             .map(|text| text.trim())
             .filter(|text| !text.is_empty())?;
+        // `row_id` first, the alias only as the fallback a raw provider read needs
+        // (it carries no row id). The chain used to start at the alias, which is the
+        // one identity on the view that is not authoritative.
         let item_id = entry
-            .item_id
+            .row_id
             .as_deref()
+            .or(entry.item_id.as_deref())
             .filter(|id| !id.is_empty())
             .map(str::to_string)
             .or_else(|| {
@@ -3510,6 +3514,51 @@ mod latest_agent_entry_tests {
                 .is_empty(),
             "even a provider with neither id must get a stable nonempty identity"
         );
+    }
+
+    /// The baseline tokenizes a ROW, so it must agree with every other reader of
+    /// that row. Divergent fixtures on purpose: with `row_id == item_id` this passes
+    /// on the alias alone and proves nothing.
+    #[test]
+    fn the_baseline_names_the_row_not_the_compatibility_alias() {
+        let views = vec![TranscriptEntryView {
+            row_id: Some("assistant:abc#row1".to_string()),
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some("assistant:abc".to_string()),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some("the reply".to_string()),
+            status: "completed".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            tool: None,
+            content_state: TranscriptContentState::Full,
+        }];
+
+        assert_eq!(
+            latest_agent_entry(&views).expect("a reply").0,
+            "assistant:abc#row1"
+        );
+    }
+
+    /// A raw provider read carries no row id, and the alias is then the only name
+    /// there is — so the fallback must still answer rather than degrading to the
+    /// synthetic turn token.
+    #[test]
+    fn a_raw_provider_read_still_falls_back_to_its_own_name() {
+        let views = vec![TranscriptEntryView {
+            row_id: None,
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some("item-7".to_string()),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some("the reply".to_string()),
+            status: "completed".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            tool: None,
+            content_state: TranscriptContentState::Full,
+        }];
+
+        assert_eq!(latest_agent_entry(&views).expect("a reply").0, "item-7");
     }
 }
 
