@@ -16,6 +16,11 @@ import {
 const ROOT = process.cwd();
 const ACTIVE_THREAD_ID = "claude-active-thread";
 const VIEWED_THREAD_ID = "codex-saved-thread";
+// The client refuses a transcript page whose generation does not match the
+// session's (symmetric fence after relay restart). The route mocks below must
+// stamp the SAME value on both sides, or the view-only pin stays on "Loading…"
+// forever and the Codex catalog never renders.
+const RELAY_GENERATION = "view-only-models-e2e-gen";
 const CLAUDE_MODELS = [
   model("default", "Default (Opus 4.8)", "anthropic", true),
   model("sonnet", "Sonnet 4.6", "anthropic"),
@@ -91,6 +96,7 @@ async function main() {
         available_models: CLAUDE_MODELS,
         transcript: [],
         transcript_truncated: false,
+        transcript_generation: RELAY_GENERATION,
       });
       await route.fulfill({ response, body: JSON.stringify(payload) });
     });
@@ -114,6 +120,7 @@ async function main() {
             ok: true,
             data: {
               thread_id: VIEWED_THREAD_ID,
+              transcript_generation: RELAY_GENERATION,
               prev_cursor: null,
               revision: 0,
               entries: [
