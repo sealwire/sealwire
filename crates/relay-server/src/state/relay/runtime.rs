@@ -1341,6 +1341,7 @@ mod tests {
             last_live_upsert_revision: None,
         });
         let older = vec![TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("older".to_string()),
@@ -1421,6 +1422,7 @@ mod tests {
         let issued_tail = issued;
 
         let page = |id: &str| TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(id.to_string()),
@@ -1632,6 +1634,7 @@ mod tests {
     fn prepend_merges_in_page_duplicate_ids() {
         let mut rt = runtime("t1", "idle");
         let page_entry = |id: &str, text: &str| TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(id.to_string()),
@@ -1734,6 +1737,7 @@ mod tests {
     fn prepend_in_page_duplicate_keeps_settled_content() {
         let mut rt = runtime("t1", "idle");
         let page_entry = |text: &str, status: &str| TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("dup".to_string()),
@@ -1811,6 +1815,7 @@ mod tests {
             can_apply: None,
         };
         let page_entry = |text: &str, status: &str, tool: ToolCallView| TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("tool:edit-1".to_string()),
@@ -1890,6 +1895,7 @@ mod tests {
 
     fn plain_view(item_id: &str, text: &str) -> TranscriptEntryView {
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(item_id.to_string()),
@@ -2265,6 +2271,7 @@ mod cold_import_tests {
 
     fn tool_entry(item_id: &str, status: &str, tool: ToolCallView) -> TranscriptEntryView {
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(item_id.to_string()),

@@ -3443,6 +3443,7 @@ mod latest_agent_entry_tests {
     #[test]
     fn assistant_identity_falls_back_when_item_ids_are_empty() {
         let entry = |turn_id: Option<&str>, text: &str| TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(String::new()),

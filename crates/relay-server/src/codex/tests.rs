@@ -2658,6 +2658,7 @@ impl CodexReplayHarness {
 
 fn agent_entry(item_id: &str, text: &str, status: &str, turn_id: &str) -> TranscriptEntryView {
     TranscriptEntryView {
+        row_id: None,
         order_seq: None,
         withdrawn: false,
         item_id: Some(item_id.to_string()),
@@ -3247,6 +3248,7 @@ async fn handle_notification_keeps_late_delta_for_prior_thread() {
                 active_flags: Vec::new(),
                 transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(vec![
                     TranscriptEntryView {
+                        row_id: None,
                         order_seq: None,
                         withdrawn: false,
                         item_id: Some("msg-1".to_string()),
@@ -3377,6 +3379,7 @@ async fn handle_notification_keeps_late_agent_completion_for_prior_thread() {
                 active_flags: Vec::new(),
                 transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(vec![
                     TranscriptEntryView {
+                        row_id: None,
                         order_seq: None,
                         withdrawn: false,
                         item_id: Some("msg-1".to_string()),
@@ -3491,6 +3494,7 @@ async fn runtime_merge_does_not_downgrade_fresh_completed_agent_message() {
                 active_flags: Vec::new(),
                 transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(vec![
                     TranscriptEntryView {
+                        row_id: None,
                         order_seq: None,
                         withdrawn: false,
                         item_id: Some("msg-1".to_string()),
@@ -3674,6 +3678,7 @@ async fn handle_notification_keeps_late_command_output_for_prior_thread() {
                 active_flags: Vec::new(),
                 transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(vec![
                     TranscriptEntryView {
+                        row_id: None,
                         order_seq: None,
                         withdrawn: false,
                         item_id: Some("cmd-1".to_string()),

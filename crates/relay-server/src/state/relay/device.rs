@@ -199,7 +199,13 @@ pub(crate) struct PendingTranscriptDelta {
     pub(crate) entry_seq: u64,
     pub(crate) order_seq: i64,
     pub(crate) server_time: u64,
-    pub(crate) item_id: String,
+    /// The row this delta appends to. Named `row_id` because that is what it has
+    /// carried since the identity split — the wire keeps an `item_id` alias.
+    pub(crate) row_id: String,
+    /// Which run minted `row_id`. Producers leave this EMPTY: it is stamped by
+    /// `RelayState::queue_broker_message`, the one funnel every provider's deltas
+    /// pass through, so the local tee and the broker payload cannot disagree.
+    pub(crate) transcript_generation: String,
     pub(crate) turn_id: Option<String>,
     pub(crate) delta: String,
     pub(crate) kind: TranscriptDeltaKind,

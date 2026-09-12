@@ -595,6 +595,8 @@ fn tool_view(
 pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp) {
     let entry = match op {
         TranscriptOp::User { item_id, text } => TranscriptEntryView {
+            // A raw provider read: not a relay row until the relay numbers it.
+            row_id: None,
             // Numbered when it becomes a runtime record; raw provider parses carry none.
             order_seq: None,
             withdrawn: false,
@@ -607,6 +609,8 @@ pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp
             content_state: TranscriptContentState::Full,
         },
         TranscriptOp::AgentChunk { item_id, text, .. } => TranscriptEntryView {
+            // A raw provider read: not a relay row until the relay numbers it.
+            row_id: None,
             // Numbered when it becomes a runtime record; raw provider parses carry none.
             order_seq: None,
             withdrawn: false,
@@ -619,6 +623,8 @@ pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp
             content_state: TranscriptContentState::Full,
         },
         TranscriptOp::ThoughtChunk { item_id, text, .. } => TranscriptEntryView {
+            // A raw provider read: not a relay row until the relay numbers it.
+            row_id: None,
             // Numbered when it becomes a runtime record; raw provider parses carry none.
             order_seq: None,
             withdrawn: false,
@@ -639,6 +645,8 @@ pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp
             output,
             status,
         } => TranscriptEntryView {
+            // A raw provider read: not a relay row until the relay numbers it.
+            row_id: None,
             // Numbered when it becomes a runtime record; raw provider parses carry none.
             order_seq: None,
             withdrawn: false,
@@ -713,7 +721,8 @@ pub(crate) fn apply_op(
                         entry_seq: mutation.entry_seq,
                         order_seq: mutation.order_seq,
                         server_time: mutation.server_time,
-                        item_id: item_id.clone(),
+                        row_id: mutation.row_id.clone(),
+                        transcript_generation: String::new(),
                         turn_id: Some(turn.clone()),
                         delta,
                         kind: TranscriptDeltaKind::AgentText,

@@ -857,6 +857,7 @@ mod tests {
     fn replay_prompt_trims_context_before_the_fork_task() {
         let transcript = (0..80)
             .map(|index| TranscriptEntryView {
+                row_id: None,
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some(format!("item-{index}")),
@@ -882,6 +883,7 @@ mod tests {
 
     fn agent_entry(item_id: &str, text: &str) -> TranscriptEntryView {
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(item_id.to_string()),
@@ -1023,6 +1025,7 @@ mod fork_point_resolution_tests {
 
     fn view(item_id: &str) -> TranscriptEntryView {
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(item_id.to_string()),

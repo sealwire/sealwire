@@ -1748,6 +1748,7 @@ fn thread_switch_back_keeps_single_user_message_when_ids_agree() {
             status: "active".to_string(),
             active_flags: vec!["waitingOnAskUser".to_string()],
             transcript: provider_entries(vec![TranscriptEntryView {
+                row_id: None,
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some(user_item_id.to_string()),
@@ -2850,6 +2851,7 @@ fn restore_thread_data_keeps_persisted_controller_and_settings() {
             status: "running".to_string(),
             active_flags: vec!["busy".to_string()],
             transcript: provider_entries(vec![TranscriptEntryView {
+                row_id: None,
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some("history-1".to_string()),
@@ -5185,6 +5187,7 @@ mod paged_history_merge_tests {
 
     fn view(item_id: &str, status: &str, tool: ToolCallView) -> TranscriptEntryView {
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(item_id.to_string()),
@@ -5706,7 +5709,8 @@ mod watched_threads {
                 entry_seq: mutation.entry_seq,
                 order_seq: mutation.order_seq,
                 server_time: mutation.server_time,
-                item_id: item_id.to_string(),
+                row_id: item_id.to_string(),
+                transcript_generation: String::new(),
                 turn_id: Some("turn-1".to_string()),
                 delta: text.to_string(),
                 kind: TranscriptDeltaKind::AgentText,
@@ -6515,6 +6519,7 @@ fn rehydrating_a_thread_does_not_rewind_its_transcript_revision() {
             status: "idle".to_string(),
             active_flags: Vec::new(),
             transcript: provider_entries(vec![TranscriptEntryView {
+                row_id: None,
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some("item-1".to_string()),
@@ -6568,6 +6573,7 @@ fn merging_fresh_history_draws_from_the_shared_revision_clock() {
             status: "idle".to_string(),
             active_flags: Vec::new(),
             transcript: provider_entries(vec![TranscriptEntryView {
+                row_id: None,
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some("fresh-item".to_string()),
@@ -7141,6 +7147,7 @@ fn delta_birth_stale_history() -> ThreadSyncData {
         transcript: ["A", "B", "C"]
             .into_iter()
             .map(|item_id| TranscriptEntryView {
+                row_id: None,
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some(item_id.to_string()),
@@ -7711,6 +7718,137 @@ mod row_identity_tests {
                 .iter()
                 .map(|r| (r.row_id.clone(), r.text.clone()))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// The wire carries the row's own identity, and the compatibility field carries
+    /// the same value — so a client built before `row_id` keeps working while a new
+    /// one can key on something the relay actually owns.
+    #[test]
+    fn a_published_row_carries_its_row_id_and_a_matching_compat_item_id() {
+        let mut relay = test_state();
+        let thread = "thread-wire";
+        relay.upsert_transcript_item_for_thread(
+            thread,
+            "codex-item-1".to_string(),
+            TranscriptEntryKind::AgentText,
+            Some("hello".to_string()),
+            "completed".to_string(),
+            Some("turn-1".to_string()),
+            None,
+        );
+
+        let runtime = relay.runtime_for_thread(thread).expect("runtime");
+        let view = runtime
+            .transcript_views()
+            .into_iter()
+            .next()
+            .expect("a row");
+        assert_eq!(view.row_id.as_deref(), Some("codex-item-1"));
+        assert_eq!(
+            view.item_id, view.row_id,
+            "the compat field must mirror the row id exactly"
+        );
+    }
+
+    /// The collision, as it reaches a client: a relay row and a provider item that
+    /// spell themselves the same way ship as TWO rows with distinct `row_id`s.
+    #[test]
+    fn a_namespace_collision_reaches_the_wire_as_two_distinctly_keyed_rows() {
+        let mut relay = test_state();
+        let thread = "thread-wire-collide";
+        relay.upsert_relay_named_item_for_thread(
+            thread,
+            "x".to_string(),
+            TranscriptEntryKind::AgentText,
+            Some("the relay's row".to_string()),
+            "completed".to_string(),
+            Some("turn-1".to_string()),
+            None,
+        );
+        relay.upsert_transcript_item_for_thread(
+            thread,
+            "x".to_string(),
+            TranscriptEntryKind::AgentText,
+            Some("the provider's row".to_string()),
+            "completed".to_string(),
+            Some("turn-1".to_string()),
+            None,
+        );
+
+        let runtime = relay.runtime_for_thread(thread).expect("runtime");
+        let views = runtime.transcript_views();
+        assert_eq!(views.len(), 2, "two rows on the wire");
+        let keys = views
+            .iter()
+            .map(|v| v.row_id.clone().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_ne!(
+            keys[0], keys[1],
+            "a client keying on row_id must see two distinct rows, got {keys:?}"
+        );
+        for view in &views {
+            assert_eq!(
+                view.item_id, view.row_id,
+                "every shipped row's compat field mirrors its row id"
+            );
+        }
+    }
+
+    /// Deltas were the one payload with no generation, so one in flight across a
+    /// restart could be applied to a transcript that had since been renumbered.
+    #[test]
+    fn a_published_delta_names_the_row_and_the_run_that_minted_it() {
+        let mut relay = test_state();
+        relay.broker_configured = true;
+        let thread = "thread-wire-delta";
+        relay.active_thread_id = Some(thread.to_string());
+        let generation = relay.transcript_generation.clone();
+
+        // An unrelated relay row already owns the spelling, so the delta must mint.
+        relay.upsert_relay_owned_row_for_thread(
+            thread,
+            "x".to_string(),
+            TranscriptEntryKind::Error,
+            Some("the relay's row".to_string()),
+            "failed".to_string(),
+            None,
+            None,
+        );
+        let mutation = relay.append_agent_delta_for_thread(thread, "x", "streamed", "turn-1");
+        relay.queue_broker_message(BrokerPendingMessage::TranscriptDelta(
+            crate::state::PendingTranscriptDelta {
+                thread_id: thread.to_string(),
+                base_revision: mutation.base_revision,
+                revision: mutation.revision,
+                entry_seq: mutation.entry_seq,
+                order_seq: mutation.order_seq,
+                server_time: mutation.server_time,
+                row_id: mutation.row_id.clone(),
+                transcript_generation: String::new(),
+                turn_id: Some("turn-1".to_string()),
+                delta: "streamed".to_string(),
+                kind: crate::state::TranscriptDeltaKind::AgentText,
+                text_offset: mutation.text_offset,
+            },
+        ));
+
+        let queued = relay
+            .pending_broker_messages
+            .iter()
+            .find_map(|message| match message {
+                BrokerPendingMessage::TranscriptDelta(delta) => Some(delta.clone()),
+                _ => None,
+            })
+            .expect("the delta was queued");
+        assert_eq!(
+            queued.row_id, mutation.row_id,
+            "the delta names the row it landed on, not the spelling it arrived under"
+        );
+        assert_ne!(queued.row_id, "x", "and that row had to mint");
+        assert_eq!(
+            queued.transcript_generation, generation,
+            "the funnel stamps the run, so a delta crossing a restart can be refused"
         );
     }
 

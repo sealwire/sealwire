@@ -1473,8 +1473,9 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                                 entry_seq: mutation.entry_seq,
                                 order_seq: mutation.order_seq,
                                 server_time: mutation.server_time,
-                                // The row's key, not the worker's name for it.
-                                item_id: mutation.row_id.clone(),
+                                row_id: mutation.row_id.clone(),
+                                // Stamped by `queue_broker_message`.
+                                transcript_generation: String::new(),
                                 turn_id: Some(turn_id),
                                 delta: text.clone(),
                                 kind: TranscriptDeltaKind::AgentText,
@@ -3763,6 +3764,7 @@ mod tests {
             status: &str,
         ) -> TranscriptEntryView {
             TranscriptEntryView {
+                row_id: None,
                 // Numbered when it becomes a runtime record; raw provider parses carry none.
                 order_seq: None,
                 withdrawn: false,

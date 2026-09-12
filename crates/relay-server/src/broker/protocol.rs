@@ -51,11 +51,15 @@ pub(super) enum OutboundBrokerPayload {
     },
     TranscriptDelta {
         thread_id: String,
+        /// Which run minted `row_id` — see `TranscriptDeltaEvent`.
+        transcript_generation: String,
         base_revision: u64,
         revision: u64,
         entry_seq: u64,
         order_seq: i64,
         server_time: u64,
+        row_id: String,
+        /// Compatibility alias, same value as `row_id`.
         item_id: String,
         turn_id: Option<String>,
         delta: String,

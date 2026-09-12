@@ -128,6 +128,7 @@ fn make_snapshot() -> SessionSnapshot {
         transcript_truncated: false,
         transcript: (0..30)
             .map(|index| TranscriptEntryView {
+                row_id: None,
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some(format!("item-{index}")),
@@ -484,6 +485,7 @@ fn compact_for_broker_drops_legacy_workflow_card_before_conversation_content() {
     snapshot.current_cwd = "/tmp/".to_string() + &"超长路径".repeat(3_000);
     snapshot.transcript = (0..3)
         .map(|index| TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(format!("item-{index}")),
@@ -531,6 +533,7 @@ fn compact_for_broker_keeps_the_teams_cache_key_under_maximum_pressure() {
     snapshot.current_cwd = "/tmp/".to_string() + &"超长路径".repeat(3_000);
     snapshot.transcript = (0..3)
         .map(|index| TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(format!("item-{index}")),
@@ -777,6 +780,7 @@ fn local_web_control_plane_metadata_does_not_shell_normal_live_transcript() {
     snapshot.logs.clear();
     snapshot.transcript = (0..4)
         .map(|index| TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(format!("assistant:live-message-{index}")),
@@ -882,6 +886,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
     // until the fixture (and the JS expectations) are regenerated.
     let authoritative_entries: Vec<TranscriptEntryView> = vec![
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("r-empty-full".to_string()),
@@ -893,6 +898,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
             content_state: TranscriptContentState::Full,
         },
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("a-empty-omitted".to_string()),
@@ -904,6 +910,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
             content_state: TranscriptContentState::Full,
         },
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("a-omitted".to_string()),
@@ -961,6 +968,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
     local.current_cwd = "/tmp/project".to_string();
     local.transcript = vec![
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("u-preview".to_string()),
@@ -972,6 +980,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
             content_state: TranscriptContentState::Full,
         },
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("a-preview-long".to_string()),
@@ -983,6 +992,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
             content_state: TranscriptContentState::Full,
         },
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("a-preview-short".to_string()),
@@ -1036,6 +1046,7 @@ fn long_session_snapshot_stays_bounded_in_bytes_and_entry_count() {
         snapshot.pending_approvals.clear();
         snapshot.transcript = (0..1_000)
             .map(|index| TranscriptEntryView {
+                row_id: None,
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some(format!("item-{index:04}")),
@@ -1116,6 +1127,7 @@ fn compact_shelled_entries_are_marked_omitted_not_inferred_from_ellipsis() {
     snapshot.pending_approvals.clear();
     snapshot.transcript = (0..3)
         .map(|index| TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(format!("item-{index}")),
@@ -1162,6 +1174,7 @@ fn compact_emergency_shell_only_exempts_settled_empty_reasoning() {
                       kind: TranscriptEntryKind,
                       text: Option<String>,
                       status: &str| TranscriptEntryView {
+        row_id: None,
         order_seq: None,
         withdrawn: false,
         item_id: Some(item_id.to_string()),
@@ -1265,6 +1278,7 @@ fn compact_local_emergency_shell_keeps_empty_reasoning_full() {
     snapshot.logs.clear();
     snapshot.pending_approvals.clear();
     snapshot.transcript = vec![TranscriptEntryView {
+        row_id: None,
         order_seq: None,
         withdrawn: false,
         item_id: Some("empty-reasoning".to_string()),
@@ -1278,6 +1292,7 @@ fn compact_local_emergency_shell_keeps_empty_reasoning_full() {
     snapshot
         .transcript
         .extend((0..3).map(|index| TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(format!("large-{index}")),
@@ -1366,6 +1381,7 @@ fn compact_emergency_shell_preserves_bodyless_entries_existing_states() {
     snapshot.pending_approvals.clear();
     snapshot.transcript = vec![
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("bodyless-preview".to_string()),
@@ -1377,6 +1393,7 @@ fn compact_emergency_shell_preserves_bodyless_entries_existing_states() {
             content_state: TranscriptContentState::Preview,
         },
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("bodyless-omitted".to_string()),
@@ -1414,6 +1431,7 @@ fn compact_marks_ellipsis_truncated_entry_preview_and_leaves_short_full() {
     snapshot.transcript_truncated = false;
     snapshot.transcript = vec![
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("short-ellipsis".to_string()),
@@ -1426,6 +1444,7 @@ fn compact_marks_ellipsis_truncated_entry_preview_and_leaves_short_full() {
             content_state: TranscriptContentState::Full,
         },
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("long".to_string()),
@@ -1475,6 +1494,7 @@ fn control_plane_flood_keeps_both_surfaces_bounded_without_shelling_live_text() 
         snapshot.transcript_truncated = false;
         snapshot.transcript = (0..3)
             .map(|index| TranscriptEntryView {
+                row_id: None,
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some(format!("live-{index}")),
@@ -1689,6 +1709,7 @@ fn compact_for_broker_stays_under_budget_even_with_oversized_cwd() {
     snapshot.active_review_jobs.clear();
     snapshot.device_records.clear();
     snapshot.transcript = vec![TranscriptEntryView {
+        row_id: None,
         order_seq: None,
         withdrawn: false,
         item_id: Some("a1".to_string()),
@@ -1853,6 +1874,7 @@ fn compact_for_surfaces_truncates_a_single_oversized_agent_message() {
         snapshot.transcript_truncated = false;
         snapshot.transcript = vec![
             TranscriptEntryView {
+                row_id: None,
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some("u1".to_string()),
@@ -1864,6 +1886,7 @@ fn compact_for_surfaces_truncates_a_single_oversized_agent_message() {
                 content_state: crate::protocol::TranscriptContentState::Full,
             },
             TranscriptEntryView {
+                row_id: None,
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some("a1".to_string()),
@@ -2157,6 +2180,7 @@ fn compact_for_broker_shells_transcript_tail_as_last_resort_without_clearing() {
         .collect();
     snapshot.transcript = (0..3)
         .map(|index| TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(format!("item-{index}")),
@@ -2208,6 +2232,7 @@ fn compact_for_broker_shells_tool_entries_dropping_heavy_content() {
     snapshot.logs.clear();
     snapshot.pending_approvals.clear();
     snapshot.transcript = vec![TranscriptEntryView {
+        row_id: None,
         order_seq: None,
         withdrawn: false,
         item_id: Some("turn-diff:turn-1".to_string()),
@@ -2263,6 +2288,7 @@ fn strip_file_change_diffs_keeps_summary_and_flags_entry() {
     let mut transcript = vec![
         // A turn-diff entry with full diffs — must be reduced to a summary.
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("turn-diff:turn-1".to_string()),
@@ -2303,6 +2329,7 @@ fn strip_file_change_diffs_keeps_summary_and_flags_entry() {
         },
         // A plain agent-text entry with no diff body — must be left untouched.
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("a1".to_string()),
@@ -2343,6 +2370,7 @@ fn compact_for_broker_shells_bring_oversized_transcript_under_budget() {
     snapshot.pending_approvals.clear();
     snapshot.transcript = (0..3)
         .map(|index| TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(format!("item-{index}")),
@@ -2409,6 +2437,7 @@ fn compact_for_broker_trims_many_file_changes_without_clearing_transcript() {
     snapshot.pending_approvals.clear();
     snapshot.logs.clear();
     snapshot.transcript = vec![TranscriptEntryView {
+        row_id: None,
         order_seq: None,
         withdrawn: false,
         item_id: Some("turn-diff:turn-1".to_string()),
@@ -2616,6 +2645,7 @@ fn compact_for_broker_preserves_existing_transcript_truncated_flag() {
     snapshot.logs.clear();
     snapshot.transcript = (0..4)
         .map(|index| TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(format!("item-{index}")),
@@ -2638,6 +2668,7 @@ fn compact_for_broker_preserves_existing_transcript_truncated_flag() {
 fn thread_transcript_response_preserves_oversized_single_entries() {
     let transcript = vec![
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("item-1".to_string()),
@@ -2649,6 +2680,7 @@ fn thread_transcript_response_preserves_oversized_single_entries() {
             content_state: crate::protocol::TranscriptContentState::Full,
         },
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("item-2".to_string()),
@@ -2711,6 +2743,7 @@ fn thread_transcript_response_preserves_oversized_single_entries() {
 #[test]
 fn thread_transcript_response_keeps_complete_entries_together() {
     let transcript = vec![TranscriptEntryView {
+        row_id: None,
         order_seq: None,
         withdrawn: false,
         item_id: Some("item-1".to_string()),
@@ -2736,6 +2769,7 @@ fn thread_transcript_response_keeps_complete_entries_together() {
 fn thread_transcript_response_can_page_backwards_from_tail() {
     let transcript = (0..12)
         .map(|index| TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(format!("item-{index}")),
@@ -2796,6 +2830,7 @@ fn thread_transcript_response_packs_many_small_entries_within_budget() {
     // pages stay within budget, pack more than one entry, and lose nothing.
     let transcript = (0..400)
         .map(|index| TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(format!("item-{index}")),
@@ -2864,6 +2899,7 @@ fn thread_transcript_page_materializes_only_entries_near_the_requested_cursor() 
         |index| {
             materialized.set(materialized.get() + 1);
             TranscriptEntryView {
+                row_id: None,
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some(format!("item-{index}")),
@@ -2898,6 +2934,7 @@ fn thread_transcript_page_materializes_only_entries_near_the_requested_cursor() 
 fn thread_transcript_response_tail_returns_latest_page_first() {
     let transcript = (0..12)
         .map(|index| TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(format!("item-{index}")),
@@ -2944,6 +2981,7 @@ fn thread_transcript_history_externalizes_large_file_change_diffs() {
         "new".repeat(12_000)
     );
     let transcript = vec![TranscriptEntryView {
+        row_id: None,
         order_seq: None,
         withdrawn: false,
         item_id: Some("turn-diff:turn-1".to_string()),
@@ -2993,6 +3031,7 @@ fn thread_transcript_history_externalizes_large_file_change_diffs() {
 fn thread_entries_response_returns_complete_entries_for_requested_item_ids() {
     let transcript = vec![
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("item-1".to_string()),
@@ -3004,6 +3043,7 @@ fn thread_entries_response_returns_complete_entries_for_requested_item_ids() {
             content_state: crate::protocol::TranscriptContentState::Full,
         },
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("item-2".to_string()),
@@ -3034,6 +3074,7 @@ fn thread_entries_response_returns_complete_entries_for_requested_item_ids() {
 #[test]
 fn thread_entry_detail_response_chunks_large_command_text() {
     let entry = TranscriptEntryView {
+        row_id: None,
         order_seq: None,
         withdrawn: false,
         item_id: Some("item-1".to_string()),
@@ -3087,6 +3128,7 @@ fn thread_entry_detail_response_chunks_large_nested_file_change_diff() {
         "new".repeat(12_000)
     );
     let entry = TranscriptEntryView {
+        row_id: None,
         order_seq: None,
         withdrawn: false,
         item_id: Some("turn-diff:turn-1".to_string()),
@@ -3155,6 +3197,7 @@ mod can_apply_flag_tests {
 
     fn turn_diff_entry(diff: &str) -> TranscriptEntryView {
         TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("turn-diff:t1".to_string()),
