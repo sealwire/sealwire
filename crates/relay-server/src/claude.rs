@@ -2320,11 +2320,10 @@ fn ensure_claude_turn_diff_entry(relay: &mut RelayState, turn_id: &str, status: 
     }
 
     let turn_diff_item_id = format!("turn-diff:{turn_id}");
+    // Addressed in the RELAY namespace, which is where `upsert_relay_named_item`
+    // below writes it.
     let existing_diff = relay
-        .snapshot()
-        .transcript
-        .into_iter()
-        .find(|entry| entry.item_id.as_deref() == Some(turn_diff_item_id.as_str()))
+        .relay_named_entry(&turn_diff_item_id)
         .and_then(|entry| entry.tool)
         .and_then(|tool| tool.diff);
 
