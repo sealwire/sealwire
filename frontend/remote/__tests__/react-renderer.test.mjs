@@ -36,11 +36,52 @@ installBrowserStubs();
 
 const {
   MissingCredentialsState,
+  RelayDirectoryList,
   RelayHomeState,
   SessionPanel,
   WorkspaceHeading,
 } = await import("../react-renderer.js");
 const { ProjectSwitcher } = await import("../../shared/project-switcher.js");
+
+// `.conversation-item` is a 3-column grid: `14px minmax(0, 1fr) auto` for
+// (lead, title, meta). Session rows always emit an empty/filled
+// `.conversation-lead` in the first track. Relay rows used to skip it, so the
+// title landed in the 14px lead column and ellipsised to a single character
+// ("r...") while "Open relay" sat alone in the 1fr track.
+test("RelayDirectoryList reserves the shared lead slot so the title can use the 1fr track", () => {
+  const markup = renderToStaticMarkup(
+    h(RelayDirectoryList, {
+      onSelectRelay() {},
+      viewModel: {
+        emptyMessage: null,
+        items: [
+          {
+            active: true,
+            actionLabel: "Open relay",
+            id: "relay-1",
+            isEnabled: true,
+            meta: "",
+            relay: {
+              deviceLabel: "Phone",
+              hasLocalProfile: true,
+              relayId: "relay-1",
+              relayLabel: "relay-on-macbook",
+            },
+            title: "relay-on-macbook",
+          },
+        ],
+      },
+    })
+  );
+
+  assert.match(
+    markup,
+    /class="conversation-item is-active"[^>]*>\s*<span class="conversation-lead" aria-hidden="true"><\/span>/,
+    "relay rows must open with the shared lead slot"
+  );
+  assert.match(markup, /class="conversation-title"[^>]*>relay-on-macbook</);
+  assert.match(markup, /Open relay/);
+});
 
 test("RelayHomeState renders the paired relay chooser", () => {
   const markup = renderToStaticMarkup(

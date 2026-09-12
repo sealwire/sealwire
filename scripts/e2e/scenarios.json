@@ -65,6 +65,7 @@
       "remote-mobile-header",
       "remote-mobile-session-actions",
       "remote-new-session-menus",
+      "remote-relay-name-truncation",
       "remote-mobile-bell",
       "remote-desktop-tabs",
       "public-session-rename",
@@ -85,6 +86,7 @@
       "remote-mobile-header",
       "remote-mobile-session-actions",
       "remote-new-session-menus",
+      "remote-relay-name-truncation",
       "remote-mobile-bell",
       "remote-desktop-tabs",
       "public-session-rename",
@@ -207,6 +209,16 @@
         "model-picker",
         "dialog-menu-anchoring",
         "touch-input",
+        "mobile-layout"
+      ]
+    },
+    "remote-relay-name-truncation": {
+      "script": "browser-remote-relay-name-truncation-e2e.mjs",
+      "tier": "core",
+      "provider": "stub",
+      "transport": "static-remote",
+      "coverage": [
+        "relay-directory",
         "mobile-layout"
       ]
     },
