@@ -251,36 +251,36 @@ function orNull(value) {
   return text ? text : null;
 }
 
-// A Codex agent message carries its raw response-item id (`msg_<hex>`) in the
-// LIVE stream, but `thread/read` — which the relay validates fork points against
-// (read_thread) — renumbers the same items positionally (`item-13`) and never
-// emits that `msg_` id. So a live-stream Codex anchor can NEVER be resolved
-// server-side and is rejected as "not part of the source thread transcript".
+// LEGACY-RELAY FALLBACK ONLY. Reached when the snapshot does not carry
+// `relay_resolves_fork_points`, i.e. the relay predates R4.
 //
-// This shape is unambiguous across every provider the relay runs: Claude entries
-// are always prefixed (`assistant:`/`user:`/`tool:`), a persisted (past-turn)
-// Codex read is `item-N`, and the ACP bridge mints `acp-<kind>-<n>` — so a bare
-// `msg_` anchor is exclusively a Codex live agent message. ACP ids in particular
-// must NOT be dropped: they are per-kind ordinals that a `session/load` replay
-// reproduces exactly, so the relay can always resolve them (see
+// Such a relay refuses an anchor it cannot locate, which forces the client to
+// predict which anchors those are. A Codex agent message carries its raw
+// response-item id (`msg_<hex>`) in the LIVE stream, while `thread/read` — what an
+// old relay validates fork points against — renumbers the same items positionally
+// (`item-13`) and never emits the `msg_` id. So a live-stream Codex anchor can
+// never be resolved by that relay and comes back as "not part of the source thread
+// transcript"; at the tip a fork drops nothing, so dropping the anchor takes the
+// whole-thread path instead of failing.
+//
+// The shape claim it rests on: Claude entries are always prefixed
+// (`assistant:`/`user:`/`tool:`), a persisted Codex read is `item-N`, and the ACP
+// bridge mints `acp-<kind>-<n>`, so a bare `msg_` anchor is exclusively a Codex
+// live agent message. ACP ids in particular must NOT be dropped — they are
+// per-kind ordinals a `session/load` replay reproduces exactly (see
 // `acp/protocol.rs::item_id`). fork-fields.test.mjs pins both directions.
 // (Reasoning `rs_` diverges the same way but is never forkable — only the last
 // agent_text of a block is, see transcript-fork.js.)
-// THE ONE PLACE that still reads a provider shape off a row key.
 //
-// Everything else about fork identity — the forkable set, the tip comparison, the
-// `up_to_item_id` actually submitted — is a row key now. This check is not: it
-// asks whether the CODEX PROVIDER will still be able to resolve this point, and
-// the answer depends on the provider's own id, which the relay deliberately does
-// not hand clients (it owns provider translation).
+// This is the last place any client code reads a provider shape off a row key, and
+// it is wrong in both directions a client cannot fix: `forkPointIsTip` is captured
+// when the dialog opens, so a turn completed on another device meanwhile makes the
+// drop fork content past the message the user picked; and the shape is a guess
+// about a namespace the relay owns and does not expose.
 //
-// Left as an explicit, documented exception rather than guessed at: the clean fix
-// is a server-derived "is this point natively forkable" capability, which the
-// relay already computes internally (`resolve_fork_point` returns Provider /
-// RelayOnly / Unlocatable) but does not yet expose. Tracked as R4/provider
-// follow-up. It degrades safely today — a row key the relay minted away from the
-// `msg_` shape simply stops matching, and the anchor is then sent rather than
-// dropped, which is the same path every resolvable anchor already takes.
+// DELETE IT when no relay older than R4 is still reachable — the only thing
+// keeping it is version skew, not the rule itself. A newer relay answers the same
+// question authoritatively and from fresh state.
 function isUnresolvableCodexLiveForkPoint(upToItemId) {
   return /^msg_/.test(String(upToItemId ?? ""));
 }
@@ -292,26 +292,37 @@ function forkProjectPayload(projectId) {
   return { project_id: projectId === FORK_PROJECT_NONE ? "" : projectId };
 }
 
-export function forkFieldsToPayload(fields) {
+// THE one place the capability is read off a snapshot. Both surfaces call this
+// rather than reaching for the field, because a typo at either call site reads as
+// `false` and silently restores the pre-flight guess against a relay that has
+// already stopped refusing the anchors it guesses about — a regression with no
+// error to notice. transcript-cross-layer.test.mjs pins the spelling against a
+// snapshot the RUST layer generated.
+export function relayResolvesForkPoints(session) {
+  return Boolean(session?.relay_resolves_fork_points);
+}
+
+// `relayResolvesForkPoints` comes from the snapshot's own
+// `relay_resolves_fork_points`. When the relay says it owns fork-point resolution,
+// the anchor goes out exactly as rendered and the client makes no judgment about it
+// at all — see `isUnresolvableCodexLiveForkPoint` for what the pre-flight rule was
+// and why only version skew keeps it.
+export function forkFieldsToPayload(fields, { relayResolvesForkPoints = false } = {}) {
   const upToItemId = orNull(fields?.upToItemId);
+  // A RESOLVABLE anchor is never dropped, on either relay: the relay re-checks it
+  // against the fresh provider read and preserves it when the source has since
+  // advanced (normalize_fork_point only collapses an id that is STILL the final
+  // entry). Dropping those blindly is a stale-snapshot race — forkPointIsTip is
+  // captured when the dialog opens, so if another device completes a turn before
+  // submission a null anchor silently forks content AFTER the message the user
+  // picked, and hands it to another provider on a cross-provider replay.
+  const dropUnresolvableAnchor =
+    !relayResolvesForkPoints &&
+    Boolean(fields?.forkPointIsTip) &&
+    isUnresolvableCodexLiveForkPoint(fields?.upToItemId);
   return {
     source_thread_id: fields?.sourceThreadId || "",
-    // A fork point at the transcript tip drops nothing, so it names the same
-    // branch as forking the whole thread. We only drop the anchor when it is a
-    // Codex live id that the relay cannot resolve (above): sending it would fail,
-    // whereas a whole-thread fork takes the exact path the working thread-list
-    // fork does. Every RESOLVABLE anchor is left intact on purpose — the relay
-    // re-checks it against the fresh provider read and preserves it when the
-    // source has since advanced (normalize_fork_point only collapses an id that
-    // is STILL the final entry). Dropping those blindly would be a stale-snapshot
-    // race: forkPointIsTip is captured when the dialog opens, so if another
-    // device completes a turn before submission, a null anchor would silently
-    // fork content AFTER the message the user picked — and hand it to another
-    // provider on a cross-provider replay.
-    up_to_item_id:
-      fields?.forkPointIsTip && isUnresolvableCodexLiveForkPoint(fields?.upToItemId)
-        ? null
-        : upToItemId,
+    up_to_item_id: dropUnresolvableAnchor ? null : upToItemId,
     cwd: orNull(fields?.cwd),
     initial_prompt: orNull(fields?.initialPrompt),
     model: orNull(fields?.model),

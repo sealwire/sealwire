@@ -310,6 +310,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
         snapshot: Some(SessionSnapshot {
             transcript_generation: String::new(),
             provider_fork_capabilities: Vec::new(),
+            relay_resolves_fork_points: true,
             provider_archive_capabilities: Vec::new(),
             provider_status: Vec::new(),
             revision: 7,
