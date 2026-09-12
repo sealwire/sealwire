@@ -513,7 +513,7 @@ function revisionMismatchDetail(event, currentRevision) {
   return {
     base_revision: event?.base_revision,
     current: currentRevision,
-    item: event?.item_id || event?.entry?.item_id,
+    item: transcriptRowKey(event) || transcriptRowKey(event?.entry),
   };
 }
 

@@ -6015,6 +6015,10 @@ tree; got {}",
             Arc<Mutex<HashMap<String, Vec<crate::provider::ProviderTranscriptEntry>>>>,
         /// Every `up_to_item_id` a native fork was actually asked for.
         fork_points: Arc<Mutex<Vec<Option<String>>>>,
+        /// Details the provider can answer, keyed by the id IT knows them under.
+        entry_details: Arc<Mutex<HashMap<String, crate::protocol::TranscriptEntryView>>>,
+        /// Every id `read_thread_entry_detail` was actually asked for.
+        detail_requests: Arc<Mutex<Vec<String>>>,
         // Models a provider (Claude, real Codex) that turns the initial prompt
         // into the first turn at creation time. Default-off keeps existing
         // tests on the "relay re-sends the prompt" branch; switching it on is
@@ -6069,6 +6073,8 @@ tree; got {}",
                 relay_named_read_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
                 thread_read_entries: Arc::new(Mutex::new(HashMap::new())),
                 fork_points: Arc::new(Mutex::new(Vec::new())),
+                entry_details: Arc::new(Mutex::new(HashMap::new())),
+                detail_requests: Arc::new(Mutex::new(Vec::new())),
                 consumes_initial_prompt: Arc::new(AtomicBool::new(false)),
                 start_turn_should_fail: Arc::new(AtomicBool::new(false)),
                 list_threads_should_fail: Arc::new(AtomicBool::new(false)),
@@ -6321,9 +6327,13 @@ tree; got {}",
         async fn read_thread_entry_detail(
             &self,
             _thread_id: &str,
-            _item_id: &str,
+            item_id: &str,
         ) -> Result<Option<crate::protocol::TranscriptEntryView>, String> {
-            Ok(None)
+            self.detail_requests.lock().await.push(item_id.to_string());
+            let Some(detail) = self.entry_details.lock().await.get(item_id).cloned() else {
+                return Ok(None);
+            };
+            Ok(Some(detail))
         }
 
         async fn archive_thread(&self, thread_id: &str) -> Result<(), String> {
@@ -10425,6 +10435,119 @@ tree; got {}",
 
     // A fork with neither prompt nor images keeps the existing behaviour: the
     // native branch stays idle and waits for the user.
+
+    /// A detail the PROVIDER answers comes back under the provider's own name.
+    /// Shipped that way, the client caches it under an id no lookup ever uses —
+    /// a permanent miss, and a refetch on every render.
+    ///
+    /// The relay translates out to reach the provider; translating back in is the
+    /// same job. Both the envelope and the nested entry must name the ROW the
+    /// client asked for.
+    #[tokio::test]
+    async fn a_provider_backed_detail_comes_back_named_by_the_requested_row() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = codex.thread_summary("codex-detail", cwd);
+        {
+            let mut threads = codex.threads.lock().await;
+            threads.insert(source.id.clone(), source.clone());
+        }
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.threads = vec![source.clone()];
+            relay.observe_thread_cwd(&source.id, cwd);
+        }
+
+        // A row whose key had to mint, so the row id and the provider id DIVERGE.
+        let row_id = {
+            let mut relay = app.relay.write().await;
+            relay.upsert_relay_owned_row_for_thread(
+                &source.id,
+                "prov-1".to_string(),
+                crate::protocol::TranscriptEntryKind::Error,
+                Some("an unrelated relay row".to_string()),
+                "failed".to_string(),
+                None,
+                None,
+            );
+            relay.upsert_transcript_item_for_thread(
+                &source.id,
+                "prov-1".to_string(),
+                crate::protocol::TranscriptEntryKind::ToolCall,
+                Some("the tool row".to_string()),
+                "completed".to_string(),
+                Some("turn-1".to_string()),
+                None,
+            );
+            let runtime = relay.runtime_for_thread(&source.id).expect("runtime");
+            runtime
+                .transcript
+                .resolve_provider("prov-1")
+                .expect("the provider namespace knows it")
+                .to_string()
+        };
+        assert_ne!(
+            row_id, "prov-1",
+            "the row key diverges from the provider id"
+        );
+
+        // The provider answers only under ITS name, with no row id of its own.
+        {
+            let mut details = codex.entry_details.lock().await;
+            details.insert(
+                "prov-1".to_string(),
+                crate::protocol::TranscriptEntryView {
+                    row_id: None,
+                    item_id: Some("prov-1".to_string()),
+                    order_seq: None,
+                    withdrawn: false,
+                    kind: crate::protocol::TranscriptEntryKind::ToolCall,
+                    text: Some("the full body".to_string()),
+                    status: "completed".to_string(),
+                    turn_id: Some("turn-1".to_string()),
+                    tool: None,
+                    content_state: crate::protocol::TranscriptContentState::Full,
+                },
+            );
+        }
+
+        let detail = app
+            .read_thread_entry_detail(crate::protocol::ReadThreadEntryDetailInput {
+                thread_id: source.id.clone(),
+                item_id: row_id.clone(),
+                field: None,
+                cursor: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("the detail resolves");
+
+        assert_eq!(
+            codex.detail_requests.lock().await.clone(),
+            vec!["prov-1".to_string()],
+            "the provider must be asked under ITS name"
+        );
+        assert_eq!(
+            detail.row_id, row_id,
+            "the envelope must name the row the client asked for"
+        );
+        assert_eq!(detail.item_id, row_id, "and its compatibility alias too");
+        let entry = detail.entry.expect("the entry came back");
+        assert_eq!(
+            entry.row_id.as_deref(),
+            Some(row_id.as_str()),
+            "the nested entry must be rebound to the requested row, not the provider id"
+        );
+        assert_eq!(
+            entry.item_id.as_deref(),
+            Some(row_id.as_str()),
+            "including its compatibility alias, which is what a client caches under"
+        );
+    }
 
     /// Fork coverage at the `fork_session` level, not just the id translator.
     ///

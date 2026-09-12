@@ -428,7 +428,8 @@ impl AppState {
                 )
             })?;
 
-            self.find_thread_provider(&input.thread_id)
+            let mut entry = self
+                .find_thread_provider(&input.thread_id)
                 .await?
                 .1
                 .read_thread_entry_detail(&input.thread_id, &provider_item_id)
@@ -438,7 +439,16 @@ impl AppState {
                         "thread entry `{}` was not found in thread `{}`",
                         input.item_id, input.thread_id
                     )
-                })?
+                })?;
+            // Rebind to the row the CLIENT asked for. The provider answers under its
+            // own name, so this entry comes back carrying `row_id: None` and the
+            // provider id in `item_id`. Shipped as-is, the client caches the detail
+            // under the provider id while every lookup uses the row id — a permanent
+            // miss, and a refetch on every render. The provider id stays internal;
+            // translating out is the relay's job, and so is translating back.
+            entry.row_id = Some(input.item_id.clone());
+            entry.item_id = Some(input.item_id.clone());
+            entry
         };
 
         if let Some(field) = input.field.as_deref() {

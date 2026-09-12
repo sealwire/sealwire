@@ -3770,9 +3770,12 @@ impl ThreadEntryDetailResponse {
         field: &str,
         cursor: usize,
     ) -> Result<Self, String> {
+        // Same precedence as `from_entry`: the ROW id when the relay materialized
+        // this entry, and only then the name a raw provider read carries.
         let item_id = entry
-            .item_id
+            .row_id
             .clone()
+            .or_else(|| entry.item_id.clone())
             .ok_or_else(|| "thread entry detail is missing item_id".to_string())?;
         let value = detail_field_value(entry, field)
             .ok_or_else(|| format!("thread entry detail field `{field}` is unavailable"))?;
