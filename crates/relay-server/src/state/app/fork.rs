@@ -74,24 +74,28 @@ impl AppState {
         // materialized read (which can answer for a thread with no runtime).
         let fork_point = match client_fork_point.as_deref() {
             Some(requested) => {
-                let (resolved, at_thread_tip) = {
+                let (resolved, covers_whole_read) = {
                     let relay = self.relay.read().await;
                     let transcript = relay
                         .runtime_for_thread(&source_thread_id)
                         .map(|runtime| &runtime.transcript);
                     (
                         resolve_fork_point(transcript, &source_data.transcript, requested),
-                        fork_point_is_thread_tip(transcript, requested),
+                        unlocatable_point_covers_the_whole_read(
+                            transcript,
+                            &source_data.transcript,
+                            requested,
+                        ),
                     )
                 };
                 match resolved.cut() {
                     Some(cut) => Some(cut),
-                    // Unlocatable, but the relay's own row order says nothing follows
-                    // it — so there is nothing after it to drop, and a whole-thread
-                    // fork names the same branch. This is the same tip-equivalence
-                    // `native_fork_point_id` applies to a point the read CAN locate,
-                    // reached through the runtime because the read cannot answer.
-                    None if at_thread_tip => None,
+                    // Unlocatable, but the runtime and THIS read together prove the
+                    // read holds nothing after the requested row — so a whole-thread
+                    // fork names the same branch. Same tip-equivalence
+                    // `native_fork_point_id` applies to a point the read can locate;
+                    // here the read cannot name the row, only bound it.
+                    None if covers_whole_read => None,
                     // Nothing can locate it and something may follow it, or the read
                     // is ambiguous about which entry was meant. Either way, guessing
                     // would cut the branch in a place the user did not choose.
@@ -598,19 +602,52 @@ impl ForkPointResolution {
     }
 }
 
-/// Whether the requested ROW is the last one the thread has.
+/// Whether widening an `Unlocatable` fork point to a whole-thread fork provably
+/// names the SAME branch the user chose.
 ///
-/// Only consulted for a point nothing could locate in the read, and only to decide
-/// between refusing and widening to a whole-thread fork. The runtime is the only
-/// thing that can answer: it holds the rows in the order the client rendered them,
-/// under the keys the client sends back, whatever the provider's read calls them.
+/// The runtime alone cannot answer this, and an earlier version of this check that
+/// asked it alone was wrong. "You picked the last row I know" is not "you picked the
+/// last row of the thread": a turn completed through another client, a provider that
+/// moved on, or a history the runtime holds only a page of all leave the fresh read
+/// ahead of the runtime. Widening on the runtime's word then hands the branch every
+/// read entry the runtime never saw — the content leak this widening exists to avoid,
+/// driven by a stale runtime instead of a stale dialog.
 ///
-/// This rests on the relay's core invariant — the runtime knows every row of a
-/// thread it holds — which `fork_session` backs up by re-checking that no turn is in
-/// flight after the read. A trailing WITHDRAWN row is skipped: it is not rendered, so
-/// it is neither a row the user could have picked nor one a branch drops.
-fn fork_point_is_thread_tip(
+/// So both sides are consulted, and the proof runs entirely through typed identities
+/// — never a spelling, never text, never a count of one side against the other:
+///
+/// 1. No row follows the requested one in the runtime, so there is nothing the client
+///    could have picked after it. A trailing WITHDRAWN row does not count: it is not
+///    rendered, so it is neither a row the user could pick nor one a branch drops.
+/// 2. Every read entry BUT THE LAST resolves to a runtime row strictly before the
+///    requested one. So none of them is content the user cut away, and none is content
+///    nothing here can account for.
+/// 3. The last read entry resolves to no runtime row at all — the only shape the
+///    requested row's own counterpart can have, since it is `Unlocatable` precisely
+///    because the read renamed it.
+///
+/// Together those make the read exactly "everything at or before the requested row",
+/// so taking all of it is the branch that was asked for. Anything else refuses.
+///
+/// Two cases this gets right by construction rather than by special-casing. A read
+/// that DESCRIBES one row twice — a tool's request and its result share a provider id
+/// — resolves both copies to the same early row and passes, correctly, since both
+/// belong to the branch. A relay-OWNED runtime row (a send reservation) carries no
+/// source name and so has no read counterpart, which means it neither anchors the
+/// proof nor blocks it.
+///
+/// Paged history behaves correctly in both directions, which is worth stating because
+/// only one of them is obvious. A page row whose `row_id` had to mint still carries
+/// the provider/relay name it arrived under (`prepend_provider_history` passes both
+/// through, and the store binds them independently of the key), so resolving a read
+/// entry through those namespaces finds it — the proof is immune to minting by
+/// construction, which a row-key comparison would not be. And the deliberate cost: a
+/// runtime holding only PART of its history cannot resolve the older read entries at
+/// all, so step 2 fails and the fork is refused. That is the intended direction —
+/// before any of this, such a fork was refused unconditionally.
+fn unlocatable_point_covers_the_whole_read(
     transcript: Option<&crate::state::relay::ThreadTranscript>,
+    read: &[crate::provider::ProviderTranscriptEntry],
     requested: &str,
 ) -> bool {
     let Some(transcript) = transcript else {
@@ -618,12 +655,42 @@ fn fork_point_is_thread_tip(
     };
     // Addressed in the ROW namespace: `requested` is the key the client holds, which
     // a collision may have minted away from the provider's spelling for it.
-    let Some(index) = transcript.index_of_row(requested) else {
+    let Some(requested_index) = transcript.index_of_row(requested) else {
         return false;
     };
-    transcript.rows()[index + 1..]
+    if !transcript.rows()[requested_index + 1..]
         .iter()
         .all(|row| row.withdrawn)
+    {
+        return false;
+    }
+    // An empty read demonstrates nothing, so it cannot demonstrate a tip either.
+    let Some((last, earlier)) = read.split_last() else {
+        return false;
+    };
+    if read_entry_row_index(transcript, last).is_some() {
+        return false;
+    }
+    earlier.iter().all(|entry| {
+        read_entry_row_index(transcript, entry).is_some_and(|index| index < requested_index)
+    })
+}
+
+/// The runtime row a READ entry names, through whichever typed identity it carries.
+///
+/// Never the entry's own spelling: a read entry is named in the provider's namespace
+/// or the adapter's, and matching one of those against row keys is what lands a
+/// provider item on an unrelated relay row that merely shares a string.
+fn read_entry_row_index(
+    transcript: &crate::state::relay::ThreadTranscript,
+    entry: &crate::provider::ProviderTranscriptEntry,
+) -> Option<usize> {
+    use crate::state::IdSpace;
+    if let Some(provider_item_id) = entry.provider_item_id.as_deref() {
+        return transcript.resolve_index_in(IdSpace::Provider, provider_item_id);
+    }
+    let relay_item_id = entry.relay_item_id.as_deref()?;
+    transcript.resolve_index_in(IdSpace::Relay, relay_item_id)
 }
 
 /// Resolve a fork point the CLIENT named, to a position in the read.
@@ -1267,14 +1334,106 @@ mod fork_point_resolution_tests {
         );
     }
 
-    /// The tip check is addressed in the ROW namespace, and the fixtures make that
-    /// observable: the tip row's `row_id` is `msg_live#row1` while its provider name
-    /// is `msg_live`. Asking by either spelling would pass if the two were equal.
-    #[test]
-    fn the_tip_check_is_addressed_by_row_key_not_by_provider_name() {
+    /// A runtime whose rows all account for the read, except the renamed tip.
+    /// `[item-1, <requested>]` against a read of `[item-1, item-2]`.
+    fn live_tip_store(requested_spelling: &str) -> (ThreadTranscript, String) {
         let mut store = ThreadTranscript::new();
-        // Takes the spelling `msg_live` in the row namespace, so the provider row
-        // below has to mint.
+        store.push(TranscriptRecord {
+            provider_item_id: Some("item-1".to_string()),
+            ..row("item-1")
+        });
+        let tip = store.push(TranscriptRecord {
+            provider_item_id: Some(requested_spelling.to_string()),
+            ..row(requested_spelling)
+        });
+        (store, tip)
+    }
+
+    /// The safe case, and WHY it is provable rather than assumed: `item-1` is the only
+    /// read entry before the last, it resolves to a runtime row before the requested
+    /// one, and the last entry resolves to nothing — so `item-2` is the only candidate
+    /// for the requested row's counterpart and nothing sits after it. Taking the whole
+    /// read is therefore the same branch as cutting at the requested row.
+    #[test]
+    fn a_read_bounded_entirely_by_the_runtime_proves_the_widening() {
+        let (store, tip) = live_tip_store("msg_live");
+        let read = vec![
+            ProviderTranscriptEntry::provider_named(view("item-1")),
+            ProviderTranscriptEntry::provider_named(view("item-2")),
+        ];
+
+        assert!(unlocatable_point_covers_the_whole_read(
+            Some(&store),
+            &read,
+            &tip
+        ));
+    }
+
+    /// THE REGRESSION, at unit scale: one more read entry nothing can place. The
+    /// runtime still says the requested row is its tip, and that is exactly why the
+    /// runtime cannot be asked alone.
+    #[test]
+    fn a_read_holding_an_entry_the_runtime_never_saw_refuses_to_widen() {
+        let (store, tip) = live_tip_store("msg_live");
+        let read = vec![
+            ProviderTranscriptEntry::provider_named(view("item-1")),
+            ProviderTranscriptEntry::provider_named(view("item-2")),
+            ProviderTranscriptEntry::provider_named(view("item-3")),
+        ];
+
+        assert!(
+            !unlocatable_point_covers_the_whole_read(Some(&store), &read, &tip),
+            "`item-2` is now a non-last entry that resolves to nothing, so the read \
+             is not bounded by the requested row and widening could leak `item-3`"
+        );
+    }
+
+    /// A read that describes ONE row twice — a tool's request and its result share a
+    /// provider id — must still prove. Both copies resolve to the same early row, and
+    /// both belong to the branch, so nothing about the count matters.
+    #[test]
+    fn a_read_that_describes_one_row_twice_still_proves_the_widening() {
+        let (store, tip) = live_tip_store("msg_live");
+        let read = vec![
+            ProviderTranscriptEntry::provider_named(view("item-1")),
+            ProviderTranscriptEntry::provider_named(view("item-1")),
+            ProviderTranscriptEntry::provider_named(view("item-2")),
+        ];
+
+        assert!(unlocatable_point_covers_the_whole_read(
+            Some(&store),
+            &read,
+            &tip
+        ));
+    }
+
+    /// The last read entry resolving to a runtime row means it is somebody else's row,
+    /// not the requested one's renamed counterpart — the requested row would not be
+    /// `Unlocatable` if the read could name it.
+    #[test]
+    fn a_read_whose_last_entry_the_runtime_can_place_refuses_to_widen() {
+        let (store, tip) = live_tip_store("msg_live");
+        let read = vec![ProviderTranscriptEntry::provider_named(view("item-1"))];
+
+        assert!(!unlocatable_point_covers_the_whole_read(
+            Some(&store),
+            &read,
+            &tip
+        ));
+        assert!(
+            !unlocatable_point_covers_the_whole_read(Some(&store), &[], &tip),
+            "and an empty read demonstrates nothing at all"
+        );
+    }
+
+    /// The runtime side is addressed in the ROW namespace, and the fixtures make that
+    /// observable: the tip row's `row_id` is `msg_live#row1` while its provider name
+    /// is `msg_live`. Asking by the provider spelling finds the unrelated row that
+    /// owns it, which would pass if the two were equal.
+    #[test]
+    fn the_runtime_side_is_addressed_by_row_key_not_by_provider_name() {
+        let mut store = ThreadTranscript::new();
+        // Takes the spelling `msg_live` in the row namespace, so the row below mints.
         let decoy = store.push(TranscriptRecord {
             relay_item_id: Some("decoy".to_string()),
             ..row("msg_live")
@@ -1284,38 +1443,50 @@ mod fork_point_resolution_tests {
             ..row("msg_live")
         });
         assert_ne!(tip, "msg_live", "the tip row had to mint its key");
+        // The decoy is the only row before the tip, and no read entry names it, so
+        // the read's single unplaceable entry is bounded by the tip alone.
+        let read = vec![ProviderTranscriptEntry::provider_named(view("item-2"))];
 
-        assert!(fork_point_is_thread_tip(Some(&store), &tip));
         assert!(
-            !fork_point_is_thread_tip(Some(&store), &decoy),
+            !unlocatable_point_covers_the_whole_read(Some(&store), &read, &decoy),
             "the decoy is not the tip, and it is what the provider's spelling names"
         );
         assert!(
-            !fork_point_is_thread_tip(Some(&store), "msg_live"),
+            !unlocatable_point_covers_the_whole_read(Some(&store), &read, "msg_live"),
             "the PROVIDER name must not answer the row-namespace question"
         );
         assert!(
-            !fork_point_is_thread_tip(None, &tip),
+            !unlocatable_point_covers_the_whole_read(None, &read, &tip),
             "no runtime, no answer"
         );
     }
 
-    /// A withdrawn row is never rendered, so it is not a row a branch drops. Leaving
-    /// it in the tip test would refuse a fork at the last message the user can see.
+    /// A withdrawn row is never rendered, so it is not a row a branch drops. Counting
+    /// it would refuse a fork at the last message the user can actually see.
     #[test]
     fn a_trailing_withdrawn_row_does_not_move_the_tip() {
-        let mut store = ThreadTranscript::new();
-        let visible = store.push(row("visible"));
+        let (mut store, tip) = live_tip_store("msg_live");
         store.push(TranscriptRecord {
             withdrawn: true,
             ..row("rejected-send")
         });
+        let read = vec![
+            ProviderTranscriptEntry::provider_named(view("item-1")),
+            ProviderTranscriptEntry::provider_named(view("item-2")),
+        ];
 
-        assert!(fork_point_is_thread_tip(Some(&store), &visible));
+        assert!(unlocatable_point_covers_the_whole_read(
+            Some(&store),
+            &read,
+            &tip
+        ));
 
-        store.push(row("live-again"));
+        store.push(TranscriptRecord {
+            provider_item_id: Some("msg_later".to_string()),
+            ..row("msg_later")
+        });
         assert!(
-            !fork_point_is_thread_tip(Some(&store), &visible),
+            !unlocatable_point_covers_the_whole_read(Some(&store), &read, &tip),
             "a VISIBLE row after it does move the tip"
         );
     }

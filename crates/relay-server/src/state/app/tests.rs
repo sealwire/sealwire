@@ -11042,6 +11042,104 @@ tree; got {}",
         fork_at_a_live_only_provider_name(true).await;
     }
 
+    /// The runtime saying "you picked my last row" is NOT the same as "you picked the
+    /// thread's last row". A turn completed through another client, a provider that
+    /// moved on, a history the runtime only holds a page of — any of those leaves the
+    /// fresh read ahead of the runtime.
+    ///
+    /// Here the read has an `item-3` this runtime never saw. Widening on the runtime's
+    /// word alone native-forks the WHOLE fresh thread and hands the branch that entry,
+    /// which is precisely the content leak the widening exists to avoid — just driven
+    /// by a stale runtime instead of a stale dialog.
+    #[tokio::test]
+    async fn a_live_only_tip_is_refused_when_the_fresh_read_moved_past_the_runtime() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        codex.native_fork.store(true, Ordering::Relaxed);
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = codex.thread_summary("codex-source", cwd);
+        {
+            let mut threads = codex.threads.lock().await;
+            threads.insert(source.id.clone(), source.clone());
+        }
+        let entry = |item_id: &str, text: &str| crate::protocol::TranscriptEntryView {
+            row_id: None,
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some(item_id.to_string()),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some(text.to_string()),
+            status: "completed".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
+        };
+        // `item-2` is the streamed message renumbered; `item-3` landed afterwards and
+        // this runtime never learned it.
+        {
+            let mut transcripts = codex.thread_transcripts.lock().await;
+            transcripts.insert(
+                source.id.clone(),
+                vec![
+                    entry("item-1", "earlier"),
+                    entry("item-2", "the streamed one"),
+                    entry("item-3", "arrived through another client"),
+                ],
+            );
+        }
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.threads = vec![source.clone()];
+        }
+        {
+            let mut relay = app.relay.write().await;
+            for (item_id, text) in [("item-1", "earlier"), ("msg_live", "the streamed one")] {
+                relay.upsert_transcript_item_for_thread(
+                    &source.id,
+                    item_id.to_string(),
+                    crate::protocol::TranscriptEntryKind::AgentText,
+                    Some(text.to_string()),
+                    "completed".to_string(),
+                    Some("turn-1".to_string()),
+                    None,
+                );
+            }
+        }
+
+        let error = app
+            .fork_session(ForkSessionInput {
+                source_thread_id: source.id.clone(),
+                up_to_item_id: Some("msg_live".to_string()),
+                cwd: Some(cwd.to_string()),
+                initial_prompt: Some("carry on".to_string()),
+                model: Some("codex-model".to_string()),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("codex".to_string()),
+                project_id: None,
+            })
+            .await
+            .expect_err(
+                "the read has an entry after the selected message that nothing can \
+                 place, so widening is not provably the same branch",
+            );
+
+        assert!(
+            error.contains("never assigned it an id"),
+            "the refusal must reuse the not-addressable message, got: {error}"
+        );
+        assert!(
+            codex.fork_points.lock().await.is_empty(),
+            "and above all it must NOT have been sent as a whole-thread fork, which \
+             would silently include `item-3`"
+        );
+    }
+
     #[tokio::test]
     async fn a_native_fork_without_prompt_or_images_stays_idle() {
         let project = TempDir::new().expect("project tempdir");
