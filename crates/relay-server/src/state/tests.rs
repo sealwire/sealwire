@@ -63,6 +63,7 @@ fn test_persisted_state() -> PersistedRelayState {
     );
     PersistedRelayState {
         asks: Default::default(),
+        goals: Default::default(),
         trusted_workspaces: Vec::new(),
         // No budget: these fixtures are about session restoration, and a cap
         // would gate turns in tests that have nothing to say about spending.
@@ -897,6 +898,91 @@ fn promote_background_thread_carries_the_orchestrator_pin() {
         Some("real-session-id"),
         "the pin must follow its thread, or the Orchestrator resets every first turn"
     );
+}
+
+#[test]
+fn promotion_carries_the_goal_across() {
+    // `/goal` on a fresh Claude session is the ordinary case: the session has no
+    // real id until its first turn, and that first turn is the one the goal
+    // drives. Left keyed to the pending id the goal vanishes from the panel and
+    // burns the rest of its budget on a thread that no longer exists.
+    let mut relay = test_state();
+    relay.set_goal(crate::state::Goal::new(
+        "goal-1".to_string(),
+        "claude-pending-7".to_string(),
+        "ship the mobile door".to_string(),
+    ));
+
+    relay.promote_background_thread("claude-pending-7", "real-session-id");
+
+    assert!(
+        relay.goal_for_thread("claude-pending-7").is_none(),
+        "nothing is left under the id that no longer exists",
+    );
+    let goal = relay
+        .goal_for_thread("real-session-id")
+        .expect("the goal follows its thread");
+    assert_eq!(goal.thread_id, "real-session-id", "and is re-pointed too");
+    assert_eq!(goal.objective, "ship the mobile door");
+}
+
+#[test]
+fn promotion_carries_the_ask_token_across() {
+    // The token is minted against the pending id on the very turn that promotes
+    // it. Left behind, the tools the goal tells the agent to call resolve to a
+    // thread that no longer exists — so its first "I'm done" is refused.
+    let mut relay = test_state();
+    let token = relay.ask_token_for_thread("claude-pending-7");
+
+    relay.promote_background_thread("claude-pending-7", "real-session-id");
+
+    assert_eq!(
+        relay.thread_for_ask_token(&token).as_deref(),
+        Some("real-session-id"),
+    );
+}
+
+#[test]
+fn removing_a_thread_takes_its_goal_with_it() {
+    // A goal outliving its thread is both a wedged driver and the user's own
+    // words surviving a permanent delete.
+    let mut relay = test_state();
+    relay.set_goal(crate::state::Goal::new(
+        "goal-1".to_string(),
+        "thread-1".to_string(),
+        "ship the mobile door".to_string(),
+    ));
+
+    relay.remove_thread("thread-1");
+
+    assert!(relay.goal_for_thread("thread-1").is_none());
+}
+
+#[test]
+fn rewording_an_objective_moves_the_reviews_revision() {
+    // Clients refetch only when the revision changes, so a field left out of the
+    // hash is a card that keeps showing a goal the relay is no longer driving.
+    let mut relay = test_state();
+    relay.set_goal(crate::state::Goal::new(
+        "goal-1".to_string(),
+        "thread-1".to_string(),
+        "ship the mobile door".to_string(),
+    ));
+    let before = relay.reviews_revision();
+
+    // Same status, same turn count, same second: only the words differ.
+    relay.update_goal("thread-1", |goal| {
+        goal.objective = "ship the mobile door, ignoring tablets".to_string()
+    });
+    let reworded = relay.reviews_revision();
+    assert_ne!(before, reworded);
+
+    // And the same for what the agent said when it stopped — two claims one
+    // second apart on the same status is an ordinary retry.
+    relay.update_goal("thread-1", |goal| {
+        goal.outcome = Some("shipped it".to_string())
+    });
+    assert_ne!(reworded, relay.reviews_revision());
 }
 
 #[test]

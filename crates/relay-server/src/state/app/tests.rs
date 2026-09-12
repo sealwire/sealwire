@@ -14128,7 +14128,7 @@ mod review_tests {
     /// assistant reply back into relay state — enough to drive the orchestrator
     /// end to end and assert what it sent to whom.
     #[derive(Clone)]
-    struct ReviewTestProvider {
+    pub(super) struct ReviewTestProvider {
         name: &'static str,
         state: Arc<RwLock<RelayState>>,
         threads: Arc<Mutex<HashMap<String, ThreadSummaryView>>>,
@@ -14149,7 +14149,7 @@ mod review_tests {
         // When true, `respond_to_approval` errors (provider rejects the denial).
         deny_fails: Arc<AtomicBool>,
         // When true, `request_turn_stop` errors.
-        interrupt_fails: Arc<AtomicBool>,
+        pub(super) interrupt_fails: Arc<AtomicBool>,
         interrupts: Arc<Mutex<Vec<String>>>,
         // Test-only latch for one selected stop request. This creates the exact
         // multi-thread drain window where an earlier owned thread has stopped
@@ -15458,7 +15458,7 @@ mod review_tests {
         }
     }
 
-    async fn build_review_app(
+    pub(super) async fn build_review_app(
         cwd: &str,
         provider_names: &[&'static str],
     ) -> (AppState, HashMap<&'static str, ReviewTestProvider>) {
@@ -15604,7 +15604,7 @@ mod review_tests {
         panic!("review job {job_id} never reached {statuses:?}");
     }
 
-    fn review_input(reviewer_provider: &str) -> RequestReviewInput {
+    pub(super) fn review_input(reviewer_provider: &str) -> RequestReviewInput {
         RequestReviewInput {
             parent_thread_id: None,
             reviewer_provider: reviewer_provider.to_string(),
@@ -26427,15 +26427,19 @@ mod ask_tests {
         .await
         .expect("the human door works");
 
+        // Told apart by content, not by order: both land in the same second, and
+        // `asked_at` has no finer resolution than that.
         let relay = app.relay.read().await;
-        let mut mine = relay.asks_of_asker(&asker);
-        mine.sort_by_key(|ask| ask.asked_at);
-        assert_eq!(
-            mine[0].message, "verbatim please",
-            "an agent's own message must reach the peer unchanged",
+        let mine = relay.asks_of_asker(&asker);
+        assert_eq!(mine.len(), 2);
+        assert!(
+            mine.iter().any(|ask| ask.message == "verbatim please"),
+            "an agent's own message must reach the peer unchanged: {:?}",
+            mine.iter().map(|ask| &ask.message).collect::<Vec<_>>(),
         );
-        assert_ne!(
-            mine[1].message, "carry on with the next step",
+        assert!(
+            mine.iter()
+                .all(|ask| ask.message != "carry on with the next step"),
             "a person's words must be expanded before a stranger sees them",
         );
     }
@@ -26519,6 +26523,748 @@ mod ask_tests {
                 .await
                 .is_err(),
             "a settled ask is not still waiting",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timeout_takes_the_answer_it_can_see_instead_of_throwing_it_away() {
+        // This happened: a real review ran past the old thirty-minute limit, was
+        // declared "did not answer", and its finished text sat in the peer's own
+        // transcript. It was only recovered by reading that transcript by hand.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+
+        let asker = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("never".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+                sandbox: None,
+            })
+            .await
+            .expect("asker starts")
+            .active_thread_id
+            .clone()
+            .expect("thread");
+
+        app.ask_agent(
+            &asker,
+            AskRequest {
+                expand_with_context: false,
+                peer_thread_id: None,
+                provider: Some("fake".to_string()),
+                model: None,
+                effort: None,
+                message: "review this".to_string(),
+            },
+        )
+        .await
+        .expect("the ask goes through");
+
+        // Let the fake peer actually reply, then sweep with a clock far past the
+        // limit — the peer is idle and HAS spoken.
+        for _ in 0..50 {
+            let spoke = {
+                let relay = app.relay.read().await;
+                relay
+                    .asks_of_asker(&asker)
+                    .first()
+                    .map(|ask| ask.status.is_terminal())
+                    .unwrap_or(false)
+            };
+            if spoke {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            app.settle_and_deliver_asks_at(crate::state::unix_now())
+                .await;
+        }
+
+        app.settle_and_deliver_asks_at(crate::state::unix_now() + 365 * 24 * 60 * 60)
+            .await;
+
+        let relay = app.relay.read().await;
+        let mine = relay.asks_of_asker(&asker);
+        let ask = mine.first().expect("recorded");
+        assert!(
+            ask.answer.is_some(),
+            "a clock firing must not discard an answer that exists: {:?}",
+            ask.error,
+        );
+    }
+
+    /// Unrestricted, because that is the only kind a goal may be set on — a
+    /// restricted session is never handed the tools that end one.
+    async fn goal_session(app: &crate::state::AppState, cwd: &str) -> String {
+        app.start_session(crate::protocol::StartSessionInput {
+            cwd: Some(cwd.to_string()),
+            provider: Some("fake".to_string()),
+            approval_policy: Some("bypass".to_string()),
+            device_id: Some("dev".to_string()),
+            initial_prompt: None,
+            model: None,
+            effort: None,
+            project_id: None,
+            sandbox: None,
+        })
+        .await
+        .expect("session starts")
+        .active_thread_id
+        .clone()
+        .expect("thread")
+    }
+
+    /// Drive one goal turn and wait for it to settle. An agent only ever learns
+    /// of a goal by being handed it, so nothing it reports back counts until it
+    /// has been.
+    async fn hand_over_the_goal(app: &crate::state::AppState, thread_id: &str) {
+        app.drive_goals_at(crate::state::unix_now()).await;
+        for _ in 0..100 {
+            let busy = {
+                let relay = app.relay.read().await;
+                relay
+                    .runtime_for_thread(thread_id)
+                    .map(|runtime| runtime.is_working())
+                    .unwrap_or(false)
+            };
+            if !busy {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_agent_can_report_on_a_goal_but_never_rewrite_it() {
+        // The whole design rests on this: an agent that can edit its own goal
+        // edits it to one it can finish.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+
+        app.set_goal(&thread, "ship the mobile door")
+            .await
+            .expect("the user sets it");
+
+        // There is no tool that writes an objective. Not "it refuses" — it does
+        // not exist, which is a stronger guarantee than a check somebody can
+        // forget to apply.
+        for name in crate::orchestrator_tools::PEER_TOOLS {
+            let spec = crate::orchestrator_tools::spec_for(name).expect("declared");
+            assert!(
+                !spec
+                    .params
+                    .iter()
+                    .any(|p| p.name == "objective" || p.name == "goal"),
+                "{name} takes something that looks like a goal to write",
+            );
+        }
+
+        // What it CAN do is say how it went, once it has been handed the goal.
+        hand_over_the_goal(&app, &thread).await;
+        let token = app.ask_token_for_thread(&thread).await;
+        app.call_peer_tool(
+            "goal_complete",
+            &serde_json::json!({ "summary": "did it; tests pass" }),
+            &token,
+        )
+        .await
+        .expect("reporting works");
+
+        let relay = app.relay.read().await;
+        let goal = relay.goal_for_thread(&thread).expect("recorded");
+        assert_eq!(
+            goal.objective, "ship the mobile door",
+            "the objective is untouched by anything the agent did",
+        );
+        assert_eq!(
+            goal.status.as_str(),
+            "complete_claimed",
+            "a claim, never 'complete' — the relay did not read the work",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_goal_drives_turns_until_the_agent_stops_it_or_the_budget_runs_out() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "keep going").await.expect("set");
+
+        // Drive far past the budget, waiting for each turn to settle first —
+        // the driver deliberately never interleaves with a turn already running,
+        // so a tight loop would be skipped every time and prove nothing.
+        for _ in 0..(crate::state::goal_max_turns() + 5) {
+            for _ in 0..100 {
+                let busy = {
+                    let relay = app.relay.read().await;
+                    relay
+                        .runtime_for_thread(&thread)
+                        .map(|runtime| runtime.is_working())
+                        .unwrap_or(false)
+                };
+                if !busy {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            app.drive_goals_at(crate::state::unix_now()).await;
+        }
+
+        let relay = app.relay.read().await;
+        let goal = relay.goal_for_thread(&thread).expect("recorded");
+        assert!(
+            goal.turns <= crate::state::goal_max_turns(),
+            "the cap holds"
+        );
+        assert_eq!(goal.status.as_str(), "out_of_turns");
+        assert!(
+            goal.outcome.is_none(),
+            "running out is not a claim about the work — success must never be inferred from it",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_settled_goal_stops_being_driven() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "ask me something")
+            .await
+            .expect("set");
+        hand_over_the_goal(&app, &thread).await;
+
+        let token = app.ask_token_for_thread(&thread).await;
+        app.call_peer_tool(
+            "goal_needs_you",
+            &serde_json::json!({ "question": "which database?" }),
+            &token,
+        )
+        .await
+        .expect("asking works");
+
+        let before = {
+            let relay = app.relay.read().await;
+            relay.goal_for_thread(&thread).expect("recorded").turns
+        };
+        for _ in 0..5 {
+            app.drive_goals_at(crate::state::unix_now()).await;
+        }
+        let relay = app.relay.read().await;
+        let goal = relay.goal_for_thread(&thread).expect("recorded");
+        assert_eq!(
+            goal.turns, before,
+            "a goal waiting on the user is not driven"
+        );
+        assert_eq!(goal.status.as_str(), "awaiting_user");
+    }
+
+    #[tokio::test]
+    async fn a_session_that_cannot_end_a_goal_is_not_given_one() {
+        // The three stopping tools ride the same token as `ask_agent`, which only
+        // an unrestricted session is handed. Driving a restricted one would hand
+        // it the objective twenty times over while telling it to stop by calling
+        // tools it does not have.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+
+        let restricted = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("never".to_string()),
+                sandbox: Some("workspace-write".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+            })
+            .await
+            .expect("session starts")
+            .active_thread_id
+            .clone()
+            .expect("thread");
+
+        let refused = app
+            .set_goal(&restricted, "ship the mobile door")
+            .await
+            .expect_err("a session with no way to stop must not be driven");
+        assert!(
+            refused.to_lowercase().contains("bypass")
+                || refused.to_lowercase().contains("approval"),
+            "the refusal has to say what to change: {refused}",
+        );
+        assert!(
+            app.relay
+                .read()
+                .await
+                .goal_for_thread(&restricted)
+                .is_none(),
+            "and nothing is recorded",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_send_that_never_reached_the_provider_does_not_spend_a_turn() {
+        // Spending before sending is right for a send that lands. A send refused
+        // before the provider ever saw it — budget cap, workspace gone — would
+        // otherwise burn the whole allowance in a minute of retries, with the
+        // agent never told anything.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "keep going").await.expect("set");
+
+        drop(project);
+        for _ in 0..5 {
+            app.drive_goals_at(crate::state::unix_now()).await;
+        }
+
+        let relay = app.relay.read().await;
+        let goal = relay.goal_for_thread(&thread).expect("recorded");
+        assert_eq!(goal.turns, 0, "nothing was driven, so nothing was spent");
+        assert_eq!(
+            goal.status.as_str(),
+            "active",
+            "and it is still the goal it was, not exhausted",
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_a_goal_stops_the_turn_it_is_running() {
+        // Stop that only clears the card is not a stop: the agent it started
+        // keeps running, and keeps editing.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "keep going").await.expect("set");
+
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_active_turn(Some("turn-in-flight".to_string()));
+            relay.notify();
+        }
+        app.cancel_goal(&thread).await.expect("stops");
+
+        let mut working = true;
+        for _ in 0..100 {
+            working = app
+                .relay
+                .read()
+                .await
+                .runtime_for_thread(&thread)
+                .map(|runtime| runtime.is_working())
+                .unwrap_or(false);
+            if !working {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(!working, "the in-flight turn was asked to stop");
+    }
+
+    #[tokio::test]
+    async fn stopping_a_goal_says_so_when_the_turn_will_not_stop() {
+        // The provider can reject, ignore or time out the stop. Reporting
+        // "stopped" anyway is the worst outcome: the card clears, the user walks
+        // away, and the agent keeps editing.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = super::review_tests::build_review_app(cwd, &["codex"]).await;
+        app.set_review_drain_max_ms(200);
+        providers
+            .get("codex")
+            .unwrap()
+            .interrupt_fails
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let thread = app
+            .start_session(crate::protocol::StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                provider: Some("codex".to_string()),
+                approval_policy: Some("bypass".to_string()),
+                model: None,
+                effort: None,
+                sandbox: None,
+                initial_prompt: None,
+                project_id: None,
+            })
+            .await
+            .expect("session starts")
+            .active_thread_id
+            .clone()
+            .expect("thread");
+        app.set_goal(&thread, "keep going").await.expect("set");
+
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_active_turn(Some("turn-that-will-not-die".to_string()));
+            relay.notify();
+        }
+
+        let reported = app
+            .cancel_goal(&thread)
+            .await
+            .expect_err("an unconfirmed stop must not read as a stop");
+        assert!(
+            reported.to_lowercase().contains("still"),
+            "the user has to be told the agent may still be working: {reported}",
+        );
+        assert_eq!(
+            app.relay
+                .read()
+                .await
+                .goal_for_thread(&thread)
+                .expect("recorded")
+                .status
+                .as_str(),
+            "cancelled",
+            "their decision is still recorded — only the quiet is in doubt",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_goal_stops_when_the_session_is_narrowed_under_it() {
+        // The gate on `set_goal` is a snapshot; settings can be changed whenever
+        // the thread is idle, and a goal between turns IS idle. Narrowed, the
+        // session loses the tools that end a goal — so the goal has to end here
+        // rather than grind out its remaining turns unanswerable.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "keep going").await.expect("set");
+
+        app.update_session_settings(crate::protocol::UpdateSessionSettingsInput {
+            thread_id: thread.clone(),
+            device_id: Some("dev".to_string()),
+            approval_policy: Some("on-request".to_string()),
+            sandbox: Some("workspace-write".to_string()),
+            model: None,
+            effort: None,
+        })
+        .await
+        .expect("narrowing an idle session is allowed");
+
+        for _ in 0..5 {
+            app.drive_goals_at(crate::state::unix_now()).await;
+        }
+
+        let relay = app.relay.read().await;
+        let goal = relay.goal_for_thread(&thread).expect("recorded");
+        assert_eq!(
+            goal.status.as_str(),
+            "blocked",
+            "it stops and says so rather than sending turns nobody can answer",
+        );
+        assert_eq!(goal.turns, 0, "and spends nothing on the way out");
+        assert!(
+            goal.outcome
+                .as_deref()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains("permission"),
+            "the reason has to name what changed: {:?}",
+            goal.outcome,
+        );
+    }
+
+    #[tokio::test]
+    async fn an_orchestrator_thread_is_not_something_to_set_a_goal_on() {
+        // Tool resolution gives the Orchestrator (and team seats) precedence over
+        // the peer bundle, so these threads are unrestricted AND have no goal
+        // tools. A goal on one can never be ended by the agent holding it.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.orchestrator_thread_id = Some(thread.clone());
+        }
+
+        app.set_goal(&thread, "keep going")
+            .await
+            .expect_err("a thread that answers to something else is not yours to drive");
+        assert!(app.relay.read().await.goal_for_thread(&thread).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_agent_cannot_settle_a_goal_it_was_never_handed() {
+        // Nothing has been driven, so any report names a goal this session was
+        // never given.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "ship the mobile door")
+            .await
+            .expect("set");
+
+        let token = app.ask_token_for_thread(&thread).await;
+        app.call_peer_tool(
+            "goal_complete",
+            &serde_json::json!({ "summary": "done" }),
+            &token,
+        )
+        .await
+        .expect_err("nothing has been handed over, so there is nothing to report on");
+
+        let relay = app.relay.read().await;
+        assert_eq!(
+            relay.goal_for_thread(&thread).expect("recorded").status,
+            crate::state::GoalStatus::Active,
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_turn_cannot_settle_the_goal_that_replaced_it() {
+        // The real sequence: goal A is driven, the user stops it, the old turn
+        // outlives the stop, the user sets goal B on the same session — and A's
+        // last word arrives naming only the thread. A turn COUNT cannot tell the
+        // two goals apart, because revising keeps the turns already spent.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "ship the mobile door")
+            .await
+            .expect("set");
+        hand_over_the_goal(&app, &thread).await;
+        assert!(
+            app.relay
+                .read()
+                .await
+                .goal_for_thread(&thread)
+                .expect("recorded")
+                .turns
+                > 0,
+            "the sequence needs a goal that really was driven",
+        );
+
+        let _ = app.cancel_goal(&thread).await;
+        app.set_goal(&thread, "something else entirely")
+            .await
+            .expect("the user sets a new one");
+
+        let token = app.ask_token_for_thread(&thread).await;
+        app.call_peer_tool(
+            "goal_complete",
+            &serde_json::json!({ "summary": "finished the FIRST objective" }),
+            &token,
+        )
+        .await
+        .expect_err("the old turn was never handed this objective");
+
+        let relay = app.relay.read().await;
+        let goal = relay.goal_for_thread(&thread).expect("recorded");
+        assert_eq!(goal.objective, "something else entirely");
+        assert_eq!(
+            goal.status,
+            crate::state::GoalStatus::Active,
+            "the user's new objective survives the old turn's last word",
+        );
+    }
+
+    #[tokio::test]
+    async fn the_last_turn_may_still_report_after_the_budget_runs_out() {
+        // The twentieth turn is marked out-of-turns as it is SENT, so the agent
+        // answering it is answering a goal that already reads expired. Refusing
+        // that report throws away the only account of the last turn's work.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "keep going").await.expect("set");
+        for _ in 0..crate::state::goal_max_turns() {
+            hand_over_the_goal(&app, &thread).await;
+        }
+        assert_eq!(
+            app.relay
+                .read()
+                .await
+                .goal_for_thread(&thread)
+                .expect("recorded")
+                .status
+                .as_str(),
+            "out_of_turns",
+        );
+
+        let token = app.ask_token_for_thread(&thread).await;
+        app.call_peer_tool(
+            "goal_complete",
+            &serde_json::json!({ "summary": "got there on the last turn" }),
+            &token,
+        )
+        .await
+        .expect("the turn it was handed is the turn it is answering");
+
+        let relay = app.relay.read().await;
+        assert_eq!(
+            relay
+                .goal_for_thread(&thread)
+                .expect("recorded")
+                .status
+                .as_str(),
+            "complete_claimed",
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_cannot_talk_over_the_report_it_already_made() {
+        // Otherwise a later turn can replace "blocked, because the permissions
+        // changed" with "all done" — and that is the one the user reads.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "ship the mobile door")
+            .await
+            .expect("set");
+        hand_over_the_goal(&app, &thread).await;
+
+        let token = app.ask_token_for_thread(&thread).await;
+        app.call_peer_tool(
+            "goal_blocked",
+            &serde_json::json!({ "reason": "cannot reach the staging box" }),
+            &token,
+        )
+        .await
+        .expect("the first report lands");
+        app.call_peer_tool(
+            "goal_complete",
+            &serde_json::json!({ "summary": "actually it is all done" }),
+            &token,
+        )
+        .await
+        .expect_err("it has already reported; the user has to be the one to resume");
+
+        let relay = app.relay.read().await;
+        let goal = relay.goal_for_thread(&thread).expect("recorded");
+        assert_eq!(goal.status.as_str(), "blocked");
+        assert_eq!(
+            goal.outcome.as_deref(),
+            Some("cannot reach the staging box"),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_goal_does_not_drive_while_another_session_operation_is_running() {
+        // Changing a session's settings holds this slot across the provider
+        // round-trip, and the narrowed settings are not visible until it lands.
+        // Driving through that window starts an autonomous turn under permissions
+        // the user has already taken away.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "keep going").await.expect("set");
+
+        let held = app.acquire_session_slot().expect("nothing else holds it");
+        for _ in 0..5 {
+            app.drive_goals_at(crate::state::unix_now()).await;
+        }
+        assert_eq!(
+            app.relay
+                .read()
+                .await
+                .goal_for_thread(&thread)
+                .expect("recorded")
+                .turns,
+            0,
+            "it waits its turn rather than racing whatever holds the session",
+        );
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn a_goal_is_not_set_on_a_thread_a_review_already_owns() {
+        // A review owns an idle parent while its reviewer reads the workspace.
+        // A goal driving that parent edits under the review.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = super::review_tests::build_review_app(cwd, &["codex"]).await;
+        let thread = app
+            .start_session(crate::protocol::StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                provider: Some("codex".to_string()),
+                approval_policy: Some("bypass".to_string()),
+                model: None,
+                effort: None,
+                sandbox: None,
+                initial_prompt: None,
+                project_id: None,
+            })
+            .await
+            .expect("session starts")
+            .active_thread_id
+            .clone()
+            .expect("thread");
+        app.request_review(super::review_tests::review_input("codex"))
+            .await
+            .expect("review starts");
+
+        app.set_goal(&thread, "keep going")
+            .await
+            .expect_err("something else is already driving this thread");
+    }
+
+    #[tokio::test]
+    async fn archiving_a_session_stops_the_goal_driving_it() {
+        // Archive is soft about the PROVIDER session, not about relay-side
+        // bookkeeping — it already drops settings and the custom name, and the
+        // relay has no un-archive, so a goal left behind is one nobody can ever
+        // see again and the sweep keeps driving. Archiving mid-turn is refused
+        // elsewhere, so the only case that reaches here is a goal between turns.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "keep going").await.expect("set");
+
+        app.archive_thread(&thread, None).await.expect("archives");
+
+        assert!(
+            app.relay.read().await.goal_for_thread(&thread).is_none(),
+            "nothing is left driving it",
+        );
+        assert!(
+            app.relay
+                .read()
+                .await
+                .threads_with_driving_goals()
+                .is_empty(),
+            "and the sweep has nothing to pick up",
         );
     }
 

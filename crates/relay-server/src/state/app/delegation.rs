@@ -560,9 +560,13 @@ pub(crate) fn reply_answers_ask(ask: &Ask, item_id: &str, reply_turn: Option<&st
 
 /// How long a peer may hold an ask before it is given up on.
 ///
-/// Without this one stuck peer keeps its asker asleep forever, because the wake
-/// only fires when NOTHING is still running.
-const ASK_TIMEOUT_SECS: u64 = 30 * 60;
+/// A backstop against a peer that is stuck forever, not a budget for real work:
+/// the wake only fires when NOTHING is still running, so one stuck ask keeps its
+/// asker asleep. It is generous because it was not — at thirty minutes a genuine
+/// review was declared "did not answer" while its answer sat finished in the
+/// peer's own transcript. A peer that is still WORKING is never timed out at
+/// all; only a silent one runs the clock out.
+const ASK_TIMEOUT_SECS: u64 = 4 * 60 * 60;
 
 /// Which askers have something to hear and nothing left to wait for.
 ///
@@ -655,12 +659,6 @@ impl AppState {
         };
 
         for (ask_id, peer_thread_id, baseline, turn_id, asked_at) in live {
-            if now.saturating_sub(asked_at) >= ASK_TIMEOUT_SECS {
-                let mut relay = self.relay.write().await;
-                relay.update_ask(&ask_id, |ask| ask.fail("it did not answer in time"));
-                relay.notify();
-                continue;
-            }
             let busy = {
                 let relay = self.relay.read().await;
                 relay
@@ -668,6 +666,30 @@ impl AppState {
                     .map(|runtime| runtime.is_working())
                     .unwrap_or(false)
             };
+            // Still working is not stuck. Timing out a peer mid-thought throws
+            // away the work AND does not stop it, so the run continues with
+            // nobody listening.
+            if !busy && now.saturating_sub(asked_at) >= ASK_TIMEOUT_SECS {
+                // Take whatever it did say before giving up. A finished answer
+                // sitting in its transcript, discarded because a clock fired, is
+                // the one outcome nobody wants — and it is what happened.
+                let salvaged = self
+                    .latest_assistant_entry_with_turn(&peer_thread_id)
+                    .await
+                    .filter(|(item_id, _, _)| baseline.as_deref() != Some(item_id.as_str()))
+                    .map(|(_, text, _)| text);
+                let mut relay = self.relay.write().await;
+                relay.update_ask(&ask_id, |ask| match salvaged {
+                    Some(text) => ask.finish(text),
+                    // Name the session, so whoever reads this can go and look
+                    // rather than being told only that it failed.
+                    None => ask.fail(format!(
+                        "it stopped without answering; its session is {peer_thread_id}"
+                    )),
+                });
+                relay.notify();
+                continue;
+            }
             if busy {
                 continue;
             }

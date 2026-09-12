@@ -1248,6 +1248,8 @@ export function createSessionRenderer({
       // Names, not a resolver: the store compares slices with JSON.stringify,
       // which DROPS functions — so a function here is invisible to that check
       // and every change beside it stops emitting.
+      goal:
+        (reviewsData.goals || []).find((entry) => entry.thread_id === viewedThreadId) || null,
       asks: (reviewsData.asks || [])
         .filter(
           (ask) =>

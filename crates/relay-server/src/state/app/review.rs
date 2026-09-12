@@ -2267,7 +2267,10 @@ tree would review commits this thread never made"
     /// agent starting in a tree is gated by its own permission harness, visibly and with
     /// the user's intent behind it. Requiring a git grant to open a session would be
     /// asking the wrong question — and answering it would not make anything safer.
-    async fn drivable_thread(&self, thread_id: &str) -> Result<LiveDir, ThreadDriveError> {
+    pub(super) async fn drivable_thread(
+        &self,
+        thread_id: &str,
+    ) -> Result<LiveDir, ThreadDriveError> {
         let recorded = self.thread_recorded_cwd(thread_id).await?;
         LiveDir::from_path(&recorded).ok_or(ThreadDriveError::WorkspaceGone { recorded })
     }
@@ -2972,7 +2975,7 @@ tree would review commits this thread never made"
     }
 
     /// Whether the given thread's runtime still reports an in-flight turn.
-    async fn thread_working(&self, thread_id: &str) -> bool {
+    pub(super) async fn thread_working(&self, thread_id: &str) -> bool {
         self.relay
             .read()
             .await
@@ -3068,7 +3071,7 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
 
     /// Wait for a thread's turn to actually end (real provider completion),
     /// re-issuing interrupts. Returns true once it ends, false at the drain max.
-    async fn drain_thread_turn(&self, thread_id: &str) -> bool {
+    pub(super) async fn drain_thread_turn(&self, thread_id: &str) -> bool {
         let drain_max = Duration::from_millis(
             self.review_drain_max_ms
                 .load(std::sync::atomic::Ordering::Relaxed),

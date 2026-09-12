@@ -22,7 +22,7 @@ function useStoreState(store) {
 export function WorkspaceDiffModalTitle({ store }) {
   const state = useStoreState(store);
   const onReviewer = state.activeTab === "reviewer";
-  return h("h2", null, onReviewer ? "Reviewer" : "Workspace diff");
+  return h("h2", null, onReviewer ? "Agents" : "Workspace diff");
 }
 
 export function createWorkspaceDiffStore({

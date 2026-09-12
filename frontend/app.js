@@ -712,6 +712,16 @@ const reviewerActions = {
   // The Agents card's Open button. Without it the card's whole point — that you
   // can go and read the other side — is a dead control.
   onOpenThread: (threadId) => void sessionViewController.openThread(threadId),
+  onStopGoal: () => {
+    const threadId = state.viewThreadId || state.session?.active_thread_id;
+    if (threadId) void host.setGoal(threadId, "").then((r) => logLine(r.text));
+  },
+  // Re-setting the same objective resumes it — including after a completion
+  // claim the user does not accept.
+  onResumeGoal: (objective) => {
+    const threadId = state.viewThreadId || state.session?.active_thread_id;
+    if (threadId) void host.setGoal(threadId, objective).then((r) => logLine(r.text));
+  },
   onStartWorkflow: (values) => state.controller?.startWorkflow(values),
   onResolveReview: (reviewJobId) => state.controller?.resolveReview(reviewJobId),
   onResolveWorkflow: (workflowRunId) => state.controller?.resolveWorkflow(workflowRunId),
@@ -2845,6 +2855,24 @@ const composerCommands = createComposerCommandController({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ thread_id: callerThreadId, ...args }),
+      });
+      const body = await response.json();
+      return {
+        text: body?.content?.[0]?.text || "No answer from the relay.",
+        isError: Boolean(body?.isError) || !response.ok,
+      };
+    } catch (error) {
+      return { text: `Could not reach the relay: ${error.message}`, isError: true };
+    }
+  },
+  // The only way an objective is ever written. There is no agent-facing
+  // equivalent on purpose.
+  setGoal: async (threadId, objective) => {
+    try {
+      const response = await apiFetch("/api/session/goal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ thread_id: threadId, objective }),
       });
       const body = await response.json();
       return {

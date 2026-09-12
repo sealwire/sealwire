@@ -376,6 +376,30 @@ impl AppState {
         let caller_thread_id = caller_thread_id.as_str();
 
         match orchestrator_tools::parse_call(name, args)? {
+            ToolCall::GoalStatus => Ok(self.goal_status_text(caller_thread_id).await),
+            ToolCall::GoalComplete { summary } => self
+                .settle_goal(
+                    caller_thread_id,
+                    crate::state::GoalStatus::CompleteClaimed,
+                    summary,
+                )
+                .await
+                .map(|()| {
+                    "Reported. The user sees it as a claim, not as done, and can reopen it."
+                        .to_string()
+                }),
+            ToolCall::GoalBlocked { reason } => self
+                .settle_goal(caller_thread_id, crate::state::GoalStatus::Blocked, reason)
+                .await
+                .map(|()| "Reported. The user can unblock you or change the goal.".to_string()),
+            ToolCall::GoalNeedsYou { question } => self
+                .settle_goal(
+                    caller_thread_id,
+                    crate::state::GoalStatus::AwaitingUser,
+                    question,
+                )
+                .await
+                .map(|()| "Asked. Work resumes when they answer.".to_string()),
             ToolCall::AnswerAsk { answer } => {
                 match self.answer_ask(caller_thread_id, answer).await {
                     Ok(()) => Ok("Sent. The agent that asked will be given it.".to_string()),
@@ -439,7 +463,12 @@ you will be sent the answers when everything you asked for is finished."
         match orchestrator_tools::parse_call(name, args)? {
             // The Orchestrator drives tasks, not ad-hoc peers. Reached only if
             // someone calls the API directly without a caller thread id.
-            ToolCall::AskAgent { .. } | ToolCall::AnswerAsk { .. } => {
+            ToolCall::AskAgent { .. }
+            | ToolCall::AnswerAsk { .. }
+            | ToolCall::GoalStatus
+            | ToolCall::GoalComplete { .. }
+            | ToolCall::GoalBlocked { .. }
+            | ToolCall::GoalNeedsYou { .. } => {
                 Err("that tool belongs to an ordinary session, not the Orchestrator".to_string())
             }
             ToolCall::ProposeTask {

@@ -41,7 +41,17 @@ pub(crate) fn seat_tools() -> Vec<&'static ToolSpec> {
 /// inside a run somebody else is driving, whereas a peer-asking session IS the
 /// driver. Same non-enforcement caveat as `SEAT_TOOLS` — it narrows what the
 /// bridge advertises, it does not authenticate anyone.
-pub(crate) const PEER_TOOLS: &[&str] = &["ask_agent", "answer_ask"];
+pub(crate) const PEER_TOOLS: &[&str] = &[
+    "ask_agent",
+    "answer_ask",
+    // Read it, and three ways to stop. Note what is NOT here and never should
+    // be: anything that writes the objective. An agent that can edit its own
+    // goal will edit it to one it can finish.
+    "goal_status",
+    "goal_complete",
+    "goal_blocked",
+    "goal_needs_you",
+];
 
 /// The specs an ordinary session is offered.
 pub(crate) fn peer_tools() -> Vec<&'static ToolSpec> {
@@ -138,6 +148,12 @@ const ACTING_TOOLS: &[&str] = &[
     // Answering the agent that asked you is not an action on the world; it is
     // the reply. A confirmation card here would strand the asker.
     "answer_ask",
+    // Reporting how a goal ended is likewise a report, not an act. Requiring a
+    // card to say "I am stuck" would leave the user waiting on a goal that has
+    // already given up.
+    "goal_complete",
+    "goal_blocked",
+    "goal_needs_you",
     // Deliberate, and the biggest thing on this list: an agent may bring in
     // another agent without a confirmation card. Requiring one per ask would
     // break the whole point — the asking agent runs its own loop and decides
@@ -381,6 +397,49 @@ reasoning-effort levels each model takes.",
         summary: "The teams available to run a task, with their ids.",
         effect: Effect::Read,
         params: &[],
+    },
+    ToolSpec {
+        name: "goal_status",
+        summary: "What you are working toward, and how many turns are left. The \
+objective is the user's; you cannot change it.",
+        effect: Effect::Read,
+        params: &[],
+    },
+    ToolSpec {
+        name: "goal_complete",
+        summary: "Report the goal met. Say what you did and the evidence — the \
+user decides whether to accept it, so an unevidenced claim just comes back.",
+        effect: Effect::Acts,
+        params: &[ToolParam {
+            name: "summary",
+            kind: ParamKind::Text,
+            required: true,
+            summary: "What was done, and how you know each part of the goal is met.",
+        }],
+    },
+    ToolSpec {
+        name: "goal_blocked",
+        summary: "Report that you cannot get there, and why. Better than \
+grinding on: the user can unblock you.",
+        effect: Effect::Acts,
+        params: &[ToolParam {
+            name: "reason",
+            kind: ParamKind::Text,
+            required: true,
+            summary: "What stopped you, and what would unblock it.",
+        }],
+    },
+    ToolSpec {
+        name: "goal_needs_you",
+        summary: "Stop and ask the user to decide something only they can. Work \
+resumes when they answer.",
+        effect: Effect::Acts,
+        params: &[ToolParam {
+            name: "question",
+            kind: ParamKind::Text,
+            required: true,
+            summary: "The decision you need, with the options as you see them.",
+        }],
     },
     ToolSpec {
         name: "answer_ask",
@@ -680,6 +739,17 @@ dismiss one before you can stage another",
 /// Validated tool call (parsed args; callers can be total).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToolCall {
+    /// Read the objective. There is no variant for writing one.
+    GoalStatus,
+    GoalComplete {
+        summary: String,
+    },
+    GoalBlocked {
+        reason: String,
+    },
+    GoalNeedsYou {
+        question: String,
+    },
     /// Reply to whoever asked you. The relay finds the ask from the caller's own
     /// token, so a peer cannot answer on somebody else's behalf.
     AnswerAsk {
@@ -984,6 +1054,16 @@ pub(crate) fn parse_call(name: &str, args: &Value) -> Result<ToolCall, String> {
             start_in_minutes: get_integer("start_in_minutes")?,
         }),
         "list_agents" => Ok(ToolCall::ListAgents),
+        "goal_status" => Ok(ToolCall::GoalStatus),
+        "goal_complete" => Ok(ToolCall::GoalComplete {
+            summary: get("summary")?.expect("required param yields Some"),
+        }),
+        "goal_blocked" => Ok(ToolCall::GoalBlocked {
+            reason: get("reason")?.expect("required param yields Some"),
+        }),
+        "goal_needs_you" => Ok(ToolCall::GoalNeedsYou {
+            question: get("question")?.expect("required param yields Some"),
+        }),
         "answer_ask" => Ok(ToolCall::AnswerAsk {
             answer: get("answer")?.expect("required param yields Some"),
         }),
