@@ -10906,6 +10906,142 @@ tree; got {}",
         );
     }
 
+    /// Codex names an agent message `msg_<hex>` on the live stream and renumbers the
+    /// SAME message positionally (`item-N`) in `thread/read`. So the runtime and the
+    /// read disagree about what the provider calls the row, and nothing can bridge
+    /// them — the point is `Unlocatable`.
+    ///
+    /// `tail_after_the_point` decides what that should mean. At the thread tip no row
+    /// follows the point, so a whole-thread fork names the same branch and the fork
+    /// goes through. With a row after it, widening would hand the branch content the
+    /// user chose to cut, so it stays refused.
+    async fn fork_at_a_live_only_provider_name(tail_after_the_point: bool) {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        codex.native_fork.store(true, Ordering::Relaxed);
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = codex.thread_summary("codex-source", cwd);
+        {
+            let mut threads = codex.threads.lock().await;
+            threads.insert(source.id.clone(), source.clone());
+        }
+        let entry = |item_id: &str, text: &str| crate::protocol::TranscriptEntryView {
+            row_id: None,
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some(item_id.to_string()),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some(text.to_string()),
+            status: "completed".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
+        };
+        // The read names every item positionally. `msg_live` appears NOWHERE in it,
+        // which is the whole point: the fixtures cannot match by accident.
+        {
+            let mut transcripts = codex.thread_transcripts.lock().await;
+            transcripts.insert(
+                source.id.clone(),
+                vec![
+                    entry("item-1", "earlier"),
+                    entry("item-2", "the streamed one"),
+                ],
+            );
+        }
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.threads = vec![source.clone()];
+        }
+        // The runtime holds what the client was shown: the live name for the streamed
+        // message, which the read will not reproduce.
+        {
+            let mut relay = app.relay.write().await;
+            relay.upsert_transcript_item_for_thread(
+                &source.id,
+                "item-1".to_string(),
+                crate::protocol::TranscriptEntryKind::AgentText,
+                Some("earlier".to_string()),
+                "completed".to_string(),
+                Some("turn-1".to_string()),
+                None,
+            );
+            relay.upsert_transcript_item_for_thread(
+                &source.id,
+                "msg_live".to_string(),
+                crate::protocol::TranscriptEntryKind::AgentText,
+                Some("the streamed one".to_string()),
+                "completed".to_string(),
+                Some("turn-1".to_string()),
+                None,
+            );
+            if tail_after_the_point {
+                relay.upsert_transcript_item_for_thread(
+                    &source.id,
+                    "msg_later".to_string(),
+                    crate::protocol::TranscriptEntryKind::AgentText,
+                    Some("arrived after the point".to_string()),
+                    "completed".to_string(),
+                    Some("turn-1".to_string()),
+                    None,
+                );
+            }
+        }
+
+        let input = ForkSessionInput {
+            source_thread_id: source.id.clone(),
+            up_to_item_id: Some("msg_live".to_string()),
+            cwd: Some(cwd.to_string()),
+            initial_prompt: Some("carry on".to_string()),
+            model: Some("codex-model".to_string()),
+            approval_policy: None,
+            sandbox: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            provider: Some("codex".to_string()),
+            project_id: None,
+        };
+
+        if tail_after_the_point {
+            let error = app
+                .fork_session(input)
+                .await
+                .expect_err("a row follows the point, so widening would drop nothing it chose to");
+            assert!(
+                error.contains("never assigned it an id"),
+                "the refusal must say why, got: {error}"
+            );
+            assert!(
+                codex.fork_points.lock().await.is_empty(),
+                "and nothing may have been sent to the provider"
+            );
+            return;
+        }
+
+        app.fork_session(input)
+            .await
+            .expect("forking at the thread tip drops nothing, so it must not be refused");
+        assert_eq!(
+            codex.fork_points.lock().await.clone(),
+            vec![None],
+            "the tip names the same branch as the whole thread, so the provider is \
+             asked for a whole-thread fork rather than an id it never issued"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fork_at_a_live_only_provider_name_at_the_tip_forks_the_whole_thread() {
+        fork_at_a_live_only_provider_name(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_fork_at_a_live_only_provider_name_before_the_tip_is_still_refused() {
+        fork_at_a_live_only_provider_name(true).await;
+    }
+
     #[tokio::test]
     async fn a_native_fork_without_prompt_or_images_stays_idle() {
         let project = TempDir::new().expect("project tempdir");

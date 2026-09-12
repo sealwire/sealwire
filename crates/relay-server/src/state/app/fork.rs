@@ -4,9 +4,10 @@ use crate::protocol::{TranscriptEntryKind, TranscriptEntryView};
 use crate::state::relay::relay_thread_is_busy;
 
 const FORK_BUSY_SOURCE_MSG: &str = "cannot fork a thread while a turn is in progress";
-/// Neither the provider nor the materialized read can locate the requested row —
-/// an unbound send reservation is the real case. Refusing by name beats branching
-/// at a guessed message. A row the READ can locate is replayed instead, not refused.
+/// Nothing can locate the requested row AND it is not the thread tip, so widening to
+/// a whole-thread fork would hand the branch content the user chose to cut. Refusing
+/// by name beats branching at a guessed message. A row the READ can locate is
+/// replayed instead of refused; one that is the tip drops nothing and widens.
 const FORK_POINT_NOT_PROVIDER_ADDRESSABLE_MSG: &str =
     "this message cannot be used as a fork point: the provider never assigned it an id";
 // Only the replay path needs a first message (the transcript IS the prompt).
@@ -73,24 +74,29 @@ impl AppState {
         // materialized read (which can answer for a thread with no runtime).
         let fork_point = match client_fork_point.as_deref() {
             Some(requested) => {
-                let resolved = {
+                let (resolved, at_thread_tip) = {
                     let relay = self.relay.read().await;
-                    resolve_fork_point(
-                        relay
-                            .runtime_for_thread(&source_thread_id)
-                            .map(|runtime| &runtime.transcript),
-                        &source_data.transcript,
-                        requested,
+                    let transcript = relay
+                        .runtime_for_thread(&source_thread_id)
+                        .map(|runtime| &runtime.transcript);
+                    (
+                        resolve_fork_point(transcript, &source_data.transcript, requested),
+                        fork_point_is_thread_tip(transcript, requested),
                     )
                 };
-                // Nothing can locate it, or the read is ambiguous about which entry
-                // was meant. Either way, guessing would cut the branch in a place
-                // the user did not choose.
-                Some(
-                    resolved
-                        .cut()
-                        .ok_or_else(|| FORK_POINT_NOT_PROVIDER_ADDRESSABLE_MSG.to_string())?,
-                )
+                match resolved.cut() {
+                    Some(cut) => Some(cut),
+                    // Unlocatable, but the relay's own row order says nothing follows
+                    // it — so there is nothing after it to drop, and a whole-thread
+                    // fork names the same branch. This is the same tip-equivalence
+                    // `native_fork_point_id` applies to a point the read CAN locate,
+                    // reached through the runtime because the read cannot answer.
+                    None if at_thread_tip => None,
+                    // Nothing can locate it and something may follow it, or the read
+                    // is ambiguous about which entry was meant. Either way, guessing
+                    // would cut the branch in a place the user did not choose.
+                    None => return Err(FORK_POINT_NOT_PROVIDER_ADDRESSABLE_MSG.to_string()),
+                }
             }
             None => None,
         };
@@ -590,6 +596,34 @@ impl ForkPointResolution {
             Self::Unlocatable => None,
         }
     }
+}
+
+/// Whether the requested ROW is the last one the thread has.
+///
+/// Only consulted for a point nothing could locate in the read, and only to decide
+/// between refusing and widening to a whole-thread fork. The runtime is the only
+/// thing that can answer: it holds the rows in the order the client rendered them,
+/// under the keys the client sends back, whatever the provider's read calls them.
+///
+/// This rests on the relay's core invariant — the runtime knows every row of a
+/// thread it holds — which `fork_session` backs up by re-checking that no turn is in
+/// flight after the read. A trailing WITHDRAWN row is skipped: it is not rendered, so
+/// it is neither a row the user could have picked nor one a branch drops.
+fn fork_point_is_thread_tip(
+    transcript: Option<&crate::state::relay::ThreadTranscript>,
+    requested: &str,
+) -> bool {
+    let Some(transcript) = transcript else {
+        return false;
+    };
+    // Addressed in the ROW namespace: `requested` is the key the client holds, which
+    // a collision may have minted away from the provider's spelling for it.
+    let Some(index) = transcript.index_of_row(requested) else {
+        return false;
+    };
+    transcript.rows()[index + 1..]
+        .iter()
+        .all(|row| row.withdrawn)
 }
 
 /// Resolve a fork point the CLIENT named, to a position in the read.
@@ -1230,6 +1264,59 @@ mod fork_point_resolution_tests {
         assert_eq!(
             describe(&resolve_fork_point(None, &read, "never-heard-of-it")),
             "Unlocatable"
+        );
+    }
+
+    /// The tip check is addressed in the ROW namespace, and the fixtures make that
+    /// observable: the tip row's `row_id` is `msg_live#row1` while its provider name
+    /// is `msg_live`. Asking by either spelling would pass if the two were equal.
+    #[test]
+    fn the_tip_check_is_addressed_by_row_key_not_by_provider_name() {
+        let mut store = ThreadTranscript::new();
+        // Takes the spelling `msg_live` in the row namespace, so the provider row
+        // below has to mint.
+        let decoy = store.push(TranscriptRecord {
+            relay_item_id: Some("decoy".to_string()),
+            ..row("msg_live")
+        });
+        let tip = store.push(TranscriptRecord {
+            provider_item_id: Some("msg_live".to_string()),
+            ..row("msg_live")
+        });
+        assert_ne!(tip, "msg_live", "the tip row had to mint its key");
+
+        assert!(fork_point_is_thread_tip(Some(&store), &tip));
+        assert!(
+            !fork_point_is_thread_tip(Some(&store), &decoy),
+            "the decoy is not the tip, and it is what the provider's spelling names"
+        );
+        assert!(
+            !fork_point_is_thread_tip(Some(&store), "msg_live"),
+            "the PROVIDER name must not answer the row-namespace question"
+        );
+        assert!(
+            !fork_point_is_thread_tip(None, &tip),
+            "no runtime, no answer"
+        );
+    }
+
+    /// A withdrawn row is never rendered, so it is not a row a branch drops. Leaving
+    /// it in the tip test would refuse a fork at the last message the user can see.
+    #[test]
+    fn a_trailing_withdrawn_row_does_not_move_the_tip() {
+        let mut store = ThreadTranscript::new();
+        let visible = store.push(row("visible"));
+        store.push(TranscriptRecord {
+            withdrawn: true,
+            ..row("rejected-send")
+        });
+
+        assert!(fork_point_is_thread_tip(Some(&store), &visible));
+
+        store.push(row("live-again"));
+        assert!(
+            !fork_point_is_thread_tip(Some(&store), &visible),
+            "a VISIBLE row after it does move the tip"
         );
     }
 
