@@ -81,22 +81,6 @@ impl ProviderTranscriptEntry {
 }
 
 impl ThreadSyncData {
-    /// A read whose every entry the provider named itself.
-    pub fn provider_named(
-        thread: ThreadSummaryView,
-        status: String,
-        active_flags: Vec<String>,
-        transcript: Vec<TranscriptEntryView>,
-    ) -> Self {
-        Self {
-            thread,
-            status,
-            active_flags,
-            transcript: ProviderTranscriptEntry::all_provider_named(transcript),
-            transcript_complete: true,
-        }
-    }
-
     pub fn views(&self) -> impl Iterator<Item = &TranscriptEntryView> + '_ {
         self.transcript.iter().map(|entry| &entry.view)
     }
