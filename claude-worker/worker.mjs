@@ -1072,7 +1072,12 @@ function sessionOptionsChanged(prev, next) {
   // persona when it wants one kept (Orchestrator send/resume). Sticky inheritance
   // here would leave a secretary prompt on a non-Orchestrator thread when MCP
   // drops off and the session rebuilds.
-  if ((prev.systemPrompt ?? "") !== (next.systemPrompt ?? "")) return true;
+  // Compare by value: buildSessionOptionsBase mints a fresh
+  // `{ type:'custom', prompt, snapshot:false }` object every call, so reference
+  // inequality would rebuild on every identical Orchestrator turn.
+  if (JSON.stringify(prev.systemPrompt ?? null) !== JSON.stringify(next.systemPrompt ?? null)) {
+    return true;
+  }
   // Same reasoning as the persona: baked in at query() time, so a live session
   // would keep the old toolset while the relay believed it had swapped one in.
   if (JSON.stringify(prev.mcpServers ?? null) !== JSON.stringify(next.mcpServers ?? null)) {

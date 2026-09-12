@@ -1,4 +1,5 @@
-FROM node:25-bookworm AS frontend-build
+# Match maintainer host: .node-version / rustc 1.94.0 (see rust-toolchain.toml).
+FROM node:25.2.1-bookworm AS frontend-build
 WORKDIR /app
 
 COPY package.json package-lock.json vite.config.js ./
@@ -14,7 +15,7 @@ COPY crates/sealwire-private/frontend ./crates/sealwire-private/frontend
 
 RUN npm ci && npm run build
 
-FROM rust:1.88-bookworm AS build
+FROM rust:1.94-bookworm AS build
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./

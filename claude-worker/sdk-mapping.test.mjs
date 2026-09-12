@@ -770,6 +770,187 @@ test("mapSdkMessage omits is_error on a successful tool_result", () => {
   assert.equal("is_error" in event, false);
 });
 
+// REGRESSION (SDK 0.3.243+): PDF Read results nest `document` / page `image`
+// blocks inside tool_result.content. JSON.stringify of those blocks would shove
+// the full base64 payload into live events, persisted state, and the broker.
+test("mapSdkMessage strips nested PDF document payloads from tool_result content", () => {
+  const pdfData = "JVBERi0xLjQK" + "A".repeat(4000);
+  const mapped = mapSdkMessage({
+    type: "user",
+    uuid: "u-pdf",
+    message: {
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "tool-pdf",
+          content: [
+            { type: "text", text: "Page 1 of notes.pdf" },
+            {
+              type: "document",
+              title: "notes.pdf",
+              source: {
+                type: "base64",
+                media_type: "application/pdf",
+                data: pdfData,
+              },
+            },
+          ],
+        },
+      ],
+    },
+  });
+  const event = Array.isArray(mapped) ? mapped[0] : mapped;
+  assert.equal(event.type, "tool_call_result");
+  assert.match(event.content, /Page 1 of notes\.pdf/);
+  assert.match(event.content, /\[Attached PDF[^\]]*\]/i);
+  assert.doesNotMatch(event.content, /JVBERi0/);
+  assert.doesNotMatch(event.content, /AAAA/);
+});
+
+test("mapSdkMessage keeps plain-text document blocks instead of labeling them as PDFs", () => {
+  // REGRESSION: DocumentBlock.source may be PlainTextSource (type:'text',
+  // media_type:'text/plain'), not only Base64PDFSource. Replacing every
+  // document with `[Attached PDF…]` drops the actual text from live events
+  // and replay.
+  const mapped = mapSdkMessage({
+    type: "user",
+    uuid: "u-doc-text",
+    message: {
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "tool-doc",
+          content: [
+            {
+              type: "document",
+              title: "notes.txt",
+              source: {
+                type: "text",
+                media_type: "text/plain",
+                data: "hello from a plain-text document",
+              },
+            },
+          ],
+        },
+      ],
+    },
+  });
+  const event = Array.isArray(mapped) ? mapped[0] : mapped;
+  assert.equal(event.type, "tool_call_result");
+  assert.match(event.content, /hello from a plain-text document/);
+  assert.doesNotMatch(event.content, /\[Attached PDF/i);
+});
+
+test("mapSdkMessage keeps ContentBlockSource document text and redacts nested images", () => {
+  const imageData = "iVBORw0KGgo" + "D".repeat(2000);
+  const mapped = mapSdkMessage({
+    type: "user",
+    uuid: "u-doc-content",
+    message: {
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "tool-doc-content",
+          content: [
+            {
+              type: "document",
+              source: {
+                type: "content",
+                content: [
+                  { type: "text", text: "section from nested content" },
+                  {
+                    type: "image",
+                    source: {
+                      type: "base64",
+                      media_type: "image/png",
+                      data: imageData,
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    },
+  });
+  const event = Array.isArray(mapped) ? mapped[0] : mapped;
+  assert.equal(event.type, "tool_call_result");
+  assert.match(event.content, /section from nested content/);
+  assert.match(event.content, /\[Attached image\]/i);
+  assert.doesNotMatch(event.content, /iVBORw0KGgo/);
+  assert.doesNotMatch(event.content, /\[Attached PDF/i);
+});
+
+test("mapSdkMessage strips nested PDF page images from tool_result content", () => {
+  const imageData = "iVBORw0KGgo" + "B".repeat(4000);
+  const mapped = mapSdkMessage({
+    type: "assistant",
+    uuid: "a-pdf",
+    message: {
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "tool-pdf-pages",
+          content: [
+            {
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: "image/png",
+                data: imageData,
+              },
+            },
+          ],
+        },
+      ],
+    },
+  });
+  const event = Array.isArray(mapped) ? mapped[0] : mapped;
+  assert.equal(event.type, "tool_call_result");
+  assert.match(event.content, /\[Attached image\]/i);
+  assert.doesNotMatch(event.content, /iVBORw0KGgo/);
+  assert.doesNotMatch(event.content, /BBBB/);
+});
+
+test("mapSessionMessages strips nested PDF payloads from replayed tool results", () => {
+  const pdfData = "JVBERi0xLjQK" + "C".repeat(2000);
+  const entries = mapSessionMessages([
+    {
+      type: "assistant",
+      uuid: "a1",
+      message: {
+        content: [
+          { type: "tool_use", id: "tool-pdf", name: "Read", input: { file_path: "notes.pdf" } },
+        ],
+      },
+    },
+    {
+      type: "user",
+      uuid: "u1",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tool-pdf",
+            content: [
+              {
+                type: "document",
+                source: { type: "base64", media_type: "application/pdf", data: pdfData },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  ]);
+  const toolEntry = entries.find((entry) => entry.item_id === "tool:tool-pdf");
+  assert.ok(toolEntry);
+  assert.match(toolEntry.tool.result_preview, /\[Attached PDF[^\]]*\]/i);
+  assert.doesNotMatch(toolEntry.tool.result_preview, /JVBERi0/);
+  assert.doesNotMatch(toolEntry.tool.result_preview, /CCCC/);
+});
+
 test("mapSessionMessages preserves full AskUserQuestion JSON for the transcript card", () => {
   // The transcript renders AskUserQuestion as a structured card by parsing
   // tool.input_preview as JSON. The default 1KB cap was truncating real

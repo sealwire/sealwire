@@ -57,10 +57,17 @@ export function buildSessionOptionsBase(cmd, { canUseTool, defaultSettingSources
   }
 
   // Persona as systemPrompt (replaces coding preset; not a user turn).
+  // SDK ≥0.3.267 snapshots a bare-string custom prompt by default and ignores
+  // later swaps until compaction — fatal for Orchestrator persona changes on a
+  // resumed provider session. Opt out so every request re-renders.
   const systemPrompt =
     typeof cmd.systemPrompt === "string" ? cmd.systemPrompt.trim() : "";
   if (systemPrompt) {
-    options.systemPrompt = systemPrompt;
+    options.systemPrompt = {
+      type: "custom",
+      prompt: systemPrompt,
+      snapshot: false,
+    };
   }
 
   // Custom tools: only `mcpServers` can define non-built-ins.

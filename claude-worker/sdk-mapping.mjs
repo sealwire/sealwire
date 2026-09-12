@@ -11,14 +11,102 @@ function textFromContent(content) {
       if (typeof block === "string") return block;
       if (block?.type === "text") return block.text || "";
       if (block?.type === "tool_result") {
-        return typeof block.content === "string"
-          ? block.content
-          : JSON.stringify(block.content ?? "");
+        return toolResultContentText(block.content);
       }
       return "";
     })
     .filter(Boolean)
     .join("\n");
+}
+
+// SDK ≥0.3.243 nests PDF `document` / page `image` blocks inside
+// tool_result.content. Those carry base64 payloads — never JSON.stringify them
+// into transcript events, persisted state, or broker traffic.
+//
+// `document` is NOT always a PDF: PlainTextSource and ContentBlockSource carry
+// readable text that must survive. Only base64/URL PDF sources get placeholders.
+export function toolResultContentText(content) {
+  if (typeof content === "string") return content;
+  if (content == null) return "";
+  if (!Array.isArray(content)) {
+    return previewJson(content);
+  }
+  const parts = [];
+  for (const block of content) {
+    if (typeof block === "string") {
+      parts.push(block);
+      continue;
+    }
+    if (!block || typeof block !== "object") continue;
+    if (block.type === "text") {
+      if (block.text) parts.push(block.text);
+      continue;
+    }
+    if (block.type === "document") {
+      parts.push(...documentBlockParts(block));
+      continue;
+    }
+    if (block.type === "image") {
+      parts.push("[Attached image]");
+      continue;
+    }
+    // Unknown structured blocks may still nest base64 `source.data`. Drop the
+    // payload and keep a type label so the transcript stays readable.
+    if (block.source?.data != null || block.data != null) {
+      parts.push(`[Attached ${block.type || "binary"}]`);
+      continue;
+    }
+    parts.push(previewJson(block));
+  }
+  return parts.filter(Boolean).join("\n");
+}
+
+function documentBlockParts(block) {
+  const source = block.source;
+  if (!source || typeof source !== "object") {
+    return [documentPlaceholder(block)];
+  }
+
+  // PlainTextSource: { type:'text', media_type:'text/plain', data }
+  if (source.type === "text" || source.media_type === "text/plain") {
+    return typeof source.data === "string" && source.data ? [source.data] : [];
+  }
+
+  // ContentBlockSource: { type:'content', content: string | ContentBlock[] }
+  if (source.type === "content") {
+    if (typeof source.content === "string") {
+      return source.content ? [source.content] : [];
+    }
+    if (Array.isArray(source.content)) {
+      const nested = toolResultContentText(source.content);
+      return nested ? [nested] : [];
+    }
+    return [];
+  }
+
+  // Base64PDFSource / URLPDFSource (and any other binary/remote PDF shape).
+  if (
+    source.type === "base64" ||
+    source.type === "url" ||
+    source.media_type === "application/pdf" ||
+    typeof source.data === "string"
+  ) {
+    return [documentPlaceholder(block, source)];
+  }
+
+  return [documentPlaceholder(block, source)];
+}
+
+function documentPlaceholder(block, source = block?.source) {
+  const title =
+    typeof block?.title === "string" && block.title.trim()
+      ? block.title.trim()
+      : typeof source?.url === "string" && source.url.trim()
+        ? source.url.trim()
+        : typeof source?.media_type === "string"
+          ? source.media_type
+          : null;
+  return title ? `[Attached PDF: ${title}]` : "[Attached PDF]";
 }
 
 export function userMessageTranscriptText(text, imageCount) {
@@ -464,10 +552,7 @@ export function mapSdkMessage(msg, turnState = {}) {
             events.push({
               type: "tool_call_result",
               id: block.tool_use_id,
-              content:
-                typeof block.content === "string"
-                  ? block.content
-                  : JSON.stringify(block.content),
+              content: toolResultContentText(block.content),
               ...(block.is_error === true ? { is_error: true } : {}),
             });
             break;
@@ -507,10 +592,7 @@ export function mapSdkMessage(msg, turnState = {}) {
           type: "tool_call_result",
           id: block.tool_use_id,
           turn_id: msg.uuid || block.tool_use_id,
-          content:
-            typeof block.content === "string"
-              ? block.content
-              : JSON.stringify(block.content ?? ""),
+          content: toolResultContentText(block.content),
           ...(block.is_error === true ? { is_error: true } : {}),
         });
       }
@@ -638,9 +720,7 @@ export function mapSessionMessages(messages, cwd = null) {
     if (!toolUseId) return;
     const itemId = `tool:${toolUseId}`;
     const status = isError ? "failed" : "completed";
-    const resultPreview = typeof content === "string"
-      ? content
-      : JSON.stringify(content ?? "");
+    const resultPreview = toolResultContentText(content);
     const existingIndex = toolEntryById.get(itemId);
     if (existingIndex != null) {
       const existing = entries[existingIndex];

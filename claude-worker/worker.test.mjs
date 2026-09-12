@@ -475,6 +475,43 @@ test("sessionOptionsChanged notices a persona swap", () => {
   );
 });
 
+test("sessionOptionsChanged compares structured personas by value", () => {
+  // REGRESSION (SDK 0.3.267+ / snapshot:false shape): buildSessionOptionsBase
+  // mint a fresh `{ type:'custom', prompt, snapshot:false }` object on every
+  // send/resume. Reference inequality would tear down the Orchestrator session
+  // on every identical turn — latency plus lost process-local state.
+  const prev = {
+    permissionMode: "default",
+    systemPrompt: {
+      type: "custom",
+      prompt: "You are the Orchestrator.",
+      snapshot: false,
+    },
+  };
+  const next = {
+    permissionMode: "default",
+    systemPrompt: {
+      type: "custom",
+      prompt: "You are the Orchestrator.",
+      snapshot: false,
+    },
+  };
+  assert.notEqual(prev.systemPrompt, next.systemPrompt, "test setup: distinct objects");
+  assert.equal(sessionOptionsChanged(prev, next), false);
+
+  assert.equal(
+    sessionOptionsChanged(prev, {
+      permissionMode: "default",
+      systemPrompt: {
+        type: "custom",
+        prompt: "You are something else.",
+        snapshot: false,
+      },
+    }),
+    true,
+  );
+});
+
 test("sessionOptionsChanged notices a toolset swap", () => {
   const withTools = {
     permissionMode: "acceptEdits",
