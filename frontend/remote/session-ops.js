@@ -79,7 +79,7 @@ import {
   normalizeThreadSearchQuery,
 } from "../shared/thread-search.js";
 import { threadAttention } from "../shared/thread-attention.js";
-import { forkFieldsToPayload } from "../shared/fork-fields.js";
+import { forkFieldsToPayload, relayResolvesForkPoints } from "../shared/fork-fields.js";
 import { isDocumentForeground, notifyThreadEvents } from "../shared/thread-notify.js";
 import { shouldRefreshViewedThread } from "../shared/viewed-thread-refresh.js";
 import {
@@ -1471,7 +1471,14 @@ export async function forkRemoteSession(forkDraft = null) {
     // Untouched settings go out as null so the relay inherits them from the
     // SOURCE thread rather than from whatever session is open here.
     await dispatchOrRecover("fork_session", {
-      input: forkFieldsToPayload({ ...forkDraft, cwd }),
+      // The REAL session, not the view-only projection: the capability is a fact
+      // about the relay process, and the projection describes a pinned thread.
+      input: forkFieldsToPayload(
+        { ...forkDraft, cwd },
+        {
+          relayResolvesForkPoints: relayResolvesForkPoints(state.realSession || state.session),
+        },
+      ),
     });
     return { ok: true };
   } catch (error) {

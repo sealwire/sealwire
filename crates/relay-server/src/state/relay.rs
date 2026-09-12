@@ -3862,6 +3862,7 @@ impl RelayState {
             transcript_generation: self.transcript_generation.clone(),
             provider_fork_capabilities: self.provider_fork_capabilities.clone(),
             provider_archive_capabilities: self.provider_archive_capabilities.clone(),
+            relay_resolves_fork_points: true,
             provider_status: self.provider_status_view(),
             revision: self.revision,
             transcript_revision,

@@ -9,6 +9,7 @@ fn make_snapshot() -> SessionSnapshot {
     SessionSnapshot {
         transcript_generation: String::new(),
         provider_fork_capabilities: Vec::new(),
+        relay_resolves_fork_points: true,
         provider_archive_capabilities: Vec::new(),
         provider_status: Vec::new(),
         revision: 7,

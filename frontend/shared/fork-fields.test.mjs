@@ -104,13 +104,34 @@ test("the fork point rides along with the payload", () => {
   assert.equal(payload.up_to_item_id, "assistant:abc");
 });
 
-test("a Codex live-id tip fork is sent as a whole-thread fork", () => {
-  // Codex's live stream tags an agent message with its response id (`msg_...`)
-  // while `thread/read` renumbers the same item positionally (`item-13`). The
-  // live id can never be resolved server-side, so forking the just-streamed last
-  // message with it is rejected as "not part of the source thread transcript".
-  // At the tip a fork drops nothing, so drop the unresolvable anchor and take the
-  // whole-thread path the working thread-list fork takes.
+// The point of R4: the shape sniff below exists only because an older relay
+// refused an anchor it could not locate. A relay that says it resolves fork points
+// itself widens an unlocatable tip anchor against FRESH state, so the client must
+// stop pre-empting it — `forkPointIsTip` is captured when the dialog opens, and
+// dropping the anchor on a stale reading of it forks content the user did not pick.
+test("a relay that resolves fork points itself is sent the anchor as rendered", () => {
+  const liveId = "msg_02a31f0f067cc13f016a6131a81104819188054b86ab3fded2";
+  const fields = {
+    ...defaultForkFields({ thread: { provider: "codex" }, models: [] }),
+    sourceThreadId: "thread-1",
+    upToItemId: liveId,
+    forkPointIsTip: true,
+  };
+
+  assert.equal(
+    forkFieldsToPayload(fields, { relayResolvesForkPoints: true }).up_to_item_id,
+    liveId,
+    "the relay owns the decision; the client must not drop the anchor for it",
+  );
+});
+
+test("against a pre-R4 relay a Codex live-id tip fork is sent as a whole-thread fork", () => {
+  // No `relayResolvesForkPoints`, so this is the version-skew path. Codex's live
+  // stream tags an agent message with its response id (`msg_...`) while
+  // `thread/read` renumbers the same item positionally (`item-13`). An old relay
+  // cannot resolve the live id and rejects the fork as "not part of the source
+  // thread transcript". At the tip a fork drops nothing, so drop the unresolvable
+  // anchor and take the whole-thread path the working thread-list fork takes.
   const fields = {
     ...defaultForkFields({ thread: { provider: "codex" }, models: [] }),
     sourceThreadId: "thread-1",

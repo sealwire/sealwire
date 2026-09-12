@@ -10,6 +10,7 @@ import { readFile } from "node:fs/promises";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { relayResolvesForkPoints } from "./shared/fork-fields.js";
 import { TranscriptContent } from "./shared/transcript-react.js";
 import { hydrateTranscript } from "./shared/transcript-hydration.js";
 import {
@@ -393,4 +394,33 @@ test("a page from the CURRENT generation still merges", async () => {
   });
 
   assert.ok(state.transcriptHydrationOrder.length > 0);
+});
+
+// The fork-point capability crosses the same Rust/JS boundary as the content
+// states above, and it is read by exactly one JS function. If the Rust field were
+// renamed, or the JS accessor's spelling drifted, the client would silently fall
+// back to guessing a provider id shape off a row key — with no error anywhere,
+// against a relay that no longer needs the guess. A hand-authored JS fixture could
+// not catch that; this snapshot is emitted by the Rust layer itself.
+test("the relay's fork-point capability is read under the name Rust serializes", () => {
+  for (const [name, snapshot] of [
+    ["local_preview_snapshot", fixture.local_preview_snapshot],
+    ["remote_omitted_snapshot", fixture.remote_omitted_snapshot],
+  ]) {
+    assert.equal(
+      relayResolvesForkPoints(snapshot),
+      true,
+      `${name}: the relay says it resolves fork points, so the client must see that`,
+    );
+  }
+
+  // And the other direction, which is what version skew actually looks like: a
+  // pre-R4 relay omits the field entirely rather than sending false.
+  const { relay_resolves_fork_points: _omitted, ...preR4 } = fixture.local_preview_snapshot;
+  assert.equal("relay_resolves_fork_points" in preR4, false, "the fixture must have carried it");
+  assert.equal(
+    relayResolvesForkPoints(preR4),
+    false,
+    "absence must read as an older relay, so the client keeps its own pre-flight rule",
+  );
 });

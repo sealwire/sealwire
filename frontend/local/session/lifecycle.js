@@ -30,7 +30,7 @@ import { loadLastEffort, saveLastApprovalPolicy } from "../../shared/last-used-s
 import { detectDeferredThreadPromotion } from "../../shared/thread-promotion.js";
 import { resolveOutgoingEffort } from "../../shared/reasoning-efforts.js";
 import { providerLabel } from "../../shared/provider-labels.js";
-import { forkFieldsToPayload } from "../../shared/fork-fields.js";
+import { forkFieldsToPayload, relayResolvesForkPoints } from "../../shared/fork-fields.js";
 import { buildNavigationThreadGroups } from "../../shared/thread-groups.js";
 import {
   EMPTY_THREAD_SEARCH,
@@ -443,7 +443,10 @@ export function createLifecycleController(ctx) {
         // `images` rides OUTSIDE forkFieldsToPayload on purpose: that builder is
         // shared with the remote client, whose fork payload must stay image-free.
         body: JSON.stringify({
-          ...forkFieldsToPayload({ ...forkDraft, sourceThreadId, cwd }),
+          ...forkFieldsToPayload(
+            { ...forkDraft, sourceThreadId, cwd },
+            { relayResolvesForkPoints: relayResolvesForkPoints(state.session) },
+          ),
           device_id: state.deviceId,
           ...(images.length ? { images } : {}),
         }),

@@ -11226,6 +11226,18 @@ tree; got {}",
         }
     }
 
+    /// The client's `/^msg_/` pre-flight rule is skipped only when this is set, so a
+    /// snapshot that stopped carrying it would silently restore the guessing —
+    /// against a relay that has already stopped refusing the anchors it guessed at.
+    #[tokio::test]
+    async fn the_snapshot_says_this_relay_resolves_client_fork_points() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _p, _o) = build_two_provider_app(cwd).await;
+
+        assert!(app.snapshot().await.relay_resolves_fork_points);
+    }
+
     // "Inherit from source session" must mean the SOURCE thread's model and
     // effort. The shared resolve_provider_model prefers the catalog default
     // when the request omits a model, so the source fallback it is handed was
