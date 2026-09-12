@@ -77,9 +77,9 @@ export function SidebarBrand() {
  * `aria-expanded`, not `aria-pressed`: this button discloses a field. The bell below is
  * the opposite case and the two must not be made to match.
  *
- * `shortcutHint` is a prop because local binds ⌘F and remote does not — a phone has no
- * such key. A hard-coded "(⌘F)" would promise a shortcut that does not exist on the
- * surface where the label is hardest to dismiss.
+ * `shortcutHint` is optional. Session search used to advertise ⌘F; that key is left to
+ * the browser for in-page Find, so local no longer passes a hint here. The prop remains
+ * for any surface that still wants to name a different binding.
  */
 export function SidebarSearchToggle({ open = false, onToggle = null, shortcutHint = "" } = {}) {
   const title = shortcutHint ? `Search sessions (${shortcutHint})` : "Search sessions";
@@ -135,20 +135,18 @@ export function SidebarBellToggle({ on = false, onToggle = null } = {}) {
  *
  * Focus takes TWO props, because there are two separate questions.
  *
- * `focusOnOpen` is the surface's policy: local reveals the field with a keyboard shortcut,
- * so focusing it is the point, while on a phone focusing pops the on-screen keyboard over
+ * `focusOnOpen` is the surface's policy: local focuses when the field opens from the
+ * magnifying-glass button, while on a phone focusing pops the on-screen keyboard over
  * the very list the user just asked to search.
  *
  * `focusSignal` is the request, and it is a counter rather than a boolean because requests
  * REPEAT. React's `autoFocus` only fires on mount, which covers opening a closed field and
- * nothing else — press ⌘F while the field is already open with the caret in the composer
+ * nothing else — open again while the field is already mounted with the caret elsewhere
  * and `open` does not change, so there is no mount and no re-render that means "focus me".
- * That is precisely what local's old imperative `setSearchOpen` did unconditionally, and
- * what an `autoFocus`-only port silently dropped. Watching a counter covers the mount and
- * the repeat with one mechanism.
+ * Watching a counter covers the mount and the repeat with one mechanism.
  *
  * Focusing also SELECTS. Closing clears the draft, so a newly opened field is empty and
- * selection is a no-op there — but a repeat ⌘F onto a field that already holds a term
+ * selection is a no-op there — but a repeat open onto a field that already holds a term
  * should let the next keystroke replace it rather than append to it.
  */
 export function SidebarSearchField({

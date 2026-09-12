@@ -1685,12 +1685,8 @@ function onSearchInput(value) {
   queueSearch(value);
 }
 
-window.addEventListener("keydown", (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") {
-    event.preventDefault();
-    setSearchOpen(true);
-  }
-});
+// Do not bind ⌘F / Ctrl+F here. Session search is click-only (sidebar magnifying
+// glass); Find must stay with the browser so the user can search the transcript.
 
 // ---------------------------------------------------------------------------
 // Activity filter (the bell)

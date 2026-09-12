@@ -2787,7 +2787,7 @@ function RemoteSidebar({
               triggerIcon: h(ProjectTagIcon),
             })
           : null,
-        // No `shortcutHint`: remote is a phone surface with no ⌘F to promise.
+        // No `shortcutHint`: ⌘F stays with the browser; session search is click-only.
         h(SidebarSearchToggle, { open: searchOpen, onToggle: onSetSearchOpen }),
         h(SidebarBellToggle, {
           on: threadFilter.on,
