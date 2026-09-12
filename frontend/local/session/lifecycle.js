@@ -1,3 +1,4 @@
+import { transcriptRowKey } from "../../shared/transcript-row-key.js";
 import {
   approvalPolicyInput,
   composerError,
@@ -100,8 +101,8 @@ function errorEntryIdSet(session) {
   const transcript = Array.isArray(session?.transcript) ? session.transcript : [];
   const ids = new Set();
   for (const entry of transcript) {
-    if (entry?.item_id && ERROR_ENTRY_STATUSES.has(entry.status)) {
-      ids.add(entry.item_id);
+    if (transcriptRowKey(entry) && ERROR_ENTRY_STATUSES.has(entry.status)) {
+      ids.add(transcriptRowKey(entry));
     }
   }
   return ids;
@@ -728,6 +729,9 @@ export function createLifecycleController(ctx) {
           reviewer_model: reviewerModel || null,
           reviewer_instructions: reviewerInstructions || null,
           max_rounds: maxRounds || 2,
+          // A transcript ROW anchor, despite the legacy wire name: it names the row the
+          // workflow card is placed under. The value must be a row key
+          // (`transcriptRowKey`), never a provider id.
           anchor_item_id: anchorItemId || null,
           parent_thread_id: parentThreadId || null,
         },
@@ -1059,10 +1063,10 @@ export function createLifecycleController(ctx) {
       return snapshot;
     }
     const carried = new Set(
-      (snapshot.transcript || []).map((candidate) => candidate?.item_id).filter(Boolean)
+      (snapshot.transcript || []).map((candidate) => transcriptRowKey(candidate)).filter(Boolean)
     );
     let suffixStart = rendered.length;
-    while (suffixStart > 0 && !carried.has(rendered[suffixStart - 1]?.item_id)) {
+    while (suffixStart > 0 && !carried.has(transcriptRowKey(rendered[suffixStart - 1]))) {
       suffixStart -= 1;
     }
     const windowed =
@@ -1071,7 +1075,10 @@ export function createLifecycleController(ctx) {
         : null;
     const rescued = rendered
       .slice(suffixStart)
-      .filter((candidate) => candidate?.item_id && !windowed?.has?.(candidate.item_id));
+      .filter(
+        (candidate) =>
+          transcriptRowKey(candidate) && !windowed?.has?.(transcriptRowKey(candidate))
+      );
     if (!rescued.length) {
       return snapshot;
     }

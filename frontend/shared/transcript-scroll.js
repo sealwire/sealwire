@@ -116,7 +116,7 @@ export function captureTranscriptScrollSnapshot({
 
 export function transcriptEntryIdentity(entry) {
   return [
-    entry?.item_id || "",
+    transcriptRowKey(entry) || "",
     entry?.kind || "",
     entry?.status || "",
     entry?.turn_id || "",

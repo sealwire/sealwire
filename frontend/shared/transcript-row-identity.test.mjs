@@ -92,3 +92,47 @@ test("a delta for an unseen row creates it under the relay's key, not the alias"
   );
   assert.equal(created.row_id, "x#row1", "explicitly, not only via the alias");
 });
+
+// --- AskUser: the relay names the row, the client never reconstructs it -----
+
+import { findPendingAskUserRequest } from "./transcript-react.js";
+
+function askUserToolEntry(rowKey) {
+  return {
+    row_id: rowKey,
+    item_id: rowKey,
+    kind: "tool_call",
+    status: "running",
+    turn_id: "turn-1",
+    tool: { item_type: "toolCall", name: "AskUserQuestion", title: "AskUserQuestion" },
+  };
+}
+
+test("a pending question matches the row the relay named, even when that row minted", () => {
+  // The tool row had to mint, so its key is NOT `tool:<tool_use_id>`. Slicing
+  // `tool:` off it yields `toolu_1#row1`, which matches no pending question —
+  // the question would render as a dead read-only card.
+  const entry = askUserToolEntry("tool:toolu_1#row1");
+  const pending = [
+    { request_id: "req-1", tool_use_id: "toolu_1", transcript_row_id: "tool:toolu_1#row1" },
+  ];
+
+  const matched = findPendingAskUserRequest(transcriptRowKey(entry), pending);
+  assert.equal(
+    matched?.request_id,
+    "req-1",
+    "the card must match the row the relay resolved"
+  );
+});
+
+test("an old relay with no transcript_row_id still matches by the legacy derivation", () => {
+  const entry = askUserToolEntry("tool:toolu_1");
+  const pending = [{ request_id: "req-1", tool_use_id: "toolu_1" }];
+
+  const matched = findPendingAskUserRequest(transcriptRowKey(entry), pending);
+  assert.equal(
+    matched?.request_id,
+    "req-1",
+    "a relay too old to send the field must keep working"
+  );
+});

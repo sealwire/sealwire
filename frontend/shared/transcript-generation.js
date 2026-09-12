@@ -29,3 +29,27 @@ export function transcriptPageIsFromAnotherGeneration(session, page) {
     page?.transcript_generation
   );
 }
+
+/**
+ * Whether a live delta may be applied to the transcript it is about to mutate.
+ *
+ * The same symmetric rule as a page, for the same reasons — and checked against
+ * the DESTINATION, never the live session: a delta routed to a view-only pin or a
+ * background buffer must be fenced by the generation THAT buffer holds, or a
+ * restart mid-stream silently appends a row from the new run onto the old one's
+ * transcript.
+ *
+ * A relay too old to stamp deltas sends `""`, and a client with nothing to compare
+ * holds `""` — accepted, exactly as before the field existed.
+ */
+export function transcriptDeltaMatchesGeneration(destinationGeneration, deltaGeneration) {
+  return transcriptPageMatchesGeneration(destinationGeneration, deltaGeneration);
+}
+
+/** Convenience for the common `(destination, event)` shape. */
+export function transcriptDeltaIsFromAnotherGeneration(destination, event) {
+  return !transcriptDeltaMatchesGeneration(
+    destination?.transcript_generation,
+    event?.transcript_generation
+  );
+}

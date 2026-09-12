@@ -1,3 +1,4 @@
+import { transcriptRowKey } from "./transcript-row-key.js";
 import {
   normalizeTranscriptDeltaKind,
   resolveDeltaAppend,
@@ -187,7 +188,7 @@ export function transcriptHydrationSignature(snapshot) {
 
   for (const entry of snapshot.transcript || []) {
     parts.push(
-      entry.item_id || "",
+      transcriptRowKey(entry) || "",
       entry.kind || "",
       entry.turn_id || "",
       entry.tool?.item_type || "",
@@ -314,7 +315,7 @@ function snapshotTailNeedsFullText(state, snapshot) {
     if (incomingState === CONTENT_STATE_FULL) {
       continue;
     }
-    const cached = entries?.get?.(entry.item_id);
+    const cached = entries?.get?.(transcriptRowKey(entry));
     if (!isFullContent(cached)) {
       return true;
     }
@@ -582,7 +583,7 @@ export function createMergedTranscriptHydrationPagePatch(
   const preparedPageRows = [];
 
   for (const entry of page.entries || []) {
-    const itemId = entry?.item_id;
+    const itemId = transcriptRowKey(entry);
     if (!itemId) {
       continue;
     }
@@ -623,8 +624,8 @@ export function createMergedTranscriptHydrationPagePatch(
   } else {
     for (const pageRow of preparedPageRows) {
       nextEntries.set(
-        pageRow.item_id,
-        mergeTranscriptEntry(nextEntries.get(pageRow.item_id), pageRow)
+        transcriptRowKey(pageRow),
+        mergeTranscriptEntry(nextEntries.get(transcriptRowKey(pageRow)), pageRow)
       );
     }
     nextOrderValue = uniqueItemIds([...pageItemIds, ...nextOrder]);
@@ -666,7 +667,7 @@ function createMergedTailPagePatch(state, page, prepareEntry) {
 
   const preparedPageEntries = [];
   for (const entry of page.entries || []) {
-    const itemId = entry?.item_id;
+    const itemId = transcriptRowKey(entry);
     if (!itemId) {
       continue;
     }
@@ -913,7 +914,7 @@ function buildHydratedTranscriptSnapshot(
   const unorderedIds = new Set();
 
   for (const entry of overlayEntries || []) {
-    const itemId = entry?.item_id;
+    const itemId = transcriptRowKey(entry);
     if (!itemId) {
       continue;
     }
@@ -1050,7 +1051,7 @@ export function markTranscriptWindowNeedsRepair(state) {
 ///
 /// Returns true when the window changed.
 export function applyTranscriptDeltaToWindow(state, delta) {
-  const itemId = delta?.item_id;
+  const itemId = transcriptRowKey(delta);
   if (!itemId) {
     return false;
   }
@@ -1205,7 +1206,7 @@ export function applyTranscriptDeltaToWindow(state, delta) {
 /// permanently suppressing the real hydration fetch. A no-op is only correct
 /// once the cache is ALREADY blank (nothing left to protect).
 export function invalidateTranscriptWindowEntryForPatch(state, threadId, patchedEntry) {
-  const itemId = patchedEntry?.item_id;
+  const itemId = transcriptRowKey(patchedEntry);
   if (!itemId || !transcriptWindowIsLoaded(state, threadId)) {
     return false;
   }
@@ -1286,7 +1287,7 @@ export function renderedTranscriptFromWindow(state, session) {
   const arrayOnlyIds = [];
   for (const entry of arrayEntries) {
     transcriptArrayFallbackLookupBuildCount += 1;
-    const itemId = entry?.item_id;
+    const itemId = transcriptRowKey(entry);
     if (!itemId) {
       continue;
     }
@@ -1348,7 +1349,7 @@ function createMergedSnapshotTailPatch(state, snapshot, signature) {
   const tailIds = [];
   const unorderedIds = new Set();
   for (const entry of snapshot.transcript || []) {
-    const itemId = entry?.item_id;
+    const itemId = transcriptRowKey(entry);
     if (!itemId) {
       continue;
     }

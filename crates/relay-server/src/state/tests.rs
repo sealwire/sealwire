@@ -7852,6 +7852,78 @@ mod row_identity_tests {
         );
     }
 
+    /// A pending question names its ROW, not the provider string its row happens
+    /// to be spelled with.
+    ///
+    /// The client used to slice `tool:` off the row key to get back a
+    /// `tool_use_id`. That only worked while the row key WAS `tool:<id>` — a row
+    /// that had to mint is keyed `tool:<id>#row1`, the surgery yields
+    /// `<id>#row1`, nothing matches, and the question renders as a dead
+    /// read-only card. The relay resolves it instead.
+    #[test]
+    fn a_pending_question_resolves_to_its_row_even_when_that_row_had_to_mint() {
+        let mut relay = test_state();
+        let thread = "thread-ask";
+
+        // Something else already owns the spelling, so the tool row must mint.
+        relay.upsert_relay_owned_row_for_thread(
+            thread,
+            "tool:toolu_1".to_string(),
+            TranscriptEntryKind::Error,
+            Some("an unrelated relay row".to_string()),
+            "failed".to_string(),
+            None,
+            None,
+        );
+        relay.upsert_transcript_item_for_thread(
+            thread,
+            "tool:toolu_1".to_string(),
+            TranscriptEntryKind::ToolCall,
+            Some("the question's tool call".to_string()),
+            "running".to_string(),
+            Some("turn-1".to_string()),
+            None,
+        );
+
+        let resolved = relay
+            .ask_user_transcript_row_id(thread, "toolu_1")
+            .expect("the tool row is resolvable");
+        assert_ne!(
+            resolved, "tool:toolu_1",
+            "the tool row had to mint, so its key is NOT the provider spelling"
+        );
+
+        let runtime = relay.runtime_for_thread(thread).expect("runtime");
+        assert_eq!(
+            runtime
+                .transcript
+                .get_row(&resolved)
+                .and_then(|row| row.text.clone())
+                .as_deref(),
+            Some("the question's tool call"),
+            "and it names the tool row, not the unrelated one that took the spelling"
+        );
+        assert_eq!(
+            runtime
+                .transcript
+                .get_row("tool:toolu_1")
+                .and_then(|row| row.text.clone())
+                .as_deref(),
+            Some("an unrelated relay row"),
+            "which still holds the spelling"
+        );
+    }
+
+    /// Nothing to resolve against is `None`, not a guess.
+    #[test]
+    fn a_pending_question_with_no_tool_row_yet_resolves_to_nothing() {
+        let relay = test_state();
+        assert_eq!(
+            relay.ask_user_transcript_row_id("thread-missing", "toolu_1"),
+            None
+        );
+    }
+
     /// Stale history must never resurrect a withdrawn send nor move a published row.
     /// All three fields are carried by hand across the whole-record replace in
     /// `merge_runtime_entry`, so each one is its own way to lose the invariant.

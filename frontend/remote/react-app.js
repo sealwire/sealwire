@@ -1,3 +1,4 @@
+import { transcriptRowKey } from "../shared/transcript-row-key.js";
 import React, {
   useCallback,
   useEffect,
@@ -953,8 +954,8 @@ function RemoteApp() {
   );
   const transcriptEntriesByItemId = new Map(
     (session?.transcript || [])
-      .filter((entry) => entry?.item_id)
-      .map((entry) => [entry.item_id, entry])
+      .filter((entry) => transcriptRowKey(entry))
+      .map((entry) => [transcriptRowKey(entry), entry])
   );
   const runningExpandedItemIds = [...transcriptUiState.transcriptExpandedItemIds]
     .filter((expandKey) => expandKey.startsWith("entry:"))

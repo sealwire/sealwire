@@ -1,3 +1,4 @@
+import { transcriptRowKey } from "./transcript-row-key.js";
 import { isWorkingThreadStatus } from "./thread-status.js";
 
 // Fork dialog field model, shared by the local and remote surfaces.
@@ -242,8 +243,7 @@ export function forkIsLossy({
 export function forkPointIsTranscriptTip(entries, upToItemId) {
   if (!upToItemId) return false;
   const last = (entries || [])[entries.length - 1];
-  const lastId = last?.item_id || last?.id || "";
-  return lastId === upToItemId;
+  return (transcriptRowKey(last) || "") === upToItemId;
 }
 
 function orNull(value) {
@@ -266,6 +266,21 @@ function orNull(value) {
 // `acp/protocol.rs::item_id`). fork-fields.test.mjs pins both directions.
 // (Reasoning `rs_` diverges the same way but is never forkable — only the last
 // agent_text of a block is, see transcript-fork.js.)
+// THE ONE PLACE that still reads a provider shape off a row key.
+//
+// Everything else about fork identity — the forkable set, the tip comparison, the
+// `up_to_item_id` actually submitted — is a row key now. This check is not: it
+// asks whether the CODEX PROVIDER will still be able to resolve this point, and
+// the answer depends on the provider's own id, which the relay deliberately does
+// not hand clients (it owns provider translation).
+//
+// Left as an explicit, documented exception rather than guessed at: the clean fix
+// is a server-derived "is this point natively forkable" capability, which the
+// relay already computes internally (`resolve_fork_point` returns Provider /
+// RelayOnly / Unlocatable) but does not yet expose. Tracked as R4/provider
+// follow-up. It degrades safely today — a row key the relay minted away from the
+// `msg_` shape simply stops matching, and the anchor is then sent rather than
+// dropped, which is the same path every resolvable anchor already takes.
 function isUnresolvableCodexLiveForkPoint(upToItemId) {
   return /^msg_/.test(String(upToItemId ?? ""));
 }

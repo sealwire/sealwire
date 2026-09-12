@@ -1,3 +1,4 @@
+import { transcriptRowKey } from "./transcript-row-key.js";
 export function reduceTranscriptDeltaEvent({
   session = null,
   event = null,
@@ -12,7 +13,7 @@ export function reduceTranscriptDeltaEvent({
   unknownDeltaKindFallback = "preserve",
   appendEmptyOffsetlessDelta = false,
 } = {}) {
-  const itemId = event?.item_id || null;
+  const itemId = transcriptRowKey(event) || null;
   const eventThreadId = transcriptEventThreadId(event);
   const currentRevision = numericRevision(session?.transcript_revision);
   const eventRevision = numericRevision(event?.revision ?? event?.transcript_revision);
@@ -55,7 +56,7 @@ export function reduceTranscriptDeltaEvent({
 
   const transcript = session.transcript;
   const entryIndex = hasCurrentEntry === undefined
-    ? transcript.findIndex((entry) => entry?.item_id === itemId)
+    ? transcript.findIndex((entry) => transcriptRowKey(entry) === itemId)
     : (hasCurrentEntry ? 0 : -1);
   const entry = hasCurrentEntry === undefined
     ? transcript[entryIndex]
@@ -263,7 +264,7 @@ export function reduceTranscriptEntryPatchEvent({
     tool: event?.tool,
     turn_id: event?.turn_id,
   };
-  const itemId = incoming?.item_id || event?.item_id || null;
+  const itemId = transcriptRowKey(incoming) || transcriptRowKey(event) || null;
   if (!itemId) {
     return patchRejected("missing_item", {
       currentRevision,
@@ -290,7 +291,7 @@ export function reduceTranscriptEntryPatchEvent({
     entryPatch.order_seq = incoming.order_seq;
   }
   const entryIndex = session.transcript.findIndex(
-    (entry) => entry?.item_id === itemId
+    (entry) => transcriptRowKey(entry) === itemId
   );
   const patchIntroducesUntrackedItem = entryIndex < 0 && windowLoaded;
   const nextTranscript = entryIndex >= 0

@@ -1,3 +1,4 @@
+import { transcriptRowKey } from "./transcript-row-key.js";
 import { transcriptPageMatchesGeneration } from "./transcript-generation.js";
 
 const TRANSCRIPT_ENTRY_DETAIL_INLINE_CACHE_MAX_BYTES = 64 * 1024;
@@ -58,7 +59,7 @@ function estimateTranscriptEntryDetailBytes(entry) {
 
 function supportsTranscriptEntryDetail(entry) {
   return Boolean(
-    entry?.item_id
+    transcriptRowKey(entry)
       && (entry.kind === "command" || entry.kind === "tool_call")
   );
 }
@@ -199,7 +200,7 @@ export function getLiveTranscriptEntryDetail(state, threadId, itemId) {
 }
 
 export function cacheTranscriptEntryDetail(state, threadId, entry) {
-  const itemId = entry?.item_id;
+  const itemId = transcriptRowKey(entry);
   if (!threadId || !itemId || !shouldInlineCacheTranscriptEntry(entry)) {
     return { cached: false, patch: null };
   }
@@ -247,7 +248,7 @@ export function cacheTranscriptEntryDetail(state, threadId, entry) {
 }
 
 export function setLiveTranscriptEntryDetail(state, threadId, entry) {
-  const itemId = entry?.item_id;
+  const itemId = transcriptRowKey(entry);
   if (!threadId || !itemId || !supportsTranscriptEntryDetail(entry)) {
     return { stored: false, patch: null };
   }
@@ -288,7 +289,7 @@ export function syncLiveTranscriptEntryDetailsFromSnapshot(state, snapshot) {
     if (!shouldRetainLiveTranscriptEntry(entry)) {
       continue;
     }
-    const itemId = entry.item_id;
+    const itemId = transcriptRowKey(entry);
     const previousEntry = nextDetails.get(itemId);
     const mergedEntry = mergeTranscriptEntryDetail(previousEntry, entry);
     if (!previousEntry || JSON.stringify(previousEntry) !== JSON.stringify(mergedEntry)) {
@@ -315,7 +316,7 @@ export function syncLiveTranscriptEntryDetailsFromSnapshot(state, snapshot) {
 }
 
 export function prepareTranscriptEntryForSurface(state, threadId, entry) {
-  if (!entry?.item_id || !supportsTranscriptEntryDetail(entry)) {
+  if (!transcriptRowKey(entry) || !supportsTranscriptEntryDetail(entry)) {
     return {
       cachePatch: null,
       entry,
@@ -347,12 +348,12 @@ export function collectFileChangeDetailItemIds(transcript) {
   const itemIds = [];
   for (const entry of transcript || []) {
     const tool = entry?.tool;
-    if (!entry?.item_id || !tool) {
+    if (!transcriptRowKey(entry) || !tool) {
       continue;
     }
     const isFileChange = tool.item_type === "fileChange" || tool.item_type === "turnDiff";
     if (isFileChange && tool.file_changes_omitted) {
-      itemIds.push(entry.item_id);
+      itemIds.push(transcriptRowKey(entry));
     }
   }
   return itemIds;
