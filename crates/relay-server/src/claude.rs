@@ -111,42 +111,138 @@ pub struct ClaudeCodeBridge {
     worker_path: String,
 }
 
-/// Attach Orchestrator MCP tools and persona when this thread is the pin.
-/// On every options-bearing command — omitting either on `send` rebuilds the
-/// session without tools (second message falls back to Bash) or without the
-/// secretary persona (second message falls back to a coding assistant).
+/// Which sealwire tool surface a thread gets, resolved FRESH every turn.
+///
+/// Never remembered by the bridge: re-deriving it each turn is what makes it
+/// survive a relay restart and a `claude-pending-…` promotion without a second
+/// copy to keep in sync.
+#[derive(Debug, PartialEq, Eq)]
+enum SessionTools {
+    /// The pinned Orchestrator. Its own tools, its persona, and no built-ins.
+    Orchestrator {
+        device_id: String,
+        system_prompt: Option<String>,
+    },
+    /// A team seat: read-only tools, built-ins untouched.
+    Seat { run_id: String },
+    /// An unrestricted session, so it can bring in another agent. Built-ins
+    /// stay: stripping them would leave a coding session unable to code.
+    Peer,
+    /// Everything else: no sealwire tools at all.
+    None,
+}
+
+/// Pure so the precedence is testable without a relay. The Orchestrator wins
+/// over a seat, and both win over the ordinary case — a thread that is the pin
+/// must not also be handed the peer tools, or it would get two ways to do
+/// overlapping things.
+fn resolve_session_tools(
+    orchestrator: Option<(String, Option<String>)>,
+    seat_run_id: Option<String>,
+    unrestricted: bool,
+) -> SessionTools {
+    if let Some((device_id, system_prompt)) = orchestrator {
+        return SessionTools::Orchestrator {
+            device_id,
+            system_prompt,
+        };
+    }
+    match seat_run_id {
+        Some(run_id) => SessionTools::Seat { run_id },
+        // Only an already-unrestricted session may bring in another agent. A
+        // restricted one could otherwise ask a freer agent to do what it may not
+        // — which is the escalation, and this is what removes it.
+        None if unrestricted => SessionTools::Peer,
+        None => SessionTools::None,
+    }
+}
+
+/// Attach the thread's MCP tools (and, for the Orchestrator, its persona).
+///
+/// Must run on EVERY options-bearing command, not just `start`. The worker
+/// diffs `mcpServers`/`allowedTools` and tears the SDK session down and rebuilds
+/// it when they change, so omitting this on `send` does not merely leave the
+/// tools behind — it rebuilds the session without them mid-conversation.
 async fn attach_orchestrator_session(
     state: &Arc<RwLock<RelayState>>,
     worker_path: &str,
     thread_id: &str,
     cmd: &mut Value,
 ) {
-    let (options, seat_run_id) = {
+    let (options, seat_run_id, unrestricted) = {
         let relay = state.read().await;
+        let settings = relay.thread_settings(thread_id);
+        let unrestricted = settings
+            .as_ref()
+            .map(|s| crate::state::session_is_unrestricted(&s.approval_policy, &s.sandbox))
+            .unwrap_or(false);
         (
             relay.orchestrator_session_options(thread_id),
             relay.seat_run_id_for_thread(thread_id),
+            unrestricted,
         )
     };
-    let Some((device_id, system_prompt)) = options else {
-        // A seat gets the read-only MCP server and nothing else. `tools` and
-        // `allowedTools` stay untouched: `tools: []` strips Bash/Edit, which is
-        // right for the Orchestrator and would leave a dev seat unable to work.
-        if let Some(run_id) = seat_run_id {
+    match resolve_session_tools(options, seat_run_id, unrestricted) {
+        SessionTools::Orchestrator {
+            device_id,
+            system_prompt,
+        } => {
+            cmd["mcpServers"] = orchestrator_mcp_config(worker_path, &device_id);
+            cmd["allowedTools"] = orchestrator_allowed_tools();
+            cmd["tools"] = Value::Array(Vec::new());
+            if let Some(prompt) = system_prompt
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+            {
+                cmd["systemPrompt"] = Value::String(prompt.to_string());
+            }
+        }
+        // `tools` and `allowedTools` stay untouched: `tools: []` strips Bash/Edit,
+        // which is right for the Orchestrator and would leave a dev seat unable
+        // to work.
+        SessionTools::Seat { run_id } => {
             cmd["mcpServers"] = seat_mcp_config(worker_path, &run_id);
         }
-        return;
-    };
-    cmd["mcpServers"] = orchestrator_mcp_config(worker_path, &device_id);
-    cmd["allowedTools"] = orchestrator_allowed_tools();
-    cmd["tools"] = Value::Array(Vec::new());
-    if let Some(prompt) = system_prompt
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-    {
-        cmd["systemPrompt"] = Value::String(prompt.to_string());
+        // The caller's own thread id rides in the env, so the relay learns who is
+        // asking from the subprocess it launched rather than from the model —
+        // which could otherwise name any thread it liked.
+        SessionTools::Peer => {
+            let token = { state.write().await.ask_token_for_thread(thread_id) };
+            cmd["mcpServers"] = peer_mcp_config(worker_path, &token);
+            cmd["allowedTools"] = peer_allowed_tools();
+        }
+        SessionTools::None => {}
     }
+}
+
+/// Auto-allow the peer tools, for the same reason the Orchestrator's are:
+/// otherwise every call stops for an approval the agent cannot answer.
+fn peer_allowed_tools() -> Value {
+    Value::Array(
+        crate::orchestrator_tools::peer_tools()
+            .iter()
+            .map(|tool| Value::String(format!("mcp__sealwire__{}", tool.name)))
+            .collect(),
+    )
+}
+
+/// MCP config for an ordinary session: same bridge, an unguessable token
+/// instead of a device id.
+///
+/// A token, not the thread id: every client can read the thread list, so a
+/// thread id proves nothing about who is calling. The token only ever exists
+/// inside the subprocess the relay launched.
+fn peer_mcp_config(worker_path: &str, token: &str) -> Value {
+    let mut config = orchestrator_mcp_config(worker_path, "");
+    if let Some(env) = config["sealwire"]["env"].as_object_mut() {
+        env.remove("SEALWIRE_DEVICE_ID");
+        env.insert(
+            "SEALWIRE_ASK_TOKEN".to_string(),
+            Value::String(token.to_string()),
+        );
+    }
+    config
 }
 
 /// Auto-allow MCP tools (`acceptEdits` does not).
@@ -2284,6 +2380,88 @@ fn thread_belongs_to_claude(relay: &RelayState, thread_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_orchestrator_pin_outranks_everything_and_an_ordinary_thread_gets_peer_tools() {
+        use super::{resolve_session_tools, SessionTools};
+
+        // The pin wins even when it also looks like a seat: handing it both tool
+        // surfaces would give it two overlapping ways to do the same thing.
+        assert_eq!(
+            resolve_session_tools(Some(("dev-1".into(), None)), Some("run-1".into()), true),
+            SessionTools::Orchestrator {
+                device_id: "dev-1".into(),
+                system_prompt: None
+            }
+        );
+        assert_eq!(
+            resolve_session_tools(None, Some("run-1".into()), true),
+            SessionTools::Seat {
+                run_id: "run-1".into()
+            }
+        );
+        assert_eq!(resolve_session_tools(None, None, true), SessionTools::Peer);
+    }
+
+    #[test]
+    fn only_a_session_that_can_already_do_anything_may_bring_in_another_agent() {
+        use super::{resolve_session_tools, SessionTools};
+        use crate::state::session_is_unrestricted;
+
+        // The escalation is "a restricted agent gets a freer one to act for it".
+        // Offering the tool only to an already-unrestricted session removes that
+        // case rather than guarding against it: there is nothing to escalate to.
+        assert_eq!(
+            resolve_session_tools(None, None, false),
+            SessionTools::None,
+            "a restricted session is offered nothing at all",
+        );
+
+        assert!(session_is_unrestricted("bypass", "workspace-write"));
+        assert!(session_is_unrestricted("never", "danger-full-access"));
+        for (approval, sandbox) in [
+            ("untrusted", "read-only"),
+            ("on-request", "workspace-write"),
+            ("never", "workspace-write"),
+            // The reviewer sentinel, which is how a read-only reviewer thread
+            // used to end up holding the tool.
+            ("review_read_only", "workspace-write"),
+        ] {
+            assert!(
+                !session_is_unrestricted(approval, sandbox),
+                "{approval}+{sandbox} is restricted",
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_session_keeps_its_built_in_tools() {
+        // `tools: []` strips Bash/Edit. Right for the Orchestrator, fatal for a
+        // session that is supposed to keep coding while a peer helps.
+        let mut cmd = serde_json::json!({});
+        match resolve_session_tools(None, None, true) {
+            SessionTools::Peer => {
+                cmd["mcpServers"] = super::peer_mcp_config("/w/worker.mjs", "tok-9");
+                cmd["allowedTools"] = super::peer_allowed_tools();
+            }
+            other => panic!("expected Peer, got {other:?}"),
+        }
+        assert!(cmd.get("tools").is_none(), "built-ins must not be stripped");
+
+        // The caller's identity comes from the subprocess env, not from the
+        // model — the model could otherwise name any thread it liked.
+        let env = &cmd["mcpServers"]["sealwire"]["env"];
+        assert_eq!(env["SEALWIRE_ASK_TOKEN"], "tok-9");
+        assert!(
+            env.get("SEALWIRE_DEVICE_ID").is_none(),
+            "a peer session proves itself with its token, not a device id"
+        );
+        assert_eq!(
+            cmd["allowedTools"],
+            serde_json::json!(["mcp__sealwire__ask_agent"]),
+            "auto-allowed, or every call stops for an approval nobody can answer"
+        );
+    }
     use super::*;
 
     async fn relay_with_thread(thread_id: &str) -> std::sync::Arc<RwLock<RelayState>> {

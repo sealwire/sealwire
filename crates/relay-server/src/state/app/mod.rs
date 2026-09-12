@@ -299,6 +299,7 @@ const MAX_THREAD_ID_BYTES: usize = 256;
 mod approvals;
 mod broker;
 mod checkpoint;
+mod delegation;
 mod fork;
 mod git_context;
 mod orchestrator;
@@ -802,6 +803,7 @@ impl AppState {
     /// compose it alike. Placement is free: the team driver is clone-shared.
     pub(crate) fn spawn_configured_watchdogs(&self) {
         self.spawn_scheduled_proposal_watchdog();
+        self.spawn_ask_watchdog();
     }
 
     /// Fires scheduled proposal cards. The due decision lives in

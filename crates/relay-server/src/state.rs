@@ -1,4 +1,5 @@
 pub(crate) mod app;
+mod delegation;
 mod persistence;
 mod relay;
 mod review;
@@ -32,6 +33,7 @@ pub(crate) use self::relay::{
 };
 // `PushKind` is referenced only by cross-module tests (codex/claude handler tests
 // assert an Error push); gate the re-export so non-test builds don't warn.
+pub(crate) use self::delegation::{session_is_unrestricted, Ask};
 #[cfg(test)]
 pub(crate) use self::relay::PushKind;
 pub(crate) use self::review::{

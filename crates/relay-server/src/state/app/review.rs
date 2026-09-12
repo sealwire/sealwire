@@ -2891,6 +2891,31 @@ tree would review commits this thread never made"
     /// the live runtime transcript; falls back to reading from the provider. The
     /// `item_id` lets callers bind a result to a turn (require a *new* message
     /// rather than reusing a pre-existing assistant reply).
+    /// `latest_assistant_entry`, plus which TURN the reply belongs to.
+    ///
+    /// "Newer than before" is not enough to identify an answer: if somebody
+    /// types into the peer in between, their reply is also newer. Only the turn
+    /// says whose question it answers.
+    pub(super) async fn latest_assistant_entry_with_turn(
+        &self,
+        thread_id: &str,
+    ) -> Option<(String, String, Option<String>)> {
+        {
+            let relay = self.relay.read().await;
+            if let Some(runtime) = relay.runtime_for_thread(thread_id) {
+                if let Some(entry) = latest_agent_entry_with_turn(&runtime.transcript_views()) {
+                    return Some(entry);
+                }
+            }
+        }
+        let bridge = {
+            let (_, bridge) = self.find_thread_provider(thread_id).await.ok()?;
+            bridge.clone()
+        };
+        let data = bridge.read_thread(thread_id).await.ok()?;
+        latest_agent_entry_with_turn(&data.to_views())
+    }
+
     pub(super) async fn latest_assistant_entry(&self, thread_id: &str) -> Option<(String, String)> {
         {
             let relay = self.relay.read().await;
@@ -3406,6 +3431,17 @@ fn reviewer_failure_message(outcome: &WaitOutcome) -> &'static str {
         WaitOutcome::Completed => "the reviewer finished",
         WaitOutcome::Cancelled => "the review was cancelled by the user",
     }
+}
+
+fn latest_agent_entry_with_turn(
+    views: &[TranscriptEntryView],
+) -> Option<(String, String, Option<String>)> {
+    let turn = views
+        .iter()
+        .rev()
+        .find(|entry| entry.kind == TranscriptEntryKind::AgentText)
+        .and_then(|entry| entry.turn_id.clone());
+    latest_agent_entry(views).map(|(item_id, text)| (item_id, text, turn))
 }
 
 fn latest_agent_entry(views: &[TranscriptEntryView]) -> Option<(String, String)> {

@@ -62,6 +62,7 @@ fn test_persisted_state() -> PersistedRelayState {
         ),
     );
     PersistedRelayState {
+        asks: Default::default(),
         trusted_workspaces: Vec::new(),
         // No budget: these fixtures are about session restoration, and a cap
         // would gate turns in tests that have nothing to say about spending.

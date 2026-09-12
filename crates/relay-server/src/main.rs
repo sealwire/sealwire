@@ -362,6 +362,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
             "/api/orchestrator/proposals/:proposal_id/confirm",
             post(confirm_orchestrator_proposal),
         )
+        .route("/api/session/ask-token", post(issue_ask_token))
         .route("/api/orchestrator/tools", get(list_orchestrator_tools))
         .route(
             "/api/orchestrator/tools/:tool_name/call",
@@ -749,6 +750,16 @@ async fn confirm_orchestrator_proposal(
         .map_err(bad_request)
 }
 
+/// `POST /api/session/ask-token` — the human door's way in.
+///
+/// A person typing `/delegate` acts on their own authority, but the tool path
+/// only accepts a token, so the surface asks for one rather than the route
+/// growing a second, weaker way to name a caller.
+#[derive(serde::Deserialize)]
+struct AskTokenInput {
+    thread_id: String,
+}
+
 #[derive(serde::Deserialize)]
 struct OrchestratorToolCallInput {
     #[serde(default)]
@@ -759,12 +770,33 @@ struct OrchestratorToolCallInput {
     /// supplied, so it narrows what a seat gets — it does not authenticate one.
     #[serde(default)]
     seat_run_id: Option<String>,
+    /// Proof of which session is calling. Only ever present in the env of the
+    /// bridge subprocess the relay launched, so unlike `seat_run_id` it really
+    /// does identify the caller — a thread id would not, since every client can
+    /// read the thread list.
+    #[serde(default)]
+    ask_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 struct OrchestratorToolListQuery {
     #[serde(default)]
+    ask_token: Option<String>,
+    #[serde(default)]
     seat_run_id: Option<String>,
+}
+
+async fn issue_ask_token(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(input): Json<AskTokenInput>,
+) -> Result<Json<ApiEnvelope<serde_json::Value>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    let token = context.app.ask_token_for_thread(&input.thread_id).await;
+    Ok(Json(ApiEnvelope::ok(
+        serde_json::json!({ "ask_token": token }),
+    )))
 }
 
 async fn list_orchestrator_tools(
@@ -774,9 +806,12 @@ async fn list_orchestrator_tools(
     Query(query): Query<OrchestratorToolListQuery>,
 ) -> Result<Json<ApiEnvelope<serde_json::Value>>, (StatusCode, Json<ApiError>)> {
     authorize_api(&context, &headers, &uri)?;
-    let tools = match query.seat_run_id {
-        Some(_) => context.app.list_team_seat_tools().await,
-        None => context.app.list_orchestrator_tools().await,
+    // Precedence mirrors the bridge's: a seat first, then an ordinary session,
+    // then the Orchestrator. Only one env key is ever set, so at most one matches.
+    let tools = match (query.seat_run_id, query.ask_token) {
+        (Some(_), _) => context.app.list_team_seat_tools().await,
+        (None, Some(_)) => context.app.list_peer_tools().await,
+        (None, None) => context.app.list_orchestrator_tools().await,
     };
     Ok(Json(ApiEnvelope::ok(serde_json::json!({ "tools": tools }))))
 }
@@ -794,6 +829,15 @@ async fn call_orchestrator_tool(
     Json(input): Json<OrchestratorToolCallInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     authorize_api(&context, &headers, &uri)?;
+    if let Some(token) = input.ask_token.as_deref() {
+        let outcome = context
+            .app
+            .call_peer_tool(&tool_name, &input.arguments, token)
+            .await;
+        return Ok(Json(
+            crate::state::app::orchestrator_dispatch::tool_result_envelope(outcome),
+        ));
+    }
     let outcome = match input.seat_run_id.as_deref() {
         Some(run_id) => {
             context

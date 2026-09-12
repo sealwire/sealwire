@@ -1084,7 +1084,7 @@ pub(crate) mod path_scope_tests {
     /// Grant the MAIN tree, not a worktree: trust is per-repository, so the main tree's
     /// grant is what its linked worktrees inherit. Tests whose point is a refusal
     /// deliberately do not call this.
-    async fn grant_workspace(app: &AppState, path: &str) {
+    pub(crate) async fn grant_workspace(app: &AppState, path: &str) {
         app.relay
             .write()
             .await
@@ -6690,7 +6690,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let session = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: Some("fake-echo".to_string()),
@@ -6761,7 +6761,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let session = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: Some("fake-echo".to_string()),
@@ -9735,7 +9735,7 @@ tree; got {}",
         pair_device(&app, "scoped-device", vec![scoped.display().to_string()]).await;
 
         let error = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("scoped-device".to_string()),
                 cwd: Some(other.display().to_string()),
                 model: None,
@@ -9860,7 +9860,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let source = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: Some("fake-echo".to_string()),
@@ -9955,7 +9955,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let source = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: Some("fake-echo".to_string()),
@@ -10025,7 +10025,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let source = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: Some("fake-echo".to_string()),
@@ -10085,7 +10085,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let source = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: Some("fake-echo".to_string()),
@@ -10130,7 +10130,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let source = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: Some("fake-echo".to_string()),
@@ -11103,7 +11103,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let source = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 // NOT the catalog default.
@@ -11165,7 +11165,7 @@ tree; got {}",
         // (An unsupported level would be clamped either way, which is how the
         // first version of this test passed for the wrong reason.)
         let source = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: Some("statusy-fancy".to_string()),
@@ -11218,7 +11218,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let source = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: Some("alpha-fancy".to_string()),
@@ -11295,7 +11295,7 @@ tree; got {}",
         // A pre-existing beta ("claude") conversation, with no model of its own
         // remembered by this relay.
         let beta_thread = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: None,
@@ -11318,7 +11318,7 @@ tree; got {}",
         // The user switches to alpha ("codex") and sends — the last-used model
         // is now an alpha id.
         let alpha_thread = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: Some("alpha-fancy".to_string()),
@@ -11414,7 +11414,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let beta_thread = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: None,
@@ -11501,7 +11501,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let source = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: None,
@@ -11544,7 +11544,7 @@ tree; got {}",
 
         // The thread we will fork: created first, then left idle.
         let quiet = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: None,
@@ -11611,7 +11611,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let source = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: Some("fake-echo".to_string()),
@@ -11662,7 +11662,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let snap_a = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(a_dir.display().to_string()),
                 model: Some("fake-echo".to_string()),
@@ -11678,7 +11678,7 @@ tree; got {}",
         let thread_a = snap_a.active_thread_id.clone().expect("thread A id");
 
         let snap_b = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(b_dir.display().to_string()),
                 model: Some("fake-echo".to_string()),
@@ -11798,7 +11798,7 @@ tree; got {}",
         // Start session A with an initial prompt; the fake provider echoes it
         // as a completed user + assistant turn.
         let snap_a = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(a_dir.display().to_string()),
                 model: None,
@@ -11878,7 +11878,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let snap_a = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(a_dir.display().to_string()),
                 model: None,
@@ -11910,7 +11910,7 @@ tree; got {}",
         assert_eq!(snap_a_bypass.model, "fake-pinned-a");
 
         let snap_b = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(b_dir.display().to_string()),
                 model: None,
@@ -11979,7 +11979,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let snap = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(project.path().display().to_string()),
                 model: None,
@@ -12021,7 +12021,7 @@ tree; got {}",
 
         // Start A with explicit, non-default settings.
         let snap = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: dev(),
                 cwd: Some(a_dir.display().to_string()),
                 model: None,
@@ -12057,7 +12057,7 @@ tree; got {}",
 
         // Start B with different settings; A's settings must not leak in.
         let snap = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: dev(),
                 cwd: Some(b_dir.display().to_string()),
                 model: None,
@@ -12150,7 +12150,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let snapshot = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: None,
@@ -12197,7 +12197,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let snap_a = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(a_dir.display().to_string()),
                 model: None,
@@ -12236,7 +12236,7 @@ tree; got {}",
         assert_eq!(live_user_entries[0].text.as_deref(), Some("Hellooo"));
 
         let snap_b = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(b_dir.display().to_string()),
                 model: None,
@@ -12316,7 +12316,7 @@ tree; got {}",
         // Use an unscoped device to start the session first (so we don't trip the scope at start).
         pair_device(&app, "wide-device", Vec::new()).await;
         let started = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("wide-device".to_string()),
                 cwd: Some(other.display().to_string()),
                 model: None,
@@ -12360,7 +12360,7 @@ tree; got {}",
         pair_device(&app, "scoped-device", vec![scoped.display().to_string()]).await;
 
         let snapshot = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("wide-device".to_string()),
                 cwd: Some(other.display().to_string()),
                 model: None,
@@ -12414,7 +12414,7 @@ tree; got {}",
         pair_device(&app, "scoped-device", vec![scoped.display().to_string()]).await;
 
         let snapshot = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("wide-device".to_string()),
                 cwd: Some(other.display().to_string()),
                 model: None,
@@ -12671,7 +12671,7 @@ tree; got {}",
         // catalog momentarily fails to load, so the inherited "default" is
         // normalized before reaching codex.
         let snap = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: None,
@@ -15142,7 +15142,7 @@ mod review_tests {
 
     async fn start_parent(app: &AppState, cwd: &str, provider: &str) -> ThreadSummaryView {
         let snap = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: None,
@@ -19655,7 +19655,7 @@ settings update: {error}"
         assert!(delete_err.contains("workflow"), "{delete_err}");
 
         let start_err = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: None,
@@ -22137,7 +22137,7 @@ the provider, not forwarded ({turn_models:?})"
         // Starting another session is NOT blocked — other threads stay usable —
         // and it becomes the active thread.
         let started = app
-            .start_session(StartSessionInput {
+            .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
                 model: None,
@@ -25807,5 +25807,494 @@ mod beta_gate_tests {
         // disk from an earlier unlocked launch.
         let response = app.teams().await;
         assert!(response.teams.is_empty());
+    }
+}
+
+/// `ask_agent`: one session bringing in another.
+#[cfg(test)]
+mod ask_tests {
+    use super::path_scope_tests::{build_app, grant_workspace};
+    use crate::protocol::StartSessionInput;
+    use relay_api::delegation::{AskError, AskRequest};
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn an_existing_session_can_be_asked_but_a_missing_one_and_yourself_cannot() {
+        // Without this the tool is a way to type into ANY thread in the relay —
+        // including one belonging to a different person's session.
+        use relay_api::delegation::{AskError, AskRequest};
+
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+
+        let asker = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("never".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+                sandbox: None,
+            })
+            .await
+            .expect("asker starts");
+        let asker_id = asker.active_thread_id.clone().expect("asker has a thread");
+
+        // A thread the asker never brought in.
+        let stranger = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("never".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+                sandbox: None,
+            })
+            .await
+            .expect("stranger starts");
+        let stranger_id = stranger
+            .active_thread_id
+            .clone()
+            .expect("stranger has a thread");
+
+        // An existing session IS fair game: it may already hold context that a
+        // fresh agent would take an hour to rebuild.
+        let reached = app
+            .ask_agent(
+                &asker_id,
+                AskRequest {
+                    peer_thread_id: Some(stranger_id.clone()),
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "have a look at this".to_string(),
+                },
+            )
+            .await;
+        assert!(
+            reached.is_ok(),
+            "an idle session can be asked, got {reached:?}"
+        );
+
+        // One that does not exist still is not.
+        let refused = app
+            .ask_agent(
+                &asker_id,
+                AskRequest {
+                    peer_thread_id: Some("no-such-thread".to_string()),
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "do my bidding".to_string(),
+                },
+            )
+            .await;
+        assert!(
+            matches!(refused, Err(AskError::NoSuchPeer)),
+            "a thread that does not exist is not addressable, got {refused:?}"
+        );
+
+        // Nor is yourself.
+        let self_ask = app
+            .ask_agent(
+                &asker_id,
+                AskRequest {
+                    peer_thread_id: Some(asker_id.clone()),
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "do it myself".to_string(),
+                },
+            )
+            .await;
+        assert!(self_ask.is_err(), "a session cannot hand work to itself");
+    }
+
+    #[tokio::test]
+    async fn a_wider_existing_session_cannot_be_used_to_get_around_your_permissions() {
+        // The hole the inheritance rule existed to close, on the path that was
+        // added last: inheritance was computed but only APPLIED when starting a
+        // new peer. Naming an existing, wider session skipped it entirely.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+
+        let mut start = |approval: &str, sandbox: &str| {
+            let cwd = cwd.clone();
+            let approval = approval.to_string();
+            let sandbox = sandbox.to_string();
+            let app = app.clone();
+            async move {
+                app.start_session(crate::protocol::StartSessionInput {
+                    cwd: Some(cwd),
+                    provider: Some("fake".to_string()),
+                    approval_policy: Some(approval),
+                    sandbox: Some(sandbox),
+                    device_id: Some("dev".to_string()),
+                    initial_prompt: None,
+                    model: None,
+                    effort: None,
+                    project_id: None,
+                })
+                .await
+                .expect("session starts")
+                .active_thread_id
+                .clone()
+                .expect("thread")
+            }
+        };
+
+        let wide = start("bypass", "danger-full-access").await;
+        let narrow = start("untrusted", "read-only").await;
+
+        let refused = app
+            .ask_agent(
+                &narrow,
+                AskRequest {
+                    peer_thread_id: Some(wide.clone()),
+                    provider: None,
+                    model: None,
+                    effort: None,
+                    message: "write this file for me".to_string(),
+                },
+            )
+            .await;
+        assert!(
+            refused.is_err(),
+            "a read-only session must not borrow a full-access one, got {refused:?}"
+        );
+
+        // The other direction is fine: handing work DOWN is always safe.
+        let allowed = app
+            .ask_agent(
+                &wide,
+                AskRequest {
+                    peer_thread_id: Some(narrow.clone()),
+                    provider: None,
+                    model: None,
+                    effort: None,
+                    message: "have a read".to_string(),
+                },
+            )
+            .await;
+        assert!(
+            allowed.is_ok(),
+            "asking a narrower session is fine, got {allowed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_a_real_token_can_act_as_a_session() {
+        // A thread id proves nothing — every client can read the whole list from
+        // /api/threads. The token only ever exists inside the subprocess the
+        // relay launched, and is bound to exactly one session.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+
+        let asker = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("never".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+                sandbox: None,
+            })
+            .await
+            .expect("asker starts")
+            .active_thread_id
+            .clone()
+            .expect("thread");
+
+        let args = serde_json::json!({ "message": "do the thing", "provider": "fake" });
+
+        // The thread id itself is not a credential.
+        assert!(
+            app.call_peer_tool("ask_agent", &args, &asker)
+                .await
+                .is_err(),
+            "a thread id must not work as a token",
+        );
+        assert!(
+            app.call_peer_tool("ask_agent", &args, "ask_madeup")
+                .await
+                .is_err(),
+            "nor must a guess",
+        );
+
+        // The real one does, and it names the session it was issued for.
+        let token = app.ask_token_for_thread(&asker).await;
+        assert!(
+            app.call_peer_tool("ask_agent", &args, &token).await.is_ok(),
+            "the issued token acts as its session",
+        );
+        let relay = app.relay.read().await;
+        assert_eq!(
+            relay.asks_of_asker(&asker).len(),
+            1,
+            "and the ask is recorded against that session, not another",
+        );
+    }
+
+    #[tokio::test]
+    async fn leaving_the_provider_out_actually_works() {
+        // The schema says it is optional and the tool description promises a
+        // default. It used to resolve to the empty string and fail every time.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+
+        let asker = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("never".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+                sandbox: None,
+            })
+            .await
+            .expect("asker starts")
+            .active_thread_id
+            .clone()
+            .expect("thread");
+
+        let peer = app
+            .ask_agent(
+                &asker,
+                AskRequest {
+                    peer_thread_id: None,
+                    provider: None,
+                    model: None,
+                    effort: None,
+                    message: "take a look".to_string(),
+                },
+            )
+            .await;
+        assert!(
+            peer.is_ok(),
+            "the advertised default must work, got {peer:?}"
+        );
+
+        // And the card records what actually ran, not what was requested.
+        let relay = app.relay.read().await;
+        let ask = relay.asks_of_asker(&asker);
+        assert_eq!(
+            ask.first().map(|a| a.peer_provider.as_str()),
+            Some("fake"),
+            "the effective provider is recorded, not the empty request",
+        );
+    }
+
+    #[tokio::test]
+    async fn the_answer_comes_back_to_the_asker_without_it_waiting() {
+        // The whole push model end to end: ask, let the peer answer, sweep, and
+        // the asker is handed the result in its own thread — having blocked on
+        // nothing.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+
+        let asker = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("never".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+                sandbox: None,
+            })
+            .await
+            .expect("asker starts");
+        let asker_id = asker.active_thread_id.clone().expect("asker thread");
+
+        let peer_id = app
+            .ask_agent(
+                &asker_id,
+                AskRequest {
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "look at the retry loop".to_string(),
+                },
+            )
+            .await
+            .expect("the ask goes through");
+
+        // The fake provider answers on its own; wait for the ask to settle.
+        let mut settled = false;
+        for _ in 0..50 {
+            app.settle_and_deliver_asks_at(crate::state::unix_now())
+                .await;
+            let relay = app.relay.read().await;
+            if relay
+                .asks_of_asker(&asker_id)
+                .iter()
+                .all(|ask| ask.status.is_terminal())
+            {
+                settled = true;
+                break;
+            }
+            drop(relay);
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+        assert!(settled, "the peer's turn never settled");
+
+        let relay = app.relay.read().await;
+        let mine = relay.asks_of_asker(&asker_id);
+        let ask = mine.first().expect("the ask is recorded");
+        assert!(
+            ask.answer.is_some(),
+            "what the peer said is captured, not just that it finished",
+        );
+        assert!(
+            ask.delivered,
+            "and handed back to the asker — it was never waiting for it",
+        );
+        assert_eq!(ask.peer_thread_id, peer_id);
+    }
+
+    #[tokio::test]
+    async fn an_agent_already_waiting_on_you_cannot_be_asked_back() {
+        // Both sides would wait forever and neither would ever be woken. The
+        // walk is transitive, so A->B->C->A is caught too, not just A->B->A.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+
+        let a = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("never".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+                sandbox: None,
+            })
+            .await
+            .expect("a starts");
+        let a_id = a.active_thread_id.clone().expect("a has a thread");
+
+        // A asks B; B is now working for A.
+        let b_id = app
+            .ask_agent(
+                &a_id,
+                AskRequest {
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "take this".to_string(),
+                },
+            )
+            .await
+            .expect("a can ask");
+
+        let back = app
+            .ask_agent(
+                &b_id,
+                AskRequest {
+                    peer_thread_id: Some(a_id.clone()),
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "you take it".to_string(),
+                },
+            )
+            .await;
+        assert!(
+            back.is_err(),
+            "asking back up the chain would deadlock both sides, got {back:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_inherits_the_askers_permissions_and_is_visible() {
+        // The security argument for letting an agent start an agent without a card,
+        // and the product argument for doing it here rather than inside a CLI.
+        use relay_api::delegation::AskRequest;
+
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+
+        let asker = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("untrusted".to_string()),
+                sandbox: Some("read-only".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+            })
+            .await
+            .expect("asker starts");
+        let asker_id = asker.active_thread_id.clone().expect("asker has a thread");
+
+        let peer_id = app
+            .ask_agent(
+                &asker_id,
+                AskRequest {
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "have a look at the error paths".to_string(),
+                },
+            )
+            .await
+            .expect("the ask goes through");
+
+        let relay = app.relay.read().await;
+        let settings = relay
+            .thread_settings(&peer_id)
+            .expect("the peer has recorded settings");
+        assert_eq!(
+            (settings.approval_policy.as_str(), settings.sandbox.as_str()),
+            ("untrusted", "read-only"),
+            "a peer must never be wider than the session that asked for it",
+        );
+        // Visible, and NOT in the reviewer set — everything in that set is assumed
+        // read-only by `has_working_thread_in_cwd`, so a writing peer there would
+        // disable the workspace-concurrency guard.
+        assert!(
+            !relay.reviewer_thread_ids().contains(&peer_id),
+            "a peer is an ordinary session, not a hidden reviewer",
+        );
+        assert!(
+            relay.asks_of_asker(&asker_id).len() == 1,
+            "the pair is recorded so the UI can show it",
+        );
     }
 }

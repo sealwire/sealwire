@@ -73,3 +73,4 @@ crates/sealwire-private/frontend/*
 !crates/sealwire-private/frontend/task-review-screen.js
 !crates/sealwire-private/frontend/task-board-react.js
 !crates/sealwire-private/frontend/task-ticket-screen.js
+!crates/sealwire-private/frontend/composer-command-controller.js

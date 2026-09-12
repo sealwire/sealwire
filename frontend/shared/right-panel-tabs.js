@@ -45,15 +45,20 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
   const workflowInProgress = CODE_FLOW_ENABLED
     ? (review.workflowRuns || []).filter((run) => !isTerminalWorkflowStatus(run.status)).length
     : 0;
+  // An agent brought in by this session counts the same as a review: this tab is
+  // now "who else is working on this", and a reviewer is one of those.
+  const asksInProgress = (review.asks || []).filter((ask) => ask.status === "working").length;
 
   // NEVER auto-switch the tab — the review must not yank the user's view around.
   // A running/blocked review only surfaces PASSIVELY here: the tab label gets a dot
   // ("Reviewer •") or a warning ("Reviewer ⚠"), and the user switches when they want.
+  // "Agents", not "Reviewer": a reviewer is just one of the agents this session
+  // can bring in, and the panel now lists the others beside it.
   const reviewerLabel = blocked
-    ? "Reviewer ⚠"
-    : inProgress > 0 || workflowInProgress > 0
-    ? "Reviewer •"
-    : "Reviewer";
+    ? "Agents ⚠"
+    : inProgress > 0 || workflowInProgress > 0 || asksInProgress > 0
+    ? "Agents •"
+    : "Agents";
 
   return h(
     "div",
@@ -75,6 +80,7 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
       ? h(ReviewerPanel, {
           panelId,
           reviewJobs: review.reviewJobs || [],
+          asks: review.asks || [],
           workflowRuns: review.workflowRuns || [],
           reviewModel: review.reviewModel || {},
           workflowModel: review.workflowModel || {},

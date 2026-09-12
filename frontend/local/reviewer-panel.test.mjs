@@ -52,7 +52,7 @@ test("ReviewerPanel empty state shows the CTA + launcher when a review can be re
       onRequestReview() {},
     })
   );
-  assert.match(html, /Ask another agent to review/);
+  assert.match(html, /Other agents working on this appear here/);
   assert.match(html, /review-launch-button/);
 });
 
@@ -219,7 +219,7 @@ test("RightPanelTabs shows the Changes body by default and both tab labels", () 
   );
   assert.match(html, /CHANGES-BODY/);
   assert.match(html, />Changes</);
-  assert.match(html, />Reviewer</);
+  assert.match(html, />Agents</);
 });
 
 test("RightPanelTabs flags the Reviewer tab when a review is blocked, and renders the reviewer body when selected", () => {
@@ -234,7 +234,7 @@ test("RightPanelTabs flags the Reviewer tab when a review is blocked, and render
       changes: h("div", null, "CHANGES-BODY"),
     })
   );
-  assert.match(blockedLabel, /Reviewer ⚠/);
+  assert.match(blockedLabel, /Agents ⚠/);
 
   const reviewerBody = renderToStaticMarkup(
     h(RightPanelTabs, {
@@ -244,7 +244,7 @@ test("RightPanelTabs flags the Reviewer tab when a review is blocked, and render
       changes: h("div", null, "CHANGES-BODY"),
     })
   );
-  assert.match(reviewerBody, /Ask another agent to review/);
+  assert.match(reviewerBody, /Other agents working on this appear here/);
   assert.doesNotMatch(reviewerBody, /CHANGES-BODY/);
 });
 
@@ -265,12 +265,12 @@ test("RightPanelTabs shows the in-progress dot for a running review", () => {
       changes: h("div", null, "CHANGES-BODY"),
     })
   );
-  assert.match(html, /Reviewer •/);
+  assert.match(html, /Agents •/);
 });
 
 test("RightPanelTabs treats an escalated review as terminal (no in-progress dot)", () => {
-  // `escalated` is terminal: the tab label must read a plain "Reviewer" — not the
-  // in-progress "Reviewer •" — so the tab agrees with review-state.js + the backend
+  // `escalated` is terminal: the tab label must read a plain "Agents" — not the
+  // in-progress "Agents •" — so the tab agrees with review-state.js + the backend
   // (regression guard for the duplicated terminal-status set that omitted escalated).
   const html = renderToStaticMarkup(
     h(RightPanelTabs, {
@@ -288,9 +288,9 @@ test("RightPanelTabs treats an escalated review as terminal (no in-progress dot)
       changes: h("div", null, "CHANGES-BODY"),
     })
   );
-  assert.doesNotMatch(html, /Reviewer •/);
-  assert.doesNotMatch(html, /Reviewer ⚠/);
-  assert.match(html, />Reviewer</);
+  assert.doesNotMatch(html, /Agents •/);
+  assert.doesNotMatch(html, /Agents ⚠/);
+  assert.match(html, />Agents</);
 });
 
 test("WorkspaceDiffModalTitle follows the active tab (so opening Reviewer isn't titled 'Workspace diff')", () => {
