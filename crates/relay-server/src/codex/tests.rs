@@ -1264,6 +1264,53 @@ async fn turn_error_push_reason_is_bounded_not_raw() {
     );
 }
 
+/// Each way an item can vanish from a Codex read must come back as an ADMITTED gap.
+///
+/// The parse stays tolerant — one unreadable item must not make a thread unreadable —
+/// so the rows are still served. What changes is that the loss is reported, because a
+/// short vec and a shorter thread are the same value to every later reader, and
+/// `fork_session` is a reader that decides what to DROP from that difference.
+#[test]
+fn a_codex_read_that_skips_an_item_reports_itself_incomplete() {
+    let item = |id: &str| json!({ "id": id, "type": "agentMessage", "text": "hi" });
+
+    let whole = json!({ "turns": [{ "id": "turn-1", "items": [item("item-1")] }] });
+    let parsed = parse_transcript(&whole);
+    assert!(
+        parsed.complete && parsed.entries.len() == 1,
+        "a well-formed read keeps every row and admits no gap"
+    );
+
+    // An item with no `id`/`type` — `parse_transcript_item` returns `None`.
+    let lost_item = json!({
+        "turns": [{ "id": "turn-1", "items": [item("item-1"), json!({ "text": "no id" })] }]
+    });
+    let parsed = parse_transcript(&lost_item);
+    assert!(
+        !parsed.complete && parsed.entries.len() == 1,
+        "an unparseable item is dropped, so the read must say it is short"
+    );
+
+    // A turn that came back without its `items` array.
+    let lost_turn = json!({
+        "turns": [{ "id": "turn-1", "items": [item("item-1")] }, { "id": "turn-2" }]
+    });
+    assert!(
+        !parse_transcript(&lost_turn).complete,
+        "a turn whose items never arrived takes an unknown number of rows with it"
+    );
+
+    // `includeTurns` was asked for and nothing came back: not an empty thread.
+    assert!(
+        !parse_transcript(&json!({ "id": "thread-1" })).complete,
+        "a read with no turns at all cannot claim to describe the thread"
+    );
+    assert!(
+        parse_transcript(&json!({ "turns": [] })).complete,
+        "but a thread that genuinely has no turns is completely described"
+    );
+}
+
 // Exercise the restore path exactly as `read_thread` does after its RPC returns:
 // unwrap the `thread` from the `thread/read` result envelope, then hydrate. This
 // covers the `result -> thread -> parse_transcript` chain, not just the pure
@@ -2804,6 +2851,7 @@ impl CodexReplayHarness {
         let mut relay = self.state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                transcript_complete: true,
                 thread: test_thread_summary(thread_id),
                 status: status.to_string(),
                 active_flags: Vec::new(),
@@ -3372,6 +3420,7 @@ async fn handle_notification_keeps_late_delta_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                transcript_complete: true,
                 thread: test_thread_summary("thread-B"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -3411,6 +3460,7 @@ async fn handle_notification_keeps_late_delta_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                transcript_complete: true,
                 thread: test_thread_summary("thread-A"),
                 status: "running".to_string(),
                 active_flags: Vec::new(),
@@ -3495,6 +3545,7 @@ async fn handle_notification_keeps_late_agent_completion_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                transcript_complete: true,
                 thread: test_thread_summary("thread-B"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -3542,6 +3593,7 @@ async fn handle_notification_keeps_late_agent_completion_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                transcript_complete: true,
                 thread: test_thread_summary("thread-A"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -3626,6 +3678,7 @@ async fn runtime_merge_does_not_downgrade_fresh_completed_agent_message() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                transcript_complete: true,
                 thread: test_thread_summary("thread-B"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -3657,6 +3710,7 @@ async fn runtime_merge_does_not_downgrade_fresh_completed_agent_message() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                transcript_complete: true,
                 thread: test_thread_summary("thread-A"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -3728,6 +3782,7 @@ async fn handle_notification_does_not_leak_late_delta_into_new_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                transcript_complete: true,
                 thread: test_thread_summary("thread-B"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -3803,6 +3858,7 @@ async fn handle_notification_keeps_late_command_output_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                transcript_complete: true,
                 thread: test_thread_summary("thread-B"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -3841,6 +3897,7 @@ async fn handle_notification_keeps_late_command_output_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                transcript_complete: true,
                 thread: test_thread_summary("thread-A"),
                 status: "running".to_string(),
                 active_flags: Vec::new(),
@@ -3899,6 +3956,7 @@ async fn handle_notification_keeps_late_turn_started_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                transcript_complete: true,
                 thread: test_thread_summary("thread-B"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -3936,6 +3994,7 @@ async fn handle_notification_keeps_late_turn_started_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                transcript_complete: true,
                 thread: test_thread_summary("thread-A"),
                 status: "thinking".to_string(),
                 active_flags: Vec::new(),
@@ -3980,6 +4039,7 @@ async fn handle_notification_keeps_full_turn_lifecycle_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                transcript_complete: true,
                 thread: test_thread_summary("thread-B"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -4035,6 +4095,7 @@ async fn handle_notification_keeps_full_turn_lifecycle_for_prior_thread() {
         let mut relay = state.write().await;
         relay.load_thread_data(
             ThreadSyncData {
+                transcript_complete: true,
                 thread: test_thread_summary("thread-A"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),

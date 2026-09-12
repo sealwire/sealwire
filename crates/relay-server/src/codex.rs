@@ -670,11 +670,13 @@ impl CodexBridge {
         let summary = parse_thread_summary(thread)?;
         let (status, active_flags) = parse_status(value_at(thread, &["status"]));
 
+        let parsed = parse_transcript(thread);
         Ok(ThreadSyncData {
             thread: summary,
             status,
             active_flags,
-            transcript: parse_transcript(thread),
+            transcript: parsed.entries,
+            transcript_complete: parsed.complete,
         })
     }
 
@@ -1246,29 +1248,51 @@ pub(crate) fn codex_turn_failure_kind(turn: &Value) -> Option<TurnFailureKind> {
 #[cfg(test)]
 pub(crate) fn parse_transcript_views(thread: &Value) -> Vec<TranscriptEntryView> {
     parse_transcript(thread)
+        .entries
         .into_iter()
         .map(|entry| entry.view)
         .collect()
 }
 
-fn parse_transcript(thread: &Value) -> Vec<crate::provider::ProviderTranscriptEntry> {
+/// A parse and whether it kept everything it was given. Tolerance is deliberate — one
+/// unreadable item must not make a thread unreadable — so the losses are reported
+/// instead of being left to look like a shorter thread. See
+/// `ThreadSyncData::transcript_complete`.
+struct ParsedTranscript {
+    entries: Vec<crate::provider::ProviderTranscriptEntry>,
+    complete: bool,
+}
+
+fn parse_transcript(thread: &Value) -> ParsedTranscript {
     use crate::provider::ProviderTranscriptEntry;
     let mut transcript = Vec::new();
+    let mut complete = true;
     let turns = match value_at(thread, &["turns"]).and_then(Value::as_array) {
         Some(turns) => turns,
-        None => return transcript,
+        // Turns were asked for and did not come back: this is not an empty thread,
+        // it is a read that cannot say what the thread holds.
+        None => {
+            return ParsedTranscript {
+                entries: transcript,
+                complete: false,
+            };
+        }
     };
 
     for turn in turns {
         let turn_id = string_at(turn, &["id"]);
         let items = match value_at(turn, &["items"]).and_then(Value::as_array) {
             Some(items) => items,
-            None => continue,
+            None => {
+                complete = false;
+                continue;
+            }
         };
 
         for item in items {
-            if let Some(entry) = parse_transcript_item(item, turn_id.clone(), "completed") {
-                transcript.push(ProviderTranscriptEntry::provider_named(entry));
+            match parse_transcript_item(item, turn_id.clone(), "completed") {
+                Some(entry) => transcript.push(ProviderTranscriptEntry::provider_named(entry)),
+                None => complete = false,
             }
         }
 
@@ -1298,7 +1322,10 @@ fn parse_transcript(thread: &Value) -> Vec<crate::provider::ProviderTranscriptEn
         }
     }
 
-    transcript
+    ParsedTranscript {
+        entries: transcript,
+        complete,
+    }
 }
 
 fn refresh_turn_diff_entry(relay: &mut RelayState, turn_id: &str) -> bool {

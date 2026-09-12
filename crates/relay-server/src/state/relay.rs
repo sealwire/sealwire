@@ -7800,6 +7800,7 @@ mod tests {
         // `restore_thread_data` — still pre-migration, because it was read from disk.
         booted.restore_thread_data(
             crate::provider::ThreadSyncData {
+                transcript_complete: true,
                 thread: test_thread("thread-1", "/work/alpha"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),

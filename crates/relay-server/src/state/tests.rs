@@ -1414,6 +1414,7 @@ fn load_thread_data_sets_active_controller_on_resume() {
     let mut relay = test_state();
     relay.load_thread_data(
         ThreadSyncData {
+            transcript_complete: true,
             thread: test_thread("thread-9", "/tmp/project"),
             status: "running".to_string(),
             active_flags: vec!["busy".to_string()],
@@ -1472,6 +1473,7 @@ fn load_thread_data_preserves_pending_requests_from_other_threads() {
 
     relay.load_thread_data(
         ThreadSyncData {
+            transcript_complete: true,
             thread: test_thread("thread-2", "/tmp/project"),
             status: "idle".to_string(),
             active_flags: Vec::new(),
@@ -1729,6 +1731,7 @@ fn thread_switch_back_keeps_single_user_message_when_ids_agree() {
     // in its per-thread runtime.
     relay.load_thread_data(
         ThreadSyncData {
+            transcript_complete: true,
             thread: test_thread("thread-2", "/tmp/project"),
             status: "idle".to_string(),
             active_flags: Vec::new(),
@@ -1745,6 +1748,7 @@ fn thread_switch_back_keeps_single_user_message_when_ids_agree() {
     // worker stamped onto the SDK message, so it matches the runtime live copy.
     relay.load_thread_data(
         ThreadSyncData {
+            transcript_complete: true,
             thread: test_thread("thread-1", "/tmp/project"),
             status: "active".to_string(),
             active_flags: vec!["waitingOnAskUser".to_string()],
@@ -2848,6 +2852,7 @@ fn restore_thread_data_keeps_persisted_controller_and_settings() {
     );
     relay.restore_thread_data(
         ThreadSyncData {
+            transcript_complete: true,
             thread: test_thread("thread-1", "/tmp/project"),
             status: "running".to_string(),
             active_flags: vec!["busy".to_string()],
@@ -6516,6 +6521,7 @@ fn rehydrating_a_thread_does_not_rewind_its_transcript_revision() {
     relay.runtimes.remove("thread-1");
     relay.load_thread_data(
         ThreadSyncData {
+            transcript_complete: true,
             thread: test_thread("thread-1", "/tmp/project"),
             status: "idle".to_string(),
             active_flags: Vec::new(),
@@ -6570,6 +6576,7 @@ fn merging_fresh_history_draws_from_the_shared_revision_clock() {
     // forward relative to everything issued so far.
     relay.load_thread_data(
         ThreadSyncData {
+            transcript_complete: true,
             thread: test_thread("thread-1", "/tmp/project"),
             status: "idle".to_string(),
             active_flags: Vec::new(),
@@ -6784,6 +6791,7 @@ fn restore_thread_data_resumes_the_clock_before_it_draws_from_it() {
 
     relay.restore_thread_data(
         ThreadSyncData {
+            transcript_complete: true,
             thread: test_thread("thread-1", "/tmp/project"),
             status: "idle".to_string(),
             active_flags: Vec::new(),
@@ -7142,6 +7150,7 @@ fn a_definitively_failed_send_leaves_a_withdrawn_tombstone() {
 /// the resulting order is keyed [D, A, B, C] permanently.
 fn delta_birth_stale_history() -> ThreadSyncData {
     ThreadSyncData {
+        transcript_complete: true,
         thread: test_thread("delta-birth", "/tmp/project"),
         status: "idle".to_string(),
         active_flags: Vec::new(),
