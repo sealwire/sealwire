@@ -955,7 +955,7 @@ pub(crate) fn apply_turn_finished(
             ThreadRoute::Background => relay.bg_upsert_transcript_item(
                 thread_id,
                 // Relay-synthesized from the turn's failure, not an ACP item.
-                crate::state::IdSpace::Row,
+                crate::state::IdSpace::Relay,
                 item_id,
                 TranscriptEntryKind::Error,
                 Some(reason.clone()),
@@ -1519,6 +1519,7 @@ pub(crate) fn sync_data_from_runtime(
         .map(|(view, record)| crate::provider::ProviderTranscriptEntry {
             view,
             provider_item_id: record.provider_item_id.clone(),
+            relay_item_id: record.relay_item_id.clone(),
         })
         .collect::<Vec<_>>();
 

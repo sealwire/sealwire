@@ -958,7 +958,7 @@ impl AppState {
             plan.recorded_cwd
         );
         let mut relay = self.relay.write().await;
-        relay.upsert_relay_named_item_for_thread(
+        relay.upsert_relay_owned_row_for_thread(
             thread_id,
             // Unique per attempt, so pressing send twice leaves two records rather than
             // one that silently overwrites the first.

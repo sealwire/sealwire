@@ -73,39 +73,36 @@ impl AppState {
         // materialized read (which can answer for a thread with no runtime).
         let fork_point = match client_fork_point.as_deref() {
             Some(requested) => {
-                let relay = self.relay.read().await;
-                Some(resolve_fork_point(
-                    relay
-                        .runtime_for_thread(&source_thread_id)
-                        .map(|runtime| &runtime.transcript),
-                    &source_data.transcript,
-                    requested,
-                ))
+                let resolved = {
+                    let relay = self.relay.read().await;
+                    resolve_fork_point(
+                        relay
+                            .runtime_for_thread(&source_thread_id)
+                            .map(|runtime| &runtime.transcript),
+                        &source_data.transcript,
+                        requested,
+                    )
+                };
+                // Nothing can locate it, or the read is ambiguous about which entry
+                // was meant. Either way, guessing would cut the branch in a place
+                // the user did not choose.
+                Some(resolved.ok_or_else(|| FORK_POINT_NOT_PROVIDER_ADDRESSABLE_MSG.to_string())?)
             }
             None => None,
         };
+        let source_views = source_data.to_views();
+        // Cut BY POSITION. Re-matching the id against the views would pick the first
+        // entry that happens to spell it the same way, which in a read containing
+        // both a provider item `x` and a synthesized row `x` is a coin flip.
+        let forked_transcript = forked_entries(&source_views, fork_point.as_ref())?;
         // A branch point the relay can locate but the provider cannot name is still a
         // real branch point — it just has to be REPLAYED rather than described. Going
         // native with no id would fork the whole thread, handing the branch
         // everything the user chose to cut.
-        let native_fork_possible = !matches!(fork_point, Some(ForkPoint::RelayOnly(_)));
-        // Truncation for replay matches against the materialized read, so it uses
-        // whichever name that read carries. Validated BEFORE normalizing, so a bogus
-        // id is an error rather than a silent whole-thread fork.
-        let truncate_at = match &fork_point {
-            None => None,
-            Some(ForkPoint::Provider(id)) | Some(ForkPoint::RelayOnly(id)) => Some(id.clone()),
-            Some(ForkPoint::Unlocatable) => {
-                return Err(FORK_POINT_NOT_PROVIDER_ADDRESSABLE_MSG.to_string())
-            }
-        };
-        let source_views = source_data.to_views();
-        let forked_transcript = truncate_transcript_at(&source_views, truncate_at.as_deref())?;
-        // Only a provider-named point may be described to the provider.
-        let up_to_item_id = match &fork_point {
-            Some(ForkPoint::Provider(id)) => normalize_fork_point(&source_views, Some(id)),
-            _ => None,
-        };
+        let native_fork_possible = fork_point
+            .as_ref()
+            .is_none_or(|point| point.provider_item_id.is_some());
+        let up_to_item_id = native_fork_point_id(source_views.len(), fork_point.as_ref());
 
         let (source_settings, source_project_id) = {
             let relay = self.relay.read().await;
@@ -539,103 +536,107 @@ fn build_fork_replay_prompt(
     }
 }
 
-/// What a requested fork point turns out to be.
-enum ForkPoint {
-    /// The provider issued this id, so a native fork can be described with it.
-    Provider(String),
-    /// Only the relay ever named this row, but the materialized read does contain
-    /// it — a real branch point that cannot be described to the provider, so the
-    /// branch has to be replayed truncated there.
-    RelayOnly(String),
-    /// Neither the runtime nor the read can locate it. An unbound send reservation
-    /// is the real case: the provider never acknowledged it, so there is nothing on
-    /// either side to branch from.
-    Unlocatable,
+/// A fork point resolved to the EXACT entry of the materialized read.
+struct ResolvedForkPoint {
+    /// Position in the read. The branch is cut here BY POSITION — never by
+    /// re-matching a spelling, because two entries in one read may share one and
+    /// the wrong one would cut the branch in the wrong place.
+    index: usize,
+    /// Present only when the provider issued a name for this entry. The only thing
+    /// a native fork can be described with.
+    provider_item_id: Option<String>,
 }
 
-/// Resolve a fork point the CLIENT named.
+/// Resolve a fork point the CLIENT named, to a position in the read.
 ///
-/// The client can only send back the id it rendered, which is the relay's key for
-/// the row. Two sources can say what that row is: the thread's runtime, if it is
-/// loaded, and the materialized read itself — which now carries each entry's
-/// provenance, so it can answer even for a thread with no runtime.
+/// The client can only send back the row id it rendered. Two sources can say what
+/// that row is: the thread's runtime, which holds the row's typed identities, and
+/// the read itself, whose entries carry their own. Matching is done through those
+/// typed identities so a provider item and a synthesized row that share a spelling
+/// never stand in for each other.
+///
+/// `None` means nothing can locate it — an unbound send reservation, or a read
+/// where the requested spelling is ambiguous and guessing would cut the wrong way.
 fn resolve_fork_point(
     transcript: Option<&crate::state::relay::ThreadTranscript>,
     read: &[crate::provider::ProviderTranscriptEntry],
     requested: &str,
-) -> ForkPoint {
+) -> Option<ResolvedForkPoint> {
     // The runtime is authoritative when it holds the row: it is where a locally
-    // created send learns the provider's name for it.
+    // created send learns the provider's name for it, and where a synthesized row
+    // keeps its source name after `row_id` was minted away from it.
     if let Some(transcript) = transcript {
         if transcript.get_row(requested).is_some() {
-            return match transcript.provider_item_id(requested) {
-                Some(provider_item_id) => ForkPoint::Provider(provider_item_id.to_string()),
-                None if read_contains(read, requested) => {
-                    ForkPoint::RelayOnly(requested.to_string())
-                }
-                None => ForkPoint::Unlocatable,
-            };
+            if let Some(provider_item_id) = transcript.provider_item_id(requested) {
+                let index = read.iter().position(|entry| {
+                    entry.provider_item_id.as_deref() == Some(provider_item_id)
+                })?;
+                return Some(ResolvedForkPoint {
+                    index,
+                    provider_item_id: Some(provider_item_id.to_string()),
+                });
+            }
+            if let Some(relay_item_id) = transcript.relay_item_id(requested) {
+                let index = read
+                    .iter()
+                    .position(|entry| entry.relay_item_id.as_deref() == Some(relay_item_id))?;
+                return Some(ResolvedForkPoint {
+                    index,
+                    provider_item_id: None,
+                });
+            }
+            // A row the relay owns outright: no source name, so no read can carry it.
+            return None;
         }
     }
-    // No runtime row: the read is the only thing that can name it.
-    match read
+    // No runtime row. The requested id can only have come from an earlier
+    // materialization of this read, so match its own key — but refuse when more
+    // than one entry answers to it, since nothing here says which was meant.
+    let mut matches = read
         .iter()
-        .find(|entry| entry.view.item_id.as_deref() == Some(requested))
-    {
-        Some(entry) => match entry.provider_item_id.as_deref() {
-            Some(provider_item_id) => ForkPoint::Provider(provider_item_id.to_string()),
-            None => ForkPoint::RelayOnly(requested.to_string()),
-        },
-        None => ForkPoint::Unlocatable,
-    }
-}
-
-fn read_contains(read: &[crate::provider::ProviderTranscriptEntry], row_id: &str) -> bool {
-    read.iter()
-        .any(|entry| entry.view.item_id.as_deref() == Some(row_id))
-}
-
-// A fork point that is the transcript's FINAL entry drops nothing, so it names
-// the same branch as forking the whole thread. Collapsing it to `None` lets a
-// tip-only native fork (Codex `thread/fork`) stay native instead of degrading
-// to a lossy replay just because the client named the message it clicked.
-//
-// Deliberately exact: if ANY entry follows the fork point — including tool
-// calls, whose results are real context — the point stays explicit. Treating
-// "last agent message with trailing tool calls" as a whole-thread fork would
-// hand the branch results the user branched before.
-fn normalize_fork_point(
-    transcript: &[TranscriptEntryView],
-    up_to_item_id: Option<&str>,
-) -> Option<String> {
-    let item_id = up_to_item_id?;
-    let is_final_entry = transcript
-        .last()
-        .and_then(|entry| entry.item_id.as_deref())
-        .is_some_and(|last| last == item_id);
-    if is_final_entry {
+        .enumerate()
+        .filter(|(_, entry)| entry.view.item_id.as_deref() == Some(requested));
+    let (index, entry) = matches.next()?;
+    if matches.next().is_some() {
         return None;
     }
-    Some(item_id.to_string())
+    Some(ResolvedForkPoint {
+        index,
+        provider_item_id: entry.provider_item_id.clone(),
+    })
 }
 
-// A fork branches at a specific message, so the replayed context must stop
-// there. Without this the branch silently inherits everything that happened
-// after the point the user picked.
-fn truncate_transcript_at(
-    transcript: &[TranscriptEntryView],
-    up_to_item_id: Option<&str>,
+/// The entries a branch inherits: everything up to and INCLUDING the fork point.
+///
+/// Indexed, never re-matched by id — a read may contain two entries spelling their
+/// ids the same way, and picking the first would cut the branch somewhere the user
+/// did not choose.
+fn forked_entries(
+    views: &[TranscriptEntryView],
+    point: Option<&ResolvedForkPoint>,
 ) -> Result<Vec<TranscriptEntryView>, String> {
-    let Some(item_id) = up_to_item_id else {
-        return Ok(transcript.to_vec());
-    };
-    let position = transcript
-        .iter()
-        .position(|entry| entry.item_id.as_deref() == Some(item_id))
-        .ok_or_else(|| {
-            format!("fork point {item_id} is not part of the source thread transcript")
-        })?;
-    Ok(transcript[..=position].to_vec())
+    match point {
+        Some(point) => views
+            .get(..=point.index)
+            .map(<[TranscriptEntryView]>::to_vec)
+            .ok_or_else(|| "fork point fell outside the source transcript".to_string()),
+        None => Ok(views.to_vec()),
+    }
+}
+
+/// The id a NATIVE fork is described with.
+///
+/// `None` for a point the provider cannot name — the branch is replayed instead —
+/// and `None` for a point that IS the final entry, which drops nothing and so names
+/// the same branch as forking the whole thread. Deliberately exact: if ANY entry
+/// follows the point, including tool calls whose results are real context, the point
+/// stays explicit rather than widening to the whole thread.
+fn native_fork_point_id(total_entries: usize, point: Option<&ResolvedForkPoint>) -> Option<String> {
+    let point = point?;
+    if point.index + 1 == total_entries {
+        return None;
+    }
+    point.provider_item_id.clone()
 }
 
 fn render_fork_replay_context(
@@ -893,6 +894,13 @@ mod tests {
         }
     }
 
+    fn point(index: usize, provider_item_id: Option<&str>) -> ResolvedForkPoint {
+        ResolvedForkPoint {
+            index,
+            provider_item_id: provider_item_id.map(str::to_string),
+        }
+    }
+
     // Forking from a message means the fork must not see anything the user had
     // not yet read at that point — otherwise "branch from here" silently
     // carries the future of the original thread into the branch.
@@ -904,7 +912,8 @@ mod tests {
             agent_entry("a3", "LATE-MARKER reverted everything"),
         ];
 
-        let truncated = truncate_transcript_at(&transcript, Some("a2")).expect("fork point exists");
+        let truncated =
+            forked_entries(&transcript, Some(&point(1, Some("a2")))).expect("fork point exists");
 
         assert_eq!(truncated.len(), 2);
         assert_eq!(truncated[1].item_id.as_deref(), Some("a2"));
@@ -916,15 +925,13 @@ mod tests {
     // replay just because the client named the message it clicked.
     #[test]
     fn a_fork_point_at_the_final_entry_normalizes_to_a_whole_thread_fork() {
-        let transcript = vec![agent_entry("a1", "one"), agent_entry("a2", "two")];
-        assert_eq!(normalize_fork_point(&transcript, Some("a2")), None);
+        assert_eq!(native_fork_point_id(2, Some(&point(1, Some("a2")))), None);
     }
 
     #[test]
     fn a_fork_point_with_entries_after_it_is_preserved() {
-        let transcript = vec![agent_entry("a1", "one"), agent_entry("a2", "two")];
         assert_eq!(
-            normalize_fork_point(&transcript, Some("a1")),
+            native_fork_point_id(2, Some(&point(0, Some("a1")))),
             Some("a1".to_string())
         );
     }
@@ -934,44 +941,29 @@ mod tests {
     // that would silently hand the branch results the user branched before.
     #[test]
     fn trailing_tool_entries_keep_the_fork_point_explicit() {
-        let mut transcript = vec![agent_entry("a1", "one")];
-        transcript.push(TranscriptEntryView {
-            order_seq: None,
-            withdrawn: false,
-            item_id: Some("tool-1".to_string()),
-            kind: TranscriptEntryKind::ToolCall,
-            text: None,
-            status: "completed".to_string(),
-            turn_id: Some("turn-a1".to_string()),
-            tool: None,
-            content_state: crate::protocol::TranscriptContentState::Full,
-        });
+        // Two entries: the agent message at 0, a tool call after it.
         assert_eq!(
-            normalize_fork_point(&transcript, Some("a1")),
+            native_fork_point_id(2, Some(&point(0, Some("a1")))),
             Some("a1".to_string())
         );
     }
 
     #[test]
     fn an_absent_fork_point_stays_absent() {
-        let transcript = vec![agent_entry("a1", "one")];
-        assert_eq!(normalize_fork_point(&transcript, None), None);
-        assert_eq!(
-            normalize_fork_point(&[], Some("a1")),
-            Some("a1".to_string())
-        );
+        assert_eq!(native_fork_point_id(1, None), None);
     }
 
+    /// A point the provider cannot name is never described to it, wherever it sits.
     #[test]
-    fn an_unknown_fork_point_is_an_error_rather_than_a_silent_full_fork() {
-        let transcript = vec![agent_entry("a1", "only entry")];
-        assert!(truncate_transcript_at(&transcript, Some("nope")).is_err());
+    fn a_point_the_provider_cannot_name_is_never_sent_natively() {
+        assert_eq!(native_fork_point_id(3, Some(&point(0, None))), None);
+        assert_eq!(native_fork_point_id(3, Some(&point(2, None))), None);
     }
 
     #[test]
     fn no_fork_point_keeps_the_whole_transcript() {
         let transcript = vec![agent_entry("a1", "one"), agent_entry("a2", "two")];
-        let kept = truncate_transcript_at(&transcript, None).expect("no fork point");
+        let kept = forked_entries(&transcript, None).expect("no fork point");
         assert_eq!(kept.len(), 2);
     }
 
@@ -1013,12 +1005,13 @@ mod fork_point_resolution_tests {
     use crate::provider::ProviderTranscriptEntry;
     use crate::state::relay::{ThreadTranscript, TranscriptRecord};
 
-    fn user_row(row_id: &str, text: &str) -> TranscriptRecord {
+    fn row(row_id: &str) -> TranscriptRecord {
         TranscriptRecord {
             row_id: row_id.to_string(),
             provider_item_id: None,
-            kind: TranscriptEntryKind::UserText,
-            text: Some(text.to_string()),
+            relay_item_id: None,
+            kind: TranscriptEntryKind::AgentText,
+            text: Some(row_id.to_string()),
             status: "completed".to_string(),
             turn_id: Some("turn-1".to_string()),
             tool: None,
@@ -1028,13 +1021,13 @@ mod fork_point_resolution_tests {
         }
     }
 
-    fn view(item_id: &str, text: &str) -> TranscriptEntryView {
+    fn view(item_id: &str) -> TranscriptEntryView {
         TranscriptEntryView {
             order_seq: None,
             withdrawn: false,
             item_id: Some(item_id.to_string()),
-            kind: TranscriptEntryKind::UserText,
-            text: Some(text.to_string()),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some(item_id.to_string()),
             status: "completed".to_string(),
             turn_id: Some("turn-1".to_string()),
             tool: None,
@@ -1042,88 +1035,125 @@ mod fork_point_resolution_tests {
         }
     }
 
-    /// Forking at a locally-created send used to be impossible: the client can only
-    /// send back the relay's key, which was then matched against the provider's own
-    /// transcript where that string cannot appear.
+    /// A read holding a provider item `x` AND a synthesized row `x`. Each published
+    /// row must resolve to ITS OWN entry — matching the spelling would pick
+    /// whichever came first.
     #[test]
-    fn a_locally_named_send_resolves_to_the_id_the_provider_later_gave_it() {
+    fn same_spelling_provider_and_synthetic_rows_resolve_to_their_own_entries() {
+        // Synthetic first, so a spelling match would always find the wrong one for
+        // the provider row.
         let read = vec![
-            ProviderTranscriptEntry::provider_named(view("codex-item-1", "the send")),
-            ProviderTranscriptEntry::provider_named(view("codex-item-2", "the reply")),
+            ProviderTranscriptEntry::relay_named(view("x")),
+            ProviderTranscriptEntry::provider_named(view("x")),
+            ProviderTranscriptEntry::provider_named(view("tail")),
         ];
         let mut store = ThreadTranscript::new();
-        let row_id = store.push(user_row("codex:user-reserve:gen-1:thread-1:1", "the send"));
-        store.bind_provider_item_id(&row_id, "codex-item-1");
+        let synthetic = store.push(TranscriptRecord {
+            relay_item_id: Some("x".to_string()),
+            ..row("x")
+        });
+        let provider_row = store.push(TranscriptRecord {
+            provider_item_id: Some("x".to_string()),
+            ..row("x")
+        });
+        assert_ne!(synthetic, provider_row, "the second had to mint");
 
-        // The defect, stated: the client's key is not addressable provider-side.
-        assert!(
-            truncate_transcript_at(
-                &read.iter().map(|e| e.view.clone()).collect::<Vec<_>>(),
-                Some(&row_id)
-            )
-            .is_err(),
-            "a relay row key must not be matchable against the provider's transcript"
+        let resolved = resolve_fork_point(Some(&store), &read, &provider_row)
+            .expect("the provider row is locatable");
+        assert_eq!(
+            resolved.index, 1,
+            "the PROVIDER entry, not the synthetic one"
         );
+        assert_eq!(resolved.provider_item_id.as_deref(), Some("x"));
 
-        match resolve_fork_point(Some(&store), &read, &row_id) {
-            ForkPoint::Provider(id) => assert_eq!(id, "codex-item-1"),
-            _ => panic!("a bound send must resolve to the provider's own id"),
-        }
+        let resolved = resolve_fork_point(Some(&store), &read, &synthetic)
+            .expect("the synthetic row is locatable by its source name");
+        assert_eq!(resolved.index, 0, "the SYNTHETIC entry");
+        assert_eq!(
+            resolved.provider_item_id, None,
+            "a synthesized row is never described to the provider"
+        );
     }
 
-    /// A provider-named row is already spelled the way the provider spells it.
+    /// The tip condition must be decided by position too. With the colliding
+    /// spellings reversed, the provider row is the tip and the synthetic one is not.
     #[test]
-    fn a_provider_named_row_resolves_to_itself_with_or_without_a_runtime() {
-        let read = vec![ProviderTranscriptEntry::provider_named(view(
-            "codex-item-1",
-            "the send",
-        ))];
+    fn the_tip_test_uses_position_so_a_shared_spelling_cannot_widen_the_fork() {
+        let read = vec![
+            ProviderTranscriptEntry::relay_named(view("x")),
+            ProviderTranscriptEntry::provider_named(view("x")),
+        ];
         let mut store = ThreadTranscript::new();
-        store.push(TranscriptRecord {
-            provider_item_id: Some("codex-item-1".to_string()),
-            ..user_row("codex-item-1", "the send")
+        let synthetic = store.push(TranscriptRecord {
+            relay_item_id: Some("x".to_string()),
+            ..row("x")
+        });
+        let provider_row = store.push(TranscriptRecord {
+            provider_item_id: Some("x".to_string()),
+            ..row("x")
         });
 
-        for transcript in [Some(&store), None] {
-            match resolve_fork_point(transcript, &read, "codex-item-1") {
-                ForkPoint::Provider(id) => assert_eq!(id, "codex-item-1"),
-                _ => panic!("a provider-named row is natively forkable"),
-            }
-        }
+        let at_tip = resolve_fork_point(Some(&store), &read, &provider_row).expect("locatable");
+        assert_eq!(
+            native_fork_point_id(read.len(), Some(&at_tip)),
+            None,
+            "the provider row IS the tip, so it forks the whole thread natively"
+        );
+
+        let before_tip = resolve_fork_point(Some(&store), &read, &synthetic).expect("locatable");
+        assert_eq!(
+            forked_entries(
+                &read.iter().map(|e| e.view.clone()).collect::<Vec<_>>(),
+                Some(&before_tip)
+            )
+            .expect("in range")
+            .len(),
+            1,
+            "the synthetic row is NOT the tip and must cut the entry after it"
+        );
     }
 
-    /// A row the adapter synthesized INTO the read is a real branch point that the
-    /// provider cannot name. It must replay, not refuse — and not go native.
+    /// A locally-created send resolves through the provider name it was later given.
     #[test]
-    fn a_relay_synthesized_row_present_in_the_read_is_replayable_not_refused() {
+    fn a_bound_send_resolves_to_the_provider_entry_it_names() {
         let read = vec![
-            ProviderTranscriptEntry::provider_named(view("codex-item-1", "before")),
-            ProviderTranscriptEntry::relay_named(view("turn-diff:turn-1", "the summary")),
+            ProviderTranscriptEntry::provider_named(view("codex-item-1")),
+            ProviderTranscriptEntry::provider_named(view("codex-item-2")),
         ];
+        let mut store = ThreadTranscript::new();
+        let row_id = store.push(row("codex:user-reserve:gen-1:t:1"));
+        store.bind_provider_item_id(&row_id, "codex-item-1");
 
-        match resolve_fork_point(None, &read, "turn-diff:turn-1") {
-            ForkPoint::RelayOnly(id) => assert_eq!(id, "turn-diff:turn-1"),
-            _ => panic!("a synthesized row the read contains must be replayable"),
-        }
+        let resolved = resolve_fork_point(Some(&store), &read, &row_id).expect("locatable");
+        assert_eq!(resolved.index, 0);
+        assert_eq!(resolved.provider_item_id.as_deref(), Some("codex-item-1"));
     }
 
-    /// A row neither side can locate — an unbound send reservation — is refused.
+    /// A row the relay owns outright has no source name, so no read can carry it.
     #[test]
-    fn a_row_no_source_can_locate_is_unlocatable() {
+    fn an_unacknowledged_reservation_is_unlocatable() {
         let read = vec![ProviderTranscriptEntry::provider_named(view(
             "codex-item-1",
-            "before",
         ))];
         let mut store = ThreadTranscript::new();
-        let row_id = store.push(user_row("codex:user-reserve:gen-1:t:1", "unacknowledged"));
+        let row_id = store.push(row("codex:user-reserve:gen-1:t:1"));
 
-        assert!(matches!(
-            resolve_fork_point(Some(&store), &read, &row_id),
-            ForkPoint::Unlocatable
-        ));
-        assert!(matches!(
-            resolve_fork_point(None, &read, "never-heard-of-it"),
-            ForkPoint::Unlocatable
-        ));
+        assert!(resolve_fork_point(Some(&store), &read, &row_id).is_none());
+        assert!(resolve_fork_point(None, &read, "never-heard-of-it").is_none());
+    }
+
+    /// With no runtime to consult, a spelling that names two entries is ambiguous.
+    /// Guessing would cut the branch somewhere the user did not choose.
+    #[test]
+    fn an_ambiguous_spelling_with_no_runtime_is_refused() {
+        let read = vec![
+            ProviderTranscriptEntry::relay_named(view("x")),
+            ProviderTranscriptEntry::provider_named(view("x")),
+        ];
+        assert!(resolve_fork_point(None, &read, "x").is_none());
+
+        let unique = vec![ProviderTranscriptEntry::provider_named(view("x"))];
+        let resolved = resolve_fork_point(None, &unique, "x").expect("unambiguous");
+        assert_eq!(resolved.index, 0);
     }
 }

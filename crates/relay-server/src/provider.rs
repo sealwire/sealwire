@@ -34,10 +34,14 @@ pub struct ThreadSyncData {
 #[derive(Clone, Debug)]
 pub struct ProviderTranscriptEntry {
     pub view: TranscriptEntryView,
-    /// What the PROVIDER calls this entry, or `None` when the adapter invented it
-    /// while parsing the read (a per-turn diff summary, a re-derived turn failure).
-    /// Those have no provider-side identity and must never be sent back as one.
+    /// What the PROVIDER calls this entry. `None` when the adapter invented it.
+    /// Never sent back to a provider unless set.
     pub provider_item_id: Option<String>,
+    /// The RELAY's own deterministic name for an entry the adapter invented while
+    /// parsing this read. Carried separately from the view's `item_id` because the
+    /// relay may have to mint a different `row_id` on a collision — after which
+    /// this is the only name that still recognises the row on the NEXT read.
+    pub relay_item_id: Option<String>,
 }
 
 impl ProviderTranscriptEntry {
@@ -45,15 +49,18 @@ impl ProviderTranscriptEntry {
     pub fn provider_named(view: TranscriptEntryView) -> Self {
         Self {
             provider_item_id: view.item_id.clone(),
+            relay_item_id: None,
             view,
         }
     }
 
-    /// The adapter synthesized this entry while parsing the read.
+    /// The adapter synthesized this entry while parsing the read. Its id is a
+    /// relay-derived source name, not a provider one.
     pub fn relay_named(view: TranscriptEntryView) -> Self {
         Self {
-            view,
             provider_item_id: None,
+            relay_item_id: view.item_id.clone(),
+            view,
         }
     }
 

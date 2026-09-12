@@ -5,15 +5,20 @@ use super::TranscriptRecord;
 
 /// Which namespace an id belongs to — and, at a row's birth, whose name it is.
 ///
-/// These are the same question: an id minted by the provider lives in the provider
-/// namespace, an id minted by the relay lives in the row namespace. Collapsing them
-/// into one lookup is what let a provider event land on an unrelated relay row that
-/// merely shared its spelling, so callers must say which one they hold.
+/// Three spaces, because a row can be named by three different authorities and any
+/// two of those names may collide. Collapsing them into one lookup is what let a
+/// provider event land on an unrelated row that merely shared its spelling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IdSpace {
-    /// A name the provider issued.
+    /// A name the provider issued. Addressable back to the provider.
     Provider,
-    /// The relay's own key for a row.
+    /// A name the RELAY derived deterministically and will derive again — a
+    /// per-turn diff summary, a re-synthesized turn failure, a per-turn fallback.
+    /// Stable across reads, so it is how the same logical row is recognised from
+    /// one read to the next, but never addressable to the provider.
+    Relay,
+    /// The relay's client-facing key for a row, with no stable source name behind
+    /// it — a send reservation, a per-attempt error row. Unique by construction.
     Row,
 }
 
@@ -22,7 +27,15 @@ impl IdSpace {
     pub(crate) fn provider_name_of(self, item_id: &str) -> Option<String> {
         match self {
             Self::Provider => Some(item_id.to_string()),
-            Self::Row => None,
+            Self::Relay | Self::Row => None,
+        }
+    }
+
+    /// What to record as a row's `relay_item_id` when it is born under `item_id`.
+    pub(crate) fn relay_name_of(self, item_id: &str) -> Option<String> {
+        match self {
+            Self::Relay => Some(item_id.to_string()),
+            Self::Provider | Self::Row => None,
         }
     }
 }
@@ -42,6 +55,11 @@ pub(crate) struct ThreadTranscript {
     /// request and its result, a send's reservation and the provider's echo);
     /// one provider id never names two rows.
     row_id_by_provider_item_id: HashMap<String, String>,
+    /// relay_item_id -> row_id. The relay's own SOURCE name for a synthesized row,
+    /// kept separately because `row_id` may be minted away from it on collision —
+    /// and then the source name is the only thing that still recognises the row
+    /// across a later read.
+    row_id_by_relay_item_id: HashMap<String, String>,
     /// Only ever used to disambiguate a minted id, so it need not be dense.
     synthetic_seq: u64,
     /// Probes performed by the last `resolve_index`. Test-only, and an atomic
@@ -83,6 +101,7 @@ impl Clone for ThreadTranscript {
             rows: self.rows.clone(),
             by_row_id: self.by_row_id.clone(),
             row_id_by_provider_item_id: self.row_id_by_provider_item_id.clone(),
+            row_id_by_relay_item_id: self.row_id_by_relay_item_id.clone(),
             synthetic_seq: self.synthetic_seq,
             #[cfg(test)]
             probe_visited: std::sync::atomic::AtomicUsize::new(0),
@@ -139,10 +158,21 @@ impl ThreadTranscript {
             .filter(|row_id| self.by_row_id.contains_key(*row_id))
     }
 
+    /// Resolve in the RELAY namespace: names the relay derived for rows it
+    /// synthesized. Deterministic across reads, which is what lets a later read
+    /// find the row again after `row_id` was minted away from that name.
+    pub(crate) fn resolve_relay(&self, relay_item_id: &str) -> Option<&str> {
+        self.row_id_by_relay_item_id
+            .get(relay_item_id)
+            .map(String::as_str)
+            .filter(|row_id| self.by_row_id.contains_key(*row_id))
+    }
+
     /// Resolve in the namespace the caller says it is holding.
     pub(crate) fn resolve_in(&self, space: IdSpace, id: &str) -> Option<&str> {
         match space {
             IdSpace::Provider => self.resolve_provider(id),
+            IdSpace::Relay => self.resolve_relay(id),
             IdSpace::Row => self.resolve_row(id),
         }
     }
@@ -158,17 +188,22 @@ impl ThreadTranscript {
         self.by_row_id.get(row_id).copied()
     }
 
-    /// Resolve an incoming history/page record to the row it belongs to.
+    /// Resolve an incoming history/page record to the row it belongs to, in
+    /// whichever namespace actually names it.
     ///
-    /// A record the provider named is matched in the PROVIDER namespace, the only
-    /// space where its identity means anything. A relay-synthesized record — a
-    /// per-turn diff re-derived from a read — carries no provider name and is
-    /// matched by its deterministic row key instead.
+    /// `row_id` is the LAST resort and only for a record carrying no source name at
+    /// all. An incoming record's `row_id` is an artifact of the temporary runtime
+    /// that materialized it — it may have been minted on a collision there — so
+    /// treating it as a stable identity merges the record into whatever row happens
+    /// to hold that spelling here.
     pub(crate) fn resolve_incoming(&self, record: &TranscriptRecord) -> Option<&str> {
-        match record.provider_item_id.as_deref() {
-            Some(provider_item_id) => self.resolve_provider(provider_item_id),
-            None => self.resolve_row(&record.row_id),
+        if let Some(provider_item_id) = record.provider_item_id.as_deref() {
+            return self.resolve_provider(provider_item_id);
         }
+        if let Some(relay_item_id) = record.relay_item_id.as_deref() {
+            return self.resolve_relay(relay_item_id);
+        }
+        self.resolve_row(&record.row_id)
     }
 
     pub(crate) fn resolve_row_index(&self, row_id: &str) -> Option<usize> {
@@ -227,6 +262,11 @@ impl ThreadTranscript {
         self.get_row(row_id)?.provider_item_id.as_deref()
     }
 
+    /// The relay's own source name for this row, if it synthesized it.
+    pub(crate) fn relay_item_id(&self, row_id: &str) -> Option<&str> {
+        self.get_row(row_id)?.relay_item_id.as_deref()
+    }
+
     /// A row id that is free right now, preferring `candidate`.
     ///
     /// Adopting the first id a row is seen under is what keeps the wire value
@@ -280,16 +320,44 @@ impl ThreadTranscript {
         true
     }
 
+    /// Record that `relay_item_id` is this row's relay-derived source name.
+    ///
+    /// Same exclusivity as the provider binder: one source name never names two
+    /// rows, so a second claim on a live name is refused rather than honoured.
+    pub(crate) fn bind_relay_item_id(&mut self, row_id: &str, relay_item_id: &str) -> bool {
+        if relay_item_id.is_empty() || !self.by_row_id.contains_key(row_id) {
+            return false;
+        }
+        if let Some(existing) = self.row_id_by_relay_item_id.get(relay_item_id) {
+            if existing != row_id && self.by_row_id.contains_key(existing) {
+                return false;
+            }
+        }
+        self.row_id_by_relay_item_id
+            .insert(relay_item_id.to_string(), row_id.to_string());
+        if let Some(index) = self.by_row_id.get(row_id).copied() {
+            let row = &mut self.rows[index];
+            if row.relay_item_id.is_none() {
+                row.relay_item_id = Some(relay_item_id.to_string());
+            }
+        }
+        true
+    }
+
     /// Append a row, minting a free id if the one it carries is taken.
     /// Returns the row id it actually landed under.
     pub(crate) fn push(&mut self, mut record: TranscriptRecord) -> String {
         let row_id = self.mint_row_id(&record.row_id);
         record.row_id = row_id.clone();
         let provider_item_id = record.provider_item_id.clone();
+        let relay_item_id = record.relay_item_id.clone();
         self.by_row_id.insert(row_id.clone(), self.rows.len());
         self.rows.push(record);
         if let Some(provider_item_id) = provider_item_id {
             self.bind_provider_item_id(&row_id, &provider_item_id);
+        }
+        if let Some(relay_item_id) = relay_item_id {
+            self.bind_relay_item_id(&row_id, &relay_item_id);
         }
         row_id
     }
@@ -312,8 +380,10 @@ impl ThreadTranscript {
         let outcome = edit(&mut self.rows[index]);
         identity.restore(&mut self.rows[index]);
         if let Some(provider_item_id) = self.rows[index].provider_item_id.clone() {
-            let row_id = identity.row_id.clone();
-            self.bind_provider_item_id(&row_id, &provider_item_id);
+            self.bind_provider_item_id(&identity.row_id, &provider_item_id);
+        }
+        if let Some(relay_item_id) = self.rows[index].relay_item_id.clone() {
+            self.bind_relay_item_id(&identity.row_id, &relay_item_id);
         }
         Some(outcome)
     }
@@ -362,6 +432,7 @@ impl ThreadTranscript {
         self.rows.clear();
         self.by_row_id.clear();
         self.row_id_by_provider_item_id.clear();
+        self.row_id_by_relay_item_id.clear();
     }
 
     pub(crate) fn rows(&self) -> &[TranscriptRecord] {
@@ -375,10 +446,17 @@ impl ThreadTranscript {
         }
         self.row_id_by_provider_item_id
             .retain(|_, row_id| self.by_row_id.contains_key(row_id));
+        self.row_id_by_relay_item_id
+            .retain(|_, row_id| self.by_row_id.contains_key(row_id));
         for row in self.rows.iter() {
             if let Some(provider_item_id) = row.provider_item_id.as_ref() {
                 self.row_id_by_provider_item_id
                     .entry(provider_item_id.clone())
+                    .or_insert_with(|| row.row_id.clone());
+            }
+            if let Some(relay_item_id) = row.relay_item_id.as_ref() {
+                self.row_id_by_relay_item_id
+                    .entry(relay_item_id.clone())
                     .or_insert_with(|| row.row_id.clone());
             }
         }
@@ -411,7 +489,13 @@ impl ThreadTranscript {
         for (provider_item_id, row_id) in &self.row_id_by_provider_item_id {
             assert!(
                 self.by_row_id.contains_key(row_id),
-                "alias {provider_item_id} points at a row that is gone"
+                "provider alias {provider_item_id} points at a row that is gone"
+            );
+        }
+        for (relay_item_id, row_id) in &self.row_id_by_relay_item_id {
+            assert!(
+                self.by_row_id.contains_key(row_id),
+                "relay alias {relay_item_id} points at a row that is gone"
             );
         }
     }
@@ -426,6 +510,7 @@ mod tests {
         TranscriptRecord {
             row_id: row_id.to_string(),
             provider_item_id: None,
+            relay_item_id: None,
             kind: TranscriptEntryKind::AgentText,
             text: Some(text.to_string()),
             status: "completed".to_string(),
@@ -545,6 +630,7 @@ mod tests {
         // A provider row that calls itself `x` cannot take the key, so it mints.
         let provider_row = store.push(TranscriptRecord {
             provider_item_id: Some("x".to_string()),
+            relay_item_id: None,
             ..row("x", "the provider's row")
         });
 

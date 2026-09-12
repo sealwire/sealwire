@@ -2479,6 +2479,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                 .push(crate::state::relay::TranscriptRecord {
                     row_id: format!("item-{index}"),
                     provider_item_id: None,
+                    relay_item_id: None,
                     kind: crate::protocol::TranscriptEntryKind::ToolCall,
                     text: None,
                     status: status.to_string(),
@@ -2503,6 +2504,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                 .push(crate::state::relay::TranscriptRecord {
                     row_id: format!("item-{index}"),
                     provider_item_id: None,
+                    relay_item_id: None,
                     kind: crate::protocol::TranscriptEntryKind::ToolCall,
                     text: None,
                     status: "completed".to_string(),
@@ -2856,6 +2858,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     .push(crate::state::relay::TranscriptRecord {
                         row_id: format!("history-{index}"),
                         provider_item_id: None,
+                        relay_item_id: None,
                         kind: crate::protocol::TranscriptEntryKind::AgentText,
                         text: Some("older tail that will not be rebuilt".to_string()),
                         status: "completed".to_string(),
@@ -3129,6 +3132,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                 .push(crate::state::relay::TranscriptRecord {
                     row_id: "inserted-first-finished-last".to_string(),
                     provider_item_id: None,
+                    relay_item_id: None,
                     kind: crate::protocol::TranscriptEntryKind::ToolCall,
                     text: None,
                     status: "completed".to_string(),
@@ -3143,6 +3147,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                 .push(crate::state::relay::TranscriptRecord {
                     row_id: "inserted-second-finished-first".to_string(),
                     provider_item_id: None,
+                    relay_item_id: None,
                     kind: crate::protocol::TranscriptEntryKind::ToolCall,
                     text: None,
                     status: "completed".to_string(),
@@ -3491,6 +3496,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     .push(crate::state::relay::TranscriptRecord {
                         row_id: format!("chatter-{index}"),
                         provider_item_id: None,
+                        relay_item_id: None,
                         kind: crate::protocol::TranscriptEntryKind::AgentText,
                         text: Some("still working, no files touched".to_string()),
                         status: "completed".to_string(),
@@ -6000,6 +6006,11 @@ tree; got {}",
         /// provider-named — the `turn-diff:*` / `turn-error:*` rows a real adapter
         /// invents while parsing a read.
         relay_named_read_ids: Arc<Mutex<std::collections::HashSet<String>>>,
+        /// An exact read, entry by entry. Overrides `thread_transcripts` when set —
+        /// needed wherever two entries share a spelling, because then an id-keyed
+        /// set cannot say which one the adapter invented.
+        thread_read_entries:
+            Arc<Mutex<HashMap<String, Vec<crate::provider::ProviderTranscriptEntry>>>>,
         /// Every `up_to_item_id` a native fork was actually asked for.
         fork_points: Arc<Mutex<Vec<Option<String>>>>,
         // Models a provider (Claude, real Codex) that turns the initial prompt
@@ -6054,6 +6065,7 @@ tree; got {}",
                 list_models_returns_empty: Arc::new(AtomicBool::new(false)),
                 native_fork: Arc::new(AtomicBool::new(false)),
                 relay_named_read_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+                thread_read_entries: Arc::new(Mutex::new(HashMap::new())),
                 fork_points: Arc::new(Mutex::new(Vec::new())),
                 consumes_initial_prompt: Arc::new(AtomicBool::new(false)),
                 start_turn_should_fail: Arc::new(AtomicBool::new(false)),
@@ -6238,6 +6250,20 @@ tree; got {}",
                 .get(thread_id)
                 .cloned()
                 .unwrap_or_default();
+            if let Some(entries) = self
+                .thread_read_entries
+                .lock()
+                .await
+                .get(thread_id)
+                .cloned()
+            {
+                return Ok(crate::provider::ThreadSyncData {
+                    thread,
+                    status: "idle".to_string(),
+                    active_flags: Vec::new(),
+                    transcript: entries,
+                });
+            }
             let relay_named = self.relay_named_read_ids.lock().await.clone();
             let transcript = transcript
                 .into_iter()
@@ -10473,6 +10499,166 @@ tree; got {}",
             !replayed.contains("cut after the branch"),
             "replay must stop AT the branch point: {replayed}"
         );
+    }
+
+    /// A read containing a provider item `x` AND a synthesized row `x`, with each
+    /// published row forked in turn.
+    ///
+    /// Matching the fork point by spelling picks whichever `x` comes first, so the
+    /// provider row could truncate at the synthetic one — and the synthetic row,
+    /// whose `row_id` was minted to `x#row1`, could not be found at all.
+    ///
+    /// `synthetic_first` also flips which `x` is the tip, so the whole-thread
+    /// normalization cannot widen a fork by accident either.
+    async fn fork_each_of_two_same_spelling_rows(synthetic_first: bool) {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        codex.native_fork.store(true, Ordering::Relaxed);
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = codex.thread_summary("codex-source", cwd);
+        {
+            let mut threads = codex.threads.lock().await;
+            threads.insert(source.id.clone(), source.clone());
+        }
+        let view = |item_id: &str, text: &str| crate::protocol::TranscriptEntryView {
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some(item_id.to_string()),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some(text.to_string()),
+            status: "completed".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
+        };
+        let synthetic =
+            crate::provider::ProviderTranscriptEntry::relay_named(view("x", "the relay's summary"));
+        let provider_entry = crate::provider::ProviderTranscriptEntry::provider_named(view(
+            "x",
+            "the provider's row",
+        ));
+        let entries = if synthetic_first {
+            vec![synthetic, provider_entry]
+        } else {
+            vec![provider_entry, synthetic]
+        };
+        {
+            let mut reads = codex.thread_read_entries.lock().await;
+            reads.insert(source.id.clone(), entries);
+        }
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.threads = vec![source.clone()];
+        }
+        // The runtime holds both rows, exactly as a client would have been shown
+        // them: the synthetic one keyed `x`, the provider one minted away from it.
+        let (synthetic_row_id, provider_row_id) = {
+            let mut relay = app.relay.write().await;
+            relay.upsert_relay_named_item_for_thread(
+                &source.id,
+                "x".to_string(),
+                crate::protocol::TranscriptEntryKind::AgentText,
+                Some("the relay's summary".to_string()),
+                "completed".to_string(),
+                Some("turn-1".to_string()),
+                None,
+            );
+            relay.upsert_transcript_item_for_thread(
+                &source.id,
+                "x".to_string(),
+                crate::protocol::TranscriptEntryKind::AgentText,
+                Some("the provider's row".to_string()),
+                "completed".to_string(),
+                Some("turn-1".to_string()),
+                None,
+            );
+            let runtime = relay.runtime_for_thread(&source.id).expect("runtime");
+            (
+                runtime
+                    .transcript
+                    .resolve_relay("x")
+                    .expect("relay namespace")
+                    .to_string(),
+                runtime
+                    .transcript
+                    .resolve_provider("x")
+                    .expect("provider namespace")
+                    .to_string(),
+            )
+        };
+        assert_ne!(synthetic_row_id, provider_row_id);
+
+        let fork_input = |up_to: &str| ForkSessionInput {
+            source_thread_id: source.id.clone(),
+            up_to_item_id: Some(up_to.to_string()),
+            cwd: Some(cwd.to_string()),
+            initial_prompt: Some("carry on".to_string()),
+            model: Some("codex-model".to_string()),
+            approval_policy: None,
+            sandbox: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            provider: Some("codex".to_string()),
+            project_id: None,
+        };
+
+        // The SYNTHETIC row: replayed, cut at its own entry, never sent natively.
+        app.fork_session(fork_input(&synthetic_row_id))
+            .await
+            .expect("a synthesized row is a real branch point");
+        assert!(
+            codex.fork_points.lock().await.is_empty(),
+            "a synthesized row must never be described to the provider"
+        );
+        let replayed = codex
+            .turn_texts
+            .lock()
+            .await
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            replayed.contains("the relay's summary"),
+            "replay must reach the synthetic branch point: {replayed}"
+        );
+        if synthetic_first {
+            assert!(
+                !replayed.contains("the provider's row"),
+                "and must cut everything after it: {replayed}"
+            );
+        }
+
+        // The PROVIDER row: native, described with the provider's own id — or with
+        // no id at all when it is the tip, which names the same branch.
+        app.fork_session(fork_input(&provider_row_id))
+            .await
+            .expect("a provider-named row forks natively");
+        let points = codex.fork_points.lock().await.clone();
+        assert_eq!(points.len(), 1, "exactly one native fork was attempted");
+        let expected = if synthetic_first {
+            // provider entry is last -> tip -> whole-thread fork
+            None
+        } else {
+            Some("x".to_string())
+        };
+        assert_eq!(
+            points[0], expected,
+            "the provider must be asked to branch at its own id (or the whole thread \
+             when the point is the tip), never at the relay's spelling"
+        );
+    }
+
+    #[tokio::test]
+    async fn forking_same_spelling_rows_with_the_synthetic_one_first() {
+        fork_each_of_two_same_spelling_rows(true).await;
+    }
+
+    #[tokio::test]
+    async fn forking_same_spelling_rows_with_the_provider_one_first() {
+        fork_each_of_two_same_spelling_rows(false).await;
     }
 
     /// The contrast: a provider-named point still forks natively, and the id the
@@ -19954,6 +20140,7 @@ settings update: {error}"
             .push(crate::state::relay::TranscriptRecord {
                 row_id: item_id,
                 provider_item_id: None,
+                relay_item_id: None,
                 kind: crate::protocol::TranscriptEntryKind::ToolCall,
                 text: None,
                 status: "completed".to_string(),
@@ -19990,6 +20177,7 @@ settings update: {error}"
                 .push(crate::state::relay::TranscriptRecord {
                     row_id: item_id,
                     provider_item_id: None,
+                    relay_item_id: None,
                     kind: crate::protocol::TranscriptEntryKind::AgentText,
                     text: Some("still working, no files touched".to_string()),
                     status: "completed".to_string(),
