@@ -1,3 +1,4 @@
+import { transcriptRowKey } from "./transcript-row-key.js";
 // Fork affordance placement.
 //
 // A block is everything between two user messages. The only branch point worth
@@ -22,7 +23,7 @@ export function computeForkableItemIds(entries = []) {
   // (offering the earlier message would be a mid-block fork).
   let lastAgent = null;
   const flush = () => {
-    const itemId = lastAgent?.item_id || lastAgent?.id || "";
+    const itemId = transcriptRowKey(lastAgent) || "";
     if (itemId) forkable.add(itemId);
     lastAgent = null;
   };
@@ -43,7 +44,7 @@ export function computeForkableItemIds(entries = []) {
 
 export function isForkableEntry(entry, options) {
   if (!options?.canFork) return false;
-  const itemId = entry?.item_id || entry?.id || "";
+  const itemId = transcriptRowKey(entry) || "";
   if (!itemId) return false;
   return Boolean(options?.forkableItemIds?.has(itemId));
 }

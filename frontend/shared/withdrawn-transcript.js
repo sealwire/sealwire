@@ -1,3 +1,4 @@
+import { transcriptRowKey } from "./transcript-row-key.js";
 // A withdrawn row is delivered but never rendered: the send it represents was
 // definitively rejected, and the server keeps the row as a tombstone because a
 // snapshot merge can only add and update — it cannot express absence.
@@ -26,8 +27,9 @@ export function visibleTranscriptEntries(entries) {
   for (const entry of entries) {
     if (transcriptEntryIsWithdrawn(entry)) {
       anyWithdrawn = true;
-      if (entry.item_id) {
-        (withdrawnIds ??= new Set()).add(entry.item_id);
+      const key = transcriptRowKey(entry);
+      if (key) {
+        (withdrawnIds ??= new Set()).add(key);
       }
     }
   }
@@ -37,7 +39,7 @@ export function visibleTranscriptEntries(entries) {
   return entries.filter(
     (entry) =>
       !transcriptEntryIsWithdrawn(entry)
-      && !(entry?.item_id && withdrawnIds?.has(entry.item_id))
+      && !(transcriptRowKey(entry) && withdrawnIds?.has(transcriptRowKey(entry)))
   );
 }
 
@@ -48,15 +50,17 @@ export function absorbWithdrawnById(keptEntries, droppedEntries) {
   }
   let withdrawnIds = null;
   for (const entry of droppedEntries) {
-    if (transcriptEntryIsWithdrawn(entry) && entry.item_id) {
-      (withdrawnIds ??= new Set()).add(entry.item_id);
+    if (transcriptEntryIsWithdrawn(entry) && transcriptRowKey(entry)) {
+      (withdrawnIds ??= new Set()).add(transcriptRowKey(entry));
     }
   }
   if (!withdrawnIds) {
     return keptEntries;
   }
   return keptEntries.map((entry) =>
-    entry?.item_id && withdrawnIds.has(entry.item_id) && entry.withdrawn !== true
+    transcriptRowKey(entry)
+    && withdrawnIds.has(transcriptRowKey(entry))
+    && entry.withdrawn !== true
       ? { ...entry, withdrawn: true }
       : entry
   );

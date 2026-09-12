@@ -1,4 +1,9 @@
-import { transcriptPageIsFromAnotherGeneration } from "../../shared/transcript-generation.js";
+import {
+  transcriptDeltaIsFromAnotherGeneration,
+  transcriptDeltaMatchesGeneration,
+  transcriptPageIsFromAnotherGeneration,
+} from "../../shared/transcript-generation.js";
+import { transcriptRowKey } from "../../shared/transcript-row-key.js";
 import { openSessionStream, sessionStreamUrl } from "../../session-stream.js";
 import { applyDeltaToViewOnlyPin } from "../view-only-thread.js";
 import {
@@ -350,10 +355,20 @@ export function createStreamController(ctx) {
     }
     // These entries belong to the run that minted their ids. A delta from a newer run
     // names its target differently, so applying it here either misses (harmless) or
-    // appends a second row for a message already in this buffer.
+    // appends a second row for a message already in this buffer. Checked against the
+    // DELTA's own stamp as well as the live session's, so a delta that crosses a
+    // restart is refused even while the session still reads as the old run.
     if (
       (state.orchestratorEntriesGeneration || "")
       !== (state.session?.transcript_generation || "")
+    ) {
+      return false;
+    }
+    if (
+      !transcriptDeltaMatchesGeneration(
+        state.orchestratorEntriesGeneration,
+        event?.transcript_generation
+      )
     ) {
       return false;
     }
@@ -412,7 +427,7 @@ export function createStreamController(ctx) {
   }
 
   function applyLocalTranscriptEntryDelta(event) {
-    if (!event?.item_id || !Array.isArray(state.session?.transcript)) {
+    if (!transcriptRowKey(event) || !Array.isArray(state.session?.transcript)) {
       return;
     }
     const currentThreadId = state.session.active_thread_id || null;
@@ -445,8 +460,15 @@ export function createStreamController(ctx) {
     // of once per token — this call only bumps transcript_revision.
     // state.session.transcript trails the window by up to one render until then;
     // every reader that needs the newest text reads the window directly.
+    // The active session is this delta's destination now, so it is the generation
+    // that must match. Refusing costs nothing to recover from: the next snapshot
+    // for this thread carries the whole tail, so there is nothing to schedule.
+    if (transcriptDeltaIsFromAnotherGeneration(state.session, event)) {
+      return;
+    }
     if (transcriptWindowIsLoaded(state, currentThreadId)) {
-      const existingWindowEntry = state.transcriptHydrationEntries.get(event.item_id);
+      // O(1): the row key straight into the window map.
+      const existingWindowEntry = state.transcriptHydrationEntries.get(transcriptRowKey(event));
       const outcome = reduceTranscriptDeltaEvent({
         session: state.session,
         event,
@@ -487,10 +509,11 @@ export function createStreamController(ctx) {
       if (!applied) {
         applied = applyAcceptedEmptyOffsetlessDeltaToWindow(event, outcome);
       }
-      const textLengthAfter = (state.transcriptHydrationEntries.get(event.item_id)?.text ?? "").length;
+      const textLengthAfter =
+        (state.transcriptHydrationEntries.get(transcriptRowKey(event))?.text ?? "").length;
       if (applied) {
         observeAppliedActiveThreadDelta({
-          itemId: event.item_id,
+          itemId: transcriptRowKey(event),
           threadId: currentThreadId,
           turnId: event.turn_id || null,
           textLengthBefore,
@@ -570,7 +593,7 @@ export function createStreamController(ctx) {
     // every site that copies the whole array.
     __recordTranscriptFullRebuild();
     observeAppliedActiveThreadDelta({
-      itemId: event.item_id,
+      itemId: transcriptRowKey(event),
       threadId: currentThreadId,
       turnId: event.turn_id || null,
       textLengthBefore: outcome.textLengthBefore,
@@ -588,7 +611,7 @@ export function createStreamController(ctx) {
     ) {
       return false;
     }
-    const itemId = outcome.itemId || event?.item_id;
+    const itemId = outcome.itemId || transcriptRowKey(event);
     const entries = state.transcriptHydrationEntries;
     const order = state.transcriptHydrationOrder;
     if (!itemId || !(entries instanceof Map) || !Array.isArray(order)) {
@@ -639,7 +662,7 @@ export function createStreamController(ctx) {
     if (!state.session || !Array.isArray(state.session.transcript)) {
       return;
     }
-    if (!(event.entry?.item_id || event.item_id)) {
+    if (!(transcriptRowKey(event.entry) || transcriptRowKey(event))) {
       return;
     }
     // Only now is this function committed to reading state.session.transcript

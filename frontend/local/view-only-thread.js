@@ -26,6 +26,7 @@ import {
 } from "../shared/session-view-model.js";
 import { reduceTranscriptDeltaEvent } from "../shared/transcript-event-reducer.js";
 import { transcriptRowKey } from "../shared/transcript-row-key.js";
+import { transcriptDeltaMatchesGeneration } from "../shared/transcript-generation.js";
 import {
   mergeWindowRowsInPlace,
   rowHasOrderKey,
@@ -125,7 +126,17 @@ export function resolveViewOnlyPinWasWorkingAfterFetch({
  * @returns {object|null}
  */
 export function applyDeltaToViewOnlyPin(pin, event) {
-  if (!pin || !event?.item_id || !Array.isArray(pin.entries)) {
+  if (!pin || !transcriptRowKey(event) || !Array.isArray(pin.entries)) {
+    return pin;
+  }
+  // Fenced against THIS pin's run, not the live session's. A pinned thread keeps
+  // the transcript of the run that minted its ids; a delta from a newer run names
+  // its target differently, so applying it either misses or appends a second row
+  // for a message already here. Refusing is complete on its own — the pin's own
+  // refresh carries the whole tail — so nothing is scheduled and nothing loops.
+  if (
+    !transcriptDeltaMatchesGeneration(pin.relayGeneration, event?.transcript_generation)
+  ) {
     return pin;
   }
   const outcome = reduceTranscriptDeltaEvent({
@@ -344,14 +355,14 @@ export function mergeOlderViewOnlyPage(pin, page) {
   }
 
   const existingIds = new Set(
-    priorEntries.map((entry) => entry?.item_id).filter(Boolean)
+    priorEntries.map((entry) => transcriptRowKey(entry)).filter(Boolean)
   );
   const older = (page.entries || []).filter(
-    (entry) => !entry?.item_id || !existingIds.has(entry.item_id)
+    (entry) => !transcriptRowKey(entry) || !existingIds.has(transcriptRowKey(entry))
   );
   // A dropped duplicate may carry the tombstone the pin's copy predates.
   const overlapping = (page.entries || []).filter(
-    (entry) => entry?.item_id && existingIds.has(entry.item_id)
+    (entry) => transcriptRowKey(entry) && existingIds.has(transcriptRowKey(entry))
   );
   return {
     ...pin,
@@ -425,11 +436,11 @@ export function mergeRefreshedViewOnlyPage(pin, page) {
   // Split what the pin holds around the window this page covers. The page is
   // authoritative INSIDE its window and says nothing outside it, so entries the
   // delta stream appended after the page was built are still ours to keep.
-  const freshIds = new Set(freshEntries.map((entry) => entry?.item_id).filter(Boolean));
+  const freshIds = new Set(freshEntries.map((entry) => transcriptRowKey(entry)).filter(Boolean));
   let firstOverlap = -1;
   let lastOverlap = -1;
   priorEntries.forEach((entry, index) => {
-    if (entry?.item_id && freshIds.has(entry.item_id)) {
+    if (transcriptRowKey(entry) && freshIds.has(transcriptRowKey(entry))) {
       if (firstOverlap === -1) firstOverlap = index;
       lastOverlap = index;
     }
@@ -458,10 +469,10 @@ export function mergeRefreshedViewOnlyPage(pin, page) {
   } else {
     prefix = priorEntries
       .slice(0, firstOverlap)
-      .filter((entry) => !entry?.item_id || !freshIds.has(entry.item_id));
+      .filter((entry) => !transcriptRowKey(entry) || !freshIds.has(transcriptRowKey(entry)));
     tail = priorEntries
       .slice(lastOverlap + 1)
-      .filter((entry) => !entry?.item_id || !freshIds.has(entry.item_id));
+      .filter((entry) => !transcriptRowKey(entry) || !freshIds.has(transcriptRowKey(entry)));
   }
 
   // The bound the `historyExtended` gate was always for: transport pages are

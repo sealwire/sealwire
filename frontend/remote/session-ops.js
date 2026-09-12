@@ -1,4 +1,8 @@
-import { transcriptPageIsFromAnotherGeneration } from "../shared/transcript-generation.js";
+import {
+  transcriptDeltaIsFromAnotherGeneration,
+  transcriptPageIsFromAnotherGeneration,
+} from "../shared/transcript-generation.js";
+import { transcriptRowKey } from "../shared/transcript-row-key.js";
 import {
   dispatchOrRecover,
   dispatchRemoteActionWithoutReply,
@@ -336,11 +340,13 @@ export async function repairRemoteWorkspace(threadId) {
 
 export function applyTranscriptDelta({
   thread_id,
+  transcript_generation,
   base_revision,
   revision,
   entry_seq,
   order_seq,
   server_time,
+  row_id,
   item_id,
   turn_id,
   delta,
@@ -380,6 +386,18 @@ export function applyTranscriptDelta({
     }
   }
 
+  // Fenced against the DESTINATION, after routing and before anything mutates:
+  // a delta from another run must not append to this one's transcript, advance
+  // its revision, or re-stamp its buffer. Refusing is safe on its own — the next
+  // snapshot for this thread carries the whole tail — so there is nothing to
+  // schedule here and no way to loop.
+  if (transcriptDeltaIsFromAnotherGeneration(currentSession, { transcript_generation })) {
+    renderLog(
+      `[transcript-delta] refused generation thread=${thread_id} row=${row_id || item_id || "-"}`
+    );
+    return;
+  }
+
   const transcript = currentSession.transcript;
   if (!Array.isArray(transcript)) return;
   // The rule: write the window only when it is loaded for THIS delta's own
@@ -404,11 +422,13 @@ export function applyTranscriptDelta({
   const viewedThreadId = commit === commitViewedSession ? (currentThreadId || thread_id) : null;
   const deltaEvent = {
     thread_id,
+    transcript_generation,
     base_revision,
     revision,
     entry_seq,
     order_seq,
     server_time,
+    row_id,
     item_id,
     turn_id,
     delta,
@@ -416,8 +436,10 @@ export function applyTranscriptDelta({
     kind,
     text_offset,
   };
+  // O(1): the row key straight into the window map, never a scan.
+  const deltaRowKey = transcriptRowKey(deltaEvent);
   const existingWindowEntry = windowLoaded
-    ? state.transcriptHydrationEntries.get(item_id)
+    ? state.transcriptHydrationEntries.get(deltaRowKey)
     : undefined;
   const outcome = reduceTranscriptDeltaEvent({
     session: currentSession,
@@ -739,7 +761,7 @@ function splitTranscriptArrayById(transcript) {
   const positionless = [];
   for (let index = 0; index < transcript.length; index += 1) {
     const entry = transcript[index];
-    const itemId = entry?.item_id;
+    const itemId = transcriptRowKey(entry);
     if (!itemId) {
       positionless.push({ index, entry });
       continue;
@@ -759,7 +781,9 @@ function joinTranscriptArrayById(originalTranscript, positionless, order, entrie
   const rebuilt = order.map((itemId) => entries.get(itemId)).filter(Boolean);
   for (const { index, entry } of positionless) {
     const anchorId = nextAddressableItemId(originalTranscript, index + 1);
-    const at = anchorId ? rebuilt.findIndex((candidate) => candidate?.item_id === anchorId) : -1;
+    const at = anchorId
+      ? rebuilt.findIndex((candidate) => transcriptRowKey(candidate) === anchorId)
+      : -1;
     if (at < 0) {
       rebuilt.push(entry);
     } else {
@@ -771,7 +795,7 @@ function joinTranscriptArrayById(originalTranscript, positionless, order, entrie
 
 function nextAddressableItemId(transcript, fromIndex) {
   for (let index = fromIndex; index < transcript.length; index += 1) {
-    const itemId = transcript[index]?.item_id;
+    const itemId = transcriptRowKey(transcript[index]);
     if (itemId) {
       return itemId;
     }
@@ -800,7 +824,7 @@ function syncTranscriptWindowWithRepairedEntries(state, threadId, repairedEntrie
     return;
   }
   for (const entry of repairedEntries) {
-    const itemId = entry?.item_id;
+    const itemId = transcriptRowKey(entry);
     if (!itemId || !entries.has(itemId)) {
       continue;
     }
@@ -2252,6 +2276,9 @@ export async function startRemoteWorkflow({
         reviewer_model: reviewerModel || null,
         reviewer_instructions: reviewerInstructions || null,
         max_rounds: maxRounds || 2,
+        // A transcript ROW anchor, despite the legacy wire name: it names the row the
+        // workflow card is placed under. The value must be a row key
+        // (`transcriptRowKey`), never a provider id.
         anchor_item_id: anchorItemId || null,
         parent_thread_id: parentThreadId || null,
       },

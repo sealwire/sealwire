@@ -1340,6 +1340,20 @@ pub struct PendingPairingRequestView {
 pub struct AskUserQuestionRequestView {
     pub request_id: String,
     pub tool_use_id: String,
+    /// The transcript ROW this question's tool call lives on, resolved by the
+    /// relay from its own typed provider name (`tool:<tool_use_id>`).
+    ///
+    /// Clients match a pending card to its row with this. They used to derive it
+    /// by slicing `tool:` off the row key, which only worked while a row key
+    /// happened to be spelled that way — a row that had to mint (`tool:x#row1`)
+    /// silently matched nothing and the question rendered as a dead read-only
+    /// card. The relay owns this translation; the client never reconstructs it.
+    ///
+    /// Absent when the relay cannot place the row (a thread with no runtime
+    /// loaded, or a question whose tool row has not arrived yet), and on a relay
+    /// too old to send it — clients fall back to the old derivation then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_row_id: Option<String>,
     pub thread_id: String,
     pub requested_at: u64,
     #[serde(default)]
@@ -1355,6 +1369,12 @@ pub struct AskUserQuestionRequestView {
 }
 
 impl AskUserQuestionRequestView {
+    /// Attach the transcript row this question's tool call lives on.
+    pub fn with_transcript_row(mut self, transcript_row_id: Option<String>) -> Self {
+        self.transcript_row_id = transcript_row_id;
+        self
+    }
+
     pub fn with_inline_questions(
         request_id: String,
         tool_use_id: String,
@@ -1367,6 +1387,8 @@ impl AskUserQuestionRequestView {
         Self {
             request_id,
             tool_use_id,
+            // Resolved by the relay at snapshot time — see `with_transcript_row`.
+            transcript_row_id: None,
             thread_id,
             requested_at,
             question_count,

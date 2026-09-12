@@ -3759,7 +3759,11 @@ impl RelayState {
                 });
                 pending
                     .into_iter()
-                    .map(|question| question.to_view())
+                    .map(|question| {
+                        let row_id = self
+                            .ask_user_transcript_row_id(&question.thread_id, &question.tool_use_id);
+                        question.to_view().with_transcript_row(row_id)
+                    })
                     .collect::<Vec<_>>()
             },
             transcript_truncated: false,
@@ -5178,6 +5182,29 @@ impl RelayState {
     /// when a broker IS configured the delta backlog is capped (dropped deltas are
     /// recoverable — the broker republishes an authoritative snapshot on reconnect).
     /// Pairing results have their own retention semantics and are always kept.
+    /// The transcript row a pending question's tool call lives on.
+    ///
+    /// Resolved in the PROVIDER namespace, because `tool:<tool_use_id>` is the name
+    /// the bridge recorded for that row — not necessarily the row's own key, which
+    /// may have had to mint. Resolved fresh on every snapshot so a question that
+    /// arrives before its tool row, or one on a background thread, still finds it
+    /// once the row exists.
+    pub(crate) fn ask_user_transcript_row_id(
+        &self,
+        thread_id: &str,
+        tool_use_id: &str,
+    ) -> Option<String> {
+        let runtime = self.runtime_for_thread(thread_id)?;
+        let provider_name = format!("tool:{tool_use_id}");
+        runtime
+            .transcript
+            .resolve_provider(&provider_name)
+            // A bridge that named the row itself (ACP mints its own ordinals) put
+            // the same string in the row namespace instead.
+            .or_else(|| runtime.transcript.resolve_row(&provider_name))
+            .map(str::to_string)
+    }
+
     pub fn queue_broker_message(&mut self, mut message: BrokerPendingMessage) {
         if let BrokerPendingMessage::TranscriptDelta(delta) = &mut message {
             // Stamped HERE, not at the producers: this is the single funnel, so the

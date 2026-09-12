@@ -1,3 +1,4 @@
+import { transcriptRowKey } from "./transcript-row-key.js";
 // Guards a snapshot against regressing already-visible text — independent of
 // the hydration window, unlike restoreHydratedTranscript (which is a no-op
 // returning the snapshot verbatim whenever the window has never loaded for
@@ -65,12 +66,12 @@ export function preserveVisibleTranscriptText(currentSession, snapshot) {
 
   const currentByItemId = new Map(
     currentSession.transcript
-      .filter((entry) => entry?.item_id)
-      .map((entry) => [entry.item_id, entry])
+      .filter((entry) => transcriptRowKey(entry))
+      .map((entry) => [transcriptRowKey(entry), entry])
   );
   let changed = false;
   const transcript = snapshot.transcript.map((entry) => {
-    const current = currentByItemId.get(entry?.item_id);
+    const current = currentByItemId.get(transcriptRowKey(entry));
     let resolved = selectVisibleSnapshotEntry(current, entry);
     // Absorbing: an out-of-order snapshot serialized before the withdrawal must
     // not resurrect a row this client already saw withdrawn.

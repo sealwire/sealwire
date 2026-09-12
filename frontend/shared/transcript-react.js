@@ -116,11 +116,11 @@ function transcriptEntryDomAttrs(
 }
 
 function resolveTranscriptDetailEntry(entry, options) {
-  if (!entry?.item_id || !options?.detailEntries) {
+  if (!transcriptRowKey(entry) || !options?.detailEntries) {
     return null;
   }
 
-  return options.detailEntries.get(entry.item_id) || null;
+  return options.detailEntries.get(transcriptRowKey(entry)) || null;
 }
 
 function ExpandableBlock({
@@ -228,7 +228,7 @@ function renderMessageActions(entry, showFork) {
           {
             type: "button",
             className: "message-fork-button",
-            "data-fork-from-item": entry.item_id || entry.id || "",
+            "data-fork-from-item": transcriptRowKey(entry) || "",
             title: "Fork from here",
             "aria-label": "Fork conversation from this message",
           },
@@ -261,7 +261,7 @@ function recordTranscriptEntryImplRender(itemId) {
 }
 
 function UserEntryImpl({ entry, isLatestUser = false, isJustPrepended = false }) {
-  recordTranscriptEntryImplRender(entry?.item_id);
+  recordTranscriptEntryImplRender(transcriptRowKey(entry));
   // `data-latest-user-message` is the anchor that the scroll layer uses to
   // pin a freshly sent user message to the top of the viewport.
   return h(
@@ -302,7 +302,7 @@ function messageAvatar(provider) {
 // transcript change, which would defeat React.memo for every agent message in
 // a long thread.
 function AgentEntryImpl({ entry, isJustPrepended = false, isForkable = false, provider = "" }) {
-  recordTranscriptEntryImplRender(entry?.item_id);
+  recordTranscriptEntryImplRender(transcriptRowKey(entry));
   return h(
     "article",
     transcriptEntryDomAttrs(entry, "chat-message chat-message-assistant", null, {
@@ -762,15 +762,33 @@ export function parseAskUserAnswers(resultPreview) {
   return answers;
 }
 
-// Find the pending AskUserQuestion request (from the live snapshot) that
-// matches the transcript entry the user is looking at. We match on tool_use_id
-// because the transcript entry's item_id (`tool:<tool_use_id>`) and the
-// snapshot's pending list both carry the same id.
-function findPendingAskUserRequest(itemId, pendingList) {
-  if (!itemId || !Array.isArray(pendingList) || !pendingList.length) {
+// Find the pending AskUserQuestion request (from the live snapshot) that matches
+// the transcript row the user is looking at.
+//
+// The relay tells us which ROW each pending question belongs to
+// (`transcript_row_id`), because only the relay can: it resolves the question's
+// `tool:<tool_use_id>` in its own provider namespace. This used to be done here
+// by slicing `tool:` off the row key, which worked only while a row key happened
+// to be spelled that way — a row that had to mint is keyed `tool:<id>#row1`, the
+// surgery yields `<id>#row1`, nothing matches, and the question renders as a dead
+// read-only card with unanswerable options.
+//
+// The old derivation survives ONLY as the fallback for a relay too old to send
+// the field. New code must not reach for it.
+export function findPendingAskUserRequest(rowKey, pendingList) {
+  if (!rowKey || !Array.isArray(pendingList) || !pendingList.length) {
     return null;
   }
-  const toolUseId = itemId.startsWith("tool:") ? itemId.slice(5) : itemId;
+  const byRow = pendingList.find((pending) => pending?.transcript_row_id === rowKey);
+  if (byRow) {
+    return byRow;
+  }
+  if (pendingList.some((pending) => pending?.transcript_row_id)) {
+    // This relay does send the field; it simply has no row for this question yet.
+    // Falling through to the legacy derivation here would match the WRONG row.
+    return null;
+  }
+  const toolUseId = rowKey.startsWith("tool:") ? rowKey.slice(5) : rowKey;
   return pendingList.find((pending) => pending?.tool_use_id === toolUseId) || null;
 }
 
@@ -795,7 +813,7 @@ function findPinnedAskUserItemIds(entries, pendingList) {
     if (!isAskUserQuestionTool(entry?.tool)) {
       continue;
     }
-    const itemId = entry.item_id || "";
+    const itemId = transcriptRowKey(entry) || "";
     const request = itemId && findPendingAskUserRequest(itemId, pendingList);
     if (request?.request_id) {
       (pinned ||= new Map()).set(itemId, request.request_id);
@@ -914,7 +932,7 @@ export function buildAskUserAnswersPayload(questions, perQuestionState) {
 // remote surface a snapshot can show `completed` while the question is genuinely
 // still pending, which would mislabel it "Answered" and make the options dead).
 function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
-  const itemId = entry.item_id || "";
+  const itemId = transcriptRowKey(entry) || "";
   const detailEntry = resolveTranscriptDetailEntry(entry, options);
   const toolEntry = detailEntry || entry;
   const tool = toolEntry.tool || entry.tool || {};
@@ -1366,7 +1384,7 @@ function AskUserQuestionStep({
 }
 
 function GenericToolEntry({ entry, isJustPrepended = false, options = null, inGroup = false }) {
-  const itemId = entry.item_id || "";
+  const itemId = transcriptRowKey(entry) || "";
   const expandKey = itemId ? `entry:${itemId}` : "";
   const expanded = Boolean(expandKey && options?.expandedKeys?.has(expandKey));
   const loading = Boolean(itemId && options?.loadingItemIds?.has(itemId));
@@ -1848,7 +1866,7 @@ export function groupToolEntries(entries) {
 }
 
 function groupExpandKey(group) {
-  const firstId = group?.entries?.[0]?.item_id || "";
+  const firstId = transcriptRowKey(group?.entries?.[0]) || "";
   return firstId ? `group:${firstId}` : "";
 }
 
@@ -2008,7 +2026,7 @@ function DiffGroupEntry({ group, options = null }) {
   const turnDiffRendersAsMember = expanded && !hasFileChangeMembers;
   const undoCandidate =
     !turnDiffRendersAsMember && options?.enableFileChangeActions && lastTurnDiffItemId
-      ? (group?.entries || []).find((entry) => entry?.item_id === lastTurnDiffItemId)
+      ? (group?.entries || []).find((entry) => transcriptRowKey(entry) === lastTurnDiffItemId)
       : null;
   // Same rule as the expanded entry: a patch git cannot apply must not offer the action.
   const undoEntry = canApplyPatch(undoCandidate?.tool) ? undoCandidate : null;
@@ -2042,7 +2060,7 @@ function DiffGroupEntry({ group, options = null }) {
     ),
     // Sibling of the toggle button (NOT a descendant) so clicking Undo never
     // bubbles into the group-toggle handler.
-    undoEntry ? turnDiffUndoAction(undoEntry.item_id, undoEntry?.tool?.apply_state) : null
+    undoEntry ? turnDiffUndoAction(transcriptRowKey(undoEntry), undoEntry?.tool?.apply_state) : null
   );
 }
 
@@ -2341,11 +2359,13 @@ function useJustPrependedItemIds(entries) {
     if (previousEntriesRef.current.length > 0 && entries.length > 0) {
       const prevIds = new Set();
       for (const entry of previousEntriesRef.current) {
-        if (entry?.item_id) prevIds.add(entry.item_id);
+        const prevKey = transcriptRowKey(entry);
+        if (prevKey) prevIds.add(prevKey);
       }
       let hasOverlap = false;
       for (const entry of entries) {
-        if (entry?.item_id && prevIds.has(entry.item_id)) {
+        const nextKey = transcriptRowKey(entry);
+        if (nextKey && prevIds.has(nextKey)) {
           hasOverlap = true;
           break;
         }
@@ -2509,7 +2529,7 @@ export function TranscriptContent({
     for (let index = entries.length - 1; index >= 0; index -= 1) {
       const entry = entries[index];
       if (entry?.tool?.item_type === "turnDiff") {
-        return entry.item_id || "";
+        return transcriptRowKey(entry) || "";
       }
     }
     return "";
@@ -2567,7 +2587,7 @@ export function TranscriptContent({
       );
       if (expanded) {
         item.entries.forEach((memberEntry, memberIndex) => {
-          const memberId = memberEntry.item_id || "";
+          const memberId = transcriptRowKey(memberEntry) || "";
           nodes.push(
             h(TranscriptEntry, {
               entry: memberEntry,
@@ -2605,7 +2625,7 @@ export function TranscriptContent({
         );
         const members = fileChangeMembers.length ? fileChangeMembers : item.entries;
         members.forEach((memberEntry, memberIndex) => {
-          const memberId = memberEntry.item_id || "";
+          const memberId = transcriptRowKey(memberEntry) || "";
           nodes.push(
             h(TranscriptEntry, {
               entry: memberEntry,
@@ -2680,7 +2700,7 @@ export function TranscriptContent({
         return null;
       }
       const pinnedEntry = pinnedAskUserEntries.get(requestId) || null;
-      const pinnedId = pinnedEntry?.item_id || "";
+      const pinnedId = transcriptRowKey(pinnedEntry) || "";
       return h(AskUserPendingCard, {
         key: `ask:${requestId}`,
         request,
@@ -2755,7 +2775,7 @@ export function findTranscriptEntryNodeIndex(nodes, entryId) {
   if (!entryId) return -1;
   return nodes.findIndex((node) => {
     const entry = node?.props?.entry;
-    return entry?.item_id === entryId || entry?.id === entryId;
+    return transcriptRowKey(entry) === entryId;
   });
 }
 

@@ -1,3 +1,4 @@
+import { transcriptRowKey } from "../../shared/transcript-row-key.js";
 import { transcript } from "../dom.js";
 import { displayedEntriesFrom, displayedThreadIdFrom } from "../displayed-thread.js";
 import { fetchTranscriptEntryDetailViaRequester } from "../../shared/transcript-entry-detail.js";
@@ -255,7 +256,7 @@ export function createTranscriptController(ctx) {
       return;
     }
 
-    const entry = displayedEntries().find((candidate) => candidate?.item_id === itemId);
+    const entry = displayedEntries().find((candidate) => transcriptRowKey(candidate) === itemId);
     if (!entry || (entry.kind !== "tool_call" && entry.kind !== "command")) {
       return;
     }

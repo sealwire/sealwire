@@ -39,7 +39,7 @@ export function reconcileAuthoritativeTail({
   prevCursor = null,
   mergeEntry = defaultMergeEntry,
 }) {
-  const addressable = (pageEntries || []).filter((entry) => entry?.item_id);
+  const addressable = (pageEntries || []).filter((entry) => transcriptRowKey(entry));
   const revision = maxRevision(currentRevision, pageRevision, targetRevision);
   const tail = {
     revision,
@@ -75,7 +75,7 @@ export function reconcileAuthoritativeTail({
   for (const entry of addressable) {
     // Entries with no item_id are dropped above: the page cannot be
     // authoritative for something it cannot name.
-    const itemId = entry.item_id;
+    const itemId = transcriptRowKey(entry);
     const merged = mergeEntry(nextEntries.get(itemId), entry);
     nextEntries.set(itemId, merged);
     pageItemIds.push(itemId);
