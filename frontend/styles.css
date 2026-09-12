@@ -6894,6 +6894,19 @@ body.is-resizing-panel {
   .workflow-run-active .workflow-run-mark { animation: none; }
 }
 
+/* An ask card is a SUMMARY. The question and the answer are both agent-written
+ * and can be pages long; unclamped they push everything else out of the panel.
+ * Reading the whole thing is what the Open button is for. */
+.reviewer-job-note {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.reviewer-job-note.is-answer {
+  -webkit-line-clamp: 6;
+}
+
 /* Idle nudge above the composer ------------------------------------------ */
 .review-idle-nudge {
   padding: 0 16px 6px;

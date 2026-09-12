@@ -95,6 +95,19 @@ pub struct AskRequest {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub message: String,
+    /// Have the asking agent turn `message` into a self-contained brief first.
+    ///
+    /// Set when a PERSON typed the command. "Carry on with the next step" means
+    /// something only inside this conversation; the peer starts from nothing and
+    /// cannot see it, so forwarding those words verbatim hands over an
+    /// instruction with no referent.
+    ///
+    /// An agent calling the tool leaves this off: it wrote the message itself,
+    /// with the conversation in front of it.
+    ///
+    /// Deliberately a relay-driven TURN, not a tool call — which is why it works
+    /// for every provider, including the ones that cannot be given tools.
+    pub expand_with_context: bool,
 }
 
 /// Why an ask could not be made.

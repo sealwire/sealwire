@@ -25871,6 +25871,7 @@ mod ask_tests {
             .ask_agent(
                 &asker_id,
                 AskRequest {
+                    expand_with_context: false,
                     peer_thread_id: Some(stranger_id.clone()),
                     provider: Some("fake".to_string()),
                     model: None,
@@ -25889,6 +25890,7 @@ mod ask_tests {
             .ask_agent(
                 &asker_id,
                 AskRequest {
+                    expand_with_context: false,
                     peer_thread_id: Some("no-such-thread".to_string()),
                     provider: Some("fake".to_string()),
                     model: None,
@@ -25907,6 +25909,7 @@ mod ask_tests {
             .ask_agent(
                 &asker_id,
                 AskRequest {
+                    expand_with_context: false,
                     peer_thread_id: Some(asker_id.clone()),
                     provider: Some("fake".to_string()),
                     model: None,
@@ -25960,6 +25963,7 @@ mod ask_tests {
             .ask_agent(
                 &narrow,
                 AskRequest {
+                    expand_with_context: false,
                     peer_thread_id: Some(wide.clone()),
                     provider: None,
                     model: None,
@@ -25978,6 +25982,7 @@ mod ask_tests {
             .ask_agent(
                 &wide,
                 AskRequest {
+                    expand_with_context: false,
                     peer_thread_id: Some(narrow.clone()),
                     provider: None,
                     model: None,
@@ -25989,6 +25994,160 @@ mod ask_tests {
         assert!(
             allowed.is_ok(),
             "asking a narrower session is fine, got {allowed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_persons_words_are_expanded_but_an_agents_message_is_not_touched() {
+        // "Carry on with the next step" means something only inside this
+        // conversation. The peer starts from nothing, so forwarding those words
+        // verbatim hands a stranger an instruction with no referent.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+
+        let asker = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("never".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+                sandbox: None,
+            })
+            .await
+            .expect("asker starts")
+            .active_thread_id
+            .clone()
+            .expect("thread");
+
+        // The agent door: what it wrote is what is sent, untouched.
+        app.ask_agent(
+            &asker,
+            AskRequest {
+                expand_with_context: false,
+                peer_thread_id: None,
+                provider: Some("fake".to_string()),
+                model: None,
+                effort: None,
+                message: "verbatim please".to_string(),
+            },
+        )
+        .await
+        .expect("the agent door works");
+
+        // The human door: the asking agent is driven for a brief first, so what
+        // the peer receives is NOT what was typed.
+        app.ask_agent(
+            &asker,
+            AskRequest {
+                expand_with_context: true,
+                peer_thread_id: None,
+                provider: Some("fake".to_string()),
+                model: None,
+                effort: None,
+                message: "carry on with the next step".to_string(),
+            },
+        )
+        .await
+        .expect("the human door works");
+
+        let relay = app.relay.read().await;
+        let mut mine = relay.asks_of_asker(&asker);
+        mine.sort_by_key(|ask| ask.asked_at);
+        assert_eq!(
+            mine[0].message, "verbatim please",
+            "an agent's own message must reach the peer unchanged",
+        );
+        assert_ne!(
+            mine[1].message, "carry on with the next step",
+            "a person's words must be expanded before a stranger sees them",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_answers_its_own_ask_and_nobody_elses() {
+        // The ask is found from the CALLER, never named by it. A peer that could
+        // name an ask could answer on another peer's behalf — and the asker
+        // would never know it had been handed the wrong agent's work.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+
+        let asker = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("never".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+                sandbox: None,
+            })
+            .await
+            .expect("asker starts")
+            .active_thread_id
+            .clone()
+            .expect("thread");
+
+        let peer = app
+            .ask_agent(
+                &asker,
+                AskRequest {
+                    expand_with_context: false,
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "have a look".to_string(),
+                },
+            )
+            .await
+            .expect("the ask goes through");
+
+        // A thread nobody asked has nothing to answer.
+        assert!(
+            app.answer_ask(&asker, "not mine to give".to_string())
+                .await
+                .is_err(),
+            "only the agent that was asked may answer",
+        );
+        assert!(
+            app.answer_ask(&peer, "   ".to_string()).await.is_err(),
+            "an empty answer tells the other agent nothing",
+        );
+
+        app.answer_ask(
+            &peer,
+            "Fixed it; you still need to pick the cap.".to_string(),
+        )
+        .await
+        .expect("the peer answers");
+
+        let relay = app.relay.read().await;
+        let mine = relay.asks_of_asker(&asker);
+        let ask = mine.first().expect("recorded");
+        assert_eq!(
+            ask.answer.as_deref(),
+            Some("Fixed it; you still need to pick the cap."),
+            "what it wrote is what the asker gets — not its whole session",
+        );
+        assert!(ask.status.is_terminal(), "answering settles the ask");
+
+        // And a second answer cannot overwrite the first.
+        drop(relay);
+        assert!(
+            app.answer_ask(&peer, "actually, something else".to_string())
+                .await
+                .is_err(),
+            "a settled ask is not still waiting",
         );
     }
 
@@ -26081,6 +26240,7 @@ mod ask_tests {
             .ask_agent(
                 &asker,
                 AskRequest {
+                    expand_with_context: false,
                     peer_thread_id: None,
                     provider: None,
                     model: None,
@@ -26134,6 +26294,7 @@ mod ask_tests {
             .ask_agent(
                 &asker_id,
                 AskRequest {
+                    expand_with_context: false,
                     peer_thread_id: None,
                     provider: Some("fake".to_string()),
                     model: None,
@@ -26207,6 +26368,7 @@ mod ask_tests {
             .ask_agent(
                 &a_id,
                 AskRequest {
+                    expand_with_context: false,
                     peer_thread_id: None,
                     provider: Some("fake".to_string()),
                     model: None,
@@ -26221,6 +26383,7 @@ mod ask_tests {
             .ask_agent(
                 &b_id,
                 AskRequest {
+                    expand_with_context: false,
                     peer_thread_id: Some(a_id.clone()),
                     provider: Some("fake".to_string()),
                     model: None,
@@ -26266,6 +26429,7 @@ mod ask_tests {
             .ask_agent(
                 &asker_id,
                 AskRequest {
+                    expand_with_context: false,
                     peer_thread_id: None,
                     provider: Some("fake".to_string()),
                     model: None,

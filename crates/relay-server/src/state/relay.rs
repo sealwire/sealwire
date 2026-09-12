@@ -3256,7 +3256,14 @@ impl RelayState {
                 .into_iter()
                 .filter(|view| in_scope(&view.parent_thread_id))
                 .collect(),
-            asks: self.asks_view(),
+            // BOTH ends, not either: an exchange is only visible to a device
+            // that may see the whole of it. The card carries the question and
+            // the answer verbatim, so half a fence is no fence.
+            asks: self
+                .asks_view()
+                .into_iter()
+                .filter(|ask| in_scope(&ask.asker_thread_id) && in_scope(&ask.peer_thread_id))
+                .collect(),
         }
     }
 

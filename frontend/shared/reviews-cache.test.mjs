@@ -151,3 +151,26 @@ test("createReviewsCache treats a payload-less response like a failure (keeps th
   await empty.sync(2, async () => ({ review_jobs: [], reviewer_threads: [] }), () => {});
   assert.equal(empty.hasData(), true, "an explicit empty ReviewsResponse is real data");
 });
+
+test("the cache keeps every list the channel carries, not just the ones it started with", () => {
+  // Regression: `asks` was fetched, returned by the relay, and then dropped here.
+  // From the panel it was indistinguishable from the relay never sending it.
+  const cache = createReviewsCache();
+  return cache
+    .sync(
+      7,
+      async () => ({
+        reviews_revision: 7,
+        review_jobs: [{ id: "r1" }],
+        reviewer_threads: [{ reviewer_thread_id: "t1" }],
+        asks: [{ id: "a1", asker_thread_id: "me" }],
+      }),
+      () => {}
+    )
+    .then(() => {
+      const data = cache.current();
+      assert.equal(data.review_jobs.length, 1);
+      assert.equal(data.reviewer_threads.length, 1);
+      assert.equal(data.asks.length, 1, "asks survive the cache");
+    });
+});

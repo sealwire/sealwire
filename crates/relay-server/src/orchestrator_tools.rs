@@ -41,7 +41,7 @@ pub(crate) fn seat_tools() -> Vec<&'static ToolSpec> {
 /// inside a run somebody else is driving, whereas a peer-asking session IS the
 /// driver. Same non-enforcement caveat as `SEAT_TOOLS` — it narrows what the
 /// bridge advertises, it does not authenticate anyone.
-pub(crate) const PEER_TOOLS: &[&str] = &["ask_agent"];
+pub(crate) const PEER_TOOLS: &[&str] = &["ask_agent", "answer_ask"];
 
 /// The specs an ordinary session is offered.
 pub(crate) fn peer_tools() -> Vec<&'static ToolSpec> {
@@ -135,6 +135,9 @@ pub(crate) enum Effect {
 /// Tools allowed to mutate without a card. Allowlist so new Acts tools are a
 /// deliberate edit. Members must release or unblock, never commit work.
 const ACTING_TOOLS: &[&str] = &[
+    // Answering the agent that asked you is not an action on the world; it is
+    // the reply. A confirmation card here would strand the asker.
+    "answer_ask",
     // Deliberate, and the biggest thing on this list: an agent may bring in
     // another agent without a confirmation card. Requiring one per ask would
     // break the whole point — the asking agent runs its own loop and decides
@@ -378,6 +381,19 @@ reasoning-effort levels each model takes.",
         summary: "The teams available to run a task, with their ids.",
         effect: Effect::Read,
         params: &[],
+    },
+    ToolSpec {
+        name: "answer_ask",
+        summary: "Send your answer to the agent that asked you for this. Call it \
+when you are done; what you write here is all it will see.",
+        effect: Effect::Acts,
+        params: &[ToolParam {
+            name: "answer",
+            kind: ParamKind::Text,
+            required: true,
+            summary: "The outcome, anything it must decide, and anything you \
+could not do. It cannot see your session.",
+        }],
     },
     ToolSpec {
         name: "ask_agent",
@@ -664,6 +680,11 @@ dismiss one before you can stage another",
 /// Validated tool call (parsed args; callers can be total).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToolCall {
+    /// Reply to whoever asked you. The relay finds the ask from the caller's own
+    /// token, so a peer cannot answer on somebody else's behalf.
+    AnswerAsk {
+        answer: String,
+    },
     /// Hand work to another agent. Nothing here says "worker" or "reviewer":
     /// the direction lives in `message`, which the relay never reads.
     AskAgent {
@@ -963,6 +984,9 @@ pub(crate) fn parse_call(name: &str, args: &Value) -> Result<ToolCall, String> {
             start_in_minutes: get_integer("start_in_minutes")?,
         }),
         "list_agents" => Ok(ToolCall::ListAgents),
+        "answer_ask" => Ok(ToolCall::AnswerAsk {
+            answer: get("answer")?.expect("required param yields Some"),
+        }),
         "ask_agent" => Ok(ToolCall::AskAgent {
             message: get("message")?.expect("required param yields Some"),
             agent: get("agent")?,

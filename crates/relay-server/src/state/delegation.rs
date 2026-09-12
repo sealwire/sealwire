@@ -51,6 +51,12 @@ pub(crate) struct Ask {
     /// and THAT reply is also "newer than the baseline". Only the turn id says
     /// which question a reply answers.
     pub(crate) turn_id: Option<String>,
+    /// Whether the peer has already been asked to summarise for the asker.
+    ///
+    /// One nudge, then take the last message: a peer that ignores the request
+    /// twice is not going to start, and asking forever would hold the asker
+    /// asleep.
+    pub(crate) nudged: bool,
     /// What came back.
     pub(crate) answer: Option<String>,
     pub(crate) status: AskStatus,
@@ -89,6 +95,7 @@ impl Ask {
             message,
             baseline_item_id,
             turn_id: None,
+            nudged: false,
             answer: None,
             status: AskStatus::Working,
             error: None,

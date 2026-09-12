@@ -680,3 +680,39 @@ test("a Re-review prefill that is not on offer falls back to a clean reviewer, a
   assert.match(html, /review this working tree/, "and the dialog says why it changed");
   assert.match(html, /starts a clean one/);
 });
+
+test("ReviewerPanel renders an ask card, and says which side you are looking at", () => {
+  // The panel showed its empty state with a live ask in the API, so this pins
+  // the component end: given asks, a card must appear.
+  const ask = {
+    id: "ask-1",
+    asker_thread_id: "me",
+    peer_thread_id: "them",
+    peer_provider: "codex",
+    asker_name: "Main session",
+    peer_name: "Retry work",
+    message: "have a look at the retry loop",
+    answer: "Fixed the backoff.",
+    status: "done",
+    delivered: false,
+  };
+  const html = renderToStaticMarkup(
+    React.createElement(ReviewerPanel, {
+      asks: [ask],
+      parentThreadId: "me",
+      onOpenThread: () => {},
+    })
+  );
+  assert.match(html, /You asked Retry work/, "the relation is stated, not just the provider");
+  assert.match(html, /have a look at the retry loop/);
+  assert.match(html, /Fixed the backoff\./);
+
+  // …and from the other side it reads the other way round.
+  const mirrored = renderToStaticMarkup(
+    React.createElement(ReviewerPanel, {
+      asks: [ask],
+      parentThreadId: "them",
+    })
+  );
+  assert.match(mirrored, /Main session asked you/);
+});

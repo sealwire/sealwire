@@ -709,6 +709,9 @@ let forkSessionRoot = null;
 // that run at module load; they only ever fire on user interaction.
 const reviewerActions = {
   onRequestReview: (values) => state.controller?.requestReview(values),
+  // The Agents card's Open button. Without it the card's whole point — that you
+  // can go and read the other side — is a dead control.
+  onOpenThread: (threadId) => void sessionViewController.openThread(threadId),
   onStartWorkflow: (values) => state.controller?.startWorkflow(values),
   onResolveReview: (reviewJobId) => state.controller?.resolveReview(reviewJobId),
   onResolveWorkflow: (workflowRunId) => state.controller?.resolveWorkflow(workflowRunId),
@@ -2832,20 +2835,16 @@ const composerCommands = createComposerCommandController({
   // The SAME endpoint an agent's tool call lands on, so the human door and the
   // agent door cannot drift apart. A refusal comes back as 200 + isError, which
   // is text for the caller to read, not a transport failure.
+  // The HUMAN door, deliberately not the tool route: a person types a few words
+  // and the asking agent is driven to turn them into a brief the other agent can
+  // act on. Forwarding "carry on with the next step" verbatim hands a stranger
+  // an instruction with no referent.
   askAgent: async (callerThreadId, args) => {
     try {
-      // The tool path only accepts a token, so the surface asks for one rather
-      // than the route growing a second, weaker way to name a caller.
-      const issued = await apiFetch("/api/session/ask-token", {
+      const response = await apiFetch("/api/session/delegate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ thread_id: callerThreadId }),
-      });
-      const askToken = (await issued.json())?.data?.ask_token;
-      const response = await apiFetch("/api/orchestrator/tools/ask_agent/call", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ arguments: args, ask_token: askToken }),
+        body: JSON.stringify({ thread_id: callerThreadId, ...args }),
       });
       const body = await response.json();
       return {
