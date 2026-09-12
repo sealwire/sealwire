@@ -34,6 +34,11 @@ export function normalizeThreadTranscriptPage(page) {
     if (!entry) {
       entry = {
         entry_index: entryIndex,
+        // The relay's row key, when it sends one. Reconstructing an entry from
+        // chunks is an explicit field list, so anything unnamed here is lost.
+        // Spread conditionally: a relay too old to send one must still produce
+        // the exact legacy shape, which is what its cached pages hold.
+        ...(typeof chunk.row_id === "string" && chunk.row_id ? { row_id: chunk.row_id } : {}),
         item_id: chunk.item_id || null,
         kind: chunk.kind || null,
         part_count: chunk.chunk_count || 1,

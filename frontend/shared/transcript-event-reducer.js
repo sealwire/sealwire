@@ -250,6 +250,10 @@ export function reduceTranscriptEntryPatchEvent({
   }
 
   const incoming = event?.entry || {
+    // Carried so the fabricated row keys the same way the snapshot row will.
+    // Without it this row lands under `item_id` and the next snapshot copy —
+    // keyed on `row_id` — renders as a SECOND copy of the same message.
+    row_id: event?.row_id,
     item_id: event?.item_id,
     entry_seq: event?.entry_seq,
     order_seq: event?.order_seq,
@@ -435,6 +439,9 @@ function deltaAppend({
       turn_id: entry.turn_id || event.turn_id || null,
     }
     : {
+      // Same reason as the patch path: a row born from a delta must carry the
+      // relay's key, or the snapshot copy of it arrives as a separate row.
+      ...(typeof event.row_id === "string" && event.row_id ? { row_id: event.row_id } : {}),
       item_id: itemId,
       turn_id: event.turn_id ?? null,
       text: appendText,
