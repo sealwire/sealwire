@@ -31,6 +31,10 @@
 // turn.  With no local sessions to clone it skips cleanly.
 //
 // Run: npm run test:browser:cursor-active-tail
+// Row identity is `row_id`; `item_id` is the relay's compatibility alias carrying
+// the same value (see frontend/shared/transcript-row-key.js). Reading the alias
+// alone makes these assertions pass whatever the two do, so they guard nothing —
+// prefer `row_id` for the same reason client code must.
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -106,8 +110,8 @@ export function countTranscriptEntryDeltas(text) {
     count += 1;
     try {
       const obj = JSON.parse(frame.data);
-      if (obj?.item_id) {
-        lastItemId = obj.item_id;
+      if (obj?.row_id ?? obj?.item_id) {
+        lastItemId = obj.row_id ?? obj.item_id;
       }
     } catch {
       // A well-formed event name still counts even if the body is damaged.
@@ -472,8 +476,8 @@ async function main() {
         window.__localDeltaCount += 1;
         try {
           const obj = JSON.parse(frame.data);
-          if (obj?.item_id) {
-            window.__lastDeltaItemId = obj.item_id;
+          if (obj?.row_id ?? obj?.item_id) {
+            window.__lastDeltaItemId = obj.row_id ?? obj.item_id;
           }
         } catch (_) {}
       }

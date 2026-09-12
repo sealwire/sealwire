@@ -30,6 +30,10 @@
 // the refusal is a race against a live stream and nothing else produces it.
 //
 // Run: npm run test:browser:cursor-view-only-tail-gap
+// Row identity is `row_id`; `item_id` is the relay's compatibility alias carrying
+// the same value (see frontend/shared/transcript-row-key.js). Reading the alias
+// alone makes these assertions pass whatever the two do, so they guard nothing —
+// prefer `row_id` for the same reason client code must.
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -544,9 +548,9 @@ async function tailOfTranscript(relayPort, threadId) {
   const newest = entries[entries.length - 1] || null;
   return {
     entries: entries.length,
-    newestEntryId: newest?.item_id ?? null,
+    newestEntryId: newest?.row_id ?? newest?.item_id ?? null,
     newestEntryKind: newest?.kind ?? null,
-    tail: entries.slice(-4).map((entry) => ({ id: entry.item_id, kind: entry.kind })),
+    tail: entries.slice(-4).map((entry) => ({ id: entry.row_id ?? entry.item_id, kind: entry.kind })),
   };
 }
 

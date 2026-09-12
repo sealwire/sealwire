@@ -238,10 +238,6 @@ impl ThreadTranscript {
         self.by_row_id.get(row_id).copied()
     }
 
-    pub(crate) fn contains_row(&self, row_id: &str) -> bool {
-        self.by_row_id.contains_key(row_id)
-    }
-
     pub(crate) fn get_row(&self, row_id: &str) -> Option<&TranscriptRecord> {
         self.resolve_row_index(row_id)
             .map(|index| &self.rows[index])

@@ -18,6 +18,10 @@
 //     reproduces, which is what fork anchors depend on
 //
 // Run: npm run test:cursor:provider
+// Row identity is `row_id`; `item_id` is the relay's compatibility alias carrying
+// the same value (see frontend/shared/transcript-row-key.js). Reading the alias
+// alone makes these assertions pass whatever the two do, so they guard nothing —
+// prefer `row_id` for the same reason client code must.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
@@ -118,7 +122,7 @@ async function main() {
 
       // Fork anchors resolve by item id, and a cold replay renumbers per kind —
       // so the shape is load-bearing, not cosmetic.
-      const ids = session.transcript.map((entry) => entry.item_id).filter(Boolean);
+      const ids = session.transcript.map((entry) => entry.row_id ?? entry.item_id).filter(Boolean);
       assert.ok(ids.length > 0, "transcript entries should carry item ids");
       assert.ok(
         ids.every((id) => /^acp-(user|msg|tool|thought)-\d+$/.test(id)),
@@ -192,7 +196,7 @@ async function main() {
       // kind, so this is what proves the numbering actually lines up rather than
       // merely being self-consistent.
       assert.deepEqual(
-        after.transcript.map((entry) => entry.item_id).filter(Boolean),
+        after.transcript.map((entry) => entry.row_id ?? entry.item_id).filter(Boolean),
         summary.itemIds,
         "item ids must be stable across a restart"
       );
