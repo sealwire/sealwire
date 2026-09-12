@@ -337,6 +337,74 @@ impl AppState {
         }
     }
 
+    /// What an ordinary session is offered so it can bring in another agent.
+    ///
+    /// Not beta-gated: this is not the task engine, and a public build is meant
+    /// to have it. Deliberately different from `list_orchestrator_tools`, which
+    /// returns nothing when tasks are locked.
+    pub async fn list_peer_tools(&self) -> Vec<OrchestratorToolView> {
+        orchestrator_tools::peer_tools()
+            .into_iter()
+            .map(|spec| OrchestratorToolView {
+                name: spec.name.to_string(),
+                description: spec.summary.to_string(),
+                input_schema: spec.input_schema(),
+            })
+            .collect()
+    }
+
+    /// The ordinary-session entry point. The token comes from the env of the
+    /// bridge subprocess the relay launched; resolving it here is what turns
+    /// "somebody claims to be a session" into "this session".
+    pub async fn call_peer_tool(
+        &self,
+        name: &str,
+        args: &Value,
+        ask_token: &str,
+    ) -> Result<String, String> {
+        if !orchestrator_tools::PEER_TOOLS.contains(&name) {
+            return Err(format!(
+                "{name} is not something a session may call — only {}",
+                orchestrator_tools::PEER_TOOLS.join(", ")
+            ));
+        }
+        let caller_thread_id = {
+            let relay = self.relay.read().await;
+            relay.thread_for_ask_token(ask_token)
+        }
+        .ok_or_else(|| "this session is not allowed to bring in another agent".to_string())?;
+        let caller_thread_id = caller_thread_id.as_str();
+
+        match orchestrator_tools::parse_call(name, args)? {
+            ToolCall::AskAgent {
+                message,
+                agent,
+                provider,
+                model,
+                effort,
+            } => {
+                let request = relay_api::delegation::AskRequest {
+                    peer_thread_id: agent,
+                    // Left unresolved on purpose: only `ask_agent` knows who is
+                    // asking, and the default is "someone other than you".
+                    provider,
+                    model,
+                    effort,
+                    message,
+                };
+                match self.ask_agent(caller_thread_id, request).await {
+                    Ok(peer) => Ok(format!(
+                        "Asked. That agent's id is {peer} — name it as `agent` to carry on \
+with it. You are not blocked: end your turn if you have nothing else to do, and \
+you will be sent the answers when everything you asked for is finished."
+                    )),
+                    Err(error) => Err(error.message()),
+                }
+            }
+            _ => Err(format!("{name} is not something a session may call")),
+        }
+    }
+
     /// Run a tool; `Err` is a refused call for the model to read (not HTTP 500).
     pub async fn call_orchestrator_tool(
         &self,
@@ -360,6 +428,11 @@ impl AppState {
         }
 
         match orchestrator_tools::parse_call(name, args)? {
+            // The Orchestrator drives tasks, not ad-hoc peers. Reached only if
+            // someone calls the API directly without a caller thread id.
+            ToolCall::AskAgent { .. } => {
+                Err("ask_agent belongs to an ordinary session, not the Orchestrator".to_string())
+            }
             ToolCall::ProposeTask {
                 title,
                 context,

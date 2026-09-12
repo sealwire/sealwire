@@ -77,6 +77,7 @@
     "preview": "vite preview --host",
     "smoke:pairing": "node scripts/pairing-smoke.mjs",
     "test:browser:smoke": "npm run build && node scripts/browser-page-smoke-e2e.mjs",
+    "test:browser:composer-commands": "npm run build && node scripts/browser-composer-commands-e2e.mjs",
     "test:browser:desktop-launcher": "npm run build && node scripts/browser-desktop-launcher-e2e.mjs",
     "test:claude:provider": "node scripts/claude-provider-e2e.mjs",
     "test:cursor:provider": "node scripts/cursor-provider-e2e.mjs",

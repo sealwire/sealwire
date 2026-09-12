@@ -9,7 +9,7 @@ use tokio::sync::{watch, RwLock};
 use tracing::warn;
 
 use super::{
-    DeviceRecord, PairedDevice, RelayState, ReviewJob, ReviewerThread, TeamRun,
+    Ask, DeviceRecord, PairedDevice, RelayState, ReviewJob, ReviewerThread, TeamRun,
     ThreadSessionSettings, WorkflowRun, PERSISTED_STATE_VERSION,
 };
 
@@ -128,6 +128,11 @@ pub(super) struct PersistedRelayState {
     /// map).
     #[serde(default)]
     pub(super) review_jobs: std::collections::HashMap<String, ReviewJob>,
+    /// Completed (TERMINAL) delegation cards. Same rule and same reason as
+    /// `review_jobs`: an in-flight job's driver dies with the process, so
+    /// restoring one would show a delegation that nothing is driving.
+    #[serde(default)]
+    pub(super) asks: std::collections::HashMap<String, Ask>,
     /// Workflow runs (orchestration metadata only — step transcripts are rebuilt
     /// from the provider). Unlike `review_jobs` (terminal-only), NON-terminal runs
     /// ARE persisted so a run survives a restart; the restore side
@@ -286,6 +291,13 @@ impl PersistedRelayState {
             // leave the parent review-locked with nothing to release it.
             review_jobs: relay
                 .review_jobs
+                .iter()
+                .filter(|(_, job)| job.status.is_terminal())
+                .map(|(id, job)| (id.clone(), job.clone()))
+                .collect(),
+            // Same rule for delegations, same reason.
+            asks: relay
+                .asks
                 .iter()
                 .filter(|(_, job)| job.status.is_terminal())
                 .map(|(id, job)| (id.clone(), job.clone()))

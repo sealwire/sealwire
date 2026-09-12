@@ -35,6 +35,22 @@ pub(crate) fn seat_tools() -> Vec<&'static ToolSpec> {
         .collect()
 }
 
+/// What an ordinary session is offered so it can bring in another agent.
+///
+/// Separate from `SEAT_TOOLS` because the audiences are opposites: a seat is
+/// inside a run somebody else is driving, whereas a peer-asking session IS the
+/// driver. Same non-enforcement caveat as `SEAT_TOOLS` — it narrows what the
+/// bridge advertises, it does not authenticate anyone.
+pub(crate) const PEER_TOOLS: &[&str] = &["ask_agent"];
+
+/// The specs an ordinary session is offered.
+pub(crate) fn peer_tools() -> Vec<&'static ToolSpec> {
+    TOOLS
+        .iter()
+        .filter(|tool| PEER_TOOLS.contains(&tool.name))
+        .collect()
+}
+
 /// The seats a task runs on. Order is the pipeline's own.
 pub(crate) const SEATS: &[&str] = &["tl", "dev", "reviewer"];
 
@@ -119,6 +135,12 @@ pub(crate) enum Effect {
 /// Tools allowed to mutate without a card. Allowlist so new Acts tools are a
 /// deliberate edit. Members must release or unblock, never commit work.
 const ACTING_TOOLS: &[&str] = &[
+    // Deliberate, and the biggest thing on this list: an agent may bring in
+    // another agent without a confirmation card. Requiring one per ask would
+    // break the whole point — the asking agent runs its own loop and decides
+    // when to ask again. What keeps this safe is not a card but that both
+    // threads stay visible and open, so a person can read either and take over.
+    "ask_agent",
     "control_run",
     "respond_to_agent",
     "widen_scope",
@@ -356,6 +378,45 @@ reasoning-effort levels each model takes.",
         summary: "The teams available to run a task, with their ids.",
         effect: Effect::Read,
         params: &[],
+    },
+    ToolSpec {
+        name: "ask_agent",
+        summary: "Hand work to another agent. Returns at once; you are sent the answers when all you asked for is done. Ask one again to continue, or several at once.",
+        effect: Effect::Acts,
+        params: &[
+            ToolParam {
+                name: "message",
+                kind: ParamKind::Text,
+                required: true,
+                summary: "What you want done. The agent starts from nothing and \
+cannot see this conversation, so say everything it needs.",
+            },
+            ToolParam {
+                name: "agent",
+                kind: ParamKind::Text,
+                required: false,
+                summary: "An agent you already asked, to carry on with it. Omit \
+to bring in a new one.",
+            },
+            ToolParam {
+                name: "provider",
+                kind: ParamKind::Text,
+                required: false,
+                summary: "Which agent to bring in (e.g. codex). Omit for the default.",
+            },
+            ToolParam {
+                name: "model",
+                kind: ParamKind::Text,
+                required: false,
+                summary: "Model for a new agent. Omit for the provider default.",
+            },
+            ToolParam {
+                name: "effort",
+                kind: ParamKind::Text,
+                required: false,
+                summary: "Reasoning effort for a new agent. Omit for the default.",
+            },
+        ],
     },
     ToolSpec {
         name: "task_definition",
@@ -603,6 +664,16 @@ dismiss one before you can stage another",
 /// Validated tool call (parsed args; callers can be total).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToolCall {
+    /// Hand work to another agent. Nothing here says "worker" or "reviewer":
+    /// the direction lives in `message`, which the relay never reads.
+    AskAgent {
+        message: String,
+        /// An agent already asked, to carry on with. `None` brings in a new one.
+        agent: Option<String>,
+        provider: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+    },
     ProposeTask {
         title: String,
         context: Option<String>,
@@ -892,6 +963,13 @@ pub(crate) fn parse_call(name: &str, args: &Value) -> Result<ToolCall, String> {
             start_in_minutes: get_integer("start_in_minutes")?,
         }),
         "list_agents" => Ok(ToolCall::ListAgents),
+        "ask_agent" => Ok(ToolCall::AskAgent {
+            message: get("message")?.expect("required param yields Some"),
+            agent: get("agent")?,
+            provider: get("provider")?,
+            model: get("model")?,
+            effort: get("effort")?,
+        }),
         "task_definition" => Ok(ToolCall::TaskDefinition {
             run_id: get("run_id")?,
         }),

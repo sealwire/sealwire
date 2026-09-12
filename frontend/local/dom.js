@@ -35,6 +35,7 @@ export const stopButton = document.querySelector("#stop-button");
 export const messageForm = document.querySelector("#message-form");
 export const messageInput = document.querySelector("#message-input");
 export const composerAttachments = document.querySelector("#composer-attachments");
+export const composerCommandMount = document.querySelector("#composer-command-mount");
 export const composerError = document.querySelector("#composer-error");
 export const messageModel = document.querySelector("#message-model");
 export const messageEffort = document.querySelector("#message-effort");

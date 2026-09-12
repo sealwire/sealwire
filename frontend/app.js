@@ -23,6 +23,7 @@ import {
   sidebarTaskListMount,
   startTaskDialogMount,
   composerAttachments,
+  composerCommandMount,
   connectionForm,
   controlBanner,
   copyPairingLinkButton,
@@ -187,6 +188,8 @@ import {
   threadSelectionIntent,
 } from "./shared/thread-multi-select.js";
 import { matchesApplePlatform } from "./shared/composer-keys.js";
+import { createComposerCommandController } from "./local/composer-commands.js";
+import { canRequestReview, selectReviewLaunchModel } from "./shared/review-state.js";
 import { createProjectsStore } from "./shared/projects-store.js";
 import { createDevicesCache } from "./shared/devices-cache.js";
 import { createReviewsCache } from "./shared/reviews-cache.js";
@@ -2793,6 +2796,73 @@ composerAttachments?.addEventListener("click", (event) => {
   messageInput.focus();
 });
 
+// The provider/model vocabulary the "/" argument matcher is allowed to resolve
+// against. Deliberately the REAL catalogue — matching against anything else is
+// how a typo becomes a silently wrong model.
+function composerCommandLaunchModel() {
+  return selectReviewLaunchModel({
+    providers: state.providers || [],
+    providerModels: state.providerModels || {},
+    session: state.session || null,
+  });
+}
+
+// What each command IS lives behind the seam; this only hands over the
+// capabilities it may act through, so the public tree never names one.
+const composerCommands = createComposerCommandController({
+  input: messageInput,
+  mount: composerCommandMount,
+  getCatalog: () => ({
+    providers: state.providers || [],
+    models: composerCommandLaunchModel().models,
+    // Every session, so "@" can name one. The ids are already here, so naming
+    // one never needs the relay to resolve a name.
+    sessions: (state.threads || []).map((thread) => ({
+      id: thread.id,
+      name: thread.name || "",
+      provider: thread.provider || "",
+    })),
+  }),
+  getContext: () => {
+    const session = state.session || null;
+    const threadId = state.viewThreadId || session?.active_thread_id || null;
+    return {
+      threadId,
+      canReview: canRequestReview(session, state.deviceId, threadId),
+      defaultReviewerProvider: composerCommandLaunchModel().defaultProvider,
+    };
+  },
+  requestReview: (values) => state.controller?.requestReview(values),
+  // The SAME endpoint an agent's tool call lands on, so the human door and the
+  // agent door cannot drift apart. A refusal comes back as 200 + isError, which
+  // is text for the caller to read, not a transport failure.
+  askAgent: async (callerThreadId, args) => {
+    try {
+      // The tool path only accepts a token, so the surface asks for one rather
+      // than the route growing a second, weaker way to name a caller.
+      const issued = await apiFetch("/api/session/ask-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ thread_id: callerThreadId }),
+      });
+      const askToken = (await issued.json())?.data?.ask_token;
+      const response = await apiFetch("/api/orchestrator/tools/ask_agent/call", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ arguments: args, ask_token: askToken }),
+      });
+      const body = await response.json();
+      return {
+        text: body?.content?.[0]?.text || "No answer from the relay.",
+        isError: Boolean(body?.isError) || !response.ok,
+      };
+    } catch (error) {
+      return { text: `Could not reach the relay: ${error.message}`, isError: true };
+    }
+  },
+  log: logLine,
+});
+
 // Drive a composer submit. The draft text and the target thread are captured
 // synchronously at submit time and the composer is frozen, so a draft edit /
 // navigation / second submit during the async send can't change or duplicate it.
@@ -2806,6 +2876,21 @@ async function runComposerSubmit() {
     // A thread mid-review can't be sent to (the relay rejects resume/send for it).
     if (text.trim() || imageAttachments.length > 0) {
       logLine("This session is being reviewed — you can’t send to it right now.");
+    }
+    return;
+  }
+  // Ours, or an ordinary message? `submit` returns null for a "/word" we do not
+  // own — and for every draft at all in a public build — which then reaches the
+  // provider verbatim. That is what keeps a user's own .claude/commands/* working.
+  const running = composerCommands.submit();
+  if (running) {
+    state.composerSubmitInFlight = true;
+    if (state.session) renderer.renderSession(state.session);
+    try {
+      await running;
+    } finally {
+      state.composerSubmitInFlight = false;
+      if (state.session) renderer.renderSession(state.session);
     }
     return;
   }

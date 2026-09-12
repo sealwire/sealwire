@@ -404,6 +404,38 @@ pub struct AcpBridge {
 }
 
 impl AcpBridge {
+    /// The sealwire MCP server for this session, or nothing.
+    ///
+    /// ACP is the reason the identity is a TOKEN rather than a thread id: the
+    /// session id does not exist until `session/new` answers, which is after the
+    /// servers have already been handed over. The token is minted first and
+    /// bound to the session once it comes back.
+    async fn peer_mcp_servers(&self, token: Option<&str>) -> Value {
+        let Some(token) = token else {
+            return json!([]);
+        };
+        json!([{
+            "name": "sealwire",
+            "command": std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".to_string()),
+            "args": [crate::provider::sealwire_mcp_bridge_path()],
+            "env": [
+                { "name": "SEALWIRE_ASK_TOKEN", "value": token },
+                { "name": "SEALWIRE_RELAY_URL", "value": crate::provider::sealwire_relay_url() },
+            ],
+        }])
+    }
+
+    /// A token only when this session is already unrestricted — the rule that
+    /// makes "an agent may bring in another agent" not an escalation.
+    async fn ask_token_if_allowed(&self, thread_id: &str) -> Option<String> {
+        let mut relay = self.state.write().await;
+        let settings = relay.thread_settings(thread_id)?;
+        if !crate::state::session_is_unrestricted(&settings.approval_policy, &settings.sandbox) {
+            return None;
+        }
+        Some(relay.ask_token_for_thread(thread_id))
+    }
+
     pub async fn spawn(
         state: Arc<RwLock<RelayState>>,
         binary_name: &'static str,
@@ -1203,17 +1235,29 @@ impl ProviderBridge for AcpBridge {
     }
 
     /// `system_prompt` is IGNORED. ACP's `session/new` carries `cwd` and
-    /// `mcpServers` and nothing resembling an instruction field. (The
-    /// `mcpServers` array IS the hook a future toolset would use — it is
-    /// hardcoded empty here.) Not smuggled in as a user turn: see
-    /// `StartThreadRequest::system_prompt`.
+    /// `mcpServers` and nothing resembling an instruction field. Not smuggled in
+    /// as a user turn: see `StartThreadRequest::system_prompt`.
     async fn start_thread(&self, request: StartThreadRequest) -> Result<StartThreadResult, String> {
         let cwd = request.cwd.as_str();
+        // Minted before the session exists, bound to it below. Only for an
+        // already-unrestricted session, so bringing in another agent can never
+        // be a way to exceed what this one may do.
+        let new_token = if crate::state::session_is_unrestricted(
+            request.approval_policy.as_str(),
+            request.sandbox.as_str(),
+        ) {
+            Some(self.state.write().await.mint_unbound_ask_token())
+        } else {
+            None
+        };
         let model = request.model.as_str();
         let approval_policy = request.approval_policy.as_str();
         let sandbox = request.sandbox.as_str();
         let result = self
-            .send_request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
+            .send_request(
+                "session/new",
+                json!({ "cwd": cwd, "mcpServers": self.peer_mcp_servers(new_token.as_deref()).await }),
+            )
             .await?;
 
         let session_id = result
@@ -1221,6 +1265,9 @@ impl ProviderBridge for AcpBridge {
             .and_then(Value::as_str)
             .ok_or_else(|| format!("{} returned no sessionId", self.display_name))?
             .to_string();
+        if let Some(token) = new_token.as_deref() {
+            self.state.write().await.bind_ask_token(token, &session_id);
+        }
 
         self.absorb_catalog(&result, true).await;
 
@@ -1314,7 +1361,13 @@ impl ProviderBridge for AcpBridge {
             let result = self
                 .send_request(
                     "session/load",
-                    json!({ "sessionId": thread_id, "cwd": cwd, "mcpServers": [] }),
+                    json!({
+                        "sessionId": thread_id,
+                        "cwd": cwd,
+                        "mcpServers": self
+                            .peer_mcp_servers(self.ask_token_if_allowed(thread_id).await.as_deref())
+                            .await,
+                    }),
                 )
                 .await;
 
@@ -1417,7 +1470,13 @@ impl ProviderBridge for AcpBridge {
         let result = self
             .send_request(
                 "session/load",
-                json!({ "sessionId": thread_id, "cwd": cwd, "mcpServers": [] }),
+                json!({
+                    "sessionId": thread_id,
+                    "cwd": cwd,
+                    "mcpServers": self
+                        .peer_mcp_servers(self.ask_token_if_allowed(thread_id).await.as_deref())
+                        .await,
+                }),
             )
             .await;
 

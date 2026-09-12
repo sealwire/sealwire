@@ -292,6 +292,11 @@ pub struct ReviewsResponse {
     pub reviews_revision: u64,
     pub review_jobs: Vec<ReviewJobView>,
     pub reviewer_threads: Vec<ReviewerThreadView>,
+    /// Agents this session brought in. Carried on the SAME channel as reviews:
+    /// one panel shows both, so a second polling loop would only be a second
+    /// thing to keep in sync.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asks: Vec<AskView>,
 }
 
 /// Uncompacted device/security payload served on demand. Device records are
@@ -3083,6 +3088,25 @@ pub struct RequestReviewInput {
     #[serde(default)]
     pub max_rounds: Option<u32>,
     pub device_id: Option<String>,
+}
+
+/// One ask: A handed B a message and is waiting. `message` and `answer` are
+/// both carried because a person never typed either one — an agent did, so the
+/// card is the only place the exchange is auditable.
+#[derive(Debug, Clone, Serialize)]
+pub struct AskView {
+    pub id: String,
+    pub asker_thread_id: String,
+    pub peer_thread_id: String,
+    pub peer_provider: String,
+    pub peer_model: Option<String>,
+    pub peer_effort: Option<String>,
+    pub message: String,
+    pub answer: Option<String>,
+    pub status: String,
+    pub error: Option<String>,
+    pub delivered: bool,
+    pub updated_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]

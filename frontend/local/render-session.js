@@ -1241,6 +1241,9 @@ export function createSessionRenderer({
       canCurrentDeviceWrite(session);
     setReviewSlice({
       reviewJobs: threadReviewJobs,
+      asks: (reviewsData.asks || []).filter(
+        (ask) => ask.asker_thread_id === viewedThreadId || ask.peer_thread_id === viewedThreadId
+      ),
       workflowRuns: threadWorkflowRuns,
       reviewModel: reviewLaunchModel(session),
       workflowModel: workflowLaunchModel(session),

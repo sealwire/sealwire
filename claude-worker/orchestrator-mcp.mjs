@@ -15,6 +15,10 @@ const DEVICE_ID = process.env.SEALWIRE_DEVICE_ID || null;
 // Set for a team seat instead of a device. Picks the read-only toolset and
 // scopes every answer to that run.
 const SEAT_RUN_ID = process.env.SEALWIRE_SEAT_RUN_ID || null;
+// Set for an ordinary session that may bring in another agent. Unguessable, and
+// only ever present inside the subprocess the relay launched — a thread id would
+// prove nothing, since any client can read the whole thread list.
+const ASK_TOKEN = process.env.SEALWIRE_ASK_TOKEN || null;
 const API_TOKEN = process.env.RELAY_API_TOKEN || null;
 
 function headers() {
@@ -39,9 +43,11 @@ const server = new Server(
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  const path = SEAT_RUN_ID
-    ? `/api/orchestrator/tools?seat_run_id=${encodeURIComponent(SEAT_RUN_ID)}`
-    : "/api/orchestrator/tools";
+  const params = new URLSearchParams();
+  if (SEAT_RUN_ID) params.set("seat_run_id", SEAT_RUN_ID);
+  if (ASK_TOKEN) params.set("ask_token", ASK_TOKEN);
+  const query = params.toString();
+  const path = query ? `/api/orchestrator/tools?${query}` : "/api/orchestrator/tools";
   const body = await relayJson(path, { method: "GET" });
   const tools = body?.data?.tools ?? body?.tools ?? [];
   return {
@@ -64,6 +70,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         arguments: args,
         device_id: DEVICE_ID,
         seat_run_id: SEAT_RUN_ID,
+        ask_token: ASK_TOKEN,
       }),
     });
   } catch (error) {

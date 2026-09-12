@@ -129,8 +129,50 @@ function reviewerThreadName(job, reviewerThreads) {
   return name || id;
 }
 
+// One agent this session brought in. Deliberately plain: the question and the
+// answer, because a person never typed either — an agent did, and this is the
+// only place the exchange can be read.
+function AskCard({ ask, onOpen = null }) {
+  const live = ask.status === "working";
+  return h(
+    "div",
+    { className: "reviewer-job" + (live ? " is-live" : "") },
+    h(
+      "div",
+      { className: "reviewer-job-head" },
+      h("span", { className: "reviewer-job-title" }, ask.peer_provider || "agent"),
+      h(
+        "span",
+        { className: "reviewer-job-status" },
+        live ? "Working" : ask.status === "done" ? "Answered" : ask.status
+      )
+    ),
+    h("p", { className: "reviewer-job-note" }, ask.message),
+    ask.answer ? h("p", { className: "reviewer-job-note is-answer" }, ask.answer) : null,
+    ask.error ? h("p", { className: "reviewer-job-note is-error" }, ask.error) : null,
+    // Undelivered is worth saying: the answer exists but its asker has not been
+    // handed it yet, which otherwise looks like nothing happened.
+    !live && ask.answer && !ask.delivered
+      ? h("p", { className: "reviewer-job-note" }, "Not handed back yet.")
+      : null,
+    onOpen && ask.peer_thread_id
+      ? h(
+          "button",
+          {
+            className: "reviewer-job-action",
+            onClick: () => onOpen(ask.peer_thread_id),
+            type: "button",
+          },
+          "Open"
+        )
+      : null
+  );
+}
+
 export function ReviewerPanel({
   reviewJobs = [],
+  asks = [],
+  onOpenThread = null,
   workflowRuns = [],
   reviewModel = {},
   workflowModel = {},
@@ -164,7 +206,8 @@ export function ReviewerPanel({
   // through to the empty state's call to action rather than rendering a populated panel
   // with nothing in it.
   const hasWorkflowRuns = CODE_FLOW_ENABLED && workflowRuns.length > 0;
-  const hasCards = hasJobs || hasWorkflowRuns;
+  const hasAsks = asks.length > 0;
+  const hasCards = hasJobs || hasWorkflowRuns || hasAsks;
   const canLaunch = typeof onRequestReview === "function";
   const canLaunchWorkflow = CODE_FLOW_ENABLED && typeof onStartWorkflow === "function";
   // The launcher is ALWAYS rendered (when wiring exists) so the affordance is
@@ -238,6 +281,8 @@ export function ReviewerPanel({
       ? h(
           "div",
           { className: "reviewer-panel-list" },
+          // Asks first: they are the live thing more often than a review is.
+          ...asks.map((ask) => h(AskCard, { key: ask.id, ask, onOpen: onOpenThread })),
           ...reviewJobs.map((job) =>
             h(ReviewerJobCard, {
               key: job.id,
@@ -287,7 +332,7 @@ export function ReviewerPanel({
           h(
             "p",
             { className: "reviewer-empty-copy" },
-            "Ask another agent to review the current changes. The reviewer runs in its own session and reports back here."
+            "Other agents working on this appear here — one you asked for help, or one reviewing the current changes. Each runs in its own session you can open and take over."
           ),
           h(
             "div",

@@ -34,6 +34,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod delegation;
 pub mod orchestration;
 pub mod review;
 pub mod team;

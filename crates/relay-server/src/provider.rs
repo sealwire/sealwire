@@ -205,6 +205,26 @@ pub struct StartThreadRequest {
     pub orchestrator_tools: Option<String>,
 }
 
+/// Where the sealwire MCP bridge script lives, beside the worker that is
+/// actually running. One definition: two providers resolve it, and a path rule
+/// kept in two places is a path rule that drifts.
+pub fn sealwire_mcp_bridge_path() -> String {
+    let worker = std::env::var("CLAUDE_WORKER_PATH").unwrap_or_default();
+    std::path::Path::new(&worker)
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join("orchestrator-mcp.mjs").display().to_string())
+        .unwrap_or_else(|| "claude-worker/orchestrator-mcp.mjs".to_string())
+}
+
+/// The relay's own URL, as the bridge subprocess must reach it.
+pub fn sealwire_relay_url() -> String {
+    std::env::var("SEALWIRE_RELAY_URL").unwrap_or_else(|_| {
+        let port = std::env::var("PORT").unwrap_or_else(|_| "8787".to_string());
+        format!("http://127.0.0.1:{port}")
+    })
+}
+
 impl StartThreadRequest {
     /// The common case: no persona, no opening turn.
     pub fn new(cwd: &str, model: &str, approval_policy: &str, sandbox: &str) -> Self {

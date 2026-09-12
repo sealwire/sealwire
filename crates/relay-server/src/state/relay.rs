@@ -22,8 +22,8 @@ use crate::{
 };
 
 use super::{
-    ensure_path_within_device_scope, persistence::PersistedRelayState, unix_now, ReviewJob,
-    RunStatus, SecurityProfile, TeamRun, TeamRunStatus, TeamThreadGate, WorkflowRun,
+    delegation::Ask, ensure_path_within_device_scope, persistence::PersistedRelayState, unix_now,
+    ReviewJob, RunStatus, SecurityProfile, TeamRun, TeamRunStatus, TeamThreadGate, WorkflowRun,
     CONTROLLER_LEASE_SECS, DEFAULT_APPROVAL_POLICY, DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX,
     STALE_TURN_PROGRESS_TIMEOUT_SECS,
 };
@@ -57,6 +57,7 @@ const MAX_SEARCH_ROUTING_HINTS: usize = 2_000;
 /// deletes them (the Reviewer panel is a persistent surface), so this cap — not
 /// a timer — is what eventually evicts old completed reviews.
 const MAX_REVIEW_JOBS: usize = 64;
+const MAX_ASKS: usize = 64;
 /// Backstop on retained workflow runs, mirroring `MAX_REVIEW_JOBS`: evict the
 /// oldest TERMINAL runs first; non-terminal runs are never auto-evicted (they
 /// have a live or restart-recoverable orchestrator).
@@ -508,6 +509,21 @@ pub struct RelayState {
     /// persisted (their orchestrator dies with the process). `pub(super)` so the
     /// persistence writer can read it.
     pub(super) review_jobs: HashMap<String, ReviewJob>,
+    /// Relay-owned delegations, keyed by job id. Same terminal-only persistence
+    /// rule as `review_jobs` and for the same reason: an in-flight job's driver
+    /// dies with the process, so restoring one would show work that nothing is
+    /// doing. Unlike a review, a delegation locks no thread — the worker stays
+    /// open so the user can take it over.
+    pub(super) asks: HashMap<String, Ask>,
+    /// Unguessable token -> the thread allowed to ask with it.
+    ///
+    /// The bridge subprocess carries the token in its env, so a tool call proves
+    /// which session made it. A thread ID would not: every client can read the
+    /// whole list from `/api/threads`, so anything could claim to be any session.
+    /// It is also the only identity available to a provider (ACP) that does not
+    /// tell us the session id until AFTER the tools are attached.
+    /// In memory only — a restart re-mints on the next turn.
+    ask_tokens: HashMap<String, String>,
     /// Durable identity of reviewer threads: reviewer_thread_id -> parent_thread_id.
     /// This is the *persisted* source of truth for nav-hiding (so reviewer threads
     /// stay hidden across a relay restart and across review-job eviction). An entry
@@ -572,6 +588,18 @@ pub struct RelayState {
     /// stream to fire push notifications on needs_input / completed transitions
     /// even when the remote app is closed. In-memory only.
     push_attention: PushAttentionTracker,
+}
+
+/// 32 random characters. This is a capability, not a log id: anything holding
+/// it can act as the session it belongs to.
+fn new_ask_token() -> String {
+    use rand::{distributions::Alphanumeric, Rng};
+    let body: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+    format!("ask_{body}")
 }
 
 impl RelayState {
@@ -671,6 +699,8 @@ impl RelayState {
             apply_states: HashMap::new(),
             recent_remote_actions: HashMap::new(),
             review_jobs: HashMap::new(),
+            asks: HashMap::new(),
+            ask_tokens: HashMap::new(),
             reviewer_threads: HashMap::new(),
             reviewer_thread_seq: 0,
             workflow_jobs: HashMap::new(),
@@ -2605,6 +2635,133 @@ impl RelayState {
         }
     }
 
+    fn prune_asks(&mut self) {
+        // Strict `<` so there is always room for the caller's insertion.
+        if self.asks.len() < MAX_ASKS {
+            return;
+        }
+        let mut terminal: Vec<(String, u64)> = self
+            .asks
+            .iter()
+            .filter(|(_, job)| job.status.is_terminal())
+            .map(|(id, job)| (id.clone(), job.updated_at))
+            .collect();
+        terminal.sort_by_key(|(_, updated_at)| *updated_at);
+        for (id, _) in terminal {
+            if self.asks.len() < MAX_ASKS {
+                break;
+            }
+            self.asks.remove(&id);
+        }
+    }
+
+    pub(crate) fn insert_ask(&mut self, job: Ask) {
+        self.prune_asks();
+        self.asks.insert(job.id.clone(), job);
+    }
+
+    /// Every ask this session made, live or settled. The caps read it, and so
+    /// does the "may I talk to this peer" check — a session may only carry on
+    /// with an agent it brought in itself.
+    /// A stable token for this thread, minted on first use.
+    ///
+    /// Stable so re-attaching on every turn does not change the config — the
+    /// Claude worker rebuilds its whole SDK session when `mcpServers` differs.
+    pub(crate) fn ask_token_for_thread(&mut self, thread_id: &str) -> String {
+        if let Some((token, _)) = self
+            .ask_tokens
+            .iter()
+            .find(|(_, owner)| owner.as_str() == thread_id)
+        {
+            return token.clone();
+        }
+        let token = new_ask_token();
+        self.ask_tokens.insert(token.clone(), thread_id.to_string());
+        token
+    }
+
+    /// Mint a token whose owner is not known yet — ACP hands the session id back
+    /// only after the tools are already attached.
+    pub(crate) fn mint_unbound_ask_token(&mut self) -> String {
+        let token = new_ask_token();
+        self.ask_tokens.insert(token.clone(), String::new());
+        token
+    }
+
+    /// Bind a token minted before its session existed. Refuses to re-point a
+    /// token that already has an owner: a token is one session's, for good.
+    pub(crate) fn bind_ask_token(&mut self, token: &str, thread_id: &str) {
+        if let Some(owner) = self.ask_tokens.get_mut(token) {
+            if owner.is_empty() {
+                *owner = thread_id.to_string();
+            }
+        }
+    }
+
+    /// Which thread may ask with this token, if any.
+    pub(crate) fn thread_for_ask_token(&self, token: &str) -> Option<String> {
+        self.ask_tokens
+            .get(token)
+            .filter(|owner| !owner.is_empty())
+            .cloned()
+    }
+
+    pub(crate) fn asks_of_asker(&self, asker_thread_id: &str) -> Vec<&Ask> {
+        self.asks
+            .values()
+            .filter(|ask| ask.asker_thread_id == asker_thread_id)
+            .collect()
+    }
+
+    /// Everyone who is (transitively) waiting on `thread_id` through a live ask.
+    ///
+    /// The cycle guard: if the thread you want to ask is already waiting on you,
+    /// asking it back means both sides wait forever and neither is ever woken.
+    /// Walks the whole chain, so A→B→C→A is caught as well as A→B→A.
+    pub(crate) fn live_ask_ancestors(&self, thread_id: &str) -> std::collections::HashSet<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut frontier = vec![thread_id.to_string()];
+        // The data could itself contain a loop; bound the walk rather than trust it.
+        for _ in 0..64 {
+            let Some(current) = frontier.pop() else { break };
+            for ask in self.asks.values() {
+                if ask.status.is_terminal() || ask.peer_thread_id != current {
+                    continue;
+                }
+                if seen.insert(ask.asker_thread_id.clone()) {
+                    frontier.push(ask.asker_thread_id.clone());
+                }
+            }
+        }
+        seen
+    }
+
+    pub(crate) fn ask(&self, ask_id: &str) -> Option<&Ask> {
+        self.asks.get(ask_id)
+    }
+
+    pub(crate) fn update_ask<F: FnOnce(&mut Ask)>(&mut self, ask_id: &str, update: F) -> bool {
+        match self.asks.get_mut(ask_id) {
+            Some(job) => {
+                update(job);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Newest first. The card list, and the only ordering clients should rely on.
+    pub(crate) fn asks_view(&self) -> Vec<crate::protocol::AskView> {
+        let mut jobs: Vec<&Ask> = self.asks.values().collect();
+        jobs.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        jobs.into_iter().map(|job| job.view()).collect()
+    }
+
     pub(crate) fn update_review_job<F: FnOnce(&mut ReviewJob)>(
         &mut self,
         id: &str,
@@ -3014,6 +3171,8 @@ impl RelayState {
     /// reviewer panel re-fetches the uncompacted `reviews_response()` only when this
     /// changes, so it does NOT refetch on every snapshot frame. It's a plain scalar on the
     /// snapshot, so byte-budget compaction never drops it (unlike `active_review_jobs`).
+    /// Also covers asks: they ride the same channel, so a change to one must
+    /// move the key the client caches on — otherwise the panel never refetches.
     pub(crate) fn reviews_revision(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         // XOR per-entry hashes so the result is independent of map iteration order.
@@ -3039,6 +3198,16 @@ impl RelayState {
             view.updated_at.hash(&mut h);
             // Rotate so a reviewer-thread change can't cancel an identical job hash.
             acc ^= h.finish().rotate_left(1);
+        }
+        for ask in self.asks.values() {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            ask.id.hash(&mut h);
+            ask.status.as_str().hash(&mut h);
+            ask.updated_at.hash(&mut h);
+            ask.peer_thread_id.hash(&mut h);
+            ask.delivered.hash(&mut h);
+            // A different rotation again, for the same reason.
+            acc ^= h.finish().rotate_left(2);
         }
         acc
     }
@@ -3087,6 +3256,7 @@ impl RelayState {
                 .into_iter()
                 .filter(|view| in_scope(&view.parent_thread_id))
                 .collect(),
+            asks: self.asks_view(),
         }
     }
 
@@ -4299,6 +4469,15 @@ impl RelayState {
             .filter(|(_, job)| job.status.is_terminal())
             .map(|(id, job)| (id.clone(), job.clone()))
             .collect();
+        // Defense in depth, same as reviews: the writer already filters, but a
+        // hand-edited or future-written state file must not restore a delegation
+        // that has no driver.
+        self.asks = persisted
+            .asks
+            .iter()
+            .filter(|(_, job)| job.status.is_terminal())
+            .map(|(id, job)| (id.clone(), job.clone()))
+            .collect();
         // Workflow runs persist NON-terminal too; reconcile any stranded run to the
         // terminal `Interrupted` here — no orchestrator survives a restart (see
         // workflow.rs / `restored_workflow_jobs`).
@@ -5486,6 +5665,15 @@ impl RelayState {
             .filter(|(_, job)| job.status.is_terminal())
             .map(|(id, job)| (id.clone(), job.clone()))
             .collect();
+        // Defense in depth, same as reviews: the writer already filters, but a
+        // hand-edited or future-written state file must not restore a delegation
+        // that has no driver.
+        self.asks = persisted
+            .asks
+            .iter()
+            .filter(|(_, job)| job.status.is_terminal())
+            .map(|(id, job)| (id.clone(), job.clone()))
+            .collect();
         // Workflow runs persist NON-terminal too; reconcile any stranded run to the
         // terminal `Interrupted` here — no orchestrator survives a restart (see
         // workflow.rs / `restored_workflow_jobs`).
@@ -6162,6 +6350,60 @@ mod tests {
         assert!(restored["r1"].error.is_some());
         assert_eq!(restored["r2"].status, RunStatus::Done);
         assert!(restored["r2"].error.is_none());
+    }
+
+    #[test]
+    fn only_settled_asks_survive_a_restart() {
+        // A live ask has nothing watching it after a restart, so restoring one
+        // would show work nobody is doing. The writer filters and the restore
+        // side filters again, so a hand-edited file cannot reintroduce it.
+        // This goes through real JSON: an in-memory round trip would not notice
+        // the status encoding breaking.
+        use crate::state::Ask;
+        use relay_api::delegation::AskStatus;
+
+        fn ask(id: &str, status: AskStatus) -> Ask {
+            let mut ask = Ask::new(
+                id.to_string(),
+                "asker".to_string(),
+                "peer".to_string(),
+                "codex".to_string(),
+                None,
+                None,
+                "do the thing".to_string(),
+                "/tmp".to_string(),
+                None,
+            );
+            ask.set_status(status);
+            ask
+        }
+
+        let mut relay = test_relay();
+        relay.insert_ask(ask("live", AskStatus::Working));
+        relay.insert_ask(ask("done", AskStatus::Done));
+
+        let persisted = PersistedRelayState::from_relay(&relay);
+        let mut written: Vec<&str> = persisted.asks.keys().map(String::as_str).collect();
+        written.sort_unstable();
+        assert_eq!(written, ["done"], "only settled asks are written");
+
+        // Through the disk format, not just the in-memory struct.
+        let json = serde_json::to_string(&persisted).expect("state encodes");
+        let mut reloaded: PersistedRelayState = serde_json::from_str(&json).expect("state decodes");
+        assert_eq!(
+            reloaded.asks.get("done").map(|ask| ask.status),
+            Some(AskStatus::Done),
+            "the status survives the disk format",
+        );
+
+        reloaded
+            .asks
+            .insert("smuggled".to_string(), ask("smuggled", AskStatus::Working));
+        let mut restored = test_relay();
+        restored.apply_persisted(&reloaded);
+        let mut back: Vec<&str> = restored.asks.keys().map(String::as_str).collect();
+        back.sort_unstable();
+        assert_eq!(back, ["done"], "a smuggled live ask is refused on restore");
     }
 
     #[test]

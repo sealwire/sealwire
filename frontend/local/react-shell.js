@@ -509,11 +509,19 @@ function ComposerShell() {
       { className: "composer-shell", hidden: true, id: "message-form" },
       h(ConversationComposer, {
         actionsBeforeSend: h("span", { id: "composer-settings-mount" }),
-        attachmentArea: h("div", {
-          className: "composer-attachments",
-          hidden: true,
-          id: "composer-attachments",
-        }),
+        // Two things share the pre-textarea slot: image attachments, and the
+        // "/" host. The host belongs INSIDE the composer box so its committed
+        // pills read as part of the field rather than as a banner above it.
+        attachmentArea: h(
+          React.Fragment,
+          null,
+          h("div", {
+            className: "composer-attachments",
+            hidden: true,
+            id: "composer-attachments",
+          }),
+          h("div", { className: "composer-command-host", id: "composer-command-mount" })
+        ),
         // The local surface is always desktop: Enter sends, Shift+Enter is a newline.
         enterSubmits: true,
         // This shell renders once; the send path fills the region by id (see
