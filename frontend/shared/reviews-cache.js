@@ -20,7 +20,9 @@ export function createReviewsCache() {
   // re-render → sync doesn't loop fetching until the snapshot is redelivered.
   let syncedRevision = null;
   let loaded = false;
-  let data = { review_jobs: [], reviewer_threads: [] };
+  // Every list the channel carries. A field left out here is fetched, returned,
+  // and then silently dropped — which looks exactly like the relay never sent it.
+  let data = { review_jobs: [], reviewer_threads: [], asks: [] };
   let inflightRevision = null;
 
   return {
@@ -59,6 +61,7 @@ export function createReviewsCache() {
         data = {
           review_jobs: resp?.review_jobs || [],
           reviewer_threads: resp?.reviewer_threads || [],
+          asks: resp?.asks || [],
         };
         if (typeof onUpdate === "function") {
           onUpdate();

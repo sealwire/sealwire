@@ -4948,3 +4948,32 @@ async fn a_codex_user_echo_binds_its_item_id_to_the_row_the_relay_already_publis
     assert_eq!(runtime.transcript.len(), 1, "still one row");
     assert_eq!(runtime.transcript[0].row_id, reservation);
 }
+
+#[test]
+fn the_codex_mcp_config_is_the_shape_codex_actually_parses() {
+    // Probed against codex-cli 0.146.0: `mcp_servers` is a MAP — a bogus shape
+    // is rejected with "expected a map in `mcp_servers`" while a made-up sibling
+    // key is ignored — env is an object, and the whole thing is per-thread (the
+    // server is spawned for the thread carrying the config and not for one
+    // without it). Claude wants a different spelling and ACP a third: one
+    // bridge, three shapes, and nothing but this to notice when one drifts.
+    let config = super::peer_mcp_servers("tok-1");
+    assert!(
+        config.is_object(),
+        "mcp_servers is a map; codex rejects an array outright",
+    );
+    let server = &config["sealwire"];
+    assert_eq!(server["env"]["SEALWIRE_ASK_TOKEN"], "tok-1");
+    assert!(
+        server["env"]["SEALWIRE_RELAY_URL"].as_str().is_some(),
+        "the subprocess has to be told where to call back",
+    );
+    assert!(
+        server["args"]
+            .as_array()
+            .and_then(|args| args.first())
+            .and_then(|arg| arg.as_str())
+            .is_some_and(|arg| arg.ends_with("orchestrator-mcp.mjs")),
+        "and which bridge to run",
+    );
+}

@@ -19,6 +19,51 @@ const MAX_PEERS_PER_ASKER: usize = 5;
 /// when to stop; this is what happens when it does not.
 const MAX_ASKS_PER_ASKER: usize = 20;
 
+/// Appended to every task handed to a peer.
+///
+/// Two versions, because only an unrestricted session is given tools. Telling a
+/// peer to call `answer_ask` when it has no such tool produced the worst of both
+/// worlds: a useful first reply, then a nudge it could not obey, then "I don't
+/// have that tool" REPLACING the useful reply.
+fn answer_instruction(has_tools: bool) -> &'static str {
+    if has_tools {
+        "\n\n---\nAnother agent asked for this and cannot see your session. When \
+you are done, call the `answer_ask` tool with what it needs to know. That is \
+what it will be shown."
+    } else {
+        "\n\n---\nAnother agent asked for this and cannot see your session. End \
+with what it needs to know — the outcome, anything it must decide, and anything \
+you could not do. Your last message is what it will be shown."
+    }
+}
+
+/// Sent once if a peer that HAS the tool finishes without using it.
+fn answer_nudge() -> &'static str {
+    "You finished without calling `answer_ask`. Call it now with what the agent \
+that asked you needs to know — it is still waiting."
+}
+
+/// How long to wait for a brief before giving up, as ticks of `BRIEF_WAIT_TICK_MS`.
+/// Generous: writing a brief is a real turn on a real model.
+const BRIEF_WAIT_TICKS: u32 = 600;
+const BRIEF_WAIT_TICK_MS: u64 = 500;
+
+/// What the asking agent is asked to write when a person's words need turning
+/// into something a stranger can act on.
+///
+/// It says "rewrite", not "answer": the agent must not do the work here, only
+/// describe it. Left vague, models start solving the problem in this turn.
+fn brief_prompt(task: &str) -> String {
+    format!(
+        "Another agent is about to be given this task, in a fresh session that \
+cannot see this conversation:\n\n{task}\n\nWrite the instructions it should \
+get. Include whatever it needs from what we have been doing — what the goal is, \
+which files and decisions matter, what \"this\" and \"the next step\" refer to, \
+and how it will know it is done. Do NOT do the work, and do not reply to me: \
+reply with the instructions themselves and nothing else."
+    )
+}
+
 /// A short, sortable id. Mirrors the review job's shape so the two read alike in
 /// logs.
 fn new_ask_id() -> String {
@@ -35,6 +80,41 @@ impl AppState {
     pub(crate) async fn ask_token_for_thread(&self, thread_id: &str) -> String {
         let mut relay = self.relay.write().await;
         relay.ask_token_for_thread(thread_id)
+    }
+
+    /// Record a peer's answer to whatever it was asked.
+    ///
+    /// The ask is found from the CALLER, never named by it: a peer that could
+    /// name an ask could answer on another peer's behalf.
+    pub(crate) async fn answer_ask(
+        &self,
+        peer_thread_id: &str,
+        answer: String,
+    ) -> Result<(), AskError> {
+        let answer = answer.trim().to_string();
+        if answer.is_empty() {
+            return Err(AskError::Failed(
+                "say what you found — an empty answer tells the other agent nothing".to_string(),
+            ));
+        }
+        let ask_id = {
+            let relay = self.relay.read().await;
+            let mut live: Vec<&Ask> = relay
+                .asks
+                .values()
+                .filter(|ask| ask.peer_thread_id == peer_thread_id && !ask.status.is_terminal())
+                .collect();
+            // Oldest first: if somehow two are open, the one waiting longest is
+            // the one this reply is for.
+            live.sort_by_key(|ask| ask.asked_at);
+            live.first().map(|ask| ask.id.clone())
+        }
+        .ok_or_else(|| AskError::Failed("nobody is waiting on you right now".to_string()))?;
+
+        let mut relay = self.relay.write().await;
+        relay.update_ask(&ask_id, |ask| ask.finish(answer));
+        relay.notify();
+        Ok(())
     }
 
     /// Hand `request.message` to a peer and record the pair.
@@ -98,6 +178,15 @@ Finish up with what you have and tell the user."
             )));
         }
 
+        // A person's one-liner becomes a brief before anyone else sees it. This
+        // costs a turn on the asking agent, which is why it is opt-in: an agent
+        // calling the tool already wrote its message with the context in view.
+        let message = if request.expand_with_context {
+            self.brief_from_asker(asker_thread_id, &message).await?
+        } else {
+            message
+        };
+
         let (approval_policy, sandbox) =
             peer_thread_settings(&asker_approval, &asker_sandbox, None, None);
 
@@ -144,6 +233,16 @@ Carry on with one of those instead of bringing in another."
             }
         };
 
+        // Whether this peer can actually answer with the tool. A peer that runs
+        // restricted has none, and must be told to answer in prose instead.
+        let peer_has_tools = {
+            let relay = self.relay.read().await;
+            relay
+                .thread_settings(&peer_thread_id)
+                .map(|s| crate::state::session_is_unrestricted(&s.approval_policy, &s.sandbox))
+                .unwrap_or(false)
+        };
+
         // What the peer had already said, so the sweeper can tell "has not picked
         // this up yet" from "answered". Both look idle.
         let baseline_item_id = self
@@ -174,7 +273,7 @@ Carry on with one of those instead of bringing in another."
         match self
             .send_message_to_thread(
                 &peer_thread_id,
-                &message,
+                &format!("{message}{}", answer_instruction(peer_has_tools)),
                 request.model.as_deref(),
                 request.effort.as_deref(),
             )
@@ -203,6 +302,67 @@ Carry on with one of those instead of bringing in another."
                 relay.notify();
                 Err(AskError::Failed(reason))
             }
+        }
+    }
+
+    /// Block until `thread_id` stops working, or the wait runs out.
+    ///
+    /// Its own small poll rather than the review orchestrator's: that one is
+    /// scoped to a review job and settles one, which is not what a brief turn
+    /// wants.
+    async fn wait_for_thread_idle(&self, thread_id: &str) {
+        for _ in 0..BRIEF_WAIT_TICKS {
+            let working = {
+                let relay = self.relay.read().await;
+                relay
+                    .runtime_for_thread(thread_id)
+                    .map(|runtime| runtime.is_working())
+                    .unwrap_or(false)
+            };
+            if !working {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(BRIEF_WAIT_TICK_MS)).await;
+        }
+    }
+
+    /// Drive one turn on the asking agent and take what it wrote as the brief.
+    ///
+    /// No tools involved — this is an ordinary turn — so it works for every
+    /// provider, including ones that can never be given a tool.
+    async fn brief_from_asker(
+        &self,
+        asker_thread_id: &str,
+        task: &str,
+    ) -> Result<String, AskError> {
+        // What it had already said, so a stale reply cannot be read as the brief.
+        let baseline = self
+            .latest_assistant_entry(asker_thread_id)
+            .await
+            .map(|(item_id, _)| item_id);
+
+        let dispatched = self
+            .send_message_to_thread(asker_thread_id, &brief_prompt(task), None, None)
+            .await
+            .map_err(|error| AskError::Failed(format!("could not ask for a brief: {error}")))?;
+
+        // The id may have been promoted by this very turn.
+        let asker_thread_id = dispatched.thread_id.as_str();
+        self.wait_for_thread_idle(asker_thread_id).await;
+
+        match self.latest_assistant_entry(asker_thread_id).await {
+            Some((item_id, text))
+                if baseline.as_deref() != Some(item_id.as_str()) && !text.trim().is_empty() =>
+            {
+                Ok(text)
+            }
+            // It said nothing new. Sending the raw words is worse than failing:
+            // the peer would act on an instruction with no referent.
+            _ => Err(AskError::Failed(
+                "this session did not write a brief for the other agent; try again, \
+or say the whole task in the command"
+                    .to_string(),
+            )),
         }
     }
 
@@ -519,16 +679,51 @@ impl AppState {
             else {
                 continue;
             };
-            let matches = {
+            let (matches, nudged) = {
                 let relay = self.relay.read().await;
-                relay
-                    .ask(&ask_id)
-                    .map(|ask| reply_answers_ask(ask, &item_id, reply_turn.as_deref()))
-                    .unwrap_or(false)
+                match relay.ask(&ask_id) {
+                    // Already answered through the tool while we were reading.
+                    Some(ask) if ask.status.is_terminal() => continue,
+                    Some(ask) => (
+                        reply_answers_ask(ask, &item_id, reply_turn.as_deref()),
+                        ask.nudged,
+                    ),
+                    None => continue,
+                }
             };
             if !matches {
                 continue;
             }
+            // It finished its turn without calling `answer_ask`. Ask once; a peer
+            // that ignores it twice is not going to start, and waiting forever
+            // would keep the asker asleep.
+            let can_be_nudged = {
+                let relay = self.relay.read().await;
+                relay
+                    .thread_settings(&peer_thread_id)
+                    .map(|s| crate::state::session_is_unrestricted(&s.approval_policy, &s.sandbox))
+                    .unwrap_or(false)
+            };
+            if !nudged && can_be_nudged {
+                let dispatched = self
+                    .send_message_to_thread(&peer_thread_id, answer_nudge(), None, None)
+                    .await;
+                let mut relay = self.relay.write().await;
+                relay.update_ask(&ask_id, |ask| {
+                    ask.nudged = true;
+                    // The nudge is a NEW turn, and the reply we are waiting for
+                    // now belongs to it. Leaving the old turn id here would make
+                    // every later reply look like somebody else's and the ask
+                    // would never settle.
+                    if let Ok(dispatched) = &dispatched {
+                        ask.turn_id = dispatched.turn_id.clone();
+                        ask.baseline_item_id = Some(item_id.clone());
+                    }
+                });
+                relay.notify();
+                continue;
+            }
+            // Nudged and still nothing. Its last message beats silence.
             let mut relay = self.relay.write().await;
             relay.update_ask(&ask_id, |ask| ask.finish(text));
             relay.notify();

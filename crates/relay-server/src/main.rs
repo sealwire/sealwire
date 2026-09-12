@@ -362,7 +362,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
             "/api/orchestrator/proposals/:proposal_id/confirm",
             post(confirm_orchestrator_proposal),
         )
-        .route("/api/session/ask-token", post(issue_ask_token))
+        .route("/api/session/delegate", post(delegate_to_agent))
         .route("/api/orchestrator/tools", get(list_orchestrator_tools))
         .route(
             "/api/orchestrator/tools/:tool_name/call",
@@ -750,14 +750,23 @@ async fn confirm_orchestrator_proposal(
         .map_err(bad_request)
 }
 
-/// `POST /api/session/ask-token` — the human door's way in.
+/// `POST /api/session/delegate` — the human door.
 ///
-/// A person typing `/delegate` acts on their own authority, but the tool path
-/// only accepts a token, so the surface asks for one rather than the route
-/// growing a second, weaker way to name a caller.
+/// Separate from the tool route because it means something different: a person
+/// typed a few words, so the asking agent is driven to turn them into a brief
+/// first. The tool route must NOT do that — an agent already wrote its message.
 #[derive(serde::Deserialize)]
-struct AskTokenInput {
+struct DelegateInput {
     thread_id: String,
+    message: String,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -786,17 +795,37 @@ struct OrchestratorToolListQuery {
     seat_run_id: Option<String>,
 }
 
-async fn issue_ask_token(
+async fn delegate_to_agent(
     State(context): State<AppContext>,
     headers: HeaderMap,
     uri: Uri,
-    Json(input): Json<AskTokenInput>,
-) -> Result<Json<ApiEnvelope<serde_json::Value>>, (StatusCode, Json<ApiError>)> {
+    Json(input): Json<DelegateInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     authorize_api(&context, &headers, &uri)?;
-    let token = context.app.ask_token_for_thread(&input.thread_id).await;
-    Ok(Json(ApiEnvelope::ok(
-        serde_json::json!({ "ask_token": token }),
-    )))
+    let outcome = context
+        .app
+        .ask_agent(
+            &input.thread_id,
+            relay_api::delegation::AskRequest {
+                peer_thread_id: input.agent,
+                provider: input.provider,
+                model: input.model,
+                effort: input.effort,
+                message: input.message,
+                // The whole reason this route exists.
+                expand_with_context: true,
+            },
+        )
+        .await
+        .map(|peer| {
+            format!(
+                "Asked. That agent's id is {peer}; you will be sent its answer when it is done."
+            )
+        })
+        .map_err(|error| error.message());
+    Ok(Json(
+        crate::state::app::orchestrator_dispatch::tool_result_envelope(outcome),
+    ))
 }
 
 async fn list_orchestrator_tools(

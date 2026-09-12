@@ -2456,11 +2456,23 @@ mod tests {
             env.get("SEALWIRE_DEVICE_ID").is_none(),
             "a peer session proves itself with its token, not a device id"
         );
-        assert_eq!(
-            cmd["allowedTools"],
-            serde_json::json!(["mcp__sealwire__ask_agent"]),
-            "auto-allowed, or every call stops for an approval nobody can answer"
-        );
+        // Every peer tool is auto-allowed, or a call stops for an approval
+        // nobody is there to answer. Asserted as a SET so adding a tool does not
+        // silently drop one from the allowlist.
+        let allowed: Vec<&str> = cmd["allowedTools"]
+            .as_array()
+            .expect("allowedTools is a list")
+            .iter()
+            .map(|tool| tool.as_str().expect("each is a string"))
+            .collect();
+        for tool in crate::orchestrator_tools::PEER_TOOLS {
+            let expected = format!("mcp__sealwire__{tool}");
+            assert!(
+                allowed.contains(&expected.as_str()),
+                "{expected} must be auto-allowed",
+            );
+        }
+        assert_eq!(allowed.len(), crate::orchestrator_tools::PEER_TOOLS.len());
     }
     use super::*;
 

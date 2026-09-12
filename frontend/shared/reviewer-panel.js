@@ -132,15 +132,26 @@ function reviewerThreadName(job, reviewerThreads) {
 // One agent this session brought in. Deliberately plain: the question and the
 // answer, because a person never typed either — an agent did, and this is the
 // only place the exchange can be read.
-function AskCard({ ask, onOpen = null }) {
+function AskCard({ ask, viewedThreadId = "", onOpen = null }) {
   const live = ask.status === "working";
+  // Which side of the pair you are looking at. Without this the card is the same
+  // whether this session asked or was asked, and the relation is invisible —
+  // which is the whole reason to show it here rather than in the transcript.
+  const iAsked = ask.asker_thread_id === viewedThreadId;
+  const other = iAsked ? ask.peer_thread_id : ask.asker_thread_id;
+  const otherName =
+    (iAsked ? ask.peer_name : ask.asker_name) || ask.peer_provider || "another agent";
   return h(
     "div",
     { className: "reviewer-job" + (live ? " is-live" : "") },
     h(
       "div",
       { className: "reviewer-job-head" },
-      h("span", { className: "reviewer-job-title" }, ask.peer_provider || "agent"),
+      h(
+        "span",
+        { className: "reviewer-job-title" },
+        iAsked ? `You asked ${otherName}` : `${otherName} asked you`
+      ),
       h(
         "span",
         { className: "reviewer-job-status" },
@@ -155,15 +166,15 @@ function AskCard({ ask, onOpen = null }) {
     !live && ask.answer && !ask.delivered
       ? h("p", { className: "reviewer-job-note" }, "Not handed back yet.")
       : null,
-    onOpen && ask.peer_thread_id
+    onOpen && other
       ? h(
           "button",
           {
             className: "reviewer-job-action",
-            onClick: () => onOpen(ask.peer_thread_id),
+            onClick: () => onOpen(other),
             type: "button",
           },
-          "Open"
+          iAsked ? "Open that agent" : "Open the session that asked"
         )
       : null
   );
@@ -282,7 +293,14 @@ export function ReviewerPanel({
           "div",
           { className: "reviewer-panel-list" },
           // Asks first: they are the live thing more often than a review is.
-          ...asks.map((ask) => h(AskCard, { key: ask.id, ask, onOpen: onOpenThread })),
+          ...asks.map((ask) =>
+            h(AskCard, {
+              key: ask.id,
+              ask,
+              viewedThreadId: parentThreadId,
+              onOpen: onOpenThread,
+            })
+          ),
           ...reviewJobs.map((job) =>
             h(ReviewerJobCard, {
               key: job.id,

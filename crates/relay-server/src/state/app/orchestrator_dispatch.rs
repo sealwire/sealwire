@@ -376,6 +376,12 @@ impl AppState {
         let caller_thread_id = caller_thread_id.as_str();
 
         match orchestrator_tools::parse_call(name, args)? {
+            ToolCall::AnswerAsk { answer } => {
+                match self.answer_ask(caller_thread_id, answer).await {
+                    Ok(()) => Ok("Sent. The agent that asked will be given it.".to_string()),
+                    Err(error) => Err(error.message()),
+                }
+            }
             ToolCall::AskAgent {
                 message,
                 agent,
@@ -384,6 +390,9 @@ impl AppState {
                 effort,
             } => {
                 let request = relay_api::delegation::AskRequest {
+                    // An agent writes its own message, with the conversation in
+                    // front of it. Only a person's words need expanding.
+                    expand_with_context: false,
                     peer_thread_id: agent,
                     // Left unresolved on purpose: only `ask_agent` knows who is
                     // asking, and the default is "someone other than you".
@@ -430,8 +439,8 @@ you will be sent the answers when everything you asked for is finished."
         match orchestrator_tools::parse_call(name, args)? {
             // The Orchestrator drives tasks, not ad-hoc peers. Reached only if
             // someone calls the API directly without a caller thread id.
-            ToolCall::AskAgent { .. } => {
-                Err("ask_agent belongs to an ordinary session, not the Orchestrator".to_string())
+            ToolCall::AskAgent { .. } | ToolCall::AnswerAsk { .. } => {
+                Err("that tool belongs to an ordinary session, not the Orchestrator".to_string())
             }
             ToolCall::ProposeTask {
                 title,

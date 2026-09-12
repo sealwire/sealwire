@@ -1198,6 +1198,10 @@ export function createSessionRenderer({
 
   // Push the review slice onto the shared workspace-diff store so the Reviewer
   // tab (rail + mobile sheet) can render jobs, the launcher model, and gating.
+  function threadNameById(threadId) {
+    return (state.threads || []).find((thread) => thread.id === threadId)?.name || null;
+  }
+
   function renderReviewSlice(session) {
     if (typeof setReviewSlice !== "function") {
       return;
@@ -1241,9 +1245,19 @@ export function createSessionRenderer({
       canCurrentDeviceWrite(session);
     setReviewSlice({
       reviewJobs: threadReviewJobs,
-      asks: (reviewsData.asks || []).filter(
-        (ask) => ask.asker_thread_id === viewedThreadId || ask.peer_thread_id === viewedThreadId
-      ),
+      // Names, not a resolver: the store compares slices with JSON.stringify,
+      // which DROPS functions — so a function here is invisible to that check
+      // and every change beside it stops emitting.
+      asks: (reviewsData.asks || [])
+        .filter(
+          (ask) =>
+            ask.asker_thread_id === viewedThreadId || ask.peer_thread_id === viewedThreadId
+        )
+        .map((ask) => ({
+          ...ask,
+          asker_name: threadNameById(ask.asker_thread_id),
+          peer_name: threadNameById(ask.peer_thread_id),
+        })),
       workflowRuns: threadWorkflowRuns,
       reviewModel: reviewLaunchModel(session),
       workflowModel: workflowLaunchModel(session),

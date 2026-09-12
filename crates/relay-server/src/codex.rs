@@ -88,12 +88,17 @@ impl ProviderBridge for CodexBridge {
         self.list_models().await
     }
 
-    /// `system_prompt` is IGNORED. The app-server's `thread/start` takes only
-    /// cwd / model / approvalPolicy / sandbox / personality — there is no
-    /// instruction surface, and `~/.codex/config.toml` is process-global while
-    /// one app-server serves every thread, so it could not be scoped to this one
-    /// anyway. Smuggling the persona in as a user turn is deliberately not done:
+    /// `system_prompt` is IGNORED: `thread/start` has no instruction surface,
+    /// and smuggling the persona in as a user turn is deliberately not done —
     /// see `StartThreadRequest::system_prompt`.
+    ///
+    /// MCP servers are a DIFFERENT story, and an earlier version of this comment
+    /// got it wrong. `thread/start` takes a per-thread `config`, and
+    /// `config.mcp_servers` is scoped to that thread — probed against
+    /// codex-cli 0.146.0: a bogus shape is rejected with "expected a map in
+    /// `mcp_servers`" while a made-up sibling key is ignored, and the server is
+    /// spawned for the thread that carries the config and not for one that does
+    /// not. So `~/.codex/config.toml` never has to be touched.
     async fn start_thread(&self, request: StartThreadRequest) -> Result<StartThreadResult, String> {
         let thread = self
             .start_thread(
@@ -233,6 +238,23 @@ impl ProviderBridge for CodexBridge {
     fn provider_name(&self) -> &'static str {
         self.provider_name
     }
+}
+
+/// The sealwire MCP server, as codex's per-thread config wants it.
+///
+/// Shape differs from Claude's (a map, `mcp_servers`, env as an object) and from
+/// ACP's (an array, env as name/value pairs) — same bridge, three spellings.
+fn peer_mcp_servers(token: &str) -> Value {
+    json!({
+        "sealwire": {
+            "command": std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".to_string()),
+            "args": [crate::provider::sealwire_mcp_bridge_path()],
+            "env": {
+                "SEALWIRE_ASK_TOKEN": token,
+                "SEALWIRE_RELAY_URL": crate::provider::sealwire_relay_url(),
+            },
+        }
+    })
 }
 
 // Turn `codex mcp list --json` output into operator log lines. Codex's
@@ -543,23 +565,37 @@ impl CodexBridge {
         sandbox: &str,
     ) -> Result<ThreadSummaryView, String> {
         let (approval_policy, sandbox) = resolve_codex_policy(approval_policy, sandbox);
-        let result = self
-            .send_request(
-                "thread/start",
-                json!({
-                    "cwd": cwd,
-                    "model": model,
-                    "approvalPolicy": approval_policy,
-                    "sandbox": sandbox,
-                    "personality": "pragmatic"
-                }),
-            )
-            .await?;
+        // Minted before the thread exists and bound once its id comes back —
+        // the same order ACP forced, because neither provider names the session
+        // until after the tools are attached.
+        let ask_token = if crate::state::session_is_unrestricted(&approval_policy, &sandbox) {
+            Some(self.state.write().await.mint_unbound_ask_token())
+        } else {
+            None
+        };
+        let mut params = json!({
+            "cwd": cwd,
+            "model": model,
+            "approvalPolicy": approval_policy,
+            "sandbox": sandbox,
+            "personality": "pragmatic"
+        });
+        if let Some(token) = ask_token.as_deref() {
+            params["config"] = json!({ "mcp_servers": peer_mcp_servers(token) });
+        }
+        let result = self.send_request("thread/start", params).await?;
 
         let thread = value_at(&result, &["thread"])
             .ok_or_else(|| "thread/start did not return a thread".to_string())?;
 
-        parse_thread_summary(thread)
+        let summary = parse_thread_summary(thread)?;
+        // The token was minted before this thread had a name. Without this it
+        // stays unowned for good, and every tool call from the session it was
+        // handed to is refused as "not allowed to bring in another agent".
+        if let Some(token) = ask_token.as_deref() {
+            self.state.write().await.bind_ask_token(token, &summary.id);
+        }
+        Ok(summary)
     }
 
     pub async fn fork_thread(
@@ -599,15 +635,21 @@ impl CodexBridge {
         sandbox: &str,
     ) -> Result<(), String> {
         let (approval_policy, sandbox) = resolve_codex_policy(approval_policy, sandbox);
-        self.send_request(
-            "thread/resume",
-            json!({
+        self.send_request("thread/resume", {
+            // Re-attached on resume, or the thread comes back without its
+            // tools — the config binds at start/resume, not per turn.
+            let mut params = json!({
                 "threadId": thread_id,
                 "approvalPolicy": approval_policy,
                 "sandbox": sandbox,
                 "personality": "pragmatic"
-            }),
-        )
+            });
+            if crate::state::session_is_unrestricted(&approval_policy, &sandbox) {
+                let token = { self.state.write().await.ask_token_for_thread(thread_id) };
+                params["config"] = json!({ "mcp_servers": peer_mcp_servers(&token) });
+            }
+            params
+        })
         .await
         .map(|_| ())
     }
