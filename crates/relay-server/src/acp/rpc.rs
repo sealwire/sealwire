@@ -1242,19 +1242,12 @@ async fn handle_create_plan(
     } else {
         let sessions = sessions.lock().await;
         sessions.iter().find_map(|(session_id, session)| {
-            (session.tool_items.contains_key(&tool_call_id) && session.turn_id.is_some()).then(
-                || {
-                    (
-                        session_id.clone(),
-                        session.approval_policy.clone(),
-                        session.cwd.clone(),
-                    )
-                },
-            )
+            (session.tool_items.contains_key(&tool_call_id) && session.turn_id.is_some())
+                .then(|| (session_id.clone(), session.cwd.clone()))
         })
     };
 
-    let Some((session_id, approval_policy, cwd)) = resolved else {
+    let Some((session_id, cwd)) = resolved else {
         // No thread means no surface to ask on. Accepting keeps plan mode
         // working — rejecting a plan the user never saw would break it for a
         // reason they cannot see — but this is exactly the silent accept this
@@ -1296,36 +1289,33 @@ async fn handle_create_plan(
         return;
     }
 
-    // Nobody to ask, for either of two remaining reasons. Semantic reviewers
-    // were handled above because their plan artifact is not the thing the review
-    // waiter parses; this branch is only for ordinary unattended/no-user plan
-    // handling.
+    // Nobody to ask. Semantic reviewers were handled above because their plan
+    // artifact is not the thing the review waiter parses; this branch is only
+    // for ordinary unattended runs (workflow / team / review-locked parent).
     //
-    // A no-prompt policy is the same contract `session/request_permission`
-    // already honours. Unlike `allow_always`, accepting a plan grants nothing
-    // that outlives the turn, so there is no permission to leak by doing so.
-    //
-    // Some background workflow/team threads also cannot route a plan to a user.
-    // For non-reviewer seats, accepting preserves the existing unattended plan
-    // contract and still leaves an explicit relay log below.
+    // Do NOT fold in `auto_approves` (never / bypass). That policy is the
+    // contract for `session/request_permission`: auto-answer so shell work can
+    // continue. Measured against Cursor, accepting `cursor/create_plan` *ends
+    // the turn*. Applying YOLO here silently settles Create Plan as completed
+    // and leaves an interactive thread idle — the "cursor planned and we
+    // stopped" failure. A reachable user still decides the plan; only runs
+    // that answer their own approvals auto-accept.
     let can_ask = state.read().await.approval_can_reach_a_user(&session_id);
-    if !can_ask || protocol::auto_approves(&approval_policy) {
+    if !can_ask {
         answer_plan(&request_id, ApprovalDecision::Approve, stdin, provider_key).await;
         // Say so. The run that owns this thread DENIES every other approval on
         // it (the review and team wait loops both do), so accepting here is the
         // opposite decision — and one the user never sees unless it is written
         // down. Same reasoning as the unroutable branch above.
-        if !can_ask {
-            let mut relay = state.write().await;
-            relay.push_log(
-                "warn",
-                format!(
-                    "Accepted a Cursor plan on `{session_id}` without asking: \
-                     the run that owns this thread answers its approvals itself."
-                ),
-            );
-            relay.notify();
-        }
+        let mut relay = state.write().await;
+        relay.push_log(
+            "warn",
+            format!(
+                "Accepted a Cursor plan on `{session_id}` without asking: \
+                 the run that owns this thread answers its approvals itself."
+            ),
+        );
+        relay.notify();
         return;
     }
 
