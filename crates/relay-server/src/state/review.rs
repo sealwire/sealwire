@@ -276,6 +276,7 @@ impl ReviewJob {
             verdict: self.verdict.clone(),
             base_sha: self.base_sha.clone(),
             candidate_sha: self.candidate_sha.clone(),
+            candidate_is_checkpoint: self.candidate_is_checkpoint,
             verdict_candidate_sha: self.verdict_candidate_sha.clone(),
         }
     }

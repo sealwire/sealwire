@@ -3543,6 +3543,10 @@ pub struct ReviewJobView {
     pub verdict: Option<String>,
     pub base_sha: Option<String>,
     pub candidate_sha: Option<String>,
+    /// Whether `candidate_sha` names a hidden checkpoint rather than a commit the
+    /// user can look up. Without it the panel offers seven characters of a sha
+    /// that `git show` cannot find.
+    pub candidate_is_checkpoint: bool,
     pub verdict_candidate_sha: Option<String>,
 }
 

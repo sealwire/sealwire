@@ -329,7 +329,7 @@ export function WorkflowRunCard({ run, onResolveWorkflow }) {
       .finally(() => setResolvePending(false));
   };
   // A code-flow run is WORK IN FLIGHT; a reviewer job is a RESULT. They used to render as
-  // the same `.reviewer-job` card in the same list, so "still running" and "finished and
+  // the same card in the same list, so "still running" and "finished and
   // approved" were the same object at a glance. This is deliberately a compact ROW rather
   // than a card: it carries no verdict to headline, and sizing it like one implied it did.
   const metaParts = ["code flow"];
@@ -379,6 +379,6 @@ export function WorkflowRunCard({ run, onResolveWorkflow }) {
     findings.length
       ? h("div", { className: "workflow-run-findings" }, findings.join("\n\n"))
       : null,
-    run?.error ? h("p", { className: "reviewer-job-error" }, run.error) : null
+    run?.error ? h("p", { className: "reviewer-card-error" }, run.error) : null
   );
 }
