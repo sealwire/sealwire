@@ -1659,18 +1659,20 @@ async fn a_cold_read_only_thread_is_put_back_in_plan_mode_before_its_turn() {
 }
 
 #[tokio::test]
-async fn a_no_prompt_thread_accepts_the_plan_without_parking_it() {
-    // Same contract as `session/request_permission` under a no-prompt policy:
-    // there is nobody to ask, so the bridge answers immediately. Accepting is
-    // the right default here — unlike `allow_always` it grants nothing that
-    // outlives the turn, and rejecting would break plan mode for a thread whose
-    // whole point is to run unattended.
+async fn a_bypass_thread_still_parks_a_plan_for_the_user() {
+    // `never` / `bypass` auto-answers `session/request_permission` so shell
+    // work can continue. Applying that to `cursor/create_plan` is the wrong
+    // contract: measured, accepting a plan *ends the turn*. A YOLO policy then
+    // silently settles Create Plan as completed and leaves the thread idle —
+    // exactly the "cursor planned and sealwire stopped" failure. A reachable
+    // user still has to decide the plan; only unattended runs (`!can_ask`)
+    // auto-accept.
     let state = relay_state();
     let (outbound, mut outbound_peer) = tokio::io::duplex(8192);
     let (inbound_writer, inbound) = tokio::io::duplex(8192);
     let bridge = AcpBridge::for_test(state.clone(), outbound, inbound, "cursor");
     bridge
-        .seed_session_with_policy_for_test("t1", "/tmp/project", "never")
+        .seed_session_with_policy_for_test("t1", "/tmp/project", "bypass")
         .await;
     bridge
         .set_session_turn_for_test("t1", Some("acp-turn-1"))
@@ -1693,12 +1695,37 @@ async fn a_no_prompt_thread_accepts_the_plan_without_parking_it() {
     .await
     .expect("write");
 
-    let sent = next_wire_line(&mut outbound_peer).await;
-    assert_eq!(sent["id"], json!(9));
-    assert_eq!(sent["result"]["outcome"], json!({"outcome":"accepted"}));
+    let parked = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            {
+                let relay = state.read().await;
+                if let Some(pending) = relay.pending_approvals.values().next() {
+                    return pending.clone();
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a bypass thread must still park the plan for the user");
+
+    assert_eq!(parked.thread_id, "t1");
     assert!(
-        state.read().await.pending_approvals.is_empty(),
-        "a no-prompt thread must not park a card nobody will answer"
+        crate::acp::protocol::is_plan_approval(&parked.request_id),
+        "the parked card must be a plan approval, not a permission: {}",
+        parked.request_id
+    );
+
+    // And nothing was answered yet — accepting would end the turn.
+    let mut buffer = vec![0_u8; 256];
+    let quiet = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        tokio::io::AsyncReadExt::read(&mut outbound_peer, &mut buffer),
+    )
+    .await;
+    assert!(
+        quiet.is_err(),
+        "the bridge answered the plan before the user decided"
     );
 }
 
