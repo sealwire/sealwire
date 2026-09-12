@@ -726,7 +726,7 @@ impl ThreadRuntime {
     }
 
     #[must_use]
-    fn merge_transcript_records_after_read_start(
+    pub(crate) fn merge_transcript_records_after_read_start(
         &mut self,
         records: Vec<TranscriptRecord>,
         read_started_at_revision: Option<u64>,
@@ -886,18 +886,26 @@ impl ThreadRuntime {
 /// Namespace-tagged on purpose: two entries are the same row only when they are
 /// named in the same space. A provider item called `x` and a relay-synthesized row
 /// keyed `x` are two rows that merely share a spelling.
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 enum PageIdentity {
     Provider(String),
+    Relay(String),
     Row(String),
 }
 
 impl PageIdentity {
+    /// All three spaces, in the order of how much they say about the row: a
+    /// provider name is the strongest claim, a relay source name next, and the
+    /// row key only when nothing named the row at its source. A variant per space
+    /// is what keeps `x` in one space from deduping against `x` in another.
     fn of(record: &TranscriptRecord) -> Self {
-        match record.provider_item_id.as_deref() {
-            Some(provider_item_id) => Self::Provider(provider_item_id.to_string()),
-            None => Self::Row(record.row_id.clone()),
+        if let Some(provider_item_id) = record.provider_item_id.as_deref() {
+            return Self::Provider(provider_item_id.to_string());
         }
+        if let Some(relay_item_id) = record.relay_item_id.as_deref() {
+            return Self::Relay(relay_item_id.to_string());
+        }
+        Self::Row(record.row_id.clone())
     }
 }
 
@@ -975,13 +983,22 @@ fn merge_runtime_entry(existing: &mut TranscriptRecord, incoming: TranscriptReco
         // matched through the resolver, so the incoming copy may legitimately be
         // named by a PROVIDER id while this row's key is the relay's own — taking
         // the incoming name would rename a row clients already hold, which the
-        // add-and-update snapshot protocol cannot express. Its provider name is
+        // add-and-update snapshot protocol cannot express. Its source names are
         // worth keeping instead.
+        //
+        // Both source names survive a less-informed copy: an incoming record that
+        // knows one of them supplies it, and one that knows neither must not erase
+        // what this row already learned. Dropping a relay name here would strand a
+        // synthesized row in the row namespace, where the NEXT read cannot find it.
         let row_id = std::mem::take(&mut existing.row_id);
         let provider_item_id = incoming
             .provider_item_id
             .clone()
             .or_else(|| existing.provider_item_id.clone());
+        let relay_item_id = incoming
+            .relay_item_id
+            .clone()
+            .or_else(|| existing.relay_item_id.clone());
         let order_seq = existing.order_seq;
         let withdrawn = existing.withdrawn || incoming.withdrawn;
         let last_live_upsert_revision = incoming
@@ -990,6 +1007,7 @@ fn merge_runtime_entry(existing: &mut TranscriptRecord, incoming: TranscriptReco
         *existing = incoming;
         existing.row_id = row_id;
         existing.provider_item_id = provider_item_id;
+        existing.relay_item_id = relay_item_id;
         existing.last_live_upsert_revision = last_live_upsert_revision;
         existing.order_seq = order_seq;
         existing.withdrawn = withdrawn;
@@ -1007,7 +1025,9 @@ fn merge_tool_call_into(
 }
 
 fn runtime_records_differ(left: &TranscriptRecord, right: &TranscriptRecord) -> bool {
-    left.kind != right.kind
+    left.provider_item_id != right.provider_item_id
+        || left.relay_item_id != right.relay_item_id
+        || left.kind != right.kind
         || left.text != right.text
         || left.status != right.status
         || left.turn_id != right.turn_id
@@ -1944,6 +1964,128 @@ mod tests {
             views[0].text.as_deref(),
             Some("the provider's row"),
             "and it must be the page's row, not the relay row that shared its name"
+        );
+    }
+
+    /// In-page dedupe keys on the NAMESPACE as well as the spelling. All three
+    /// spaces are distinct, so `x` in one never folds into `x` in another.
+    #[test]
+    fn page_identity_separates_all_three_namespaces() {
+        // All three spell their identity `x` and differ ONLY in which space it lives
+        // in — so a collapsed namespace makes two of them compare equal.
+        let provider = TranscriptRecord {
+            provider_item_id: Some("x".to_string()),
+            ..plain_record("x", "provider", 0)
+        };
+        let relay_named = TranscriptRecord {
+            relay_item_id: Some("x".to_string()),
+            ..plain_record("x", "relay", 0)
+        };
+        // Nothing named it at its source; only its row key says anything.
+        let no_source = plain_record("x", "no source", 0);
+
+        assert_eq!(PageIdentity::of(&provider), PageIdentity::of(&provider));
+        assert_ne!(
+            PageIdentity::of(&provider),
+            PageIdentity::of(&relay_named),
+            "a provider name and a relay source name are different spaces"
+        );
+        assert_ne!(
+            PageIdentity::of(&relay_named),
+            PageIdentity::of(&no_source),
+            "a relay source name and a bare row key are different spaces"
+        );
+        assert_ne!(
+            PageIdentity::of(&provider),
+            PageIdentity::of(&no_source),
+            "a provider name and a bare row key are different spaces"
+        );
+
+        // Provider outranks relay when a record somehow carries both.
+        let both = TranscriptRecord {
+            provider_item_id: Some("p".to_string()),
+            relay_item_id: Some("r".to_string()),
+            ..plain_record("row-c", "both", 0)
+        };
+        assert_eq!(
+            PageIdentity::of(&both),
+            PageIdentity::Provider("p".to_string())
+        );
+    }
+
+    /// The production shape of that rule: one page carrying a provider item `x` and
+    /// a synthesized row `x` must land two rows, not one merged one.
+    #[test]
+    fn a_page_holding_both_a_provider_and_a_relay_named_x_is_not_deduped() {
+        let mut rt = runtime("t1", "idle");
+
+        let views = rt.prepend_provider_history(
+            vec![
+                crate::provider::ProviderTranscriptEntry::relay_named(plain_view(
+                    "x",
+                    "the relay's summary",
+                )),
+                crate::provider::ProviderTranscriptEntry::provider_named(plain_view(
+                    "x",
+                    "the provider's row",
+                )),
+            ],
+            Some(10),
+            None,
+        );
+
+        assert_eq!(
+            rt.transcript.len(),
+            2,
+            "one page, two namespaces, two rows: {:?}",
+            rt.transcript
+                .iter()
+                .map(|r| (r.row_id.clone(), r.text.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            rt.transcript.resolve_relay("x"),
+            Some("x"),
+            "the synthesized row took the key and keeps its source name"
+        );
+        let provider_row = rt
+            .transcript
+            .get_by_provider("x")
+            .expect("the provider namespace knows `x`");
+        assert_ne!(provider_row.row_id, "x");
+        assert_eq!(provider_row.text.as_deref(), Some("the provider's row"));
+        assert_eq!(views.len(), 2, "and the page reports both");
+    }
+
+    /// A less-informed incoming copy must not erase a source name the row already
+    /// learned. Dropping the relay name strands a synthesized row in the row
+    /// namespace, where the next read cannot find it.
+    #[test]
+    fn a_whole_record_merge_keeps_both_source_names() {
+        let mut existing = TranscriptRecord {
+            provider_item_id: Some("prov-1".to_string()),
+            relay_item_id: Some("turn-diff:turn-1".to_string()),
+            ..plain_record("row-a", "short", 0)
+        };
+        existing.status = "running".to_string();
+
+        // A history copy that knows neither name, and differs enough to replace.
+        let incoming = TranscriptRecord {
+            provider_item_id: None,
+            relay_item_id: None,
+            ..plain_record("row-a", "a longer body from history", 0)
+        };
+
+        assert!(merge_runtime_entry(&mut existing, incoming));
+        assert_eq!(
+            existing.provider_item_id.as_deref(),
+            Some("prov-1"),
+            "the provider name survives a copy that does not carry it"
+        );
+        assert_eq!(
+            existing.relay_item_id.as_deref(),
+            Some("turn-diff:turn-1"),
+            "and so does the relay source name"
         );
     }
 
