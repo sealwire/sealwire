@@ -122,6 +122,27 @@ fn provider_entries(
     crate::provider::ProviderTranscriptEntry::all_provider_named(views)
 }
 
+/// A temp directory name no other test can land on.
+///
+/// The three persistence tests used `pid + nanos`, but they run concurrently in
+/// ONE process, so the pid is shared and a coarse clock can hand two of them the
+/// same instant — then one test's `remove_dir_all` deletes the other's state
+/// mid-run. The counter is what actually guarantees uniqueness; the timestamp
+/// only keeps leftovers from separate runs apart.
+fn unique_test_dir_name() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "agent-relay-test-{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time should move forward")
+            .as_nanos(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 fn test_state() -> RelayState {
     let (change_tx, _) = watch::channel(0_u64);
     RelayState::new(
@@ -4014,14 +4035,7 @@ fn filter_deleted_threads_hides_locally_purged_threads() {
 
 #[tokio::test]
 async fn persistence_store_round_trips_to_disk() {
-    let unique = format!(
-        "agent-relay-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time should move forward")
-            .as_nanos()
-    );
+    let unique = unique_test_dir_name();
     let directory = std::env::temp_dir().join(unique);
     let path = directory.join("session.json");
     let store = PersistenceStore::from_path(path.clone());
@@ -4074,14 +4088,7 @@ async fn persistence_store_round_trips_to_disk() {
 
 #[tokio::test]
 async fn persistence_store_loads_legacy_state_without_thread_settings() {
-    let unique = format!(
-        "agent-relay-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time should move forward")
-            .as_nanos()
-    );
+    let unique = unique_test_dir_name();
     let directory = std::env::temp_dir().join(unique);
     let path = directory.join("session.json");
     let store = PersistenceStore::from_path(path.clone());
@@ -4145,14 +4152,7 @@ async fn persistence_store_loads_legacy_state_without_thread_settings() {
 
 #[tokio::test]
 async fn persistence_store_rejects_old_schema_version() {
-    let unique = format!(
-        "agent-relay-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time should move forward")
-            .as_nanos()
-    );
+    let unique = unique_test_dir_name();
     let directory = std::env::temp_dir().join(unique);
     let path = directory.join("session.json");
     let store = PersistenceStore::from_path(path.clone());
