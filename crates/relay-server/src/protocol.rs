@@ -109,9 +109,10 @@ pub struct SessionSnapshot {
     /// it cannot locate forces the client to predict which anchors those are, which
     /// is only answerable by reading a provider's id shape off a row key — and the
     /// answer depends on the provider's own namespace, which the relay deliberately
-    /// does not hand clients. This relay instead widens an unlocatable anchor at the
-    /// thread tip (see `fork_point_is_thread_tip`), judged against fresh state rather
-    /// than a dialog snapshot.
+    /// does not hand clients. This relay instead widens an unlocatable anchor only
+    /// when the runtime AND the fresh provider read together prove that nothing sits
+    /// after it (see `unlocatable_point_covers_the_whole_read`), and refuses when they
+    /// cannot — never widening on one side's word.
     ///
     /// `#[serde(default)]` so absence reads as "older relay" and a client keeps its
     /// own pre-flight rule. Constant-true per process: it names a behavior of this
