@@ -1537,6 +1537,8 @@ pub(crate) fn sync_data_from_runtime(
         status: runtime.current_status.clone(),
         active_flags: runtime.active_flags.clone(),
         transcript,
+        // Every row the runtime holds, 1:1 with its records — asserted just above.
+        transcript_complete: true,
     })
 }
 

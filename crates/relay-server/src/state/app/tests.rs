@@ -2876,6 +2876,7 @@ is also what keeps the refusal from confirming it exists: {error}"
             relay.apply_persisted(&persisted);
             relay.load_thread_data(
                 crate::provider::ThreadSyncData {
+                    transcript_complete: true,
                     thread: crate::protocol::ThreadSummaryView {
                         workspace_trusted: false,
                         id: "thread-a".to_string(),
@@ -6015,6 +6016,10 @@ tree; got {}",
             Arc<Mutex<HashMap<String, Vec<crate::provider::ProviderTranscriptEntry>>>>,
         /// Every `up_to_item_id` a native fork was actually asked for.
         fork_points: Arc<Mutex<Vec<Option<String>>>>,
+        /// Makes `read_thread` admit it dropped a row, the way a real bridge does for
+        /// an item it cannot parse. The read itself is still whatever the fixture
+        /// says — the point is that the LOSS is reported, not inferable from it.
+        read_drops_a_row: Arc<AtomicBool>,
         /// Details the provider can answer, keyed by the id IT knows them under.
         entry_details: Arc<Mutex<HashMap<String, crate::protocol::TranscriptEntryView>>>,
         /// Every id `read_thread_entry_detail` was actually asked for.
@@ -6073,6 +6078,7 @@ tree; got {}",
                 relay_named_read_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
                 thread_read_entries: Arc::new(Mutex::new(HashMap::new())),
                 fork_points: Arc::new(Mutex::new(Vec::new())),
+                read_drops_a_row: Arc::new(AtomicBool::new(false)),
                 entry_details: Arc::new(Mutex::new(HashMap::new())),
                 detail_requests: Arc::new(Mutex::new(Vec::new())),
                 consumes_initial_prompt: Arc::new(AtomicBool::new(false)),
@@ -6266,6 +6272,7 @@ tree; got {}",
                 .cloned()
             {
                 return Ok(crate::provider::ThreadSyncData {
+                    transcript_complete: !self.read_drops_a_row.load(Ordering::Relaxed),
                     thread,
                     status: "idle".to_string(),
                     active_flags: Vec::new(),
@@ -6288,6 +6295,7 @@ tree; got {}",
                 })
                 .collect();
             Ok(crate::provider::ThreadSyncData {
+                transcript_complete: !self.read_drops_a_row.load(Ordering::Relaxed),
                 thread,
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -7374,6 +7382,7 @@ tree; got {}",
                 (thread.id.clone(), None),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
+                        transcript_complete: true,
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
@@ -7390,6 +7399,7 @@ tree; got {}",
                 (thread.id.clone(), Some(7)),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
+                        transcript_complete: true,
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
@@ -7495,6 +7505,7 @@ tree; got {}",
                 (thread.id.clone(), None),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
+                        transcript_complete: true,
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
@@ -7510,6 +7521,7 @@ tree; got {}",
                 (thread.id.clone(), Some(123)),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
+                        transcript_complete: true,
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
@@ -7587,6 +7599,7 @@ tree; got {}",
                 (thread.id.clone(), None),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
+                        transcript_complete: true,
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
@@ -7669,6 +7682,7 @@ tree; got {}",
                 (thread.id.clone(), None),
                 crate::provider::ThreadTranscriptPageData {
                     sync: crate::provider::ThreadSyncData {
+                        transcript_complete: true,
                         thread: thread.clone(),
                         status: "idle".to_string(),
                         active_flags: Vec::new(),
@@ -9360,6 +9374,7 @@ tree; got {}",
                 .ok_or_else(|| format!("unknown thread {thread_id}"))?;
             let running = self.running.lock().unwrap().contains(thread_id);
             Ok(ThreadSyncData {
+                transcript_complete: true,
                 thread,
                 status: if running {
                     "active".to_string()
@@ -9637,6 +9652,7 @@ tree; got {}",
                 .get(thread_id)
                 .ok_or_else(|| format!("consumed-initial thread '{thread_id}' was not found"))?;
             Ok(crate::provider::ThreadSyncData {
+                transcript_complete: true,
                 thread: thread.summary.clone(),
                 status: thread.summary.status.clone(),
                 active_flags: Vec::new(),
@@ -11035,6 +11051,112 @@ tree; got {}",
     #[tokio::test]
     async fn a_fork_at_a_live_only_provider_name_at_the_tip_forks_the_whole_thread() {
         fork_at_a_live_only_provider_name(false).await;
+    }
+
+    /// The same fork that legitimately widens at the tip must be REFUSED when the read
+    /// that proved it admits it dropped a row.
+    ///
+    /// The widening proof reads "every entry but the last places before the requested
+    /// row, and the last places nowhere, so the last IS the requested row". That last
+    /// step assumes the row is in the read at all. A bridge parses tolerantly — Codex
+    /// skips an item with no `id`, Claude skips one it cannot deserialize — so the
+    /// entry the proof takes for the requested row can instead be one that came AFTER
+    /// it, and the branch is native-forked at the provider's tip carrying content the
+    /// user chose to cut. Nothing about the ids distinguishes the two reads, which is
+    /// why the bridge's own admission is the only thing that can refuse here.
+    #[tokio::test]
+    async fn a_fork_at_the_tip_is_refused_when_the_read_admits_it_dropped_a_row() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        codex.native_fork.store(true, Ordering::Relaxed);
+        // The read is the SAME one that widens in
+        // `a_fork_at_a_live_only_provider_name_at_the_tip_forks_the_whole_thread`; only
+        // the reported completeness differs.
+        codex.read_drops_a_row.store(true, Ordering::Relaxed);
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = codex.thread_summary("codex-source", cwd);
+        {
+            let mut threads = codex.threads.lock().await;
+            threads.insert(source.id.clone(), source.clone());
+        }
+        let entry = |item_id: &str, text: &str| crate::protocol::TranscriptEntryView {
+            row_id: None,
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some(item_id.to_string()),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some(text.to_string()),
+            status: "completed".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
+        };
+        {
+            let mut transcripts = codex.thread_transcripts.lock().await;
+            transcripts.insert(
+                source.id.clone(),
+                vec![
+                    entry("item-1", "earlier"),
+                    entry("item-2", "the streamed one"),
+                ],
+            );
+        }
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.threads = vec![source.clone()];
+        }
+        {
+            let mut relay = app.relay.write().await;
+            relay.upsert_transcript_item_for_thread(
+                &source.id,
+                "item-1".to_string(),
+                crate::protocol::TranscriptEntryKind::AgentText,
+                Some("earlier".to_string()),
+                "completed".to_string(),
+                Some("turn-1".to_string()),
+                None,
+            );
+            relay.upsert_transcript_item_for_thread(
+                &source.id,
+                "msg_live".to_string(),
+                crate::protocol::TranscriptEntryKind::AgentText,
+                Some("the streamed one".to_string()),
+                "completed".to_string(),
+                Some("turn-1".to_string()),
+                None,
+            );
+        }
+
+        let input = ForkSessionInput {
+            source_thread_id: source.id.clone(),
+            up_to_item_id: Some("msg_live".to_string()),
+            cwd: Some(cwd.to_string()),
+            initial_prompt: Some("carry on".to_string()),
+            model: Some("codex-model".to_string()),
+            approval_policy: None,
+            sandbox: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            provider: Some("codex".to_string()),
+            project_id: None,
+        };
+
+        let error = app
+            .fork_session(input)
+            .await
+            .expect_err("a read that dropped a row cannot prove the point is the tip");
+        assert!(
+            error.contains("never assigned it an id"),
+            "the refusal must say why, got: {error}"
+        );
+        assert!(
+            codex.fork_points.lock().await.is_empty(),
+            "and nothing may have been sent to the provider — a whole-thread native \
+             fork here would carry the rows the user cut"
+        );
     }
 
     #[tokio::test]
@@ -12809,6 +12931,7 @@ tree; got {}",
                 .cloned()
                 .ok_or_else(|| format!("thread '{thread_id}' not found"))?;
             Ok(crate::provider::ThreadSyncData {
+                transcript_complete: true,
                 thread,
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -14604,6 +14727,7 @@ mod review_tests {
                 .cloned()
                 .unwrap_or_default();
             Ok(crate::provider::ThreadSyncData {
+                transcript_complete: true,
                 thread,
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -25621,6 +25745,7 @@ mod late_catalog_tests {
                 .cloned()
                 .ok_or_else(|| format!("thread '{thread_id}' not found"))?;
             Ok(crate::provider::ThreadSyncData {
+                transcript_complete: true,
                 thread,
                 status: "idle".to_string(),
                 active_flags: Vec::new(),

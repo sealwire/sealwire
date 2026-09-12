@@ -84,6 +84,7 @@ impl AppState {
                         unlocatable_point_covers_the_whole_read(
                             transcript,
                             &source_data.transcript,
+                            source_data.transcript_complete,
                             requested,
                         ),
                     )
@@ -616,6 +617,12 @@ impl ForkPointResolution {
 /// So both sides are consulted, and the proof runs entirely through typed identities
 /// — never a spelling, never text, never a count of one side against the other:
 ///
+/// 0. The read admits no gaps. Steps 2 and 3 only bound the read from ABOVE; turning
+///    that into "the read ends AT the requested row" needs the row's counterpart to be
+///    present at all, and a bridge that silently dropped it produces a read that passes
+///    every other step while its last entry is content the user cut. This premise was
+///    implicit until it was written down, and it is the one no identity check can
+///    recover: see `ThreadSyncData::transcript_complete`.
 /// 1. No row follows the requested one in the runtime, so there is nothing the client
 ///    could have picked after it. A trailing WITHDRAWN row does not count: it is not
 ///    rendered, so it is neither a row the user could pick nor one a branch drops.
@@ -648,8 +655,18 @@ impl ForkPointResolution {
 fn unlocatable_point_covers_the_whole_read(
     transcript: Option<&crate::state::relay::ThreadTranscript>,
     read: &[crate::provider::ProviderTranscriptEntry],
+    read_is_complete: bool,
     requested: &str,
 ) -> bool {
+    // Step 3 concludes "the last entry IS the requested row's counterpart" from "no
+    // other entry can be it". That holds only if the counterpart is in the read at
+    // all: drop it, and the last entry is some row AFTER the fork point, resolving to
+    // nothing for the very same reason and passing the very same checks. No
+    // arrangement of ids distinguishes the two — only the reader knows it dropped
+    // something, so an admitted gap refuses here.
+    if !read_is_complete {
+        return false;
+    }
     let Some(transcript) = transcript else {
         return false;
     };
@@ -991,6 +1008,7 @@ mod tests {
 
     fn source_with_transcript(transcript: Vec<TranscriptEntryView>) -> ThreadSyncData {
         ThreadSyncData {
+            transcript_complete: true,
             thread: crate::protocol::ThreadSummaryView {
                 workspace_trusted: false,
                 id: "source-thread".to_string(),
@@ -1365,6 +1383,7 @@ mod fork_point_resolution_tests {
         assert!(unlocatable_point_covers_the_whole_read(
             Some(&store),
             &read,
+            true,
             &tip
         ));
     }
@@ -1382,9 +1401,40 @@ mod fork_point_resolution_tests {
         ];
 
         assert!(
-            !unlocatable_point_covers_the_whole_read(Some(&store), &read, &tip),
+            !unlocatable_point_covers_the_whole_read(Some(&store), &read, true, &tip),
             "`item-2` is now a non-last entry that resolves to nothing, so the read \
              is not bounded by the requested row and widening could leak `item-3`"
+        );
+    }
+
+    /// A read that DROPPED the requested row's counterpart, and the reason the
+    /// completeness flag has to exist at all: the two cases are INDISTINGUISHABLE by
+    /// id. `[item-1, item-3]` with `item-2` missing resolves exactly as the safe
+    /// `[item-1, item-2]` does — one early entry that places, one last entry that does
+    /// not — so every step of the proof passes and the branch is widened onto
+    /// `item-3`, the content the user cut.
+    ///
+    /// Both halves are asserted on purpose. The first pins that the identity checks
+    /// CANNOT catch this, so a future reader does not try to replace the flag with a
+    /// cleverer comparison; the second pins that the reader's own admission is what
+    /// refuses.
+    #[test]
+    fn a_read_that_dropped_a_row_refuses_to_widen() {
+        let (store, tip) = live_tip_store("msg_live");
+        let read = vec![
+            ProviderTranscriptEntry::provider_named(view("item-1")),
+            ProviderTranscriptEntry::provider_named(view("item-3")),
+        ];
+
+        assert!(
+            unlocatable_point_covers_the_whole_read(Some(&store), &read, true, &tip),
+            "a gapped read is identical to a tip read under every identity check, \
+             which is why completeness cannot be inferred here"
+        );
+        assert!(
+            !unlocatable_point_covers_the_whole_read(Some(&store), &read, false, &tip),
+            "and a read that admits the gap must refuse, or widening leaks `item-3` \
+             into the branch"
         );
     }
 
@@ -1403,6 +1453,7 @@ mod fork_point_resolution_tests {
         assert!(unlocatable_point_covers_the_whole_read(
             Some(&store),
             &read,
+            true,
             &tip
         ));
     }
@@ -1418,10 +1469,11 @@ mod fork_point_resolution_tests {
         assert!(!unlocatable_point_covers_the_whole_read(
             Some(&store),
             &read,
+            true,
             &tip
         ));
         assert!(
-            !unlocatable_point_covers_the_whole_read(Some(&store), &[], &tip),
+            !unlocatable_point_covers_the_whole_read(Some(&store), &[], true, &tip),
             "and an empty read demonstrates nothing at all"
         );
     }
@@ -1448,15 +1500,15 @@ mod fork_point_resolution_tests {
         let read = vec![ProviderTranscriptEntry::provider_named(view("item-2"))];
 
         assert!(
-            !unlocatable_point_covers_the_whole_read(Some(&store), &read, &decoy),
+            !unlocatable_point_covers_the_whole_read(Some(&store), &read, true, &decoy),
             "the decoy is not the tip, and it is what the provider's spelling names"
         );
         assert!(
-            !unlocatable_point_covers_the_whole_read(Some(&store), &read, "msg_live"),
+            !unlocatable_point_covers_the_whole_read(Some(&store), &read, true, "msg_live"),
             "the PROVIDER name must not answer the row-namespace question"
         );
         assert!(
-            !unlocatable_point_covers_the_whole_read(None, &read, &tip),
+            !unlocatable_point_covers_the_whole_read(None, &read, true, &tip),
             "no runtime, no answer"
         );
     }
@@ -1478,6 +1530,7 @@ mod fork_point_resolution_tests {
         assert!(unlocatable_point_covers_the_whole_read(
             Some(&store),
             &read,
+            true,
             &tip
         ));
 
@@ -1486,7 +1539,7 @@ mod fork_point_resolution_tests {
             ..row("msg_later")
         });
         assert!(
-            !unlocatable_point_covers_the_whole_read(Some(&store), &read, &tip),
+            !unlocatable_point_covers_the_whole_read(Some(&store), &read, true, &tip),
             "a VISIBLE row after it does move the tip"
         );
     }

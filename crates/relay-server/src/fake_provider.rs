@@ -682,6 +682,7 @@ impl ProviderBridge for FakeProviderBridge {
             transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(
                 thread.transcript.clone(),
             ),
+            transcript_complete: true,
         })
     }
 

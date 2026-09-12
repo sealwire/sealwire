@@ -22,6 +22,17 @@ pub struct ThreadSyncData {
     pub status: String,
     pub active_flags: Vec<String>,
     pub transcript: Vec<ProviderTranscriptEntry>,
+    /// Whether `transcript` holds EVERY row of the thread, or is known to have
+    /// dropped some — a malformed item, an entry that would not deserialize, a turn
+    /// that came back without its items.
+    ///
+    /// Bridges parse tolerantly on purpose: one unreadable item should not make a
+    /// thread unreadable. That is right for rendering and wrong for any reader that
+    /// reasons about what is ABSENT, because a dropped row and a row that was never
+    /// there are the same short vec. `fork_session` is such a reader — see
+    /// `unlocatable_point_covers_the_whole_read` — so the loss is reported rather
+    /// than inferred.
+    pub transcript_complete: bool,
 }
 
 /// One entry of a provider read, carrying its own provenance.
@@ -82,6 +93,7 @@ impl ThreadSyncData {
             status,
             active_flags,
             transcript: ProviderTranscriptEntry::all_provider_named(transcript),
+            transcript_complete: true,
         }
     }
 
@@ -301,6 +313,15 @@ pub trait ProviderBridge: Send + Sync {
         approval_policy: &str,
         sandbox: &str,
     ) -> Result<(), String>;
+    /// The thread's rows, in birth order, and honest about whether that is all of them.
+    ///
+    /// Order is load-bearing: a fork cuts the branch BY POSITION in this vec, so a
+    /// reordered read cuts somewhere the user did not choose. Completeness is
+    /// load-bearing separately, and is the subtler one — `fork_session` proves a
+    /// widened fork point against this read, and that proof needs "the requested row
+    /// is in here somewhere". A bridge that drops a row it could not parse must say so
+    /// through `ThreadSyncData::transcript_complete` rather than return a short vec,
+    /// because a short vec is indistinguishable from a shorter thread.
     async fn read_thread(&self, thread_id: &str) -> Result<ThreadSyncData, String>;
     /// Whether a recorded session can still be given a turn.
     ///

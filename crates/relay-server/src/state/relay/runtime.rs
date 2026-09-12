@@ -1447,6 +1447,7 @@ mod tests {
     #[test]
     fn from_sync_data_does_not_resurrect_working_status_without_a_turn() {
         let data = ThreadSyncData {
+            transcript_complete: true,
             thread: summary("t1", "active"),
             status: "active".to_string(),
             active_flags: Vec::new(),
@@ -2196,6 +2197,7 @@ mod tests {
         //    materializes the synthetic one under a minted key of its own.
         let fresh = ThreadRuntime::from_sync_data(
             ThreadSyncData {
+                transcript_complete: true,
                 thread: summary("t1", "idle"),
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -2370,6 +2372,7 @@ mod cold_import_tests {
 
     fn sync(transcript: Vec<ProviderTranscriptEntry>) -> ThreadSyncData {
         ThreadSyncData {
+            transcript_complete: true,
             thread: summary_for("t1"),
             status: "idle".to_string(),
             active_flags: Vec::new(),

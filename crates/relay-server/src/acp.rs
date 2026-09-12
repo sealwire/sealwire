@@ -1062,6 +1062,8 @@ impl AcpBridge {
 /// A thread row for a session that exists but has no content yet.
 fn empty_thread_sync(thread_id: &str, cwd: &str, provider_key: &'static str) -> ThreadSyncData {
     ThreadSyncData {
+        // Empty because the session HAS no content, not because a read lost it.
+        transcript_complete: true,
         thread: ThreadSummaryView {
             workspace_trusted: false,
             id: thread_id.to_string(),
@@ -1499,6 +1501,9 @@ impl ProviderBridge for AcpBridge {
             .unwrap_or_default();
 
         Ok(ThreadSyncData {
+            // `session/load` replays the session and `capture` keeps every update it
+            // turned into a row, in arrival order.
+            transcript_complete: true,
             thread: ThreadSummaryView {
                 workspace_trusted: false,
                 id: thread_id.to_string(),

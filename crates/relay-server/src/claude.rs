@@ -792,6 +792,8 @@ impl ProviderBridge for ClaudeCodeBridge {
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
                 transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(Vec::new()),
+                // Empty because the thread HAS no rows yet, not because any were lost.
+                transcript_complete: true,
             });
         };
         let cwd = self.cwd_for_thread(thread_id).await;
@@ -809,8 +811,8 @@ impl ProviderBridge for ClaudeCodeBridge {
         // Keep the public thread id stable when the underlying SDK session id
         // differs (i.e. a promoted pending thread).
         thread.id = thread_id.to_string();
-        let transcript = value_at(&result, &["transcript"])
-            .and_then(Value::as_array)
+        let items = value_at(&result, &["transcript"]).and_then(Value::as_array);
+        let transcript = items
             .map(|items| {
                 items
                     .iter()
@@ -818,11 +820,17 @@ impl ProviderBridge for ClaudeCodeBridge {
                     .collect::<Vec<TranscriptEntryView>>()
             })
             .unwrap_or_default();
+        // An item the worker sent that this relay cannot deserialize is dropped from
+        // the MIDDLE of the transcript, which no later reader can detect. A worker
+        // ahead of this binary — a new `kind`, a new tool shape — is exactly how that
+        // happens. See `ThreadSyncData::transcript_complete`.
+        let transcript_complete = items.is_some_and(|items| items.len() == transcript.len());
         Ok(ThreadSyncData {
             thread,
             status: "idle".to_string(),
             active_flags: Vec::new(),
             transcript: inject_turn_diff_entries(transcript),
+            transcript_complete,
         })
     }
 
@@ -863,6 +871,9 @@ impl ProviderBridge for ClaudeCodeBridge {
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
                 transcript: inject_turn_diff_entries(transcript),
+                // A PAGE, so it holds part of the thread by construction — never the
+                // whole-thread read the widening proof requires.
+                transcript_complete: false,
             },
             prev_cursor: value_at(&result, &["prev_cursor"])
                 .and_then(Value::as_u64)
