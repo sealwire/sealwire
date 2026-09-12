@@ -22,10 +22,10 @@ use crate::{
 };
 
 use super::{
-    delegation::Ask, ensure_path_within_device_scope, persistence::PersistedRelayState, unix_now,
-    ReviewJob, RunStatus, SecurityProfile, TeamRun, TeamRunStatus, TeamThreadGate, WorkflowRun,
-    CONTROLLER_LEASE_SECS, DEFAULT_APPROVAL_POLICY, DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX,
-    STALE_TURN_PROGRESS_TIMEOUT_SECS,
+    delegation::Ask, ensure_path_within_device_scope, goal::Goal, goal::GoalStatus,
+    persistence::PersistedRelayState, unix_now, ReviewJob, RunStatus, SecurityProfile, TeamRun,
+    TeamRunStatus, TeamThreadGate, WorkflowRun, CONTROLLER_LEASE_SECS, DEFAULT_APPROVAL_POLICY,
+    DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX, STALE_TURN_PROGRESS_TIMEOUT_SECS,
 };
 
 pub use self::approval::{ApprovalKind, PendingApproval};
@@ -515,6 +515,13 @@ pub struct RelayState {
     /// doing. Unlike a review, a delegation locks no thread — the worker stays
     /// open so the user can take it over.
     pub(super) asks: HashMap<String, Ask>,
+    /// One goal per thread, keyed by the thread pursuing it.
+    ///
+    /// Unlike `asks`, ACTIVE goals persist: an in-flight ask has nothing driving
+    /// it after a restart, but an objective is the user's and stays worth having.
+    /// It comes back `Interrupted`, never running — resuming work unasked, days
+    /// later, is its own surprise.
+    pub(super) goals: HashMap<String, Goal>,
     /// Unguessable token -> the thread allowed to ask with it.
     ///
     /// The bridge subprocess carries the token in its env, so a tool call proves
@@ -700,6 +707,7 @@ impl RelayState {
             recent_remote_actions: HashMap::new(),
             review_jobs: HashMap::new(),
             asks: HashMap::new(),
+            goals: HashMap::new(),
             ask_tokens: HashMap::new(),
             reviewer_threads: HashMap::new(),
             reviewer_thread_seq: 0,
@@ -2164,6 +2172,20 @@ impl RelayState {
                 question.thread_id = real_id.to_string();
             }
         }
+        // The peer token is minted against the pending id on this very turn, so
+        // the tools that turn is being told to call would resolve to a thread
+        // that no longer exists.
+        for owner in self.ask_tokens.values_mut() {
+            if owner == pending_id {
+                *owner = real_id.to_string();
+            }
+        }
+        // `/goal` on a session that has never been messaged is the ordinary case,
+        // and its first driven turn is the very thing that promotes it.
+        if let Some(mut goal) = self.goals.remove(pending_id) {
+            goal.thread_id = real_id.to_string();
+            self.goals.insert(real_id.to_string(), goal);
+        }
         for job in self.review_jobs.values_mut() {
             if job.reviewer_thread_id.as_deref() == Some(pending_id) {
                 job.reviewer_thread_id = Some(real_id.to_string());
@@ -2706,6 +2728,46 @@ impl RelayState {
             .cloned()
     }
 
+    pub(crate) fn goal_for_thread(&self, thread_id: &str) -> Option<&Goal> {
+        self.goals.get(thread_id)
+    }
+
+    pub(crate) fn set_goal(&mut self, goal: Goal) {
+        self.goals.insert(goal.thread_id.clone(), goal);
+    }
+
+    pub(crate) fn update_goal<F: FnOnce(&mut Goal)>(&mut self, thread_id: &str, update: F) -> bool {
+        match self.goals.get_mut(thread_id) {
+            Some(goal) => {
+                update(goal);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Threads whose goal the relay should be driving right now.
+    pub(crate) fn threads_with_driving_goals(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .goals
+            .values()
+            .filter(|goal| goal.status.is_driving())
+            .map(|goal| goal.thread_id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    pub(crate) fn goals_view(&self) -> Vec<crate::protocol::GoalView> {
+        let mut goals: Vec<&Goal> = self.goals.values().filter(|g| g.status.is_live()).collect();
+        goals.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        goals.into_iter().map(|goal| goal.view()).collect()
+    }
+
     pub(crate) fn asks_of_asker(&self, asker_thread_id: &str) -> Vec<&Ask> {
         self.asks
             .values()
@@ -3209,6 +3271,19 @@ impl RelayState {
             // A different rotation again, for the same reason.
             acc ^= h.finish().rotate_left(2);
         }
+        for goal in self.goals.values() {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            goal.id.hash(&mut h);
+            goal.status.as_str().hash(&mut h);
+            goal.turns.hash(&mut h);
+            goal.updated_at.hash(&mut h);
+            // The text itself, because a reword inside one second moves nothing
+            // else — and the card would keep showing a goal that is no longer
+            // the one being driven.
+            goal.objective.hash(&mut h);
+            goal.outcome.hash(&mut h);
+            acc ^= h.finish().rotate_left(3);
+        }
         acc
     }
 
@@ -3263,6 +3338,12 @@ impl RelayState {
                 .asks_view()
                 .into_iter()
                 .filter(|ask| in_scope(&ask.asker_thread_id) && in_scope(&ask.peer_thread_id))
+                .collect(),
+            // Same fence: the objective is the user's own words.
+            goals: self
+                .goals_view()
+                .into_iter()
+                .filter(|goal| in_scope(&goal.thread_id))
                 .collect(),
         }
     }
@@ -4480,6 +4561,23 @@ impl RelayState {
             .filter(|(_, job)| job.status.is_terminal())
             .map(|(id, job)| (id.clone(), job.clone()))
             .collect();
+        // A goal survives, but never running: whatever was driving it died with
+        // the process, and picking the work back up unasked — minutes or days
+        // later — is its own surprise.
+        self.goals = persisted
+            .goals
+            .iter()
+            .map(|(thread_id, goal)| {
+                let mut goal = goal.clone();
+                if goal.status.is_driving() {
+                    goal.status = GoalStatus::Interrupted;
+                }
+                // Whatever turn was outstanding died with the process, so nothing
+                // may report against it.
+                goal.close_dispatch_on_restore();
+                (thread_id.clone(), goal)
+            })
+            .collect();
         // Workflow runs persist NON-terminal too; reconcile any stranded run to the
         // terminal `Interrupted` here — no orchestrator survives a restart (see
         // workflow.rs / `restored_workflow_jobs`).
@@ -4822,6 +4920,10 @@ impl RelayState {
         self.threads.retain(|thread| thread.id != thread_id);
         self.thread_settings.remove(thread_id);
         self.thread_last_activity_at.remove(thread_id);
+        // Goals persist, so one left behind outlives a permanent delete as the
+        // user's own words in session.json — and keeps the driver sweeping a
+        // thread that is gone.
+        self.goals.remove(thread_id);
         // The user's title goes with the session, on ARCHIVE as well as delete — this is
         // the shared path. The relay has no un-archive, so an override left behind here
         // could never be reached again: it would hold a slot under the persisted cap
@@ -5675,6 +5777,23 @@ impl RelayState {
             .iter()
             .filter(|(_, job)| job.status.is_terminal())
             .map(|(id, job)| (id.clone(), job.clone()))
+            .collect();
+        // A goal survives, but never running: whatever was driving it died with
+        // the process, and picking the work back up unasked — minutes or days
+        // later — is its own surprise.
+        self.goals = persisted
+            .goals
+            .iter()
+            .map(|(thread_id, goal)| {
+                let mut goal = goal.clone();
+                if goal.status.is_driving() {
+                    goal.status = GoalStatus::Interrupted;
+                }
+                // Whatever turn was outstanding died with the process, so nothing
+                // may report against it.
+                goal.close_dispatch_on_restore();
+                (thread_id.clone(), goal)
+            })
             .collect();
         // Workflow runs persist NON-terminal too; reconcile any stranded run to the
         // terminal `Interrupted` here — no orchestrator survives a restart (see

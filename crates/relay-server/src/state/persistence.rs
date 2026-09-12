@@ -9,7 +9,7 @@ use tokio::sync::{watch, RwLock};
 use tracing::warn;
 
 use super::{
-    Ask, DeviceRecord, PairedDevice, RelayState, ReviewJob, ReviewerThread, TeamRun,
+    Ask, DeviceRecord, Goal, PairedDevice, RelayState, ReviewJob, ReviewerThread, TeamRun,
     ThreadSessionSettings, WorkflowRun, PERSISTED_STATE_VERSION,
 };
 
@@ -133,6 +133,12 @@ pub(super) struct PersistedRelayState {
     /// restoring one would show a delegation that nothing is driving.
     #[serde(default)]
     pub(super) asks: std::collections::HashMap<String, Ask>,
+    /// Goals, INCLUDING active ones — the opposite rule to `asks`, on purpose.
+    /// An in-flight ask has nothing driving it after a restart; an objective is
+    /// the user's and is still worth having. The restore side reconciles a live
+    /// one to `Interrupted` so nothing resumes unasked.
+    #[serde(default)]
+    pub(super) goals: std::collections::HashMap<String, Goal>,
     /// Workflow runs (orchestration metadata only — step transcripts are rebuilt
     /// from the provider). Unlike `review_jobs` (terminal-only), NON-terminal runs
     /// ARE persisted so a run survives a restart; the restore side
@@ -302,6 +308,8 @@ impl PersistedRelayState {
                 .filter(|(_, job)| job.status.is_terminal())
                 .map(|(id, job)| (id.clone(), job.clone()))
                 .collect(),
+            // …and the opposite rule for goals: keep the live ones too.
+            goals: relay.goals.clone(),
             // Persist ALL workflow runs (terminal cards AND non-terminal): a
             // non-terminal run must survive so the restore side can reconcile it to
             // `Interrupted` and offer a re-run, rather than vanishing on restart.

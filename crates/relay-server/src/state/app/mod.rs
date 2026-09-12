@@ -301,6 +301,7 @@ mod checkpoint;
 mod delegation;
 mod fork;
 mod git_context;
+mod goal;
 mod orchestrator;
 pub(crate) mod orchestrator_dispatch;
 pub(crate) mod orchestrator_proposals;
@@ -803,6 +804,7 @@ impl AppState {
     pub(crate) fn spawn_configured_watchdogs(&self) {
         self.spawn_scheduled_proposal_watchdog();
         self.spawn_ask_watchdog();
+        self.spawn_goal_watchdog();
     }
 
     /// Fires scheduled proposal cards. The due decision lives in

@@ -293,17 +293,17 @@ test("RightPanelTabs treats an escalated review as terminal (no in-progress dot)
   assert.match(html, />Agents</);
 });
 
-test("WorkspaceDiffModalTitle follows the active tab (so opening Reviewer isn't titled 'Workspace diff')", () => {
+test("WorkspaceDiffModalTitle follows the active tab (so opening Agents isn't titled 'Workspace diff')", () => {
   const changes = renderToStaticMarkup(
     h(WorkspaceDiffModalTitle, { store: makeStore({ activeTab: "changes" }) })
   );
   assert.match(changes, /Workspace diff/);
-  assert.doesNotMatch(changes, /Reviewer/);
+  assert.doesNotMatch(changes, /Agents/);
 
   const reviewer = renderToStaticMarkup(
     h(WorkspaceDiffModalTitle, { store: makeStore({ activeTab: "reviewer" }) })
   );
-  assert.match(reviewer, /Reviewer/);
+  assert.match(reviewer, /Agents/);
   assert.doesNotMatch(reviewer, /Workspace diff/);
 });
 

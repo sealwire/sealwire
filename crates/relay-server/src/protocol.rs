@@ -314,6 +314,9 @@ pub struct ReviewsResponse {
     /// thing to keep in sync.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub asks: Vec<AskView>,
+    /// …and what those sessions are working toward, for the same reason.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub goals: Vec<GoalView>,
 }
 
 /// Uncompacted device/security payload served on demand. Device records are
@@ -3106,6 +3109,20 @@ pub struct RequestReviewInput {
     #[serde(default)]
     pub max_rounds: Option<u32>,
     pub device_id: Option<String>,
+}
+
+/// What a session is working toward. `status` deliberately says
+/// `complete_claimed`, not `complete`: the relay never read the work.
+#[derive(Debug, Clone, Serialize)]
+pub struct GoalView {
+    pub id: String,
+    pub thread_id: String,
+    pub objective: String,
+    pub status: String,
+    pub turns: u32,
+    pub max_turns: u32,
+    pub outcome: Option<String>,
+    pub updated_at: u64,
 }
 
 /// One ask: A handed B a message and is waiting. `message` and `answer` are

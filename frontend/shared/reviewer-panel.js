@@ -129,6 +129,65 @@ function reviewerThreadName(job, reviewerThreads) {
   return name || id;
 }
 
+// What this session is working toward.
+//
+// The wording is load-bearing: "reports complete", never "complete". The relay
+// carries the work without reading it, so it cannot tell you the goal is met —
+// only that the agent says so.
+const GOAL_STATUS_LABEL = {
+  active: "Working",
+  awaiting_user: "Waiting on you",
+  complete_claimed: "Agent reports complete",
+  blocked: "Stuck",
+  out_of_turns: "Out of turns",
+  interrupted: "Interrupted by a restart",
+};
+
+function GoalCard({ goal, onStop = null, onResume = null }) {
+  const working = goal.status === "active";
+  return h(
+    "div",
+    { className: "reviewer-job goal-card" + (working ? " is-live" : "") },
+    h(
+      "div",
+      { className: "reviewer-job-head" },
+      h("span", { className: "reviewer-job-title" }, "Goal"),
+      h(
+        "span",
+        { className: "reviewer-job-status" },
+        GOAL_STATUS_LABEL[goal.status] || goal.status
+      )
+    ),
+    h("p", { className: "reviewer-job-note" }, goal.objective),
+    goal.outcome ? h("p", { className: "reviewer-job-note is-answer" }, goal.outcome) : null,
+    h(
+      "p",
+      { className: "reviewer-job-meta" },
+      working ? `Turn ${goal.turns} of ${goal.max_turns}` : `${goal.turns} turns used`
+    ),
+    h(
+      "div",
+      { className: "reviewer-panel-actions" },
+      working && onStop
+        ? h(
+            "button",
+            { className: "reviewer-job-action", onClick: () => onStop(), type: "button" },
+            "Stop"
+          )
+        : null,
+      // Everything that is not active can be picked back up — including a
+      // completion claim you do not accept.
+      !working && onResume
+        ? h(
+            "button",
+            { className: "reviewer-job-action", onClick: () => onResume(goal.objective), type: "button" },
+            goal.status === "complete_claimed" ? "Not done — keep going" : "Keep going"
+          )
+        : null
+    )
+  );
+}
+
 // One agent this session brought in. Deliberately plain: the question and the
 // answer, because a person never typed either — an agent did, and this is the
 // only place the exchange can be read.
@@ -183,6 +242,9 @@ function AskCard({ ask, viewedThreadId = "", onOpen = null }) {
 export function ReviewerPanel({
   reviewJobs = [],
   asks = [],
+  goal = null,
+  onStopGoal = null,
+  onResumeGoal = null,
   onOpenThread = null,
   workflowRuns = [],
   reviewModel = {},
@@ -218,7 +280,7 @@ export function ReviewerPanel({
   // with nothing in it.
   const hasWorkflowRuns = CODE_FLOW_ENABLED && workflowRuns.length > 0;
   const hasAsks = asks.length > 0;
-  const hasCards = hasJobs || hasWorkflowRuns || hasAsks;
+  const hasCards = hasJobs || hasWorkflowRuns || hasAsks || Boolean(goal);
   const canLaunch = typeof onRequestReview === "function";
   const canLaunchWorkflow = CODE_FLOW_ENABLED && typeof onStartWorkflow === "function";
   // The launcher is ALWAYS rendered (when wiring exists) so the affordance is
@@ -279,7 +341,7 @@ export function ReviewerPanel({
       ? h(
           "header",
           { className: "reviewer-panel-header" },
-          h("h2", { className: "reviewer-panel-title" }, "Reviewer"),
+          h("h2", { className: "reviewer-panel-title" }, "Agents"),
           h(
             "div",
             { className: "reviewer-panel-actions" },
@@ -292,7 +354,16 @@ export function ReviewerPanel({
       ? h(
           "div",
           { className: "reviewer-panel-list" },
-          // Asks first: they are the live thing more often than a review is.
+          // The goal first: it is what everything below it is in service of.
+          goal
+            ? h(GoalCard, {
+                key: goal.id,
+                goal,
+                onStop: onStopGoal,
+                onResume: onResumeGoal,
+              })
+            : null,
+          // Asks next: they are the live thing more often than a review is.
           ...asks.map((ask) =>
             h(AskCard, {
               key: ask.id,

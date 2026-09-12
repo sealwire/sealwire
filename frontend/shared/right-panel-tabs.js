@@ -48,6 +48,9 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
   // An agent brought in by this session counts the same as a review: this tab is
   // now "who else is working on this", and a reviewer is one of those.
   const asksInProgress = (review.asks || []).filter((ask) => ask.status === "working").length;
+  // A goal being worked on belongs in the tab's dot too: it is the longest-lived
+  // thing this panel shows.
+  const goalWorking = review.goal?.status === "active" ? 1 : 0;
 
   // NEVER auto-switch the tab — the review must not yank the user's view around.
   // A running/blocked review only surfaces PASSIVELY here: the tab label gets a dot
@@ -56,7 +59,7 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
   // can bring in, and the panel now lists the others beside it.
   const reviewerLabel = blocked
     ? "Agents ⚠"
-    : inProgress > 0 || workflowInProgress > 0 || asksInProgress > 0
+    : inProgress > 0 || workflowInProgress > 0 || asksInProgress > 0 || goalWorking > 0
     ? "Agents •"
     : "Agents";
 
@@ -81,6 +84,9 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
           panelId,
           reviewJobs: review.reviewJobs || [],
           asks: review.asks || [],
+          goal: review.goal || null,
+          onStopGoal: reviewer.onStopGoal || null,
+          onResumeGoal: reviewer.onResumeGoal || null,
           onOpenThread: reviewer.onOpenThread || null,
           workflowRuns: review.workflowRuns || [],
           reviewModel: review.reviewModel || {},

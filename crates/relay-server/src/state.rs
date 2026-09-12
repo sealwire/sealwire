@@ -1,5 +1,6 @@
 pub(crate) mod app;
 mod delegation;
+mod goal;
 mod persistence;
 mod relay;
 mod review;
@@ -34,6 +35,12 @@ pub(crate) use self::relay::{
 // `PushKind` is referenced only by cross-module tests (codex/claude handler tests
 // assert an Error push); gate the re-export so non-test builds don't warn.
 pub(crate) use self::delegation::{session_is_unrestricted, Ask};
+pub(crate) use self::goal::{Goal, GoalStatus};
+
+/// The continuation budget, read where the prompt is built.
+pub(crate) fn goal_max_turns() -> u32 {
+    self::goal::MAX_GOAL_TURNS
+}
 #[cfg(test)]
 pub(crate) use self::relay::PushKind;
 pub(crate) use self::review::{

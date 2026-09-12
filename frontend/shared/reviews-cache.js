@@ -22,7 +22,7 @@ export function createReviewsCache() {
   let loaded = false;
   // Every list the channel carries. A field left out here is fetched, returned,
   // and then silently dropped — which looks exactly like the relay never sent it.
-  let data = { review_jobs: [], reviewer_threads: [], asks: [] };
+  let data = { review_jobs: [], reviewer_threads: [], asks: [], goals: [] };
   let inflightRevision = null;
 
   return {
@@ -62,6 +62,7 @@ export function createReviewsCache() {
           review_jobs: resp?.review_jobs || [],
           reviewer_threads: resp?.reviewer_threads || [],
           asks: resp?.asks || [],
+          goals: resp?.goals || [],
         };
         if (typeof onUpdate === "function") {
           onUpdate();

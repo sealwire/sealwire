@@ -363,6 +363,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
             post(confirm_orchestrator_proposal),
         )
         .route("/api/session/delegate", post(delegate_to_agent))
+        .route("/api/session/goal", post(set_session_goal))
         .route("/api/orchestrator/tools", get(list_orchestrator_tools))
         .route(
             "/api/orchestrator/tools/:tool_name/call",
@@ -755,6 +756,19 @@ async fn confirm_orchestrator_proposal(
 /// Separate from the tool route because it means something different: a person
 /// typed a few words, so the asking agent is driven to turn them into a brief
 /// first. The tool route must NOT do that — an agent already wrote its message.
+/// `POST /api/session/goal` — the only way an objective is ever written.
+///
+/// There is deliberately no agent-facing TOOL: an agent that can edit its own
+/// goal will edit it to one it can finish. That stops drift, not an adversary —
+/// this route is reachable by anything that can reach loopback, shells included.
+#[derive(serde::Deserialize)]
+struct GoalInput {
+    thread_id: String,
+    /// Empty cancels: "/goal" with nothing after it stops the current one.
+    #[serde(default)]
+    objective: String,
+}
+
 #[derive(serde::Deserialize)]
 struct DelegateInput {
     thread_id: String,
@@ -793,6 +807,31 @@ struct OrchestratorToolListQuery {
     ask_token: Option<String>,
     #[serde(default)]
     seat_run_id: Option<String>,
+}
+
+async fn set_session_goal(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(input): Json<GoalInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    let outcome = if input.objective.trim().is_empty() {
+        context
+            .app
+            .cancel_goal(&input.thread_id)
+            .await
+            .map(|()| "Goal stopped.".to_string())
+    } else {
+        context
+            .app
+            .set_goal(&input.thread_id, &input.objective)
+            .await
+            .map(|()| "Goal set. This session will work toward it and come back when it is done, stuck, or needs you.".to_string())
+    };
+    Ok(Json(
+        crate::state::app::orchestrator_dispatch::tool_result_envelope(outcome),
+    ))
 }
 
 async fn delegate_to_agent(

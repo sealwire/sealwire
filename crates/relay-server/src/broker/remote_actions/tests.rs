@@ -1057,6 +1057,7 @@ fn plain_fetch_reviews_result_carries_the_reviews_payload_to_the_device() {
     // big workspaces and vanished on small ones.
     let reviews = crate::protocol::ReviewsResponse {
         asks: Vec::new(),
+        goals: Vec::new(),
         reviews_revision: 99,
         review_jobs: Vec::new(),
         reviewer_threads: vec![crate::protocol::ReviewerThreadView {
