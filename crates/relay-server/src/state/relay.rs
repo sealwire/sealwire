@@ -494,9 +494,10 @@ pub struct RelayState {
     pub(super) runtimes: HashMap<String, ThreadRuntime>,
     pub(super) transcript: ThreadTranscript,
     pub(super) logs: Vec<LogEntryView>,
-    /// In-memory file-change apply state keyed by transcript `item_id`
-    /// (typically `turn-diff:<turn_id>`). Never persisted: lost on relay
-    /// restart, which resets entries to the default "applied" state.
+    /// In-memory file-change apply state keyed by ROW id (typically
+    /// `turn-diff:<turn_id>`, but the minted key when that spelling was taken).
+    /// Never persisted: lost on relay restart, which resets entries to the default
+    /// "applied" state.
     pub(super) apply_states: HashMap<String, FileChangeApplyState>,
     recent_remote_actions: HashMap<String, CachedRemoteActionState>,
     /// Relay-owned cross-agent review jobs, keyed by job id. TERMINAL jobs are
@@ -3842,13 +3843,7 @@ impl RelayState {
                     .iter()
                     .map(|record| {
                         let mut view = record.to_view();
-                        if let (Some(item_id), Some(tool)) =
-                            (view.item_id.as_ref(), view.tool.as_mut())
-                        {
-                            if let Some(state) = self.apply_states.get(item_id) {
-                                tool.apply_state = Some(*state);
-                            }
-                        }
+                        runtime::overlay_apply_state(record, &mut view, &self.apply_states);
                         view
                     })
                     .collect()
