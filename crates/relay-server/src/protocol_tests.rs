@@ -196,6 +196,7 @@ fn review_job_view(
         }),
         base_sha: None,
         candidate_sha: None,
+        candidate_is_checkpoint: false,
         verdict_candidate_sha: None,
     }
 }
@@ -810,6 +811,7 @@ fn local_web_control_plane_metadata_does_not_shell_normal_live_transcript() {
             verdict: Some("review completed with no blocking findings".to_string()),
             base_sha: None,
             candidate_sha: None,
+            candidate_is_checkpoint: false,
             verdict_candidate_sha: None,
         })
         .collect();
@@ -1525,6 +1527,7 @@ fn control_plane_flood_keeps_both_surfaces_bounded_without_shelling_live_text() 
                 verdict: Some("no blocking findings in this review round".to_string()),
                 base_sha: None,
                 candidate_sha: None,
+                candidate_is_checkpoint: false,
                 verdict_candidate_sha: None,
             })
             .collect();

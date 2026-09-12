@@ -1,7 +1,7 @@
-// Live click test for the reviewer card's session-id "i" toggle. The sibling
-// reviewer-panel.test.mjs uses renderToStaticMarkup (initial markup only), so it can
-// prove the id is collapsed by default and the toggle is wired — but NOT that clicking
-// actually inserts/removes `.reviewer-job-thread`. That last invariant needs a real DOM
+// Live click test for the review card's ··· menu. The sibling reviewer-panel.test.mjs
+// uses renderToStaticMarkup (initial markup only), so it can prove Stop and Delete are
+// absent from the resting card — but not that opening the menu actually produces them,
+// nor that Delete stays inert while the reviewer is still running. Both need a real DOM
 // + React state, so this file mounts the panel under jsdom and clicks for real.
 //
 // jsdom is a devDependency: it is not in the package `files` allowlist and npm never
@@ -35,58 +35,135 @@ function click(el) {
   el.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
 }
 
-test("clicking the info toggle reveals, then hides, the reviewer session id line", async () => {
+async function mountPanel(props) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-
   await act(async () => {
     root.render(
       h(ReviewerPanel, {
-        reviewJobs: [
-          {
-            id: "r1",
-            reviewer_provider: "codex",
-            status: "waiting_for_reviewer",
-            reviewer_thread_id: "rev-thread-7",
-          },
-        ],
         canRequest: false,
+        onDeleteReview() {},
+        onResolveReview() {},
         // No fetchReviewerTranscript on purpose: the card's polling effect early-returns
-        // without it, so nothing async runs during this synchronous toggle test.
+        // without it, so nothing async runs during these synchronous clicks.
+        ...props,
       })
     );
   });
+  return {
+    container,
+    async unmount() {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
+}
 
-  const toggle = container.querySelector(".reviewer-job-info");
-  assert.ok(toggle, "the info toggle should render when there is a reviewer session");
+const menuItems = (container) =>
+  [...container.querySelectorAll(".reviewer-menu-list .overflow-menu-item")].map((item) => ({
+    disabled: item.disabled,
+    label: item.textContent,
+  }));
 
-  // Collapsed by default: no id line, toggle reports not-expanded.
-  assert.equal(container.querySelector(".reviewer-job-thread"), null, "id line hidden by default");
-  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+test("the ··· menu opens, then closes, and is where Stop and Delete live", async () => {
+  const { container, unmount } = await mountPanel({
+    reviewJobs: [
+      {
+        id: "r1",
+        reviewer_provider: "codex",
+        status: "waiting_for_reviewer",
+        reviewer_thread_id: "rev-thread-7",
+      },
+    ],
+  });
 
-  // Click → the id line appears with the full id, toggle flips to expanded.
-  await act(async () => click(toggle));
-  const line = container.querySelector(".reviewer-job-thread");
-  assert.ok(line, "clicking the toggle reveals the id line");
-  assert.equal(line.textContent, "rev-thread-7", "revealed line shows the full session id");
+  const trigger = container.querySelector(".reviewer-menu-button");
+  assert.ok(trigger, "the review card should carry an overflow trigger");
+  assert.equal(container.querySelector(".reviewer-menu-list"), null, "closed by default");
+  assert.equal(trigger.getAttribute("aria-expanded"), "false");
+
+  await act(async () => click(trigger));
   assert.equal(
-    container.querySelector(".reviewer-job-info").getAttribute("aria-expanded"),
+    container.querySelector(".reviewer-menu-button").getAttribute("aria-expanded"),
     "true"
   );
+  assert.deepEqual(menuItems(container), [
+    { disabled: false, label: "Stop review" },
+    // Deleting a review whose reviewer is still running would strand the lock, so the
+    // item is present-but-inert rather than hidden — the reason is on its tooltip.
+    { disabled: true, label: "Delete review" },
+  ]);
 
-  // Click again → the id line is removed again (true toggle, not one-way reveal).
-  await act(async () => click(container.querySelector(".reviewer-job-info")));
-  assert.equal(
-    container.querySelector(".reviewer-job-thread"),
-    null,
-    "clicking again hides the id line"
-  );
-  assert.equal(
-    container.querySelector(".reviewer-job-info").getAttribute("aria-expanded"),
-    "false"
-  );
+  await act(async () => click(container.querySelector(".reviewer-menu-button")));
+  assert.equal(container.querySelector(".reviewer-menu-list"), null, "true toggle, not a one-way reveal");
 
-  await act(async () => root.unmount());
-  container.remove();
+  await unmount();
+});
+
+test("a blocked review offers the unlock wording; a terminal one offers only Delete", async () => {
+  const blocked = await mountPanel({
+    reviewJobs: [{ id: "r2", reviewer_provider: "codex", status: "blocked" }],
+  });
+  await act(async () => click(blocked.container.querySelector(".reviewer-menu-button")));
+  assert.deepEqual(menuItems(blocked.container), [
+    { disabled: false, label: "Stop reviewer & unlock" },
+    { disabled: true, label: "Delete review" },
+  ]);
+  await blocked.unmount();
+
+  const done = await mountPanel({
+    reviewJobs: [
+      { id: "r3", reviewer_provider: "codex", status: "escalated", reviewer_thread_id: "rev-1" },
+    ],
+  });
+  await act(async () => click(done.container.querySelector(".reviewer-menu-button")));
+  // `escalated` is terminal, so there is nothing left to stop and Delete is live.
+  assert.deepEqual(menuItems(done.container), [{ disabled: false, label: "Delete review" }]);
+  await done.unmount();
+});
+
+test("choosing Delete fires once for the reviewed job and closes the menu", async () => {
+  const deleted = [];
+  const { container, unmount } = await mountPanel({
+    reviewJobs: [
+      { id: "r9", reviewer_provider: "codex", status: "complete", reviewer_thread_id: "rev-9" },
+    ],
+    onDeleteReview: (id) => deleted.push(id),
+  });
+
+  await act(async () => click(container.querySelector(".reviewer-menu-button")));
+  await act(async () => click(container.querySelector(".reviewer-menu-list .overflow-menu-item")));
+  assert.deepEqual(deleted, ["r9"]);
+  assert.equal(container.querySelector(".reviewer-menu-list"), null);
+
+  await unmount();
+});
+
+test("an ask card opens the agent's session — the card IS the affordance", async () => {
+  const opened = [];
+  const { container, unmount } = await mountPanel({
+    asks: [
+      {
+        id: "ask-1",
+        asker_thread_id: "me",
+        peer_thread_id: "them",
+        peer_provider: "codex",
+        message: "have a look at the retry loop",
+        answer: "Fixed the backoff.",
+        status: "done",
+        delivered: true,
+        updated_at: 10,
+      },
+    ],
+    parentThreadId: "me",
+    onOpenThread: (id) => opened.push(id),
+  });
+
+  const card = container.querySelector(".reviewer-ask");
+  assert.equal(card.getAttribute("role"), "button", "and announces itself as one");
+  await act(async () => click(card));
+  assert.deepEqual(opened, ["them"]);
+
+  await unmount();
 });

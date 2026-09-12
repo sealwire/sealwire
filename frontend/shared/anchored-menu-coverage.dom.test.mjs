@@ -33,6 +33,7 @@ const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 
 const { ProjectPicker } = await import("./project-picker.js");
+const { ReviewerPanel } = await import("./reviewer-panel.js");
 const { ProjectSwitcher } = await import("./project-switcher.js");
 const { SettingPill } = await import("./setting-pill.js");
 const { StartSessionSplitButton } = await import("./start-session-split-button.js");
@@ -94,6 +95,18 @@ const MENUS = [
     menu: ".workspace-picker-panel",
     name: "ThreadWorkspaceField (review panel working tree)",
     trigger: ".workspace-picker-trigger",
+  },
+  {
+    // The Agents panel's per-card ··· (Stop / Delete a review).
+    element: () =>
+      h(ReviewerPanel, {
+        onDeleteReview: () => {},
+        reviewJobs: [{ id: "r1", reviewer_provider: "codex", status: "complete" }],
+      }),
+    file: "reviewer-panel.js",
+    menu: ".reviewer-menu-list",
+    name: "LedgerMenu (Agents panel review actions)",
+    trigger: ".reviewer-menu-button",
   },
   {
     element: () =>

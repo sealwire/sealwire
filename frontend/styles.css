@@ -6475,63 +6475,505 @@ body.is-resizing-panel {
   box-shadow: var(--shadow-1);
 }
 
-/* Reviewer tab body ------------------------------------------------------- */
+/* Agents tab body ---------------------------------------------------------
+   A LEDGER of delegations, not a chat log. Two rules drive nearly every value below:
+   the agent's name is a group HEADING (so it never repeats inside a card), and a card
+   carries an intent title plus one line of result (so the raw prompt never renders).
+   Colour is reserved for a real blocker — everything else is grey, weight, and space. */
 .reviewer-panel {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
-  gap: 12px;
-  padding: 12px;
+  min-height: 0;
 }
-.reviewer-panel-header {
+.reviewer-panel-body {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex: 1 1 auto;
+  flex-direction: column;
   gap: 8px;
+  padding: 4px 12px 16px;
 }
-.reviewer-panel-title {
-  margin: 0;
+/* The eyebrow that replaces the repeated subject line. `label` names the section,
+   `meta` says how much of it there is, `trailing` carries the one identifier worth
+   the space (a short sha — never a bare session uuid). */
+.reviewer-ledger-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 2px 0;
+}
+.reviewer-ledger-label {
+  flex: none;
   font-size: var(--text-xs);
   font-weight: var(--weight-strong);
-  color: var(--text-3, var(--text-secondary));
+  letter-spacing: 0.1em;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  color: var(--text-3, var(--text-secondary));
 }
-.reviewer-panel-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
+.reviewer-ledger-meta {
+  flex: 1 1 auto;
   min-width: 0;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.reviewer-panel-list {
+.reviewer-ledger-trailing {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.reviewer-sha {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+/* Separates the pinned slots above from the time-ordered flow below. */
+.reviewer-ledger-rule {
+  height: 1px;
+  margin: 8px 2px 0;
+  border: 0;
+  background: var(--border-faint);
+}
+/* Presence, in the vocabulary the session rows already use. */
+.reviewer-live-dot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--r-pill);
+  background: currentColor;
+}
+
+/* Cards --------------------------------------------------------------------
+   A settled card has no border and no fill: at 340px wide, a stack of outlined boxes
+   reads as chrome competing with its own contents. The border is spent on the one
+   card that is live, which is the only place it carries information. */
+.reviewer-card {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 5px;
+  padding: 9px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  background: transparent;
 }
-/* Empty state reads as one elevated "call to action" card. Its left edge lines
-   up with the REVIEWER eyebrow above it (both are direct children of the panel's
-   12px padding — the old asymmetric `8px 4px` inset pushed the copy 4px past the
-   eyebrow), and it takes the same one-step-above-the-rail fill as a real job card,
-   so the empty panel reads as "ready for an action", not unfinished. */
+.reviewer-card.is-live {
+  border-color: var(--border-subtle);
+  background: var(--surface-1);
+}
+.reviewer-card.is-openable {
+  cursor: pointer;
+}
+.reviewer-card.is-openable:hover {
+  background: var(--surface-1);
+}
+.reviewer-card.is-openable:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+/* The intent, in the card's only strong type. It is a heading, so it may wrap — this
+   is the line that has to distinguish this delegation from the last one. */
+.reviewer-card-title {
+  margin: 0;
+  min-width: 0;
+  font-size: var(--text-ui);
+  font-weight: var(--weight-strong);
+  line-height: var(--leading-tight);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+/* One line of result. The full text lives in the session the card opens, so this is
+   clamped rather than scrolled — a card that grows to fit an agent's answer pushes
+   every other delegation out of the panel. */
+.reviewer-card-result {
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--text-secondary);
+}
+.reviewer-card-note {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+.reviewer-card-error {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-warning);
+}
+.reviewer-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+}
+.reviewer-card-button,
+.reviewer-card-actions .review-launch-button {
+  flex: none;
+  height: 28px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.reviewer-card-button:hover:not(:disabled),
+.reviewer-card-actions .review-launch-button:hover:not(:disabled) {
+  background: var(--surface-3);
+}
+/* The one link in the panel: it leaves for another session, so it gets the accent that
+   nothing else here is allowed to use. */
+.reviewer-open-link {
+  flex: 1 1 auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: var(--text-sm);
+  color: var(--accent);
+  text-align: left;
+  cursor: pointer;
+}
+.reviewer-open-link:hover {
+  text-decoration: underline;
+}
+
+/* Rounds -------------------------------------------------------------------
+   Earlier attempts at the SAME delegation. One row each, so a failed round stops
+   earning a whole card that repeats an error the user has already read. */
+.reviewer-rounds {
+  display: flex;
+  flex-direction: column;
+  margin-top: 4px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border-faint);
+}
+.reviewer-round {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  padding: 3px 0;
+}
+.reviewer-round-label {
+  flex: none;
+  width: 18px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.reviewer-round-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reviewer-round-time {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+/* Goal ---------------------------------------------------------------------
+   Pinned above the review slot: a review judges one commit, the goal is the standing
+   objective that commit — and that review — is in service of. */
+.reviewer-goal-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.reviewer-goal-status.is-live {
+  color: var(--accent);
+}
+.reviewer-goal {
+  border-color: var(--border-subtle);
+  background: var(--surface-1);
+}
+
+/* Review -------------------------------------------------------------------
+   The only permanently pinned delegation, because it is the only one that decides
+   whether the work can land. */
+.reviewer-review {
+  padding: 0;
+  border-color: var(--border-subtle);
+  background: var(--surface-1);
+  overflow: hidden;
+}
+.reviewer-review-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  background: var(--status-neutral-bg);
+}
+.reviewer-review-banner-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--text-secondary);
+}
+.reviewer-review-banner-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-strong);
+  color: var(--text-primary);
+}
+.reviewer-review-banner-time {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+/* Tone rides the FILL and the DOT. The word only takes the tone colour in light, where
+   --ok-fg / --warn-fg clear 4.5:1 as text; in dark they are mark-safe but not text-safe,
+   so the label stays --text-1 there. Same split as the status pills this replaces. */
+.reviewer-tone-alert .reviewer-review-banner { background: var(--warn-bg); }
+.reviewer-tone-alert .reviewer-review-banner-dot { background: var(--warn-fg); }
+.reviewer-tone-ready .reviewer-review-banner { background: var(--ok-bg); }
+.reviewer-tone-ready .reviewer-review-banner-dot { background: var(--ok-fg); }
+.reviewer-tone-active .reviewer-review-banner-dot { background: var(--accent); }
+:root[data-theme="light"] .reviewer-tone-alert .reviewer-review-banner-text {
+  color: var(--warn-fg);
+}
+:root[data-theme="light"] .reviewer-tone-ready .reviewer-review-banner-text {
+  color: var(--ok-fg);
+}
+.reviewer-review-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 12px 11px;
+}
+/* The reviewer's own words. The relay carries them as free markdown — there is no
+   severity or file:line on the wire — so they render quieter than the verdict above
+   and scroll rather than growing the card. */
+.reviewer-findings {
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--text-secondary);
+  max-height: 260px;
+  overflow-y: auto;
+}
+/* A `file.rs:34` chip is the most common inline span in a review, and at the shared
+   transcript size it outweighs the prose around it. */
+.reviewer-findings code {
+  font-size: var(--text-xs);
+}
+.reviewer-findings p:last-child {
+  margin-bottom: 0;
+}
+/* A reviewer writes for a full-width transcript, so it opens with `## Findings` and
+   indents its bullets 40px — which in a 340px rail outranks the verdict and eats an
+   eighth of the line. Demoted here rather than upstream: the transcript still wants
+   document-scale markdown, this column never does. */
+.reviewer-findings :is(h1, h2, h3, h4, h5, h6) {
+  margin: 0 0 4px;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-strong);
+  line-height: var(--leading-tight);
+  color: var(--text-primary);
+}
+.reviewer-findings :is(ul, ol) {
+  margin: 0 0 6px;
+  padding-left: 16px;
+}
+.reviewer-findings li + li {
+  margin-top: 4px;
+}
+.reviewer-findings > :last-child {
+  margin-bottom: 0;
+}
+
+/* Agent groups -------------------------------------------------------------
+   The heading IS the agent. Nothing below it repeats the name. */
+.reviewer-agent {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.reviewer-agent-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 2px 2px;
+}
+.reviewer-agent-mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 19px;
+  height: 19px;
+  border-radius: var(--r-sm);
+}
+.reviewer-agent-mark.is-letter {
+  background: var(--surface-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-strong);
+  color: var(--text-secondary);
+}
+.reviewer-agent-mark svg {
+  width: 15px;
+  height: 15px;
+}
+.reviewer-agent-name {
+  flex: none;
+  font-size: var(--text-ui);
+  font-weight: var(--weight-strong);
+  color: var(--text-primary);
+}
+.reviewer-agent-model {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reviewer-agent-state {
+  flex: none;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.reviewer-agent-state.is-live {
+  color: var(--accent);
+}
+
+/* Ask cards ---------------------------------------------------------------- */
+.reviewer-ask-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.reviewer-ask-state {
+  flex: none;
+  margin-top: 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.reviewer-ask-state.is-live { color: var(--accent); }
+.reviewer-ask-state.is-answered { color: var(--ok-fg); }
+.reviewer-ask-state.is-failed { color: var(--warn-fg); }
+/* An answer that exists but has not been handed back to its asker looks like nothing
+   happened, so it says so rather than reading as "answered". */
+.reviewer-ask-state.is-not-handed-back { color: var(--text-warning); }
+.reviewer-ask-inbound {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+/* Overflow menu ------------------------------------------------------------
+   Destructive and rare actions live behind this, so the resting card shows only the
+   two things a review is actually for: run it again, or go read it. */
+.reviewer-menu {
+  flex: none;
+  margin-left: auto;
+  position: relative;
+}
+.reviewer-menu-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  font-size: var(--text-ui);
+  line-height: var(--leading-none);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.reviewer-menu-button:hover,
+.reviewer-menu-button[aria-expanded="true"] {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+/* Borrowed from the header menus, but this panel's whole type scale sits a step below
+   theirs, and a 14px row over an 11px ledger reads as a different application. */
+.reviewer-menu-list {
+  min-width: 180px;
+}
+.reviewer-menu-list .overflow-menu-item {
+  padding: 7px 10px;
+  font-size: var(--text-ui);
+  font-weight: var(--weight-regular);
+}
+.overflow-menu-item.is-danger {
+  color: var(--err-fg);
+}
+.overflow-menu-item:disabled {
+  color: var(--text-faint, var(--text-tertiary));
+  cursor: default;
+}
+
+/* Action bar ---------------------------------------------------------------
+   One wide primary plus room for an overflow, pinned to the foot of the panel so the
+   way to start a delegation does not depend on how far the ledger has been scrolled. */
+.reviewer-panel-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  flex: none;
+  display: flex;
+  gap: 6px;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--border-faint);
+  background: var(--surface-0);
+}
+.reviewer-panel-bar .review-launch-button {
+  flex: 1 1 auto;
+  height: 34px;
+  justify-content: center;
+  border-color: var(--border-subtle);
+  background: transparent;
+  font-size: var(--text-ui);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+.reviewer-panel-bar .review-launch-button:hover:not(:disabled) {
+  background: var(--surface-1);
+}
+
+/* Empty state reads as one call-to-action block above the bar that acts on it. */
 .reviewer-empty {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
+  margin-top: 4px;
   padding: 16px;
   border-radius: var(--r-md);
   background: var(--surface-1);
-}
-/* The panel's single primary action: promote it from the ghost header-button
-   look to the accent fill and span it across the card so it reads as the CTA. */
-.reviewer-empty .review-launch-button {
-  flex: 1 1 150px;
-  background: var(--accent);
-  color: var(--accent-on);
-  border-color: transparent;
-}
-.reviewer-empty .review-launch-button:hover:not(:disabled) {
-  background: var(--accent-hover-color);
-  border-color: transparent;
 }
 .reviewer-empty-copy {
   margin: 0;
@@ -6543,264 +6985,6 @@ body.is-resizing-panel {
   margin: 0;
   font-size: var(--text-sm);
   color: var(--text-tertiary, var(--text-secondary));
-}
-/* The card sits one surface step ABOVE the rail beneath it, in both themes — white on
-   pale grey in light, lighter navy on the darkest navy in dark. That direction is what
-   makes it read as lifted, and it does the job the old 1px border + shadow were doing:
-   measured ΔE2000 for s0→s1 is 2.75 (dark) / 3.65 (light), both clear of the ~2.3 JND
-   for a large field. A border would now only add a second, weaker boundary on top of a
-   sufficient one. (Contrast RATIO is the wrong metric here — it is calibrated for text
-   legibility, not for whether two large fills read as separate.) */
-.reviewer-job {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px;
-  border-radius: var(--r-md);
-  background: var(--surface-1);
-}
-/* Failed / escalated. With no border to recolour, the tone rides an inset stripe on the
-   leading edge — the same "colour the mark, not the words" move the transcript already
-   uses for its semantic left-borders, and it survives the rounded corner cleanly. */
-.reviewer-job-alert { box-shadow: inset 2px 0 0 var(--warn-fg); }
-/* No longer wraps. The reason it did was the long status label ("Reviewer still has
-   concerns") sharing this row and shoving the meta cluster onto a second line — and that
-   label now leads the outcome row instead. What is left on the right is "Round 3/3",
-   which is short and fixed, so the row holds one line and the model truncates if the
-   identity cluster runs long. */
-.reviewer-job-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-/* The identity row is a METADATA BAND, not a heading. It answers "who reviewed this",
-   which is the least urgent of the card's four questions, so every part of it is sized
-   and coloured to recede beneath the verdict below. It used to lead with a 13px strong
-   provider name, which put it level with the finding text. */
-.reviewer-job-identity {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0; /* let the model truncate instead of pushing the round off */
-}
-.reviewer-job-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-/* Provider chip. The hue is the provider's own brand token (Claude orange / Codex
-   steel-blue / Cursor violet), which sits deliberately OUTSIDE the semantic palette —
-   it identifies a vendor, it does not carry a status. Falls back to neutral for any
-   provider we don't ship a mark for. */
-.reviewer-job-provider {
-  flex-shrink: 0;
-  padding: 1px 6px;
-  border-radius: var(--r-sm);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-medium);
-  line-height: var(--leading-normal);
-  color: var(--text-secondary);
-  background: var(--status-neutral-bg);
-  white-space: nowrap;
-}
-.reviewer-job-provider[data-provider="codex"] {
-  color: var(--provider-codex-fg);
-  background: var(--provider-codex-fill);
-}
-.reviewer-job-provider[data-provider="claude_code"] {
-  color: var(--provider-claude-fg);
-  background: var(--provider-claude-fill);
-}
-.reviewer-job-provider[data-provider="cursor"] {
-  color: var(--provider-cursor-fg);
-  background: var(--provider-cursor-fill);
-}
-.reviewer-job-model {
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-/* Effort is the quietest fact on the card — one step below the model it qualifies, and
-   no longer a filled pill, which was giving a low-value token the same visual weight as
-   the provider chip beside it. */
-.reviewer-job-effort {
-  flex-shrink: 0;
-  font-size: var(--text-xs);
-  line-height: var(--leading-normal);
-  color: var(--text-tertiary, var(--text-secondary));
-  white-space: nowrap;
-}
-/* Iterative-loop progress. This has ALWAYS rendered when max_rounds > 1 (it is not new
-   markup) but carried no rule of its own, so it inherited 14px body text and read as
-   prose floating in the header. */
-.reviewer-job-round {
-  flex-shrink: 0;
-  font-size: var(--text-xs);
-  font-weight: var(--weight-medium);
-  color: var(--text-tertiary, var(--text-secondary));
-  white-space: nowrap;
-}
-/* Small circled "i" that collapses the noisy reviewer session id out of the resting
-   card; click to toggle the id line in/out (see .reviewer-job-thread). */
-.reviewer-job-info {
-  flex-shrink: 0;
-  align-self: center; /* the identity row is baseline-aligned; center the circle */
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  border: 1px solid var(--border-subtle);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: var(--text-xs);
-  font-style: italic;
-  line-height: var(--leading-none);
-  cursor: pointer;
-}
-.reviewer-job-info:hover,
-.reviewer-job-info[aria-expanded="true"] {
-  color: var(--text-primary);
-  border-color: var(--text-secondary);
-}
-.reviewer-job-info[aria-expanded="true"] {
-  background: var(--surface-muted);
-}
-/* Touch devices: keep the dot visually small (per the "little circled i" intent) but
-   expand the actual tap target to ~40px — matching the other round mobile controls —
-   via an invisible centered overlay, so the resting header doesn't grow. */
-@media (pointer: coarse) {
-  .reviewer-job-info {
-    position: relative;
-  }
-  .reviewer-job-info::after {
-    content: "";
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 40px;
-    height: 40px;
-    transform: translate(-50%, -50%);
-  }
-}
-/* The reviewer thread name is long: keep it to one line, truncate with an
-   ellipsis, and rely on the title/aria-label for the full value on hover. */
-.reviewer-job-thread {
-  margin: 2px 0 0;
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-/* The outcome row — the card's headline. Verdict leads, lifecycle status trails. */
-.reviewer-job-outcome {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-/* The verdict is the one thing the card exists to say, so it takes the panel-title step
-   (--text-lg, 20px) — the same token the design language assigns to "Panel / status-page
-   titles". It used to be a 14px sentence ("Verdict: approve") sitting between the header
-   and the findings, i.e. typographically indistinguishable from both.
-   The WORD stays --text-1 in both themes on purpose: dark --ok-fg measures 3.86:1 on this
-   surface, which is a passing MARK but a failing word. The colour therefore lives on the
-   glyph, per DESIGN_LANGUAGE.md. Light --ok-fg would clear it at 5.52:1, but colouring the
-   word in one theme only would make the two modes disagree about what the emphasis IS. */
-.reviewer-job-verdict {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  min-width: 0;
-  font-size: var(--text-lg);
-  font-weight: var(--weight-strong);
-  line-height: var(--leading-tight);
-  color: var(--text-primary);
-}
-.reviewer-job-verdict-mark { flex-shrink: 0; }
-.reviewer-job-verdict-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.reviewer-job-verdict-ok .reviewer-job-verdict-mark { color: var(--ok-fg); }
-.reviewer-job-verdict-warn .reviewer-job-verdict-mark { color: var(--warn-fg); }
-.reviewer-job-verdict-neutral .reviewer-job-verdict-mark {
-  color: var(--text-tertiary, var(--text-secondary));
-}
-/* Status pill. The tone rides the FILL, which is legible in both themes; the label only
-   takes the tone colour in light, where --ok-fg / --warn-fg clear 4.5:1 as text. In dark
-   they do not, so the label stays --text-1 there and the fill carries the meaning. This
-   asymmetry is deliberate and is the documented behaviour of the palette — the text-safe
-   / marks-only split flips between modes. */
-.reviewer-job-status {
-  flex-shrink: 0;
-  font-size: var(--text-xs);
-  font-weight: var(--weight-medium);
-  padding: 2px 8px;
-  border-radius: var(--r-pill);
-  background: var(--status-neutral-bg);
-  color: var(--text-primary);
-  white-space: nowrap;
-}
-.reviewer-job-status-ready { background: var(--ok-bg); }
-.reviewer-job-status-alert { background: var(--warn-bg); }
-:root[data-theme="light"] .reviewer-job-status-ready { color: var(--ok-fg); }
-:root[data-theme="light"] .reviewer-job-status-alert { color: var(--warn-fg); }
-/* `white-space: pre-wrap` was a holdover from when this pane showed raw text. The body is
-   real markdown elements now, so pre-wrap was preserving the newlines BETWEEN blocks on
-   top of their margins and double-spacing the whole review. */
-.reviewer-job-review {
-  font-size: var(--text-ui);
-  line-height: var(--leading-relaxed);
-  color: var(--text-primary);
-  max-height: 320px;
-  overflow-y: auto;
-}
-.reviewer-job-loading,
-.reviewer-job-error {
-  margin: 0;
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-}
-.reviewer-job-error { color: var(--text-warning); }
-/* Actions are the LAST of the card's four questions, so they stop competing with the
-   verdict above: the buttons drop their outlines for a quiet fill, and the destructive
-   one is pushed to the far edge as plain text. Two equally-outlined boxes side by side
-   read as a choice between peers, which "Re-review" and "Delete" are not. */
-.reviewer-job-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.reviewer-job-actions .header-button {
-  border-color: transparent;
-  background: var(--surface-2);
-  font-size: var(--text-sm);
-}
-.reviewer-job-actions .header-button:hover:not(:disabled) {
-  background: var(--surface-3);
-}
-/* Pinned to the trailing edge and stripped to text — reachable, but never the thing your
-   eye lands on first. */
-.reviewer-job-actions .reviewer-delete-button {
-  margin-left: auto;
-  background: transparent;
-  color: var(--text-tertiary, var(--text-secondary));
-}
-.reviewer-job-actions .reviewer-delete-button:hover:not(:disabled) {
-  background: transparent;
-  color: var(--err-fg);
 }
 
 /* Code-flow runs ----------------------------------------------------------
@@ -6876,7 +7060,7 @@ body.is-resizing-panel {
 }
 /* Unlike the reviewer body — which is real markdown ELEMENTS — these findings are raw
    text joined with blank lines, so this one genuinely needs pre-wrap. It used to inherit
-   it from `.reviewer-job-review`, which is exactly why removing it there (where it was
+   it from the reviewer body, which is exactly why removing it there (where it was
    double-spacing rendered markdown) would otherwise have collapsed these onto one line. */
 .workflow-run-findings {
   font-size: var(--text-sm);
@@ -6892,19 +7076,6 @@ body.is-resizing-panel {
 }
 @media (prefers-reduced-motion: reduce) {
   .workflow-run-active .workflow-run-mark { animation: none; }
-}
-
-/* An ask card is a SUMMARY. The question and the answer are both agent-written
- * and can be pages long; unclamped they push everything else out of the panel.
- * Reading the whole thing is what the Open button is for. */
-.reviewer-job-note {
-  display: -webkit-box;
-  -webkit-line-clamp: 4;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.reviewer-job-note.is-answer {
-  -webkit-line-clamp: 6;
 }
 
 /* Idle nudge above the composer ------------------------------------------ */

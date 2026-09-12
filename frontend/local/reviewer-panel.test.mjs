@@ -83,30 +83,28 @@ test("ReviewerPanel empty state omits the launcher entirely when no request wiri
   assert.match(html, /Available when the agent is idle/);
 });
 
-test("ReviewerPanel renders a job card with a Delete action enabled only on terminal status", () => {
-  const terminal = renderToStaticMarkup(
+test("the review slot leads with its lifecycle, and keeps Stop/Delete out of the resting card", () => {
+  const html = renderToStaticMarkup(
     h(ReviewerPanel, {
-      reviewJobs: [{ id: "r1", reviewer_provider: "claude_code", status: "complete", reviewer_thread_id: "t-rev" }],
+      reviewJobs: [
+        { id: "r1", reviewer_provider: "claude_code", status: "complete", reviewer_thread_id: "t-rev" },
+      ],
       canRequest: false,
+      onDeleteReview() {},
     })
   );
-  assert.match(terminal, /claude_code/);
-  assert.match(terminal, /Review complete/);
-  // Delete button present and NOT disabled for a terminal job.
-  assert.match(terminal, /reviewer-delete-button/);
-  assert.doesNotMatch(terminal, /reviewer-delete-button[^>]*disabled/);
-
-  const active = renderToStaticMarkup(
-    h(ReviewerPanel, {
-      reviewJobs: [{ id: "r2", reviewer_provider: "codex", status: "waiting_for_reviewer" }],
-      canRequest: false,
-    })
-  );
-  // Delete disabled while the review is still running.
-  assert.match(active, /reviewer-delete-button[^>]*disabled/);
+  assert.match(html, /reviewer-ledger-label[^>]*>Review</);
+  assert.match(html, /Claude/, "the reviewer is named on the heading, not inside the card");
+  assert.match(html, /Review complete/);
+  // Both destructive/rare actions live behind the ··· menu now, so neither is in the
+  // resting markup; what stands in for them is the menu trigger.
+  assert.doesNotMatch(html, />Delete</);
+  assert.match(html, /reviewer-menu-button/);
 });
 
-test("ReviewerPanel surfaces the unlock action when a review is blocked", () => {
+test("a blocked review says so in the card's headline, in the alert tone", () => {
+  // Blocked is the one state the user MUST act on, so it outranks the verdict and is
+  // the only thing in the panel that earns colour.
   const html = renderToStaticMarkup(
     h(ReviewerPanel, {
       reviewJobs: [{ id: "r3", reviewer_provider: "codex", status: "blocked" }],
@@ -114,35 +112,8 @@ test("ReviewerPanel surfaces the unlock action when a review is blocked", () => 
       onResolveReview() {},
     })
   );
-  assert.match(html, /review-resolve-button/);
-  assert.match(html, /Stop reviewer &amp; unlock/);
-});
-
-test("ReviewerPanel shows a Stop button for any in-progress (non-terminal) review", () => {
-  // A stuck-but-not-blocked review (e.g. the reviewer turn hangs) must still be
-  // stoppable, so the user can recover the locked workspace.
-  const running = renderToStaticMarkup(
-    h(ReviewerPanel, {
-      reviewJobs: [{ id: "r", reviewer_provider: "codex", status: "waiting_for_reviewer" }],
-      canRequest: false,
-      onResolveReview() {},
-    })
-  );
-  assert.match(running, /review-resolve-button/);
-  assert.match(running, />Stop review</);
-  assert.doesNotMatch(running, /Stop reviewer &amp; unlock/);
-
-  // A terminal review has no Stop button (only Delete).
-  const done = renderToStaticMarkup(
-    h(ReviewerPanel, {
-      reviewJobs: [
-        { id: "r2", reviewer_provider: "codex", status: "complete", reviewer_thread_id: "t" },
-      ],
-      canRequest: false,
-      onResolveReview() {},
-    })
-  );
-  assert.doesNotMatch(done, /review-resolve-button/);
+  assert.match(html, /reviewer-tone-alert/);
+  assert.match(html, /Review blocked — action needed/);
 });
 
 test("ReviewerChip stays hidden when there is no review (idle), regardless of canRequest", () => {
@@ -319,7 +290,7 @@ test("WorkspaceDiffSheetBody carries its own diff-scoped refresh (not the modal 
   assert.match(html, /aria-label="Refresh workspace diff"/);
 });
 
-test("ReviewerPanel shows round progress + verdict for an iterative review", () => {
+test("the review heading carries the iterative round, and the card headlines the verdict", () => {
   const html = renderToStaticMarkup(
     h(ReviewerPanel, {
       reviewJobs: [
@@ -335,19 +306,14 @@ test("ReviewerPanel shows round progress + verdict for an iterative review", () 
       canRequest: false,
     })
   );
-  assert.match(html, /Round 1\/3/);
-  // The verdict is the card's title now, so the visible word drops the "Verdict:" prefix
-  // that its own position already implies — but the prefix stays for screen readers, and
-  // the underscore is humanised for display only.
-  assert.match(html, /reviewer-job-verdict-label[^>]*>needs changes</);
-  assert.match(html, /sr-only[^>]*>Verdict: </);
-  // Tone rides a class, and the colour lands on the MARK rather than the word: dark
-  // --ok-fg is a passing mark (3.86:1) but a failing 4.5:1 word on this surface.
-  assert.match(html, /reviewer-job-verdict reviewer-job-verdict-warn/);
-  assert.match(html, /reviewer-job-verdict-mark/);
+  assert.match(html, /round 1\/3 · Codex/, "the loop's own round beats the attempt count");
+  // The verdict is the headline, phrased as the decision it implies rather than as the
+  // enum — "needs_changes" is not what a user wants to read off a merge gate.
+  assert.match(html, /Needs changes · won&#x27;t merge yet/);
+  assert.match(html, /reviewer-tone-alert/);
 });
 
-test("ReviewerPanel hides round/verdict for a single-shot review", () => {
+test("a single-shot review counts attempts instead, and an unknown verdict is not surfaced", () => {
   const html = renderToStaticMarkup(
     h(ReviewerPanel, {
       reviewJobs: [
@@ -363,65 +329,15 @@ test("ReviewerPanel hides round/verdict for a single-shot review", () => {
       canRequest: false,
     })
   );
-  assert.doesNotMatch(html, /Round 1\/1/);
-  // An "unknown" verdict is not surfaced.
-  assert.doesNotMatch(html, /Verdict:/);
+  assert.match(html, /round 1 · Codex/);
+  assert.doesNotMatch(html, /round 1\/1/);
+  assert.match(html, /Review complete/, "with no verdict, the lifecycle is the headline");
+  assert.doesNotMatch(html, /unknown/);
 });
 
-test("ReviewerPanel treats an escalated review as terminal (Delete enabled)", () => {
-  const html = renderToStaticMarkup(
-    h(ReviewerPanel, {
-      reviewJobs: [
-        {
-          id: "r-esc",
-          reviewer_provider: "codex",
-          status: "escalated",
-          reviewer_thread_id: "rev-1",
-          round: 3,
-          max_rounds: 3,
-          verdict: "needs_changes",
-        },
-      ],
-      canRequest: false,
-    })
-  );
-  // The Delete button shows its TERMINAL title only when the job is terminal — so an
-  // An escalated job is deletable (and its transcript is fetched, gated by the same flag).
-  assert.match(html, /Delete this review and its reviewer session/);
-  assert.doesNotMatch(html, /Stop the reviewer before deleting/);
-});
-
-test("ReviewerPanel shows the reviewer model and collapses the (long) session id behind the info toggle, full value in its tooltip", () => {
-  const longName = "Review: refactor the workspace-diff host into shared chrome (round 1)";
-  const html = renderToStaticMarkup(
-    h(ReviewerPanel, {
-      reviewJobs: [
-        {
-          id: "r1",
-          reviewer_provider: "codex",
-          reviewer_model: "gpt-5-codex",
-          status: "waiting_for_reviewer",
-          reviewer_thread_id: "rev-thread-1",
-        },
-      ],
-      reviewerThreads: [{ reviewer_thread_id: "rev-thread-1", name: longName }],
-      canRequest: false,
-    })
-  );
-  // Model is shown.
-  assert.match(html, /reviewer-job-model[^>]*>gpt-5-codex</);
-  // The noisy session id/name is NOT in the resting card — it's collapsed behind the
-  // header "i" (default hidden), so it doesn't crowd the header.
-  assert.doesNotMatch(html, /reviewer-job-thread/);
-  // The info toggle is present, starts collapsed (aria-expanded="false"), and carries the
-  // FULL value in its title + aria-label so hovering/tapping reveals all of it.
-  const escaped = longName.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
-  assert.match(html, new RegExp(`reviewer-job-info[^>]*title="${escaped}"`));
-  assert.match(html, /reviewer-job-info[^>]*aria-expanded="false"/);
-  assert.match(html, /aria-label="Show reviewer session id \(Review: refactor/);
-});
-
-test("ReviewerPanel shows the reviewer effort chip beside the model, with a reasoning-effort tooltip", () => {
+test("the reviewer's model rides the heading; effort survives on its tooltip", () => {
+  // The identity band inside the card is gone — the agent is named by the heading now —
+  // so both facts have to land there, and the row truncates, so effort goes to the title.
   const html = renderToStaticMarkup(
     h(ReviewerPanel, {
       reviewJobs: [
@@ -437,88 +353,59 @@ test("ReviewerPanel shows the reviewer effort chip beside the model, with a reas
       canRequest: false,
     })
   );
-  // The effort renders in its own chip, with the full value in the title tooltip.
-  assert.match(html, /reviewer-job-effort[^>]*>high</);
-  assert.match(html, /reviewer-job-effort[^>]*title="Reasoning effort: high"/);
-  // Both facets show together: model AND effort.
-  assert.match(html, /reviewer-job-model[^>]*>gpt-5-codex</);
+  assert.match(html, /reviewer-ledger-meta[^>]*>round 1 · Codex · gpt-5-codex</);
+  assert.match(html, /title="round 1 · Codex · gpt-5-codex · effort high"/);
 });
 
-test("ReviewerPanel omits the effort chip when the job carries no effort", () => {
-  const html = renderToStaticMarkup(
-    h(ReviewerPanel, {
-      reviewJobs: [
-        {
-          id: "r2",
-          reviewer_provider: "codex",
-          reviewer_model: "gpt-5-codex",
-          // no reviewer_effort (e.g. a reused thread with no recorded effort)
-          status: "waiting_for_reviewer",
-          reviewer_thread_id: "rev-thread-2",
-        },
-      ],
-      canRequest: false,
-    })
-  );
-  assert.doesNotMatch(html, /reviewer-job-effort/);
-});
-
-test("ReviewerPanel falls back to the reviewer thread id when the thread has no name; hides model when unknown", () => {
-  const html = renderToStaticMarkup(
-    h(ReviewerPanel, {
-      reviewJobs: [
-        {
-          id: "r2",
-          reviewer_provider: "codex",
-          status: "waiting_for_reviewer",
-          reviewer_thread_id: "rev-thread-2",
-          // no reviewer_model (e.g. a reused thread that inherits its model)
-        },
-      ],
-      reviewerThreads: [], // no name match
-      canRequest: false,
-    })
-  );
-  // No model span when the job carries no model.
-  assert.doesNotMatch(html, /reviewer-job-model/);
-  // The id is collapsed by default (not in the resting card)...
-  assert.doesNotMatch(html, /reviewer-job-thread/);
-  // ...and the info toggle falls back to the raw thread id as its tooltip value.
-  assert.match(html, /reviewer-job-info[^>]*title="rev-thread-2"/);
-});
-
-test("ReviewerPanel collapses the session id behind an info toggle (hidden by default; toggle omitted when there's no session)", () => {
-  // With a reviewer thread: the id line is collapsed and the info toggle stands in for it.
-  const withThread = renderToStaticMarkup(
+test("no bare session id is shown for a review — only a short sha, and only a real one", () => {
+  const withSha = renderToStaticMarkup(
     h(ReviewerPanel, {
       reviewJobs: [
         {
           id: "r1",
           reviewer_provider: "codex",
-          status: "waiting_for_reviewer",
+          status: "complete",
           reviewer_thread_id: "rev-thread-9",
+          verdict_candidate_sha: "2011c6939ab4f00c",
         },
       ],
       canRequest: false,
+      onOpenThread() {},
     })
   );
-  // The id is NOT rendered in the resting card (collapsed by default)...
-  assert.doesNotMatch(withThread, /reviewer-job-thread/);
-  // ...but the reveal control is present, collapsed, and wired to the id.
-  assert.match(withThread, /reviewer-job-info[^>]*title="rev-thread-9"/);
-  assert.match(withThread, /reviewer-job-info[^>]*aria-expanded="false"/);
-  assert.match(withThread, /aria-label="Show reviewer session id \(rev-thread-9\)"/);
+  assert.match(withSha, /reviewer-sha[^>]*>2011c69</);
+  assert.doesNotMatch(withSha, /2011c6939ab4/, "the full sha never renders");
+  assert.doesNotMatch(withSha, /rev-thread-9</, "nor does the reviewer's session id");
+  // What the id was FOR is now a named action instead.
+  assert.match(withSha, /Open review/);
 
-  // With NO reviewer thread id there's nothing to reveal, so the toggle is omitted
-  // entirely (no dangling "i" that opens an empty line).
-  const noThread = renderToStaticMarkup(
+  // No sha on the wire → no trailing slot at all, rather than a placeholder.
+  const noSha = renderToStaticMarkup(
     h(ReviewerPanel, {
       reviewJobs: [{ id: "r2", reviewer_provider: "codex", status: "waiting_for_reviewer" }],
       canRequest: false,
     })
   );
-  assert.doesNotMatch(noThread, /reviewer-job-info/);
-  assert.doesNotMatch(noThread, /reviewer-job-thread/);
+  assert.doesNotMatch(noSha, /reviewer-sha/);
+  assert.doesNotMatch(noSha, /Open review/, "and nothing to open without a reviewer session");
+});
+
+test("earlier review attempts collapse to one line each instead of repeating as cards", () => {
+  // The panel used to give a failed round its own full card restating the same error.
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      reviewJobs: [
+        { id: "r1", reviewer_provider: "codex", status: "complete", verdict: "approve", updated_at: 100 },
+        { id: "r2", reviewer_provider: "codex", status: "failed", error: "nothing committed to review", updated_at: 200 },
+        { id: "r3", reviewer_provider: "codex", status: "blocked", updated_at: 300 },
+      ],
+      canRequest: false,
+    })
+  );
+  assert.equal(html.match(/reviewer-review-banner-text/g).length, 1, "one card, not three");
+  assert.match(html, /reviewer-round-label[^>]*>R2<[\s\S]*nothing committed to review/);
+  assert.match(html, /reviewer-round-label[^>]*>R1<[\s\S]*Review complete · approve/);
+  assert.match(html, /reviewer-ledger-meta[^>]*>round 3 · Codex</, "and the heading counts them");
 });
 
 test("a terminal card carries a per-card Re-review launcher (prefilled, own modal id)", () => {
@@ -681,7 +568,7 @@ test("a Re-review prefill that is not on offer falls back to a clean reviewer, a
   assert.match(html, /starts a clean one/);
 });
 
-test("ReviewerPanel renders an ask card, and says which side you are looking at", () => {
+test("an ask renders under its agent's heading, titled by intent rather than by subject", () => {
   // The panel showed its empty state with a live ask in the API, so this pins
   // the component end: given asks, a card must appear.
   const ask = {
@@ -689,12 +576,14 @@ test("ReviewerPanel renders an ask card, and says which side you are looking at"
     asker_thread_id: "me",
     peer_thread_id: "them",
     peer_provider: "codex",
+    peer_model: "gpt-5-codex",
     asker_name: "Main session",
     peer_name: "Retry work",
-    message: "have a look at the retry loop",
+    message: "have a look at the retry loop\n\n(hundreds of words of context follow)",
     answer: "Fixed the backoff.",
     status: "done",
-    delivered: false,
+    delivered: true,
+    updated_at: 10,
   };
   const html = renderToStaticMarkup(
     React.createElement(ReviewerPanel, {
@@ -703,16 +592,70 @@ test("ReviewerPanel renders an ask card, and says which side you are looking at"
       onOpenThread: () => {},
     })
   );
-  assert.match(html, /You asked Retry work/, "the relation is stated, not just the provider");
-  assert.match(html, /have a look at the retry loop/);
-  assert.match(html, /Fixed the backoff\./);
+  assert.match(html, /reviewer-agent-name[^>]*>Codex</, "the agent is the GROUP heading");
+  assert.match(html, /reviewer-agent-model[^>]*>gpt-5-codex</);
+  assert.match(html, /Asked<[\s\S]*1 thread</);
+  // The card carries the intent and the result — never "You asked codex", and never the
+  // raw prompt, which only survives on the tooltip.
+  assert.doesNotMatch(html, /You asked/);
+  assert.match(html, /reviewer-card-title[^>]*>have a look at the retry loop</);
+  assert.match(html, /hundreds of words of context follow/, "…on the title attribute");
+  assert.match(html, /reviewer-card-result[^>]*>Fixed the backoff\.</);
+  assert.match(html, /reviewer-ask-state is-answered/);
 
-  // …and from the other side it reads the other way round.
+  // …and from the other side the direction is a tag, not a rewritten title.
   const mirrored = renderToStaticMarkup(
     React.createElement(ReviewerPanel, {
       asks: [ask],
       parentThreadId: "them",
     })
   );
-  assert.match(mirrored, /Main session asked you/);
+  assert.match(mirrored, /reviewer-agent-name[^>]*>Main session</);
+  assert.match(mirrored, /reviewer-ask-inbound[^>]*>asked you</);
+});
+
+test("an answer that has not been handed back does not read as answered", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ReviewerPanel, {
+      asks: [
+        {
+          id: "ask-2",
+          asker_thread_id: "me",
+          peer_thread_id: "them",
+          peer_provider: "codex",
+          message: "check the retry loop",
+          answer: "done",
+          status: "done",
+          delivered: false,
+          updated_at: 10,
+        },
+      ],
+      parentThreadId: "me",
+    })
+  );
+  assert.match(html, /reviewer-ask-state is-not-handed-back/);
+  assert.match(html, />not handed back</);
+});
+
+test("follow-ups to one agent session collapse into that thread's rounds", () => {
+  const base = {
+    asker_thread_id: "me",
+    peer_thread_id: "them",
+    peer_provider: "codex",
+    status: "done",
+    delivered: true,
+  };
+  const html = renderToStaticMarkup(
+    React.createElement(ReviewerPanel, {
+      asks: [
+        { ...base, id: "a1", message: "where should /goal live", answer: "In the JSON state file.", updated_at: 100 },
+        { ...base, id: "a2", message: "and what about archive", answer: "Same record, new field.", updated_at: 200 },
+      ],
+      parentThreadId: "me",
+    })
+  );
+  assert.equal(html.match(/reviewer-card-title/g).length, 1, "one card for one subject");
+  assert.match(html, /reviewer-card-title[^>]*>and what about archive</);
+  assert.match(html, /reviewer-round-label[^>]*>R1<[\s\S]*In the JSON state file\./);
+  assert.match(html, /1 thread</, "counted as one thread, not two asks");
 });
