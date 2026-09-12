@@ -25,6 +25,10 @@
 // nothing else produces the edge.
 //
 // Run: npm run test:browser:cursor-view-only-history
+// Row identity is `row_id`; `item_id` is the relay's compatibility alias carrying
+// the same value (see frontend/shared/transcript-row-key.js). Reading the alias
+// alone makes these assertions pass whatever the two do, so they guard nothing —
+// prefer `row_id` for the same reason client code must.
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -605,7 +609,7 @@ async function drainTranscript(relayPort, threadId, maxPages = 24) {
     entries += page.length;
     pages += 1;
     if (page.length) {
-      oldestEntryId = page[0].item_id || null;
+      oldestEntryId = page[0].row_id ?? page[0].item_id ?? null;
     }
     if (data.prev_cursor == null) {
       return { pages, entries, oldestEntryId, exhausted: true };

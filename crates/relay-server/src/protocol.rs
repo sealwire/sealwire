@@ -2024,6 +2024,21 @@ pub struct TranscriptEntryView {
     /// id for the item. That is the one case where the two differ in meaning, and
     /// it is why a client must never treat `item_id` as provider-addressable: the
     /// relay owns that translation.
+    ///
+    /// THE ALIAS IS A SERIALIZATION BOUNDARY, NOT A CONCEPT. Nothing inside the
+    /// relay reads it to identify a row, and nothing should start: `row_id` is the
+    /// identity and a reader that takes the alias instead agrees with the rest only
+    /// while `to_view` keeps putting the same string in both. The alias exists at
+    /// exactly four wire types — this one, `ThreadEntryDetailResponse`,
+    /// `TranscriptDeltaEvent`, and the broker's `TranscriptDelta` — plus
+    /// `TranscriptRecord`'s `#[serde(rename)]` for reading back old persisted
+    /// snapshots.
+    ///
+    /// REMOVAL CRITERION: delete it when no client built before `row_id` existed is
+    /// still reachable. Until then `grep` staying non-empty is correct, and emptying
+    /// it by dropping the field would silently unkey every row such a client holds.
+    /// Deliberately NOT `skip_serializing_if`, unlike `row_id`: an old client reads
+    /// this field unconditionally, so it must always be present even as `null`.
     pub item_id: Option<String>,
     /// Where this row sorts within its thread, for the run named by
     /// `transcript_generation`. Absent only on entries a relay this old never
