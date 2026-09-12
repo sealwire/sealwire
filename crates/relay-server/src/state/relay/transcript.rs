@@ -181,6 +181,27 @@ impl RelayState {
         )
     }
 
+    /// The row a RELAY-synthesized name refers to, on the active thread.
+    ///
+    /// Symmetric with `upsert_relay_named_item`, which resolves in the same space.
+    /// Matching the spelling against ROW keys instead disagreed with the write the
+    /// moment `row_id` had to be minted away from the source name — and then landed
+    /// on whichever unrelated row owns that spelling.
+    ///
+    /// Straight off the runtime record, NOT through `snapshot()`: the snapshot
+    /// projection strips `tool.diff` for transport, so a caller that read the diff
+    /// back out of it always got `None`.
+    pub(crate) fn relay_named_entry(&self, item_id: &str) -> Option<TranscriptEntryView> {
+        // The same mirror `upsert_relay_named_item` falls back to with no active
+        // thread, so the read cannot look somewhere the write never went.
+        let transcript = match self.selected_runtime() {
+            Some(runtime) => &runtime.transcript,
+            None => &self.transcript,
+        };
+        let row_id = transcript.resolve_relay(item_id)?;
+        transcript.get_row(row_id).map(TranscriptRecord::to_view)
+    }
+
     /// Active-thread convenience for a row the RELAY synthesized.
     pub(crate) fn upsert_relay_named_item(
         &mut self,

@@ -1548,6 +1548,174 @@ async fn handle_notification_enriches_turn_diff_from_same_turn_file_changes() {
     assert_eq!(summary.diff.as_deref(), Some("@@ -1 +1 @@\n-old\n+new"));
 }
 
+/// The same enrichment, with the row's key MINTED AWAY from its source name.
+///
+/// `turn-diff:*` is written through the relay namespace, so it survives a collision
+/// on the row key. The refresh that carries the accumulated diff forward looked the
+/// row up by that spelling instead — against row keys — so once a provider item
+/// owned the spelling, the refresh found the WRONG row, saw no tool on it, and gave
+/// up. The turn's diff then never reached the file-change summary.
+#[tokio::test]
+async fn a_turn_diff_row_whose_key_was_minted_away_is_still_enriched() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-1".to_string());
+        // A provider item that happens to spell itself the way the relay names its
+        // own per-turn summary. It takes the ROW key, so the summary below has to
+        // mint — which is the whole reason `relay_item_id` exists.
+        relay.upsert_transcript_item_for_thread(
+            "thread-1",
+            "turn-diff:turn-1".to_string(),
+            TranscriptEntryKind::AgentText,
+            Some("an unrelated message".to_string()),
+            "completed".to_string(),
+            Some("turn-1".to_string()),
+            None,
+        );
+    }
+
+    handle_notification(
+        json!({
+            "method": "turn/diff/updated",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "diff": "@@ -1 +1 @@\n-old\n+new"
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    handle_notification(
+        json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "id": "item-file-change",
+                    "type": "fileChange",
+                    "status": "completed",
+                    "changes": [
+                        { "path": "frontend/app.js", "kind": "modify" }
+                    ]
+                }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let runtime = relay.selected_runtime().expect("runtime");
+    let row_id = runtime
+        .transcript
+        .resolve_relay("turn-diff:turn-1")
+        .expect("the summary is addressable in the RELAY namespace")
+        .to_string();
+    assert_ne!(
+        row_id, "turn-diff:turn-1",
+        "the fixtures must diverge: the summary's row key had to be minted"
+    );
+    let summary = runtime
+        .transcript
+        .get_row(&row_id)
+        .and_then(|row| row.tool.as_ref())
+        .expect("the summary row carries the turn's tool call");
+
+    assert_eq!(
+        summary.title,
+        "Codex changed `frontend/app.js` in this turn."
+    );
+    assert_eq!(summary.file_changes.len(), 1);
+    assert_eq!(summary.file_changes[0].path, "frontend/app.js");
+    assert_eq!(
+        summary.diff.as_deref(),
+        Some("@@ -1 +1 @@\n-old\n+new"),
+        "the accumulated diff must survive the refresh"
+    );
+}
+
+/// The refresh reads the accumulated diff back out and splits it per file. It used
+/// to read it from `snapshot()`, whose transport projection sets `tool.diff = None`
+/// — so it was always handed nothing, and the per-file bodies could only ever come
+/// from the fallback summary, which carries paths without content.
+#[tokio::test]
+async fn the_refresh_reads_the_unstripped_diff_so_per_file_bodies_survive() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-1".to_string());
+    }
+
+    let diff = "diff --git a/frontend/app.js b/frontend/app.js\n\
+                --- a/frontend/app.js\n\
+                +++ b/frontend/app.js\n\
+                @@ -1 +1 @@\n\
+                -old\n\
+                +new\n";
+    handle_notification(
+        json!({
+            "method": "turn/diff/updated",
+            "params": { "threadId": "thread-1", "turnId": "turn-1", "diff": diff }
+        }),
+        &state,
+    )
+    .await;
+
+    // Triggers the refresh, which rebuilds the summary from the diff it reads back.
+    handle_notification(
+        json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "id": "item-file-change",
+                    "type": "fileChange",
+                    "status": "completed",
+                    "changes": [ { "path": "frontend/app.js", "kind": "modify" } ]
+                }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let views = relay
+        .selected_runtime()
+        .expect("runtime")
+        .transcript_views();
+    let summary = views
+        .iter()
+        .find(|entry| entry.item_id.as_deref() == Some("turn-diff:turn-1"))
+        .and_then(|entry| entry.tool.as_ref())
+        .expect("turn diff entry should exist");
+
+    assert_eq!(summary.file_changes.len(), 1);
+    assert_eq!(summary.file_changes[0].path, "frontend/app.js");
+    assert!(
+        summary.file_changes[0].diff.contains("+new"),
+        "the per-file body must survive the refresh, got: {:?}",
+        summary.file_changes[0].diff
+    );
+}
+
 #[tokio::test]
 async fn handle_notification_enriches_turn_diff_from_added_file_content() {
     let (change_tx, _) = watch::channel(0_u64);

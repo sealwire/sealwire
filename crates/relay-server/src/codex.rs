@@ -1303,12 +1303,9 @@ fn parse_transcript(thread: &Value) -> Vec<crate::provider::ProviderTranscriptEn
 
 fn refresh_turn_diff_entry(relay: &mut RelayState, turn_id: &str) -> bool {
     let turn_diff_item_id = format!("turn-diff:{turn_id}");
-    let existing_entry = relay
-        .snapshot()
-        .transcript
-        .into_iter()
-        .find(|entry| entry.item_id.as_deref() == Some(turn_diff_item_id.as_str()));
-    let Some(existing_entry) = existing_entry else {
+    // Addressed in the RELAY namespace, which is where `upsert_relay_named_item`
+    // below writes it.
+    let Some(existing_entry) = relay.relay_named_entry(&turn_diff_item_id) else {
         return false;
     };
     let Some(existing_tool) = existing_entry.tool else {
