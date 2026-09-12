@@ -57,6 +57,7 @@ fn make_snapshot() -> SessionSnapshot {
         transcript_truncated: false,
         transcript: (0..12)
             .map(|index| TranscriptEntryView {
+                row_id: None,
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some(format!("item-{index}")),
@@ -589,6 +590,7 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
         entry_seq_start: Some(4),
         entry_seq_end: Some(4),
         entries: vec![TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("item-large".to_string()),
@@ -606,6 +608,7 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
     let thread_entries = ThreadEntriesResponse {
         thread_id: "thread-1".to_string(),
         entries: vec![TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some("item-small".to_string()),
@@ -681,6 +684,7 @@ fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
             entry_seq_start: Some(4),
             entry_seq_end: Some(4),
             entries: vec![TranscriptEntryView {
+                row_id: None,
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some("item-large".to_string()),

@@ -1609,7 +1609,7 @@ fn can_merge_transcript_delta(
     next: &PendingTranscriptDelta,
 ) -> bool {
     current.thread_id == next.thread_id
-        && current.item_id == next.item_id
+        && current.row_id == next.row_id
         && current.turn_id == next.turn_id
         && current.kind == next.kind
         && current.revision == next.base_revision
@@ -1654,7 +1654,9 @@ fn build_transcript_delta_messages(
                     entry_seq: delta.entry_seq,
                     order_seq: delta.order_seq,
                     server_time: delta.server_time,
-                    item_id: delta.item_id.clone(),
+                    transcript_generation: delta.transcript_generation.clone(),
+                    row_id: delta.row_id.clone(),
+                    item_id: delta.row_id.clone(),
                     turn_id: delta.turn_id.clone(),
                     delta: delta.delta.clone(),
                     delta_kind: kind.to_string(),
@@ -1677,7 +1679,10 @@ fn build_transcript_delta_messages(
                 "entry_seq": delta.entry_seq,
                 "order_seq": delta.order_seq,
                 "server_time": delta.server_time,
-                "item_id": delta.item_id,
+                "transcript_generation": delta.transcript_generation,
+                "row_id": delta.row_id,
+                // Compatibility alias; same value as `row_id`.
+                "item_id": delta.row_id,
                 "turn_id": delta.turn_id,
                 "delta": delta.delta,
                 "delta_kind": kind,
@@ -1709,7 +1714,7 @@ async fn publish_transcript_delta(
     let targets = state.broker_targets_for_thread(&delta.thread_id).await;
     if targets.is_empty() {
         debug!(
-            item_id = %delta.item_id,
+            row_id = %delta.row_id,
             thread_id = %delta.thread_id,
             turn_id = delta.turn_id.as_deref().unwrap_or("-"),
             delta_kind = kind,
@@ -1728,7 +1733,7 @@ async fn publish_transcript_delta(
         scope = "transcript_delta",
         target_count = targets.len(),
         targets = %target_summary,
-        item_id = %delta.item_id,
+        row_id = %delta.row_id,
         thread_id = %delta.thread_id,
         turn_id = delta.turn_id.as_deref().unwrap_or("-"),
         delta_kind = kind,

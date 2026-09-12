@@ -109,9 +109,10 @@ pub(crate) struct TranscriptRecord {
 impl TranscriptRecord {
     pub(crate) fn to_view(&self) -> TranscriptEntryView {
         TranscriptEntryView {
-            // The compatibility field: clients still call this `item_id`, and it
-            // still carries the relay's stable row identity — never the mutable
-            // provider id. Adding an explicit `row_id` to the wire is R3.
+            // THE client identity. Every key a client builds is this.
+            row_id: Some(self.row_id.clone()),
+            // Compatibility: the same value, for a client built before `row_id`
+            // existed. Never the provider id — the relay owns that translation.
             item_id: Some(self.row_id.clone()),
             order_seq: Some(self.order_seq),
             withdrawn: self.withdrawn,

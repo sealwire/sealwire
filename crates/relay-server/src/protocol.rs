@@ -1962,6 +1962,25 @@ pub enum FileChangeApplyState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptEntryView {
+    /// THE client identity of this row: relay-owned, minted once, never changed.
+    ///
+    /// Every client-side key is this — React keys, window/cache maps, scroll
+    /// anchors — and every row-addressed request (detail, fork point, apply) names
+    /// it. Valid within the run named by `transcript_generation`.
+    ///
+    /// `None` on an entry that is not a relay row: a raw provider read the relay
+    /// has not materialized yet. Clients never see those; the relay numbers a page
+    /// before shipping it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_id: Option<String>,
+    /// COMPATIBILITY ONLY. Carries the same value as `row_id` for every row the
+    /// relay ships, and exists so a client built against the pre-`row_id` protocol
+    /// keeps working. New client code must read `row_id` (via `transcriptRowKey`).
+    ///
+    /// On a raw provider read — where `row_id` is absent — this is the PROVIDER's
+    /// id for the item. That is the one case where the two differ in meaning, and
+    /// it is why a client must never treat `item_id` as provider-addressable: the
+    /// relay owns that translation.
     pub item_id: Option<String>,
     /// Where this row sorts within its thread, for the run named by
     /// `transcript_generation`. Absent only on entries a relay this old never
@@ -2059,10 +2078,14 @@ pub struct ThreadEntryDetailChunk {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadEntryDetailResponse {
     pub thread_id: String,
-    /// Which run minted `item_id` — without it a detail fetched across a restart
+    /// Which run minted `row_id` — without it a detail fetched across a restart
     /// gets attached to whatever row holds that id now. See `ThreadTranscriptResponse`.
     #[serde(default)]
     pub transcript_generation: String,
+    /// The row this detail belongs to. Clients match on this.
+    #[serde(default)]
+    pub row_id: String,
+    /// Compatibility alias, same value as `row_id`.
     pub item_id: String,
     pub entry: Option<TranscriptEntryView>,
     pub pending_fields: Vec<ThreadEntryDetailPendingField>,
@@ -2957,12 +2980,22 @@ pub struct DismissOrchestratorProposalInput {
 #[derive(Debug, Clone, Serialize)]
 pub struct TranscriptDeltaEvent {
     pub thread_id: String,
+    /// Which run minted `row_id`, so a delta in flight across a restart is not
+    /// applied to a transcript that has since been renumbered. Snapshots, pages and
+    /// details have always carried this; deltas were the one unfenced payload.
+    #[serde(default)]
+    pub transcript_generation: String,
     pub base_revision: u64,
     pub revision: u64,
     pub entry_seq: u64,
     /// Birth-time order key of the row this delta appends to.
     pub order_seq: i64,
     pub server_time: u64,
+    /// The row this delta appends to. See `TranscriptEntryView::row_id`.
+    #[serde(default)]
+    pub row_id: String,
+    /// COMPATIBILITY ONLY — the same value as `row_id`. See
+    /// `TranscriptEntryView::item_id`.
     pub item_id: String,
     pub turn_id: Option<String>,
     pub delta: String,
@@ -3667,9 +3700,13 @@ impl ThreadEntryDetailResponse {
     }
 
     pub fn from_entry(thread_id: String, entry: TranscriptEntryView) -> Result<Self, String> {
+        // The ROW id when the relay materialized this entry; a raw provider read
+        // has only its own name, which is what a detail fetched straight from a
+        // provider carries.
         let item_id = entry
-            .item_id
+            .row_id
             .clone()
+            .or_else(|| entry.item_id.clone())
             .ok_or_else(|| "thread entry detail is missing item_id".to_string())?;
         let mut entry_for_response = entry.clone();
         externalize_nested_file_change_diffs(&mut entry_for_response);
@@ -3697,6 +3734,7 @@ impl ThreadEntryDetailResponse {
             thread_id,
             // Stamped by the caller that holds the relay (see `stamp_generation`).
             transcript_generation: String::new(),
+            row_id: item_id.clone(),
             item_id,
             entry: Some(entry_for_response),
             pending_fields,
@@ -3725,6 +3763,7 @@ impl ThreadEntryDetailResponse {
             thread_id,
             // Stamped by the caller that holds the relay (see `stamp_generation`).
             transcript_generation: String::new(),
+            row_id: item_id.clone(),
             item_id,
             entry: None,
             pending_fields: next_cursor

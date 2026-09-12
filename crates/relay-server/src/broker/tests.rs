@@ -727,7 +727,8 @@ fn transcript_delta_coalescing_merges_contiguous_item_updates() {
         entry_seq: 4,
         order_seq: 0,
         server_time: 100,
-        item_id: "item-1".to_string(),
+        row_id: "item-1".to_string(),
+        transcript_generation: String::new(),
         turn_id: Some("turn-1".to_string()),
         delta: "hel".to_string(),
         kind: TranscriptDeltaKind::AgentText,
@@ -1280,6 +1281,7 @@ fn summarize_thread_transcript_response_reports_entry_and_char_counts() {
         entry_seq_end: Some(2),
         entries: vec![
             TranscriptEntryView {
+                row_id: None,
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some("item-1".to_string()),
@@ -1291,6 +1293,7 @@ fn summarize_thread_transcript_response_reports_entry_and_char_counts() {
                 content_state: crate::protocol::TranscriptContentState::Full,
             },
             TranscriptEntryView {
+                row_id: None,
                 order_seq: None,
                 withdrawn: false,
                 item_id: Some("item-2".to_string()),
@@ -1456,7 +1459,8 @@ mod transcript_delta_delivery {
             entry_seq: 2,
             order_seq: 0,
             server_time: 1_700,
-            item_id: "item-1".to_string(),
+            row_id: "item-1".to_string(),
+            transcript_generation: String::new(),
             turn_id: Some("turn-1".to_string()),
             delta: text.to_string(),
             kind: TranscriptDeltaKind::AgentText,

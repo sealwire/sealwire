@@ -712,12 +712,18 @@ impl RelayState {
     fn emit_local_transcript_delta(&self, delta: &PendingTranscriptDelta) {
         let _ = self.delta_tx.send(TranscriptDeltaEvent {
             thread_id: delta.thread_id.clone(),
+            // Deltas were the one payload that carried no generation, so a delta in
+            // flight across a restart could be applied to a transcript that had
+            // since been renumbered. Stamped by `queue_broker_message`.
+            transcript_generation: delta.transcript_generation.clone(),
             base_revision: delta.base_revision,
             revision: delta.revision,
             entry_seq: delta.entry_seq,
             order_seq: delta.order_seq,
             server_time: delta.server_time,
-            item_id: delta.item_id.clone(),
+            row_id: delta.row_id.clone(),
+            // Compatibility: the same value. See `TranscriptEntryView::item_id`.
+            item_id: delta.row_id.clone(),
             turn_id: delta.turn_id.clone(),
             delta: delta.delta.clone(),
             delta_kind: match delta.kind {
@@ -5172,7 +5178,15 @@ impl RelayState {
     /// when a broker IS configured the delta backlog is capped (dropped deltas are
     /// recoverable — the broker republishes an authoritative snapshot on reconnect).
     /// Pairing results have their own retention semantics and are always kept.
-    pub fn queue_broker_message(&mut self, message: BrokerPendingMessage) {
+    pub fn queue_broker_message(&mut self, mut message: BrokerPendingMessage) {
+        if let BrokerPendingMessage::TranscriptDelta(delta) = &mut message {
+            // Stamped HERE, not at the producers: this is the single funnel, so the
+            // local tee below and the broker payload downstream cannot disagree
+            // about which run the row id belongs to.
+            delta
+                .transcript_generation
+                .clone_from(&self.transcript_generation);
+        }
         if let BrokerPendingMessage::TranscriptDelta(delta) = &message {
             // Tee to the local SSE subscribers FIRST — before the broker-only guard
             // below. A relay with no broker still has a local surface, and that
@@ -5779,7 +5793,8 @@ mod tests {
             entry_seq: 0,
             order_seq: 0,
             server_time: 0,
-            item_id: "i1".to_string(),
+            row_id: "i1".to_string(),
+            transcript_generation: String::new(),
             turn_id: None,
             delta: "x".to_string(),
             kind: TranscriptDeltaKind::AgentText,

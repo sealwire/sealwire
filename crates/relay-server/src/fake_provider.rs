@@ -901,6 +901,8 @@ impl ProviderBridge for FakeProviderBridge {
 
         tokio::spawn(async move {
             let user_entry = TranscriptEntryView {
+                // A raw provider read: not a relay row until the relay numbers it.
+                row_id: None,
                 // Numbered when it becomes a runtime record; raw provider parses carry none.
                 order_seq: None,
                 withdrawn: false,
@@ -923,6 +925,8 @@ impl ProviderBridge for FakeProviderBridge {
                     .await;
             }
             let assistant_entry = TranscriptEntryView {
+                // A raw provider read: not a relay row until the relay numbers it.
+                row_id: None,
                 // Numbered when it becomes a runtime record; raw provider parses carry none.
                 order_seq: None,
                 withdrawn: false,
@@ -1280,6 +1284,8 @@ impl ProviderBridge for FakeProviderBridge {
                     // which is what makes "returns to its original position"
                     // true beyond the live snapshot.
                     ask_user_entries.push(TranscriptEntryView {
+                        // A raw provider read: not a relay row until the relay numbers it.
+                        row_id: None,
                         // Numbered when it becomes a runtime record; raw provider parses carry none.
                         order_seq: None,
                         withdrawn: false,
@@ -1293,6 +1299,8 @@ impl ProviderBridge for FakeProviderBridge {
                     });
                     if let Some(text) = ask_user_trailing_text.clone() {
                         ask_user_entries.push(TranscriptEntryView {
+                            // A raw provider read: not a relay row until the relay numbers it.
+                            row_id: None,
                             // Numbered when it becomes a runtime record; raw provider parses carry none.
                             order_seq: None,
                             withdrawn: false,
@@ -1422,6 +1430,8 @@ impl ProviderBridge for FakeProviderBridge {
                 )
                 .await;
                 tool_entries.push(TranscriptEntryView {
+                    // A raw provider read: not a relay row until the relay numbers it.
+                    row_id: None,
                     // Numbered when it becomes a runtime record; raw provider parses carry none.
                     order_seq: None,
                     withdrawn: false,
@@ -1460,6 +1470,8 @@ impl ProviderBridge for FakeProviderBridge {
                         relay.notify();
                     }
                     tool_entries.push(TranscriptEntryView {
+                        // A raw provider read: not a relay row until the relay numbers it.
+                        row_id: None,
                         // Numbered when it becomes a runtime record; raw provider parses carry none.
                         order_seq: None,
                         withdrawn: false,
@@ -1527,7 +1539,8 @@ impl ProviderBridge for FakeProviderBridge {
                         entry_seq: mutation.entry_seq,
                         order_seq: mutation.order_seq,
                         server_time: mutation.server_time,
-                        item_id: mutation.row_id.clone(),
+                        row_id: mutation.row_id.clone(),
+                        transcript_generation: String::new(),
                         turn_id: Some(turn_id_for_task.clone()),
                         delta: chunk.clone(),
                         kind: TranscriptDeltaKind::AgentText,
@@ -1618,6 +1631,8 @@ impl ProviderBridge for FakeProviderBridge {
                 FakeTerminalBehavior::Error => {
                     settle_fake_turn(&state, &thread_id, &turn_id_for_task, "idle").await;
                     let error_entry = TranscriptEntryView {
+                        // A raw provider read: not a relay row until the relay numbers it.
+                        row_id: None,
                         // Numbered when it becomes a runtime record; raw provider parses carry none.
                         order_seq: None,
                         withdrawn: false,
@@ -1650,6 +1665,8 @@ impl ProviderBridge for FakeProviderBridge {
                         relay.notify();
                     }
                     let partial_entry = (!streamed_reply.is_empty()).then(|| TranscriptEntryView {
+                        // A raw provider read: not a relay row until the relay numbers it.
+                        row_id: None,
                         text: Some(streamed_reply.clone()),
                         status: "failed".to_string(),
                         ..assistant_entry
@@ -1678,6 +1695,8 @@ impl ProviderBridge for FakeProviderBridge {
                     relay.notify();
                     drop(relay);
                     let partial_entry = (!streamed_reply.is_empty()).then(|| TranscriptEntryView {
+                        // A raw provider read: not a relay row until the relay numbers it.
+                        row_id: None,
                         text: Some(streamed_reply.clone()),
                         status: "failed".to_string(),
                         ..assistant_entry
@@ -1697,6 +1716,8 @@ impl ProviderBridge for FakeProviderBridge {
                 }
                 FakeTerminalBehavior::Missing => {
                     let partial_entry = (!streamed_reply.is_empty()).then(|| TranscriptEntryView {
+                        // A raw provider read: not a relay row until the relay numbers it.
+                        row_id: None,
                         text: Some(streamed_reply.clone()),
                         status: "streaming".to_string(),
                         ..assistant_entry

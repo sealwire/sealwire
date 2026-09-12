@@ -2816,6 +2816,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                 .prepend_provider_history(
                     crate::provider::ProviderTranscriptEntry::all_provider_named(vec![
                         crate::protocol::TranscriptEntryView {
+                            row_id: None,
                             order_seq: None,
                             withdrawn: false,
                             item_id: Some("old-write".to_string()),
@@ -2894,6 +2895,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     active_flags: Vec::new(),
                     transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(vec![
                         crate::protocol::TranscriptEntryView {
+                            row_id: None,
                             order_seq: None,
                             withdrawn: false,
                             item_id: Some("tail".to_string()),
@@ -7345,6 +7347,7 @@ tree; got {}",
             .await
             .insert(thread.id.clone(), thread.clone());
         let entry = |item_id: Option<&str>, text: &str| crate::protocol::TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: item_id.map(str::to_string),
@@ -7465,6 +7468,7 @@ tree; got {}",
             .await
             .insert(thread.id.clone(), thread.clone());
         let entry = |item_id: &str, text: &str| crate::protocol::TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(item_id.to_string()),
@@ -7578,6 +7582,7 @@ tree; got {}",
                         active_flags: Vec::new(),
                         transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(
                             vec![crate::protocol::TranscriptEntryView {
+                                row_id: None,
                                 order_seq: None,
                                 withdrawn: false,
                                 item_id: Some("tail".to_string()),
@@ -7659,6 +7664,7 @@ tree; got {}",
                         active_flags: Vec::new(),
                         transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(
                             vec![crate::protocol::TranscriptEntryView {
+                                row_id: None,
                                 order_seq: None,
                                 withdrawn: false,
                                 item_id: Some("stale-tail".to_string()),
@@ -8278,6 +8284,7 @@ tree; got {}",
             .await
             .insert(thread.id.clone(), thread.clone());
         let entry = |id: &str| crate::protocol::TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(id.to_string()),
@@ -9512,6 +9519,7 @@ tree; got {}",
             let thread = Self::thread_summary(thread_id, cwd, preview.clone());
             let initial_user_message =
                 initial_prompt.map(|prompt| crate::protocol::TranscriptEntryView {
+                    row_id: None,
                     order_seq: None,
                     withdrawn: false,
                     item_id: Some("user:provider-initial".to_string()),
@@ -9526,6 +9534,7 @@ tree; got {}",
             if let Some(entry) = initial_user_message.clone() {
                 transcript.push(entry);
                 transcript.push(crate::protocol::TranscriptEntryView {
+                    row_id: None,
                     order_seq: None,
                     withdrawn: false,
                     item_id: Some("assistant:provider-reply".to_string()),
@@ -10437,6 +10446,7 @@ tree; got {}",
             threads.insert(source.id.clone(), source.clone());
         }
         let entry = |item_id: &str, text: &str| crate::protocol::TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(item_id.to_string()),
@@ -10523,6 +10533,7 @@ tree; got {}",
             threads.insert(source.id.clone(), source.clone());
         }
         let view = |item_id: &str, text: &str| crate::protocol::TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(item_id.to_string()),
@@ -10677,6 +10688,7 @@ tree; got {}",
             threads.insert(source.id.clone(), source.clone());
         }
         let entry = |item_id: &str| crate::protocol::TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(item_id.to_string()),
@@ -10828,6 +10840,7 @@ tree; got {}",
             .insert(source.id.clone(), source.clone());
         let forked_thread_id = "codex-fork-2".to_string();
         let entry = |id: &str| crate::protocol::TranscriptEntryView {
+            row_id: None,
             order_seq: None,
             withdrawn: false,
             item_id: Some(id.to_string()),
@@ -14599,6 +14612,7 @@ mod review_tests {
                 let mut transcripts = transcripts.lock().await;
                 let entries = transcripts.entry(thread_id).or_default();
                 entries.push(TranscriptEntryView {
+                    row_id: None,
                     order_seq: None,
                     withdrawn: false,
                     item_id: Some(user_item),
@@ -14610,6 +14624,7 @@ mod review_tests {
                     content_state: crate::protocol::TranscriptContentState::Full,
                 });
                 entries.push(TranscriptEntryView {
+                    row_id: None,
                     order_seq: None,
                     withdrawn: false,
                     item_id: Some(assistant_item),
@@ -14844,6 +14859,7 @@ mod review_tests {
                 let mut transcripts = transcripts.lock().await;
                 let entries = transcripts.entry(thread_id).or_default();
                 entries.push(TranscriptEntryView {
+                    row_id: None,
                     order_seq: None,
                     withdrawn: false,
                     item_id: Some(user_item),
@@ -14856,6 +14872,7 @@ mod review_tests {
                 });
                 if emit_assistant && fail_completed_turn.is_none() {
                     entries.push(TranscriptEntryView {
+                        row_id: None,
                         order_seq: None,
                         withdrawn: false,
                         item_id: Some(assistant_item),
