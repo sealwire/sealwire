@@ -2041,14 +2041,6 @@ pub struct ReadThreadTranscriptInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadThreadEntriesInput {
-    pub thread_id: String,
-    pub item_ids: Vec<String>,
-    #[serde(default)]
-    pub device_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadThreadEntryDetailInput {
     pub thread_id: String,
     pub item_id: String,
@@ -2079,12 +2071,6 @@ pub struct ThreadTranscriptResponse {
     pub prev_cursor: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_state: Option<ThreadStateView>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThreadEntriesResponse {
-    pub thread_id: String,
-    pub entries: Vec<TranscriptEntryView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3704,36 +3690,6 @@ impl ThreadTranscriptResponse {
             revision,
             entry_at,
         )
-    }
-}
-
-impl ThreadEntriesResponse {
-    pub fn from_item_ids(
-        thread_id: String,
-        transcript: Vec<TranscriptEntryView>,
-        item_ids: Vec<String>,
-    ) -> Self {
-        let requested = item_ids
-            .into_iter()
-            .filter(|item_id| !item_id.is_empty())
-            .collect::<std::collections::HashSet<_>>();
-
-        let entries = if requested.is_empty() {
-            Vec::new()
-        } else {
-            transcript
-                .into_iter()
-                .filter(|entry| {
-                    entry
-                        .item_id
-                        .as_ref()
-                        .map(|item_id| requested.contains(item_id))
-                        .unwrap_or(false)
-                })
-                .collect()
-        };
-
-        Self { thread_id, entries }
     }
 }
 

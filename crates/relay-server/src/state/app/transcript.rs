@@ -277,60 +277,6 @@ impl AppState {
         })
     }
 
-    pub async fn read_thread_entries(
-        &self,
-        input: ReadThreadEntriesInput,
-    ) -> Result<ThreadEntriesResponse, String> {
-        {
-            let relay = self.relay.read().await;
-            let device_scope = input
-                .device_id
-                .as_deref()
-                .map(|id| relay.device_path_scope(id))
-                .unwrap_or_default();
-            if let Some(runtime) = relay.runtime_for_thread(&input.thread_id) {
-                ensure_path_within_device_scope(
-                    &runtime.current_cwd,
-                    &device_scope,
-                    &relay.allowed_roots,
-                )?;
-                let transcript = runtime.transcript_views();
-
-                return Ok(ThreadEntriesResponse::from_item_ids(
-                    input.thread_id,
-                    transcript,
-                    input.item_ids,
-                ));
-            }
-        }
-
-        let thread_data = self
-            .find_thread_provider(&input.thread_id)
-            .await?
-            .1
-            .read_thread(&input.thread_id)
-            .await?;
-        {
-            let relay = self.relay.read().await;
-            let device_scope = input
-                .device_id
-                .as_deref()
-                .map(|id| relay.device_path_scope(id))
-                .unwrap_or_default();
-            ensure_path_within_device_scope(
-                &thread_data.thread.cwd,
-                &device_scope,
-                &relay.allowed_roots,
-            )?;
-        }
-
-        Ok(ThreadEntriesResponse::from_item_ids(
-            input.thread_id,
-            thread_data.into_views(),
-            input.item_ids,
-        ))
-    }
-
     /// Stamps the generation on every detail response, whichever branch produced it —
     /// same rule as `read_thread_transcript`: a branch that forgot would silently look
     /// like "same run as whatever you have".

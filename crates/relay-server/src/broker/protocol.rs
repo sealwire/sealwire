@@ -4,8 +4,7 @@ use serde_json::Value;
 
 use crate::protocol::{
     ApprovalReceipt, AskUserQuestionDetailResponse, ModelOptionView, PairedDeviceView,
-    SessionSnapshot, ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadTranscriptResponse,
-    ThreadsResponse,
+    SessionSnapshot, ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsResponse,
 };
 
 use super::{
@@ -123,7 +122,6 @@ pub(super) enum OutboundBrokerPayload {
         target_peer_id: String,
         action: RemoteActionKind,
         ok: bool,
-        thread_entries: Option<ThreadEntriesResponse>,
         thread_entry_detail: Option<ThreadEntryDetailResponse>,
         thread_transcript: Option<ThreadTranscriptResponse>,
         workspace_diff: Option<crate::protocol::WorkspaceDiffResponse>,

@@ -1,8 +1,8 @@
 use super::*;
 use crate::protocol::{
     AskUserOptionView, AskUserQuestionDetailResponse, AskUserQuestionRequestView,
-    AskUserQuestionView, SecurityMode, ThreadEntriesResponse, ThreadSummaryView,
-    ThreadTranscriptResponse, ThreadsResponse, TranscriptEntryKind, TranscriptEntryView,
+    AskUserQuestionView, SecurityMode, ThreadSummaryView, ThreadTranscriptResponse,
+    ThreadsResponse, TranscriptEntryKind, TranscriptEntryView,
 };
 
 fn make_snapshot() -> SessionSnapshot {
@@ -156,9 +156,6 @@ fn cached_remote_action_result_omits_snapshot_for_non_session_lifecycle_actions(
 fn high_frequency_remote_actions_do_not_emit_info_logs() {
     assert!(!remote_action_emits_info_log(RemoteActionKind::Heartbeat));
     assert!(!remote_action_emits_info_log(RemoteActionKind::ListThreads));
-    assert!(!remote_action_emits_info_log(
-        RemoteActionKind::FetchThreadEntries
-    ));
     assert!(!remote_action_emits_info_log(
         RemoteActionKind::FetchThreadEntryDetail
     ));
@@ -480,7 +477,6 @@ fn plain_remote_action_result_payload_splits_control_results_from_session_result
         providers: None,
         models: None,
         threads: None,
-        thread_entries: None,
         thread_entry_detail: None,
         thread_transcript: None,
         workspace_diff: None,
@@ -519,7 +515,6 @@ fn plain_remote_action_result_payload_splits_control_results_from_session_result
         providers: None,
         models: None,
         threads: None,
-        thread_entries: None,
         thread_entry_detail: None,
         thread_transcript: None,
         workspace_diff: None,
@@ -605,22 +600,6 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
         prev_cursor: Some(1),
         thread_state: None,
     };
-    let thread_entries = ThreadEntriesResponse {
-        thread_id: "thread-1".to_string(),
-        entries: vec![TranscriptEntryView {
-            row_id: None,
-            order_seq: None,
-            withdrawn: false,
-            item_id: Some("item-small".to_string()),
-            kind: TranscriptEntryKind::UserText,
-            text: Some("short".to_string()),
-            status: "completed".to_string(),
-            turn_id: Some("turn-small".to_string()),
-            tool: None,
-            content_state: crate::protocol::TranscriptContentState::Full,
-        }],
-    };
-
     let breakdown = measure_remote_action_result_sizes(
         RemoteActionKind::FetchThreadTranscript,
         true,
@@ -629,7 +608,6 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
         None,
         None,
         None,
-        Some(&thread_entries),
         None,
         Some(&thread_transcript),
         // workspace_diff
@@ -657,7 +635,6 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
         None,
     );
 
-    assert!(breakdown.thread_transcript_bytes > breakdown.thread_entries_bytes);
     assert_eq!(breakdown.snapshot_bytes, 0);
     assert!(breakdown.thread_transcript_bytes > breakdown.snapshot_bytes);
     assert!(breakdown.plaintext_bytes >= breakdown.thread_transcript_bytes);
@@ -674,7 +651,6 @@ fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
         providers: None,
         models: None,
         threads: None,
-        thread_entries: None,
         thread_entry_detail: None,
         thread_transcript: Some(ThreadTranscriptResponse {
             transcript_generation: String::new(),
@@ -728,7 +704,6 @@ fn make_large_ask_user_detail_plaintext() -> RemoteActionResultPlaintext {
         providers: None,
         models: None,
         threads: None,
-        thread_entries: None,
         thread_entry_detail: None,
         thread_transcript: None,
         workspace_diff: None,
@@ -1102,7 +1077,6 @@ fn plain_fetch_reviews_result_carries_the_reviews_payload_to_the_device() {
         providers: None,
         models: None,
         threads: None,
-        thread_entries: None,
         thread_entry_detail: None,
         thread_transcript: None,
         workspace_diff: None,
@@ -1151,7 +1125,6 @@ fn plain_dedicated_workflows_and_devices_payloads_reach_the_device() {
         providers: None,
         models: None,
         threads: None,
-        thread_entries: None,
         thread_entry_detail: None,
         thread_transcript: None,
         workspace_diff: None,
@@ -1213,7 +1186,6 @@ fn plain_fetch_projects_result_carries_the_projects_payload_to_the_device() {
         providers: None,
         models: None,
         threads: None,
-        thread_entries: None,
         thread_entry_detail: None,
         thread_transcript: None,
         workspace_diff: None,
@@ -1266,7 +1238,6 @@ fn plain_fetch_workspace_git_context_result_reaches_the_device() {
         providers: None,
         models: None,
         threads: None,
-        thread_entries: None,
         thread_entry_detail: None,
         thread_transcript: None,
         workspace_diff: None,

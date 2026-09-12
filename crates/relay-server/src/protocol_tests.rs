@@ -4,12 +4,11 @@ use crate::protocol::{
     AskUserOptionView, AskUserQuestionRequestView, AskUserQuestionView, DeleteThreadInput,
     DeviceLifecycleState, DeviceRecordView, FileChangeDiffView, HealthResponse, LogEntryView,
     ReviewActionInput, ReviewActivityView, ReviewJobView, ReviewerThreadView, SecurityMode,
-    SessionSnapshot, SessionSnapshotCompactProfile, ThreadEntriesResponse,
-    ThreadEntryDetailResponse, ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse,
-    ThreadsResponseCompactProfile, ToolCallView, TranscriptContentState, TranscriptEntryKind,
-    TranscriptEntryView, WorkflowActivityView, WorkflowRunView, WorkflowVerdictView,
-    EMERGENCY_TRANSCRIPT_SHELL_CHARS, MAX_REVIEW_ACTIVITY_REMOTE_JOBS,
-    MAX_WORKFLOW_ACTIVITY_REMOTE_LOCKED_THREAD_IDS,
+    SessionSnapshot, SessionSnapshotCompactProfile, ThreadEntryDetailResponse, ThreadSummaryView,
+    ThreadTranscriptResponse, ThreadsResponse, ThreadsResponseCompactProfile, ToolCallView,
+    TranscriptContentState, TranscriptEntryKind, TranscriptEntryView, WorkflowActivityView,
+    WorkflowRunView, WorkflowVerdictView, EMERGENCY_TRANSCRIPT_SHELL_CHARS,
+    MAX_REVIEW_ACTIVITY_REMOTE_JOBS, MAX_WORKFLOW_ACTIVITY_REMOTE_LOCKED_THREAD_IDS,
 };
 
 const MAX_BROKER_LOGS: usize = 8;
@@ -3025,50 +3024,6 @@ fn thread_transcript_history_externalizes_large_file_change_diffs() {
     assert!(tool.diff.is_none());
     assert!(tool.file_changes[0].diff.is_empty());
     assert!(serde_json::to_vec(&page).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
-}
-
-#[test]
-fn thread_entries_response_returns_complete_entries_for_requested_item_ids() {
-    let transcript = vec![
-        TranscriptEntryView {
-            row_id: None,
-            order_seq: None,
-            withdrawn: false,
-            item_id: Some("item-1".to_string()),
-            kind: TranscriptEntryKind::UserText,
-            text: Some("hello".repeat(2_000)),
-            status: "completed".to_string(),
-            turn_id: Some("turn-1".to_string()),
-            tool: None,
-            content_state: crate::protocol::TranscriptContentState::Full,
-        },
-        TranscriptEntryView {
-            row_id: None,
-            order_seq: None,
-            withdrawn: false,
-            item_id: Some("item-2".to_string()),
-            kind: TranscriptEntryKind::AgentText,
-            text: Some("world".repeat(2_000)),
-            status: "completed".to_string(),
-            turn_id: Some("turn-2".to_string()),
-            tool: None,
-            content_state: crate::protocol::TranscriptContentState::Full,
-        },
-    ];
-
-    let response = ThreadEntriesResponse::from_item_ids(
-        "thread-1".to_string(),
-        transcript.clone(),
-        vec!["item-2".to_string()],
-    );
-
-    assert_eq!(response.thread_id, "thread-1");
-    assert_eq!(response.entries.len(), 1);
-    assert_eq!(response.entries[0].item_id.as_deref(), Some("item-2"));
-    assert_eq!(
-        response.entries[0].text.as_deref(),
-        transcript[1].text.as_deref()
-    );
 }
 
 #[test]
