@@ -321,6 +321,10 @@ export function RelayDirectoryList({ onSelectRelay, viewModel }) {
           onClick: () => onSelectRelay(item.id),
           type: "button",
         },
+        // Same 3-column grid as session rows (`14px | 1fr | auto`). An empty
+        // lead slot is load-bearing: without it the title occupies the 14px
+        // track and ellipsises to one character while meta sits in the 1fr.
+        h("span", { className: "conversation-lead", "aria-hidden": "true" }),
         h("span", { className: "conversation-title" }, item.title),
         h("span", { className: "conversation-preview" }, relaySubtitle(item.relay)),
         h(
