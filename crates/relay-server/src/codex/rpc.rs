@@ -525,7 +525,7 @@ async fn handle_notification_for_provider(
                         relay.bg_upsert_transcript_item(
                             &bg_thread_id,
                             // Relay-synthesized from the turn's error, not a Codex item.
-                            crate::state::IdSpace::Row,
+                            crate::state::IdSpace::Relay,
                             codex_turn_error_item_id(completed_turn.as_deref()),
                             crate::protocol::TranscriptEntryKind::Error,
                             Some(reason),
@@ -540,7 +540,7 @@ async fn handle_notification_for_provider(
                     relay.bg_set_transcript_item_status(
                         &bg_thread_id,
                         // Relay-synthesized: the provider never named it.
-                        crate::state::IdSpace::Row,
+                        crate::state::IdSpace::Relay,
                         &format!("turn-diff:{turn_id}"),
                         "completed",
                         now,
@@ -637,7 +637,7 @@ async fn handle_notification_for_provider(
                 }
                 if let Some(turn_id) = completed_turn.as_deref() {
                     changed |= relay.set_transcript_item_status(
-                        crate::state::IdSpace::Row,
+                        crate::state::IdSpace::Relay,
                         &format!("turn-diff:{turn_id}"),
                         "completed",
                     );

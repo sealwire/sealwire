@@ -93,6 +93,30 @@ impl RelayState {
         self.touch_bg_progress_at(thread_id, now);
     }
 
+    /// Background twin of `append_relay_named_agent_delta_for_thread`.
+    pub fn bg_append_relay_named_agent_delta(
+        &mut self,
+        thread_id: &str,
+        item_id: &str,
+        delta: &str,
+        turn_id: &str,
+        now: u64,
+    ) {
+        if self.drop_bg_event_for_deleted_thread(thread_id) {
+            return;
+        }
+        let mutation =
+            self.append_relay_named_agent_delta_for_thread(thread_id, item_id, delta, turn_id);
+        self.queue_background_transcript_delta(
+            thread_id,
+            delta,
+            Some(turn_id),
+            TranscriptDeltaKind::AgentText,
+            mutation,
+        );
+        self.touch_bg_progress_at(thread_id, now);
+    }
+
     pub fn bg_start_agent_message(
         &mut self,
         thread_id: &str,

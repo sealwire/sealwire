@@ -1377,24 +1377,58 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
             if matches!(route, ClaudeThreadRoute::Drop) {
                 return;
             }
-            if let (Some(item_id), Some(turn_id), Some(text)) = (
-                string_at(&payload, &["item_id"]).or_else(|| Some("assistant:latest".to_string())),
+            // Turn id first: the fallback name below is derived from it.
+            if let (Some(turn_id), Some(text)) = (
                 string_at(&payload, &["turn_id"]).or_else(|| relay.active_turn_id.clone()),
                 string_at(&payload, &["text"]),
             ) {
+                // `assistant_delta` carries no item id by contract, so the relay
+                // derives one. Keyed on the TURN, not the thread: the old
+                // `assistant:latest` was one name for the whole session, so every
+                // id-less assistant message in it merged into a single row —
+                // different turns silently overwriting each other's text.
+                //
+                // Derived names are relay-named. The SDK never issued this string,
+                // so it must not be offered back as a provider id.
+                let (item_id, provider_named) = match string_at(&payload, &["item_id"]) {
+                    Some(item_id) => (item_id, true),
+                    None => (format!("assistant:turn:{turn_id}"), false),
+                };
                 let status =
                     string_at(&payload, &["status"]).unwrap_or_else(|| "completed".to_string());
                 if let ClaudeThreadRoute::Background(thread_id) = route.clone() {
                     if status == "completed" {
-                        relay.bg_complete_agent_message(
+                        if provider_named {
+                            relay.bg_complete_agent_message(
+                                &thread_id,
+                                item_id,
+                                text.clone(),
+                                turn_id,
+                                crate::state::unix_now(),
+                            );
+                        } else {
+                            relay.bg_upsert_transcript_item(
+                                &thread_id,
+                                crate::state::IdSpace::Relay,
+                                item_id,
+                                TranscriptEntryKind::AgentText,
+                                Some(text.clone()),
+                                "completed".to_string(),
+                                Some(turn_id),
+                                None,
+                                crate::state::unix_now(),
+                            );
+                        }
+                    } else if provider_named {
+                        relay.bg_append_agent_delta(
                             &thread_id,
-                            item_id,
-                            text.clone(),
-                            turn_id,
+                            &item_id,
+                            &text,
+                            &turn_id,
                             crate::state::unix_now(),
                         );
                     } else {
-                        relay.bg_append_agent_delta(
+                        relay.bg_append_relay_named_agent_delta(
                             &thread_id,
                             &item_id,
                             &text,
@@ -1404,15 +1438,36 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     }
                 } else {
                     if status == "completed" {
-                        relay.complete_agent_message(item_id, text.clone(), turn_id);
+                        if provider_named {
+                            relay.complete_agent_message(item_id, text.clone(), turn_id);
+                        } else {
+                            relay.upsert_relay_named_item(
+                                item_id,
+                                TranscriptEntryKind::AgentText,
+                                Some(text.clone()),
+                                "completed".to_string(),
+                                Some(turn_id),
+                                None,
+                            );
+                        }
                         relay.touch_progress(Some("thinking"), None);
                     } else {
                         relay.touch_progress(Some("streaming"), None);
-                        let mutation = relay.append_agent_delta(&item_id, &text, &turn_id);
-                        let thread_id = relay.active_thread_id.clone().unwrap_or_default();
+                        let thread_id_for_delta =
+                            relay.active_thread_id.clone().unwrap_or_default();
+                        let mutation = if provider_named {
+                            relay.append_agent_delta(&item_id, &text, &turn_id)
+                        } else {
+                            relay.append_relay_named_agent_delta_for_thread(
+                                &thread_id_for_delta,
+                                &item_id,
+                                &text,
+                                &turn_id,
+                            )
+                        };
                         relay.queue_broker_message(BrokerPendingMessage::TranscriptDelta(
                             PendingTranscriptDelta {
-                                thread_id,
+                                thread_id: thread_id_for_delta,
                                 base_revision: mutation.base_revision,
                                 revision: mutation.revision,
                                 entry_seq: mutation.entry_seq,
@@ -1772,7 +1827,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                         if !ensure_claude_turn_diff_entry(&mut relay, turn_id, "completed") {
                             relay.set_transcript_item_status(
                                 // Relay-synthesized: the provider never named it.
-                                crate::state::IdSpace::Row,
+                                crate::state::IdSpace::Relay,
                                 &format!("turn-diff:{turn_id}"),
                                 "completed",
                             );
@@ -1852,7 +1907,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                         relay.bg_upsert_transcript_item(
                             &thread_id,
                             // Relay-synthesized from the terminal, not an SDK item.
-                            crate::state::IdSpace::Row,
+                            crate::state::IdSpace::Relay,
                             claude_turn_error_item_id(turn_id.as_deref()),
                             TranscriptEntryKind::Error,
                             Some(reason),
@@ -3966,6 +4021,69 @@ mod tests {
             !paths.iter().any(|path| path.contains("bad.rs")),
             "the failed edit must not appear as a file change; got {paths:?}"
         );
+    }
+
+    /// `assistant_delta` carries no item id by contract, so the relay derives one.
+    ///
+    /// The old fallback was `assistant:latest` — ONE name for the whole session, so
+    /// every id-less assistant message in the thread merged into a single row and
+    /// each new turn overwrote the last one's text. The derived name must be
+    /// per-turn: same-turn deltas coalesce, different turns do not.
+    #[tokio::test]
+    async fn id_less_assistant_deltas_coalesce_per_turn_and_never_across_turns() {
+        let state = test_relay_with_active_b().await;
+
+        let delta = |turn: &str, text: &str| {
+            json!({
+                "type": "assistant_delta",
+                "provider_session_id": "thread-b",
+                "turn_id": turn,
+                "text": text,
+                "status": "streaming"
+            })
+        };
+        handle_worker_event(delta("turn-1", "first "), &state).await;
+        handle_worker_event(delta("turn-1", "turn"), &state).await;
+        handle_worker_event(delta("turn-2", "second turn"), &state).await;
+
+        let relay = state.read().await;
+        let runtime = relay.runtime_for_thread("thread-b").expect("runtime");
+        let rows = runtime
+            .transcript
+            .iter()
+            .filter(|row| row.kind == TranscriptEntryKind::AgentText)
+            .map(|row| (row.text.clone().unwrap_or_default(), row.turn_id.clone()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rows.len(),
+            2,
+            "one row per turn, not one row for the session: {rows:?}"
+        );
+        assert_eq!(
+            rows[0].0, "first turn",
+            "same-turn deltas must coalesce into one row"
+        );
+        assert_eq!(rows[1].0, "second turn", "a new turn is a new row");
+        assert_eq!(rows[0].1.as_deref(), Some("turn-1"));
+        assert_eq!(rows[1].1.as_deref(), Some("turn-2"));
+
+        // A derived name is not a provider name: the SDK never issued it, so it must
+        // not be offered back as one.
+        for row in runtime
+            .transcript
+            .iter()
+            .filter(|row| row.kind == TranscriptEntryKind::AgentText)
+        {
+            assert_eq!(
+                row.provider_item_id, None,
+                "a relay-derived assistant id must never claim provider addressability"
+            );
+            assert!(
+                row.relay_item_id.is_some(),
+                "and it must be recorded as the relay's own source name"
+            );
+        }
     }
 
     #[tokio::test]

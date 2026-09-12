@@ -311,8 +311,10 @@ impl ThreadRuntime {
                     .item_id
                     .unwrap_or_else(|| format!("history-{index}")),
                 // Provenance travels ON the entry, so a synthesized row and a
-                // provider row that happen to share a spelling stay distinguishable.
+                // provider row that happen to share a spelling stay distinguishable —
+                // and the relay's own source name survives `row_id` being minted.
                 provider_item_id: entry.provider_item_id,
+                relay_item_id: entry.relay_item_id,
                 kind: entry.view.kind,
                 text: entry.view.text,
                 status: entry.view.status,
@@ -553,6 +555,7 @@ impl ThreadRuntime {
                     .item_id
                     .unwrap_or_else(|| format!("provider-history-{fallback_page}-{index}")),
                 provider_item_id: entry.provider_item_id,
+                relay_item_id: entry.relay_item_id,
                 kind: entry.view.kind,
                 text: entry.view.text,
                 status: entry.view.status,
@@ -844,7 +847,9 @@ impl ThreadRuntime {
                 record.order_seq = prev_key + spacing * (offset as i64 + 1);
             }
         }
-        self.transcript.insert_before(index, records);
+        // The minted ids are the caller's business only when it must report them;
+        // this path renumbers in place and its caller re-reads the store.
+        let _ = self.transcript.insert_before(index, records);
     }
 
     /// Last-resort dedupe for a user row the resolver could not place.
@@ -1122,6 +1127,7 @@ mod tests {
         TranscriptRecord {
             row_id: item_id.to_string(),
             provider_item_id: None,
+            relay_item_id: None,
             // History-shaped: a re-read carries no live sequence number.
             order_seq: 0,
             withdrawn: false,
@@ -1304,6 +1310,7 @@ mod tests {
         rt.transcript.push(TranscriptRecord {
             row_id: "tail".to_string(),
             provider_item_id: None,
+            relay_item_id: None,
             kind: crate::protocol::TranscriptEntryKind::AgentText,
             text: Some("tail".to_string()),
             status: "completed".to_string(),
@@ -1381,6 +1388,7 @@ mod tests {
         rt.transcript.push(TranscriptRecord {
             row_id: "tail-1".to_string(),
             provider_item_id: None,
+            relay_item_id: None,
             kind: crate::protocol::TranscriptEntryKind::AgentText,
             text: Some("tail".to_string()),
             status: "completed".to_string(),
@@ -1441,6 +1449,7 @@ mod tests {
         rt.transcript.push(TranscriptRecord {
             row_id: "row-1".to_string(),
             provider_item_id: None,
+            relay_item_id: None,
             kind: crate::protocol::TranscriptEntryKind::AgentText,
             text: Some("short".to_string()),
             status: "running".to_string(),
@@ -1455,6 +1464,7 @@ mod tests {
             TranscriptRecord {
                 row_id: "row-1".to_string(),
                 provider_item_id: None,
+                relay_item_id: None,
                 kind: crate::protocol::TranscriptEntryKind::AgentText,
                 text: Some("short but different".to_string()),
                 status: "completed".to_string(),
@@ -1468,6 +1478,7 @@ mod tests {
             TranscriptRecord {
                 row_id: "row-2".to_string(),
                 provider_item_id: None,
+                relay_item_id: None,
                 kind: crate::protocol::TranscriptEntryKind::AgentText,
                 text: Some("new".to_string()),
                 status: "completed".to_string(),
@@ -1495,6 +1506,7 @@ mod tests {
         let record = |id: &str| TranscriptRecord {
             row_id: id.to_string(),
             provider_item_id: None,
+            relay_item_id: None,
             kind: crate::protocol::TranscriptEntryKind::AgentText,
             text: Some(id.to_string()),
             status: "completed".to_string(),
@@ -1557,6 +1569,7 @@ mod tests {
         let record = |id: &str| TranscriptRecord {
             row_id: id.to_string(),
             provider_item_id: None,
+            relay_item_id: None,
             kind: crate::protocol::TranscriptEntryKind::AgentText,
             text: Some(id.to_string()),
             status: "completed".to_string(),
@@ -1638,6 +1651,7 @@ mod tests {
         let record = |id: &str| TranscriptRecord {
             row_id: id.to_string(),
             provider_item_id: None,
+            relay_item_id: None,
             kind: crate::protocol::TranscriptEntryKind::AgentText,
             text: Some(id.to_string()),
             status: "completed".to_string(),
@@ -1842,6 +1856,7 @@ mod tests {
         TranscriptRecord {
             row_id: row_id.to_string(),
             provider_item_id: None,
+            relay_item_id: None,
             kind: crate::protocol::TranscriptEntryKind::AgentText,
             text: Some(text.to_string()),
             status: "completed".to_string(),
@@ -1929,6 +1944,110 @@ mod tests {
             views[0].text.as_deref(),
             Some("the provider's row"),
             "and it must be the page's row, not the relay row that shared its name"
+        );
+    }
+
+    /// The sequence the page-only test stops short of: a collision resolved by a
+    /// PAGE, and then a later full read that contains both colliding entries.
+    ///
+    /// The synthetic row's `row_id` was minted away from its source name by step 2,
+    /// so nothing but a typed source identity can recognise it in step 3. Resolving
+    /// a provider-less record by its freshly materialized `row_id` merged the
+    /// synthetic copy into the PROVIDER's row — the synthetic row silently stopped
+    /// being refreshed and the provider row took its content.
+    #[test]
+    fn a_page_collision_still_resolves_correctly_on_the_next_full_read() {
+        let mut rt = runtime("t1", "idle");
+
+        // 1. A published row the relay synthesized, keyed `x`.
+        let issued = rt.alloc_tail_order_seq();
+        let mut synthetic = plain_record("x", "the relay's summary", issued);
+        synthetic.relay_item_id = Some("x".to_string());
+        rt.transcript.push(synthetic);
+
+        // 2. An older page whose provider also names an item `x`.
+        let _ = rt.prepend_provider_history(
+            vec![crate::provider::ProviderTranscriptEntry::provider_named(
+                plain_view("x", "the provider's row"),
+            )],
+            Some(10),
+            None,
+        );
+        let provider_row_id = rt
+            .transcript
+            .get_by_provider("x")
+            .expect("the provider namespace knows `x`")
+            .row_id
+            .clone();
+        assert_ne!(provider_row_id, "x", "the page row had to mint");
+
+        // 3. A later full read carrying BOTH, provider first so the fresh runtime
+        //    materializes the synthetic one under a minted key of its own.
+        let fresh = ThreadRuntime::from_sync_data(
+            ThreadSyncData {
+                thread: summary("t1", "idle"),
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: vec![
+                    crate::provider::ProviderTranscriptEntry::provider_named(plain_view(
+                        "x",
+                        "the provider's row, refreshed",
+                    )),
+                    crate::provider::ProviderTranscriptEntry::relay_named(plain_view(
+                        "x",
+                        "the relay's summary, refreshed",
+                    )),
+                ],
+            },
+            "untrusted",
+            "ro",
+            "high",
+            "model",
+            0,
+            0,
+        );
+        let _ = rt.merge_fresh_history(fresh);
+
+        // 4. Both published rows intact, each refreshed from its own copy.
+        assert_eq!(
+            rt.transcript.len(),
+            2,
+            "no new rows, got {:?}",
+            rt.transcript
+                .iter()
+                .map(|r| (r.row_id.clone(), r.text.clone()))
+                .collect::<Vec<_>>()
+        );
+        let synthetic = rt.transcript.get_row("x").expect("the synthetic row");
+        assert_eq!(
+            synthetic.text.as_deref(),
+            Some("the relay's summary, refreshed"),
+            "the synthetic row must be refreshed from the synthetic copy"
+        );
+        assert_eq!(
+            synthetic.relay_item_id.as_deref(),
+            Some("x"),
+            "and keep its source name"
+        );
+        assert_eq!(synthetic.provider_item_id, None);
+
+        let provider_row = rt
+            .transcript
+            .get_by_provider("x")
+            .expect("the provider namespace still knows `x`");
+        assert_eq!(
+            provider_row.row_id, provider_row_id,
+            "the provider row keeps the id it was published under"
+        );
+        assert_eq!(
+            provider_row.text.as_deref(),
+            Some("the provider's row, refreshed"),
+            "and is refreshed from the provider copy"
+        );
+        assert_eq!(
+            rt.transcript.resolve_relay("x"),
+            Some("x"),
+            "the relay alias still names the synthetic row"
         );
     }
 

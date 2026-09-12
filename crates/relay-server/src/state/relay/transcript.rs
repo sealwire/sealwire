@@ -77,6 +77,15 @@ pub(crate) struct TranscriptRecord {
     /// rebuilt store can recover the mapping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) provider_item_id: Option<String>,
+    /// The RELAY's own source name for a row it synthesized — `turn-diff:<turn>`,
+    /// `turn-error:<turn>`. Deterministic, so the same logical row is recognisable
+    /// from one read to the next.
+    ///
+    /// Held separately from `row_id` because `row_id` may be minted away on a
+    /// collision, and then it is no longer the name the next read will use. It is
+    /// NOT provider-addressable: nothing here may be sent to a provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) relay_item_id: Option<String>,
     pub(crate) kind: TranscriptEntryKind,
     pub(crate) text: Option<String>,
     pub(crate) status: String,
@@ -169,7 +178,7 @@ impl RelayState {
         )
     }
 
-    /// Active-thread convenience for a row the RELAY named.
+    /// Active-thread convenience for a row the RELAY synthesized.
     pub(crate) fn upsert_relay_named_item(
         &mut self,
         item_id: String,
@@ -187,10 +196,37 @@ impl RelayState {
         )
     }
 
-    /// The RELAY named this row and the provider has not acknowledged it — a send's
-    /// reservation. Recording the relay's own key as a provider id would later hand
-    /// the provider a string it has never seen.
+    /// The RELAY synthesized this row and will derive the same name again from a
+    /// later read — `turn-diff:<turn>`, `turn-error:<turn>`. That name is recorded
+    /// as the row's SOURCE identity, which is how the next read recognises it even
+    /// if `row_id` had to be minted away on a collision. It is never sent to a
+    /// provider.
     pub(crate) fn upsert_relay_named_item_for_thread(
+        &mut self,
+        thread_id: &str,
+        item_id: String,
+        kind: TranscriptEntryKind,
+        text: Option<String>,
+        status: String,
+        turn_id: Option<String>,
+        tool: Option<ToolCallView>,
+    ) -> TranscriptMutationMeta {
+        self.upsert_item_for_thread(
+            thread_id,
+            item_id,
+            IdSpace::Relay,
+            kind,
+            text,
+            status,
+            turn_id,
+            tool,
+        )
+    }
+
+    /// A row the relay owns outright and that no read will ever re-derive — a send
+    /// reservation, a per-attempt workspace error. Unique by construction, so it
+    /// carries no source name in either alias space.
+    pub(crate) fn upsert_relay_owned_row_for_thread(
         &mut self,
         thread_id: &str,
         item_id: String,
@@ -247,9 +283,11 @@ impl RelayState {
                 let entry_seq = runtime.transcript.len() as u64 + 1;
                 let order_seq = runtime.alloc_tail_order_seq();
                 let provider_item_id = space.provider_name_of(&item_id);
+                let relay_item_id = space.relay_name_of(&item_id);
                 let row_id = runtime.transcript.push(TranscriptRecord {
                     row_id: item_id,
                     provider_item_id,
+                    relay_item_id,
                     kind,
                     text,
                     status,
@@ -316,6 +354,7 @@ impl RelayState {
         let row_id = self.transcript.push(TranscriptRecord {
             row_id: item_id,
             provider_item_id,
+            relay_item_id: None,
             kind,
             text,
             status,
@@ -406,12 +445,36 @@ impl RelayState {
         delta: &str,
         turn_id: &str,
     ) -> TranscriptMutationMeta {
+        self.append_agent_delta_in(thread_id, IdSpace::Provider, item_id, delta, turn_id)
+    }
+
+    /// Append agent text to a row the RELAY named.
+    ///
+    /// The Claude worker's `assistant_delta` carries no item id, so the relay has to
+    /// derive one. That derived name is not provider-addressable — offering it as a
+    /// fork point or a detail id would address the SDK with a string it never
+    /// issued — so the row records it as a relay source name instead.
+    pub fn append_relay_named_agent_delta_for_thread(
+        &mut self,
+        thread_id: &str,
+        item_id: &str,
+        delta: &str,
+        turn_id: &str,
+    ) -> TranscriptMutationMeta {
+        self.append_agent_delta_in(thread_id, IdSpace::Relay, item_id, delta, turn_id)
+    }
+
+    fn append_agent_delta_in(
+        &mut self,
+        thread_id: &str,
+        space: IdSpace,
+        item_id: &str,
+        delta: &str,
+        turn_id: &str,
+    ) -> TranscriptMutationMeta {
         let (row_id, entry_seq, order_seq, text_offset) = {
             let runtime = self.ensure_runtime_for_thread(thread_id);
-            if let Some(index) = runtime
-                .transcript
-                .resolve_index_in(IdSpace::Provider, item_id)
-            {
+            if let Some(index) = runtime.transcript.resolve_index_in(space, item_id) {
                 let row_id = runtime.transcript[index].row_id.clone();
                 let order_seq = runtime.transcript[index].order_seq;
                 let text_offset = runtime
@@ -433,7 +496,8 @@ impl RelayState {
                 let order_seq = runtime.alloc_tail_order_seq();
                 let row_id = runtime.transcript.push(TranscriptRecord {
                     row_id: item_id.to_string(),
-                    provider_item_id: Some(item_id.to_string()),
+                    provider_item_id: space.provider_name_of(item_id),
+                    relay_item_id: space.relay_name_of(item_id),
                     kind: TranscriptEntryKind::AgentText,
                     text: Some(delta.to_string()),
                     status: "streaming".to_string(),
@@ -550,7 +614,7 @@ impl RelayState {
                 runtime.codex_user_reservation_seq
             )
         };
-        self.upsert_relay_named_item_for_thread(
+        self.upsert_relay_owned_row_for_thread(
             thread_id,
             item_id.clone(),
             TranscriptEntryKind::UserText,
@@ -1035,6 +1099,7 @@ impl RelayState {
                 let row_id = runtime.transcript.push(TranscriptRecord {
                     row_id: item_id.to_string(),
                     provider_item_id: Some(item_id.to_string()),
+                    relay_item_id: None,
                     kind: TranscriptEntryKind::Command,
                     text: Some(delta.to_string()),
                     status: "running".to_string(),

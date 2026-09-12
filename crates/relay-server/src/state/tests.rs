@@ -1988,6 +1988,7 @@ fn persisted_state_round_trip_drops_ephemeral_fields() {
     relay.transcript.push(TranscriptRecord {
         row_id: "history-0".to_string(),
         provider_item_id: None,
+        relay_item_id: None,
         kind: TranscriptEntryKind::AgentText,
         text: Some("hello".to_string()),
         status: "completed".to_string(),
@@ -6727,6 +6728,7 @@ fn promoting_a_background_thread_does_not_rewind_the_real_threads_revision() {
         TranscriptRecord {
             row_id: "a".to_string(),
             provider_item_id: None,
+            relay_item_id: None,
             kind: TranscriptEntryKind::AgentText,
             text: Some("a".to_string()),
             status: "completed".to_string(),
@@ -6739,6 +6741,7 @@ fn promoting_a_background_thread_does_not_rewind_the_real_threads_revision() {
         TranscriptRecord {
             row_id: "b".to_string(),
             provider_item_id: None,
+            relay_item_id: None,
             kind: TranscriptEntryKind::AgentText,
             text: Some("b".to_string()),
             status: "completed".to_string(),
@@ -7254,6 +7257,7 @@ mod row_identity_tests {
                 .push(crate::state::relay::TranscriptRecord {
                     row_id: "relay-minted-row".to_string(),
                     provider_item_id: None,
+                    relay_item_id: None,
                     kind: TranscriptEntryKind::AgentText,
                     text: Some(String::new()),
                     status: "streaming".to_string(),
@@ -7300,6 +7304,7 @@ mod row_identity_tests {
                 .push(crate::state::relay::TranscriptRecord {
                     row_id: "row-1".to_string(),
                     provider_item_id: None,
+                    relay_item_id: None,
                     kind: TranscriptEntryKind::ToolCall,
                     text: Some("tool".to_string()),
                     status: "running".to_string(),
@@ -7608,6 +7613,7 @@ mod row_identity_tests {
             let _ = runtime.merge_transcript_records(vec![crate::state::relay::TranscriptRecord {
                 row_id: "codex-item-1".to_string(),
                 provider_item_id: Some("codex-item-1".to_string()),
+                relay_item_id: None,
                 kind: TranscriptEntryKind::UserText,
                 text: Some("doomed send".to_string()),
                 status: "completed".to_string(),
