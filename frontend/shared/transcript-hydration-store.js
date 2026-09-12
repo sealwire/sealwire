@@ -1003,9 +1003,14 @@ function toTranscriptEntry(entry) {
     turn_id: entry.turn_id || null,
     tool: entry.tool || null,
     content_state: contentStateOf(entry),
-    // An explicit field list DROPS what it does not name. These two carry the
-    // ordering and withdrawal contracts — losing them here silently un-numbers
-    // and resurrects rows arriving via pages.
+    // An explicit field list DROPS what it does not name. These three carry the
+    // identity, ordering and withdrawal contracts — losing them here silently
+    // un-keys, un-numbers and resurrects rows arriving via pages.
+    //
+    // `row_id` is the relay's own name for the row and the only one a client may
+    // key on. A relay too old to send it leaves this absent, and `transcriptRowKey`
+    // falls back to `item_id` — which is what makes that relay still work.
+    ...(typeof entry.row_id === "string" && entry.row_id ? { row_id: entry.row_id } : {}),
     ...(Number.isSafeInteger(entry.order_seq) ? { order_seq: entry.order_seq } : {}),
     ...(entry.withdrawn === true ? { withdrawn: true } : {}),
   };
@@ -1132,6 +1137,10 @@ export function applyTranscriptDeltaToWindow(state, delta) {
   upsertWindowRowInPlace(
     { entries, order },
     {
+      // The relay's key for this row, when it sent one. A row born here without
+      // it keys on `item_id`, and the page copy that follows keys on `row_id` —
+      // the same message, twice, in one window.
+      ...(typeof delta.row_id === "string" && delta.row_id ? { row_id: delta.row_id } : {}),
       item_id: itemId,
       kind,
       text: startsAtZero ? appendText : "",

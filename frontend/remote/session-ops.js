@@ -486,6 +486,9 @@ function commitTranscriptDeltaAppend({
   let nextSession;
   if (windowLoaded) {
     appendTranscriptDeltaToWindow(state, {
+      // Forwarded for the same reason `order_seq` below is: this payload is
+      // rebuilt field by field, so anything unnamed here never reaches the window.
+      row_id: event.row_id,
       item_id: outcome.itemId,
       thread_id: currentThreadId,
       delta: event.delta ?? "",

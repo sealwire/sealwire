@@ -596,6 +596,9 @@ export function createStreamController(ctx) {
     }
     const existing = entries.get(itemId);
     const nextEntry = {
+      // Only for a row this window does not already hold — an existing one
+      // brings its own key through the spread below.
+      ...(typeof event?.row_id === "string" && event.row_id ? { row_id: event.row_id } : {}),
       item_id: itemId,
       text: "",
       tool: null,
