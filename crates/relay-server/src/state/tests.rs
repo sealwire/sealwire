@@ -7924,6 +7924,59 @@ mod row_identity_tests {
         );
     }
 
+    /// The race a row-namespace fallback would lose: an unrelated relay row
+    /// already holds the spelling `tool:<id>`, and the question arrives BEFORE
+    /// its own provider tool row.
+    ///
+    /// Falling back to the row namespace answers with that unrelated row, and the
+    /// question pins to somebody else's message. `None` is the honest answer until
+    /// the real row exists — the next snapshot resolves it.
+    #[test]
+    fn a_pending_question_never_falls_back_to_a_row_that_merely_shares_the_spelling() {
+        let mut relay = test_state();
+        let thread = "thread-ask-race";
+
+        relay.upsert_relay_owned_row_for_thread(
+            thread,
+            "tool:toolu_1".to_string(),
+            TranscriptEntryKind::Error,
+            Some("an unrelated relay row".to_string()),
+            "failed".to_string(),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            relay.ask_user_transcript_row_id(thread, "toolu_1"),
+            None,
+            "before the provider's tool row exists there is nothing to name"
+        );
+
+        relay.upsert_transcript_item_for_thread(
+            thread,
+            "tool:toolu_1".to_string(),
+            TranscriptEntryKind::ToolCall,
+            Some("the question's tool call".to_string()),
+            "running".to_string(),
+            Some("turn-1".to_string()),
+            None,
+        );
+
+        let resolved = relay
+            .ask_user_transcript_row_id(thread, "toolu_1")
+            .expect("now the provider row exists");
+        let runtime = relay.runtime_for_thread(thread).expect("runtime");
+        assert_eq!(
+            runtime
+                .transcript
+                .get_row(&resolved)
+                .and_then(|row| row.text.clone())
+                .as_deref(),
+            Some("the question's tool call"),
+            "and it is the minted PROVIDER row, never the one holding the spelling"
+        );
+    }
+
     /// Stale history must never resurrect a withdrawn send nor move a published row.
     /// All three fields are carried by hand across the whole-record replace in
     /// `merge_runtime_entry`, so each one is its own way to lose the invariant.

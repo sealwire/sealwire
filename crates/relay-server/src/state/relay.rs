@@ -5195,13 +5195,19 @@ impl RelayState {
         tool_use_id: &str,
     ) -> Option<String> {
         let runtime = self.runtime_for_thread(thread_id)?;
-        let provider_name = format!("tool:{tool_use_id}");
+        // PROVIDER namespace only. Every producer of a pending question — the
+        // Claude bridge and the fake provider; ACP refuses AskUserQuestion
+        // outright — writes that row through a provider-named writer, so there is
+        // no producer a row-namespace fallback would serve.
+        //
+        // It would actively harm: an unrelated relay-owned row can hold the
+        // spelling `tool:<id>` while the real tool row has not arrived yet, and
+        // falling back would answer with that row. Naming the wrong row is worse
+        // than naming none — `None` simply means "not placed yet", and the next
+        // snapshot resolves it once the row exists.
         runtime
             .transcript
-            .resolve_provider(&provider_name)
-            // A bridge that named the row itself (ACP mints its own ordinals) put
-            // the same string in the row namespace instead.
-            .or_else(|| runtime.transcript.resolve_row(&provider_name))
+            .resolve_provider(&format!("tool:{tool_use_id}"))
             .map(str::to_string)
     }
 

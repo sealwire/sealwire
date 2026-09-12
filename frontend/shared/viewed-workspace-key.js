@@ -1,3 +1,4 @@
+import { transcriptRowKey } from "./transcript-row-key.js";
 // Identity of the workspace a surface is looking at. Birth `current_cwd` does
 // not move when a session is observed in another tree, so the remembered
 // pin/proven path has to ride along — otherwise an open Changes panel keeps
@@ -47,7 +48,7 @@ export function decideWorkspaceRefresh({
   let latest = null;
   for (let i = entries.length - 1; i >= 0; i -= 1) {
     if (entries[i]?.tool?.item_type === "turnDiff") {
-      latest = entries[i].item_id || null;
+      latest = transcriptRowKey(entries[i]) || null;
       break;
     }
   }
