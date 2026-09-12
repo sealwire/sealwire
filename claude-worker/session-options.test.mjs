@@ -86,10 +86,30 @@ test("a systemPrompt on the command reaches the SDK options", () => {
     { cwd: "/tmp", systemPrompt: "You are the Orchestrator." },
     defaults
   );
-  assert.equal(opts.systemPrompt, "You are the Orchestrator.");
   // A full replacement, not `{preset:'claude_code', append}`: a secretary that
   // does not write code should not inherit the coding agent's system prompt.
-  assert.equal(typeof opts.systemPrompt, "string");
+  // And snapshot MUST be false: SDK ≥0.3.267 records a bare-string custom
+  // prompt and ignores later persona swaps until compaction.
+  assert.deepEqual(opts.systemPrompt, {
+    type: "custom",
+    prompt: "You are the Orchestrator.",
+    snapshot: false,
+  });
+});
+
+test("relay-managed personas opt out of SDK system-prompt snapshots", () => {
+  // REGRESSION (SDK 0.3.267+): a bare string `systemPrompt` is snapshotted by
+  // default. The worker rebuilds the query when the persona changes, but a
+  // resume of the SAME provider session would keep serving the recorded
+  // Orchestrator text until compaction — while the relay believes the persona
+  // was replaced or cleared. `snapshot: false` makes every request re-render.
+  const withPersona = buildSessionOptionsBase(
+    { cwd: "/tmp", systemPrompt: "You are the Orchestrator." },
+    defaults
+  );
+  const cleared = buildSessionOptionsBase({ cwd: "/tmp" }, defaults);
+  assert.equal(withPersona.systemPrompt.snapshot, false);
+  assert.ok(!("systemPrompt" in cleared), "clearing the persona must omit the field");
 });
 
 test("no systemPrompt leaves the SDK default alone", () => {

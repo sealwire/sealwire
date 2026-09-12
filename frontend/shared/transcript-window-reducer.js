@@ -171,7 +171,6 @@ function warnOnceAboutUnsortedPage() {
     return;
   }
   warnedAboutUnsortedPage = true;
-  // eslint-disable-next-line no-console
   console?.warn?.(
     "transcript page arrived out of order_seq order; sorting it. This is a relay-side "
       + "contract violation, not a client fallback that should be relied on."

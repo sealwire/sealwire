@@ -1,0 +1,6 @@
+# Pin to the maintainer build host (rustc 1.94.0). CI's
+# dtolnay/rust-toolchain@stable follows this file when no
+# explicit `toolchain:` is set; keep Docker in sync too.
+[toolchain]
+channel = "1.94.0"
+components = ["rustfmt", "clippy"]

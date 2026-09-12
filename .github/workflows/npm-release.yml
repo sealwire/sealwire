@@ -102,6 +102,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.94.0
           targets: ${{ matrix.cargo_target }}
 
       - name: Cache Rust build
