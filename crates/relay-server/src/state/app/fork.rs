@@ -86,7 +86,11 @@ impl AppState {
                 // Nothing can locate it, or the read is ambiguous about which entry
                 // was meant. Either way, guessing would cut the branch in a place
                 // the user did not choose.
-                Some(resolved.ok_or_else(|| FORK_POINT_NOT_PROVIDER_ADDRESSABLE_MSG.to_string())?)
+                Some(
+                    resolved
+                        .cut()
+                        .ok_or_else(|| FORK_POINT_NOT_PROVIDER_ADDRESSABLE_MSG.to_string())?,
+                )
             }
             None => None,
         };
@@ -547,6 +551,47 @@ struct ResolvedForkPoint {
     provider_item_id: Option<String>,
 }
 
+/// How a fork point the CLIENT named resolves against the read.
+///
+/// The three states are named rather than encoded as nested options. The caller has
+/// to treat "the relay can locate it but the provider cannot name it" (replay,
+/// truncated there) differently from "nothing can locate it" (refuse or widen), and
+/// an `Option<ResolvedForkPoint>` whose `provider_item_id` is itself an `Option`
+/// reads as either one by accident.
+enum ForkPointResolution {
+    /// Located in the read AND named by the provider — the only state a native fork
+    /// at a message can be described with.
+    Provider {
+        index: usize,
+        provider_item_id: String,
+    },
+    /// Located in the read, but only the relay ever named it. A real branch point;
+    /// it just has to be replayed rather than described to the provider.
+    RelayOnly { index: usize },
+    /// Nothing can locate it in the read.
+    Unlocatable,
+}
+
+impl ForkPointResolution {
+    /// The cut this resolution describes, or `None` when it locates nothing.
+    fn cut(self) -> Option<ResolvedForkPoint> {
+        match self {
+            Self::Provider {
+                index,
+                provider_item_id,
+            } => Some(ResolvedForkPoint {
+                index,
+                provider_item_id: Some(provider_item_id),
+            }),
+            Self::RelayOnly { index } => Some(ResolvedForkPoint {
+                index,
+                provider_item_id: None,
+            }),
+            Self::Unlocatable => None,
+        }
+    }
+}
+
 /// Resolve a fork point the CLIENT named, to a position in the read.
 ///
 /// The client can only send back the row id it rendered. Two sources can say what
@@ -555,38 +600,46 @@ struct ResolvedForkPoint {
 /// typed identities so a provider item and a synthesized row that share a spelling
 /// never stand in for each other.
 ///
-/// `None` means nothing can locate it — an unbound send reservation, or a read
-/// where the requested spelling is ambiguous and guessing would cut the wrong way.
+/// `Unlocatable` covers an unbound send reservation, a live-only provider name the
+/// read renumbers, and a read where the requested spelling is ambiguous and guessing
+/// would cut the wrong way. What the caller does about it is `fork_session`'s
+/// decision, not this function's.
 fn resolve_fork_point(
     transcript: Option<&crate::state::relay::ThreadTranscript>,
     read: &[crate::provider::ProviderTranscriptEntry],
     requested: &str,
-) -> Option<ResolvedForkPoint> {
+) -> ForkPointResolution {
     // The runtime is authoritative when it holds the row: it is where a locally
     // created send learns the provider's name for it, and where a synthesized row
     // keeps its source name after `row_id` was minted away from it.
     if let Some(transcript) = transcript {
         if transcript.get_row(requested).is_some() {
             if let Some(provider_item_id) = transcript.provider_item_id(requested) {
-                let index = read.iter().position(|entry| {
-                    entry.provider_item_id.as_deref() == Some(provider_item_id)
-                })?;
-                return Some(ResolvedForkPoint {
-                    index,
-                    provider_item_id: Some(provider_item_id.to_string()),
-                });
+                return match read
+                    .iter()
+                    .position(|entry| entry.provider_item_id.as_deref() == Some(provider_item_id))
+                {
+                    Some(index) => ForkPointResolution::Provider {
+                        index,
+                        provider_item_id: provider_item_id.to_string(),
+                    },
+                    // The provider named this row on a channel its own read does not
+                    // reproduce — Codex's live `msg_*` against `thread/read`'s
+                    // positional `item-N`. Nothing here can bridge the two.
+                    None => ForkPointResolution::Unlocatable,
+                };
             }
             if let Some(relay_item_id) = transcript.relay_item_id(requested) {
-                let index = read
+                return match read
                     .iter()
-                    .position(|entry| entry.relay_item_id.as_deref() == Some(relay_item_id))?;
-                return Some(ResolvedForkPoint {
-                    index,
-                    provider_item_id: None,
-                });
+                    .position(|entry| entry.relay_item_id.as_deref() == Some(relay_item_id))
+                {
+                    Some(index) => ForkPointResolution::RelayOnly { index },
+                    None => ForkPointResolution::Unlocatable,
+                };
             }
             // A row the relay owns outright: no source name, so no read can carry it.
-            return None;
+            return ForkPointResolution::Unlocatable;
         }
     }
     // No runtime row. The requested id can only have come from an earlier
@@ -596,14 +649,19 @@ fn resolve_fork_point(
         .iter()
         .enumerate()
         .filter(|(_, entry)| entry.view.item_id.as_deref() == Some(requested));
-    let (index, entry) = matches.next()?;
+    let Some((index, entry)) = matches.next() else {
+        return ForkPointResolution::Unlocatable;
+    };
     if matches.next().is_some() {
-        return None;
+        return ForkPointResolution::Unlocatable;
     }
-    Some(ResolvedForkPoint {
-        index,
-        provider_item_id: entry.provider_item_id.clone(),
-    })
+    match entry.provider_item_id.clone() {
+        Some(provider_item_id) => ForkPointResolution::Provider {
+            index,
+            provider_item_id,
+        },
+        None => ForkPointResolution::RelayOnly { index },
+    }
 }
 
 /// The entries a branch inherits: everything up to and INCLUDING the fork point.
@@ -1023,6 +1081,15 @@ mod fork_point_resolution_tests {
         }
     }
 
+    /// Names the variant in a panic message; `cut()` would flatten two of them.
+    fn describe(resolution: &ForkPointResolution) -> &'static str {
+        match resolution {
+            ForkPointResolution::Provider { .. } => "Provider",
+            ForkPointResolution::RelayOnly { .. } => "RelayOnly",
+            ForkPointResolution::Unlocatable => "Unlocatable",
+        }
+    }
+
     fn view(item_id: &str) -> TranscriptEntryView {
         TranscriptEntryView {
             row_id: None,
@@ -1061,21 +1128,25 @@ mod fork_point_resolution_tests {
         });
         assert_ne!(synthetic, provider_row, "the second had to mint");
 
-        let resolved = resolve_fork_point(Some(&store), &read, &provider_row)
-            .expect("the provider row is locatable");
-        assert_eq!(
-            resolved.index, 1,
-            "the PROVIDER entry, not the synthetic one"
-        );
-        assert_eq!(resolved.provider_item_id.as_deref(), Some("x"));
+        match resolve_fork_point(Some(&store), &read, &provider_row) {
+            ForkPointResolution::Provider {
+                index,
+                provider_item_id,
+            } => {
+                assert_eq!(index, 1, "the PROVIDER entry, not the synthetic one");
+                assert_eq!(provider_item_id, "x");
+            }
+            other => panic!("expected Provider, got {}", describe(&other)),
+        }
 
-        let resolved = resolve_fork_point(Some(&store), &read, &synthetic)
-            .expect("the synthetic row is locatable by its source name");
-        assert_eq!(resolved.index, 0, "the SYNTHETIC entry");
-        assert_eq!(
-            resolved.provider_item_id, None,
-            "a synthesized row is never described to the provider"
-        );
+        // RelayOnly, not Provider: a synthesized row is never described to the
+        // provider. The two used to differ only by an inner `Option` being `None`.
+        match resolve_fork_point(Some(&store), &read, &synthetic) {
+            ForkPointResolution::RelayOnly { index } => {
+                assert_eq!(index, 0, "the SYNTHETIC entry")
+            }
+            other => panic!("expected RelayOnly, got {}", describe(&other)),
+        }
     }
 
     /// The tip condition must be decided by position too. With the colliding
@@ -1096,14 +1167,18 @@ mod fork_point_resolution_tests {
             ..row("x")
         });
 
-        let at_tip = resolve_fork_point(Some(&store), &read, &provider_row).expect("locatable");
+        let at_tip = resolve_fork_point(Some(&store), &read, &provider_row)
+            .cut()
+            .expect("locatable");
         assert_eq!(
             native_fork_point_id(read.len(), Some(&at_tip)),
             None,
             "the provider row IS the tip, so it forks the whole thread natively"
         );
 
-        let before_tip = resolve_fork_point(Some(&store), &read, &synthetic).expect("locatable");
+        let before_tip = resolve_fork_point(Some(&store), &read, &synthetic)
+            .cut()
+            .expect("locatable");
         assert_eq!(
             forked_entries(
                 &read.iter().map(|e| e.view.clone()).collect::<Vec<_>>(),
@@ -1127,9 +1202,16 @@ mod fork_point_resolution_tests {
         let row_id = store.push(row("codex:user-reserve:gen-1:t:1"));
         store.bind_provider_item_id(&row_id, "codex-item-1");
 
-        let resolved = resolve_fork_point(Some(&store), &read, &row_id).expect("locatable");
-        assert_eq!(resolved.index, 0);
-        assert_eq!(resolved.provider_item_id.as_deref(), Some("codex-item-1"));
+        match resolve_fork_point(Some(&store), &read, &row_id) {
+            ForkPointResolution::Provider {
+                index,
+                provider_item_id,
+            } => {
+                assert_eq!(index, 0);
+                assert_eq!(provider_item_id, "codex-item-1");
+            }
+            other => panic!("expected Provider, got {}", describe(&other)),
+        }
     }
 
     /// A row the relay owns outright has no source name, so no read can carry it.
@@ -1141,8 +1223,14 @@ mod fork_point_resolution_tests {
         let mut store = ThreadTranscript::new();
         let row_id = store.push(row("codex:user-reserve:gen-1:t:1"));
 
-        assert!(resolve_fork_point(Some(&store), &read, &row_id).is_none());
-        assert!(resolve_fork_point(None, &read, "never-heard-of-it").is_none());
+        assert_eq!(
+            describe(&resolve_fork_point(Some(&store), &read, &row_id)),
+            "Unlocatable"
+        );
+        assert_eq!(
+            describe(&resolve_fork_point(None, &read, "never-heard-of-it")),
+            "Unlocatable"
+        );
     }
 
     /// With no runtime to consult, a spelling that names two entries is ambiguous.
@@ -1153,10 +1241,15 @@ mod fork_point_resolution_tests {
             ProviderTranscriptEntry::relay_named(view("x")),
             ProviderTranscriptEntry::provider_named(view("x")),
         ];
-        assert!(resolve_fork_point(None, &read, "x").is_none());
+        assert_eq!(
+            describe(&resolve_fork_point(None, &read, "x")),
+            "Unlocatable"
+        );
 
         let unique = vec![ProviderTranscriptEntry::provider_named(view("x"))];
-        let resolved = resolve_fork_point(None, &unique, "x").expect("unambiguous");
+        let resolved = resolve_fork_point(None, &unique, "x")
+            .cut()
+            .expect("unambiguous");
         assert_eq!(resolved.index, 0);
     }
 }
