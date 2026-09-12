@@ -145,9 +145,11 @@ impl RelayState {
         )
     }
 
-    fn stamp_transcript_item_seq(&mut self, thread_id: &str, item_id: &str, revision: u64) {
+    /// `row_id` is a ROW key — `update_row` resolves in that namespace only. Callers
+    /// holding a provider or relay source name must resolve it first.
+    fn stamp_transcript_item_seq(&mut self, thread_id: &str, row_id: &str, revision: u64) {
         if let Some(runtime) = self.runtimes.get_mut(thread_id) {
-            runtime.transcript.update_row(item_id, |entry| {
+            runtime.transcript.update_row(row_id, |entry| {
                 entry.last_live_upsert_revision = Some(revision);
             });
         }
@@ -514,7 +516,12 @@ impl RelayState {
         // A delta births rows too, so it owes the same birth stamp an upsert pays.
         // Without it the resume read-race merge cannot see that this row appeared
         // AFTER the provider read began, and stale history is appended past it.
-        self.stamp_transcript_item_seq(thread_id, item_id, revision);
+        //
+        // Stamped by ROW id, not by the name the caller passed: the row may have had
+        // to mint one when that name was already spoken for in another namespace,
+        // and stamping the source spelling then lands on the unrelated row that
+        // holds it — or on nothing at all, silently skipping the birth stamp.
+        self.stamp_transcript_item_seq(thread_id, &row_id, revision);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
         }
@@ -1113,8 +1120,9 @@ impl RelayState {
             }
         };
         let (base_revision, revision) = self.bump_thread_transcript_revision(thread_id);
-        // Same birth stamp as the agent-text delta above, for the same reason.
-        self.stamp_transcript_item_seq(thread_id, item_id, revision);
+        // Same birth stamp as the agent-text delta above, by ROW id for the same
+        // reason: the source spelling may belong to a different row entirely.
+        self.stamp_transcript_item_seq(thread_id, &row_id, revision);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
         }

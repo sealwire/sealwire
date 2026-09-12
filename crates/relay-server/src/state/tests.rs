@@ -7584,6 +7584,136 @@ mod row_identity_tests {
         );
     }
 
+    /// A delta that has to MINT its row must stamp the birth on the row it minted.
+    ///
+    /// The stamp is a row-namespace write, but both delta paths passed the caller's
+    /// source spelling. When that spelling already belongs to an unrelated row the
+    /// stamp lands there — or nowhere — and the new row looks to the resume merge
+    /// like it predates the read. Stale history is then ordered after it, which is
+    /// the reordering dbe695b2 closed.
+    #[test]
+    fn a_delta_that_mints_its_row_stamps_the_birth_on_the_row_it_minted() {
+        for kind in ["agent", "command"] {
+            let mut relay = test_state();
+            let thread = format!("thread-delta-mint-{kind}");
+
+            // An unrelated relay-owned row already holds the spelling `x`.
+            relay.upsert_relay_owned_row_for_thread(
+                &thread,
+                "x".to_string(),
+                TranscriptEntryKind::Error,
+                Some("the relay's row".to_string()),
+                "failed".to_string(),
+                None,
+                None,
+            );
+
+            // Its own creation stamped it; that stamp must not move.
+            let stamp_before = relay
+                .runtime_for_thread(&thread)
+                .expect("runtime")
+                .transcript
+                .get_row("x")
+                .expect("the relay's row")
+                .last_live_upsert_revision;
+
+            // The provider streams under its own `x`, which must mint a new row.
+            let mutation = if kind == "agent" {
+                relay.append_agent_delta_for_thread(&thread, "x", "streamed", "turn-1")
+            } else {
+                relay.append_command_delta_for_thread(&thread, "x", "streamed")
+            };
+
+            let runtime = relay.runtime_for_thread(&thread).expect("runtime");
+            assert_eq!(
+                runtime.transcript.len(),
+                2,
+                "{kind}: the delta minted a row"
+            );
+            assert_ne!(mutation.row_id, "x", "{kind}: it could not take the key");
+
+            let minted = runtime
+                .transcript
+                .get_row(&mutation.row_id)
+                .expect("the minted row");
+            assert!(
+                minted.last_live_upsert_revision.is_some(),
+                "{kind}: the row born by this delta must carry its birth stamp"
+            );
+            let unrelated = runtime.transcript.get_row("x").expect("the relay's row");
+            assert_eq!(
+                unrelated.last_live_upsert_revision, stamp_before,
+                "{kind}: the delta's stamp must not land on the row that merely shares the spelling"
+            );
+            assert_ne!(
+                minted.last_live_upsert_revision, stamp_before,
+                "{kind}: the minted row's stamp is its own, later than the other row's"
+            );
+        }
+    }
+
+    /// The consequence the stamp exists for, end to end: a row born mid-read stays
+    /// after the stale history the read returns, even when it had to mint.
+    #[test]
+    fn a_minted_delta_row_still_sorts_after_stale_history() {
+        let mut relay = test_state();
+        let thread = "thread-delta-mint-order";
+        relay.upsert_relay_owned_row_for_thread(
+            thread,
+            "x".to_string(),
+            TranscriptEntryKind::Error,
+            Some("the relay's row".to_string()),
+            "failed".to_string(),
+            None,
+            None,
+        );
+        let read_started_at = relay.transcript_clock();
+
+        // Born LIVE while the read is in flight, minting because `x` is taken.
+        let mutation = relay.append_agent_delta_for_thread(thread, "x", "live text", "turn-1");
+
+        // The read returns history that knows neither row.
+        let stale = crate::state::relay::TranscriptRecord {
+            row_id: "older".to_string(),
+            provider_item_id: Some("older".to_string()),
+            relay_item_id: None,
+            kind: TranscriptEntryKind::AgentText,
+            text: Some("older history".to_string()),
+            status: "completed".to_string(),
+            turn_id: None,
+            tool: None,
+            order_seq: 0,
+            withdrawn: false,
+            last_live_upsert_revision: None,
+        };
+        {
+            let runtime = relay.runtimes.get_mut(thread).expect("runtime");
+            let _ = runtime
+                .merge_transcript_records_after_read_start(vec![stale], Some(read_started_at));
+        }
+
+        let runtime = relay.runtime_for_thread(thread).expect("runtime");
+        let live_index = runtime
+            .transcript
+            .iter()
+            .position(|row| row.row_id == mutation.row_id)
+            .expect("the live row");
+        let stale_index = runtime
+            .transcript
+            .iter()
+            .position(|row| row.text.as_deref() == Some("older history"))
+            .expect("the stale row");
+        assert!(
+            stale_index < live_index,
+            "stale history must stay before a row born after the read began: {:?}",
+            runtime
+                .transcript
+                .iter()
+                .map(|r| (r.row_id.clone(), r.text.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
     /// Stale history must never resurrect a withdrawn send nor move a published row.
     /// All three fields are carried by hand across the whole-record replace in
     /// `merge_runtime_entry`, so each one is its own way to lose the invariant.
