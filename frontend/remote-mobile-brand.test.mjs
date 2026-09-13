@@ -60,3 +60,20 @@ test("remote mobile hides the desktop-only collapse toggle", () => {
     "expected the desktop collapse toggle to stay hidden on remote mobile"
   );
 });
+
+// The desktop header-band sync (min-height: --header-band-height + negative
+// stack-gap margin) is a three-column seam. The remote phone drawer is not that
+// seam — leaving those rules active there stretches the brand row to ~67px and
+// pulls the following drawer content up by the cancelled gap.
+test("remote mobile restores a content-height brand row, not the desktop header band", () => {
+  assert.match(
+    mobileCss,
+    /\.remote-app-shell\s+\.sidebar-top-bar\s*\{[^}]*min-height:\s*0/,
+    "expected remote mobile to clear the desktop --header-band-height min-height"
+  );
+  assert.match(
+    mobileCss,
+    /\.remote-app-shell\s+\.sidebar-top-bar\s*\{[^}]*margin-bottom:\s*0/,
+    "expected remote mobile to clear the desktop stack-gap cancel"
+  );
+});

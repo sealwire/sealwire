@@ -26,6 +26,7 @@
       "local-session-rename",
       "local-session-tab-scroll",
       "local-rail-toggle-align",
+      "local-sidebar-header-band",
       "local-permission-modes",
       "local-workspace-repair"
     ],
@@ -55,6 +56,7 @@
       "local-session-rename",
       "local-session-tab-scroll",
       "local-rail-toggle-align",
+      "local-sidebar-header-band",
       "local-delete",
       "local-permission-modes",
       "local-workspace-repair"
@@ -440,6 +442,16 @@
       "coverage": [
         "rail-toggle-align",
         "reviewer-panel",
+        "desktop-layout"
+      ]
+    },
+    "local-sidebar-header-band": {
+      "script": "browser-sidebar-header-band-e2e.mjs",
+      "tier": "core",
+      "provider": "fake",
+      "transport": "local",
+      "coverage": [
+        "sidebar-header-band",
         "desktop-layout"
       ]
     },

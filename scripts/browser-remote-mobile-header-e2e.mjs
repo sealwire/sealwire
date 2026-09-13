@@ -418,7 +418,50 @@ async function main() {
       `expected scrolling to move the inner transcript (not the page), got ${JSON.stringify(layout)}`
     );
 
-    console.log(`remote-mobile-header-e2e OK ${JSON.stringify(layout)}`);
+    // Desktop header-band sync must not stretch the drawer brand row. Open the
+    // nav drawer and prove the Sealwire row stays content-height (not ~67px).
+    await page.tap("#remote-nav-toggle-button");
+    await page.waitForFunction(
+      () => {
+        const shell = document.querySelector(".remote-app-shell");
+        const aside = document.querySelector(".remote-app-shell .sidebar");
+        if (shell?.dataset.remoteNavState !== "open" || !aside) return false;
+        return aside.getBoundingClientRect().left >= 0;
+      },
+      undefined,
+      { timeout: TIMEOUT_MS }
+    );
+    const drawerBrand = await page.evaluate(() => {
+      const bar = document.querySelector(".remote-app-shell .sidebar-top-bar");
+      if (!bar) return null;
+      const rect = bar.getBoundingClientRect();
+      const band = getComputedStyle(document.documentElement)
+        .getPropertyValue("--header-band-height")
+        .trim();
+      return {
+        height: Math.round(rect.height * 100) / 100,
+        headerBandHeight: band,
+        minHeight: getComputedStyle(bar).minHeight,
+        marginBottom: getComputedStyle(bar).marginBottom,
+      };
+    });
+    assert.ok(drawerBrand, "expected the remote drawer brand row to be present");
+    assert.ok(
+      drawerBrand.height > 0 && drawerBrand.height <= 48,
+      `drawer brand row must stay content-height, not the desktop header band — ${JSON.stringify(drawerBrand)}`
+    );
+    assert.equal(
+      drawerBrand.minHeight,
+      "0px",
+      `drawer brand must clear desktop min-height — ${JSON.stringify(drawerBrand)}`
+    );
+    assert.equal(
+      drawerBrand.marginBottom,
+      "0px",
+      `drawer brand must clear desktop stack-gap cancel — ${JSON.stringify(drawerBrand)}`
+    );
+
+    console.log(`remote-mobile-header-e2e OK ${JSON.stringify({ layout, drawerBrand })}`);
   } catch (error) {
     await writeFailureArtifacts({
       scenario: "remote-mobile-header-e2e",

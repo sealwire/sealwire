@@ -146,3 +146,54 @@ test("the top bar's first control starts on the gutter, not beside it", () => {
     assert.equal(box.left, "0", ".sidebar-top-bar must not pad its leading edge");
   }
 });
+
+// The Sealwire logo row and the chat-header ("Small improvement") are one band
+// across the top of the window. Sessions sits under that band the way the session
+// tab strip sits under the chat-header — so the logo row must share the measured
+// height, start at y=0 (no sidebar padding-top), and cancel the column gap so
+// Sessions is not pushed below the tabs.
+test("the sidebar logo row shares the measured chat-header band height", () => {
+  const bar = declarations(".sidebar-top-bar");
+  assert.equal(
+    bar.get("min-height"),
+    "var(--header-band-height, 67px)",
+    "without this the logo row is shorter than the chat-header and Sessions drifts off the tab strip"
+  );
+  assert.equal(
+    bar.get("box-sizing"),
+    "border-box",
+    "padding inside the band must not grow it past the measured chat-header height"
+  );
+});
+
+test("the sidebar does not inset the logo band below the chat-header", () => {
+  const sidebar = declarations(".sidebar");
+  const box = paddingBox(sidebar.get("padding") || "");
+  assert.equal(
+    box.top,
+    "0",
+    `padding-top ${box.top} would push the logo band below the chat-header`
+  );
+  assert.equal(box.left, "var(--sidebar-gutter)");
+  assert.equal(box.right, "var(--sidebar-gutter)");
+});
+
+test("the logo row cancels the sidebar stack gap so Sessions meets the tab strip", () => {
+  const sidebar = declarations(".sidebar");
+  assert.equal(sidebar.get("--sidebar-stack-gap"), "16px");
+  assert.equal(sidebar.get("gap"), "var(--sidebar-stack-gap)");
+
+  const bar = declarations(".sidebar-top-bar");
+  assert.equal(
+    bar.get("margin-bottom"),
+    "calc(-1 * var(--sidebar-stack-gap))",
+    "the column gap under the logo row would otherwise drop Sessions below the tabs"
+  );
+
+  const conversation = declarations('.app-shell[data-view="conversation"] .sidebar');
+  assert.equal(
+    conversation.get("--sidebar-stack-gap"),
+    "12px",
+    "conversation tightens the stack gap; the cancel must track that value"
+  );
+});
