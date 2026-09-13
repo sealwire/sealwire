@@ -149,7 +149,7 @@ test("ReviewerChip is a labeled pill that surfaces review status", () => {
     })
   );
   assert.match(done, /reviewer-chip/);
-  assert.match(done, />Reviewer</);
+  assert.match(done, />Agents</);
   assert.match(done, /is-done/);
   assert.match(done, /✓/);
 
@@ -173,7 +173,7 @@ test("ReviewerChip surfaces a running review with a badge", () => {
     })
   );
   assert.match(html, /reviewer-chip/);
-  assert.match(html, />Reviewer</);
+  assert.match(html, />Agents</);
   assert.match(html, /is-active/);
   assert.match(html, /workspace-diff-chip-review/);
 });
@@ -658,4 +658,86 @@ test("follow-ups to one agent session collapse into that thread's rounds", () =>
   assert.match(html, /reviewer-card-title[^>]*>and what about archive</);
   assert.match(html, /reviewer-round-label[^>]*>R1<[\s\S]*In the JSON state file\./);
   assert.match(html, /1 thread</, "counted as one thread, not two asks");
+});
+
+// The chip is the only way into the Agents panel on a phone, and a session driving a goal
+// has neither a review nor a workflow to count.
+test("ReviewerChip surfaces a running goal, and an ask, with no review in sight", () => {
+  const goal = renderToStaticMarkup(
+    h(ReviewerChip, {
+      store: makeStore({
+        review: {
+          reviewJobs: [],
+          goal: { objective: "Ship it", status: "active", turns: 1, max_turns: 20 },
+          canRequest: false,
+          blocked: false,
+        },
+      }),
+    })
+  );
+  assert.match(goal, /reviewer-chip/);
+  assert.match(goal, /is-active/);
+
+  const ask = renderToStaticMarkup(
+    h(ReviewerChip, {
+      store: makeStore({
+        review: {
+          reviewJobs: [],
+          asks: [{ id: "a1", status: "working" }],
+          canRequest: false,
+          blocked: false,
+        },
+      }),
+    })
+  );
+  assert.match(ask, /reviewer-chip/);
+  assert.match(ask, /is-active/);
+
+  // A goal that has stopped is still worth a way in — it is how you press "keep going".
+  const settled = renderToStaticMarkup(
+    h(ReviewerChip, {
+      store: makeStore({
+        review: {
+          reviewJobs: [],
+          goal: { objective: "Ship it", status: "complete_claimed", turns: 7, max_turns: 20 },
+          canRequest: false,
+          blocked: false,
+        },
+      }),
+    })
+  );
+  assert.match(settled, /reviewer-chip/);
+  assert.match(settled, /is-done/);
+});
+
+// A goal that stopped to ask you something is not a finished one. The chip is the whole
+// signal on a phone, so reading "✓ complete" is worse than showing nothing.
+test("a goal that stopped for the user reads as needing attention, not as done", () => {
+  const chipFor = (status) =>
+    renderToStaticMarkup(
+      h(ReviewerChip, {
+        store: makeStore({
+          review: {
+            reviewJobs: [],
+            goal: { objective: "Ship it", status, turns: 4, max_turns: 20 },
+            canRequest: false,
+            blocked: false,
+          },
+        }),
+      })
+    );
+
+  for (const status of ["awaiting_user", "out_of_turns", "interrupted", "blocked"]) {
+    const html = chipFor(status);
+    assert.match(html, /is-blocked/, `${status} should read as needing you`);
+    assert.doesNotMatch(html, /is-done/, `${status} must not read as complete`);
+  }
+
+  // A completion claim IS a result to go and look at — the panel is where you accept it
+  // or press "not done".
+  assert.match(chipFor("complete_claimed"), /is-done/);
+
+  // Whatever the state, the tooltip must not talk about reviews when the panel is
+  // carrying a goal.
+  assert.doesNotMatch(/title="([^"]*)"/.exec(chipFor("active"))[1], /[Rr]eview/);
 });

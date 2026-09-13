@@ -139,6 +139,7 @@ enum SessionTools {
 fn resolve_session_tools(
     orchestrator: Option<(String, Option<String>)>,
     seat_run_id: Option<String>,
+    drives_itself: bool,
     unrestricted: bool,
 ) -> SessionTools {
     if let Some((device_id, system_prompt)) = orchestrator {
@@ -147,14 +148,17 @@ fn resolve_session_tools(
             system_prompt,
         };
     }
-    match seat_run_id {
-        Some(run_id) => SessionTools::Seat { run_id },
-        // Only an already-unrestricted session may bring in another agent. A
-        // restricted one could otherwise ask a freer agent to do what it may not
-        // — which is the escalation, and this is what removes it.
-        None if unrestricted => SessionTools::Peer,
-        None => SessionTools::None,
+    if let Some(run_id) = seat_run_id {
+        return SessionTools::Seat { run_id };
     }
+    // Two gates, and both must hold. `drives_itself` also covers a reviewer and a Code
+    // Flow step, which permissions cannot: a reviewer inherits the wide ones it needs in
+    // order to read. Unrestricted stays because a restricted session could otherwise ask
+    // a freer agent to do what it may not.
+    if drives_itself && unrestricted {
+        return SessionTools::Peer;
+    }
+    SessionTools::None
 }
 
 /// Attach the thread's MCP tools (and, for the Orchestrator, its persona).
@@ -169,7 +173,7 @@ async fn attach_orchestrator_session(
     thread_id: &str,
     cmd: &mut Value,
 ) {
-    let (options, seat_run_id, unrestricted) = {
+    let (options, seat_run_id, drives_itself, unrestricted) = {
         let relay = state.read().await;
         let settings = relay.thread_settings(thread_id);
         let unrestricted = settings
@@ -179,10 +183,11 @@ async fn attach_orchestrator_session(
         (
             relay.orchestrator_session_options(thread_id),
             relay.seat_run_id_for_thread(thread_id),
+            relay.thread_drives_itself(thread_id),
             unrestricted,
         )
     };
-    match resolve_session_tools(options, seat_run_id, unrestricted) {
+    match resolve_session_tools(options, seat_run_id, drives_itself, unrestricted) {
         SessionTools::Orchestrator {
             device_id,
             system_prompt,
@@ -2398,19 +2403,35 @@ mod tests {
         // The pin wins even when it also looks like a seat: handing it both tool
         // surfaces would give it two overlapping ways to do the same thing.
         assert_eq!(
-            resolve_session_tools(Some(("dev-1".into(), None)), Some("run-1".into()), true),
+            resolve_session_tools(
+                Some(("dev-1".into(), None)),
+                Some("run-1".into()),
+                true,
+                true
+            ),
             SessionTools::Orchestrator {
                 device_id: "dev-1".into(),
                 system_prompt: None
             }
         );
         assert_eq!(
-            resolve_session_tools(None, Some("run-1".into()), true),
+            resolve_session_tools(None, Some("run-1".into()), true, true),
             SessionTools::Seat {
                 run_id: "run-1".into()
             }
         );
-        assert_eq!(resolve_session_tools(None, None, true), SessionTools::Peer);
+        assert_eq!(
+            resolve_session_tools(None, None, true, true),
+            SessionTools::Peer
+        );
+
+        // A reviewer or a Code Flow step: no run owns it, and its permissions are wide
+        // because it has to read — only "does it decide its own turns" separates it.
+        assert_eq!(
+            resolve_session_tools(None, None, false, true),
+            SessionTools::None,
+            "something else drives it, so it is offered nothing",
+        );
     }
 
     #[test]
@@ -2422,7 +2443,7 @@ mod tests {
         // Offering the tool only to an already-unrestricted session removes that
         // case rather than guarding against it: there is nothing to escalate to.
         assert_eq!(
-            resolve_session_tools(None, None, false),
+            resolve_session_tools(None, None, true, false),
             SessionTools::None,
             "a restricted session is offered nothing at all",
         );
@@ -2449,7 +2470,7 @@ mod tests {
         // `tools: []` strips Bash/Edit. Right for the Orchestrator, fatal for a
         // session that is supposed to keep coding while a peer helps.
         let mut cmd = serde_json::json!({});
-        match resolve_session_tools(None, None, true) {
+        match resolve_session_tools(None, None, true, true) {
             SessionTools::Peer => {
                 cmd["mcpServers"] = super::peer_mcp_config("/w/worker.mjs", "tok-9");
                 cmd["allowedTools"] = super::peer_allowed_tools();

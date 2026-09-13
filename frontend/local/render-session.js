@@ -124,8 +124,8 @@ import {
   ReviewLauncher,
 } from "../shared/review-panel.js";
 import {
+  agentsPanelSlice,
   createReviewsCache,
-  reviewCardsForViewedThread,
   reusableReviewersFromReviews,
 } from "../shared/reviews-cache.js";
 import { createWorkflowsCache } from "../shared/workflows-cache.js";
@@ -1198,10 +1198,6 @@ export function createSessionRenderer({
 
   // Push the review slice onto the shared workspace-diff store so the Reviewer
   // tab (rail + mobile sheet) can render jobs, the launcher model, and gating.
-  function threadNameById(threadId) {
-    return (state.threads || []).find((thread) => thread.id === threadId)?.name || null;
-  }
-
   function renderReviewSlice(session) {
     if (typeof setReviewSlice !== "function") {
       return;
@@ -1237,29 +1233,13 @@ export function createSessionRenderer({
     }
     const reviewsData = reviewsCache.current();
     const workflowsData = workflowsCache.current();
-    const threadReviewJobs = reviewCardsForViewedThread(reviewsData, viewedThreadId);
     const threadWorkflowRuns = workflowRunsForThread(workflowsData, viewedThreadId);
     const viewingWritableAuthor =
       typeof startWorkflow === "function" &&
       isViewingConversation(session) &&
       canCurrentDeviceWrite(session);
     setReviewSlice({
-      reviewJobs: threadReviewJobs,
-      // Names, not a resolver: the store compares slices with JSON.stringify,
-      // which DROPS functions — so a function here is invisible to that check
-      // and every change beside it stops emitting.
-      goal:
-        (reviewsData.goals || []).find((entry) => entry.thread_id === viewedThreadId) || null,
-      asks: (reviewsData.asks || [])
-        .filter(
-          (ask) =>
-            ask.asker_thread_id === viewedThreadId || ask.peer_thread_id === viewedThreadId
-        )
-        .map((ask) => ({
-          ...ask,
-          asker_name: threadNameById(ask.asker_thread_id),
-          peer_name: threadNameById(ask.peer_thread_id),
-        })),
+      ...agentsPanelSlice(reviewsData, viewedThreadId, state.threads),
       workflowRuns: threadWorkflowRuns,
       reviewModel: reviewLaunchModel(session),
       workflowModel: workflowLaunchModel(session),
@@ -1270,12 +1250,6 @@ export function createSessionRenderer({
         null,
         getThreadWorkspace()?.cwd || null
       ),
-      // Full reviewer-thread list so each card can show its reviewer thread's
-      // (long, truncated-with-tooltip) name by joining on reviewer_thread_id.
-      reviewerThreads: reviewsData.reviewer_threads || [],
-      // The thread the panel is showing: sent as the review's parent so a review
-      // targets the VIEWED thread, not the relay's active thread.
-      parentThreadId: viewedThreadId,
       canRequest:
         typeof requestReview === "function" &&
         canRequestReview(session, state.deviceId, viewedThreadId),

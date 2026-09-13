@@ -15543,7 +15543,10 @@ mod review_tests {
         }
     }
 
-    async fn wait_for_review(app: &AppState, job_id: &str) -> crate::protocol::ReviewJobView {
+    pub(super) async fn wait_for_review(
+        app: &AppState,
+        job_id: &str,
+    ) -> crate::protocol::ReviewJobView {
         wait_for_review_status(app, job_id, &["complete", "failed", "blocked", "escalated"]).await
     }
 
@@ -16463,6 +16466,7 @@ resurrected into a turn that never completes: {:?}",
                 crate::state::ReviewMode::CleanThread,
                 cwd.to_string(),
                 "device-1".to_string(),
+                relay_api::delegation::StartedBy::Person,
                 None,
                 1,
             );
@@ -16604,6 +16608,7 @@ resurrected into a turn that never completes: {:?}",
                     crate::state::ReviewMode::CleanThread,
                     cwd.to_string(),
                     "device-1".to_string(),
+                    relay_api::delegation::StartedBy::Person,
                     None,
                     1,
                 );
@@ -16709,6 +16714,7 @@ resurrected into a turn that never completes: {:?}",
                     crate::state::ReviewMode::CleanThread,
                     cwd.to_string(),
                     "device-1".to_string(),
+                    relay_api::delegation::StartedBy::Person,
                     None,
                     1,
                 );
@@ -19039,7 +19045,7 @@ one that was dirty going in"
 
     // --- Phase 5: iterative review loop ----------------------------------------
 
-    async fn queue_verdicts(provider: &ReviewTestProvider, verdicts: &[&str]) {
+    pub(super) async fn queue_verdicts(provider: &ReviewTestProvider, verdicts: &[&str]) {
         let mut queue = provider.reviewer_verdicts.lock().await;
         for verdict in verdicts {
             queue.push_back(verdict.to_string());
@@ -22639,6 +22645,7 @@ the provider, not forwarded ({turn_models:?})"
                 crate::state::ReviewMode::CleanThread,
                 cwd.to_string(),
                 "device-1".to_string(),
+                relay_api::delegation::StartedBy::Person,
                 None,
                 1,
             );
@@ -24321,6 +24328,7 @@ turn) must allow a review: {error:?}"
                     crate::state::ReviewMode::CleanThread,
                     cwd.to_string(),
                     "device-1".to_string(),
+                    relay_api::delegation::StartedBy::Person,
                     None,
                     1,
                 );
@@ -24346,6 +24354,7 @@ turn) must allow a review: {error:?}"
                 crate::state::ReviewMode::CleanThread,
                 cwd.to_string(),
                 "device-1".to_string(),
+                relay_api::delegation::StartedBy::Person,
                 None,
                 1,
             );
@@ -24537,6 +24546,7 @@ turn) must allow a review: {error:?}"
                 crate::state::ReviewMode::CleanThread,
                 cwd.to_string(),
                 "device-1".to_string(),
+                relay_api::delegation::StartedBy::Person,
                 None,
                 1,
             );
@@ -26184,7 +26194,7 @@ mod beta_gate_tests {
 /// `ask_agent`: one session bringing in another.
 #[cfg(test)]
 mod ask_tests {
-    use super::path_scope_tests::{build_app, grant_workspace};
+    use super::path_scope_tests::{build_app, grant_workspace, pair_device};
     use crate::protocol::StartSessionInput;
     use relay_api::delegation::{AskError, AskRequest};
     use tempfile::TempDir;
@@ -26242,7 +26252,7 @@ mod ask_tests {
             .ask_agent(
                 &asker_id,
                 AskRequest {
-                    expand_with_context: false,
+                    started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: Some(stranger_id.clone()),
                     provider: Some("fake".to_string()),
                     model: None,
@@ -26261,7 +26271,7 @@ mod ask_tests {
             .ask_agent(
                 &asker_id,
                 AskRequest {
-                    expand_with_context: false,
+                    started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: Some("no-such-thread".to_string()),
                     provider: Some("fake".to_string()),
                     model: None,
@@ -26280,7 +26290,7 @@ mod ask_tests {
             .ask_agent(
                 &asker_id,
                 AskRequest {
-                    expand_with_context: false,
+                    started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: Some(asker_id.clone()),
                     provider: Some("fake".to_string()),
                     model: None,
@@ -26334,7 +26344,7 @@ mod ask_tests {
             .ask_agent(
                 &narrow,
                 AskRequest {
-                    expand_with_context: false,
+                    started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: Some(wide.clone()),
                     provider: None,
                     model: None,
@@ -26353,7 +26363,7 @@ mod ask_tests {
             .ask_agent(
                 &wide,
                 AskRequest {
-                    expand_with_context: false,
+                    started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: Some(narrow.clone()),
                     provider: None,
                     model: None,
@@ -26400,7 +26410,7 @@ mod ask_tests {
         app.ask_agent(
             &asker,
             AskRequest {
-                expand_with_context: false,
+                started_by: relay_api::delegation::StartedBy::Agent,
                 peer_thread_id: None,
                 provider: Some("fake".to_string()),
                 model: None,
@@ -26416,7 +26426,7 @@ mod ask_tests {
         app.ask_agent(
             &asker,
             AskRequest {
-                expand_with_context: true,
+                started_by: relay_api::delegation::StartedBy::Person,
                 peer_thread_id: None,
                 provider: Some("fake".to_string()),
                 model: None,
@@ -26476,7 +26486,7 @@ mod ask_tests {
             .ask_agent(
                 &asker,
                 AskRequest {
-                    expand_with_context: false,
+                    started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: None,
                     provider: Some("fake".to_string()),
                     model: None,
@@ -26557,7 +26567,7 @@ mod ask_tests {
         app.ask_agent(
             &asker,
             AskRequest {
-                expand_with_context: false,
+                started_by: relay_api::delegation::StartedBy::Agent,
                 peer_thread_id: None,
                 provider: Some("fake".to_string()),
                 model: None,
@@ -26597,6 +26607,793 @@ mod ask_tests {
             ask.answer.is_some(),
             "a clock firing must not discard an answer that exists: {:?}",
             ask.error,
+        );
+    }
+
+    // A provider whose session is created BY the first turn promotes the id mid-send, and
+    // the goal moves with it. Closing the dispatch on the id we sent to leaves the real
+    // goal reading "charged, never started", which the watchdog settles Blocked.
+    #[tokio::test]
+    async fn a_wake_that_promotes_the_session_closes_the_dispatch_on_the_real_one() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let placeholder = goal_session(&app, &cwd).await;
+        let real_id = format!("{placeholder}-promoted");
+        bridge.promote_on_first_turn(&placeholder, &real_id).await;
+
+        app.set_goal(&placeholder, "ship the mobile door", None)
+            .await
+            .expect("the user sets it");
+        app.ask_agent(
+            &placeholder,
+            AskRequest {
+                started_by: relay_api::delegation::StartedBy::Agent,
+                peer_thread_id: None,
+                provider: Some("fake".to_string()),
+                model: None,
+                effort: None,
+                message: "look at the retry loop".to_string(),
+            },
+        )
+        .await
+        .expect("the ask goes through");
+
+        for _ in 0..60 {
+            app.settle_and_deliver_asks_at(crate::state::unix_now())
+                .await;
+            {
+                let relay = app.relay.read().await;
+                if relay
+                    .goal_for_thread(&real_id)
+                    .is_some_and(|goal| goal.turns > 0)
+                {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+
+        let relay = app.relay.read().await;
+        let goal = relay
+            .goal_for_thread(&real_id)
+            .expect("the goal moved with the session");
+        assert_eq!(goal.turns, 1, "the wake charged it");
+        assert!(
+            !goal.dispatch_never_started(),
+            "the turn did start — closing the dispatch on the id we sent to would have the \
+watchdog settle this Blocked",
+        );
+    }
+
+    // Stop has a second way out: the thread reads as working but no turn is actually
+    // running, so it clears the stale status and returns early. A peer stopped THERE is
+    // still a peer somebody is waiting on.
+    #[tokio::test]
+    async fn stopping_a_peer_that_only_looks_busy_still_ends_its_ask() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "stopper", Vec::new()).await;
+        let thread = goal_session(&app, &cwd).await;
+
+        let peer = app
+            .ask_agent(
+                &thread,
+                AskRequest {
+                    started_by: relay_api::delegation::StartedBy::Agent,
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "look at the retry loop".to_string(),
+                },
+            )
+            .await
+            .expect("the ask goes through");
+
+        // Working status, no turn — the branch the other stop test never reaches.
+        {
+            let mut relay = app.relay.write().await;
+            relay.ensure_runtime_for_thread(&peer).active_turn_id = None;
+            relay.set_thread_status(&peer, "active".to_string(), Vec::new());
+            let ids: Vec<String> = relay
+                .asks_of_asker(&thread)
+                .into_iter()
+                .map(|ask| ask.id.clone())
+                .collect();
+            for id in ids {
+                relay.update_ask(&id, |ask| {
+                    ask.status = relay_api::delegation::AskStatus::Working;
+                    ask.answer = None;
+                });
+            }
+        }
+
+        app.stop_active_turn(crate::protocol::StopTurnInput {
+            device_id: Some("stopper".to_string()),
+            thread_id: peer.clone(),
+        })
+        .await
+        .expect("a thread that only looks busy is still stoppable");
+
+        let relay = app.relay.read().await;
+        assert!(
+            relay
+                .asks_of_asker(&thread)
+                .iter()
+                .all(|ask| ask.status.is_terminal()),
+            "the asker is waiting on a peer nobody is going to answer with",
+        );
+    }
+
+    // One peer can hold several asks, and a stop finds ONE last reply. It belongs to the
+    // ask whose turn produced it; giving it to the others answers questions nobody asked.
+    #[tokio::test]
+    async fn a_stop_gives_the_peers_last_reply_only_to_the_ask_that_earned_it() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "stopper", Vec::new()).await;
+        let thread = goal_session(&app, &cwd).await;
+
+        let peer = app
+            .ask_agent(
+                &thread,
+                AskRequest {
+                    started_by: relay_api::delegation::StartedBy::Agent,
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "the first question".to_string(),
+                },
+            )
+            .await
+            .expect("the ask goes through");
+
+        // Let the peer actually say something, so there is a reply to misattribute.
+        let mut reply_turn = None;
+        for _ in 0..50 {
+            if let Some((_, _, turn)) = app.latest_assistant_entry_with_turn(&peer).await {
+                reply_turn = turn;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+        let reply_turn = reply_turn.expect("the fake peer answers");
+
+        // Two live asks on that one peer: the first owns the reply's turn, the second is
+        // a later question the peer never got to.
+        {
+            let mut relay = app.relay.write().await;
+            let ids: Vec<String> = relay
+                .asks_of_asker(&thread)
+                .into_iter()
+                .map(|ask| ask.id.clone())
+                .collect();
+            for id in ids {
+                relay.update_ask(&id, |ask| {
+                    ask.status = relay_api::delegation::AskStatus::Working;
+                    ask.turn_id = Some(reply_turn.clone());
+                    ask.answer = None;
+                    ask.baseline_item_id = None;
+                });
+            }
+            let mut later = relay
+                .asks_of_asker(&thread)
+                .first()
+                .map(|ask| (*ask).clone())
+                .expect("one on record");
+            later.id = "ask-later".to_string();
+            later.turn_id = Some("a-turn-that-never-ran".to_string());
+            relay.insert_ask(later);
+            relay.ensure_runtime_for_thread(&peer).active_turn_id = Some("peer-turn".to_string());
+        }
+
+        app.stop_active_turn(crate::protocol::StopTurnInput {
+            device_id: Some("stopper".to_string()),
+            thread_id: peer.clone(),
+        })
+        .await
+        .expect("the user stops the peer");
+
+        let relay = app.relay.read().await;
+        let later = relay.ask("ask-later").expect("still on record");
+        assert!(
+            later.answer.is_none(),
+            "a reply from another turn is not this ask's answer: {:?}",
+            later.answer
+        );
+        assert!(
+            later
+                .error
+                .as_deref()
+                .is_some_and(|text| text.contains("stopped")),
+            "it was stopped before answering, and should say so: {:?}",
+            later.error
+        );
+        let earned = relay
+            .asks_of_asker(&thread)
+            .into_iter()
+            .find(|ask| ask.id != "ask-later")
+            .expect("the first is on record");
+        assert!(
+            earned.answer.is_some(),
+            "the ask whose turn produced the reply keeps it"
+        );
+    }
+
+    // A stop the user pressed has to stand. The relay nudges a peer that went quiet
+    // without answering, so stopping one restarts it; and an idle peer with nothing new
+    // to say never settles at all, parking the asker until a four-hour clock calls it
+    // "did not answer in time" — which is not what happened and not what to do about it.
+    #[tokio::test]
+    async fn stopping_a_peer_ends_its_ask_then_and_there() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "stopper", Vec::new()).await;
+        let thread = goal_session(&app, &cwd).await;
+
+        let peer = app
+            .ask_agent(
+                &thread,
+                AskRequest {
+                    started_by: relay_api::delegation::StartedBy::Agent,
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "look at the retry loop".to_string(),
+                },
+            )
+            .await
+            .expect("the ask goes through");
+
+        // Hold a turn open on the peer, the way a provider mid-answer does, so there is
+        // something for the user to stop.
+        {
+            let mut relay = app.relay.write().await;
+            relay.ensure_runtime_for_thread(&peer).active_turn_id = Some("peer-turn".to_string());
+        }
+
+        app.stop_active_turn(crate::protocol::StopTurnInput {
+            device_id: Some("stopper".to_string()),
+            thread_id: peer.clone(),
+        })
+        .await
+        .expect("the user stops the peer");
+
+        let (terminal, outcome) = {
+            let relay = app.relay.read().await;
+            let ask = relay
+                .asks_of_asker(&thread)
+                .into_iter()
+                .find(|ask| ask.peer_thread_id == peer)
+                .expect("the ask is on record")
+                .clone();
+            (ask.status.is_terminal(), ask.error.clone())
+        };
+        assert!(
+            terminal,
+            "the user's stop ends the ask; nothing may re-drive it"
+        );
+        assert!(
+            outcome
+                .as_deref()
+                .map(|text| text.contains("stopped"))
+                .unwrap_or(true),
+            "say it was stopped, not that it ran out of time: {outcome:?}"
+        );
+
+        // And the sweep must not bring it back — a terminal ask is not nudged.
+        app.settle_and_deliver_asks_at(crate::state::unix_now())
+            .await;
+        let still_terminal = {
+            let relay = app.relay.read().await;
+            relay
+                .asks_of_asker(&thread)
+                .into_iter()
+                .find(|ask| ask.peer_thread_id == peer)
+                .expect("still on record")
+                .status
+                .is_terminal()
+        };
+        assert!(
+            still_terminal,
+            "the sweep restarted an ask the user stopped"
+        );
+    }
+
+    // Charging before the send leaves a window where the goal watchdog sees a dispatch
+    // that never started and Blocks a perfectly healthy goal. The wake has to take the
+    // same session slot the driver holds across ITS charge-and-send, or they interleave.
+    #[tokio::test]
+    async fn the_wake_holds_the_session_slot_while_it_charges_and_sends() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+
+        app.set_goal(&thread, "ship the mobile door", None)
+            .await
+            .expect("the user sets it");
+        app.ask_agent(
+            &thread,
+            AskRequest {
+                started_by: relay_api::delegation::StartedBy::Agent,
+                peer_thread_id: None,
+                provider: Some("fake".to_string()),
+                model: None,
+                effort: None,
+                message: "look at the retry loop".to_string(),
+            },
+        )
+        .await
+        .expect("the ask goes through");
+
+        let state_of = |app: crate::state::AppState, thread: String| async move {
+            let relay = app.relay.read().await;
+            let asks = relay.asks_of_asker(&thread);
+            (
+                asks.iter().all(|ask| ask.status.is_terminal()),
+                asks.iter().any(|ask| ask.delivered),
+            )
+        };
+
+        let slot = app.acquire_session_slot().expect("nothing else holds it");
+        let mut settled = false;
+        for _ in 0..50 {
+            app.settle_and_deliver_asks_at(crate::state::unix_now())
+                .await;
+            let (terminal, delivered) = state_of(app.clone(), thread.clone()).await;
+            assert!(!delivered, "the slot is held; nothing may be handed back");
+            if terminal {
+                settled = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+        assert!(
+            settled,
+            "the fake peer should finish even while the slot is held"
+        );
+
+        drop(slot);
+        app.settle_and_deliver_asks_at(crate::state::unix_now())
+            .await;
+        let (_, delivered) = state_of(app.clone(), thread.clone()).await;
+        assert!(delivered, "with the slot free the answers go back");
+    }
+
+    // A reviewer reads and comments; a Code Flow step does what its run says. Neither
+    // decides its own turns, so neither gets the tools for deciding them — and permissions
+    // cannot answer that, because a reviewer inherits the wide ones it needs to read.
+    #[tokio::test]
+    async fn a_session_something_else_drives_is_refused_the_tools_for_driving_yourself() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        let token = app.ask_token_for_thread(&thread).await;
+
+        app.call_peer_tool("goal_status", &serde_json::json!({}), &token)
+            .await
+            .expect("it is its own session until something else takes it over");
+
+        // The relay marks a thread as a reviewer by recording it against a review.
+        {
+            let mut relay = app.relay.write().await;
+            let mut job = crate::state::ReviewJob::new(
+                "review-role".to_string(),
+                "some-parent".to_string(),
+                "fake".to_string(),
+                "fake".to_string(),
+                None,
+                crate::state::ReviewMode::CleanThread,
+                cwd.clone(),
+                "device-1".to_string(),
+                relay_api::delegation::StartedBy::Person,
+                None,
+                1,
+            );
+            job.reviewer_thread_id = Some(thread.clone());
+            relay.insert_review_job(job);
+        }
+
+        assert!(
+            app.list_peer_tools_for(&token).await.is_empty(),
+            "nor are they advertised to one"
+        );
+        for tool in crate::orchestrator_tools::PEER_TOOLS {
+            app.call_peer_tool(tool, &serde_json::json!({}), &token)
+                .await
+                .expect_err("a reviewer does not get to bring in agents of its own");
+        }
+    }
+
+    // A seat is inside a run somebody else is driving. Only claude_code actually withheld
+    // these — codex and cursor decide by permission level alone and never ask whether the
+    // thread is a seat, so a cursor seat was handed the lot. The refusal belongs at the
+    // call, where it holds however the tools were advertised.
+    #[tokio::test]
+    async fn a_task_seat_may_not_call_the_tools_an_ordinary_session_gets() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        let token = app.ask_token_for_thread(&thread).await;
+
+        // It is an ordinary session until a run owns it.
+        app.call_peer_tool("goal_status", &serde_json::json!({}), &token)
+            .await
+            .expect("an ordinary session reads its own goal");
+
+        {
+            let mut relay = app.relay.write().await;
+            let mut run = relay_api::team::TeamRun::new(
+                "team-seat-guard".to_string(),
+                crate::state::TaskSpec::default(),
+                cwd.clone(),
+                "device-1".to_string(),
+            );
+            run.sub_tasks.push(relay_api::team::SubTask {
+                owned_thread_ids: vec![thread.clone()],
+                ..Default::default()
+            });
+            relay.insert_team_run(run);
+        }
+
+        assert!(
+            app.list_peer_tools_for(&token).await.is_empty(),
+            "nor are they advertised to one — the list rides every request"
+        );
+
+        for tool in crate::orchestrator_tools::PEER_TOOLS {
+            let error = app
+                .call_peer_tool(tool, &serde_json::json!({}), &token)
+                .await
+                .expect_err("a seat may not reach past its own run");
+            assert!(
+                error.contains("drives this session"),
+                "{tool} should say why it is refused: {error}"
+            );
+        }
+    }
+
+    // A review a PERSON asked for spends nothing: they are present, and `max_rounds` is
+    // the bound they set. The budget is for work an agent went and started on its own.
+    #[tokio::test]
+    async fn a_review_a_person_asked_for_spends_nothing_from_the_goal() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = super::review_tests::build_review_app(cwd, &["codex"]).await;
+        let thread = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                provider: Some("codex".to_string()),
+                approval_policy: Some("bypass".to_string()),
+                model: None,
+                effort: None,
+                sandbox: None,
+                initial_prompt: None,
+                project_id: None,
+            })
+            .await
+            .expect("session starts")
+            .active_thread_id
+            .clone()
+            .expect("thread");
+        app.set_goal(&thread, "ship the mobile door", None)
+            .await
+            .expect("the goal is set while the thread is free");
+
+        super::review_tests::queue_verdicts(providers.get("codex").unwrap(), &["APPROVE"]).await;
+        let receipt = app
+            .request_review(super::review_tests::review_input("codex"))
+            .await
+            .expect("review starts");
+        super::review_tests::wait_for_review(&app, &receipt.review_job_id).await;
+
+        let relay = app.relay.read().await;
+        let goal = relay.goal_for_thread(&thread).expect("recorded");
+        assert_eq!(
+            goal.turns, 0,
+            "every turn of it was work the person asked for and is there to read"
+        );
+        assert_eq!(
+            goal.status.as_str(),
+            "active",
+            "and the objective survives it"
+        );
+    }
+
+    // "Do the work, get it reviewed, address the review" is the loop a goal is for. A
+    // review takes the thread for as long as it runs, but it gives it back — so the goal
+    // waits it out rather than dying, and the turn that comes back to answer the findings
+    // is the relay acting on its own, which pays like any other.
+    #[tokio::test]
+    async fn a_review_pauses_a_goal_and_answering_it_costs_a_turn() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = super::review_tests::build_review_app(cwd, &["codex"]).await;
+        let thread = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                provider: Some("codex".to_string()),
+                approval_policy: Some("bypass".to_string()),
+                model: None,
+                effort: None,
+                sandbox: None,
+                initial_prompt: None,
+                project_id: None,
+            })
+            .await
+            .expect("session starts")
+            .active_thread_id
+            .clone()
+            .expect("thread");
+
+        app.set_goal(&thread, "ship the mobile door", None)
+            .await
+            .expect("the goal is set while the thread is free");
+        let receipt = app
+            .request_review(super::review_tests::review_input("codex"))
+            .await
+            .expect("review starts on the same thread");
+
+        app.drive_goals_at(crate::state::unix_now()).await;
+        {
+            let relay = app.relay.read().await;
+            let goal = relay.goal_for_thread(&thread).expect("recorded");
+            assert_eq!(
+                goal.status.as_str(),
+                "active",
+                "a review borrows the thread; it does not end the objective"
+            );
+            assert_eq!(goal.turns, 0, "and nothing is spent while it waits");
+        }
+
+        app.relay
+            .write()
+            .await
+            .update_review_job(&receipt.review_job_id, |job| {
+                job.set_status(crate::state::ReviewJobStatus::Complete)
+            });
+
+        app.drive_goals_at(crate::state::unix_now()).await;
+        let relay = app.relay.read().await;
+        let goal = relay.goal_for_thread(&thread).expect("recorded");
+        assert_eq!(goal.status.as_str(), "active", "and picks straight back up");
+        assert_eq!(
+            goal.turns, 1,
+            "answering the review is a turn like any other"
+        );
+    }
+
+    // The other half of the rule, and the one that is easy to get backwards: the budget
+    // stands in for somebody watching, so a turn the USER typed is already supervised and
+    // must be free. Charging it would mean the closer you watch, the less runway it has.
+    #[tokio::test]
+    async fn a_turn_the_user_typed_is_not_charged_to_the_goal() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "ship the mobile door", None)
+            .await
+            .expect("the user sets it");
+
+        // One relay-driven turn first, so the assertion below is about the SECOND turn
+        // being free rather than about nothing having happened yet.
+        hand_over_the_goal(&app, &thread).await;
+        let after_drive = {
+            let relay = app.relay.read().await;
+            relay.goal_for_thread(&thread).expect("recorded").turns
+        };
+        assert_eq!(after_drive, 1, "the relay drove one turn and paid for it");
+
+        for message in ["something unrelated", "about the goal: rename that button"] {
+            app.send_message(crate::protocol::SendMessageInput {
+                text: message.to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("dev".to_string()),
+                thread_id: thread.clone(),
+            })
+            .await
+            .expect("the user may always talk to their own session");
+            for _ in 0..100 {
+                let busy = {
+                    let relay = app.relay.read().await;
+                    relay
+                        .runtime_for_thread(&thread)
+                        .map(|runtime| runtime.is_working())
+                        .unwrap_or(false)
+                };
+                if !busy {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+
+        let relay = app.relay.read().await;
+        let goal = relay.goal_for_thread(&thread).expect("recorded");
+        assert_eq!(
+            goal.turns, after_drive,
+            "neither message was the relay acting on its own; both are free"
+        );
+        assert_eq!(goal.status.as_str(), "active", "and neither ends the goal");
+    }
+
+    // Who set the work going, not who sent the turn. A person asking for help is present
+    // and bounded what they asked for; an agent extending its own loop is the thing the
+    // budget exists to bound. The delivery turn looks identical either way.
+    #[tokio::test]
+    async fn help_a_person_asked_for_is_not_charged_to_the_goal() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "ship the mobile door", None)
+            .await
+            .expect("the user sets it");
+
+        app.ask_agent(
+            &thread,
+            AskRequest {
+                // What `/delegate` typed by a person sends.
+                started_by: relay_api::delegation::StartedBy::Person,
+                peer_thread_id: None,
+                provider: Some("fake".to_string()),
+                model: None,
+                effort: None,
+                message: "look at the retry loop".to_string(),
+            },
+        )
+        .await
+        .expect("the ask goes through");
+
+        for _ in 0..50 {
+            app.settle_and_deliver_asks_at(crate::state::unix_now())
+                .await;
+            let relay = app.relay.read().await;
+            if relay
+                .asks_of_asker(&thread)
+                .iter()
+                .all(|ask| ask.status.is_terminal() && ask.delivered)
+            {
+                break;
+            }
+            drop(relay);
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+
+        let relay = app.relay.read().await;
+        assert_eq!(
+            relay.goal_for_thread(&thread).expect("recorded").turns,
+            0,
+            "the person asked for this and is reading the answer; it is their turn, not the budget's"
+        );
+    }
+
+    // Help the agent went and got itself. Handing the answers back is a turn it caused,
+    // so a goal whose agent keeps asking would otherwise run on a budget that never moves.
+    #[tokio::test]
+    async fn handing_peer_answers_back_spends_a_goal_turn() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+
+        app.set_goal(&thread, "ship the mobile door", None)
+            .await
+            .expect("the user sets it");
+        let spent = || async {
+            app.relay
+                .read()
+                .await
+                .goal_for_thread(&thread)
+                .expect("recorded")
+                .turns
+        };
+        assert_eq!(spent().await, 0);
+
+        app.ask_agent(
+            &thread,
+            AskRequest {
+                started_by: relay_api::delegation::StartedBy::Agent,
+                peer_thread_id: None,
+                provider: Some("fake".to_string()),
+                model: None,
+                effort: None,
+                message: "look at the retry loop".to_string(),
+            },
+        )
+        .await
+        .expect("the ask goes through");
+
+        let mut delivered = false;
+        for _ in 0..50 {
+            app.settle_and_deliver_asks_at(crate::state::unix_now())
+                .await;
+            {
+                let relay = app.relay.read().await;
+                if relay
+                    .asks_of_asker(&thread)
+                    .iter()
+                    .all(|ask| ask.status.is_terminal() && ask.delivered)
+                {
+                    delivered = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+        assert!(delivered, "the fake peer should answer and be handed back");
+
+        assert_eq!(
+            spent().await,
+            1,
+            "the wake started a turn on this session; the goal pays for it"
+        );
+    }
+
+    // A goal drives an unrestricted agent on its own. A paired device whose grant does
+    // not cover the thread must not be able to point one at work it cannot even see, nor
+    // erase the objective of a thread outside its grant.
+    #[tokio::test]
+    async fn a_goal_cannot_be_set_or_stopped_outside_the_device_scope() {
+        let mine = TempDir::new().expect("mine");
+        let theirs = TempDir::new().expect("theirs");
+        let mine_cwd = mine.path().to_string_lossy().to_string();
+        let theirs_cwd = theirs.path().to_string_lossy().to_string();
+
+        let (app, _p, _o) = build_app(&mine_cwd).await;
+        grant_workspace(&app, &mine_cwd).await;
+        grant_workspace(&app, &theirs_cwd).await;
+        let hidden = goal_session(&app, &theirs_cwd).await;
+        pair_device(&app, "narrow-device", vec![mine_cwd.clone()]).await;
+
+        let error = app
+            .set_goal(&hidden, "do my bidding over there", Some("narrow-device"))
+            .await
+            .expect_err("a thread outside the grant is not one to point a goal at");
+        assert!(error.contains("no such session"), "unexpected: {error}");
+        assert!(app.relay.read().await.goal_for_thread(&hidden).is_none());
+
+        // The local operator set it, so only the local operator can stop it.
+        app.set_goal(&hidden, "the user's own objective", None)
+            .await
+            .expect("the local operator is not scoped");
+        let error = app
+            .cancel_goal(&hidden, Some("narrow-device"))
+            .await
+            .expect_err("a thread outside the grant is not one to stop");
+        assert!(error.contains("no such session"), "unexpected: {error}");
+        assert_eq!(
+            app.relay
+                .read()
+                .await
+                .goal_for_thread(&hidden)
+                .expect("still there")
+                .status
+                .as_str(),
+            "active",
         );
     }
 
@@ -26651,7 +27448,7 @@ mod ask_tests {
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
 
-        app.set_goal(&thread, "ship the mobile door")
+        app.set_goal(&thread, "ship the mobile door", None)
             .await
             .expect("the user sets it");
 
@@ -26700,7 +27497,9 @@ mod ask_tests {
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "keep going").await.expect("set");
+        app.set_goal(&thread, "keep going", None)
+            .await
+            .expect("set");
 
         // Drive far past the budget, waiting for each turn to settle first —
         // the driver deliberately never interleaves with a turn already running,
@@ -26742,7 +27541,7 @@ mod ask_tests {
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "ask me something")
+        app.set_goal(&thread, "ask me something", None)
             .await
             .expect("set");
         hand_over_the_goal(&app, &thread).await;
@@ -26802,7 +27601,7 @@ mod ask_tests {
             .expect("thread");
 
         let refused = app
-            .set_goal(&restricted, "ship the mobile door")
+            .set_goal(&restricted, "ship the mobile door", None)
             .await
             .expect_err("a session with no way to stop must not be driven");
         assert!(
@@ -26831,7 +27630,9 @@ mod ask_tests {
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "keep going").await.expect("set");
+        app.set_goal(&thread, "keep going", None)
+            .await
+            .expect("set");
 
         drop(project);
         for _ in 0..5 {
@@ -26857,14 +27658,16 @@ mod ask_tests {
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "keep going").await.expect("set");
+        app.set_goal(&thread, "keep going", None)
+            .await
+            .expect("set");
 
         {
             let mut relay = app.relay.write().await;
             relay.set_active_turn(Some("turn-in-flight".to_string()));
             relay.notify();
         }
-        app.cancel_goal(&thread).await.expect("stops");
+        app.cancel_goal(&thread, None).await.expect("stops");
 
         let mut working = true;
         for _ in 0..100 {
@@ -26915,7 +27718,9 @@ mod ask_tests {
             .active_thread_id
             .clone()
             .expect("thread");
-        app.set_goal(&thread, "keep going").await.expect("set");
+        app.set_goal(&thread, "keep going", None)
+            .await
+            .expect("set");
 
         {
             let mut relay = app.relay.write().await;
@@ -26924,7 +27729,7 @@ mod ask_tests {
         }
 
         let reported = app
-            .cancel_goal(&thread)
+            .cancel_goal(&thread, None)
             .await
             .expect_err("an unconfirmed stop must not read as a stop");
         assert!(
@@ -26955,7 +27760,9 @@ mod ask_tests {
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "keep going").await.expect("set");
+        app.set_goal(&thread, "keep going", None)
+            .await
+            .expect("set");
 
         app.update_session_settings(crate::protocol::UpdateSessionSettingsInput {
             thread_id: thread.clone(),
@@ -27006,7 +27813,7 @@ mod ask_tests {
             relay.orchestrator_thread_id = Some(thread.clone());
         }
 
-        app.set_goal(&thread, "keep going")
+        app.set_goal(&thread, "keep going", None)
             .await
             .expect_err("a thread that answers to something else is not yours to drive");
         assert!(app.relay.read().await.goal_for_thread(&thread).is_none());
@@ -27021,7 +27828,7 @@ mod ask_tests {
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "ship the mobile door")
+        app.set_goal(&thread, "ship the mobile door", None)
             .await
             .expect("set");
 
@@ -27052,7 +27859,7 @@ mod ask_tests {
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "ship the mobile door")
+        app.set_goal(&thread, "ship the mobile door", None)
             .await
             .expect("set");
         hand_over_the_goal(&app, &thread).await;
@@ -27067,8 +27874,8 @@ mod ask_tests {
             "the sequence needs a goal that really was driven",
         );
 
-        let _ = app.cancel_goal(&thread).await;
-        app.set_goal(&thread, "something else entirely")
+        let _ = app.cancel_goal(&thread, None).await;
+        app.set_goal(&thread, "something else entirely", None)
             .await
             .expect("the user sets a new one");
 
@@ -27101,7 +27908,9 @@ mod ask_tests {
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "keep going").await.expect("set");
+        app.set_goal(&thread, "keep going", None)
+            .await
+            .expect("set");
         for _ in 0..crate::state::goal_max_turns() {
             hand_over_the_goal(&app, &thread).await;
         }
@@ -27145,7 +27954,7 @@ mod ask_tests {
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "ship the mobile door")
+        app.set_goal(&thread, "ship the mobile door", None)
             .await
             .expect("set");
         hand_over_the_goal(&app, &thread).await;
@@ -27186,7 +27995,9 @@ mod ask_tests {
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "keep going").await.expect("set");
+        app.set_goal(&thread, "keep going", None)
+            .await
+            .expect("set");
 
         let held = app.acquire_session_slot().expect("nothing else holds it");
         for _ in 0..5 {
@@ -27233,7 +28044,7 @@ mod ask_tests {
             .await
             .expect("review starts");
 
-        app.set_goal(&thread, "keep going")
+        app.set_goal(&thread, "keep going", None)
             .await
             .expect_err("something else is already driving this thread");
     }
@@ -27250,7 +28061,9 @@ mod ask_tests {
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "keep going").await.expect("set");
+        app.set_goal(&thread, "keep going", None)
+            .await
+            .expect("set");
 
         app.archive_thread(&thread, None).await.expect("archives");
 
@@ -27278,23 +28091,8 @@ mod ask_tests {
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
 
-        let asker = app
-            .start_session(crate::protocol::StartSessionInput {
-                cwd: Some(cwd.clone()),
-                provider: Some("fake".to_string()),
-                approval_policy: Some("never".to_string()),
-                device_id: Some("dev".to_string()),
-                initial_prompt: None,
-                model: None,
-                effort: None,
-                project_id: None,
-                sandbox: None,
-            })
-            .await
-            .expect("asker starts")
-            .active_thread_id
-            .clone()
-            .expect("thread");
+        // Unrestricted, because that is the only kind a bridge ever hands a token to.
+        let asker = goal_session(&app, &cwd).await;
 
         let args = serde_json::json!({ "message": "do the thing", "provider": "fake" });
 
@@ -27357,7 +28155,7 @@ mod ask_tests {
             .ask_agent(
                 &asker,
                 AskRequest {
-                    expand_with_context: false,
+                    started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: None,
                     provider: None,
                     model: None,
@@ -27411,7 +28209,7 @@ mod ask_tests {
             .ask_agent(
                 &asker_id,
                 AskRequest {
-                    expand_with_context: false,
+                    started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: None,
                     provider: Some("fake".to_string()),
                     model: None,
@@ -27485,7 +28283,7 @@ mod ask_tests {
             .ask_agent(
                 &a_id,
                 AskRequest {
-                    expand_with_context: false,
+                    started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: None,
                     provider: Some("fake".to_string()),
                     model: None,
@@ -27500,7 +28298,7 @@ mod ask_tests {
             .ask_agent(
                 &b_id,
                 AskRequest {
-                    expand_with_context: false,
+                    started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: Some(a_id.clone()),
                     provider: Some("fake".to_string()),
                     model: None,
@@ -27546,7 +28344,7 @@ mod ask_tests {
             .ask_agent(
                 &asker_id,
                 AskRequest {
-                    expand_with_context: false,
+                    started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: None,
                     provider: Some("fake".to_string()),
                     model: None,

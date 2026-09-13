@@ -1046,12 +1046,10 @@ the drain window; it may still be running."
         let start = classify_workspace_result(
             workspace,
             bridge
-                .start_thread(StartThreadRequest::new(
-                    workspace.as_str(),
-                    &model,
-                    &approval_policy,
-                    &sandbox,
-                ))
+                .start_thread(
+                    StartThreadRequest::new(workspace.as_str(), &model, &approval_policy, &sandbox)
+                        .driven_by(crate::provider::SessionPurpose::Workflow),
+                )
                 .await,
         )?;
         let mut thread = start.thread;

@@ -1042,17 +1042,21 @@ from {}; no provider turn was active.",
                 ),
             );
             relay.notify();
-            return Ok(relay.snapshot());
+            drop(relay);
+            // A peer stopped in THIS state is still a peer somebody is waiting on. Leaving
+            // it live is what let the sweep nudge it back, or park the asker for four hours.
+            self.settle_asks_stopped_by_user(&thread_id).await;
+            return Ok(self.snapshot().await);
         };
 
-        match self
+        let turn_already_gone = match self
             .find_thread_provider(&thread_id)
             .await?
             .1
             .request_turn_stop(&thread_id, Some(&turn_id))
             .await
         {
-            Ok(()) => {}
+            Ok(()) => false,
             // Provider already dropped the turn (Codex: "no active turn to interrupt").
             // That is the terminal signal — clear the local ghost instead of leaving
             // Stop/archive/send wedged until restart.
@@ -1075,9 +1079,15 @@ from {}; no provider turn was active.",
                     ),
                 );
                 relay.notify();
-                return Ok(relay.snapshot());
+                true
             }
             Err(error) => return Err(error),
+        };
+        // The stop stands, so anything waiting on this thread's answer is over. Before the
+        // snapshot, or the client is handed a view that still shows the peer working.
+        self.settle_asks_stopped_by_user(&thread_id).await;
+        if turn_already_gone {
+            return Ok(self.snapshot().await);
         }
 
         {

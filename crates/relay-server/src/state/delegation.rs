@@ -45,6 +45,9 @@ pub(crate) struct Ask {
     /// a peer that has not picked up the turn still looks idle, and its PREVIOUS
     /// reply would be captured as the answer to this ask.
     pub(crate) baseline_item_id: Option<String>,
+    /// Who set this going. Read when the answers are handed back, to decide whether
+    /// that turn comes out of the asker's goal budget.
+    pub(crate) started_by: relay_api::delegation::StartedBy,
     /// The turn this ask dispatched.
     ///
     /// Load-bearing: a peer can be typed into by a person while an ask is open,
@@ -83,6 +86,7 @@ impl Ask {
         message: String,
         cwd: String,
         baseline_item_id: Option<String>,
+        started_by: relay_api::delegation::StartedBy,
     ) -> Self {
         let now = unix_now();
         Self {
@@ -94,6 +98,7 @@ impl Ask {
             peer_effort,
             message,
             baseline_item_id,
+            started_by,
             turn_id: None,
             nudged: false,
             answer: None,
@@ -166,6 +171,7 @@ mod tests {
             "fix the flaky test".into(),
             "/tmp".into(),
             None,
+            relay_api::delegation::StartedBy::Agent,
         )
     }
 

@@ -5,6 +5,7 @@ import {
   signClaimInitProof,
 } from "./crypto.js";
 import { renderLog } from "./session-surface.js";
+import { ACTIONS_REQUIRING_SESSION_CLAIM } from "./session-claim-actions.js";
 import {
   CLAIM_REFRESH_FLOOR_MS,
   CLAIM_REFRESH_SKEW_MS,
@@ -952,13 +953,7 @@ function isSessionClaimError(message) {
 }
 
 function requiresSessionClaim(actionType) {
-  return actionType === "send_message"
-    || actionType === "apply_file_change"
-    || actionType === "request_review"
-    || actionType === "start_workflow"
-    || actionType === "resolve_review"
-    || actionType === "resolve_workflow"
-    || actionType === "delete_review";
+  return ACTIONS_REQUIRING_SESSION_CLAIM.has(actionType);
 }
 
 function shouldAutoReclaimSession() {

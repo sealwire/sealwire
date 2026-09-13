@@ -425,10 +425,16 @@ impl AcpBridge {
         }])
     }
 
-    /// A token only when this session is already unrestricted — the rule that
-    /// makes "an agent may bring in another agent" not an escalation.
+    /// A token only for a session that decides its own turns AND is already unrestricted.
+    ///
+    /// Reattachment has a thread id, so it asks the same question the call gate does
+    /// instead of re-deciding on permissions — which cannot tell a reviewer, holding the
+    /// wide permissions it needs in order to read, from a person's own session.
     async fn ask_token_if_allowed(&self, thread_id: &str) -> Option<String> {
         let mut relay = self.state.write().await;
+        if !relay.thread_drives_itself(thread_id) {
+            return None;
+        }
         let settings = relay.thread_settings(thread_id)?;
         if !crate::state::session_is_unrestricted(&settings.approval_policy, &settings.sandbox) {
             return None;
@@ -1241,12 +1247,13 @@ impl ProviderBridge for AcpBridge {
     /// as a user turn: see `StartThreadRequest::system_prompt`.
     async fn start_thread(&self, request: StartThreadRequest) -> Result<StartThreadResult, String> {
         let cwd = request.cwd.as_str();
-        // Minted before the session exists, bound to it below. Only for an
-        // already-unrestricted session, so bringing in another agent can never
-        // be a way to exceed what this one may do.
-        let new_token = if crate::state::session_is_unrestricted(
+        // Minted before the session exists, bound to it below. What it is for decides
+        // whether it gets one at all — permissions alone handed a task seat the tools of
+        // a session that drives itself.
+        let new_token = if crate::provider::session_gets_peer_tools(
             request.approval_policy.as_str(),
             request.sandbox.as_str(),
+            &request.purpose,
         ) {
             Some(self.state.write().await.mint_unbound_ask_token())
         } else {

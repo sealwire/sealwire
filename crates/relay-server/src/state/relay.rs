@@ -2474,6 +2474,21 @@ impl RelayState {
         TeamAttribution::default()
     }
 
+    /// Whether this thread decides its own turns, as things stand.
+    ///
+    /// The one answer every tool decision reads. Derived rather than stored because the
+    /// answer moves — a run adopts a thread, a finished run is reopened — and three
+    /// bridges each deriving their own is how a cursor seat and a claude reviewer both
+    /// ended up holding the tools of a session that runs itself.
+    pub(crate) fn thread_drives_itself(&self, thread_id: &str) -> bool {
+        self.orchestrator_thread_id.as_deref() != Some(thread_id)
+            && self.seat_run_id_for_thread(thread_id).is_none()
+            // The AUTHOR's own session while a Code Flow drives it, not only the steps:
+            // `is_reviewer_thread` sees the steps, and the run owns both.
+            && !self.is_thread_workflow_locked(thread_id)
+            && !self.is_reviewer_thread(thread_id)
+    }
+
     /// Whether a thread is a reviewer outside any team run — a standalone
     /// review, a review job, or a workflow step.
     fn is_reviewer_thread(&self, thread_id: &str) -> bool {
@@ -6410,6 +6425,7 @@ mod tests {
                 ReviewMode::CleanThread,
                 "/tmp/project".to_string(),
                 "device".to_string(),
+                relay_api::delegation::StartedBy::Person,
                 None,
                 1,
             );
@@ -6494,6 +6510,7 @@ mod tests {
                 "do the thing".to_string(),
                 "/tmp".to_string(),
                 None,
+                relay_api::delegation::StartedBy::Agent,
             );
             ask.set_status(status);
             ask

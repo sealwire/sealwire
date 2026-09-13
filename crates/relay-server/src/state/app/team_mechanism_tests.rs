@@ -6762,6 +6762,7 @@ async fn delete_task_preflights_every_seat_before_deleting_any_of_them() {
             crate::state::ReviewMode::CleanThread,
             root.clone(),
             "device-1".to_string(),
+            relay_api::delegation::StartedBy::Person,
             None,
             1,
         );
@@ -7447,6 +7448,7 @@ async fn delete_task_drops_persisted_review_cards_with_the_seat() {
             crate::state::ReviewMode::CleanThread,
             root.clone(),
             "device-1".to_string(),
+            relay_api::delegation::StartedBy::Person,
             None,
             1,
         );

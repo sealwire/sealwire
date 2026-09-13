@@ -342,6 +342,23 @@ impl AppState {
     /// Not beta-gated: this is not the task engine, and a public build is meant
     /// to have it. Deliberately different from `list_orchestrator_tools`, which
     /// returns nothing when tasks are locked.
+    /// Empty for a thread a task run owns: `call_peer_tool` refuses it anyway, and a
+    /// list is re-sent with every request, so advertising what can only be refused is
+    /// paid for over and over.
+    pub async fn list_peer_tools_for(&self, ask_token: &str) -> Vec<OrchestratorToolView> {
+        let eligible = {
+            let relay = self.relay.read().await;
+            relay
+                .thread_for_ask_token(ask_token)
+                .map(|thread_id| self.peer_tools_allowed(&relay, &thread_id).is_ok())
+                .unwrap_or(true)
+        };
+        if !eligible {
+            return Vec::new();
+        }
+        self.list_peer_tools().await
+    }
+
     pub async fn list_peer_tools(&self) -> Vec<OrchestratorToolView> {
         orchestrator_tools::peer_tools()
             .into_iter()
@@ -356,6 +373,36 @@ impl AppState {
     /// The ordinary-session entry point. The token comes from the env of the
     /// bridge subprocess the relay launched; resolving it here is what turns
     /// "somebody claims to be a session" into "this session".
+    /// Whether this thread may use the peer tools, as things stand.
+    ///
+    /// Re-derived rather than trusted: a token is minted once and never changes, while both
+    /// facts behind it move — a run can take a thread over, and settings can be narrowed
+    /// after the bridge was attached. The list asks the same thing, so a session is never
+    /// advertised what it would be refused.
+    fn peer_tools_allowed(
+        &self,
+        relay: &crate::state::RelayState,
+        thread_id: &str,
+    ) -> Result<(), String> {
+        if !relay.thread_drives_itself(thread_id) {
+            return Err(
+                "something else drives this session — these tools are for a \
+session that runs itself"
+                    .to_string(),
+            );
+        }
+        let unrestricted = relay
+            .thread_settings(thread_id)
+            .map(|s| crate::state::session_is_unrestricted(&s.approval_policy, &s.sandbox))
+            .unwrap_or(false);
+        if !unrestricted {
+            return Err(
+                "this session's permissions no longer allow bringing in another agent".to_string(),
+            );
+        }
+        Ok(())
+    }
+
     pub async fn call_peer_tool(
         &self,
         name: &str,
@@ -375,6 +422,10 @@ impl AppState {
         .ok_or_else(|| "this session is not allowed to bring in another agent".to_string())?;
         let caller_thread_id = caller_thread_id.as_str();
 
+        {
+            let relay = self.relay.read().await;
+            self.peer_tools_allowed(&relay, caller_thread_id)?;
+        }
         match orchestrator_tools::parse_call(name, args)? {
             ToolCall::GoalStatus => Ok(self.goal_status_text(caller_thread_id).await),
             ToolCall::GoalComplete { summary } => self
@@ -414,9 +465,7 @@ impl AppState {
                 effort,
             } => {
                 let request = relay_api::delegation::AskRequest {
-                    // An agent writes its own message, with the conversation in
-                    // front of it. Only a person's words need expanding.
-                    expand_with_context: false,
+                    started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: agent,
                     // Left unresolved on purpose: only `ask_agent` knows who is
                     // asking, and the default is "someone other than you".

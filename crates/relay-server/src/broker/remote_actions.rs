@@ -232,6 +232,17 @@ pub(super) enum RemoteActionRequest {
         #[serde(default)]
         device_id: Option<String>,
     },
+    SetGoal {
+        thread_id: String,
+        objective: String,
+        #[serde(default)]
+        device_id: Option<String>,
+    },
+    StopGoal {
+        thread_id: String,
+        #[serde(default)]
+        device_id: Option<String>,
+    },
     RegisterPushSubscription {
         input: PushSubscriptionInput,
     },
@@ -283,6 +294,8 @@ impl RemoteActionRequest {
             Self::ResolveReview { .. } => RemoteActionKind::ResolveReview,
             Self::ResolveWorkflow { .. } => RemoteActionKind::ResolveWorkflow,
             Self::DeleteReview { .. } => RemoteActionKind::DeleteReview,
+            Self::SetGoal { .. } => RemoteActionKind::SetGoal,
+            Self::StopGoal { .. } => RemoteActionKind::StopGoal,
             Self::RegisterPushSubscription { .. } => RemoteActionKind::RegisterPushSubscription,
             Self::UnregisterPushSubscription { .. } => RemoteActionKind::UnregisterPushSubscription,
         }
@@ -469,6 +482,19 @@ impl RemoteActionRequest {
                 review_id,
                 device_id: Some(device_id),
             },
+            Self::SetGoal {
+                thread_id,
+                objective,
+                ..
+            } => Self::SetGoal {
+                thread_id,
+                objective,
+                device_id: Some(device_id),
+            },
+            Self::StopGoal { thread_id, .. } => Self::StopGoal {
+                thread_id,
+                device_id: Some(device_id),
+            },
             Self::RegisterPushSubscription { mut input } => {
                 input.device_id = Some(device_id);
                 Self::RegisterPushSubscription { input }
@@ -522,6 +548,8 @@ pub(super) enum RemoteActionKind {
     ResolveReview,
     ResolveWorkflow,
     DeleteReview,
+    SetGoal,
+    StopGoal,
     RegisterPushSubscription,
     UnregisterPushSubscription,
 }
@@ -567,6 +595,8 @@ impl RemoteActionKind {
             Self::ResolveReview => "resolve_review",
             Self::ResolveWorkflow => "resolve_workflow",
             Self::DeleteReview => "delete_review",
+            Self::SetGoal => "set_goal",
+            Self::StopGoal => "stop_goal",
             Self::RegisterPushSubscription => "register_push_subscription",
             Self::UnregisterPushSubscription => "unregister_push_subscription",
         }
@@ -1503,6 +1533,29 @@ async fn execute_remote_action(
             reviews: Some(state.reviews(device_id).await),
             ..RemoteActionOutcome::default()
         }),
+        // The objective is written whole, never merged: re-sending the same one is how a
+        // stopped goal resumes, and how "not done — keep going" answers a completion claim.
+        RemoteActionRequest::SetGoal {
+            thread_id,
+            objective,
+            device_id,
+        } => {
+            let device_id = device_id.ok_or_else(|| "missing device id".to_string())?;
+            state
+                .set_goal(&thread_id, &objective, Some(&device_id))
+                .await
+                .map(|()| RemoteActionOutcome::default())
+        }
+        RemoteActionRequest::StopGoal {
+            thread_id,
+            device_id,
+        } => {
+            let device_id = device_id.ok_or_else(|| "missing device id".to_string())?;
+            state
+                .cancel_goal(&thread_id, Some(&device_id))
+                .await
+                .map(|()| RemoteActionOutcome::default())
+        }
         RemoteActionRequest::FetchWorkflows { device_id } => Ok(RemoteActionOutcome {
             workflows: Some(state.workflows(device_id).await),
             ..RemoteActionOutcome::default()
@@ -1562,6 +1615,10 @@ fn requires_session_claim(action: RemoteActionKind) -> bool {
             | RemoteActionKind::ResolveReview
             | RemoteActionKind::ResolveWorkflow
             | RemoteActionKind::DeleteReview
+            // The stop too: unlike `stop_turn` it settles the goal Cancelled and takes the
+            // card away, so an unclaimed device could erase the controller's objective.
+            | RemoteActionKind::SetGoal
+            | RemoteActionKind::StopGoal
     )
 }
 
@@ -2875,6 +2932,8 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         | RemoteActionKind::ResolveReview
         | RemoteActionKind::ResolveWorkflow
         | RemoteActionKind::DeleteReview
+        | RemoteActionKind::SetGoal
+        | RemoteActionKind::StopGoal
         | RemoteActionKind::RegisterPushSubscription
         | RemoteActionKind::UnregisterPushSubscription => RemoteActionResultKind::RemoteActionAck,
     }

@@ -5,7 +5,29 @@
 //! accept — see `crates/relay-server/src/state/goal.rs` for why the objective
 //! is not something an agent can write.
 
-use crate::state::{unix_now, AppState, Goal, GoalStatus};
+use crate::state::{
+    path_within_device_scope, relay::RelayState, unix_now, AppState, Goal, GoalStatus,
+};
+
+/// Scope a goal write exactly as the panel scopes its READ, so a device can only point a
+/// goal at — or erase one from — a session it can see. "No such session" rather than a
+/// refusal: an out-of-scope thread should not be confirmed to exist.
+fn ensure_goal_thread_in_scope(
+    relay: &RelayState,
+    thread_id: &str,
+    device_id: Option<&str>,
+) -> Result<(), String> {
+    let Some(cwd) = relay.thread_cwd(thread_id) else {
+        return Err("there is no such session".to_string());
+    };
+    let scope = device_id
+        .map(|id| relay.device_path_scope(id))
+        .unwrap_or_default();
+    if !path_within_device_scope(&cwd, &scope, &relay.allowed_roots) {
+        return Err("there is no such session".to_string());
+    }
+    Ok(())
+}
 
 /// The turn the relay sends to keep a goal moving.
 ///
@@ -45,17 +67,32 @@ fn thread_can_end_a_goal(relay: &crate::state::RelayState, thread_id: &str) -> b
 /// and workflows own a thread they are not currently sending to — a second
 /// driver editing under them is exactly what the lock exists to stop. Checked
 /// again before every turn, because all of these can start after the goal did.
+/// Something else owns this thread for good, and the goal has nowhere to go.
 fn thread_answers_to_another_driver(relay: &crate::state::RelayState, thread_id: &str) -> bool {
     relay.orchestrator_thread_id.as_deref() == Some(thread_id)
         || relay.seat_run_id_for_thread(thread_id).is_some()
-        || relay.is_thread_review_locked(thread_id)
         || relay.is_thread_or_cwd_workflow_locked(thread_id)
         || relay.is_thread_or_cwd_team_locked(thread_id)
 }
 
+/// Borrowed, not taken: a review hands the thread back when it settles.
+///
+/// "Do the work, get it reviewed, answer the review" is the loop a goal exists to run, so
+/// the goal waits the review out rather than dying at the start of it — and the turn that
+/// comes back to answer the findings is charged like any other the relay starts.
+fn thread_is_lent_to_a_review(relay: &crate::state::RelayState, thread_id: &str) -> bool {
+    relay.is_thread_review_locked(thread_id)
+}
+
 impl AppState {
     /// Set or replace the goal for a thread. A person's action, always.
-    pub(crate) async fn set_goal(&self, thread_id: &str, objective: &str) -> Result<(), String> {
+    /// `device_id` is `None` for the local operator, which is scoped by relay roots alone.
+    pub(crate) async fn set_goal(
+        &self,
+        thread_id: &str,
+        objective: &str,
+        device_id: Option<&str>,
+    ) -> Result<(), String> {
         let objective = objective.trim().to_string();
         if objective.is_empty() {
             return Err("say what you want done".to_string());
@@ -64,9 +101,7 @@ impl AppState {
         // thread, and a goal admitted against settings that moved in between is
         // one the session cannot end.
         let mut relay = self.relay.write().await;
-        if relay.thread_cwd(thread_id).is_none() {
-            return Err("there is no such session".to_string());
-        }
+        ensure_goal_thread_in_scope(&relay, thread_id, device_id)?;
         if !thread_can_end_a_goal(&relay, thread_id) {
             return Err(
                 "a goal runs this session on its own, so it needs a session that can \
@@ -74,7 +109,12 @@ stop itself — switch its approval to bypass (or its sandbox to full access) an
                     .to_string(),
             );
         }
-        if thread_answers_to_another_driver(&relay, thread_id) {
+        // A review ALREADY under way is different from one the goal asks for later: the
+        // goal would be editing the tree the reviewer is reading. Refused here, waited out
+        // in the driver.
+        if thread_answers_to_another_driver(&relay, thread_id)
+            || thread_is_lent_to_a_review(&relay, thread_id)
+        {
             return Err(
                 "this session is already being driven by something else — give the goal \
 to one of your own sessions"
@@ -96,9 +136,14 @@ to one of your own sessions"
         Ok(())
     }
 
-    pub(crate) async fn cancel_goal(&self, thread_id: &str) -> Result<(), String> {
+    pub(crate) async fn cancel_goal(
+        &self,
+        thread_id: &str,
+        device_id: Option<&str>,
+    ) -> Result<(), String> {
         let handed_over = {
             let mut relay = self.relay.write().await;
+            ensure_goal_thread_in_scope(&relay, thread_id, device_id)?;
             let Some(goal) = relay.goal_for_thread(thread_id) else {
                 return Err("this session has no goal".to_string());
             };
@@ -175,6 +220,35 @@ still be working. Stop the session itself to be sure."
         Ok(())
     }
 
+    /// Charge a turn the relay started on its own to this thread's goal, and open the
+    /// dispatch it pays for. Returns whether anything was charged.
+    ///
+    /// Every autonomous turn has to come out of the budget, not just the continuations
+    /// this file sends: an agent that ends each turn by asking a peer is driven onward by
+    /// the delegation wake instead, and a cap only that loop can never reach is no cap.
+    /// A turn the USER typed is deliberately not charged — being watched is the thing the
+    /// budget stands in for.
+    pub(crate) async fn charge_goal_for_driven_turn(&self, thread_id: &str) -> bool {
+        let mut relay = self.relay.write().await;
+        let driving = relay
+            .goal_for_thread(thread_id)
+            .map(|goal| goal.status.is_driving())
+            .unwrap_or(false);
+        if !driving {
+            return false;
+        }
+        relay.update_goal(thread_id, |goal| goal.hand_over());
+        relay.notify();
+        true
+    }
+
+    /// The turn a `charge_goal_for_driven_turn` paid for reached the provider.
+    pub(crate) async fn goal_dispatch_landed(&self, thread_id: &str) {
+        let mut relay = self.relay.write().await;
+        relay.update_goal(thread_id, |goal| goal.dispatch_landed());
+        relay.notify();
+    }
+
     /// Hand the objective back to every thread that is between turns.
     ///
     /// `now` is a parameter so tests choose it; the loop only supplies a clock.
@@ -194,14 +268,16 @@ still be working. Stop the session itself to be sure."
                 return;
             };
 
-            // Busy, or waiting on peers: the delegation wake will bring it back.
-            // Driving now would interleave a second turn with the first.
+            // Busy, waiting on peers, or lent to a review: each of these gives the thread
+            // back on its own, so waiting is right where settling would throw the
+            // objective away. Driving now would interleave a second turn with the first.
             let skip = {
                 let relay = self.relay.read().await;
                 let working = relay
                     .runtime_for_thread(&thread_id)
                     .map(|runtime| runtime.is_working())
-                    .unwrap_or(false);
+                    .unwrap_or(false)
+                    || thread_is_lent_to_a_review(&relay, &thread_id);
                 let waiting = relay
                     .asks_of_asker(&thread_id)
                     .iter()

@@ -1753,3 +1753,59 @@ fn unicode_and_escape_heavy_chunks_stay_within_the_frame_limit_and_round_trip() 
         serde_json::from_str(&decrypted).expect("decrypted chunks must reassemble into JSON");
     assert_eq!(parsed, expected);
 }
+
+#[test]
+fn goal_actions_round_trip_and_bind_device() {
+    let set: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "set_goal",
+        "thread_id": "thread-1",
+        "objective": "Ship the mobile surface"
+    }))
+    .expect("set_goal should parse");
+    assert_eq!(set.kind(), RemoteActionKind::SetGoal);
+    assert_eq!(RemoteActionKind::SetGoal.as_str(), "set_goal");
+    match set.bind_device("device-3".to_string()) {
+        RemoteActionRequest::SetGoal {
+            thread_id,
+            objective,
+            device_id,
+        } => {
+            assert_eq!(thread_id, "thread-1");
+            assert_eq!(objective, "Ship the mobile surface");
+            assert_eq!(device_id.as_deref(), Some("device-3"));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    let stop: RemoteActionRequest =
+        serde_json::from_value(serde_json::json!({ "type": "stop_goal", "thread_id": "thread-1" }))
+            .expect("stop_goal should parse");
+    assert_eq!(stop.kind(), RemoteActionKind::StopGoal);
+    assert_eq!(RemoteActionKind::StopGoal.as_str(), "stop_goal");
+    match stop.bind_device("device-3".to_string()) {
+        RemoteActionRequest::StopGoal {
+            thread_id,
+            device_id,
+        } => {
+            assert_eq!(thread_id, "thread-1");
+            assert_eq!(device_id.as_deref(), Some("device-3"));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    for kind in [RemoteActionKind::SetGoal, RemoteActionKind::StopGoal] {
+        assert!(matches!(
+            remote_action_result_kind(kind),
+            RemoteActionResultKind::RemoteActionAck
+        ));
+    }
+}
+
+// Stopping a goal is not the brake `stop_turn` is: it settles the goal Cancelled and the
+// card goes away.
+#[test]
+fn both_goal_actions_need_the_session_claim() {
+    assert!(requires_session_claim(RemoteActionKind::SetGoal));
+    assert!(requires_session_claim(RemoteActionKind::StopGoal));
+    assert!(!requires_session_claim(RemoteActionKind::StopTurn));
+}

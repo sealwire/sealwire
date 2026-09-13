@@ -1002,6 +1002,7 @@ fn promotion_keeps_a_reviewed_parent_review_locked() {
         crate::state::ReviewMode::CleanThread,
         "/tmp/project".to_string(),
         "device-1".to_string(),
+        relay_api::delegation::StartedBy::Person,
         None,
         1,
     );
@@ -2320,6 +2321,7 @@ fn terminal_review_cards_persist_across_restart_but_in_progress_ones_do_not() {
         ReviewMode::CleanThread,
         "/tmp/project".to_string(),
         "device-1".to_string(),
+        relay_api::delegation::StartedBy::Person,
         None,
         1,
     );
@@ -2338,6 +2340,7 @@ fn terminal_review_cards_persist_across_restart_but_in_progress_ones_do_not() {
         ReviewMode::CleanThread,
         "/tmp/project".to_string(),
         "device-1".to_string(),
+        relay_api::delegation::StartedBy::Person,
         None,
         1,
     );
@@ -2396,6 +2399,7 @@ fn restore_drops_a_non_terminal_review_job_from_a_corrupt_or_future_snapshot() {
         ReviewMode::CleanThread,
         "/tmp/project".to_string(),
         "device-1".to_string(),
+        relay_api::delegation::StartedBy::Person,
         None,
         1,
     );
@@ -2414,6 +2418,7 @@ fn restore_drops_a_non_terminal_review_job_from_a_corrupt_or_future_snapshot() {
         ReviewMode::CleanThread,
         "/tmp/project".to_string(),
         "device-1".to_string(),
+        relay_api::delegation::StartedBy::Person,
         None,
         1,
     );
@@ -2459,6 +2464,7 @@ fn review_jobs_view_shows_one_card_per_reviewer_thread_keeping_the_latest() {
             ReviewMode::CleanThread,
             "/tmp/project".to_string(),
             "device-1".to_string(),
+            relay_api::delegation::StartedBy::Person,
             None,
             1,
         );
@@ -2509,6 +2515,7 @@ fn review_jobs_view_keeps_an_in_progress_run_visible_over_a_same_second_terminal
             ReviewMode::CleanThread,
             "/tmp/project".to_string(),
             "device-1".to_string(),
+            relay_api::delegation::StartedBy::Person,
             None,
             1,
         );
@@ -2548,6 +2555,7 @@ fn drop_terminal_review_jobs_for_reviewer_keeps_an_in_progress_run() {
             ReviewMode::CleanThread,
             "/tmp/project".to_string(),
             "device-1".to_string(),
+            relay_api::delegation::StartedBy::Person,
             None,
             1,
         );
@@ -2789,6 +2797,7 @@ fn reviewers_to_evict_protects_active_review_reviewer() {
         ReviewMode::CleanThread,
         "/tmp/project".to_string(),
         "device-1".to_string(),
+        relay_api::delegation::StartedBy::Person,
         None,
         1,
     );

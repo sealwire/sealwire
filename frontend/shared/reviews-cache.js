@@ -94,6 +94,62 @@ export function reviewCardsForViewedThread(reviews, viewedThreadId) {
 }
 
 /**
+ * The goal of the thread the panel is showing, from a `ReviewsResponse`.
+ * @param {{goals?: Array}|null|undefined} reviews
+ * @param {string|null|undefined} viewedThreadId
+ */
+export function goalForThread(reviews, viewedThreadId) {
+  if (!viewedThreadId) {
+    return null;
+  }
+  return (reviews?.goals || []).find((goal) => goal?.thread_id === viewedThreadId) || null;
+}
+
+/**
+ * The asks the viewed thread is either end of, stamped with both sides' names. Names, not
+ * a resolver: the store diffs slices with `JSON.stringify`, which drops functions.
+ * @param {{asks?: Array}|null|undefined} reviews
+ * @param {string|null|undefined} viewedThreadId
+ * @param {Array<{id?: string, name?: string}>|null|undefined} threads
+ */
+export function asksForThread(reviews, viewedThreadId, threads) {
+  if (!viewedThreadId) {
+    return [];
+  }
+  const nameById = new Map((threads || []).map((thread) => [thread?.id, thread?.name || null]));
+  return (reviews?.asks || [])
+    .filter(
+      (ask) =>
+        ask?.asker_thread_id === viewedThreadId || ask?.peer_thread_id === viewedThreadId
+    )
+    .map((ask) => ({
+      ...ask,
+      asker_name: nameById.get(ask.asker_thread_id) || null,
+      peer_name: nameById.get(ask.peer_thread_id) || null,
+    }));
+}
+
+/**
+ * Everything the Agents panel shows that depends only on the viewed thread. One call so a
+ * surface cannot pick up the review cards and quietly miss the goal, which is how remote
+ * shipped without either. It must return EVERY key every time: the store merges patches,
+ * so a key left out keeps the thread you were looking at before.
+ * @param {{review_jobs?: Array, goals?: Array, asks?: Array, reviewer_threads?: Array}|null|undefined} reviews
+ * @param {string|null|undefined} viewedThreadId
+ * @param {Array<{id?: string, name?: string}>|null|undefined} threads
+ */
+export function agentsPanelSlice(reviews, viewedThreadId, threads) {
+  return {
+    reviewJobs: reviewCardsForViewedThread(reviews, viewedThreadId),
+    goal: goalForThread(reviews, viewedThreadId),
+    asks: asksForThread(reviews, viewedThreadId, threads),
+    // Every reviewer thread, so a card can name its own by joining on reviewer_thread_id.
+    reviewerThreads: reviews?.reviewer_threads || [],
+    parentThreadId: viewedThreadId || null,
+  };
+}
+
+/**
  * Reusable reviewer threads of the viewed thread from a `ReviewsResponse`.
  * `workspaceCwd` drops reviewers minted in another tree.
  */

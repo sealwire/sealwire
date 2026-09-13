@@ -95,19 +95,45 @@ pub struct AskRequest {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub message: String,
-    /// Have the asking agent turn `message` into a self-contained brief first.
+    /// Who set this going. Two things follow from it, and both are why it is the
+    /// cause that is recorded rather than either effect.
     ///
-    /// Set when a PERSON typed the command. "Carry on with the next step" means
-    /// something only inside this conversation; the peer starts from nothing and
-    /// cannot see it, so forwarding those words verbatim hands over an
-    /// instruction with no referent.
+    /// A person's words are expanded into a self-contained brief first: "carry on
+    /// with the next step" means something only inside this conversation, and the
+    /// peer starts from nothing. An agent wrote its own message with the
+    /// conversation in front of it, so nothing is expanded.
     ///
-    /// An agent calling the tool leaves this off: it wrote the message itself,
-    /// with the conversation in front of it.
-    ///
-    /// Deliberately a relay-driven TURN, not a tool call — which is why it works
-    /// for every provider, including the ones that cannot be given tools.
-    pub expand_with_context: bool,
+    /// And a goal's budget only pays for what an AGENT set going — see
+    /// `charge_goal_for_driven_turn`.
+    pub started_by: StartedBy,
+}
+
+/// Who set a piece of autonomous work going.
+///
+/// The distinction the goal budget turns on: a person asking for help is present and
+/// has bounded what they asked for, while an agent extending its own loop is exactly
+/// what the budget exists to bound. The turns the relay drives afterwards look
+/// identical, so the cause has to be recorded when the work starts.
+///
+/// NOT a security boundary. `Person` is which door the request came through, not proof a
+/// human opened it: the loopback route that stamps it takes no device id, and a session
+/// unrestricted enough to hold these tools has a shell to curl it with. Like the goal
+/// budget it feeds, this guards against drift, not against an agent that means to evade
+/// it — see the module doc in `relay-server/src/state/goal.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartedBy {
+    Person,
+    /// The default a record with no recorded cause decodes as: the budget should fail
+    /// towards charging, since the other way round is how a cap stops being one.
+    #[default]
+    Agent,
+}
+
+impl StartedBy {
+    pub fn is_agent(self) -> bool {
+        matches!(self, StartedBy::Agent)
+    }
 }
 
 /// Why an ask could not be made.

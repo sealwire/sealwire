@@ -2372,7 +2372,8 @@ over on resume"
             bridge
                 .start_thread(
                     StartThreadRequest::new(workspace.as_str(), &model, &approval_policy, &sandbox)
-                        .with_effort(&effort),
+                        .with_effort(&effort)
+                        .driven_by(crate::provider::SessionPurpose::Seat(run_id.to_string())),
                 )
                 .await,
         )?;

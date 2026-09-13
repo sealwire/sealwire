@@ -156,9 +156,10 @@ import {
   workflowRunsForThread,
 } from "../shared/workflow-state.js";
 import { ReviewLauncher } from "../shared/review-panel.js";
+import { createGoalActions } from "../shared/goal-actions.js";
 import {
+  agentsPanelSlice,
   createReviewsCache,
-  reviewCardsForViewedThread,
   reusableReviewersFromReviews,
 } from "../shared/reviews-cache.js";
 import { createWorkflowsCache } from "../shared/workflows-cache.js";
@@ -1169,8 +1170,21 @@ function RemoteApp() {
   // would re-dispatch full transcript fetches on every routine remote render.
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
+  const remoteViewedThreadId = session?.active_thread_id || null;
+  // Read through a ref for the same reason `handlers` is: the goal actions have to keep
+  // one identity across renders, so they cannot close over this render's thread id.
+  const viewedThreadIdRef = useRef(null);
+  viewedThreadIdRef.current = remoteViewedThreadId;
   const reviewerActions = useMemo(
     () => ({
+      ...createGoalActions({
+        getThreadId: () => viewedThreadIdRef.current,
+        setGoal: (threadId, objective) => handlersRef.current.onSetGoal?.(threadId, objective),
+        stopGoal: (threadId) => handlersRef.current.onStopGoal?.(threadId),
+      }),
+      // The Agents card's Open button. View-only navigation, not a resume: the thread
+      // being read may be another agent's and may be mid-turn.
+      onOpenThread: (threadId) => handlersRef.current.onViewThread?.(threadId),
       onRequestReview: (values) => handlersRef.current.onRequestReview?.(values),
       onStartWorkflow: (values) => handlersRef.current.onStartWorkflow?.(values),
       onResolveReview: (reviewJobId) =>
@@ -1189,7 +1203,6 @@ function RemoteApp() {
   // Push the review slice onto the remote workspace-diff store so the Reviewer
   // tab (rail + modal) and the mobile chip badge stay in sync with the session.
   const remoteDeviceId = currentState.remoteAuth?.deviceId;
-  const remoteViewedThreadId = session?.active_thread_id || null;
   // Subscribe so a pin in Changes re-filters the Reviewer picker in the same frame.
   const remoteWorkspace = useSyncExternalStore(
     useCallback((onChange) => getRemoteWorkspaceDiffStore().subscribe(onChange), []),
@@ -1398,7 +1411,7 @@ function RemoteApp() {
     const workflowsData = remoteWorkflows || { workflow_runs: [] };
     const remoteThreadWorkflowRuns = workflowRunsForThread(workflowsData, remoteViewedThreadId);
     getRemoteWorkspaceDiffStore().setReview({
-      reviewJobs: reviewCardsForViewedThread(reviewsData, remoteViewedThreadId),
+      ...agentsPanelSlice(reviewsData, remoteViewedThreadId, remoteThreadList),
       workflowRuns: remoteThreadWorkflowRuns,
       reviewModel: {
         ...selectReviewLaunchModel({
@@ -1429,12 +1442,6 @@ function RemoteApp() {
         null,
         remoteWorkspaceCwd
       ),
-      // Full reviewer-thread list so each card can show its reviewer thread's
-      // (long, truncated-with-tooltip) name by joining on reviewer_thread_id.
-      reviewerThreads: reviewsData.reviewer_threads || [],
-      // The thread the panel is showing (on remote this is the active/viewed thread):
-      // sent as the review's parent so the backend reviews this thread explicitly.
-      parentThreadId: remoteViewedThreadId,
       canRequest: canRequestReview(session, remoteDeviceId, remoteViewedThreadId),
       canStartWorkflow: hasControllerLease && canStartWorkflow(session, remoteViewedThreadId),
       blocked:
@@ -1444,6 +1451,7 @@ function RemoteApp() {
     session,
     remoteReviews,
     remoteWorkflows,
+    remoteThreadList,
     remoteUi.providers,
     remoteUi.providerModels,
     remoteUi.providerModelsStatus,

@@ -526,6 +526,9 @@ reviewer thread"
             reviewer_mode,
             cwd,
             device_id.clone(),
+            // Only a person can ask for a review today; the tool that let an agent do it
+            // was withdrawn. If it returns, it passes `Agent` here and nothing else moves.
+            relay_api::delegation::StartedBy::Person,
             non_empty(input.instructions.clone()),
             // Round budget for the iterative loop: default 1 (single-shot), clamp 1..=10.
             input.max_rounds.unwrap_or(1).clamp(1, MAX_REVIEW_ROUNDS),
@@ -1612,11 +1615,28 @@ started ({error}); finishing with round {round}'s findings."
         message: String,
         status: ReviewJobStatus,
     ) {
+        // Only a review an AGENT went and started: a person who asked for one is present
+        // and already bounded it with `max_rounds`, so charging its turns to the goal would
+        // double up two caps that exist for different reasons.
+        let started_by = {
+            let relay = self.relay.read().await;
+            relay
+                .review_job(job_id)
+                .map(|job| job.started_by)
+                .unwrap_or_default()
+        };
+        let charged =
+            started_by.is_agent() && self.charge_goal_for_driven_turn(parent_thread_id).await;
         let post_turn = match self
             .send_message_to_thread(parent_thread_id, &message, None, None)
             .await
         {
-            Ok(dispatched) => dispatched.turn_id,
+            Ok(dispatched) => {
+                if charged {
+                    self.goal_dispatch_landed(parent_thread_id).await;
+                }
+                dispatched.turn_id
+            }
             Err(error) if error.is_workspace_gone() => {
                 // The review is already recorded on the job (and rendered in the reviewer
                 // panel), so settle instead of failing a finished review on delivery.
@@ -1697,6 +1717,9 @@ started ({error}); finishing with round {round}'s findings."
         // stopping, or reading back from) the placeholder would find no runtime, call
         // a turn that just started finished, and fail the review — the parent-side
         // twin of the clean-reviewer bug.
+        // Deliberately NOT charged to a goal on this thread: the recap moves the objective
+        // nowhere, it is a briefing the review asked for. Only turns that advance the work
+        // unattended come out of the budget.
         let (parent_thread_id, recap_turn) = match self
             .send_message_to_thread(parent_thread_id, parent_recap_prompt(), None, None)
             .await
@@ -2485,12 +2508,10 @@ tree would review commits this thread never made"
         let start = classify_workspace_result(
             workspace,
             bridge
-                .start_thread(StartThreadRequest::new(
-                    workspace.as_str(),
-                    &model,
-                    &approval_policy,
-                    &sandbox,
-                ))
+                .start_thread(
+                    StartThreadRequest::new(workspace.as_str(), &model, &approval_policy, &sandbox)
+                        .driven_by(crate::provider::SessionPurpose::Reviewer),
+                )
                 .await,
         )?;
         let mut thread = start.thread;

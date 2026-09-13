@@ -106,6 +106,7 @@ impl ProviderBridge for CodexBridge {
                 &request.model,
                 &request.approval_policy,
                 &request.sandbox,
+                &request.purpose,
             )
             .await?;
         Ok(StartThreadResult {
@@ -563,16 +564,18 @@ impl CodexBridge {
         model: &str,
         approval_policy: &str,
         sandbox: &str,
+        purpose: &crate::provider::SessionPurpose,
     ) -> Result<ThreadSummaryView, String> {
         let (approval_policy, sandbox) = resolve_codex_policy(approval_policy, sandbox);
         // Minted before the thread exists and bound once its id comes back —
         // the same order ACP forced, because neither provider names the session
         // until after the tools are attached.
-        let ask_token = if crate::state::session_is_unrestricted(&approval_policy, &sandbox) {
-            Some(self.state.write().await.mint_unbound_ask_token())
-        } else {
-            None
-        };
+        let ask_token =
+            if crate::provider::session_gets_peer_tools(&approval_policy, &sandbox, purpose) {
+                Some(self.state.write().await.mint_unbound_ask_token())
+            } else {
+                None
+            };
         let mut params = json!({
             "cwd": cwd,
             "model": model,
@@ -644,7 +647,10 @@ impl CodexBridge {
                 "sandbox": sandbox,
                 "personality": "pragmatic"
             });
-            if crate::state::session_is_unrestricted(&approval_policy, &sandbox) {
+            // Resume has a thread id, so it asks the same question the call gate does
+            // rather than re-deciding on permissions alone.
+            let drives_itself = { self.state.read().await.thread_drives_itself(thread_id) };
+            if drives_itself && crate::state::session_is_unrestricted(&approval_policy, &sandbox) {
                 let token = { self.state.write().await.ask_token_for_thread(thread_id) };
                 params["config"] = json!({ "mcp_servers": peer_mcp_servers(&token) });
             }

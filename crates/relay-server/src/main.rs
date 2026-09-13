@@ -819,13 +819,13 @@ async fn set_session_goal(
     let outcome = if input.objective.trim().is_empty() {
         context
             .app
-            .cancel_goal(&input.thread_id)
+            .cancel_goal(&input.thread_id, None)
             .await
             .map(|()| "Goal stopped.".to_string())
     } else {
         context
             .app
-            .set_goal(&input.thread_id, &input.objective)
+            .set_goal(&input.thread_id, &input.objective, None)
             .await
             .map(|()| "Goal set. This session will work toward it and come back when it is done, stuck, or needs you.".to_string())
     };
@@ -852,7 +852,7 @@ async fn delegate_to_agent(
                 effort: input.effort,
                 message: input.message,
                 // The whole reason this route exists.
-                expand_with_context: true,
+                started_by: relay_api::delegation::StartedBy::Person,
             },
         )
         .await
@@ -878,7 +878,7 @@ async fn list_orchestrator_tools(
     // then the Orchestrator. Only one env key is ever set, so at most one matches.
     let tools = match (query.seat_run_id, query.ask_token) {
         (Some(_), _) => context.app.list_team_seat_tools().await,
-        (None, Some(_)) => context.app.list_peer_tools().await,
+        (None, Some(token)) => context.app.list_peer_tools_for(&token).await,
         (None, None) => context.app.list_orchestrator_tools().await,
     };
     Ok(Json(ApiEnvelope::ok(serde_json::json!({ "tools": tools }))))

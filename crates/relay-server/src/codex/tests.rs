@@ -3000,6 +3000,7 @@ async fn activate_fake_codex_thread(
             "gpt-5-codex",
             "on-request",
             "workspace-write",
+            &crate::provider::SessionPurpose::Ordinary,
         )
         .await
         .expect("start fake Codex thread");

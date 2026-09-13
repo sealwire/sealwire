@@ -912,6 +912,23 @@ export function WorkspaceDiffChip({ store, onTap }) {
   );
 }
 
+const GOAL_WANTS_THE_USER = new Set([
+  "blocked",
+  "awaiting_user",
+  "out_of_turns",
+  "interrupted",
+]);
+
+const GOAL_CHIP_TITLE = {
+  active: "Working toward your goal — tap to watch or stop it",
+  awaiting_user: "The goal needs you — tap to answer",
+  blocked: "The goal is stuck — tap to see why",
+  out_of_turns: "The goal ran out of turns — tap to keep it going",
+  interrupted: "The goal stopped at a restart — tap to pick it up",
+  complete_claimed: "The agent says the goal is done — tap to check",
+  cancelled: "The goal was stopped — tap to pick it up",
+};
+
 // A dedicated, self-describing "Reviewer" pill for mobile (the desktop rail has
 // the tab instead). It surfaces whenever there's a review to see OR one can be
 // started, and tapping it opens the right panel straight on the Reviewer tab.
@@ -921,33 +938,41 @@ export function ReviewerChip({ store, onTap }) {
   const review = state.review || {};
   const reviewJobs = review.reviewJobs || [];
   const workflowRuns = review.workflowRuns || [];
-  const blocked = Boolean(review.blocked);
-  const active = reviewJobs.some((job) => !TERMINAL_REVIEW.has(job.status));
+  const asks = review.asks || [];
+  const goal = review.goal || null;
+  // A goal that ran out of turns, was interrupted, or stopped to ask something is waiting
+  // on the user exactly as a blocked review is — not finished.
+  const blocked =
+    Boolean(review.blocked)
+    || GOAL_WANTS_THE_USER.has(goal?.status);
+  const active =
+    reviewJobs.some((job) => !TERMINAL_REVIEW.has(job.status))
+    || goal?.status === "active"
+    || asks.some((ask) => ask.status === "working");
   const activeWorkflow = workflowRuns.some(
     (run) => !["done", "escalated", "failed", "interrupted", "cancelled"].includes(run.status)
   );
-  const hasReviews = reviewJobs.length > 0 || workflowRuns.length > 0;
+  // A goal or an ask counts as something to see: on a phone this pill is the only door
+  // into the panel, and a session driving a goal has neither a review nor a workflow.
+  const hasReviews =
+    reviewJobs.length > 0 || workflowRuns.length > 0 || Boolean(goal) || asks.length > 0;
   // Only surface once there's an actual review to track (in progress / blocked /
   // done) — that's when the status badge carries signal. In the pure-idle "you
   // could start one" state the chip says nothing and just competes for composer
   // space with the diff chip and the "Want a second opinion?" idle nudge already
   // shown there, so stay hidden and let those handle discovery + launch.
   if (!hasReviews) return null;
-  const badge = blocked ? "⚠" : active || activeWorkflow ? "•" : hasReviews ? "✓" : null;
-  const modifier = blocked
-    ? "is-blocked"
-    : active || activeWorkflow
-    ? "is-active"
-    : hasReviews
-    ? "is-done"
-    : "is-idle";
-  const title = blocked
+  const badge = blocked ? "⚠" : active || activeWorkflow ? "•" : "✓";
+  const modifier = blocked ? "is-blocked" : active || activeWorkflow ? "is-active" : "is-done";
+  // The pill is one door to several things, so the tooltip names whichever is loudest —
+  // a goal outranks a review the same way it does in the panel.
+  const title = goal
+    ? GOAL_CHIP_TITLE[goal.status] || "Tap to see this session's goal"
+    : blocked
     ? "Review blocked — tap to resolve"
     : active || activeWorkflow
     ? "Review workflow in progress — tap to view"
-    : hasReviews
-    ? "Review complete — tap to view findings"
-    : "Ask another agent to review — tap to start";
+    : "Review complete — tap to view findings";
   return h(
     "button",
     {
@@ -957,7 +982,9 @@ export function ReviewerChip({ store, onTap }) {
       title,
     },
     h("span", { className: "reviewer-chip-icon", "aria-hidden": "true" }, "🔍"),
-    h("span", { className: "workspace-diff-chip-label" }, "Reviewer"),
+    // "Agents", matching the desktop tab: the panel behind this pill stopped being about
+    // reviews alone once it grew the goal and the asks. Class names stay as styling hooks.
+    h("span", { className: "workspace-diff-chip-label" }, "Agents"),
     badge
       ? h(
           "span",

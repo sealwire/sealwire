@@ -2340,6 +2340,32 @@ export async function resolveRemoteWorkflow(workflowRunId) {
   }
 }
 
+// Two actions rather than one with an empty objective: the relay gates and logs them
+// separately, and "stop" should not have to be spelled as an absent value.
+async function dispatchGoal(threadId, action, payload, note) {
+  if (!threadId) {
+    renderLog("No session to set a goal on.");
+    return false;
+  }
+  renderLog(note);
+  try {
+    await dispatchOrRecover(action, { thread_id: threadId, ...payload });
+    await syncRemoteSnapshot(`post-${action}`, true);
+    return true;
+  } catch (error) {
+    renderLog(`Remote goal update failed: ${error.message}`);
+    return false;
+  }
+}
+
+export function setRemoteGoal(threadId, objective) {
+  return dispatchGoal(threadId, "set_goal", { objective }, "Setting the goal…");
+}
+
+export function stopRemoteGoal(threadId) {
+  return dispatchGoal(threadId, "stop_goal", {}, "Stopping the goal…");
+}
+
 export async function deleteRemoteReview(reviewId) {
   if (!reviewId) {
     renderLog("No review to delete.");

@@ -177,6 +177,10 @@ pub(crate) struct ReviewJob {
     /// The device that requested the review. Used to restore parent control when
     /// handing the active thread back from the reviewer.
     pub(crate) requested_by_device_id: String,
+    /// Who set this review going. Only an agent's own reviews come out of a goal's
+    /// budget: a person asking for one is present, and bounded it with `max_rounds`.
+    #[serde(default)]
+    pub(crate) started_by: relay_api::delegation::StartedBy,
     pub(crate) instructions: Option<String>,
 }
 
@@ -191,6 +195,7 @@ impl ReviewJob {
         reviewer_mode: ReviewMode,
         cwd: String,
         requested_by_device_id: String,
+        started_by: relay_api::delegation::StartedBy,
         instructions: Option<String>,
         max_rounds: u32,
     ) -> Self {
@@ -225,6 +230,7 @@ impl ReviewJob {
             posted_back_turn_id: None,
             error: None,
             requested_by_device_id,
+            started_by,
             instructions,
         }
     }
@@ -943,6 +949,7 @@ mod tests {
             ReviewMode::CleanThread,
             "/tmp".to_string(),
             "device-1".to_string(),
+            relay_api::delegation::StartedBy::Person,
             None,
             1,
         )

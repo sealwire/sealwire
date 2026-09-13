@@ -199,6 +199,47 @@ pub struct StartThreadRequest {
     /// Attach Orchestrator tools for this `device_id`. Claude → mcpServers;
     /// others may no-op. Must not half-attach.
     pub orchestrator_tools: Option<String>,
+    /// What this session is being created FOR. Carried on the request because a bridge
+    /// has to decide its tools before the thread has an id anything could look up.
+    pub purpose: SessionPurpose,
+}
+
+/// Who will drive the session being created — which is what decides its tools.
+///
+/// Declared by the creator rather than inferred: every caller knows what it is starting,
+/// while a bridge looking only at permissions cannot tell a task seat running unattended
+/// from a person's own session, and handed both the same tools.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SessionPurpose {
+    /// A person talks to it, and it runs its own loop.
+    #[default]
+    Ordinary,
+    /// A task run drives it.
+    Seat(String),
+    /// The review loop drives it.
+    Reviewer,
+    /// A Code Flow run drives it.
+    Workflow,
+}
+
+impl SessionPurpose {
+    /// Whether anything but the session itself is in charge of its turns.
+    pub fn is_driven_by_the_relay(&self) -> bool {
+        !matches!(self, SessionPurpose::Ordinary)
+    }
+}
+
+/// Whether a session being created should be handed the peer MCP bridge.
+///
+/// The tools let a session bring in other agents and run itself, so they belong to a
+/// session that does. Permissions are still the second gate, never the only one.
+pub fn session_gets_peer_tools(
+    approval_policy: &str,
+    sandbox: &str,
+    purpose: &SessionPurpose,
+) -> bool {
+    !purpose.is_driven_by_the_relay()
+        && crate::state::session_is_unrestricted(approval_policy, sandbox)
 }
 
 /// Where the sealwire MCP bridge script lives, beside the worker that is
@@ -233,7 +274,14 @@ impl StartThreadRequest {
             initial_prompt: None,
             system_prompt: None,
             orchestrator_tools: None,
+            purpose: SessionPurpose::Ordinary,
         }
+    }
+
+    /// Say what the session is for, which is what decides the tools it is handed.
+    pub fn driven_by(mut self, purpose: SessionPurpose) -> Self {
+        self.purpose = purpose;
+        self
     }
 
     pub fn with_effort(mut self, effort: &str) -> Self {
@@ -1122,5 +1170,58 @@ mod classify_tests {
             classify_spawn_error("timed out after 30s while starting Codex"),
             ProviderStatusKind::Failed
         );
+    }
+}
+
+#[cfg(test)]
+mod session_audience_tests {
+    use super::{session_gets_peer_tools, SessionPurpose, StartThreadRequest};
+
+    // What a session is FOR decides its tools, not how wide its permissions happen to be.
+    // Deciding on permissions is what handed a cursor task seat — which runs bypass so it
+    // can work unattended — the tools of a session that drives itself.
+    #[test]
+    fn only_a_session_that_drives_itself_is_handed_the_tools_for_it() {
+        let driven = [
+            SessionPurpose::Seat("run-1".to_string()),
+            SessionPurpose::Reviewer,
+            SessionPurpose::Workflow,
+        ];
+        for purpose in &driven {
+            for (approval, sandbox) in [
+                ("bypass", "workspace-write"),
+                ("never", "danger-full-access"),
+                ("never", "workspace-write"),
+            ] {
+                assert!(
+                    !session_gets_peer_tools(approval, sandbox, purpose),
+                    "{purpose:?} at {approval}/{sandbox}"
+                );
+            }
+        }
+
+        assert!(session_gets_peer_tools(
+            "bypass",
+            "workspace-write",
+            &SessionPurpose::Ordinary
+        ));
+        // Permissions are still the second gate: a restricted session could otherwise ask
+        // a freer agent to do what it may not.
+        assert!(!session_gets_peer_tools(
+            "never",
+            "workspace-write",
+            &SessionPurpose::Ordinary
+        ));
+    }
+
+    #[test]
+    fn a_session_is_a_persons_own_unless_its_creator_says_otherwise() {
+        let ordinary = StartThreadRequest::new("/tmp", "m", "bypass", "workspace-write");
+        assert_eq!(ordinary.purpose, SessionPurpose::Ordinary);
+        assert!(!ordinary.purpose.is_driven_by_the_relay());
+
+        let seat = StartThreadRequest::new("/tmp", "m", "bypass", "workspace-write")
+            .driven_by(SessionPurpose::Seat("run-1".to_string()));
+        assert!(seat.purpose.is_driven_by_the_relay());
     }
 }

@@ -477,6 +477,9 @@ pub struct FakeProviderBridge {
     approval_gates: Arc<Mutex<HashMap<String, FakeApprovalGate>>>,
     ask_user_gates: Arc<Mutex<HashMap<String, FakeAskUserGate>>>,
     turn_stop_behaviors: Arc<Mutex<HashMap<String, FakeStopBehavior>>>,
+    /// Placeholder id -> the id the session really gets, applied during `start_turn`.
+    /// Models Claude, whose session does not exist until its first user message.
+    promote_on_start: Arc<Mutex<HashMap<String, String>>>,
     stopped_turns: Arc<Mutex<HashSet<String>>>,
     scenario_harness: Option<FakeScenarioHarness>,
     /// `(cwd, system_prompt)` for every thread opened with a persona. The fake
@@ -504,6 +507,14 @@ impl FakeProviderBridge {
 
     pub async fn recorded_system_prompts(&self) -> Vec<(String, String)> {
         self.system_prompts.lock().await.clone()
+    }
+
+    /// Make `placeholder` become `real_id` when its first turn starts.
+    pub(crate) async fn promote_on_first_turn(&self, placeholder: &str, real_id: &str) {
+        self.promote_on_start
+            .lock()
+            .await
+            .insert(placeholder.to_string(), real_id.to_string());
     }
 
     pub async fn spawn(state: Arc<RwLock<RelayState>>) -> Result<Self, String> {
@@ -541,6 +552,7 @@ impl FakeProviderBridge {
             approval_gates: Arc::new(Mutex::new(HashMap::new())),
             ask_user_gates: Arc::new(Mutex::new(HashMap::new())),
             turn_stop_behaviors: Arc::new(Mutex::new(HashMap::new())),
+            promote_on_start: Arc::new(Mutex::new(HashMap::new())),
             stopped_turns: Arc::new(Mutex::new(HashSet::new())),
             scenario_harness,
             system_prompts: Arc::new(Mutex::new(Vec::new())),
@@ -730,6 +742,15 @@ impl ProviderBridge for FakeProviderBridge {
         })
     }
 
+    async fn resolve_started_thread_id(&self, requested_thread_id: &str) -> String {
+        self.promote_on_start
+            .lock()
+            .await
+            .get(requested_thread_id)
+            .cloned()
+            .unwrap_or_else(|| requested_thread_id.to_string())
+    }
+
     async fn start_turn(
         &self,
         thread_id: &str,
@@ -740,6 +761,14 @@ impl ProviderBridge for FakeProviderBridge {
     ) -> Result<Option<String>, String> {
         if !self.threads.lock().await.contains_key(thread_id) {
             return Err(format!("fake thread '{thread_id}' was not found"));
+        }
+
+        // The session is created BY this turn, so the promotion happens inside it —
+        // exactly where the real deferred-start bridge does it.
+        if let Some(real_id) = self.promote_on_start.lock().await.get(thread_id).cloned() {
+            let mut relay = self.state.write().await;
+            relay.promote_background_thread(thread_id, &real_id);
+            relay.notify();
         }
 
         let thread_id = thread_id.to_string();

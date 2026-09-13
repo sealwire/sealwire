@@ -181,7 +181,7 @@ Finish up with what you have and tell the user."
         // A person's one-liner becomes a brief before anyone else sees it. This
         // costs a turn on the asking agent, which is why it is opt-in: an agent
         // calling the tool already wrote its message with the context in view.
-        let message = if request.expand_with_context {
+        let message = if request.started_by == relay_api::delegation::StartedBy::Person {
             self.brief_from_asker(asker_thread_id, &message).await?
         } else {
             message
@@ -266,6 +266,7 @@ Carry on with one of those instead of bringing in another."
                 message.clone(),
                 asker_cwd.to_string(),
                 baseline_item_id,
+                request.started_by,
             ));
             relay.notify();
         }
@@ -752,6 +753,47 @@ impl AppState {
         }
     }
 
+    /// End any live ask this thread was answering, because the user stopped its turn.
+    ///
+    /// Without this the sweep sees a peer that went quiet without answering and nudges it
+    /// back to life — the stop visibly does not take — and a peer with nothing new to say
+    /// never settles at all, parking the asker until the four-hour clock reports the one
+    /// thing that did not happen: that it ran out of time.
+    pub(crate) async fn settle_asks_stopped_by_user(&self, peer_thread_id: &str) {
+        let live: Vec<Ask> = {
+            let relay = self.relay.read().await;
+            relay
+                .asks
+                .values()
+                .filter(|ask| !ask.status.is_terminal() && ask.peer_thread_id == peer_thread_id)
+                .cloned()
+                .collect()
+        };
+        if live.is_empty() {
+            return;
+        }
+        // Whatever it managed to say still beats nothing — the same salvage the timeout
+        // does. Matched by TURN, not just by item: a peer can hold several asks, and one
+        // reply belongs to exactly the one whose turn produced it.
+        let latest = self.latest_assistant_entry_with_turn(peer_thread_id).await;
+        let mut relay = self.relay.write().await;
+        for ask in live {
+            let salvaged = latest
+                .as_ref()
+                .filter(|(item_id, _, reply_turn)| {
+                    reply_answers_ask(&ask, item_id, reply_turn.as_deref())
+                })
+                .map(|(_, text, _)| text.clone());
+            relay.update_ask(&ask.id, |ask| match salvaged {
+                Some(text) => ask.finish(text),
+                None => ask.fail(format!(
+                    "you stopped it before it answered; its session is {peer_thread_id}"
+                )),
+            });
+        }
+        relay.notify();
+    }
+
     async fn wake_idle_askers(&self) {
         let ready = {
             let relay = self.relay.read().await;
@@ -773,7 +815,7 @@ impl AppState {
             if busy {
                 continue;
             }
-            let (message, ask_ids) = {
+            let (message, ask_ids, any_agent_asked) = {
                 let relay = self.relay.read().await;
                 let mut mine: Vec<&Ask> = relay
                     .asks_of_asker(&asker)
@@ -787,7 +829,16 @@ impl AppState {
                 (
                     wake_message(&mine),
                     mine.iter().map(|ask| ask.id.clone()).collect::<Vec<_>>(),
+                    mine.iter().any(|ask| ask.started_by.is_agent()),
                 )
+            };
+
+            // Taken before anything is written, and held across the charge and the send —
+            // the goal driver holds this same slot across ITS charge-and-send, and a
+            // watchdog tick landing inside this window sees a dispatch that never started
+            // and Blocks a healthy goal. Nothing is marked yet, so the next sweep retries.
+            let Ok(_slot) = self.acquire_session_slot() else {
+                continue;
             };
 
             // Mark BEFORE sending. A send that lands but is not marked delivers
@@ -800,15 +851,29 @@ impl AppState {
                 }
                 relay.notify();
             }
-            if let Err(error) = self
+            // Only help the AGENT went and got: a person who typed `/delegate` is present
+            // and is reading the answer, which is the thing the budget stands in for. One
+            // agent-asked answer in the batch is enough — the turn is indivisible.
+            //
+            // Charged before the send, because a turn that lands uncounted is how a budget
+            // gets beaten and a failed start does not prove the provider never began.
+            let charged = any_agent_asked && self.charge_goal_for_driven_turn(&asker).await;
+            match self
                 .send_message_to_thread(&asker, &message, None, None)
                 .await
             {
-                self.push_runtime_log(
-                    "warn",
-                    format!("Could not hand answers back to {asker}: {error}"),
-                )
-                .await;
+                // A deferred-start provider creates its session inside this call, so the
+                // goal moved to the real id while we were in it; closing the dispatch on
+                // the id we sent to would leave the real one looking never-started.
+                Ok(dispatched) if charged => self.goal_dispatch_landed(&dispatched.thread_id).await,
+                Ok(_) => {}
+                Err(error) => {
+                    self.push_runtime_log(
+                        "warn",
+                        format!("Could not hand answers back to {asker}: {error}"),
+                    )
+                    .await;
+                }
             }
         }
     }
@@ -842,6 +907,7 @@ mod wake_tests {
             "do the thing".into(),
             "/tmp".into(),
             None,
+            relay_api::delegation::StartedBy::Agent,
         );
         ask.set_status(status);
         ask.delivered = delivered;
