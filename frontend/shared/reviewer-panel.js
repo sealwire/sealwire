@@ -194,7 +194,7 @@ const GOAL_STATUS_LABEL = {
   complete_claimed: "Agent reports complete",
   blocked: "Stuck",
   out_of_turns: "Out of turns",
-  interrupted: "Interrupted by a restart",
+  interrupted: "Stopped — pick it back up",
 };
 
 // Above the review slot, because it outranks it: a review judges one commit, the goal is

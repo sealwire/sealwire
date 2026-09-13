@@ -924,7 +924,7 @@ const GOAL_CHIP_TITLE = {
   awaiting_user: "The goal needs you — tap to answer",
   blocked: "The goal is stuck — tap to see why",
   out_of_turns: "The goal ran out of turns — tap to keep it going",
-  interrupted: "The goal stopped at a restart — tap to pick it up",
+  interrupted: "The goal is stopped — tap to pick it back up",
   complete_claimed: "The agent says the goal is done — tap to check",
   cancelled: "The goal was stopped — tap to pick it up",
 };

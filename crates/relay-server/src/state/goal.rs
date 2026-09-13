@@ -41,8 +41,8 @@ pub(crate) enum GoalStatus {
     Blocked,
     /// Ran out of turns. Deliberately not a failure and never a completion.
     OutOfTurns,
-    /// The relay restarted while this was active. Requires an explicit resume:
-    /// picking work back up unasked, minutes or days later, is its own surprise.
+    /// Paused, either by a restart or by the user stopping the turn. Requires an
+    /// explicit resume: picking work back up unasked is its own surprise.
     Interrupted,
     #[default]
     Cancelled,

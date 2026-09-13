@@ -12,7 +12,9 @@ use crate::state::{
 /// Scope a goal write exactly as the panel scopes its READ, so a device can only point a
 /// goal at — or erase one from — a session it can see. "No such session" rather than a
 /// refusal: an out-of-scope thread should not be confirmed to exist.
-fn ensure_goal_thread_in_scope(
+/// Refuses as "no such session" rather than "not allowed": a device outside the
+/// scope must not learn the thread exists.
+pub(crate) fn ensure_thread_in_device_scope(
     relay: &RelayState,
     thread_id: &str,
     device_id: Option<&str>,
@@ -101,7 +103,7 @@ impl AppState {
         // thread, and a goal admitted against settings that moved in between is
         // one the session cannot end.
         let mut relay = self.relay.write().await;
-        ensure_goal_thread_in_scope(&relay, thread_id, device_id)?;
+        ensure_thread_in_device_scope(&relay, thread_id, device_id)?;
         if !thread_can_end_a_goal(&relay, thread_id) {
             return Err(
                 "a goal runs this session on its own, so it needs a session that can \
@@ -143,7 +145,7 @@ to one of your own sessions"
     ) -> Result<(), String> {
         let handed_over = {
             let mut relay = self.relay.write().await;
-            ensure_goal_thread_in_scope(&relay, thread_id, device_id)?;
+            ensure_thread_in_device_scope(&relay, thread_id, device_id)?;
             let Some(goal) = relay.goal_for_thread(thread_id) else {
                 return Err("this session has no goal".to_string());
             };
@@ -218,6 +220,30 @@ still be working. Stop the session itself to be sure."
         relay.update_goal(thread_id, |goal| goal.settle(status, outcome.clone()));
         relay.notify();
         Ok(())
+    }
+
+    /// A stop the user pressed ends the RUN, not just the turn in flight.
+    ///
+    /// The driver ticks every three seconds, so without this the objective is handed
+    /// straight back and Stop reads as broken. `Interrupted` is the resumable state — the
+    /// card offers "keep going" and the next turn is the user's to ask for. Stopping the
+    /// goal itself is a different button and still settles `Cancelled`.
+    pub(crate) async fn interrupt_goal_stopped_by_user(&self, thread_id: &str) {
+        let mut relay = self.relay.write().await;
+        let driving = relay
+            .goal_for_thread(thread_id)
+            .map(|goal| goal.status.is_driving())
+            .unwrap_or(false);
+        if !driving {
+            return;
+        }
+        relay.update_goal(thread_id, |goal| {
+            goal.settle(
+                GoalStatus::Interrupted,
+                "you stopped it — press keep going when you want it to carry on",
+            )
+        });
+        relay.notify();
     }
 
     /// Charge a turn the relay started on its own to this thread's goal, and open the

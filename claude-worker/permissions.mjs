@@ -12,8 +12,14 @@ export function createPermissionHandler(
     nextAskUserRequestId,
     getProviderSessionId = () => null,
     emitEvent = emit,
+    permissionMode,
   } = {},
 ) {
+  // Required, not defaulted: a caller that forgets it would silently get "ask about
+  // everything", which is exactly the YOLO bug this argument exists to fix.
+  if (typeof permissionMode !== "string" || !permissionMode) {
+    throw new TypeError("createPermissionHandler needs the session's permissionMode");
+  }
   // AskUserQuestion routes through canUseTool just like a normal permission
   // request, but it's a structured "answer a question" UX, not an approve/deny.
   // Split it off into its own pending pool + event so the frontend can render
@@ -29,6 +35,18 @@ export function createPermissionHandler(
   return (toolName, input, options) => {
     if (askUserHandler && isAskUserQuestionTool(toolName)) {
       return askUserHandler(input, options);
+    }
+    // The SDK calls this before EVERY tool, whatever the mode — so bypassing has
+    // to be answered here or it is not bypassing. AskUserQuestion stays above: it
+    // is the agent asking a question, not the harness asking for permission.
+    if (permissionMode === "bypassPermissions") {
+      return {
+        behavior: "allow",
+        updatedInput: input ?? {},
+        toolUseID: options?.toolUseID,
+        // No decisionClassification: it is telemetry meaning "the user clicked this",
+        // and nobody clicked. The CLI's conservative inference is the honest answer.
+      };
     }
     const id = `approval:${nextApprovalId()}`;
     emitEvent({

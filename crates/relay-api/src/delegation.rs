@@ -95,6 +95,9 @@ pub struct AskRequest {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub message: String,
+    /// The paired device that asked, when a person did. A session claim is not a
+    /// path-scope grant, so the thread still has to be inside this device's scope.
+    pub device_id: Option<String>,
     /// Who set this going. Two things follow from it, and both are why it is the
     /// cause that is recorded rather than either effect.
     ///

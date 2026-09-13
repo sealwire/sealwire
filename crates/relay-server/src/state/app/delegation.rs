@@ -141,6 +141,24 @@ impl AppState {
             let cwd = relay
                 .thread_cwd(asker_thread_id)
                 .ok_or(AskError::NoSuchAsker)?;
+            // Only a person's delegate carries a device; an agent's peer tool has no
+            // device to be scoped by and is already bounded by its own thread.
+            if let Some(device) = request.device_id.as_deref() {
+                crate::state::app::goal::ensure_thread_in_device_scope(
+                    &relay,
+                    asker_thread_id,
+                    Some(device),
+                )
+                .map_err(AskError::Failed)?;
+                if let Some(peer) = request.peer_thread_id.as_deref() {
+                    crate::state::app::goal::ensure_thread_in_device_scope(
+                        &relay,
+                        peer,
+                        Some(device),
+                    )
+                    .map_err(AskError::Failed)?;
+                }
+            }
             let settings = relay.thread_settings(asker_thread_id);
             let defaults_approval = settings
                 .as_ref()

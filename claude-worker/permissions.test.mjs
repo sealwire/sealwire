@@ -103,7 +103,7 @@ test("createPermissionHandler routes AskUserQuestion to the ask-user handler, no
     const handler = createPermissionHandler(
       pendingApprovals,
       () => 1,
-      { pendingAskUserQuestions, nextAskUserRequestId: () => 1 }
+      { pendingAskUserQuestions, nextAskUserRequestId: () => 1, permissionMode: "default" }
     );
     handler(
       "AskUserQuestion",
@@ -135,7 +135,7 @@ test("createPermissionHandler still routes non-AskUserQuestion tools to the appr
     const handler = createPermissionHandler(
       pendingApprovals,
       () => 1,
-      { pendingAskUserQuestions, nextAskUserRequestId: () => 1 }
+      { pendingAskUserQuestions, nextAskUserRequestId: () => 1, permissionMode: "default" }
     );
     handler("Bash", { command: "ls" }, { toolUseID: "tool-2", title: "Bash" });
     assert.equal(pendingAskUserQuestions.size, 0);
@@ -158,7 +158,7 @@ test("createPermissionHandler stores input so approve can echo it back", async (
     return true;
   };
   try {
-    const handler = createPermissionHandler(pendingApprovals, () => ++counter);
+    const handler = createPermissionHandler(pendingApprovals, () => ++counter, { permissionMode: "default" });
     const input = { command: "ls -la", description: "list" };
     const promise = handler("Bash", input, {
       toolUseID: "tool-42",
@@ -193,7 +193,7 @@ test("createPermissionHandler stamps approval requests with provider session id"
     const handler = createPermissionHandler(
       pendingApprovals,
       () => 1,
-      { getProviderSessionId: () => "session-1" }
+      { getProviderSessionId: () => "session-1", permissionMode: "default" }
     );
     handler("Bash", { command: "pwd" }, { toolUseID: "tool-1", title: "Bash" });
     const event = JSON.parse(captured.join("").split("\n").filter(Boolean)[0]);
@@ -237,4 +237,64 @@ test("rejectAllPendingApprovals can reject only one provider session", async () 
   assert.equal(resolvedA.toolUseID, "tool-a");
   resolveB({ behavior: "allow" });
   await promiseB;
+});
+
+// YOLO means nothing gets asked. The handler is installed on EVERY session
+// regardless of mode, and the SDK calls it before every tool execution — so a
+// handler that does not know the mode asks about anything the settings
+// allowlist happens not to cover, which is most of what an agent actually runs.
+test("a bypassPermissions session is never asked, whatever the tool", async () => {
+  const emitted = [];
+  const pending = new Map();
+  const handler = createPermissionHandler(pending, () => 1, {
+    emitEvent: (event) => emitted.push(event),
+    permissionMode: "bypassPermissions",
+  });
+
+  // Nothing in any allowlist. The shape that was prompting was a heredoc piped
+  // to python, but the tool and input are not the point — under YOLO nothing is.
+  const command = "python3 - <<'PY'\nprint(1)\nPY";
+  // Raced, because the failure here is a promise that never settles: the
+  // handler parks waiting for an answer nobody is going to give.
+  const result = await Promise.race([
+    handler("Bash", { command }, {
+      signal: new AbortController().signal,
+      suggestions: [],
+      toolUseID: "tool-1",
+    }),
+    new Promise((resolve) => setTimeout(() => resolve("asked"), 250)),
+  ]);
+
+  assert.notEqual(result, "asked", "it parked waiting on the user instead of allowing");
+  assert.equal(result.behavior, "allow");
+  assert.deepEqual(
+    result.updatedInput,
+    { command },
+    "the SDK's Zod schema requires updatedInput on every allow"
+  );
+  assert.deepEqual(emitted, [], "nothing may be sent to the user to approve");
+  assert.equal(pending.size, 0, "and nothing may be left waiting on an answer");
+});
+
+test("a session that is not bypassing still asks", async () => {
+  const emitted = [];
+  const pending = new Map();
+  const handler = createPermissionHandler(pending, () => 1, {
+    emitEvent: (event) => emitted.push(event),
+    permissionMode: "default",
+  });
+
+  const asked = handler("Bash", { command: "rm -rf /" }, {
+    signal: new AbortController().signal,
+    suggestions: [],
+    toolUseID: "tool-2",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(emitted.length, 1, "the user is asked");
+  assert.equal(emitted[0].type, "approval_requested");
+  assert.equal(pending.size, 1);
+
+  rejectAllPendingApprovals(pending);
+  await asked;
 });

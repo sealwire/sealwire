@@ -18,10 +18,19 @@ const REVIEWER_DISALLOWED_TOOLS = [
   "AskUserQuestion",
 ];
 
+/// The mode the SDK is actually given, after the reviewer sentinel is translated.
+/// Exported because the permission handler has to answer the same question: a
+/// handler that does not know the mode asks about everything, and YOLO stops
+/// meaning anything.
+export function effectivePermissionMode(cmd) {
+  const requested = cmd?.permissionMode ?? "default";
+  return requested === REVIEWER_READ_ONLY_MODE ? "bypassPermissions" : requested;
+}
+
 export function buildSessionOptionsBase(cmd, { canUseTool, defaultSettingSources, observeCwd }) {
   const requestedMode = cmd.permissionMode ?? "default";
   const readOnlyReviewer = requestedMode === REVIEWER_READ_ONLY_MODE;
-  const permissionMode = readOnlyReviewer ? "bypassPermissions" : requestedMode;
+  const permissionMode = effectivePermissionMode(cmd);
   const options = {
     cwd: cmd.cwd ?? process.cwd(),
     permissionMode,

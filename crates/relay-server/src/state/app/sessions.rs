@@ -1046,8 +1046,14 @@ from {}; no provider turn was active.",
             // A peer stopped in THIS state is still a peer somebody is waiting on. Leaving
             // it live is what let the sweep nudge it back, or park the asker for four hours.
             self.settle_asks_stopped_by_user(&thread_id).await;
+            self.interrupt_goal_stopped_by_user(&thread_id).await;
             return Ok(self.snapshot().await);
         };
+
+        // Before the provider is asked, not after: a provider that rejects the stop would
+        // otherwise return early and leave the watchdog free to hand the objective back —
+        // the user pressed Stop and got more turns.
+        self.interrupt_goal_stopped_by_user(&thread_id).await;
 
         let turn_already_gone = match self
             .find_thread_provider(&thread_id)
@@ -1083,8 +1089,9 @@ from {}; no provider turn was active.",
             }
             Err(error) => return Err(error),
         };
-        // The stop stands, so anything waiting on this thread's answer is over. Before the
-        // snapshot, or the client is handed a view that still shows the peer working.
+        // The stop stands, so anything waiting on this thread's answer is over, and a goal
+        // driving it pauses. Before the snapshot, or the client is handed a view that still
+        // shows the peer working and the goal running.
         self.settle_asks_stopped_by_user(&thread_id).await;
         if turn_already_gone {
             return Ok(self.snapshot().await);

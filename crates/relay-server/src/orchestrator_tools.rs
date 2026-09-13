@@ -456,7 +456,7 @@ could not do. It cannot see your session.",
     },
     ToolSpec {
         name: "ask_agent",
-        summary: "Hand work to another agent. Returns at once; you are sent the answers when all you asked for is done. Ask one again to continue, or several at once.",
+        summary: "Hand work to another agent. Returns at once and you are woken with the answers — do not poll or wait. Ask one again to continue, or several at once.",
         effect: Effect::Acts,
         params: &[
             ToolParam {
@@ -1734,6 +1734,22 @@ it failed",
                 }
             }
         }
+    }
+
+    #[test]
+    fn ask_agent_tells_the_caller_not_to_wait_on_the_answer() {
+        // A peer that polls burns a turn per check and can sit in a sleep loop for
+        // hours; the push model only works if the tool says so out loud.
+        let tool = TOOLS
+            .iter()
+            .find(|tool| tool.name == "ask_agent")
+            .expect("ask_agent should be registered");
+        let summary = tool.summary.to_lowercase();
+        assert!(
+            summary.contains("do not poll"),
+            "ask_agent's summary must forbid polling, got: {}",
+            tool.summary
+        );
     }
 
     #[test]

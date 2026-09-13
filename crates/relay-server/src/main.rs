@@ -853,6 +853,8 @@ async fn delegate_to_agent(
                 message: input.message,
                 // The whole reason this route exists.
                 started_by: relay_api::delegation::StartedBy::Person,
+                // Loopback callers carry no path scope to be checked against.
+                device_id: None,
             },
         )
         .await

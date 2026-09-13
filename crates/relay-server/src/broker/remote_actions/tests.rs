@@ -1809,3 +1809,40 @@ fn both_goal_actions_need_the_session_claim() {
     assert!(requires_session_claim(RemoteActionKind::StopGoal));
     assert!(!requires_session_claim(RemoteActionKind::StopTurn));
 }
+
+// `/delegate` from a phone. The other two composer commands already had a door —
+// `set_goal`/`stop_goal` and `request_review` — so this was the one that could only be
+// typed on a desktop.
+#[test]
+fn delegating_from_a_paired_device_round_trips_and_binds_it() {
+    let ask: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "delegate",
+        "thread_id": "thread-1",
+        "message": "look at the retry loop",
+        "provider": "codex"
+    }))
+    .expect("delegate should parse");
+    assert_eq!(ask.kind(), RemoteActionKind::Delegate);
+    assert_eq!(RemoteActionKind::Delegate.as_str(), "delegate");
+    match ask.bind_device("device-4".to_string()) {
+        RemoteActionRequest::Delegate {
+            thread_id,
+            message,
+            provider,
+            device_id,
+            ..
+        } => {
+            assert_eq!(thread_id, "thread-1");
+            assert_eq!(message, "look at the retry loop");
+            assert_eq!(provider.as_deref(), Some("codex"));
+            assert_eq!(device_id.as_deref(), Some("device-4"));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    // Bringing in another agent is starting work, so it is gated like sending a message.
+    assert!(requires_session_claim(RemoteActionKind::Delegate));
+    assert!(matches!(
+        remote_action_result_kind(RemoteActionKind::Delegate),
+        RemoteActionResultKind::RemoteActionAck
+    ));
+}

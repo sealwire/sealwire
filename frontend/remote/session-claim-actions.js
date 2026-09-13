@@ -8,6 +8,7 @@ export const ACTIONS_REQUIRING_SESSION_CLAIM = new Set([
   "resolve_review",
   "resolve_workflow",
   "delete_review",
+  "delegate",
   "set_goal",
   "stop_goal",
 ]);

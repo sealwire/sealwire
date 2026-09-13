@@ -16381,6 +16381,56 @@ resurrected into a turn that never completes: {:?}",
     }
 
     #[tokio::test]
+    async fn delegation_rejected_when_asker_workspace_is_outside_the_device_scope() {
+        // A session claim is not a path-scope grant: a phone scoped to one project could
+        // otherwise name a thread in another and set paid, writing work going there.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let other = TempDir::new().expect("other tmpdir");
+        let other_scope = other.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.paired_devices.insert(
+                "device-scoped".to_string(),
+                crate::state::relay::PairedDevice {
+                    device_id: "device-scoped".to_string(),
+                    label: "device-scoped".to_string(),
+                    payload_secret: "test-payload-secret".to_string(),
+                    device_verify_key: "test-verify-key".to_string(),
+                    created_at: 1,
+                    last_seen_at: Some(1),
+                    last_peer_id: Some("peer-test".to_string()),
+                    broker_join_ticket_expires_at: None,
+                    path_scope: vec![other_scope.to_string()],
+                },
+            );
+        }
+
+        let err = app
+            .ask_agent(
+                &parent.id,
+                relay_api::delegation::AskRequest {
+                    started_by: relay_api::delegation::StartedBy::Person,
+                    device_id: Some("device-scoped".to_string()),
+                    peer_thread_id: None,
+                    provider: Some("codex".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "take a look at this".to_string(),
+                },
+            )
+            .await
+            .expect_err("delegating on a thread outside the device's scope must be rejected");
+        assert!(
+            err.message().contains("no such session"),
+            "expected a path-scope refusal that does not confirm the thread exists, got: {}",
+            err.message()
+        );
+    }
+
+    #[tokio::test]
     async fn reviewer_thread_provider_never_reports_the_session_source_as_provider() {
         // Codex running inside an editor reports a session `source` of "vscode" with an
         // EMPTY provider on its summary. The reviewer thread's provider must NOT become
@@ -26252,6 +26302,7 @@ mod ask_tests {
             .ask_agent(
                 &asker_id,
                 AskRequest {
+                    device_id: None,
                     started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: Some(stranger_id.clone()),
                     provider: Some("fake".to_string()),
@@ -26271,6 +26322,7 @@ mod ask_tests {
             .ask_agent(
                 &asker_id,
                 AskRequest {
+                    device_id: None,
                     started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: Some("no-such-thread".to_string()),
                     provider: Some("fake".to_string()),
@@ -26290,6 +26342,7 @@ mod ask_tests {
             .ask_agent(
                 &asker_id,
                 AskRequest {
+                    device_id: None,
                     started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: Some(asker_id.clone()),
                     provider: Some("fake".to_string()),
@@ -26344,6 +26397,7 @@ mod ask_tests {
             .ask_agent(
                 &narrow,
                 AskRequest {
+                    device_id: None,
                     started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: Some(wide.clone()),
                     provider: None,
@@ -26363,6 +26417,7 @@ mod ask_tests {
             .ask_agent(
                 &wide,
                 AskRequest {
+                    device_id: None,
                     started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: Some(narrow.clone()),
                     provider: None,
@@ -26410,6 +26465,7 @@ mod ask_tests {
         app.ask_agent(
             &asker,
             AskRequest {
+                device_id: None,
                 started_by: relay_api::delegation::StartedBy::Agent,
                 peer_thread_id: None,
                 provider: Some("fake".to_string()),
@@ -26426,6 +26482,7 @@ mod ask_tests {
         app.ask_agent(
             &asker,
             AskRequest {
+                device_id: None,
                 started_by: relay_api::delegation::StartedBy::Person,
                 peer_thread_id: None,
                 provider: Some("fake".to_string()),
@@ -26486,6 +26543,7 @@ mod ask_tests {
             .ask_agent(
                 &asker,
                 AskRequest {
+                    device_id: None,
                     started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: None,
                     provider: Some("fake".to_string()),
@@ -26567,6 +26625,7 @@ mod ask_tests {
         app.ask_agent(
             &asker,
             AskRequest {
+                device_id: None,
                 started_by: relay_api::delegation::StartedBy::Agent,
                 peer_thread_id: None,
                 provider: Some("fake".to_string()),
@@ -26629,6 +26688,7 @@ mod ask_tests {
         app.ask_agent(
             &placeholder,
             AskRequest {
+                device_id: None,
                 started_by: relay_api::delegation::StartedBy::Agent,
                 peer_thread_id: None,
                 provider: Some("fake".to_string()),
@@ -26683,6 +26743,7 @@ watchdog settle this Blocked",
             .ask_agent(
                 &thread,
                 AskRequest {
+                    device_id: None,
                     started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: None,
                     provider: Some("fake".to_string()),
@@ -26744,6 +26805,7 @@ watchdog settle this Blocked",
             .ask_agent(
                 &thread,
                 AskRequest {
+                    device_id: None,
                     started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: None,
                     provider: Some("fake".to_string()),
@@ -26827,6 +26889,61 @@ watchdog settle this Blocked",
         );
     }
 
+    // Stopping the turn a goal is running means stop. The driver ticks every three
+    // seconds, so without this the objective is simply handed back and the session is
+    // working again before the user has looked away — and the Stop reads as broken.
+    #[tokio::test]
+    async fn stopping_a_goals_turn_pauses_the_goal_rather_than_restarting_it() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "stopper", Vec::new()).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "ship the mobile door", None)
+            .await
+            .expect("the user sets it");
+        hand_over_the_goal(&app, &thread).await;
+
+        // A turn in flight, the way there is one when a person reaches for Stop.
+        {
+            let mut relay = app.relay.write().await;
+            relay.ensure_runtime_for_thread(&thread).active_turn_id = Some("turn-1".to_string());
+        }
+
+        app.stop_active_turn(crate::protocol::StopTurnInput {
+            device_id: Some("stopper".to_string()),
+            thread_id: thread.clone(),
+        })
+        .await
+        .expect("the user stops the turn");
+
+        let spent = {
+            let relay = app.relay.read().await;
+            let goal = relay.goal_for_thread(&thread).expect("still on record");
+            assert!(
+                !goal.status.is_driving(),
+                "the goal kept driving after the user stopped it: {}",
+                goal.status.as_str()
+            );
+            assert_eq!(
+                goal.status.as_str(),
+                "interrupted",
+                "and it is the user's to pick back up"
+            );
+            goal.turns
+        };
+
+        // The watchdog must not quietly undo the stop on its next tick.
+        app.drive_goals_at(crate::state::unix_now()).await;
+        let relay = app.relay.read().await;
+        assert_eq!(
+            relay.goal_for_thread(&thread).expect("recorded").turns,
+            spent,
+            "nothing may be sent until the user picks it back up"
+        );
+    }
+
     // A stop the user pressed has to stand. The relay nudges a peer that went quiet
     // without answering, so stopping one restarts it; and an idle peer with nothing new
     // to say never settles at all, parking the asker until a four-hour clock calls it
@@ -26844,6 +26961,7 @@ watchdog settle this Blocked",
             .ask_agent(
                 &thread,
                 AskRequest {
+                    device_id: None,
                     started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: None,
                     provider: Some("fake".to_string()),
@@ -26927,6 +27045,7 @@ watchdog settle this Blocked",
         app.ask_agent(
             &thread,
             AskRequest {
+                device_id: None,
                 started_by: relay_api::delegation::StartedBy::Agent,
                 peer_thread_id: None,
                 provider: Some("fake".to_string()),
@@ -26975,6 +27094,35 @@ watchdog settle this Blocked",
     // A reviewer reads and comments; a Code Flow step does what its run says. Neither
     // decides its own turns, so neither gets the tools for deciding them — and permissions
     // cannot answer that, because a reviewer inherits the wide ones it needs to read.
+    #[tokio::test]
+    async fn ask_agent_reply_tells_the_asker_to_end_its_turn() {
+        // The observed failure was a peer writing a `sleep 10` curl loop to watch its
+        // own delegation, so the reply has to instruct rather than merely describe.
+        let project = TempDir::new().expect("tmpdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        let token = app.ask_token_for_thread(&thread).await;
+
+        let reply = app
+            .call_peer_tool(
+                "ask_agent",
+                &serde_json::json!({ "message": "take a look at this" }),
+                &token,
+            )
+            .await
+            .expect("a delegate from a session that may delegate should succeed");
+        let reply = reply.to_lowercase();
+        assert!(
+            reply.contains("do not poll"),
+            "the reply must forbid polling outright, got: {reply}"
+        );
+        assert!(
+            reply.contains("end your turn"),
+            "the reply must tell the asker to end its turn, got: {reply}"
+        );
+    }
+
     #[tokio::test]
     async fn a_session_something_else_drives_is_refused_the_tools_for_driving_yourself() {
         let project = TempDir::new().expect("tempdir");
@@ -27255,6 +27403,7 @@ watchdog settle this Blocked",
         app.ask_agent(
             &thread,
             AskRequest {
+                device_id: None,
                 // What `/delegate` typed by a person sends.
                 started_by: relay_api::delegation::StartedBy::Person,
                 peer_thread_id: None,
@@ -27316,6 +27465,7 @@ watchdog settle this Blocked",
         app.ask_agent(
             &thread,
             AskRequest {
+                device_id: None,
                 started_by: relay_api::delegation::StartedBy::Agent,
                 peer_thread_id: None,
                 provider: Some("fake".to_string()),
@@ -28155,6 +28305,7 @@ watchdog settle this Blocked",
             .ask_agent(
                 &asker,
                 AskRequest {
+                    device_id: None,
                     started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: None,
                     provider: None,
@@ -28209,6 +28360,7 @@ watchdog settle this Blocked",
             .ask_agent(
                 &asker_id,
                 AskRequest {
+                    device_id: None,
                     started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: None,
                     provider: Some("fake".to_string()),
@@ -28283,6 +28435,7 @@ watchdog settle this Blocked",
             .ask_agent(
                 &a_id,
                 AskRequest {
+                    device_id: None,
                     started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: None,
                     provider: Some("fake".to_string()),
@@ -28298,6 +28451,7 @@ watchdog settle this Blocked",
             .ask_agent(
                 &b_id,
                 AskRequest {
+                    device_id: None,
                     started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: Some(a_id.clone()),
                     provider: Some("fake".to_string()),
@@ -28344,6 +28498,7 @@ watchdog settle this Blocked",
             .ask_agent(
                 &asker_id,
                 AskRequest {
+                    device_id: None,
                     started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: None,
                     provider: Some("fake".to_string()),

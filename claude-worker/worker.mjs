@@ -63,7 +63,11 @@ import {
   mcpStatusLogLines,
   userMessageTranscriptText,
 } from "./sdk-mapping.mjs";
-import { buildSessionOptionsBase, createCwdReporter } from "./session-options.mjs";
+import {
+  buildSessionOptionsBase,
+  createCwdReporter,
+  effectivePermissionMode,
+} from "./session-options.mjs";
 import { createProgressTracker } from "./progress-tracker.mjs";
 import { checkInstalledClaudeBinary } from "./native-binary-check.mjs";
 import {
@@ -284,6 +288,7 @@ function buildSessionOptions(
       nextAskUserRequestId,
       getProviderSessionId,
       emitEvent,
+      permissionMode: effectivePermissionMode(cmd),
     }),
     defaultSettingSources: DEFAULT_SETTING_SOURCES,
     observeCwd,

@@ -465,6 +465,7 @@ session that runs itself"
                 effort,
             } => {
                 let request = relay_api::delegation::AskRequest {
+                    device_id: None,
                     started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: agent,
                     // Left unresolved on purpose: only `ask_agent` knows who is
@@ -477,8 +478,9 @@ session that runs itself"
                 match self.ask_agent(caller_thread_id, request).await {
                     Ok(peer) => Ok(format!(
                         "Asked. That agent's id is {peer} — name it as `agent` to carry on \
-with it. You are not blocked: end your turn if you have nothing else to do, and \
-you will be sent the answers when everything you asked for is finished."
+with it.\n\nEnd your turn now if you have nothing else to do. Do NOT poll, sleep, \
+or check on it: the relay wakes you with the answers when everything you asked \
+for is done, and a turn spent waiting is a turn spent for nothing."
                     )),
                     Err(error) => Err(error.message()),
                 }
