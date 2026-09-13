@@ -26353,6 +26353,189 @@ mod ask_tests {
             )
             .await;
         assert!(self_ask.is_err(), "a session cannot hand work to itself");
+
+        // A finished Task seat is still a seat — not peer labour.
+        {
+            let mut relay = app.relay.write().await;
+            let mut run = relay_api::team::TeamRun::new(
+                "finished-ask-seat".to_string(),
+                crate::state::TaskSpec::default(),
+                cwd.clone(),
+                "device-1".to_string(),
+            );
+            run.tl_thread_id = stranger_id.clone();
+            run.status = relay_api::team::TeamRunStatus::Done;
+            relay.insert_team_run(run);
+        }
+        let seat_ask = app
+            .ask_agent(
+                &asker_id,
+                AskRequest {
+                    device_id: None,
+                    started_by: relay_api::delegation::StartedBy::Agent,
+                    peer_thread_id: Some(stranger_id.clone()),
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "reuse the finished seat".to_string(),
+                },
+            )
+            .await;
+        match seat_ask {
+            Err(AskError::Failed(message)) => {
+                assert!(
+                    message.contains("belongs to a Task"),
+                    "refusal must name Task ownership: {message}"
+                );
+                assert!(
+                    !message.contains("already working inside"),
+                    "terminal seats must not be described as actively working: {message}"
+                );
+            }
+            other => panic!("expected Task-seat refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_peer_admission_uses_the_same_standalone_identity_boundary() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+
+        let asker = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("bypass".to_string()),
+                sandbox: Some("workspace-write".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+            })
+            .await
+            .expect("asker starts")
+            .active_thread_id
+            .clone()
+            .expect("asker thread");
+        let peer = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("bypass".to_string()),
+                sandbox: Some("workspace-write".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+            })
+            .await
+            .expect("peer starts")
+            .active_thread_id
+            .clone()
+            .expect("peer thread");
+
+        let ask = |peer_thread_id: String| {
+            let app = app.clone();
+            let asker = asker.clone();
+            async move {
+                app.ask_agent(
+                    &asker,
+                    AskRequest {
+                        device_id: None,
+                        started_by: relay_api::delegation::StartedBy::Agent,
+                        peer_thread_id: Some(peer_thread_id),
+                        provider: Some("fake".to_string()),
+                        model: None,
+                        effort: None,
+                        message: "have a look".to_string(),
+                    },
+                )
+                .await
+            }
+        };
+
+        ask(peer.clone())
+            .await
+            .expect("an ordinary idle existing session remains askable");
+
+        {
+            let mut relay = app.relay.write().await;
+            relay.orchestrator_thread_id = Some(peer.clone());
+        }
+        match ask(peer.clone()).await {
+            Err(AskError::Failed(message)) => {
+                assert!(
+                    message.contains("Orchestrator"),
+                    "idle Orchestrator pin must be refused: {message}"
+                );
+            }
+            other => panic!("expected Orchestrator refusal, got {other:?}"),
+        }
+        {
+            let mut relay = app.relay.write().await;
+            relay.orchestrator_thread_id = None;
+        }
+
+        {
+            let mut relay = app.relay.write().await;
+            let mut run = crate::state::WorkflowRun::new(
+                "wf-ask-lock".to_string(),
+                "code-flow".to_string(),
+                peer.clone(),
+                "anchor".to_string(),
+                cwd.clone(),
+                "dev".to_string(),
+            );
+            run.set_status(crate::state::RunStatus::Running);
+            relay.insert_workflow_run(run);
+            assert!(
+                !relay.thread_is_standalone(&peer),
+                "workflow parent must leave the ordinary-identity boundary"
+            );
+        }
+        match ask(peer.clone()).await {
+            Err(AskError::Failed(message)) => {
+                assert!(
+                    message.contains("Code Flow"),
+                    "workflow-locked peer must be refused: {message}"
+                );
+            }
+            other => panic!("expected Code Flow refusal, got {other:?}"),
+        }
+        {
+            let mut relay = app.relay.write().await;
+            relay.remove_workflow_run("wf-ask-lock");
+        }
+
+        {
+            let mut relay = app.relay.write().await;
+            let mut run = relay_api::team::TeamRun::new(
+                "terminal-ask-peer".to_string(),
+                crate::state::TaskSpec::default(),
+                cwd.clone(),
+                "device-1".to_string(),
+            );
+            run.tl_thread_id = peer.clone();
+            run.status = relay_api::team::TeamRunStatus::Done;
+            relay.insert_team_run(run);
+        }
+        match ask(peer.clone()).await {
+            Err(AskError::Failed(message)) => {
+                assert!(
+                    message.contains("belongs to a Task"),
+                    "terminal Task seat must keep Task wording: {message}"
+                );
+                assert!(
+                    !message.contains("already working") && !message.contains("driven"),
+                    "terminal seats must not be described as actively driven: {message}"
+                );
+            }
+            other => panic!("expected Task-seat refusal, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -27381,10 +27564,44 @@ watchdog settle this Blocked",
                 .await
                 .expect_err("a seat may not reach past its own run");
             assert!(
-                error.contains("drives this session"),
+                error.contains("belongs to a Task"),
                 "{tool} should say why it is refused: {error}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_terminal_task_seat_refuses_a_goal_without_claiming_a_live_driver() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        {
+            let mut relay = app.relay.write().await;
+            let mut run = relay_api::team::TeamRun::new(
+                "finished-seat-goal".to_string(),
+                crate::state::TaskSpec::default(),
+                cwd.clone(),
+                "device-1".to_string(),
+            );
+            run.tl_thread_id = thread.clone();
+            run.status = relay_api::team::TeamRunStatus::Done;
+            relay.insert_team_run(run);
+        }
+
+        let err = app
+            .set_goal(&thread, "ship something else", None)
+            .await
+            .expect_err("a retained Task seat cannot host an ordinary goal");
+        assert!(
+            err.contains("belongs to a Task"),
+            "refusal must name Task ownership, not a live driver: {err}"
+        );
+        assert!(
+            !err.contains("already being driven"),
+            "terminal seats must not be described as actively driven: {err}"
+        );
     }
 
     // A review a PERSON asked for spends nothing: they are present, and `max_rounds` is

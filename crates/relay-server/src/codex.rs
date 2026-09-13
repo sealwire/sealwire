@@ -246,14 +246,53 @@ impl ProviderBridge for CodexBridge {
 /// Shape differs from Claude's (a map, `mcp_servers`, env as an object) and from
 /// ACP's (an array, env as name/value pairs) — same bridge, three spellings.
 fn peer_mcp_servers(token: &str) -> Value {
+    peer_mcp_servers_with_transport(
+        token,
+        crate::provider::sealwire_relay_api_token().as_deref(),
+    )
+}
+
+fn peer_mcp_servers_with_transport(token: &str, relay_api_token: Option<&str>) -> Value {
+    let mut env = json!({
+        "SEALWIRE_ASK_TOKEN": token,
+        "SEALWIRE_RELAY_URL": crate::provider::sealwire_relay_url(),
+    });
+    if let Some(api_token) = relay_api_token.filter(|t| !t.is_empty()) {
+        env["RELAY_API_TOKEN"] = Value::String(api_token.to_string());
+    }
     json!({
         "sealwire": {
             "command": std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".to_string()),
             "args": [crate::provider::sealwire_mcp_bridge_path()],
-            "env": {
-                "SEALWIRE_ASK_TOKEN": token,
-                "SEALWIRE_RELAY_URL": crate::provider::sealwire_relay_url(),
-            },
+            "env": env,
+        }
+    })
+}
+
+/// Seat MCP for Codex: same map shape as peer, run id instead of ask token.
+///
+/// No device id and no ask token — those unlock write/peer surfaces a seat
+/// must not hold. Only `SEALWIRE_SEAT_RUN_ID` scopes `task_definition`.
+fn seat_mcp_servers(run_id: &str) -> Value {
+    seat_mcp_servers_with_transport(
+        run_id,
+        crate::provider::sealwire_relay_api_token().as_deref(),
+    )
+}
+
+fn seat_mcp_servers_with_transport(run_id: &str, relay_api_token: Option<&str>) -> Value {
+    let mut env = json!({
+        "SEALWIRE_SEAT_RUN_ID": run_id,
+        "SEALWIRE_RELAY_URL": crate::provider::sealwire_relay_url(),
+    });
+    if let Some(api_token) = relay_api_token.filter(|t| !t.is_empty()) {
+        env["RELAY_API_TOKEN"] = Value::String(api_token.to_string());
+    }
+    json!({
+        "sealwire": {
+            "command": std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".to_string()),
+            "args": [crate::provider::sealwire_mcp_bridge_path()],
+            "env": env,
         }
     })
 }
@@ -569,13 +608,16 @@ impl CodexBridge {
         let (approval_policy, sandbox) = resolve_codex_policy(approval_policy, sandbox);
         // Minted before the thread exists and bound once its id comes back —
         // the same order ACP forced, because neither provider names the session
-        // until after the tools are attached.
-        let ask_token =
-            if crate::provider::session_gets_peer_tools(&approval_policy, &sandbox, purpose) {
+        // until after the tools are attached. Seat purpose attaches the
+        // run-scoped bridge instead and never mints an ask token.
+        let identity =
+            crate::provider::sealwire_mcp_for_new_session(&approval_policy, &sandbox, purpose);
+        let ask_token = match &identity {
+            crate::provider::SealwireMcpIdentity::Peer => {
                 Some(self.state.write().await.mint_unbound_ask_token())
-            } else {
-                None
-            };
+            }
+            _ => None,
+        };
         let mut params = json!({
             "cwd": cwd,
             "model": model,
@@ -583,8 +625,16 @@ impl CodexBridge {
             "sandbox": sandbox,
             "personality": "pragmatic"
         });
-        if let Some(token) = ask_token.as_deref() {
-            params["config"] = json!({ "mcp_servers": peer_mcp_servers(token) });
+        match &identity {
+            crate::provider::SealwireMcpIdentity::Seat(run_id) => {
+                params["config"] = json!({ "mcp_servers": seat_mcp_servers(run_id) });
+            }
+            crate::provider::SealwireMcpIdentity::Peer => {
+                if let Some(token) = ask_token.as_deref() {
+                    params["config"] = json!({ "mcp_servers": peer_mcp_servers(token) });
+                }
+            }
+            crate::provider::SealwireMcpIdentity::None => {}
         }
         let result = self.send_request("thread/start", params).await?;
 
@@ -647,12 +697,27 @@ impl CodexBridge {
                 "sandbox": sandbox,
                 "personality": "pragmatic"
             });
-            // Resume has a thread id, so it asks the same question the call gate does
-            // rather than re-deciding on permissions alone.
-            let drives_itself = { self.state.read().await.thread_drives_itself(thread_id) };
-            if drives_itself && crate::state::session_is_unrestricted(&approval_policy, &sandbox) {
-                let token = { self.state.write().await.ask_token_for_thread(thread_id) };
-                params["config"] = json!({ "mcp_servers": peer_mcp_servers(&token) });
+            // Retained Task seat first, then the same ordinary-standalone peer
+            // gate the call path uses. Permissions alone cannot tell a reviewer
+            // (wide so it can read) from a person's own session.
+            let (seat_run_id, standalone) = {
+                let relay = self.state.read().await;
+                (
+                    relay.retained_seat_run_id_for_thread(thread_id),
+                    relay.thread_is_standalone(thread_id),
+                )
+            };
+            let unrestricted = crate::state::session_is_unrestricted(&approval_policy, &sandbox);
+            match crate::provider::sealwire_mcp_for_reattach(seat_run_id, standalone, unrestricted)
+            {
+                crate::provider::SealwireMcpIdentity::Seat(run_id) => {
+                    params["config"] = json!({ "mcp_servers": seat_mcp_servers(&run_id) });
+                }
+                crate::provider::SealwireMcpIdentity::Peer => {
+                    let token = { self.state.write().await.ask_token_for_thread(thread_id) };
+                    params["config"] = json!({ "mcp_servers": peer_mcp_servers(&token) });
+                }
+                crate::provider::SealwireMcpIdentity::None => {}
             }
             params
         })

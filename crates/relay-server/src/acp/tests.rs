@@ -2996,3 +2996,412 @@ async fn a_foreground_agent_chunks_second_delta_offset_follows_the_first() {
          naive fix ships text_offset: 0 and the client refuses the delta as a gap"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Seat MCP parity with Claude: Cursor ACP must attach the run-scoped sealwire
+// bridge on session/new and restore it on every session/load path.
+// ---------------------------------------------------------------------------
+
+fn assert_acp_seat_mcp(servers: &serde_json::Value, run_id: &str) {
+    let list = servers.as_array().expect("ACP mcpServers is an array");
+    assert_eq!(list.len(), 1, "{servers}");
+    let env = list[0]["env"].as_array().expect("env pairs");
+    let mut found_run = false;
+    for pair in env {
+        let name = pair["name"].as_str().unwrap_or("");
+        let value = pair["value"].as_str().unwrap_or("");
+        assert_ne!(name, "SEALWIRE_ASK_TOKEN", "{pair}");
+        assert_ne!(name, "SEALWIRE_DEVICE_ID", "{pair}");
+        if name == "SEALWIRE_SEAT_RUN_ID" {
+            assert_eq!(value, run_id);
+            found_run = true;
+        }
+    }
+    assert!(found_run, "missing SEALWIRE_SEAT_RUN_ID in {servers}");
+}
+
+fn assert_acp_peer_mcp(servers: &serde_json::Value) {
+    let list = servers.as_array().expect("ACP mcpServers is an array");
+    assert_eq!(list.len(), 1, "{servers}");
+    let env = list[0]["env"].as_array().expect("env pairs");
+    let mut found_token = false;
+    for pair in env {
+        let name = pair["name"].as_str().unwrap_or("");
+        assert_ne!(name, "SEALWIRE_SEAT_RUN_ID", "{pair}");
+        assert_ne!(name, "SEALWIRE_DEVICE_ID", "{pair}");
+        if name == "SEALWIRE_ASK_TOKEN" {
+            assert!(!pair["value"].as_str().unwrap_or("").is_empty());
+            found_token = true;
+        }
+    }
+    assert!(found_token, "missing SEALWIRE_ASK_TOKEN in {servers}");
+}
+
+fn assert_acp_no_mcp(servers: &serde_json::Value) {
+    let list = servers.as_array().cloned().unwrap_or_default();
+    assert!(list.is_empty(), "expected empty mcpServers, got {servers}");
+}
+
+#[test]
+fn an_acp_seat_mcp_entry_is_array_shaped_with_env_pairs_and_no_peer_identity() {
+    let entry = crate::acp::seat_mcp_server_entry_for_test("run-9");
+    assert_eq!(entry["name"], json!("sealwire"));
+    let env = entry["env"].as_array().expect("env pairs");
+    assert!(
+        env.iter()
+            .any(|pair| { pair["name"] == "SEALWIRE_SEAT_RUN_ID" && pair["value"] == "run-9" }),
+        "{env:?}"
+    );
+    assert!(
+        env.iter().all(
+            |pair| pair["name"] != "SEALWIRE_ASK_TOKEN" && pair["name"] != "SEALWIRE_DEVICE_ID"
+        ),
+        "{env:?}"
+    );
+    assert!(
+        env.iter().all(|pair| pair["name"] != "RELAY_API_TOKEN"),
+        "{env:?}"
+    );
+}
+
+#[test]
+fn acp_seat_and_peer_mcp_include_non_empty_relay_api_token_only() {
+    let seat = crate::acp::seat_mcp_server_entry_with_transport_for_test("run-9", Some("secret"));
+    let seat_env = seat["env"].as_array().expect("env");
+    assert!(seat_env
+        .iter()
+        .any(|p| p["name"] == "RELAY_API_TOKEN" && p["value"] == "secret"));
+    assert!(seat_env
+        .iter()
+        .all(|p| p["name"] != "SEALWIRE_ASK_TOKEN" && p["name"] != "SEALWIRE_DEVICE_ID"));
+
+    let peer = crate::acp::peer_mcp_server_entry_with_transport_for_test("tok-1", Some("secret"));
+    let peer_env = peer["env"].as_array().expect("env");
+    assert!(peer_env
+        .iter()
+        .any(|p| p["name"] == "RELAY_API_TOKEN" && p["value"] == "secret"));
+    assert!(peer_env
+        .iter()
+        .any(|p| p["name"] == "SEALWIRE_ASK_TOKEN" && p["value"] == "tok-1"));
+    assert!(peer_env
+        .iter()
+        .all(|p| p["name"] != "SEALWIRE_SEAT_RUN_ID" && p["name"] != "SEALWIRE_DEVICE_ID"));
+
+    for absent in [None, Some("")] {
+        for entry in [
+            crate::acp::seat_mcp_server_entry_with_transport_for_test("run-9", absent),
+            crate::acp::peer_mcp_server_entry_with_transport_for_test("tok-1", absent),
+        ] {
+            assert!(entry["env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|p| p["name"] != "RELAY_API_TOKEN"));
+        }
+    }
+}
+
+/// Drive `start_thread` against a scripted agent and return the `session/new`
+/// request the bridge actually put on the wire.
+async fn drive_acp_start_thread(
+    bridge: std::sync::Arc<AcpBridge>,
+    outbound_peer: tokio::io::DuplexStream,
+    inbound_writer: tokio::io::DuplexStream,
+    request: crate::provider::StartThreadRequest,
+) -> (crate::provider::StartThreadResult, serde_json::Value) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (session_new_tx, session_new_rx) = tokio::sync::oneshot::channel();
+    let answerer = tokio::spawn(async move {
+        let mut peer = BufReader::new(outbound_peer);
+        let mut writer = inbound_writer;
+        let mut line = String::new();
+        let mut session_new = None;
+        let mut session_new_tx = Some(session_new_tx);
+        loop {
+            line.clear();
+            if peer.read_line(&mut line).await.expect("read") == 0 {
+                break;
+            }
+            let sent: serde_json::Value =
+                serde_json::from_str(line.trim()).expect("valid JSON on the wire");
+            let method = sent["method"].as_str().unwrap_or("");
+            if method == "session/new" {
+                if let Some(tx) = session_new_tx.take() {
+                    let _ = tx.send(sent.clone());
+                }
+                session_new = Some(sent.clone());
+            }
+            let reply = if method == "session/new" {
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": sent["id"],
+                    "result": { "sessionId": "acp-seat-1" }
+                })
+            } else {
+                json!({ "jsonrpc": "2.0", "id": sent["id"], "result": {} })
+            };
+            writer
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .expect("write");
+            writer.flush().await.expect("flush");
+            // start_thread sends session/new, then set_mode; once both are
+            // answered the call returns and we can stop.
+            if session_new.is_some() && method == "session/set_mode" {
+                break;
+            }
+        }
+    });
+
+    let started = crate::provider::ProviderBridge::start_thread(&*bridge, request)
+        .await
+        .expect("start_thread must succeed");
+    let session_new = tokio::time::timeout(std::time::Duration::from_secs(2), session_new_rx)
+        .await
+        .expect("session/new was captured")
+        .expect("session/new oneshot");
+    let _ = answerer.await;
+    (started, session_new)
+}
+
+#[tokio::test]
+async fn an_acp_seat_session_new_attaches_seat_mcp_not_peer() {
+    let state = relay_state();
+    let (outbound, outbound_peer) = tokio::io::duplex(8192);
+    let (inbound_writer, inbound) = tokio::io::duplex(8192);
+    let bridge = std::sync::Arc::new(AcpBridge::for_test(state, outbound, inbound, "cursor"));
+
+    let (_started, session_new) = drive_acp_start_thread(
+        bridge,
+        outbound_peer,
+        inbound_writer,
+        crate::provider::StartThreadRequest::new("/tmp/project", "", "bypass", "workspace-write")
+            .driven_by(crate::provider::SessionPurpose::Seat("run-seat".into())),
+    )
+    .await;
+
+    assert_acp_seat_mcp(&session_new["params"]["mcpServers"], "run-seat");
+}
+
+#[tokio::test]
+async fn an_ordinary_unrestricted_acp_session_still_gets_peer_mcp() {
+    let state = relay_state();
+    let (outbound, outbound_peer) = tokio::io::duplex(8192);
+    let (inbound_writer, inbound) = tokio::io::duplex(8192);
+    let bridge = std::sync::Arc::new(AcpBridge::for_test(state, outbound, inbound, "cursor"));
+
+    let (_started, session_new) = drive_acp_start_thread(
+        bridge,
+        outbound_peer,
+        inbound_writer,
+        crate::provider::StartThreadRequest::new("/tmp/project", "", "bypass", "workspace-write"),
+    )
+    .await;
+
+    assert_acp_peer_mcp(&session_new["params"]["mcpServers"]);
+}
+
+#[tokio::test]
+async fn an_acp_reviewer_or_workflow_session_gets_no_mcp() {
+    for purpose in [
+        crate::provider::SessionPurpose::Reviewer,
+        crate::provider::SessionPurpose::Workflow,
+    ] {
+        let state = relay_state();
+        let (outbound, outbound_peer) = tokio::io::duplex(8192);
+        let (inbound_writer, inbound) = tokio::io::duplex(8192);
+        let bridge = std::sync::Arc::new(AcpBridge::for_test(state, outbound, inbound, "cursor"));
+
+        let (_started, session_new) = drive_acp_start_thread(
+            bridge,
+            outbound_peer,
+            inbound_writer,
+            crate::provider::StartThreadRequest::new(
+                "/tmp/project",
+                "",
+                "bypass",
+                "workspace-write",
+            )
+            .driven_by(purpose.clone()),
+        )
+        .await;
+
+        assert_acp_no_mcp(&session_new["params"]["mcpServers"]);
+    }
+}
+
+#[tokio::test]
+async fn an_acp_seat_session_load_restores_seat_mcp_from_live_run_state() {
+    let state = relay_state();
+    {
+        let mut relay = state.write().await;
+        let mut run = relay_api::team::TeamRun::new(
+            "run-seat".to_string(),
+            Default::default(),
+            "/tmp/project".to_string(),
+            "device-1".to_string(),
+        );
+        run.tl_thread_id = "t-cold".to_string();
+        run.status = relay_api::team::TeamRunStatus::Running;
+        relay.insert_team_run(run);
+        relay.remember_thread_settings("t-cold", "bypass", "workspace-write", "", "");
+    }
+
+    let (outbound, mut outbound_peer) = tokio::io::duplex(8192);
+    let (inbound_writer, inbound) = tokio::io::duplex(8192);
+    let bridge = std::sync::Arc::new(AcpBridge::for_test(state, outbound, inbound, "cursor"));
+    bridge.allow_session_load_for_test().await;
+    bridge
+        .absorb_listing_for_test("t-cold", "/tmp/project")
+        .await;
+
+    let loading = {
+        let bridge = bridge.clone();
+        tokio::spawn(async move {
+            crate::provider::ProviderBridge::session_can_take_a_turn(&*bridge, "t-cold").await
+        })
+    };
+
+    let request = next_wire_line(&mut outbound_peer).await;
+    assert_eq!(request["method"], json!("session/load"));
+    assert_acp_seat_mcp(&request["params"]["mcpServers"], "run-seat");
+
+    let mut writer = inbound_writer;
+    let reply = json!({"jsonrpc": "2.0", "id": request["id"], "result": {}});
+    tokio::io::AsyncWriteExt::write_all(&mut writer, format!("{reply}\n").as_bytes())
+        .await
+        .expect("write");
+    tokio::io::AsyncWriteExt::flush(&mut writer)
+        .await
+        .expect("flush");
+
+    assert!(loading.await.expect("join"));
+}
+
+#[tokio::test]
+async fn a_terminal_unrestricted_acp_seat_keeps_seat_mcp() {
+    let state = relay_state();
+    {
+        let mut relay = state.write().await;
+        let mut run = relay_api::team::TeamRun::new(
+            "run-done".to_string(),
+            Default::default(),
+            "/tmp/project".to_string(),
+            "device-1".to_string(),
+        );
+        run.tl_thread_id = "t-cold".to_string();
+        run.status = relay_api::team::TeamRunStatus::Done;
+        relay.insert_team_run(run);
+        // Cursor seats run bypass. Finishing the Task must not flip the seat to peer.
+        relay.remember_thread_settings("t-cold", "bypass", "workspace-write", "", "");
+    }
+
+    let (outbound, mut outbound_peer) = tokio::io::duplex(8192);
+    let (inbound_writer, inbound) = tokio::io::duplex(8192);
+    let bridge = std::sync::Arc::new(AcpBridge::for_test(state, outbound, inbound, "cursor"));
+    bridge.allow_session_load_for_test().await;
+    bridge
+        .absorb_listing_for_test("t-cold", "/tmp/project")
+        .await;
+
+    let loading = {
+        let bridge = bridge.clone();
+        tokio::spawn(async move {
+            crate::provider::ProviderBridge::session_can_take_a_turn(&*bridge, "t-cold").await
+        })
+    };
+
+    let request = next_wire_line(&mut outbound_peer).await;
+    assert_eq!(request["method"], json!("session/load"));
+    assert_acp_seat_mcp(&request["params"]["mcpServers"], "run-done");
+
+    let mut writer = inbound_writer;
+    let reply = json!({"jsonrpc": "2.0", "id": request["id"], "result": {}});
+    tokio::io::AsyncWriteExt::write_all(&mut writer, format!("{reply}\n").as_bytes())
+        .await
+        .expect("write");
+    tokio::io::AsyncWriteExt::flush(&mut writer)
+        .await
+        .expect("flush");
+
+    assert!(loading.await.expect("join"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_acp_seat_resume_restores_seat_mcp_on_provider_reattach() {
+    // When a provider reattachment actually happens, resume_thread must
+    // session/load seat MCP for a live seat. Ordinary resume_or_start_thread
+    // reuse does not force this refresh; that lifecycle edge remains deferred.
+    let state = relay_state();
+    {
+        let mut relay = state.write().await;
+        let mut run = relay_api::team::TeamRun::new(
+            "run-reopen".to_string(),
+            Default::default(),
+            "/tmp/project".to_string(),
+            "device-1".to_string(),
+        );
+        run.tl_thread_id = "t-seat".to_string();
+        run.status = relay_api::team::TeamRunStatus::Running;
+        relay.insert_team_run(run);
+        relay.remember_thread_settings("t-seat", "bypass", "workspace-write", "", "");
+    }
+
+    let (outbound, outbound_peer) = tokio::io::duplex(8192);
+    let (inbound_writer, inbound) = tokio::io::duplex(8192);
+    let bridge = std::sync::Arc::new(AcpBridge::for_test(
+        state.clone(),
+        outbound,
+        inbound,
+        "cursor",
+    ));
+    bridge.allow_session_load_for_test().await;
+    bridge
+        .seed_session_with_policy_for_test("t-seat", "/tmp/project", "bypass")
+        .await;
+    bridge.mark_session_content_for_test("t-seat").await;
+
+    assert!(crate::provider::ProviderBridge::session_can_take_a_turn(&*bridge, "t-seat").await);
+
+    let (load_tx, load_rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+    let answerer = tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let mut peer = BufReader::new(outbound_peer);
+        let mut writer = inbound_writer;
+        let mut line = String::new();
+        let mut load_tx = Some(load_tx);
+        loop {
+            line.clear();
+            if peer.read_line(&mut line).await.expect("read") == 0 {
+                break;
+            }
+            let sent: serde_json::Value =
+                serde_json::from_str(line.trim()).expect("valid JSON on the wire");
+            if sent["method"] == "session/load" {
+                if let Some(tx) = load_tx.take() {
+                    let _ = tx.send(sent.clone());
+                }
+            }
+            let reply = json!({ "jsonrpc": "2.0", "id": sent["id"], "result": {} });
+            writer
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .expect("write");
+            writer.flush().await.expect("flush");
+            if load_tx.is_none() && sent["method"] == "session/set_mode" {
+                break;
+            }
+        }
+    });
+
+    crate::provider::ProviderBridge::resume_thread(&*bridge, "t-seat", "bypass", "workspace-write")
+        .await
+        .expect("reopened resume");
+    let load = tokio::time::timeout(std::time::Duration::from_secs(2), load_rx)
+        .await
+        .expect("session/load captured")
+        .expect("oneshot");
+    assert_acp_seat_mcp(&load["params"]["mcpServers"], "run-reopen");
+    let _ = answerer.await;
+}

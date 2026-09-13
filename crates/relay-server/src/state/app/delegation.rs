@@ -457,7 +457,8 @@ or say the whole task in the command"
     ///
     /// A session that already exists is fair game — it may have context a fresh
     /// agent would take an hour to rebuild. What is not fair game is a session
-    /// somebody is in the middle of using, or one the relay is already driving.
+    /// somebody is in the middle of using, or one that is not an ordinary
+    /// standalone agent (Orchestrator, retained Task seat, reviewer, Code Flow).
     async fn check_peer_is_askable(
         &self,
         asker_thread_id: &str,
@@ -474,16 +475,25 @@ or say the whole task in the command"
         if relay.thread_cwd(peer_thread_id).is_none() {
             return Err(AskError::NoSuchPeer);
         }
-        // Both are already driven by the relay; a message from the side would
-        // race whatever is driving them.
-        if relay
-            .reviewer_thread_ids()
-            .contains(&peer_thread_id.to_string())
-            || relay.seat_run_id_for_thread(peer_thread_id).is_some()
-        {
-            return Err(AskError::Failed(
-                "that agent is already working inside something else".to_string(),
-            ));
+        // Same ordinary-identity boundary as Peer MCP issuance and peer-tool
+        // authorization. Role-specific wording first; never describe a finished
+        // Task seat as actively driven.
+        if !relay.thread_is_standalone(peer_thread_id) {
+            let message = if relay.thread_is_retained_team_seat(peer_thread_id) {
+                "that agent belongs to a Task and cannot take peer work"
+            } else if relay.orchestrator_thread_id.as_deref() == Some(peer_thread_id) {
+                "that agent is the Orchestrator and cannot take peer work"
+            } else if relay.is_thread_workflow_locked(peer_thread_id) {
+                "that agent is inside a Code Flow and cannot take peer work"
+            } else if relay
+                .reviewer_thread_ids()
+                .contains(&peer_thread_id.to_string())
+            {
+                "that agent is already working inside a review"
+            } else {
+                "that agent is not an ordinary session and cannot take peer work"
+            };
+            return Err(AskError::Failed(message.to_string()));
         }
         // Deadlock: if it is waiting on you, even at a remove, asking it back
         // means neither side is ever woken.

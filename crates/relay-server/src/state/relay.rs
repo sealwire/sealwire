@@ -1955,17 +1955,77 @@ impl RelayState {
     /// is not the pin, the device id was lost, or the acting device is explicitly
     /// revoked in device records. Unpaired ids are allowed — the local browser
     /// surface uses a localStorage UUID that never enters `paired_devices`.
-    /// The live run this thread is a seat of, if any. Terminal runs are skipped:
-    /// a finished task has nothing left to steer.
+    /// Live scheduling: the currently live Task run driving this thread, if any.
+    ///
+    /// Terminal and otherwise retained ownership is intentionally excluded —
+    /// engine turn ownership, team locks, and "is a driver active" all need the
+    /// live axis. Durable seat identity (MCP, peer eligibility) uses
+    /// [`retained_seat_run_id_for_thread`] / [`thread_is_retained_team_seat`].
+    ///
+    /// Never picks an arbitrary run from map iteration: exactly one live owner
+    /// yields that run id; zero or more than one live owner yields `None`.
     pub(crate) fn seat_run_id_for_thread(&self, thread_id: &str) -> Option<String> {
-        self.team_runs_snapshot()
+        let live: Vec<&TeamRun> = self
+            .team_runs
+            .values()
             .filter(|run| run.is_live_in_current_build())
-            .find(|run| {
+            .filter(|run| {
                 run.owned_thread_ids()
                     .iter()
                     .any(|owned| owned == thread_id)
             })
-            .map(|run| run.id.clone())
+            .collect();
+        match live.as_slice() {
+            [run] => Some(run.id.clone()),
+            _ => None,
+        }
+    }
+
+    /// Whether any retained Task run still lists this thread as a member seat.
+    ///
+    /// Durable ownership axis: includes terminal and reopenable runs, and inert
+    /// backend records that are still on the session. Used so finishing a Task
+    /// does not silently turn a seat into an ordinary standalone session.
+    pub(crate) fn thread_is_retained_team_seat(&self, thread_id: &str) -> bool {
+        self.team_runs.values().any(|run| {
+            run.owned_thread_ids()
+                .iter()
+                .any(|owned| owned == thread_id)
+        })
+    }
+
+    /// Durable Task-seat identity for MCP attachment and related classification.
+    ///
+    /// Never picks an arbitrary run from map iteration. Resolution:
+    /// 1. Exactly one retained owner → that run.
+    /// 2. Several owners, but exactly one of them is live → the live run.
+    /// 3. Zero owners, or ambiguous among live / among terminal-only → `None`
+    ///    (callers must not mint Peer MCP either; see [`thread_is_standalone`]).
+    pub(crate) fn retained_seat_run_id_for_thread(&self, thread_id: &str) -> Option<String> {
+        let owners: Vec<&TeamRun> = self
+            .team_runs
+            .values()
+            .filter(|run| {
+                run.owned_thread_ids()
+                    .iter()
+                    .any(|owned| owned == thread_id)
+            })
+            .collect();
+        match owners.as_slice() {
+            [] => None,
+            [run] => Some(run.id.clone()),
+            many => {
+                let live: Vec<&TeamRun> = many
+                    .iter()
+                    .copied()
+                    .filter(|run| run.is_live_in_current_build())
+                    .collect();
+                match live.as_slice() {
+                    [run] => Some(run.id.clone()),
+                    _ => None,
+                }
+            }
+        }
     }
 
     pub(crate) fn orchestrator_session_options(
@@ -2474,15 +2534,18 @@ impl RelayState {
         TeamAttribution::default()
     }
 
-    /// Whether this thread decides its own turns, as things stand.
+    /// Whether this thread has ordinary standalone-session identity.
     ///
-    /// The one answer every tool decision reads. Derived rather than stored because the
-    /// answer moves — a run adopts a thread, a finished run is reopened — and three
-    /// bridges each deriving their own is how a cursor seat and a claude reviewer both
-    /// ended up holding the tools of a session that runs itself.
-    pub(crate) fn thread_drives_itself(&self, thread_id: &str) -> bool {
+    /// True only when it is not the Orchestrator pin, not a retained Task seat
+    /// (live or terminal), not a reviewer, and not workflow-locked. Shared by
+    /// Peer MCP configuration, peer-tool authorization, and existing-peer
+    /// admission. Goals intentionally use a split model (non-ordinary identity
+    /// plus live competing-driver / review locks) and do not call this
+    /// predicate. Not a claim that a live Task driver is currently sending
+    /// turns (see [`seat_run_id_for_thread`] / team locks for that live axis).
+    pub(crate) fn thread_is_standalone(&self, thread_id: &str) -> bool {
         self.orchestrator_thread_id.as_deref() != Some(thread_id)
-            && self.seat_run_id_for_thread(thread_id).is_none()
+            && !self.thread_is_retained_team_seat(thread_id)
             // The AUTHOR's own session while a Code Flow drives it, not only the steps:
             // `is_reviewer_thread` sees the steps, and the run owns both.
             && !self.is_thread_workflow_locked(thread_id)
@@ -3133,10 +3196,15 @@ impl RelayState {
         if self.team_runs.len() < MAX_WORKFLOW_RUNS {
             return;
         }
+        // Soft cap for terminal Task records that still own seat thread ids:
+        // this helper is synchronous and cannot delete provider sessions, so
+        // evicting the metadata would promote surviving seats to ordinary/Peer
+        // identity. Only prune terminal history whose owned-seat set is empty
+        // (seats already released by the explicit delete lifecycle).
         let mut terminal: Vec<(String, u64)> = self
             .team_runs
             .iter()
-            .filter(|(_, run)| run.status.is_terminal())
+            .filter(|(_, run)| run.status.is_terminal() && run.owned_thread_ids().is_empty())
             .map(|(id, run)| (id.clone(), run.updated_at))
             .collect();
         terminal.sort_by_key(|(_, updated_at)| *updated_at);
@@ -6668,6 +6736,16 @@ mod tests {
             "an inert paused TL is visible history, not a conversable local seat"
         );
         assert_eq!(relay.seat_run_id_for_thread("tl-future"), None);
+        assert!(
+            relay.thread_is_retained_team_seat("tl-future"),
+            "inert retained ownership is still durable seat identity"
+        );
+        assert_eq!(
+            relay
+                .retained_seat_run_id_for_thread("tl-future")
+                .as_deref(),
+            Some("future")
+        );
         assert_eq!(
             relay.team_run_cwd_for_thread("tl-future").as_deref(),
             Some("/tmp/task-future"),
@@ -6686,6 +6764,196 @@ mod tests {
             relay.team_run_cwd_for_thread("tl-terminal"),
             None,
             "terminal lingering questions must fall back to foreground-session authorization"
+        );
+        assert!(
+            relay.thread_is_retained_team_seat("tl-terminal"),
+            "a finished Task still owns its member seats"
+        );
+        assert_eq!(
+            relay
+                .retained_seat_run_id_for_thread("tl-terminal")
+                .as_deref(),
+            Some("terminal")
+        );
+        assert!(
+            !relay.thread_is_standalone("tl-terminal"),
+            "terminal seats must not become ordinary standalone sessions"
+        );
+    }
+
+    #[test]
+    fn durable_seat_identity_survives_running_to_terminal_to_reopen() {
+        let mut relay = test_relay();
+        let mut run = team_run_with_status("cycle", TeamRunStatus::Running);
+        run.tl_thread_id = "seat-1".to_string();
+        relay.insert_team_run(run);
+
+        assert_eq!(
+            relay.seat_run_id_for_thread("seat-1").as_deref(),
+            Some("cycle")
+        );
+        assert_eq!(
+            relay.retained_seat_run_id_for_thread("seat-1").as_deref(),
+            Some("cycle")
+        );
+        assert!(!relay.thread_is_standalone("seat-1"));
+
+        relay.update_team_run("cycle", |run| {
+            run.status = TeamRunStatus::Done;
+        });
+        assert_eq!(
+            relay.seat_run_id_for_thread("seat-1"),
+            None,
+            "live scheduling must clear when the run is terminal"
+        );
+        assert_eq!(
+            relay.retained_seat_run_id_for_thread("seat-1").as_deref(),
+            Some("cycle"),
+            "durable seat identity must keep the same run across terminal"
+        );
+        assert!(!relay.thread_is_standalone("seat-1"));
+
+        relay.update_team_run("cycle", |run| {
+            run.status = TeamRunStatus::Running;
+        });
+        assert_eq!(
+            relay.seat_run_id_for_thread("seat-1").as_deref(),
+            Some("cycle")
+        );
+        assert_eq!(
+            relay.retained_seat_run_id_for_thread("seat-1").as_deref(),
+            Some("cycle")
+        );
+        assert!(!relay.thread_is_standalone("seat-1"));
+    }
+
+    #[test]
+    fn ambiguous_retained_seat_ownership_refuses_an_arbitrary_run_id() {
+        let mut relay = test_relay();
+        let mut older = team_run_with_status("older", TeamRunStatus::Done);
+        older.tl_thread_id = "shared-seat".to_string();
+        let mut newer = team_run_with_status("newer", TeamRunStatus::Done);
+        newer.tl_thread_id = "shared-seat".to_string();
+        relay.insert_team_run(older);
+        relay.insert_team_run(newer);
+
+        assert!(relay.thread_is_retained_team_seat("shared-seat"));
+        assert_eq!(
+            relay.retained_seat_run_id_for_thread("shared-seat"),
+            None,
+            "two terminal owners must not yield a HashMap-iteration pick"
+        );
+        assert!(
+            !relay.thread_is_standalone("shared-seat"),
+            "ambiguous retained ownership still blocks ordinary Peer identity"
+        );
+
+        relay.update_team_run("newer", |run| {
+            run.status = TeamRunStatus::Running;
+        });
+        assert_eq!(
+            relay
+                .retained_seat_run_id_for_thread("shared-seat")
+                .as_deref(),
+            Some("newer"),
+            "a unique live owner wins over other retained claimants"
+        );
+    }
+
+    #[test]
+    fn live_seat_lookup_refuses_an_arbitrary_run_when_two_live_owners_claim_a_thread() {
+        let mut relay = test_relay();
+        let mut a = team_run_with_status("live-a", TeamRunStatus::Running);
+        a.tl_thread_id = "shared-live".to_string();
+        let mut b = team_run_with_status("live-b", TeamRunStatus::Running);
+        b.tl_thread_id = "shared-live".to_string();
+        relay.insert_team_run(a);
+        relay.insert_team_run(b);
+
+        assert_eq!(
+            relay.seat_run_id_for_thread("shared-live"),
+            None,
+            "two live owners must not yield a HashMap-iteration pick"
+        );
+        assert_eq!(
+            relay.retained_seat_run_id_for_thread("shared-live"),
+            None,
+            "durable lookup also fails closed when live ownership is ambiguous"
+        );
+        assert!(!relay.thread_is_standalone("shared-live"));
+    }
+
+    #[test]
+    fn retention_pressure_cannot_promote_a_terminal_owned_seat_to_ordinary() {
+        let mut relay = test_relay();
+        let mut kept = team_run_with_status("kept-terminal", TeamRunStatus::Done);
+        kept.tl_thread_id = "kept-seat".to_string();
+        kept.spec.agreed_scope = "Keep this TaskSpec under retention pressure.".to_string();
+        kept.requested_at = 1;
+        kept.updated_at = 1;
+        relay.insert_team_run(kept);
+
+        for i in 0..MAX_WORKFLOW_RUNS {
+            let mut run = team_run_with_status(&format!("filler-{i}"), TeamRunStatus::Done);
+            // Empty owned set: these are the only terminal records prune may drop.
+            run.tl_thread_id.clear();
+            run.requested_at = 10 + i as u64;
+            run.updated_at = 10 + i as u64;
+            relay.insert_team_run(run);
+        }
+
+        assert!(
+            relay.team_runs.contains_key("kept-terminal"),
+            "a terminal Task that still owns seat ids must survive the soft cap"
+        );
+        assert_eq!(
+            relay
+                .retained_seat_run_id_for_thread("kept-seat")
+                .as_deref(),
+            Some("kept-terminal")
+        );
+        assert!(!relay.thread_is_standalone("kept-seat"));
+        assert_eq!(
+            relay
+                .team_run("kept-terminal")
+                .map(|run| run.spec.agreed_scope.as_str()),
+            Some("Keep this TaskSpec under retention pressure.")
+        );
+        assert!(
+            !relay.team_runs.contains_key("filler-0"),
+            "empty-owned terminal history remains prunable at the cap"
+        );
+    }
+
+    #[test]
+    fn releasing_every_owned_seat_lets_terminal_history_be_pruned() {
+        let mut relay = test_relay();
+        let mut run = team_run_with_status("releasable", TeamRunStatus::Done);
+        run.tl_thread_id = "to-release".to_string();
+        run.requested_at = 1;
+        run.updated_at = 1;
+        relay.insert_team_run(run);
+        assert!(relay.thread_is_retained_team_seat("to-release"));
+
+        relay.update_team_run("releasable", |run| {
+            run.release_owned_thread("to-release");
+        });
+        assert!(
+            !relay.thread_is_retained_team_seat("to-release"),
+            "explicit seat release is what ends durable ownership"
+        );
+        assert!(relay.thread_is_standalone("to-release"));
+
+        for i in 0..MAX_WORKFLOW_RUNS {
+            let mut filler = team_run_with_status(&format!("live-{i}"), TeamRunStatus::Paused);
+            filler.tl_thread_id = format!("live-seat-{i}");
+            filler.requested_at = 100 + i as u64;
+            filler.updated_at = 100 + i as u64;
+            relay.insert_team_run(filler);
+        }
+        assert!(
+            !relay.team_runs.contains_key("releasable"),
+            "once seats are released, empty terminal history may be pruned"
         );
     }
 
@@ -6783,6 +7051,7 @@ mod tests {
 
         let mut relay = test_relay();
         let mut finished = team_run_with_status("finished", TeamRunStatus::Done);
+        finished.tl_thread_id.clear();
         finished.requested_at = 100;
         finished.updated_at = 1;
         relay.insert_team_run(finished);
@@ -6803,7 +7072,7 @@ mod tests {
         );
         assert!(
             !relay.team_runs.contains_key("finished"),
-            "old terminal history should be pruned before the new insert when already at cap"
+            "empty-owned terminal history should be pruned before the new insert when already at cap"
         );
     }
 

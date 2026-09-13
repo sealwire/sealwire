@@ -403,6 +403,75 @@ pub struct AcpBridge {
     authenticated: AtomicBool,
 }
 
+/// Peer MCP entry as ACP wants it: array element, env as name/value pairs.
+fn peer_mcp_server_entry(token: &str) -> Value {
+    peer_mcp_server_entry_with_transport(
+        token,
+        crate::provider::sealwire_relay_api_token().as_deref(),
+    )
+}
+
+fn peer_mcp_server_entry_with_transport(token: &str, relay_api_token: Option<&str>) -> Value {
+    let mut env = vec![
+        json!({ "name": "SEALWIRE_ASK_TOKEN", "value": token }),
+        json!({ "name": "SEALWIRE_RELAY_URL", "value": crate::provider::sealwire_relay_url() }),
+    ];
+    if let Some(api_token) = relay_api_token.filter(|t| !t.is_empty()) {
+        env.push(json!({ "name": "RELAY_API_TOKEN", "value": api_token }));
+    }
+    json!({
+        "name": "sealwire",
+        "command": std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".to_string()),
+        "args": [crate::provider::sealwire_mcp_bridge_path()],
+        "env": env,
+    })
+}
+
+/// Seat MCP entry for ACP: same array shape, run id only — no ask token, no device.
+fn seat_mcp_server_entry(run_id: &str) -> Value {
+    seat_mcp_server_entry_with_transport(
+        run_id,
+        crate::provider::sealwire_relay_api_token().as_deref(),
+    )
+}
+
+fn seat_mcp_server_entry_with_transport(run_id: &str, relay_api_token: Option<&str>) -> Value {
+    let mut env = vec![
+        json!({ "name": "SEALWIRE_SEAT_RUN_ID", "value": run_id }),
+        json!({ "name": "SEALWIRE_RELAY_URL", "value": crate::provider::sealwire_relay_url() }),
+    ];
+    if let Some(api_token) = relay_api_token.filter(|t| !t.is_empty()) {
+        env.push(json!({ "name": "RELAY_API_TOKEN", "value": api_token }));
+    }
+    json!({
+        "name": "sealwire",
+        "command": std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".to_string()),
+        "args": [crate::provider::sealwire_mcp_bridge_path()],
+        "env": env,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn seat_mcp_server_entry_for_test(run_id: &str) -> Value {
+    seat_mcp_server_entry_with_transport(run_id, None)
+}
+
+#[cfg(test)]
+pub(crate) fn seat_mcp_server_entry_with_transport_for_test(
+    run_id: &str,
+    relay_api_token: Option<&str>,
+) -> Value {
+    seat_mcp_server_entry_with_transport(run_id, relay_api_token)
+}
+
+#[cfg(test)]
+pub(crate) fn peer_mcp_server_entry_with_transport_for_test(
+    token: &str,
+    relay_api_token: Option<&str>,
+) -> Value {
+    peer_mcp_server_entry_with_transport(token, relay_api_token)
+}
+
 impl AcpBridge {
     /// The sealwire MCP server for this session, or nothing.
     ///
@@ -414,32 +483,44 @@ impl AcpBridge {
         let Some(token) = token else {
             return json!([]);
         };
-        json!([{
-            "name": "sealwire",
-            "command": std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".to_string()),
-            "args": [crate::provider::sealwire_mcp_bridge_path()],
-            "env": [
-                { "name": "SEALWIRE_ASK_TOKEN", "value": token },
-                { "name": "SEALWIRE_RELAY_URL", "value": crate::provider::sealwire_relay_url() },
-            ],
-        }])
+        json!([peer_mcp_server_entry(token)])
     }
 
-    /// A token only for a session that decides its own turns AND is already unrestricted.
-    ///
-    /// Reattachment has a thread id, so it asks the same question the call gate does
-    /// instead of re-deciding on permissions — which cannot tell a reviewer, holding the
-    /// wide permissions it needs in order to read, from a person's own session.
-    async fn ask_token_if_allowed(&self, thread_id: &str) -> Option<String> {
-        let mut relay = self.state.write().await;
-        if !relay.thread_drives_itself(thread_id) {
-            return None;
+    /// Seat MCP for ACP: array shape, env as name/value pairs, run id only.
+    async fn seat_mcp_servers(&self, run_id: &str) -> Value {
+        json!([seat_mcp_server_entry(run_id)])
+    }
+
+    /// Reattach MCP: retained Task seat wins, then ordinary standalone peer,
+    /// else empty — same precedence Codex uses on `thread/resume`.
+    async fn mcp_servers_for_reattach(&self, thread_id: &str) -> Value {
+        // Keep the peer decision and token mint under the same lock, as the old
+        // `ask_token_if_allowed` path did. A team must not be able to adopt the
+        // thread between those two operations and leave it holding peer identity.
+        let (identity, peer_token) = {
+            let mut relay = self.state.write().await;
+            let unrestricted = relay
+                .thread_settings(thread_id)
+                .map(|s| crate::state::session_is_unrestricted(&s.approval_policy, &s.sandbox))
+                .unwrap_or(false);
+            let identity = crate::provider::sealwire_mcp_for_reattach(
+                relay.retained_seat_run_id_for_thread(thread_id),
+                relay.thread_is_standalone(thread_id),
+                unrestricted,
+            );
+            let peer_token = matches!(identity, crate::provider::SealwireMcpIdentity::Peer)
+                .then(|| relay.ask_token_for_thread(thread_id));
+            (identity, peer_token)
+        };
+        match identity {
+            crate::provider::SealwireMcpIdentity::Seat(run_id) => {
+                self.seat_mcp_servers(&run_id).await
+            }
+            crate::provider::SealwireMcpIdentity::Peer => {
+                self.peer_mcp_servers(peer_token.as_deref()).await
+            }
+            crate::provider::SealwireMcpIdentity::None => json!([]),
         }
-        let settings = relay.thread_settings(thread_id)?;
-        if !crate::state::session_is_unrestricted(&settings.approval_policy, &settings.sandbox) {
-            return None;
-        }
-        Some(relay.ask_token_for_thread(thread_id))
     }
 
     pub async fn spawn(
@@ -1249,15 +1330,27 @@ impl ProviderBridge for AcpBridge {
         let cwd = request.cwd.as_str();
         // Minted before the session exists, bound to it below. What it is for decides
         // whether it gets one at all — permissions alone handed a task seat the tools of
-        // a session that drives itself.
-        let new_token = if crate::provider::session_gets_peer_tools(
+        // a session that drives itself. Seat purpose attaches the run-scoped bridge
+        // instead and never mints an ask token.
+        let identity = crate::provider::sealwire_mcp_for_new_session(
             request.approval_policy.as_str(),
             request.sandbox.as_str(),
             &request.purpose,
-        ) {
-            Some(self.state.write().await.mint_unbound_ask_token())
-        } else {
-            None
+        );
+        let new_token = match &identity {
+            crate::provider::SealwireMcpIdentity::Peer => {
+                Some(self.state.write().await.mint_unbound_ask_token())
+            }
+            _ => None,
+        };
+        let mcp_servers = match &identity {
+            crate::provider::SealwireMcpIdentity::Seat(run_id) => {
+                self.seat_mcp_servers(run_id).await
+            }
+            crate::provider::SealwireMcpIdentity::Peer => {
+                self.peer_mcp_servers(new_token.as_deref()).await
+            }
+            crate::provider::SealwireMcpIdentity::None => json!([]),
         };
         let model = request.model.as_str();
         let approval_policy = request.approval_policy.as_str();
@@ -1265,7 +1358,7 @@ impl ProviderBridge for AcpBridge {
         let result = self
             .send_request(
                 "session/new",
-                json!({ "cwd": cwd, "mcpServers": self.peer_mcp_servers(new_token.as_deref()).await }),
+                json!({ "cwd": cwd, "mcpServers": mcp_servers }),
             )
             .await?;
 
@@ -1373,9 +1466,7 @@ impl ProviderBridge for AcpBridge {
                     json!({
                         "sessionId": thread_id,
                         "cwd": cwd,
-                        "mcpServers": self
-                            .peer_mcp_servers(self.ask_token_if_allowed(thread_id).await.as_deref())
-                            .await,
+                        "mcpServers": self.mcp_servers_for_reattach(thread_id).await,
                     }),
                 )
                 .await;
@@ -1482,9 +1573,7 @@ impl ProviderBridge for AcpBridge {
                 json!({
                     "sessionId": thread_id,
                     "cwd": cwd,
-                    "mcpServers": self
-                        .peer_mcp_servers(self.ask_token_if_allowed(thread_id).await.as_deref())
-                        .await,
+                    "mcpServers": self.mcp_servers_for_reattach(thread_id).await,
                 }),
             )
             .await;

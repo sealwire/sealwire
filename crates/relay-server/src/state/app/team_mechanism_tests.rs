@@ -2949,6 +2949,16 @@ async fn a_recorded_seat_is_reused_when_reachable_and_replaced_when_not() {
         started,
         "a routable session must be handed straight back, not duplicated"
     );
+    assert!(
+        _providers
+            .get("codex")
+            .expect("codex test provider")
+            .resumes
+            .lock()
+            .await
+            .is_empty(),
+        "ordinary live-seat reuse must not call provider resume"
+    );
 
     assert_eq!(
         app.resume_or_start_thread(

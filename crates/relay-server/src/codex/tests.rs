@@ -5207,3 +5207,326 @@ fn the_codex_mcp_config_is_the_shape_codex_actually_parses() {
         "and which bridge to run",
     );
 }
+
+#[test]
+fn a_codex_seat_mcp_config_carries_the_run_and_no_peer_or_device_identity() {
+    let config = super::seat_mcp_servers_with_transport("run-7", None);
+    assert!(
+        config.is_object(),
+        "seat mcp_servers must stay map-shaped like peer"
+    );
+    let env = config["sealwire"]["env"].as_object().expect("env object");
+    assert_eq!(
+        env.get("SEALWIRE_SEAT_RUN_ID").and_then(|v| v.as_str()),
+        Some("run-7")
+    );
+    assert!(env.get("SEALWIRE_ASK_TOKEN").is_none(), "{env:?}");
+    assert!(env.get("SEALWIRE_DEVICE_ID").is_none(), "{env:?}");
+    assert!(env.get("RELAY_API_TOKEN").is_none(), "{env:?}");
+    assert!(
+        env.get("SEALWIRE_RELAY_URL")
+            .and_then(|v| v.as_str())
+            .is_some(),
+        "{env:?}"
+    );
+}
+
+#[test]
+fn codex_seat_and_peer_mcp_include_non_empty_relay_api_token_only() {
+    let seat = super::seat_mcp_servers_with_transport("run-7", Some("relay-secret"));
+    assert_eq!(seat["sealwire"]["env"]["RELAY_API_TOKEN"], "relay-secret");
+    assert!(seat["sealwire"]["env"].get("SEALWIRE_ASK_TOKEN").is_none());
+    assert!(seat["sealwire"]["env"].get("SEALWIRE_DEVICE_ID").is_none());
+
+    let peer = super::peer_mcp_servers_with_transport("tok-1", Some("relay-secret"));
+    assert_eq!(peer["sealwire"]["env"]["RELAY_API_TOKEN"], "relay-secret");
+    assert_eq!(peer["sealwire"]["env"]["SEALWIRE_ASK_TOKEN"], "tok-1");
+    assert!(peer["sealwire"]["env"]
+        .get("SEALWIRE_SEAT_RUN_ID")
+        .is_none());
+    assert!(peer["sealwire"]["env"].get("SEALWIRE_DEVICE_ID").is_none());
+
+    for absent in [None, Some("")] {
+        let seat = super::seat_mcp_servers_with_transport("run-7", absent);
+        assert!(seat["sealwire"]["env"].get("RELAY_API_TOKEN").is_none());
+        let peer = super::peer_mcp_servers_with_transport("tok-1", absent);
+        assert!(peer["sealwire"]["env"].get("RELAY_API_TOKEN").is_none());
+    }
+}
+
+fn codex_thread_start_mcp(payload: &Value) -> Option<&Value> {
+    payload
+        .get("params")
+        .and_then(|p| p.get("config"))
+        .and_then(|c| c.get("mcp_servers"))
+}
+
+fn assert_codex_seat_mcp(mcp: &Value, run_id: &str) {
+    assert!(mcp.is_object(), "Codex mcp_servers must be a map: {mcp}");
+    let env = mcp["sealwire"]["env"].as_object().expect("env object");
+    assert_eq!(
+        env.get("SEALWIRE_SEAT_RUN_ID").and_then(|v| v.as_str()),
+        Some(run_id),
+        "{env:?}"
+    );
+    assert!(env.get("SEALWIRE_ASK_TOKEN").is_none(), "{env:?}");
+    assert!(env.get("SEALWIRE_DEVICE_ID").is_none(), "{env:?}");
+}
+
+fn assert_codex_peer_mcp(mcp: &Value) {
+    assert!(mcp.is_object(), "Codex mcp_servers must be a map: {mcp}");
+    let env = mcp["sealwire"]["env"].as_object().expect("env object");
+    assert!(
+        env.get("SEALWIRE_ASK_TOKEN")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| !t.is_empty()),
+        "{env:?}"
+    );
+    assert!(env.get("SEALWIRE_SEAT_RUN_ID").is_none(), "{env:?}");
+    assert!(env.get("SEALWIRE_DEVICE_ID").is_none(), "{env:?}");
+}
+
+fn insert_live_codex_seat_run(relay: &mut crate::state::RelayState, run_id: &str, thread_id: &str) {
+    let mut run = relay_api::team::TeamRun::new(
+        run_id.to_string(),
+        Default::default(),
+        "/tmp/project".to_string(),
+        "device-1".to_string(),
+    );
+    run.tl_thread_id = thread_id.to_string();
+    run.status = relay_api::team::TeamRunStatus::Running;
+    relay.insert_team_run(run);
+}
+
+#[tokio::test]
+async fn a_codex_seat_thread_start_attaches_seat_mcp_not_peer() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5-codex",
+            "never",
+            "workspace-write",
+            &crate::provider::SessionPurpose::Seat("run-seat".into()),
+        )
+        .await
+        .expect("start seat");
+
+    let start = codex_recv_payloads(&state)
+        .await
+        .into_iter()
+        .find(|payload| payload.get("method").and_then(Value::as_str) == Some("thread/start"))
+        .expect("thread/start");
+    let mcp = codex_thread_start_mcp(&start).expect("seat must attach mcp_servers");
+    assert_codex_seat_mcp(mcp, "run-seat");
+}
+
+#[tokio::test]
+async fn a_codex_seat_resume_restores_seat_mcp_from_live_run_state() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let thread = bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5-codex",
+            "never",
+            "workspace-write",
+            &crate::provider::SessionPurpose::Seat("run-seat".into()),
+        )
+        .await
+        .expect("start seat");
+    {
+        let mut relay = state.write().await;
+        insert_live_codex_seat_run(&mut relay, "run-seat", &thread.id);
+        relay.remember_thread_settings(&thread.id, "never", "workspace-write", "", "gpt-5-codex");
+    }
+
+    bridge
+        .resume_thread(&thread.id, "never", "workspace-write")
+        .await
+        .expect("resume seat");
+
+    let resume = codex_recv_payloads(&state)
+        .await
+        .into_iter()
+        .find(|payload| payload.get("method").and_then(Value::as_str) == Some("thread/resume"))
+        .expect("thread/resume");
+    let mcp = resume
+        .get("params")
+        .and_then(|p| p.get("config"))
+        .and_then(|c| c.get("mcp_servers"))
+        .expect("live seat resume must restore mcp_servers");
+    assert_codex_seat_mcp(mcp, "run-seat");
+}
+
+#[tokio::test]
+async fn an_ordinary_unrestricted_codex_session_still_gets_peer_mcp() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5-codex",
+            "bypass",
+            "workspace-write",
+            &crate::provider::SessionPurpose::Ordinary,
+        )
+        .await
+        .expect("start ordinary");
+
+    let start = codex_recv_payloads(&state)
+        .await
+        .into_iter()
+        .find(|payload| payload.get("method").and_then(Value::as_str) == Some("thread/start"))
+        .expect("thread/start");
+    let mcp = codex_thread_start_mcp(&start).expect("ordinary unrestricted must attach peer MCP");
+    assert_codex_peer_mcp(mcp);
+}
+
+#[tokio::test]
+async fn a_codex_reviewer_or_workflow_session_gets_no_mcp() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    for purpose in [
+        crate::provider::SessionPurpose::Reviewer,
+        crate::provider::SessionPurpose::Workflow,
+    ] {
+        bridge
+            .start_thread(
+                "/tmp/project",
+                "gpt-5-codex",
+                "bypass",
+                "workspace-write",
+                &purpose,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("start {purpose:?}: {e}"));
+    }
+
+    let starts: Vec<_> = codex_recv_payloads(&state)
+        .await
+        .into_iter()
+        .filter(|payload| payload.get("method").and_then(Value::as_str) == Some("thread/start"))
+        .collect();
+    assert_eq!(starts.len(), 2);
+    for start in starts {
+        assert!(
+            codex_thread_start_mcp(&start).is_none(),
+            "restricted non-seat sessions must stay tool-free: {start}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_terminal_unrestricted_codex_seat_keeps_seat_mcp() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let thread = bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5-codex",
+            "bypass",
+            "workspace-write",
+            &crate::provider::SessionPurpose::Seat("run-done".into()),
+        )
+        .await
+        .expect("start");
+    {
+        let mut relay = state.write().await;
+        let mut run = relay_api::team::TeamRun::new(
+            "run-done".to_string(),
+            Default::default(),
+            "/tmp/project".to_string(),
+            "device-1".to_string(),
+        );
+        run.tl_thread_id = thread.id.clone();
+        run.status = relay_api::team::TeamRunStatus::Done;
+        relay.insert_team_run(run);
+        // Bypass resolves to never + danger-full-access; unrestricted via sandbox.
+        relay.remember_thread_settings(&thread.id, "bypass", "workspace-write", "", "gpt-5-codex");
+    }
+
+    bridge
+        .resume_thread(&thread.id, "bypass", "workspace-write")
+        .await
+        .expect("resume");
+
+    let resume = codex_recv_payloads(&state)
+        .await
+        .into_iter()
+        .find(|payload| payload.get("method").and_then(Value::as_str) == Some("thread/resume"))
+        .expect("thread/resume");
+    let mcp = resume
+        .get("params")
+        .and_then(|p| p.get("config"))
+        .and_then(|c| c.get("mcp_servers"))
+        .expect("retained terminal seat must keep seat MCP");
+    assert_codex_seat_mcp(mcp, "run-done");
+}
+
+#[tokio::test]
+async fn a_reopened_codex_seat_keeps_the_same_seat_mcp_across_terminal() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let thread = bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5-codex",
+            "bypass",
+            "workspace-write",
+            &crate::provider::SessionPurpose::Seat("run-reopen".into()),
+        )
+        .await
+        .expect("start");
+    {
+        let mut relay = state.write().await;
+        let mut run = relay_api::team::TeamRun::new(
+            "run-reopen".to_string(),
+            Default::default(),
+            "/tmp/project".to_string(),
+            "device-1".to_string(),
+        );
+        run.tl_thread_id = thread.id.clone();
+        run.status = relay_api::team::TeamRunStatus::Done;
+        relay.insert_team_run(run);
+        relay.remember_thread_settings(&thread.id, "bypass", "workspace-write", "", "gpt-5-codex");
+    }
+
+    bridge
+        .resume_thread(&thread.id, "bypass", "workspace-write")
+        .await
+        .expect("terminal resume");
+    let terminal = codex_recv_payloads(&state)
+        .await
+        .into_iter()
+        .filter(|payload| payload.get("method").and_then(Value::as_str) == Some("thread/resume"))
+        .next_back()
+        .expect("terminal thread/resume");
+    assert_codex_seat_mcp(
+        terminal
+            .get("params")
+            .and_then(|p| p.get("config"))
+            .and_then(|c| c.get("mcp_servers"))
+            .expect("seat while terminal"),
+        "run-reopen",
+    );
+
+    {
+        let mut relay = state.write().await;
+        relay.update_team_run("run-reopen", |run| {
+            run.status = relay_api::team::TeamRunStatus::Running;
+        });
+    }
+
+    bridge
+        .resume_thread(&thread.id, "bypass", "workspace-write")
+        .await
+        .expect("reopened resume");
+    let reopened = codex_recv_payloads(&state)
+        .await
+        .into_iter()
+        .filter(|payload| payload.get("method").and_then(Value::as_str) == Some("thread/resume"))
+        .next_back()
+        .expect("reopened thread/resume");
+    let mcp = reopened
+        .get("params")
+        .and_then(|p| p.get("config"))
+        .and_then(|c| c.get("mcp_servers"))
+        .expect("same seat identity after reopen");
+    assert_codex_seat_mcp(mcp, "run-reopen");
+}

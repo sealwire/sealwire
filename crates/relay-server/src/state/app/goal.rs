@@ -62,18 +62,21 @@ fn thread_can_end_a_goal(relay: &crate::state::RelayState, thread_id: &str) -> b
         .unwrap_or(false)
 }
 
-/// Whether something OTHER than a goal is entitled to drive this thread.
+/// Whether this thread belongs to a non-ordinary agent role that cannot host a goal.
 ///
-/// The Orchestrator and team seats get their own toolset instead of the peer
-/// one, so they are unrestricted and still have no way to end a goal. Reviews
-/// and workflows own a thread they are not currently sending to — a second
-/// driver editing under them is exactly what the lock exists to stop. Checked
-/// again before every turn, because all of these can start after the goal did.
-/// Something else owns this thread for good, and the goal has nowhere to go.
-fn thread_answers_to_another_driver(relay: &crate::state::RelayState, thread_id: &str) -> bool {
+/// Distinct from an *active* competing driver: a finished Task's seat still belongs
+/// to that Task even when no driver is sending turns.
+fn thread_has_non_ordinary_identity(relay: &crate::state::RelayState, thread_id: &str) -> bool {
     relay.orchestrator_thread_id.as_deref() == Some(thread_id)
-        || relay.seat_run_id_for_thread(thread_id).is_some()
-        || relay.is_thread_or_cwd_workflow_locked(thread_id)
+        || relay.thread_is_retained_team_seat(thread_id)
+}
+
+/// Whether something OTHER than a goal is currently entitled to drive this thread.
+///
+/// Live locks only: workflow ownership and a live Task's workspace/thread lock.
+/// Checked again before every turn, because these can start after the goal did.
+fn thread_has_active_competing_driver(relay: &crate::state::RelayState, thread_id: &str) -> bool {
+    relay.is_thread_or_cwd_workflow_locked(thread_id)
         || relay.is_thread_or_cwd_team_locked(thread_id)
 }
 
@@ -114,7 +117,16 @@ stop itself — switch its approval to bypass (or its sandbox to full access) an
         // A review ALREADY under way is different from one the goal asks for later: the
         // goal would be editing the tree the reviewer is reading. Refused here, waited out
         // in the driver.
-        if thread_answers_to_another_driver(&relay, thread_id)
+        if thread_has_non_ordinary_identity(&relay, thread_id) {
+            return Err(if relay.thread_is_retained_team_seat(thread_id) {
+                "this session belongs to a Task — give the goal to one of your own sessions"
+                    .to_string()
+            } else {
+                "this session is the Orchestrator — give the goal to one of your own sessions"
+                    .to_string()
+            });
+        }
+        if thread_has_active_competing_driver(&relay, thread_id)
             || thread_is_lent_to_a_review(&relay, thread_id)
         {
             return Err(
@@ -377,7 +389,19 @@ running, so it can no longer report back — restore them and set the goal again
                     relay.notify();
                     continue;
                 }
-                if thread_answers_to_another_driver(&relay, &thread_id) {
+                if thread_has_non_ordinary_identity(&relay, &thread_id) {
+                    let reason = if relay.thread_is_retained_team_seat(&thread_id) {
+                        "this session belongs to a Task now, so the goal cannot keep driving it — \
+give the goal to one of your own sessions"
+                    } else {
+                        "this session became the Orchestrator while the goal was running — \
+give the goal to one of your own sessions"
+                    };
+                    relay.update_goal(&thread_id, |goal| goal.settle(GoalStatus::Blocked, reason));
+                    relay.notify();
+                    continue;
+                }
+                if thread_has_active_competing_driver(&relay, &thread_id) {
                     relay.update_goal(&thread_id, |goal| {
                         goal.settle(
                             GoalStatus::Blocked,

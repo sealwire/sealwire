@@ -325,12 +325,8 @@ impl AppState {
                 if let Some(reason) = run.non_executing_backend_reason() {
                     return Err(reason.to_string());
                 }
-                if run.status.is_terminal() {
-                    return Err(format!(
-                        "this task already finished as {}",
-                        run.status.as_str()
-                    ));
-                }
+                // Terminal retained seats may still read their own TaskSpec —
+                // finishing a Task does not revoke seat identity or `task_definition`.
                 Ok(task_definition_block(&run.id, &run.spec))
             }
             _ => Err(format!("{name} is not something the team may call")),
@@ -384,12 +380,14 @@ impl AppState {
         relay: &crate::state::RelayState,
         thread_id: &str,
     ) -> Result<(), String> {
-        if !relay.thread_drives_itself(thread_id) {
-            return Err(
-                "something else drives this session — these tools are for a \
-session that runs itself"
-                    .to_string(),
-            );
+        if !relay.thread_is_standalone(thread_id) {
+            return Err(if relay.thread_is_retained_team_seat(thread_id) {
+                "this session belongs to a Task — these tools are for an ordinary session"
+                    .to_string()
+            } else {
+                "this session is not an ordinary standalone session — these tools are for one that is"
+                    .to_string()
+            });
         }
         let unrestricted = relay
             .thread_settings(thread_id)
@@ -1941,6 +1939,32 @@ mod tests {
             );
         }
         assert!(!seat.contains(&"widen_scope".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_terminal_seat_may_still_read_its_own_task_definition() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, run_id) = app_with_a_live_run(&cwd).await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.update_team_run(&run_id, |run| {
+                run.status = relay_api::team::TeamRunStatus::Done;
+                run.spec.agreed_scope = "Finished investigation.".to_string();
+            });
+        }
+
+        let reply = app
+            .call_team_seat_tool("task_definition", &json!({}), &run_id)
+            .await
+            .expect("a retained terminal seat may still read its TaskSpec");
+        assert!(reply.contains("Finished investigation."), "{reply}");
+
+        let err = app
+            .call_team_seat_tool("widen_scope", &json!({ "addition": "x" }), &run_id)
+            .await
+            .expect_err("terminal seats still cannot call write tools");
+        assert!(err.contains("not something the team may call"), "{err}");
     }
 
     #[tokio::test]

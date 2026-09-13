@@ -139,7 +139,7 @@ enum SessionTools {
 fn resolve_session_tools(
     orchestrator: Option<(String, Option<String>)>,
     seat_run_id: Option<String>,
-    drives_itself: bool,
+    standalone: bool,
     unrestricted: bool,
 ) -> SessionTools {
     if let Some((device_id, system_prompt)) = orchestrator {
@@ -151,11 +151,11 @@ fn resolve_session_tools(
     if let Some(run_id) = seat_run_id {
         return SessionTools::Seat { run_id };
     }
-    // Two gates, and both must hold. `drives_itself` also covers a reviewer and a Code
+    // Two gates, and both must hold. `standalone` also covers a reviewer and a Code
     // Flow step, which permissions cannot: a reviewer inherits the wide ones it needs in
     // order to read. Unrestricted stays because a restricted session could otherwise ask
     // a freer agent to do what it may not.
-    if drives_itself && unrestricted {
+    if standalone && unrestricted {
         return SessionTools::Peer;
     }
     SessionTools::None
@@ -173,7 +173,7 @@ async fn attach_orchestrator_session(
     thread_id: &str,
     cmd: &mut Value,
 ) {
-    let (options, seat_run_id, drives_itself, unrestricted) = {
+    let (options, seat_run_id, standalone, unrestricted) = {
         let relay = state.read().await;
         let settings = relay.thread_settings(thread_id);
         let unrestricted = settings
@@ -182,12 +182,12 @@ async fn attach_orchestrator_session(
             .unwrap_or(false);
         (
             relay.orchestrator_session_options(thread_id),
-            relay.seat_run_id_for_thread(thread_id),
-            relay.thread_drives_itself(thread_id),
+            relay.retained_seat_run_id_for_thread(thread_id),
+            relay.thread_is_standalone(thread_id),
             unrestricted,
         )
     };
-    match resolve_session_tools(options, seat_run_id, drives_itself, unrestricted) {
+    match resolve_session_tools(options, seat_run_id, standalone, unrestricted) {
         SessionTools::Orchestrator {
             device_id,
             system_prompt,
@@ -239,7 +239,19 @@ fn peer_allowed_tools() -> Value {
 /// thread id proves nothing about who is calling. The token only ever exists
 /// inside the subprocess the relay launched.
 fn peer_mcp_config(worker_path: &str, token: &str) -> Value {
-    let mut config = orchestrator_mcp_config(worker_path, "");
+    peer_mcp_config_with_transport(
+        worker_path,
+        token,
+        crate::provider::sealwire_relay_api_token().as_deref(),
+    )
+}
+
+fn peer_mcp_config_with_transport(
+    worker_path: &str,
+    token: &str,
+    relay_api_token: Option<&str>,
+) -> Value {
+    let mut config = orchestrator_mcp_config_with_transport(worker_path, "", relay_api_token);
     if let Some(env) = config["sealwire"]["env"].as_object_mut() {
         env.remove("SEALWIRE_DEVICE_ID");
         env.insert(
@@ -264,7 +276,19 @@ fn orchestrator_allowed_tools() -> Value {
 /// MCP config for a team seat: same bridge, run id instead of a device id, so
 /// the seat's own tool calls land on the read-only path.
 fn seat_mcp_config(worker_path: &str, run_id: &str) -> Value {
-    let mut config = orchestrator_mcp_config(worker_path, "");
+    seat_mcp_config_with_transport(
+        worker_path,
+        run_id,
+        crate::provider::sealwire_relay_api_token().as_deref(),
+    )
+}
+
+fn seat_mcp_config_with_transport(
+    worker_path: &str,
+    run_id: &str,
+    relay_api_token: Option<&str>,
+) -> Value {
+    let mut config = orchestrator_mcp_config_with_transport(worker_path, "", relay_api_token);
     if let Some(env) = config["sealwire"]["env"].as_object_mut() {
         env.remove("SEALWIRE_DEVICE_ID");
         env.insert(
@@ -276,22 +300,29 @@ fn seat_mcp_config(worker_path: &str, run_id: &str) -> Value {
 }
 
 fn orchestrator_mcp_config(worker_path: &str, device_id: &str) -> Value {
+    orchestrator_mcp_config_with_transport(
+        worker_path,
+        device_id,
+        crate::provider::sealwire_relay_api_token().as_deref(),
+    )
+}
+
+fn orchestrator_mcp_config_with_transport(
+    worker_path: &str,
+    device_id: &str,
+    relay_api_token: Option<&str>,
+) -> Value {
     let bridge = std::path::Path::new(worker_path)
         .parent()
         .map(|dir| dir.join("orchestrator-mcp.mjs").display().to_string())
         .unwrap_or_else(|| "claude-worker/orchestrator-mcp.mjs".to_string());
     let mut env = json!({
         "SEALWIRE_DEVICE_ID": device_id,
-        "SEALWIRE_RELAY_URL": std::env::var("SEALWIRE_RELAY_URL").unwrap_or_else(|_| {
-            let port = std::env::var("PORT").unwrap_or_else(|_| "8787".to_string());
-            format!("http://127.0.0.1:{port}")
-        }),
+        "SEALWIRE_RELAY_URL": crate::provider::sealwire_relay_url(),
     });
-    // Only when the API is actually token-gated.
-    if let Ok(token) = std::env::var("RELAY_API_TOKEN") {
-        if !token.is_empty() {
-            env["RELAY_API_TOKEN"] = Value::String(token);
-        }
+    // Same AuthConfig normalization as Codex/ACP: trim, omit empty/whitespace-only.
+    if let Some(token) = relay_api_token.filter(|token| !token.is_empty()) {
+        env["RELAY_API_TOKEN"] = Value::String(token.to_string());
     }
     json!({
         "sealwire": {
@@ -2426,7 +2457,7 @@ mod tests {
         );
 
         // A reviewer or a Code Flow step: no run owns it, and its permissions are wide
-        // because it has to read — only "does it decide its own turns" separates it.
+        // because it has to read — only ordinary standalone identity separates it.
         assert_eq!(
             resolve_session_tools(None, None, false, true),
             SessionTools::None,
@@ -2926,13 +2957,61 @@ mod tests {
     /// Orchestrator's key, and it unlocks the write tools.
     #[test]
     fn a_seats_mcp_config_carries_the_run_and_no_device() {
-        let config = seat_mcp_config("/tmp/claude-worker/worker.mjs", "run-7");
+        let config = seat_mcp_config_with_transport("/tmp/claude-worker/worker.mjs", "run-7", None);
         let env = config["sealwire"]["env"].as_object().expect("env object");
         assert_eq!(
             env.get("SEALWIRE_SEAT_RUN_ID").and_then(|v| v.as_str()),
             Some("run-7")
         );
         assert!(env.get("SEALWIRE_DEVICE_ID").is_none(), "{env:?}");
+        assert!(env.get("SEALWIRE_ASK_TOKEN").is_none(), "{env:?}");
+        assert!(env.get("RELAY_API_TOKEN").is_none(), "{env:?}");
+    }
+
+    #[test]
+    fn claude_seat_and_peer_mcp_include_trimmed_relay_api_token_only() {
+        let seat = seat_mcp_config_with_transport(
+            "/tmp/claude-worker/worker.mjs",
+            "run-7",
+            crate::provider::sealwire_relay_api_token_from(Some("  secret  ".to_string()))
+                .as_deref(),
+        );
+        let seat_env = seat["sealwire"]["env"].as_object().expect("seat env");
+        assert_eq!(
+            seat_env.get("RELAY_API_TOKEN").and_then(|v| v.as_str()),
+            Some("secret")
+        );
+        assert!(seat_env.get("SEALWIRE_ASK_TOKEN").is_none(), "{seat_env:?}");
+        assert!(seat_env.get("SEALWIRE_DEVICE_ID").is_none(), "{seat_env:?}");
+
+        let peer = peer_mcp_config_with_transport(
+            "/tmp/claude-worker/worker.mjs",
+            "tok-1",
+            crate::provider::sealwire_relay_api_token_from(Some("  secret  ".to_string()))
+                .as_deref(),
+        );
+        assert_eq!(peer["sealwire"]["env"]["RELAY_API_TOKEN"], "secret");
+        assert_eq!(peer["sealwire"]["env"]["SEALWIRE_ASK_TOKEN"], "tok-1");
+        assert!(peer["sealwire"]["env"].get("SEALWIRE_DEVICE_ID").is_none());
+
+        for absent in [
+            crate::provider::sealwire_relay_api_token_from(None),
+            crate::provider::sealwire_relay_api_token_from(Some(String::new())),
+            crate::provider::sealwire_relay_api_token_from(Some("   \t\n".to_string())),
+        ] {
+            let seat = seat_mcp_config_with_transport(
+                "/tmp/claude-worker/worker.mjs",
+                "run-7",
+                absent.as_deref(),
+            );
+            assert!(seat["sealwire"]["env"].get("RELAY_API_TOKEN").is_none());
+            let peer = peer_mcp_config_with_transport(
+                "/tmp/claude-worker/worker.mjs",
+                "tok-1",
+                absent.as_deref(),
+            );
+            assert!(peer["sealwire"]["env"].get("RELAY_API_TOKEN").is_none());
+        }
     }
 
     /// `tools: []` is how the Orchestrator is stripped down to a chat surface.
@@ -2974,6 +3053,48 @@ mod tests {
             "the seat never got its read-only server: {cmd}"
         );
         assert!(cmd.get("tools").is_none(), "{cmd}");
+        assert!(cmd.get("allowedTools").is_none(), "{cmd}");
+    }
+
+    #[tokio::test]
+    async fn attaching_a_terminal_seat_keeps_seat_mcp_not_peer() {
+        let (_bridge, state) = match spawn_fake_bridge().await {
+            Some(pair) => pair,
+            None => return,
+        };
+        let thread_id = "seat-thread-done".to_string();
+        let mut run = relay_api::team::TeamRun::new(
+            "run-done".to_string(),
+            Default::default(),
+            "/tmp/seat".to_string(),
+            "device-1".to_string(),
+        );
+        run.tl_thread_id = thread_id.clone();
+        run.status = relay_api::team::TeamRunStatus::Done;
+        {
+            let mut relay = state.write().await;
+            relay.insert_team_run(run);
+            relay.remember_thread_settings(&thread_id, "bypass", "workspace-write", "", "");
+        }
+
+        let mut cmd = json!({ "type": "send" });
+        attach_orchestrator_session(
+            &state,
+            "/tmp/claude-worker/worker.mjs",
+            &thread_id,
+            &mut cmd,
+        )
+        .await;
+        let env = cmd["mcpServers"]["sealwire"]["env"]
+            .as_object()
+            .expect("seat env");
+        assert_eq!(
+            env.get("SEALWIRE_SEAT_RUN_ID").and_then(|v| v.as_str()),
+            Some("run-done"),
+            "terminal Claude seats must keep seat MCP: {cmd}"
+        );
+        assert!(env.get("SEALWIRE_ASK_TOKEN").is_none(), "{env:?}");
+        assert!(env.get("SEALWIRE_DEVICE_ID").is_none(), "{env:?}");
         assert!(cmd.get("allowedTools").is_none(), "{cmd}");
     }
 

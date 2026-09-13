@@ -242,6 +242,59 @@ pub fn session_gets_peer_tools(
         && crate::state::session_is_unrestricted(approval_policy, sandbox)
 }
 
+/// Which sealwire MCP identity a provider session should carry.
+///
+/// One precedence rule for every bridge: a retained Task seat gets the
+/// run-scoped `task_definition` bridge, never peer tools; an ordinary
+/// unrestricted standalone session gets peer tools; everything else gets nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SealwireMcpIdentity {
+    /// Run-scoped seat tools (`task_definition` only).
+    Seat(String),
+    /// Peer tools (ask another agent, etc.). Caller mints/binds the ask token.
+    Peer,
+    /// No sealwire MCP.
+    None,
+}
+
+/// MCP identity for a session being created, from its declared purpose.
+///
+/// Seat purpose wins before the peer gate so a task seat that runs with wide
+/// permissions (so it can work unattended) is not handed peer tools.
+pub fn sealwire_mcp_for_new_session(
+    approval_policy: &str,
+    sandbox: &str,
+    purpose: &SessionPurpose,
+) -> SealwireMcpIdentity {
+    match purpose {
+        SessionPurpose::Seat(run_id) => SealwireMcpIdentity::Seat(run_id.clone()),
+        _ if session_gets_peer_tools(approval_policy, sandbox, purpose) => {
+            SealwireMcpIdentity::Peer
+        }
+        _ => SealwireMcpIdentity::None,
+    }
+}
+
+/// MCP identity when reattaching an existing thread.
+///
+/// `seat_run_id` is durable Task-seat ownership (live or retained terminal).
+/// `standalone` is ordinary-session identity (`thread_is_standalone`): Peer only
+/// when there is no seat and the thread is eligible as an ordinary unrestricted
+/// session.
+pub fn sealwire_mcp_for_reattach(
+    seat_run_id: Option<String>,
+    standalone: bool,
+    unrestricted: bool,
+) -> SealwireMcpIdentity {
+    if let Some(run_id) = seat_run_id {
+        return SealwireMcpIdentity::Seat(run_id);
+    }
+    if standalone && unrestricted {
+        return SealwireMcpIdentity::Peer;
+    }
+    SealwireMcpIdentity::None
+}
+
 /// Where the sealwire MCP bridge script lives, beside the worker that is
 /// actually running. One definition: two providers resolve it, and a path rule
 /// kept in two places is a path rule that drifts.
@@ -260,6 +313,18 @@ pub fn sealwire_relay_url() -> String {
         let port = std::env::var("PORT").unwrap_or_else(|_| "8787".to_string());
         format!("http://127.0.0.1:{port}")
     })
+}
+
+/// `RELAY_API_TOKEN` for MCP subprocess transport auth, using the same
+/// normalization as [`crate::auth::AuthConfig`]: trim surrounding whitespace,
+/// then treat empty as absent. Independent of seat / peer / device identity.
+pub fn sealwire_relay_api_token() -> Option<String> {
+    sealwire_relay_api_token_from(std::env::var("RELAY_API_TOKEN").ok())
+}
+
+/// Pure form of [`sealwire_relay_api_token`] for tests and shared normalization.
+pub fn sealwire_relay_api_token_from(value: Option<String>) -> Option<String> {
+    relay_util::trimmed_option_string(value)
 }
 
 impl StartThreadRequest {
@@ -834,6 +899,26 @@ mod registry_tests {
     use super::*;
 
     #[test]
+    fn sealwire_relay_api_token_matches_authconfig_trim() {
+        // AuthConfig::from_env_for_bind_host uses trimmed_option_string on the
+        // same env var; MCP subprocesses must see exactly that token.
+        assert_eq!(sealwire_relay_api_token_from(None), None);
+        assert_eq!(sealwire_relay_api_token_from(Some(String::new())), None);
+        assert_eq!(
+            sealwire_relay_api_token_from(Some("   \t\n".to_string())),
+            None
+        );
+        assert_eq!(
+            sealwire_relay_api_token_from(Some("  secret  ".to_string())).as_deref(),
+            Some("secret")
+        );
+        assert_eq!(
+            sealwire_relay_api_token_from(Some("relay-secret".to_string())).as_deref(),
+            Some("relay-secret")
+        );
+    }
+
+    #[test]
     fn the_default_provider_is_declared_not_an_accident_of_spawn_order() {
         // It used to be whichever provider called `set_provider_name` last
         // during boot. That is not a decision anyone made: it is the tail of a
@@ -1175,7 +1260,10 @@ mod classify_tests {
 
 #[cfg(test)]
 mod session_audience_tests {
-    use super::{session_gets_peer_tools, SessionPurpose, StartThreadRequest};
+    use super::{
+        sealwire_mcp_for_new_session, sealwire_mcp_for_reattach, session_gets_peer_tools,
+        SealwireMcpIdentity, SessionPurpose, StartThreadRequest,
+    };
 
     // What a session is FOR decides its tools, not how wide its permissions happen to be.
     // Deciding on permissions is what handed a cursor task seat — which runs bypass so it
@@ -1223,5 +1311,58 @@ mod session_audience_tests {
         let seat = StartThreadRequest::new("/tmp", "m", "bypass", "workspace-write")
             .driven_by(SessionPurpose::Seat("run-1".to_string()));
         assert!(seat.purpose.is_driven_by_the_relay());
+    }
+
+    #[test]
+    fn new_session_mcp_identity_prefers_seat_over_peer() {
+        assert_eq!(
+            sealwire_mcp_for_new_session(
+                "bypass",
+                "workspace-write",
+                &SessionPurpose::Seat("run-7".into())
+            ),
+            SealwireMcpIdentity::Seat("run-7".into())
+        );
+        assert_eq!(
+            sealwire_mcp_for_new_session("bypass", "workspace-write", &SessionPurpose::Ordinary),
+            SealwireMcpIdentity::Peer
+        );
+        for purpose in [SessionPurpose::Reviewer, SessionPurpose::Workflow] {
+            assert_eq!(
+                sealwire_mcp_for_new_session("bypass", "workspace-write", &purpose),
+                SealwireMcpIdentity::None,
+                "{purpose:?}"
+            );
+        }
+        assert_eq!(
+            sealwire_mcp_for_new_session("never", "workspace-write", &SessionPurpose::Ordinary),
+            SealwireMcpIdentity::None
+        );
+    }
+
+    #[test]
+    fn reattach_mcp_identity_restores_a_retained_seat_before_peer() {
+        assert_eq!(
+            sealwire_mcp_for_reattach(Some("run-7".into()), true, true),
+            SealwireMcpIdentity::Seat("run-7".into())
+        );
+        assert_eq!(
+            sealwire_mcp_for_reattach(None, true, true),
+            SealwireMcpIdentity::Peer
+        );
+        // Non-standalone (retained seat / reviewer / …) stays tool-free without a
+        // seat id; restricted standalone stays tool-free; retained seat id wins.
+        assert_eq!(
+            sealwire_mcp_for_reattach(None, false, true),
+            SealwireMcpIdentity::None
+        );
+        assert_eq!(
+            sealwire_mcp_for_reattach(None, true, false),
+            SealwireMcpIdentity::None
+        );
+        assert_eq!(
+            sealwire_mcp_for_reattach(Some("run-done".into()), false, true),
+            SealwireMcpIdentity::Seat("run-done".into())
+        );
     }
 }
