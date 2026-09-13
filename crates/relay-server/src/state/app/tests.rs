@@ -26949,6 +26949,101 @@ watchdog settle this Blocked",
     // to say never settles at all, parking the asker until a four-hour clock calls it
     // "did not answer in time" — which is not what happened and not what to do about it.
     #[tokio::test]
+    async fn a_peer_waiting_on_its_own_peer_is_not_treated_as_having_gone_quiet() {
+        // B answering "I have asked C" and ending its turn is the behaviour we now ask
+        // for, so the sweep must not read that idleness as refusing to answer A.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let a = goal_session(&app, &cwd).await;
+
+        let b = app
+            .ask_agent(
+                &a,
+                AskRequest {
+                    device_id: None,
+                    started_by: relay_api::delegation::StartedBy::Agent,
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "look at the retry loop".to_string(),
+                },
+            )
+            .await
+            .expect("A asks B");
+
+        // Wait for B's reply to land, or the sweep would skip it for having said nothing
+        // and the test would pass without exercising anything.
+        let mut replied = false;
+        for _ in 0..50 {
+            if app.latest_assistant_entry_with_turn(&b).await.is_some() {
+                replied = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+        assert!(replied, "the fake peer should answer");
+
+        // And for its turn to actually close: a peer still mid-turn is skipped by the
+        // sweep for a different reason, which would make this test prove nothing.
+        let mut idle = false;
+        for _ in 0..50 {
+            let working = {
+                let relay = app.relay.read().await;
+                relay
+                    .runtime_for_thread(&b)
+                    .map(|runtime| runtime.is_working())
+                    .unwrap_or(false)
+            };
+            if !working {
+                idle = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+        assert!(idle, "B's turn should end");
+
+        let _c = app
+            .ask_agent(
+                &b,
+                AskRequest {
+                    device_id: None,
+                    started_by: relay_api::delegation::StartedBy::Agent,
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "and you look at the parser".to_string(),
+                },
+            )
+            .await
+            .expect("B asks C");
+
+        app.settle_and_deliver_asks_at(crate::state::unix_now())
+            .await;
+
+        let ask = {
+            let relay = app.relay.read().await;
+            relay
+                .asks_of_asker(&a)
+                .into_iter()
+                .find(|ask| ask.peer_thread_id == b)
+                .expect("A's ask is on record")
+                .clone()
+        };
+        assert!(
+            !ask.nudged,
+            "B is waiting on C, not ignoring A — nudging it asks for an answer it cannot give yet"
+        );
+        assert!(
+            !ask.status.is_terminal(),
+            "settling now hands A a placeholder and wakes it while C is still working"
+        );
+    }
+
+    #[tokio::test]
     async fn stopping_a_peer_ends_its_ask_then_and_there() {
         let project = TempDir::new().expect("tempdir");
         let cwd = project.path().to_string_lossy().to_string();

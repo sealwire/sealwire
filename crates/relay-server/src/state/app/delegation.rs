@@ -680,10 +680,18 @@ impl AppState {
         for (ask_id, peer_thread_id, baseline, turn_id, asked_at) in live {
             let busy = {
                 let relay = self.relay.read().await;
-                relay
+                let working = relay
                     .runtime_for_thread(&peer_thread_id)
                     .map(|runtime| runtime.is_working())
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+                // A peer that handed part of the job to its own peer is waiting, not
+                // ignoring us: it is woken when that answer lands, and not before then
+                // can it answer us. Ends the chain at whatever depth it reaches.
+                working
+                    || relay
+                        .asks_of_asker(&peer_thread_id)
+                        .into_iter()
+                        .any(|ask| !ask.status.is_terminal())
             };
             // Still working is not stuck. Timing out a peer mid-thought throws
             // away the work AND does not stop it, so the run continues with
