@@ -111,11 +111,6 @@ impl AppState {
         // one the session cannot end.
         let mut relay = self.relay.write().await;
         ensure_thread_in_device_scope(&relay, thread_id, device_id)?;
-        // A frame the wire already superseded. Not an error: the device that sent it did
-        // nothing wrong, and the snapshot it gets back shows what actually happened.
-        if !relay.claim_goal_ingress(thread_id, ingress) {
-            return Ok(());
-        }
         if !thread_can_end_a_goal(&relay, thread_id) {
             return Err(
                 "a goal runs this session on its own, so it needs a session that can \
@@ -155,20 +150,41 @@ to one of your own sessions"
                 crate::state::MAX_GOAL_OBJECTIVE_CHARS
             ));
         }
+        // Claimed here rather than on the way in: a frame refused above changed nothing,
+        // so it must not take the position away from an older frame that would have.
+        // Refusal itself is not an error — the device that sent it did nothing wrong, and
+        // the snapshot it gets back shows what actually happened.
+        if !relay.claim_goal_ingress(thread_id, ingress) {
+            return Ok(());
+        }
         // A wording tweak keeps the turns spent so far. Pass `reset_turns` when
         // the person wants a fresh budget; out-of-turns still resets on its own.
-        if relay.goal_for_thread(thread_id).is_some() {
+        let superseded_turn = if relay.goal_for_thread(thread_id).is_some() {
+            // Read under this lock, so the stop below lands on the turn carrying the OLD
+            // objective and never on the one the driver starts for this one.
+            let running = relay
+                .runtime_for_thread(thread_id)
+                .and_then(|runtime| runtime.active_turn_id.clone());
             relay.update_goal(thread_id, |goal| {
                 goal.revise(objective.clone(), reset_turns)
             });
+            running
         } else {
             relay.set_goal(Goal::new(
                 format!("goal-{}-{}", unix_now(), super::review::random_suffix()),
                 thread_id.to_string(),
                 objective,
             ));
-        }
+            None
+        };
         relay.notify();
+        drop(relay);
+        // A turn in flight was handed the objective this one replaces, so it is editing
+        // toward something the user has already changed. This is also what makes a
+        // superseded Stop safe to drop: whichever frame wins, the old turn is stopped.
+        if let Some(turn_id) = superseded_turn {
+            self.request_provider_stop(thread_id, Some(&turn_id)).await;
+        }
         Ok(())
     }
 
@@ -181,6 +197,9 @@ to one of your own sessions"
         let handed_over = {
             let mut relay = self.relay.write().await;
             ensure_thread_in_device_scope(&relay, thread_id, device_id)?;
+            // Claimed before the existence check on purpose: a Stop that finds no goal
+            // still has to hold the position, or a Set that arrived BEFORE it lands
+            // afterwards and starts one the user has already stopped.
             if !relay.claim_goal_ingress(thread_id, ingress) {
                 return Ok(());
             }

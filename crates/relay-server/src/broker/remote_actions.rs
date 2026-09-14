@@ -24,6 +24,13 @@ use crate::{
 
 /// How long a reconnected asker waits for an answer someone else is producing.
 const REMOTE_ACTION_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+/// How often it repeats "still running" while it waits. Must stay under the client's own
+/// deadline (`REMOTE_ACTION_TIMEOUT_MS` in `frontend/remote/actions.js`) or the phone gives
+/// up between two of them and reports a failure for a write that is still running.
+const REMOTE_ACTION_PENDING_NOTICE_INTERVAL: Duration = Duration::from_secs(10);
+/// The client-side deadline the interval above has to outpace, mirrored for the test.
+#[cfg(test)]
+pub(super) const CLIENT_REMOTE_ACTION_DEADLINE: Duration = Duration::from_secs(15);
 
 use super::{
     crypto::{decrypt_json, encrypt_json, EncryptedEnvelope},
@@ -906,13 +913,20 @@ pub(super) async fn handle_remote_action(
             // Almost always a phone that reconnected: its first attempt is still running,
             // and the writer it would have answered through died with the old session.
             // Answer this one when the original finishes.
-            publish_remote_action_pending(writer, &from_peer_id, &action_id).await;
             let state = state.clone();
             let writer = writer.clone();
             let device_id = resolved_device_id.clone();
+            let waited_peer_id = from_peer_id.clone();
             tokio::spawn(async move {
-                if let Some(cached) =
-                    await_remote_action_result(&state, &device_id, &action_id, wait).await
+                if let Some(cached) = await_remote_action_result(
+                    &state,
+                    &writer,
+                    &waited_peer_id,
+                    &device_id,
+                    &action_id,
+                    wait,
+                )
+                .await
                 {
                     let _ = replay_plain_remote_action_result(
                         &state,
@@ -1178,13 +1192,20 @@ pub(super) async fn handle_encrypted_remote_action(
             .await;
         }
         Ok(RemoteActionReplayDecision::InFlight(wait)) => {
-            publish_remote_action_pending(writer, &from_peer_id, &action_id).await;
             let state = state.clone();
             let writer = writer.clone();
             let waited_device_id = device_id.clone();
+            let waited_peer_id = from_peer_id.clone();
             tokio::spawn(async move {
-                if let Some(cached) =
-                    await_remote_action_result(&state, &waited_device_id, &action_id, wait).await
+                if let Some(cached) = await_remote_action_result(
+                    &state,
+                    &writer,
+                    &waited_peer_id,
+                    &waited_device_id,
+                    &action_id,
+                    wait,
+                )
+                .await
                 {
                     let _ = replay_encrypted_remote_action_result(
                         &state,
@@ -2339,12 +2360,12 @@ async fn publish_remote_action_pending(
 
 async fn await_remote_action_result(
     state: &AppState,
+    writer: &BrokerWriter,
+    target_peer_id: &str,
     device_id: &str,
     action_id: &str,
     wait: RemoteActionWait,
 ) -> Option<CachedRemoteActionResult> {
-    // Subscribe BEFORE re-reading, or a result stored between the reservation and here
-    // wakes nobody and this waits out the whole deadline for an answer already on file.
     let finished = wait.finished.clone();
     let wake = async move { finished.notified().await };
     let mut wake = std::pin::pin!(wake);
@@ -2353,12 +2374,22 @@ async fn await_remote_action_result(
         futures_util::poll!(wake.as_mut()),
         std::task::Poll::Ready(())
     );
-    if !woken_already
-        && tokio::time::timeout(REMOTE_ACTION_WAIT_TIMEOUT, wake)
-            .await
-            .is_err()
-    {
-        return None;
+    if !woken_already {
+        // Repeated rather than said once: the asker's own deadline is far shorter than
+        // this wait, so a single notice only buys one more window of it.
+        let give_up_at = Instant::now() + REMOTE_ACTION_WAIT_TIMEOUT;
+        loop {
+            publish_remote_action_pending(writer, target_peer_id, action_id).await;
+            if tokio::time::timeout(REMOTE_ACTION_PENDING_NOTICE_INTERVAL, wake.as_mut())
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            if Instant::now() >= give_up_at {
+                return None;
+            }
+        }
     }
     // Checked on every path, including the one where the answer was already on file: an
     // earlier asker holds the writer of a session that has since been replaced.

@@ -1853,3 +1853,15 @@ fn delegating_from_a_paired_device_round_trips_and_binds_it() {
         RemoteActionResultKind::RemoteActionAck
     ));
 }
+
+/// The relay repeats "still running" faster than the phone gives up. If these two drift
+/// apart the phone reports a failure between two notices — for a write that is running.
+#[test]
+fn the_still_working_notice_outpaces_the_deadline_it_exists_to_hold_off() {
+    assert!(
+        REMOTE_ACTION_PENDING_NOTICE_INTERVAL < CLIENT_REMOTE_ACTION_DEADLINE,
+        "the relay repeats every {:?} but the phone gives up after {:?}",
+        REMOTE_ACTION_PENDING_NOTICE_INTERVAL,
+        CLIENT_REMOTE_ACTION_DEADLINE
+    );
+}

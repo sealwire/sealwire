@@ -2430,3 +2430,87 @@ test("an inbound frame for another surface does not notify the remote store", as
       + "notification is a full RemoteApp re-render for a frame we throw away"
   );
 });
+
+// Every peer in the room receives every ordinary payload, and a paired phone is a peer.
+// Nothing here checked who sent one, so any paired device could put words in the relay's
+// mouth — a forged snapshot, a forged action result, a forged "still working" that holds
+// another phone's request open indefinitely.
+test("a payload from another surface is not treated as if the relay had sent it", async () => {
+  installBrowserStubs();
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { configureBrokerClient, connectBroker } = await import("./broker-client.js");
+
+  const delivered = [];
+  configureBrokerClient({
+    onBrokerPayload(payload) {
+      delivered.push(payload?.kind);
+    },
+  });
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-sender-check",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-peer",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  void connectBroker("sender check");
+  await waitFor(() => FakeWebSocket.instances.length > 0);
+  const socket = FakeWebSocket.instances.at(-1);
+  socket.emit("open", {});
+  socket.emit("message", {
+    data: JSON.stringify({
+      type: "welcome",
+      protocol_version: 1,
+      channel_id: "room-a",
+      peer_id: "surface-self",
+      peers: [{ peer_id: "relay-peer", role: "relay" }],
+    }),
+  });
+  await waitFor(() => state.socketPeerId === "surface-self");
+
+  socket.emit("message", {
+    data: JSON.stringify({
+      type: "message",
+      from_peer_id: "surface-attacker",
+      from_role: "surface",
+      payload: {
+        kind: "session_snapshot",
+        protocol_version: 2,
+        snapshot: { current_status: "idle", transcript: [], logs: [] },
+      },
+    }),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(
+    delivered,
+    [],
+    "a payload from a peer that is not the relay must not reach the surface at all"
+  );
+
+  socket.emit("message", {
+    data: JSON.stringify({
+      type: "message",
+      from_peer_id: "relay-peer",
+      from_role: "relay",
+      payload: {
+        kind: "session_snapshot",
+        protocol_version: 2,
+        snapshot: { current_status: "idle", transcript: [], logs: [] },
+      },
+    }),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(delivered, ["session_snapshot"], "and the relay's own still does");
+});

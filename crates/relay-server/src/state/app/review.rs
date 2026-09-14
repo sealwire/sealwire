@@ -2970,7 +2970,11 @@ tree would review commits this thread never made"
 
     /// Request provider cancellation without mutating local runtime state. A
     /// provider completion event remains the only proof that work stopped.
-    async fn request_provider_stop(&self, thread_id: &str, turn_id: Option<&str>) -> bool {
+    pub(super) async fn request_provider_stop(
+        &self,
+        thread_id: &str,
+        turn_id: Option<&str>,
+    ) -> bool {
         match self.find_thread_provider(thread_id).await {
             Ok((_, bridge)) => bridge
                 .clone()

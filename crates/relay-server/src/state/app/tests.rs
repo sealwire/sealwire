@@ -26244,7 +26244,7 @@ mod beta_gate_tests {
 /// `ask_agent`: one session bringing in another.
 #[cfg(test)]
 mod ask_tests {
-    use super::path_scope_tests::{build_app, grant_workspace, pair_device};
+    use super::path_scope_tests::{build_app, build_app_with_bridge, grant_workspace, pair_device};
     use crate::protocol::StartSessionInput;
     use relay_api::delegation::{AskError, AskRequest};
     use tempfile::TempDir;
@@ -27115,6 +27115,39 @@ watchdog settle this Blocked",
             status,
             Some(crate::state::GoalStatus::Cancelled),
             "the last thing the user did on the wire was stop it"
+        );
+    }
+
+    // The other direction of the same race, and the one where refusing the older frame is
+    // not the same as running the two in order: Stop carries a side effect. If the later
+    // Set simply wins, the turn the Stop was aimed at is still running — still editing,
+    // against an objective the user has already replaced.
+    #[tokio::test]
+    async fn revising_a_goal_stops_the_turn_that_was_working_on_the_old_one() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "dev", Vec::new()).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "the original objective", None, false, Some(10))
+            .await
+            .expect("the user sets one");
+
+        // A turn in flight, carrying the objective about to be replaced.
+        {
+            let mut relay = app.relay.write().await;
+            relay.ensure_runtime_for_thread(&thread).active_turn_id = Some("turn-old".to_string());
+        }
+
+        app.set_goal(&thread, "a different objective", None, false, Some(12))
+            .await
+            .expect("the other device revises it");
+
+        assert!(
+            provider.stop_was_requested_for("turn-old").await,
+            "the turn handed the old objective was left running against a goal that has \
+             been replaced"
         );
     }
 

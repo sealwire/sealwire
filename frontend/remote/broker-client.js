@@ -706,6 +706,13 @@ async function handleSocketMessage(rawData, connectReason, connection = currentC
   }
 
   logInboundBrokerMessage(frame);
+  // Every peer in the room gets every ordinary payload, and a paired phone is a peer. So
+  // without this any paired device could put words in the relay's mouth: a forged
+  // snapshot, a forged action result, a forged "still working" holding a request open.
+  if (frame.from_role !== "relay") {
+    renderLog(`Ignoring a ${frame.payload?.kind || "payload"} from a peer that is not the relay.`);
+    return;
+  }
   if (!isSupportedRelayProtocolVersion(frame.payload?.protocol_version)) {
     renderLog(
       `Relay payload protocol ${frame.payload?.protocol_version} is not supported by this client. Refresh this page after updating.`

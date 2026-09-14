@@ -1626,8 +1626,10 @@ test("a relay saying it is still working restarts the phone's deadline", async (
   state.pendingActions.clear();
 
   const cleared = [];
+  const armedFor = [];
   let nextTimerId = 900;
-  globalThis.window.setTimeout = () => {
+  globalThis.window.setTimeout = (_handler, delay) => {
+    armedFor.push(delay);
     nextTimerId += 1;
     return nextTimerId;
   };
@@ -1658,6 +1660,13 @@ test("a relay saying it is still working restarts the phone's deadline", async (
     state.pendingActions.get("action-waiting")?.timeoutId,
     4242,
     "and a fresh one is armed in its place"
+  );
+  // For the FULL window, not a token amount: the relay repeats its notice on a shorter
+  // cycle than this, so anything less would let the phone give up between two of them.
+  assert.deepEqual(
+    armedFor,
+    [15_000],
+    "the replacement deadline has to be a whole window, or the notice buys nothing"
   );
   state.pendingActions.clear();
 });

@@ -490,6 +490,12 @@ pub struct FakeProviderBridge {
 }
 
 impl FakeProviderBridge {
+    /// Whether a stop was asked for this exact turn. Read by tests that need to prove a
+    /// turn left working against a superseded objective was actually told to stop.
+    pub async fn stop_was_requested_for(&self, turn_id: &str) -> bool {
+        self.stopped_turns.lock().await.contains(turn_id)
+    }
+
     /// Make `start_thread` take `ms` to answer.
     ///
     /// A test seam with one purpose: a check-then-act race needs both callers
