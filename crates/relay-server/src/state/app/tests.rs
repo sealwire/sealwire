@@ -27456,7 +27456,7 @@ watchdog settle this Blocked",
         grant_workspace(&app, &cwd).await;
         pair_device(&app, "dev", Vec::new()).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "the original objective", None, Some(10))
+        app.set_goal(&thread, "the original objective", None, false, Some(10))
             .await
             .expect("the user sets one");
 
@@ -27468,12 +27468,43 @@ watchdog settle this Blocked",
             relay.ensure_runtime_for_thread(&thread).active_turn_id = Some("turn-user".to_string());
         }
 
-        let _ = app.cancel_goal(&thread, None, Some(11)).await;
+        let reported = app.cancel_goal(&thread, None, Some(11)).await;
 
         assert!(
             !provider.stop_was_requested_for("turn-user").await,
             "stopping the goal stopped a turn it had no reason to believe was its own"
         );
+        assert!(
+            reported.is_err(),
+            "something the goal cannot identify may still be running, and saying nothing \
+             about it reads as 'stopped': {reported:?}"
+        );
+    }
+
+    // But when nothing is running at all there is nothing to be unsure about, and warning
+    // the user their agent may still be working is simply false.
+    #[tokio::test]
+    async fn stopping_a_goal_that_started_nothing_is_just_stopped() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _provider, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "dev", Vec::new()).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "the original objective", None, false, Some(10))
+            .await
+            .expect("the user sets one");
+
+        app.set_review_drain_max_ms(200);
+        {
+            // Charged, and the send never became a turn — the session is idle.
+            let mut relay = app.relay.write().await;
+            relay.update_goal(&thread, |goal| goal.hand_over());
+        }
+
+        app.cancel_goal(&thread, None, Some(11))
+            .await
+            .expect("nothing is running, so the stop is a stop");
     }
 
     // Stopping the turn a goal is running means stop. The driver ticks every three

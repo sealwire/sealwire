@@ -302,9 +302,10 @@ still running — the agent may still be working to it. Stop the session itself 
             }
             // Charged and never told which turn it became. The driver stops what it
             // started once it sees the goal settled; there is nothing safe to do here.
+            // An idle session is the one case there is nothing to be unsure about.
             None => {
                 drop(slot);
-                !handed_over
+                !handed_over || !self.thread_working(thread_id).await
             }
         };
         if drained {
