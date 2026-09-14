@@ -23,8 +23,10 @@ import {
 } from "./surface-state.js";
 import { sendBrokerFrame } from "./broker-client.js";
 
-// The relay answers every remote action promptly — a delegate now hands its slow half
-// to a task of its own — so one deadline covers them all.
+// One deadline for every action. Not because they are all quick — the relay still
+// awaits list_threads and send_message in its single receive loop, and a cold Codex
+// catalog alone is allowed 30s — but because a longer deadline is the wrong cure for
+// that: the relay is stalled either way, and waiting through it just hides that.
 const REMOTE_ACTION_TIMEOUT_MS = 15_000;
 
 

@@ -1424,6 +1424,7 @@ fn set_thread_flag_round_trips_the_payload_the_remote_surface_sends() {
 /// with `q` dropped the relay answers with the ordinary page, so the device shows every
 /// session and the search box looks broken. The browser e2e cannot see it — that harness
 /// stubs the relay, so it IS the server there.
+
 #[tokio::test]
 async fn list_threads_action_carries_the_search_query() {
     use crate::fake_provider::FakeProviderBridge;
