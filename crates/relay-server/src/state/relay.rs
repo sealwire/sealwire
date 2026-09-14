@@ -4657,9 +4657,9 @@ impl RelayState {
             .filter(|(_, job)| job.status.is_terminal())
             .map(|(id, job)| (id.clone(), job.clone()))
             .collect();
-        // Nothing drives a delegation across a restart, so one that was under way comes
-        // back settled rather than live — kept, so the person who asked can see it
-        // stopped, rather than finding no trace of what they were told was accepted.
+        // Kept across a restart rather than dropped: one whose peer exists stays live for
+        // the sweep to settle from that peer's transcript, and only one that never got a
+        // peer is settled here.
         self.asks = Self::restored_asks(&persisted.asks);
         // A goal survives, but never running: whatever was driving it died with
         // the process, and picking the work back up unasked — minutes or days
@@ -5869,9 +5869,9 @@ impl RelayState {
             .filter(|(_, job)| job.status.is_terminal())
             .map(|(id, job)| (id.clone(), job.clone()))
             .collect();
-        // Nothing drives a delegation across a restart, so one that was under way comes
-        // back settled rather than live — kept, so the person who asked can see it
-        // stopped, rather than finding no trace of what they were told was accepted.
+        // Kept across a restart rather than dropped: one whose peer exists stays live for
+        // the sweep to settle from that peer's transcript, and only one that never got a
+        // peer is settled here.
         self.asks = Self::restored_asks(&persisted.asks);
         // A goal survives, but never running: whatever was driving it died with
         // the process, and picking the work back up unasked — minutes or days

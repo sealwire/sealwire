@@ -2010,19 +2010,11 @@ fn plain_action_frame(from_peer_id: &str, action_id: &str, request: serde_json::
     .expect("action frame serializes")
 }
 
-/// A surface that leaves mid-reply must not cost every other surface the rest of that
-/// reply's pacing.
+/// One slow action must not cost every other surface — or the session itself.
 ///
-/// Surface A asks for a workspace diff big enough to be chunked (~10 chunks, 250ms
-/// apart — about 2.3s of pacing). While that reply is going out, A leaves and B asks a
-/// question. Two things must hold, and before this work neither did:
-///
-///   * B is answered promptly, because the relay is still READING. Previously the
-///     session loop awaited the whole chunked publish inline, so B's frame sat unread
-///     on the socket until A's reply had finished.
-///   * A's train stops, because the departure is now observable while the train paces.
-///     Previously the presence frame announcing it could not be read until afterwards,
-///     which is what made the first attempt at this fix a no-op.
+/// A's provider never answers. Two things must hold: B, a different surface, is still
+/// answered, and A's own later frame is NOT — a surface's frames stay in order however
+/// long the one in front takes.
 #[tokio::test]
 async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
     if !broker_session_e2e_enabled() {
@@ -2075,11 +2067,21 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
             .await
             .expect("threads request sends");
 
+        // A asks a SECOND thing, behind its own hung one. Same surface, so it must wait.
+        socket
+            .send(Message::Text(plain_action_frame(
+                "surface-a",
+                "action-a-projects",
+                serde_json::json!({ "type": "fetch_projects" }),
+            )))
+            .await
+            .expect("A's second request sends");
+
         // B asks something the relay can answer without any provider at all.
         socket
             .send(Message::Text(plain_action_frame(
                 "surface-b",
-                "action-projects",
+                "action-b-projects",
                 serde_json::json!({ "type": "fetch_projects" }),
             )))
             .await
@@ -2098,21 +2100,27 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
                 }
                 Message::Close(_) => break,
                 Message::Text(text) => {
-                    let kind = serde_json::from_str::<serde_json::Value>(&text)
-                        .ok()
-                        .and_then(|value| {
-                            value
-                                .get("payload")
-                                .and_then(|payload| payload.get("kind"))
-                                .and_then(|kind| kind.as_str())
-                                .map(str::to_string)
-                        })
-                        .unwrap_or_else(|| "unknown".to_string());
+                    let payload = serde_json::from_str::<serde_json::Value>(&text).ok();
+                    let field = |name: &str| {
+                        payload
+                            .as_ref()
+                            .and_then(|value| value.get("payload"))
+                            .and_then(|payload| payload.get(name))
+                            .and_then(|found| found.as_str())
+                            .map(str::to_string)
+                    };
+                    // The action id, not just the kind: which request was answered is the
+                    // whole question when the point is what had to wait for what.
+                    let kind = field("kind").unwrap_or_else(|| "unknown".to_string());
+                    let label = match field("action_id") {
+                        Some(action_id) => format!("{kind}:{action_id}"),
+                        None => kind,
+                    };
                     broker_view
                         .lock()
                         .unwrap()
                         .frames
-                        .push((kind, std::time::Instant::now()));
+                        .push((label, std::time::Instant::now()));
                 }
                 _ => {}
             }
@@ -2172,8 +2180,18 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
         "the hanging provider answered, so nothing here was actually slow; saw {kinds:?}"
     );
     assert!(
-        seen.count_of("remote_transcript_result") > 0,
+        kinds
+            .iter()
+            .any(|kind| kind.ends_with(":action-b-projects")),
         "the second device was never answered while the first one's request hung; saw {kinds:?}"
+    );
+    // The other half, and the one that spawn-then-lock got wrong: a surface's own frames
+    // are FIFO, so A's second request waits behind A's first however long that takes.
+    assert!(
+        !kinds
+            .iter()
+            .any(|kind| kind.ends_with(":action-a-projects")),
+        "A's later request overtook its own hung one; saw {kinds:?}"
     );
     assert!(
         seen.count_of("ping") > 0,
@@ -2181,6 +2199,19 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
     );
 }
 
+/// A surface that leaves mid-reply must not cost every other surface the rest of that
+/// reply's pacing.
+///
+/// Surface A asks for a workspace diff big enough to be chunked (~10 chunks, 250ms
+/// apart — about 2.3s of pacing). While that reply is going out, A leaves and B asks a
+/// question. Two things must hold, and before this work neither did:
+///
+///   * B is answered promptly, because the relay is still READING. Previously the
+///     session loop awaited the whole chunked publish inline, so B's frame sat unread
+///     on the socket until A's reply had finished.
+///   * A's train stops, because the departure is now observable while the train paces.
+///     Previously the presence frame announcing it could not be read until afterwards,
+///     which is what made the first attempt at this fix a no-op.
 #[tokio::test]
 async fn a_departing_surface_does_not_stall_the_relay_for_everyone_else() {
     if !broker_session_e2e_enabled() {

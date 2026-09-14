@@ -62,10 +62,12 @@ const PUBLIC_RELAY_IDENTITY_SCHEMA_VERSION: u32 = 1;
 const SNAPSHOT_PUBLISH_MIN_INTERVAL_MILLIS: u64 = 500;
 const TRANSCRIPT_DELTA_PUBLISH_WINDOW_MILLIS: u64 = 100;
 const BROKER_MESSAGE_HANDLER_SLOW_WARN_MILLIS: u128 = 1_000;
-/// How far the handler may fall behind the socket before the session is ended. Deep
-/// enough to absorb one slow action's worth of traffic, shallow enough that a stuck
-/// handler is noticed rather than buffered indefinitely.
+/// How far the router may fall behind the socket before the session is ended. It only
+/// routes, so filling this means something is badly wrong rather than merely slow.
 const INBOUND_MESSAGE_QUEUE_CAPACITY: usize = 256;
+/// How far ONE surface may fall behind before its frames are shed. Per surface, so a
+/// phone waiting on something slow cannot make its backlog anyone else's problem.
+const SURFACE_MESSAGE_QUEUE_CAPACITY: usize = 64;
 pub(crate) const RELAY_BROKER_IDENTITY_PATH_ENV: &str = "RELAY_BROKER_IDENTITY_PATH";
 const MAX_BROKER_TEXT_FRAME_BYTES: usize = 65_536;
 /// Bumped to 2 when chunked action results stopped base64'ing their payload: the field
@@ -973,37 +975,73 @@ async fn run_broker_session_with_liveness(
     let handler_state = state.clone();
     let handler_writer = writer.clone();
     let _handler_task = tokio::spawn(async move {
-        // One queue per surface: two phones have no order between them and must not wait
-        // on each other, but one phone's own frames do — a claim has to land before the
-        // action that presents it.
-        let mut per_peer: std::collections::HashMap<
+        // A queue and a worker per surface. Order comes from the queue, not from when a
+        // task happens to be polled: two phones must not wait on each other, but one
+        // phone's claim has to land before the action that presents it.
+        let mut surfaces: std::collections::HashMap<
             String,
-            std::sync::Arc<tokio::sync::Mutex<()>>,
+            tokio::sync::mpsc::Sender<ServerMessage>,
         > = std::collections::HashMap::new();
         while let Some(message) = inbound_rx.recv().await {
-            let queue = per_peer
-                .entry(message_ordering_key(&message))
-                .or_default()
-                .clone();
-            let state = handler_state.clone();
-            let writer = handler_writer.clone();
-            let report = handler_error_tx.clone();
-            tokio::spawn(async move {
-                let _in_order = queue.lock().await;
-                let message_name = server_message_name(&message);
-                let started_at = Instant::now();
-                if let Err(error) = handle_server_message(&state, &writer, message).await {
-                    let _ = report.try_send(error);
-                    return;
+            let key = message_ordering_key(&message);
+            let departing = matches!(
+                &message,
+                ServerMessage::Presence {
+                    kind: PresenceKind::Left,
+                    ..
                 }
-                let elapsed_ms = started_at.elapsed().as_millis();
-                if elapsed_ms >= BROKER_MESSAGE_HANDLER_SLOW_WARN_MILLIS {
-                    warn!(
-                        message = message_name,
-                        elapsed_ms, "broker message handler was slow"
-                    );
-                }
+            );
+            let sender = surfaces.entry(key.clone()).or_insert_with(|| {
+                let (tx, mut rx) =
+                    tokio::sync::mpsc::channel::<ServerMessage>(SURFACE_MESSAGE_QUEUE_CAPACITY);
+                let state = handler_state.clone();
+                let writer = handler_writer.clone();
+                let report = handler_error_tx.clone();
+                tokio::spawn(async move {
+                    while let Some(message) = rx.recv().await {
+                        let message_name = server_message_name(&message);
+                        let started_at = Instant::now();
+                        // A handler that panics would otherwise take this surface's queue
+                        // with it and report nothing, leaving the socket looking healthy.
+                        let handled =
+                            futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                                handle_server_message(&state, &writer, message),
+                            ))
+                            .await;
+                        match handled {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                let _ = report.try_send(error);
+                                return;
+                            }
+                            Err(_) => {
+                                let _ = report.try_send(format!(
+                                    "broker message handler panicked on {message_name}"
+                                ));
+                                return;
+                            }
+                        }
+                        let elapsed_ms = started_at.elapsed().as_millis();
+                        if elapsed_ms >= BROKER_MESSAGE_HANDLER_SLOW_WARN_MILLIS {
+                            warn!(
+                                message = message_name,
+                                elapsed_ms, "broker message handler was slow"
+                            );
+                        }
+                    }
+                });
+                tx
             });
+            // Shed this surface's frame rather than the whole session: one phone falling
+            // behind is its problem, and it retries. Blocking here would make it everyone's.
+            if sender.try_send(message).is_err() {
+                warn!(surface = %key, "broker surface queue is full; dropping a frame");
+            }
+            // Its worker drains what is queued and then stops, which is also what keeps
+            // this map from growing for the length of the session.
+            if departing {
+                surfaces.remove(&key);
+            }
         }
     });
 
