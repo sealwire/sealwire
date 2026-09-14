@@ -106,6 +106,16 @@ impl AppState {
         if objective.is_empty() {
             return Err("say what you want done".to_string());
         }
+        // The same slot every other session-changing operation takes. Without it this
+        // raced them all: the driver charges a turn and sends inside this slot, so a
+        // revision could land in the window where a turn is owed and has no id yet, and a
+        // turn could START between deciding which turn to stop and asking for it.
+        //
+        // Released before the wait below on purpose — that wait is allowed five minutes,
+        // and holding the slot for it would stop the session being used at all.
+        let slot = self.acquire_session_slot().map_err(|_| {
+            "this session is starting a turn right now — try again in a moment".to_string()
+        })?;
         // Under the write lock the whole way: settings can change on any idle
         // thread, and a goal admitted against settings that moved in between is
         // one the session cannot end.
@@ -207,6 +217,7 @@ before relying on this."
             return Ok(());
         }
         self.request_provider_stop(thread_id, Some(&turn_id)).await;
+        drop(slot);
         // Never trust the ack — a provider can reject it, ignore it, or time out — and
         // wait on THAT turn, not on the thread: waiting on the thread retries against
         // whatever is current, which after the old turn ends is someone else's.
@@ -234,6 +245,11 @@ still running — the agent may still be working to it. Stop the session itself 
         device_id: Option<&str>,
         ingress: Option<u64>,
     ) -> Result<(), String> {
+        // As above. A stop landing while the driver was between charging a turn and
+        // sending it used to report success and let that turn start anyway.
+        let slot = self.acquire_session_slot().map_err(|_| {
+            "this session is starting a turn right now — try again in a moment".to_string()
+        })?;
         let handed_over = {
             let mut relay = self.relay.write().await;
             ensure_thread_in_device_scope(&relay, thread_id, device_id)?;
@@ -264,6 +280,7 @@ still running — the agent may still be working to it. Stop the session itself 
             return Ok(());
         }
         let _ = self.request_thread_stop(thread_id).await;
+        drop(slot);
         if self.drain_thread_turn(thread_id).await {
             return Ok(());
         }

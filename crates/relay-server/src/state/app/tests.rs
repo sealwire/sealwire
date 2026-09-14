@@ -27337,6 +27337,46 @@ watchdog settle this Blocked",
         );
     }
 
+    // Changing a goal changes the session, so it takes the same slot every other
+    // session-changing operation takes. Without it a stop could land in the window where
+    // the driver has charged a turn and not yet sent it: nothing to stop, success
+    // reported, and the turn starts anyway a moment later.
+    #[tokio::test]
+    async fn changing_a_goal_while_the_session_is_starting_a_turn_is_refused_not_faked() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "dev", Vec::new()).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "the original objective", None, Some(10))
+            .await
+            .expect("the user sets one");
+
+        // What the driver holds across charging a turn and sending it.
+        let slot = app.acquire_session_slot().expect("the slot is free");
+
+        let stopped = app.cancel_goal(&thread, None, Some(11)).await;
+        let revised = app
+            .set_goal(&thread, "something else", None, Some(12))
+            .await;
+
+        assert!(
+            stopped.is_err(),
+            "stopping reported success while the session was mid-send: {stopped:?}"
+        );
+        assert!(
+            revised.is_err(),
+            "revising reported success while the session was mid-send: {revised:?}"
+        );
+        drop(slot);
+
+        // And works again once the session is free, so this is a refusal and not a wall.
+        app.cancel_goal(&thread, None, Some(13))
+            .await
+            .expect("stopping works once the send is done");
+    }
+
     // Stopping the turn a goal is running means stop. The driver ticks every three
     // seconds, so without this the objective is simply handed back and the session is
     // working again before the user has looked away — and the Stop reads as broken.
