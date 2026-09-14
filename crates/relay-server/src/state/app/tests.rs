@@ -27318,6 +27318,77 @@ watchdog settle this Blocked",
     }
 
     #[tokio::test]
+    async fn the_ask_limit_has_the_same_self_counting_problem_as_the_agent_limit() {
+        // I fixed the agent count by ignoring peerless records and left this one alone.
+        // The record written on acceptance is an ask like any other, so at nineteen the
+        // caller is told yes and its own placeholder then puts it at the limit.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = goal_session(&app, &cwd).await;
+
+        {
+            let mut relay = app.relay.write().await;
+            for index in 0..19 {
+                relay.insert_ask(crate::state::delegation::Ask::new(
+                    format!("ask-{index}"),
+                    asker.clone(),
+                    // All to one peer, so only the ASK count is under test here.
+                    "peer-0".to_string(),
+                    "fake".to_string(),
+                    None,
+                    None,
+                    "earlier work".to_string(),
+                    cwd.clone(),
+                    None,
+                    relay_api::delegation::StartedBy::Agent,
+                ));
+            }
+        }
+
+        let ask_id = app
+            .ask_agent_detached(
+                &asker,
+                AskRequest {
+                    device_id: None,
+                    started_by: relay_api::delegation::StartedBy::Person,
+                    peer_thread_id: Some("peer-0".to_string()),
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "the twentieth, which is allowed".to_string(),
+                },
+            )
+            .await
+            .expect("nineteen asks is under the limit of twenty");
+
+        let mut outcome = None;
+        for _ in 0..50 {
+            let ask = {
+                let relay = app.relay.read().await;
+                relay.ask(&ask_id).cloned()
+            };
+            if ask
+                .as_ref()
+                .map(|a| a.status.is_terminal())
+                .unwrap_or(false)
+            {
+                outcome = ask;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+
+        if let Some(settled) = outcome {
+            assert!(
+                !settled.error.as_deref().unwrap_or("").contains("limit"),
+                "accepted at nineteen, then refused for being at twenty — it counted itself: {settled:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn the_record_written_on_acceptance_does_not_count_against_its_own_delegate() {
         // It is written with no peer yet, so counting distinct peers sees "" as one more
         // agent: the caller is told yes at four, and the background half then refuses the

@@ -4,10 +4,8 @@
 //! The asking agent owns the loop, so this record holds no flow — just who asked
 //! whom, what came back, and whether the answer has been handed over yet.
 //!
-//! Two invariants, both copied from review jobs for the same reasons:
-//!  1. terminal is final (`set_status` refuses to move off it),
-//!  2. only terminal asks persist — an in-flight one has nothing watching it
-//!     after a restart, so restoring it would show work nobody is doing.
+//! Terminal is final: `set_status` refuses to move off it. Live asks DO persist —
+//! the restore side settles the ones nothing can recover (see `restored_asks`).
 //!
 //! Unlike a review, an ask locks neither thread. That is the point: both sides
 //! stay open so a person can read them and take over.
@@ -19,17 +17,15 @@ use relay_api::delegation::AskStatus;
 use super::unix_now;
 
 /// `Default` + `#[serde(default)]` give forward-compat: a record written by a
-/// future build still decodes, missing fields fall back, unknown ones are
-/// ignored. Only TERMINAL asks are ever written.
+/// future build still decodes, missing fields fall back, unknown ones are ignored.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Ask {
     pub(crate) id: String,
     /// The session that asked.
     pub(crate) asker_thread_id: String,
-    /// The session that was asked. Set as soon as the ask is recorded — an ask
-    /// with no peer is never stored, because the tool call that creates one only
-    /// returns after the peer has the message.
+    /// The session that was asked. Empty until one is started: a delegate is recorded
+    /// when it is accepted, which is before its brief has been written.
     pub(crate) peer_thread_id: String,
     pub(crate) peer_provider: String,
     pub(crate) peer_model: Option<String>,

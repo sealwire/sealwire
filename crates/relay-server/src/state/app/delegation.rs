@@ -141,7 +141,7 @@ impl AppState {
     ) -> Result<String, AskError> {
         // Refusals a person can act on are answered here; only the brief and the peer's
         // start happen out of sight.
-        let prechecked = self.precheck_ask(asker_thread_id, &request).await?;
+        let prechecked = self.precheck_ask(asker_thread_id, &request, None).await?;
 
         // Written before the caller is answered: a restart during the minutes the brief
         // takes would otherwise lose an accepted delegate with nothing to show for it.
@@ -187,6 +187,10 @@ impl AppState {
         &self,
         asker_thread_id: &str,
         request: &AskRequest,
+        // The record this re-check is FOR, once one exists. Counting it would make an
+        // accepted delegate refuse itself; not counting placeholders at all would drop
+        // the reservation that keeps concurrent ones under the cap.
+        skip_ask_id: Option<&str>,
     ) -> Result<PrecheckedAsk, AskError> {
         let message = request.message.trim().to_string();
         if message.is_empty() {
@@ -230,13 +234,16 @@ impl AppState {
                 .as_ref()
                 .map(|s| s.sandbox.clone())
                 .unwrap_or_default();
-            let mine: Vec<&Ask> = relay.asks_of_asker(asker_thread_id).into_iter().collect();
-            // A record written on acceptance has no peer yet. Counting "" as an agent
-            // makes a delegate refuse itself, and makes concurrent ones share one slot.
+            let mine: Vec<&Ask> = relay
+                .asks_of_asker(asker_thread_id)
+                .into_iter()
+                .filter(|ask| Some(ask.id.as_str()) != skip_ask_id)
+                .collect();
+            // A record with no peer yet still holds a slot — that is what keeps two
+            // delegates accepted at the same moment from both starting a sixth agent.
             let distinct_peers = mine
                 .iter()
                 .map(|ask| ask.peer_thread_id.as_str())
-                .filter(|id| !id.is_empty())
                 .collect::<std::collections::HashSet<_>>()
                 .len();
             let provider = relay
@@ -303,7 +310,9 @@ Finish up with what you have and tell the user."
             asker_sandbox,
             asker_provider,
             peers,
-        } = self.precheck_ask(asker_thread_id, &request).await?;
+        } = self
+            .precheck_ask(asker_thread_id, &request, existing_ask_id.as_deref())
+            .await?;
 
         // A person's one-liner becomes a brief before anyone else sees it. This
         // costs a turn on the asking agent, which is why it is opt-in: an agent

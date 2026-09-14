@@ -3240,17 +3240,20 @@ impl RelayState {
             .collect()
     }
 
-    /// Clone persisted workflow runs for restore, reconciling any NON-terminal run
-    /// to the terminal `Interrupted` state: after a restart there is no orchestrator
-    /// to drive it, so it must never come back `Running` (the failure
-    /// `persistence.rs` warns about for review jobs). Terminal runs restore as-is.
+    /// Settle the delegations a restart left unrecoverable. One whose peer exists stays
+    /// live on purpose: the sweep reads that peer's transcript, so failing it here would
+    /// overwrite an answer with a failure that did not happen.
     fn restored_asks(persisted: &HashMap<String, Ask>) -> HashMap<String, Ask> {
         persisted
             .iter()
             .map(|(id, ask)| {
                 let mut ask = ask.clone();
-                if !ask.status.is_terminal() {
-                    ask.fail("it was still under way when the relay restarted".to_string());
+                // A peer that exists may have answered already, and the sweep settles a
+                // live ask by reading its transcript — failing it here would take it out
+                // of reach and overwrite the answer with a failure that did not happen.
+                // One with no peer has nothing to recover from.
+                if !ask.status.is_terminal() && ask.peer_thread_id.is_empty() {
+                    ask.fail("it never got started before the relay restarted".to_string());
                 }
                 (id.clone(), ask)
             })
@@ -6616,21 +6619,74 @@ mod tests {
         let mut restored = test_relay();
         restored.apply_persisted(&reloaded);
 
+        // Both have a peer, so both stay reachable by the sweep rather than being failed
+        // on the way in. What the restore side must not do is invent a peer for one that
+        // never had one — that case is covered by the peerless test above.
         for id in ["live", "smuggled"] {
             assert!(
-                restored
-                    .asks
-                    .get(id)
-                    .expect("kept")
-                    .status
-                    .is_terminal(),
-                "{id} must not come back live — a hand-edited file cannot reintroduce a driverless delegation"
+                !restored.asks.get(id).expect("kept").status.is_terminal(),
+                "{id} has a peer whose transcript may hold the answer; settling it here loses that"
             );
         }
         assert_eq!(
             restored.asks.get("done").map(|ask| ask.status),
             Some(AskStatus::Done),
             "a settled one is untouched"
+        );
+    }
+
+    #[test]
+    fn a_restart_does_not_throw_away_an_answer_the_peer_already_wrote() {
+        // The sweep settles a live ask by reading its peer's transcript — that is what
+        // drives one. Failing every live ask on the way in takes the ask out of the
+        // sweep's reach, so an answer written just before the restart is lost AND a
+        // failure that did not happen is written back over it.
+        use crate::state::Ask;
+        use relay_api::delegation::AskStatus;
+
+        let mut started = Ask::new(
+            "started".to_string(),
+            "asker".to_string(),
+            "peer-thread".to_string(),
+            "codex".to_string(),
+            None,
+            None,
+            "do the thing".to_string(),
+            "/tmp".to_string(),
+            None,
+            relay_api::delegation::StartedBy::Agent,
+        );
+        started.set_status(AskStatus::Working);
+
+        let mut never_started = started.clone();
+        never_started.id = "never-started".to_string();
+        never_started.peer_thread_id = String::new();
+
+        let mut relay = test_relay();
+        relay.insert_ask(started);
+        relay.insert_ask(never_started);
+
+        let persisted = PersistedRelayState::from_relay(&relay);
+        let mut restored = test_relay();
+        restored.apply_persisted(&persisted);
+
+        assert!(
+            !restored
+                .asks
+                .get("started")
+                .expect("kept")
+                .status
+                .is_terminal(),
+            "its peer exists and may have answered; the sweep must still be able to settle it"
+        );
+        assert!(
+            restored
+                .asks
+                .get("never-started")
+                .expect("kept")
+                .status
+                .is_terminal(),
+            "no peer was ever started, so nothing can recover it and it must not sit live"
         );
     }
 
@@ -6661,7 +6717,10 @@ mod tests {
         }
 
         let mut relay = test_relay();
-        relay.insert_ask(ask("under-way", AskStatus::Working));
+        let mut under_way = ask("under-way", AskStatus::Working);
+        // Never got a peer, so nothing can recover it — the case that must come back settled.
+        under_way.peer_thread_id = String::new();
+        relay.insert_ask(under_way);
         relay.insert_ask(ask("done", AskStatus::Done));
 
         let persisted = PersistedRelayState::from_relay(&relay);
