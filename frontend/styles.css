@@ -6613,6 +6613,12 @@ body.is-resizing-panel {
 /* One line of result. The full text lives in the session the card opens, so this is
    clamped rather than scrolled — a card that grows to fit an agent's answer pushes
    every other delegation out of the panel. */
+/* A question the run is stopped on is read in full and acted on; only a finished
+   goal's summary is a preview worth clamping. */
+.reviewer-card-result.is-question {
+  display: block;
+  overflow: visible;
+}
 .reviewer-card-result {
   margin: 0;
   display: -webkit-box;

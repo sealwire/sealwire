@@ -188,6 +188,15 @@ function LedgerMenu({ items, label = "More actions" }) {
 // The wording is load-bearing: "reports complete", never "complete". The relay
 // carries the work without reading it, so it cannot tell you the goal is met —
 // only that the agent says so.
+// Shared with the tab marker in right-panel-tabs.js: the states the relay cannot
+// move past on its own are exactly the ones whose text has to be readable.
+export const GOAL_STATES_NEEDING_USER = new Set([
+  "awaiting_user",
+  "complete_claimed",
+  "blocked",
+  "out_of_turns",
+]);
+
 const GOAL_STATUS_LABEL = {
   active: "Working",
   awaiting_user: "Waiting on you",
@@ -219,7 +228,19 @@ function GoalSlot({ goal, onStop = null, onResume = null }) {
       "article",
       { className: `reviewer-card reviewer-goal${working ? " is-live" : ""}` },
       h("p", { className: "reviewer-card-title" }, goal.objective),
-      goal.outcome ? h("p", { className: "reviewer-card-result" }, goal.outcome) : null,
+      goal.outcome
+        ? h(
+            "p",
+            {
+              // A goal stopped for the user has put its QUESTION here, not a summary.
+              // Two clamped lines of it is a decision nobody can make.
+              className: `reviewer-card-result${
+                GOAL_STATES_NEEDING_USER.has(goal.status) ? " is-question" : ""
+              }`,
+            },
+            goal.outcome
+          )
+        : null,
       working || onResume
         ? h(
             "div",

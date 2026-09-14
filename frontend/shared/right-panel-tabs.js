@@ -1,7 +1,7 @@
 import React from "react";
 
 import { SegmentedControl } from "./session-settings-panel.js";
-import { ReviewerPanel } from "./reviewer-panel.js";
+import { GOAL_STATES_NEEDING_USER, ReviewerPanel } from "./reviewer-panel.js";
 import { isTerminalReviewStatus } from "./review-state.js";
 import { CODE_FLOW_ENABLED, isTerminalWorkflowStatus } from "./workflow-state.js";
 
@@ -14,15 +14,6 @@ function useStoreState(store) {
     () => store.getState()
   );
 }
-
-// Every goal state the relay cannot move past on its own. Kept as a set, not a
-// not-active check: "cancelled" is also not active and needs nobody.
-const GOAL_STATES_NEEDING_USER = new Set([
-  "awaiting_user",
-  "complete_claimed",
-  "blocked",
-  "out_of_turns",
-]);
 
 const EMPTY_REVIEW = {
   reviewJobs: [],
