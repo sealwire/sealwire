@@ -272,6 +272,30 @@ pub(crate) fn peer_is_wider_than_asker(
 ///
 /// Requests are accepted only when they NARROW. That direction is always safe
 /// and lets an agent hand out something weaker than itself on purpose.
+/// Whether the asker's latest reply is the expansion we asked for.
+///
+/// Not merely "something new": while the expansion is being written the person can
+/// send an unrelated message, and its reply would otherwise be handed to the peer as
+/// the instruction. A half-written reply from a stopped turn is the same mistake.
+pub(crate) fn brief_from_reply(
+    entry: Option<(String, String, Option<String>)>,
+    baseline_item_id: Option<&str>,
+    dispatched_turn_id: Option<&str>,
+) -> Option<String> {
+    let (item_id, text, turn_id) = entry?;
+    if baseline_item_id == Some(item_id.as_str()) {
+        return None;
+    }
+    if text.trim().is_empty() {
+        return None;
+    }
+    // An absent turn on either side cannot be matched, so it cannot be trusted.
+    match (turn_id.as_deref(), dispatched_turn_id) {
+        (Some(reply), Some(asked)) if reply == asked => Some(text),
+        _ => None,
+    }
+}
+
 pub(crate) fn peer_thread_settings(
     asker_approval: &str,
     asker_sandbox: &str,
@@ -371,5 +395,69 @@ and got {sandbox}",
         // silently narrowed to something that might not work.
         let (approval, _) = peer_thread_settings("brand-new", "workspace-write", None, None);
         assert_eq!(approval, "brand-new");
+    }
+}
+
+#[cfg(test)]
+mod brief_reply_tests {
+    use super::brief_from_reply;
+
+    fn entry(
+        item: &str,
+        text: &str,
+        turn: Option<&str>,
+    ) -> Option<(String, String, Option<String>)> {
+        Some((item.to_string(), text.to_string(), turn.map(str::to_string)))
+    }
+
+    #[test]
+    fn a_reply_from_the_turn_we_asked_is_the_brief() {
+        assert_eq!(
+            brief_from_reply(
+                entry("i2", "look at the retry loop in auth", Some("t1")),
+                Some("i1"),
+                Some("t1")
+            ),
+            Some("look at the retry loop in auth".to_string())
+        );
+    }
+
+    #[test]
+    fn a_reply_from_another_turn_is_not() {
+        // The person messaged the asker while the brief was being written; that reply
+        // is an answer to them, and sending it would point the peer at the wrong work.
+        assert_eq!(
+            brief_from_reply(
+                entry("i9", "sure, the CSS is in styles.css", Some("t2")),
+                Some("i1"),
+                Some("t1")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn an_untracked_turn_is_not_trusted_either_way() {
+        assert_eq!(
+            brief_from_reply(entry("i2", "text", None), None, Some("t1")),
+            None
+        );
+        assert_eq!(
+            brief_from_reply(entry("i2", "text", Some("t1")), None, None),
+            None
+        );
+    }
+
+    #[test]
+    fn nothing_new_and_nothing_said_are_both_refusals() {
+        assert_eq!(
+            brief_from_reply(entry("i1", "text", Some("t1")), Some("i1"), Some("t1")),
+            None
+        );
+        assert_eq!(
+            brief_from_reply(entry("i2", "   ", Some("t1")), Some("i1"), Some("t1")),
+            None
+        );
+        assert_eq!(brief_from_reply(None, Some("i1"), Some("t1")), None);
     }
 }

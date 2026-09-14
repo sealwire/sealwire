@@ -452,15 +452,17 @@ Finish up with what you have and tell the user."
         let asker_thread_id = dispatched.thread_id.as_str();
         self.wait_for_thread_idle(asker_thread_id).await;
 
-        match self.latest_assistant_entry(asker_thread_id).await {
-            Some((item_id, text))
-                if baseline.as_deref() != Some(item_id.as_str()) && !text.trim().is_empty() =>
-            {
-                Ok(text)
-            }
-            // It said nothing new. Sending the raw words is worse than failing:
-            // the peer would act on an instruction with no referent.
-            _ => Err(AskError::Failed(
+        let entry = self.latest_assistant_entry_with_turn(asker_thread_id).await;
+        match crate::state::delegation::brief_from_reply(
+            entry,
+            baseline.as_deref(),
+            dispatched.turn_id.as_deref(),
+        ) {
+            Some(text) => Ok(text),
+            // Nothing new, nothing said, or said in some other turn. Sending the raw
+            // words is worse than failing: the peer would act on an instruction with
+            // no referent.
+            None => Err(AskError::Failed(
                 "this session did not write a brief for the other agent; try again, \
 or say the whole task in the command"
                     .to_string(),
