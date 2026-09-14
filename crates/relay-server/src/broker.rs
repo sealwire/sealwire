@@ -974,7 +974,12 @@ async fn run_broker_session_with_liveness(
     let (handler_error_tx, mut handler_error) = tokio::sync::mpsc::channel::<String>(1);
     let handler_state = state.clone();
     let handler_writer = writer.clone();
-    let _handler_task = tokio::spawn(async move {
+    // Aborted on every exit path, like the writer. Frames still sitting in this queue
+    // belong to a connection that has ended: applying a buffered arrival afterwards would
+    // mark a surface present again that the disconnect has just recorded as gone, and the
+    // client resends what it was waiting on anyway. Surfaces already dispatched keep
+    // draining — their work was accepted.
+    let _handler_task = AbortOnDrop(tokio::spawn(async move {
         // A queue and a worker per surface. Order comes from the queue, not from when a
         // task happens to be polled: two phones must not wait on each other, but one
         // phone's claim has to land before the action that presents it.
@@ -1078,7 +1083,7 @@ async fn run_broker_session_with_liveness(
                 surfaces.remove(&key);
             }
         }
-    });
+    }));
 
     loop {
         tokio::select! {
@@ -1265,6 +1270,15 @@ fn is_surface_presence(message: &ServerMessage) -> bool {
         message,
         ServerMessage::Presence { peer, .. } if peer.role == PeerRole::Surface
     )
+}
+
+/// Ends a task when the session that owns it does.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Where a frame sat in the order the relay read them off its one socket.
