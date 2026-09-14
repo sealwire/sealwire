@@ -12,7 +12,7 @@
  * Both are device-authenticated and DO NOT require a session claim.
  */
 
-import { dispatchRemoteActionWithoutReply } from "./actions.js";
+import { dispatchOrRecover } from "./actions.js";
 
 /**
  * Convert a base64url VAPID public key into the Uint8Array the
@@ -92,7 +92,10 @@ export async function ensurePushSubscription({ vapidPublicKey, registration } = 
       });
     }
 
-    await dispatchRemoteActionWithoutReply("register_push_subscription", {
+    // Waits for the relay's ack rather than for the socket write. The broker accepts
+    // the frame whether or not a relay is in the room, so a bare write is not evidence
+    // anyone heard it — and being pending is what gets it resent when the relay returns.
+    await dispatchOrRecover("register_push_subscription", {
       input: subscriptionToInput(subscription),
     });
 
@@ -121,7 +124,7 @@ export async function disablePushSubscription({ registration } = {}) {
     const { endpoint } = subscription;
     await subscription.unsubscribe();
     if (endpoint) {
-      await dispatchRemoteActionWithoutReply("unregister_push_subscription", {
+      await dispatchOrRecover("unregister_push_subscription", {
         endpoint,
       });
     }

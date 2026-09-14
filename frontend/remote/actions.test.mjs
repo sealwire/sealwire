@@ -1437,3 +1437,86 @@ test("a relay leaving suspends action deadlines rather than failing them", async
     "and the action must be kept so it can be resent under the same id"
   );
 });
+
+// A registration the relay never received leaves the phone silent while the UI says it
+// is subscribed. The browser socket being open is not evidence the relay heard anything:
+// the broker accepts the frame whether or not a relay peer is in the room. Keeping the
+// action pending is what makes it recoverable — it is resent on the relay's return, under
+// its original id, so the relay's replay cache answers rather than registering twice.
+test("a push registration stays pending until the relay answers it", async () => {
+  installBrowserStubs();
+  globalThis.window.isSecureContext = true;
+  globalThis.window.PushManager = function PushManager() {};
+  globalThis.window.Notification = { permission: "granted" };
+  Object.defineProperty(globalThis, "navigator", {
+    value: { serviceWorker: {} },
+    configurable: true,
+    writable: true,
+  });
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { ensurePushSubscription } = await import("./push-subscribe.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-push-pending",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-push" });
+  state.pendingActions.clear();
+
+  const sent = [];
+  state.socket = {
+    readyState: 1,
+    // Never answers: this models a relay that was not in the room to hear it.
+    send(frameText) {
+      sent.push(JSON.parse(frameText));
+    },
+  };
+  const registration = {
+    pushManager: {
+      async getSubscription() {
+        return {
+          toJSON: () => ({
+            endpoint: "https://push.example.test/abc",
+            keys: { p256dh: "p256dh-value", auth: "auth-value" },
+          }),
+        };
+      },
+    },
+  };
+
+  // Not awaited: with no answer it never settles, which is the point.
+  const pending = ensurePushSubscription({
+    vapidPublicKey: "BMgLU4l-tVY26rhHP0AG0HsQBpTrGrhL-eryvizKLryWHlRJJk1Z4rZS0Mjkm9DOLuZ9CUMC1dvxQ8llGGQ_Q9I",
+    registration,
+  }).catch(() => {});
+  await nextTick();
+  await nextTick();
+
+  assert.equal(
+    sent.filter((frame) => frame.payload?.request?.type === "register_push_subscription").length,
+    1,
+    "the registration is sent once"
+  );
+  assert.equal(
+    state.pendingActions.size,
+    1,
+    "and is kept as pending, so the relay's return resends it instead of the phone "
+      + "believing a frame nobody received had worked"
+  );
+  void pending;
+  state.pendingActions.clear();
+  state.socket = null;
+});

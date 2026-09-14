@@ -991,18 +991,22 @@ async fn run_broker_session_with_liveness(
                     ..
                 }
             );
-            // A departure is two state writes and no provider call, and it cannot wait:
-            // until it lands the relay counts a gone phone as present and keeps addressing
-            // it. Its queued frames still run — only the presence overtakes them, so no
-            // work the surface already asked for is thrown away.
-            if is_surface_departure(&message) {
+            // Presence is two state writes and no provider call, and it cannot wait: until
+            // a departure lands the relay counts a gone phone as present and keeps
+            // addressing it. Arrivals come through here for the same reason and for one
+            // more — handling only departures inline would let an arrival that came FIRST
+            // be applied last, marking a surface that has gone present again. Queued frames
+            // still run either way, so no work the surface already asked for is lost.
+            if is_surface_presence(&message) {
                 if let Err(error) =
                     handle_server_message(&handler_state, &handler_writer, message).await
                 {
                     let _ = handler_error_tx.try_send(error);
                     return;
                 }
-                surfaces.remove(&key);
+                if departing {
+                    surfaces.remove(&key);
+                }
                 continue;
             }
             let sender = surfaces.entry(key.clone()).or_insert_with(|| {
@@ -1253,16 +1257,12 @@ fn decode_server_frame(frame: Message) -> Result<Option<ServerMessage>, String> 
 /// Which frames must stay in order with each other: a surface's own, keyed by it.
 /// Everything else shares one key, which keeps the session's own frames ordered without
 /// putting them behind any surface.
-/// A surface announcing it has gone. Its own queued frames may be slow; this one is the
-/// relay's own bookkeeping and is the reason the queue exists to be overtaken.
-fn is_surface_departure(message: &ServerMessage) -> bool {
+/// A surface announcing it arrived or went. The relay's own bookkeeping, and the reason
+/// the per-surface queues exist to be overtaken.
+fn is_surface_presence(message: &ServerMessage) -> bool {
     matches!(
         message,
-        ServerMessage::Presence {
-            kind: PresenceKind::Left,
-            peer,
-            ..
-        } if peer.role == PeerRole::Surface
+        ServerMessage::Presence { peer, .. } if peer.role == PeerRole::Surface
     )
 }
 

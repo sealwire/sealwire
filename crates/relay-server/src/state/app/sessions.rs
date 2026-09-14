@@ -1191,7 +1191,13 @@ marking idle locally."
         // join, never by a value the client sent — otherwise one phone could take over
         // another connection's watch slot. Local surfaces send their own per-tab id;
         // that is only a routing key inside an already-authenticated device.
-        let broker_peer_id = relay.paired_device_peer_id(&device_id);
+        // The stamped peer when the declaration came over the broker; the device-wide
+        // lookup only for callers that never had one (a local tab). Asking the device
+        // where it is now answers for the connection that REPLACED this one.
+        let broker_peer_id = input
+            .broker_peer_id
+            .clone()
+            .or_else(|| relay.paired_device_peer_id(&device_id));
         let surface_id = match broker_peer_id {
             Some(peer_id) => {
                 // A declaration queued behind a slow action outlives its surface. Honouring

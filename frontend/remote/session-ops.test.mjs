@@ -7499,3 +7499,22 @@ test("a relay that left makes the phone declare its watch set again", async () =
 
   state.socket = null;
 });
+
+// The handler above is only worth anything if the runtime installs it. Deleting the
+// registration leaves every test that calls it directly green while a real relay-left
+// event does nothing at all.
+test("the runtime registers the relay-presence handler with the broker client", async () => {
+  activeBrowser = installBrowserStubs();
+
+  const { handleRelayPresence, ensureRemoteRuntimeConfigured } = await import("./remote-runtime.js");
+  const { configuredBrokerHandlers } = await import("./broker-client.js");
+
+  ensureRemoteRuntimeConfigured();
+
+  assert.equal(
+    configuredBrokerHandlers().onRelayPresence,
+    handleRelayPresence,
+    "the broker client must call this on relay presence; nothing else notices a relay "
+      + "that went away while this browser's own socket stayed up"
+  );
+});

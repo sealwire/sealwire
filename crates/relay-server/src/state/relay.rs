@@ -232,6 +232,10 @@ pub(crate) enum RemoteActionReplayDecision {
     InFlight,
 }
 
+/// How many departed surfaces are remembered. Each is a peer id string; a few hundred
+/// covers any plausible backlog of frames still draining from connections that have gone.
+const MAX_REMEMBERED_DEPARTED_SURFACES: usize = 512;
+
 #[derive(Debug, Clone)]
 enum CachedRemoteActionState {
     InFlight {
@@ -425,10 +429,15 @@ pub struct RelayState {
     pub paired_devices: HashMap<String, PairedDevice>,
     online_surface_peer_ids: HashSet<String>,
     online_surface_peer_devices: HashMap<String, String>,
-    /// Surfaces this broker connection WATCHED leave, as opposed to ones it never knew
-    /// about. Absent from the online set means both, and they deserve opposite answers:
-    /// a reply to a surface we saw go is one nobody can read.
+    /// Surfaces WATCHED leaving, as opposed to ones never known about. Absent from the
+    /// online set means both, and they deserve opposite answers: a reply to a surface we
+    /// saw go is one nobody can read.
+    ///
+    /// Deliberately outlives the broker connection: the workers still draining that
+    /// surface's frames are detached and outlive it too, and they are exactly what this
+    /// guards against. Bounded by insertion order instead.
     departed_surface_peer_ids: HashSet<String>,
+    departed_surface_peer_order: VecDeque<String>,
     /// Which threads each SURFACE is currently looking at, so transcript deltas are
     /// published only where they can be rendered.
     ///
@@ -685,6 +694,7 @@ impl RelayState {
             online_surface_peer_ids: HashSet::new(),
             online_surface_peer_devices: HashMap::new(),
             departed_surface_peer_ids: HashSet::new(),
+            departed_surface_peer_order: VecDeque::new(),
             watched_threads: HashMap::new(),
             usage_store: crate::usage::store::UsageStore::disabled(),
             codex_usage: crate::usage::CodexUsageTracker::new(),
@@ -4734,6 +4744,7 @@ impl RelayState {
         self.recompute_reviewer_thread_seq();
         self.online_surface_peer_ids.clear();
         self.departed_surface_peer_ids.clear();
+        self.departed_surface_peer_order.clear();
         self.online_surface_peer_devices.clear();
         self.backfill_device_records_from_paired_devices();
         self.pending_pairings.clear();
@@ -5198,7 +5209,9 @@ impl RelayState {
         self.broker_connected = connected;
         if !connected {
             self.online_surface_peer_ids.clear();
-            self.departed_surface_peer_ids.clear();
+            // Departed peers are deliberately NOT cleared here. The workers still draining
+            // their frames are detached and outlive this connection, so forgetting now
+            // drops the record exactly while the thing it guards against is still running.
             self.online_surface_peer_devices.clear();
             // Broker surfaces are gone with the connection, so their watch sets go too
             // (the client re-declares on reconnect). LOCAL tabs are NOT affected — they
@@ -5287,7 +5300,7 @@ impl RelayState {
     }
 
     pub fn mark_surface_peer_online(&mut self, peer_id: &str) -> bool {
-        self.departed_surface_peer_ids.remove(peer_id);
+        self.forget_departed_surface_peer(peer_id);
         self.online_surface_peer_ids.insert(peer_id.to_string())
     }
 
@@ -5308,9 +5321,32 @@ impl RelayState {
         self.departed_surface_peer_ids.contains(peer_id)
     }
 
+    fn remember_departed_surface_peer(&mut self, peer_id: &str) {
+        if !self.departed_surface_peer_ids.insert(peer_id.to_string()) {
+            return;
+        }
+        self.departed_surface_peer_order
+            .push_back(peer_id.to_string());
+        // A surface mints a fresh peer id on every join, so unbounded this grows for as
+        // long as the relay stays up under a client that reconnects in a loop. The oldest
+        // ids are the ones whose frames finished longest ago.
+        while self.departed_surface_peer_order.len() > MAX_REMEMBERED_DEPARTED_SURFACES {
+            if let Some(evicted) = self.departed_surface_peer_order.pop_front() {
+                self.departed_surface_peer_ids.remove(&evicted);
+            }
+        }
+    }
+
+    fn forget_departed_surface_peer(&mut self, peer_id: &str) {
+        if self.departed_surface_peer_ids.remove(peer_id) {
+            self.departed_surface_peer_order
+                .retain(|remembered| remembered != peer_id);
+        }
+    }
+
     pub fn mark_surface_peer_offline(&mut self, peer_id: &str) -> bool {
         self.online_surface_peer_devices.remove(peer_id);
-        self.departed_surface_peer_ids.insert(peer_id.to_string());
+        self.remember_departed_surface_peer(peer_id);
         let removed = self.online_surface_peer_ids.remove(peer_id);
         self.prune_offline_broker_surfaces();
         removed
@@ -5321,8 +5357,11 @@ impl RelayState {
         I: IntoIterator<Item = String>,
     {
         self.online_surface_peer_ids = peer_ids.into_iter().collect();
+        let online = self.online_surface_peer_ids.clone();
         self.departed_surface_peer_ids
-            .retain(|peer_id| !self.online_surface_peer_ids.contains(peer_id));
+            .retain(|peer_id| !online.contains(peer_id));
+        self.departed_surface_peer_order
+            .retain(|peer_id| !online.contains(peer_id));
         self.online_surface_peer_devices
             .retain(|peer_id, _| self.online_surface_peer_ids.contains(peer_id));
         self.prune_offline_broker_surfaces();
@@ -5960,6 +5999,7 @@ impl RelayState {
         self.recompute_reviewer_thread_seq();
         self.online_surface_peer_ids.clear();
         self.departed_surface_peer_ids.clear();
+        self.departed_surface_peer_order.clear();
         self.online_surface_peer_devices.clear();
         self.backfill_device_records_from_paired_devices();
         self.pending_pairings.clear();

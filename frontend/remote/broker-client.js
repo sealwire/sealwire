@@ -52,6 +52,14 @@ export function configureBrokerClient(handlers) {
   onRelayPresence = handlers.onRelayPresence || onRelayPresence;
 }
 
+/// What `configureBrokerClient` currently has installed.
+///
+/// Exported for tests: a handler that is never registered is invisible from the socket,
+/// so testing the handler itself proves nothing about whether it runs.
+export function configuredBrokerHandlers() {
+  return { onBrokerReady, onBrokerPayload, onBrokerDisconnect, onRelayPresence };
+}
+
 function currentConnectionSelectionKey() {
   if (hasActivePairing()) {
     return `pairing:${state.pairingTicket.pairing_id}`;

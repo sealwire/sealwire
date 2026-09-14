@@ -319,7 +319,7 @@ impl RemoteActionRequest {
         }
     }
 
-    fn bind_device(self, device_id: String) -> Self {
+    fn bind_device(self, device_id: String, from_peer_id: &str) -> Self {
         match self {
             Self::ClaimChallenge { proof } => Self::ClaimChallenge { proof },
             Self::ClaimDevice {
@@ -363,6 +363,7 @@ impl RemoteActionRequest {
             }
             Self::WatchThreads { mut input } => {
                 input.device_id = Some(device_id);
+                input.broker_peer_id = Some(from_peer_id.to_string());
                 Self::WatchThreads { input }
             }
             Self::ListProviders => Self::ListProviders,
@@ -875,7 +876,7 @@ pub(super) async fn handle_remote_action(
             action_kind,
             &resolved_device_id,
             &from_peer_id,
-            request.bind_device(resolved_device_id.clone()),
+            request.bind_device(resolved_device_id.clone(), &from_peer_id),
             false,
         )
         .await;
@@ -960,7 +961,7 @@ pub(super) async fn handle_remote_action(
             {
                 Ok(()) => match execute_remote_action(
                     state,
-                    request.bind_device(resolved_device_id.clone()),
+                    request.bind_device(resolved_device_id.clone(), &from_peer_id),
                 )
                 .await
                 {
@@ -1135,7 +1136,7 @@ pub(super) async fn handle_encrypted_remote_action(
             action_kind,
             &device_id,
             &from_peer_id,
-            request.bind_device(device_id.clone()),
+            request.bind_device(device_id.clone(), &from_peer_id),
             true,
         )
         .await;
@@ -1213,7 +1214,11 @@ pub(super) async fn handle_encrypted_remote_action(
                 .await
             {
                 Ok(()) => {
-                    match execute_remote_action(state, request.bind_device(device_id.clone())).await
+                    match execute_remote_action(
+                        state,
+                        request.bind_device(device_id.clone(), &from_peer_id),
+                    )
+                    .await
                     {
                         Ok(outcome) => attach_session_claim_if_needed(
                             action_kind,

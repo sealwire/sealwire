@@ -3073,6 +3073,12 @@ pub struct WatchThreadsInput {
     /// id it already knows, so a phone cannot claim another connection's slot.
     #[serde(default)]
     pub surface_id: Option<String>,
+    /// The broker connection this declaration was authenticated on. `serde(skip)`, so it
+    /// can only ever be stamped by the relay: a device-wide "where is this phone now"
+    /// lookup answers for the CURRENT connection, which is the wrong one for a
+    /// declaration that was queued by a connection since replaced.
+    #[serde(skip)]
+    pub broker_peer_id: Option<String>,
     /// Connection generation this declaration belongs to, from the SSE stream that
     /// opened it. A stale page's POST can land after its replacement has already
     /// declared; without this it would overwrite the live watch set, and the new page
