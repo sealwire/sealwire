@@ -1853,6 +1853,9 @@ async fn managed_broker_state(cwd: &str) -> AppState {
         change_tx.clone(),
         SecurityProfile::managed(),
     )));
+    // An untrusted workspace answers a diff with a short "cannot read this", which is
+    // indistinguishable from a small diff to any test that measures the reply.
+    relay.write().await.trusted_workspaces.push(cwd.to_string());
     relay.write().await.paired_devices.insert(
         "phone-1".to_string(),
         crate::state::PairedDevice {
@@ -2245,6 +2248,9 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
 ///   * A's train stops, because the departure is now observable while the train paces.
 ///     Previously the presence frame announcing it could not be read until afterwards,
 ///     which is what made the first attempt at this fix a no-op.
+///
+/// Only the second bullet still has teeth. Publishing is a hand-off to the writer task
+/// now, so the first one holds even with message handling made serial again — checked.
 #[tokio::test]
 async fn a_departing_surface_does_not_stall_the_relay_for_everyone_else() {
     if !broker_session_e2e_enabled() {
