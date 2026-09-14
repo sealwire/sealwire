@@ -1880,3 +1880,64 @@ fn test_origin() -> FrameOrigin {
         lease: 1,
     }
 }
+
+/// A claim challenge from a connection that has gone must not take the device back.
+///
+/// It was the one action exempt from the lease check, and it is the worst one to exempt:
+/// the challenge is bound to the peer that asked, so binding the device to a dead peer
+/// aims every reply there AND makes completing the claim from the live connection fail.
+#[tokio::test]
+async fn a_claim_challenge_from_a_closed_connection_does_not_take_the_device_back() {
+    use crate::state::{PairedDevice, RelayState, SecurityProfile};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::{watch, RwLock};
+
+    let (change_tx, _rx) = watch::channel(0_u64);
+    let relay = Arc::new(RwLock::new(RelayState::new(
+        "/tmp/claim-lease-test".to_string(),
+        change_tx.clone(),
+        SecurityProfile::private(),
+    )));
+    let stale_lease = {
+        let mut relay = relay.write().await;
+        relay.paired_devices.insert(
+            "phone-1".to_string(),
+            PairedDevice {
+                device_id: "phone-1".to_string(),
+                label: "phone-1".to_string(),
+                payload_secret: "secret".to_string(),
+                device_verify_key: "verify".to_string(),
+                created_at: 1,
+                last_seen_at: Some(1),
+                last_peer_id: None,
+                broker_join_ticket_expires_at: None,
+                path_scope: Vec::new(),
+            },
+        );
+        // The old connection's lease, then it goes, then the phone comes back as a new
+        // peer and becomes the one the device is bound to.
+        let stale = relay.open_surface_lease("surface-old");
+        relay.mark_surface_peer_offline("surface-old");
+        relay.mark_surface_peer_online("surface-new");
+        relay
+            .mark_paired_device_seen("phone-1", "surface-new", None, 2)
+            .expect("bind");
+        stale
+    };
+    let state = AppState::from_parts(relay.clone(), HashMap::new(), change_tx);
+
+    let _ = issue_claim_challenge_outcome(&state, "phone-1", "surface-old", stale_lease).await;
+
+    assert_eq!(
+        relay
+            .read()
+            .await
+            .paired_devices
+            .get("phone-1")
+            .and_then(|device| device.last_peer_id.clone())
+            .as_deref(),
+        Some("surface-new"),
+        "a challenge queued by the closed connection bound the device back to it"
+    );
+}

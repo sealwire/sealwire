@@ -973,7 +973,8 @@ pub(super) async fn handle_remote_action(
 
     let result = match request {
         RemoteActionRequest::ClaimChallenge { .. } => {
-            issue_claim_challenge_outcome(state, &resolved_device_id, &from_peer_id).await
+            issue_claim_challenge_outcome(state, &resolved_device_id, &from_peer_id, origin.lease)
+                .await
         }
         RemoteActionRequest::ClaimDevice {
             challenge_id,
@@ -1259,7 +1260,7 @@ pub(super) async fn handle_encrypted_remote_action(
 
     let result = match request {
         RemoteActionRequest::ClaimChallenge { .. } => {
-            issue_claim_challenge_outcome(state, &device_id, &from_peer_id).await
+            issue_claim_challenge_outcome(state, &device_id, &from_peer_id, origin.lease).await
         }
         RemoteActionRequest::ClaimDevice {
             challenge_id,
@@ -1972,9 +1973,14 @@ async fn issue_claim_challenge_outcome(
     state: &AppState,
     device_id: &str,
     peer_id: &str,
+    lease: u64,
 ) -> Result<RemoteActionOutcome, String> {
+    // Under the same lease check as every other action. Exempting it let a signed
+    // challenge queued by a connection that has gone bind the device back to it, and the
+    // challenge is bound to that peer too — so the reply is aimed at a dead socket and
+    // completing it from the live one is refused.
     state
-        .mark_remote_device_seen(device_id, peer_id, None)
+        .mark_remote_device_seen(device_id, peer_id, Some(lease))
         .await?;
     let challenge = state.issue_claim_challenge(device_id, peer_id).await?;
     Ok(RemoteActionOutcome {

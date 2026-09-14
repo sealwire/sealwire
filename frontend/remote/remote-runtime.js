@@ -1,4 +1,4 @@
-import { clearClaimLifecycle, configureRemoteActions, handleRemoteBrokerPayload, recoverRemoteSession, rejectPendingActions, resendPendingActions, suspendPendingActionDeadlines } from "./actions.js";
+import { abandonStalledClaim, clearClaimLifecycle, configureRemoteActions, handleRemoteBrokerPayload, recoverRemoteSession, rejectPendingActions, resendPendingActions, suspendPendingActionDeadlines } from "./actions.js";
 import { closeBrokerSocket, configureBrokerClient, connectBroker, refreshRelayDirectory } from "./broker-client.js";
 import { replaceRemoteIdentity } from "./identity-change.js";
 import { initializeRemoteNavigation, openRemoteNavigation } from "./navigation.js";
@@ -37,6 +37,9 @@ export function handleRelayPresence(kind, peer) {
     return;
   }
   if (kind === "joined") {
+    // Before recovery, because recovery awaits the claim and a challenge left over from
+    // the relay's previous session is one nobody will ever answer.
+    abandonStalledClaim();
     void recoverRemoteSession("relay joined");
     // Anything still unanswered is asked again under its ORIGINAL action id, so a
     // reply lost while the relay was away is served from its replay cache rather

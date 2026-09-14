@@ -283,6 +283,20 @@ export function scheduleClaimRefresh() {
   }));
 }
 
+/// Settle a claim challenge nobody is going to answer, and clear the lifecycle round it.
+///
+/// A challenge is never resent — it answers one the relay has since forgotten — so
+/// without this its promise stays pending forever, and `ensureRemoteClaim` hands that
+/// same promise to every later recovery, which then never finishes.
+export function abandonStalledClaim() {
+  for (const [actionId, pending] of [...state.pendingActions.entries()]) {
+    if (pending?.actionType === "claim_challenge") {
+      rejectPendingAction(actionId, new Error("the relay restarted before answering"));
+    }
+  }
+  clearClaimLifecycle();
+}
+
 export function clearClaimLifecycle() {
   cancelClaimRefresh();
   applyRemoteSurfacePatch(createClaimLifecyclePatch({

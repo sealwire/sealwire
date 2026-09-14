@@ -1670,3 +1670,60 @@ test("a relay saying it is still working restarts the phone's deadline", async (
   );
   state.pendingActions.clear();
 });
+
+// A claim challenge is deliberately never resent: it answers a challenge the relay has
+// since forgotten. But nothing settled it either, so its promise stayed pending — and
+// `ensureRemoteClaim` hands that same promise to the recovery that runs on the relay's
+// return, which therefore never finishes. The phone stops recovering at all.
+test("a relay coming back does not leave recovery waiting on a dead claim", async () => {
+  installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRelayPresence } = await import("./remote-runtime.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-dead-claim",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-claim" });
+  state.pendingActions.clear();
+
+  let rejected = false;
+  state.pendingActions.set("claim-1", {
+    actionType: "claim_challenge",
+    request: {},
+    timeoutId: 7,
+    reject: () => {
+      rejected = true;
+    },
+    resolve: () => {},
+  });
+  state.claimPromise = new Promise(() => {});
+  state.socket = { readyState: 1, send() {} };
+
+  handleRelayPresence("joined", { role: "relay", peer_id: "relay-1" });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(
+    state.pendingActions.has("claim-1"),
+    false,
+    "the claim nobody will answer has to be settled, or every later recovery waits on it"
+  );
+  assert.ok(rejected, "and settled as a failure, so its caller can start a fresh one");
+  assert.equal(state.claimPromise, null, "with the lifecycle cleared for a new attempt");
+
+  state.pendingActions.clear();
+  state.socket = null;
+});
