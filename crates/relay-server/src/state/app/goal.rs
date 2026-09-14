@@ -159,12 +159,18 @@ to one of your own sessions"
         }
         // A wording tweak keeps the turns spent so far. Pass `reset_turns` when
         // the person wants a fresh budget; out-of-turns still resets on its own.
-        let superseded_turn = if relay.goal_for_thread(thread_id).is_some() {
-            // Read under this lock, so the stop below lands on the turn carrying the OLD
-            // objective and never on the one the driver starts for this one.
-            let running = relay
-                .runtime_for_thread(thread_id)
-                .and_then(|runtime| runtime.active_turn_id.clone());
+        let superseded_turn = if let Some(goal) = relay.goal_for_thread(thread_id) {
+            // Only a turn the relay handed THIS goal. A person typing into the same
+            // session has a turn too, and another device revising the goal is not
+            // permission to cancel it — `dispatch_open` is the difference.
+            let running = goal
+                .dispatch_open
+                .then(|| {
+                    relay
+                        .runtime_for_thread(thread_id)
+                        .and_then(|runtime| runtime.active_turn_id.clone())
+                })
+                .flatten();
             relay.update_goal(thread_id, |goal| {
                 goal.revise(objective.clone(), reset_turns)
             });
@@ -182,10 +188,35 @@ to one of your own sessions"
         // A turn in flight was handed the objective this one replaces, so it is editing
         // toward something the user has already changed. This is also what makes a
         // superseded Stop safe to drop: whichever frame wins, the old turn is stopped.
-        if let Some(turn_id) = superseded_turn {
-            self.request_provider_stop(thread_id, Some(&turn_id)).await;
+        let Some(turn_id) = superseded_turn else {
+            return Ok(());
+        };
+        // Re-read rather than trust what the lock said: two providers cancel whatever
+        // turn is current and ignore the id, so a turn that ended in between would have
+        // its replacement cancelled instead.
+        if self.thread_active_turn_id(thread_id).await.as_deref() != Some(turn_id.as_str()) {
+            return Ok(());
         }
-        Ok(())
+        self.request_provider_stop(thread_id, Some(&turn_id)).await;
+        // Never trust the ack, exactly as a stop does: a provider can reject it, ignore
+        // it, or time out, and an agent still editing toward the old objective is the
+        // whole reason this stop exists.
+        if self.drain_thread_turn(thread_id).await {
+            return Ok(());
+        }
+        Err(
+            "the goal is revised, but the turn started for the objective it replaced is \
+still running — the agent may still be working to it. Stop the session itself to be sure."
+                .to_string(),
+        )
+    }
+
+    async fn thread_active_turn_id(&self, thread_id: &str) -> Option<String> {
+        self.relay
+            .read()
+            .await
+            .runtime_for_thread(thread_id)
+            .and_then(|runtime| runtime.active_turn_id.clone())
     }
 
     pub(crate) async fn cancel_goal(

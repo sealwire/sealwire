@@ -27134,10 +27134,12 @@ watchdog settle this Blocked",
             .await
             .expect("the user sets one");
 
-        // A turn in flight, carrying the objective about to be replaced.
+        // A turn the RELAY handed the goal, carrying the objective about to be replaced.
+        app.set_review_drain_max_ms(200);
         {
             let mut relay = app.relay.write().await;
             relay.ensure_runtime_for_thread(&thread).active_turn_id = Some("turn-old".to_string());
+            relay.update_goal(&thread, |goal| goal.hand_over());
         }
 
         app.set_goal(&thread, "a different objective", None, false, Some(12))
@@ -27148,6 +27150,50 @@ watchdog settle this Blocked",
             provider.stop_was_requested_for("turn-old").await,
             "the turn handed the old objective was left running against a goal that has \
              been replaced"
+        );
+        // Asked is not stopped. The revision waits for the turn to really end, the same
+        // way a stop does, because an agent still editing toward the old objective is the
+        // whole reason for asking.
+        let still_running = {
+            let relay = app.relay.read().await;
+            relay
+                .runtime_for_thread(&thread)
+                .and_then(|runtime| runtime.active_turn_id.clone())
+        };
+        assert_eq!(
+            still_running, None,
+            "the revision reported success while the old objective's turn was still running"
+        );
+    }
+
+    // And only the goal's OWN turn. A person typing into the same session has a turn too,
+    // and another device revising the goal is not permission to cancel it.
+    #[tokio::test]
+    async fn revising_a_goal_leaves_a_turn_the_goal_did_not_start_alone() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "dev", Vec::new()).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "the original objective", None, false, Some(10))
+            .await
+            .expect("the user sets one");
+
+        // A turn with no goal dispatch behind it: the person typed it themselves.
+        app.set_review_drain_max_ms(200);
+        {
+            let mut relay = app.relay.write().await;
+            relay.ensure_runtime_for_thread(&thread).active_turn_id = Some("turn-mine".to_string());
+        }
+
+        app.set_goal(&thread, "a different objective", None, false, Some(12))
+            .await
+            .expect("the other device revises it");
+
+        assert!(
+            !provider.stop_was_requested_for("turn-mine").await,
+            "revising the goal cancelled a turn the goal never started"
         );
     }
 
