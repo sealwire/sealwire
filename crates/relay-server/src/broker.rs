@@ -62,6 +62,10 @@ const PUBLIC_RELAY_IDENTITY_SCHEMA_VERSION: u32 = 1;
 const SNAPSHOT_PUBLISH_MIN_INTERVAL_MILLIS: u64 = 500;
 const TRANSCRIPT_DELTA_PUBLISH_WINDOW_MILLIS: u64 = 100;
 const BROKER_MESSAGE_HANDLER_SLOW_WARN_MILLIS: u128 = 1_000;
+/// How far the handler may fall behind the socket before the session is ended. Deep
+/// enough to absorb one slow action's worth of traffic, shallow enough that a stuck
+/// handler is noticed rather than buffered indefinitely.
+const INBOUND_MESSAGE_QUEUE_CAPACITY: usize = 256;
 pub(crate) const RELAY_BROKER_IDENTITY_PATH_ENV: &str = "RELAY_BROKER_IDENTITY_PATH";
 const MAX_BROKER_TEXT_FRAME_BYTES: usize = 65_536;
 /// Bumped to 2 when chunked action results stopped base64'ing their payload: the field
@@ -960,8 +964,58 @@ async fn run_broker_session_with_liveness(
         Instant::now() + Duration::from_secs(24 * 60 * 60),
     ));
 
+    // Handling runs on its own task, in order. The receive arm used to await it, so one
+    // slow action — a cold provider catalog is minutes — stopped the relay reading
+    // anything at all, from any device, including its own heartbeat.
+    let (inbound_tx, mut inbound_rx) =
+        tokio::sync::mpsc::channel::<ServerMessage>(INBOUND_MESSAGE_QUEUE_CAPACITY);
+    let (handler_error_tx, mut handler_error) = tokio::sync::mpsc::channel::<String>(1);
+    let handler_state = state.clone();
+    let handler_writer = writer.clone();
+    let _handler_task = tokio::spawn(async move {
+        // One queue per surface: two phones have no order between them and must not wait
+        // on each other, but one phone's own frames do — a claim has to land before the
+        // action that presents it.
+        let mut per_peer: std::collections::HashMap<
+            String,
+            std::sync::Arc<tokio::sync::Mutex<()>>,
+        > = std::collections::HashMap::new();
+        while let Some(message) = inbound_rx.recv().await {
+            let queue = per_peer
+                .entry(message_ordering_key(&message))
+                .or_default()
+                .clone();
+            let state = handler_state.clone();
+            let writer = handler_writer.clone();
+            let report = handler_error_tx.clone();
+            tokio::spawn(async move {
+                let _in_order = queue.lock().await;
+                let message_name = server_message_name(&message);
+                let started_at = Instant::now();
+                if let Err(error) = handle_server_message(&state, &writer, message).await {
+                    let _ = report.try_send(error);
+                    return;
+                }
+                let elapsed_ms = started_at.elapsed().as_millis();
+                if elapsed_ms >= BROKER_MESSAGE_HANDLER_SLOW_WARN_MILLIS {
+                    warn!(
+                        message = message_name,
+                        elapsed_ms, "broker message handler was slow"
+                    );
+                }
+            });
+        }
+    });
+
     loop {
         tokio::select! {
+            // A handler error still ends the session; it just arrives here now rather
+            // than as the return value of the arm that read the socket.
+            handler_failed = handler_error.recv() => {
+                let error = handler_failed
+                    .unwrap_or_else(|| "broker message handler stopped".to_string());
+                return Err(BrokerSessionError::after_connected(error, connected_at));
+            }
             // The socket is the session, so a write failure still ends it. It now
             // arrives here instead of as the return value of a publish call, because
             // publishing is a hand-off to the writer task.
@@ -1102,18 +1156,13 @@ async fn run_broker_session_with_liveness(
                 if let Some(message) = decode_server_frame(frame)
                     .map_err(|error| BrokerSessionError::after_connected(error, connected_at))?
                 {
-                    let message_name = server_message_name(&message);
-                    let started_at = Instant::now();
-                    handle_server_message(state, &writer, message)
-                        .await
-                        .map_err(|error| BrokerSessionError::after_connected(error, connected_at))?;
-                    let elapsed_ms = started_at.elapsed().as_millis();
-                    if elapsed_ms >= BROKER_MESSAGE_HANDLER_SLOW_WARN_MILLIS {
-                        warn!(
-                            message = message_name,
-                            elapsed_ms,
-                            "broker server message handling was slow"
-                        );
+                    // Handed over rather than awaited. A full queue means the handler is
+                    // that far behind, which is a session to end, not a frame to drop.
+                    if inbound_tx.try_send(message).is_err() {
+                        return Err(BrokerSessionError::after_connected(
+                            "broker inbound queue overflowed".to_string(),
+                            connected_at,
+                        ));
                     }
                 }
             }
@@ -1130,6 +1179,17 @@ fn decode_server_frame(frame: Message) -> Result<Option<ServerMessage>, String> 
         Message::Close(_) => Err("broker closed the socket".to_string()),
         Message::Binary(_) => Ok(None),
         _ => Ok(None),
+    }
+}
+
+/// Which frames must stay in order with each other: a surface's own, keyed by it.
+/// Everything else shares one key, which keeps the session's own frames ordered without
+/// putting them behind any surface.
+fn message_ordering_key(message: &ServerMessage) -> String {
+    match message {
+        ServerMessage::Message { from_peer_id, .. } => from_peer_id.clone(),
+        ServerMessage::Presence { peer, .. } => peer.peer_id.clone(),
+        _ => String::new(),
     }
 }
 

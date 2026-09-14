@@ -1870,6 +1870,93 @@ async fn managed_broker_state(cwd: &str) -> AppState {
     AppState::from_parts(relay, HashMap::new(), change_tx)
 }
 
+/// Answers nothing, slowly. A cold provider catalog is the real shape of this: Codex
+/// alone is allowed thirty seconds, and the relay awaits it inside the receive loop.
+struct NeverAnswersProvider;
+
+#[async_trait::async_trait]
+impl crate::provider::ProviderBridge for NeverAnswersProvider {
+    async fn list_threads(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<crate::protocol::ThreadSummaryView>, String> {
+        std::future::pending().await
+    }
+    async fn list_models(&self) -> Result<Vec<crate::protocol::ModelOptionView>, String> {
+        std::future::pending().await
+    }
+    async fn start_thread(
+        &self,
+        _request: crate::provider::StartThreadRequest,
+    ) -> Result<crate::provider::StartThreadResult, String> {
+        Err("not used by this test".to_string())
+    }
+    async fn resume_thread(
+        &self,
+        _thread_id: &str,
+        _approval_policy: &str,
+        _sandbox: &str,
+    ) -> Result<(), String> {
+        Err("not used by this test".to_string())
+    }
+    async fn read_thread(
+        &self,
+        _thread_id: &str,
+    ) -> Result<crate::provider::ThreadSyncData, String> {
+        Err("not used by this test".to_string())
+    }
+    async fn read_thread_entry_detail(
+        &self,
+        _thread_id: &str,
+        _item_id: &str,
+    ) -> Result<Option<crate::protocol::TranscriptEntryView>, String> {
+        Ok(None)
+    }
+    async fn archive_thread(&self, _thread_id: &str) -> Result<(), String> {
+        Err("not used by this test".to_string())
+    }
+    async fn delete_thread_permanently(
+        &self,
+        _thread_id: &str,
+    ) -> Result<crate::codex_local::LocalThreadDeleteSummary, String> {
+        Err("not used by this test".to_string())
+    }
+    async fn start_turn(
+        &self,
+        _thread_id: &str,
+        _text: &str,
+        _model: &str,
+        _effort: &str,
+        _images: &[crate::provider::ProviderImage],
+    ) -> Result<Option<String>, String> {
+        Err("not used by this test".to_string())
+    }
+    async fn request_turn_stop(
+        &self,
+        _thread_id: &str,
+        _turn_id: Option<&str>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn respond_to_approval(
+        &self,
+        _pending: &crate::state::PendingApproval,
+        _input: &crate::protocol::ApprovalDecisionInput,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn respond_to_ask_user_question(
+        &self,
+        _request_id: &str,
+        _answers: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn provider_name(&self) -> &'static str {
+        "never-answers"
+    }
+}
+
 /// What the fake broker saw, with arrival times, so the test can talk about latency
 /// rather than just ordering.
 #[derive(Default)]
@@ -1936,6 +2023,164 @@ fn plain_action_frame(from_peer_id: &str, action_id: &str, request: serde_json::
 ///   * A's train stops, because the departure is now observable while the train paces.
 ///     Previously the presence frame announcing it could not be read until afterwards,
 ///     which is what made the first attempt at this fix a no-op.
+#[tokio::test]
+async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
+    if !broker_session_e2e_enabled() {
+        eprintln!("skipping: set AGENT_RELAY_BROKER_SESSION_E2E=1 to run the broker session e2e");
+        return;
+    }
+
+    // A cold provider catalog is minutes, not milliseconds, and the relay awaits it in
+    // the same arm that reads the socket — so one phone asking for its thread list used
+    // to stop the relay hearing anything at all, from anyone.
+    let workspace = tempfile::TempDir::new().expect("tmpdir");
+    let cwd = workspace.path().to_string_lossy().to_string();
+
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener should bind");
+    let address = listener.local_addr().expect("listener should resolve");
+    let observations = Arc::new(std::sync::Mutex::new(BrokerObservations::default()));
+    let broker_view = Arc::clone(&observations);
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("broker should accept");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("handshake should succeed");
+
+        let welcome = ServerMessage::Welcome {
+            protocol_version: 1,
+            channel_id: "room-e2e".to_string(),
+            peer_id: "relay-e2e".to_string(),
+            peers: vec![
+                surface_peer("surface-a", "phone-1"),
+                surface_peer("surface-b", "phone-1"),
+            ],
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&welcome).expect("welcome serializes"),
+            ))
+            .await
+            .expect("welcome sends");
+
+        // A asks the thing that never comes back.
+        socket
+            .send(Message::Text(plain_action_frame(
+                "surface-a",
+                "action-threads",
+                serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
+            )))
+            .await
+            .expect("threads request sends");
+
+        // B asks something the relay can answer without any provider at all.
+        socket
+            .send(Message::Text(plain_action_frame(
+                "surface-b",
+                "action-projects",
+                serde_json::json!({ "type": "fetch_projects" }),
+            )))
+            .await
+            .expect("projects request sends");
+
+        while let Some(frame) = socket.next().await {
+            let Ok(frame) = frame else { break };
+            match frame {
+                Message::Ping(payload) => {
+                    broker_view
+                        .lock()
+                        .unwrap()
+                        .frames
+                        .push(("ping".to_string(), std::time::Instant::now()));
+                    let _ = socket.send(Message::Pong(payload)).await;
+                }
+                Message::Close(_) => break,
+                Message::Text(text) => {
+                    let kind = serde_json::from_str::<serde_json::Value>(&text)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("payload")
+                                .and_then(|payload| payload.get("kind"))
+                                .and_then(|kind| kind.as_str())
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_else(|| "unknown".to_string());
+                    broker_view
+                        .lock()
+                        .unwrap()
+                        .frames
+                        .push((kind, std::time::Instant::now()));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let config = heartbeat_test_config(format!("ws://{address}")).await;
+    let state = {
+        let (change_tx, _) = watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            cwd.clone(),
+            change_tx.clone(),
+            SecurityProfile::managed(),
+        )));
+        relay.write().await.paired_devices.insert(
+            "phone-1".to_string(),
+            crate::state::PairedDevice {
+                device_id: "phone-1".to_string(),
+                label: "phone-1".to_string(),
+                payload_secret: "secret".to_string(),
+                device_verify_key: "verify".to_string(),
+                created_at: 1,
+                last_seen_at: Some(1),
+                last_peer_id: None,
+                broker_join_ticket_expires_at: None,
+                path_scope: Vec::new(),
+            },
+        );
+        let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> =
+            HashMap::new();
+        providers.insert("never-answers".to_string(), Arc::new(NeverAnswersProvider));
+        AppState::from_parts(relay, providers, change_tx)
+    };
+    let mut change_rx = state.subscribe();
+
+    let _session = tokio::time::timeout(
+        Duration::from_secs(3),
+        run_broker_session_with_liveness(
+            &state,
+            &mut change_rx,
+            &config,
+            BrokerLivenessConfig {
+                ping_interval: Duration::from_millis(300),
+                pong_timeout: Duration::from_secs(30),
+            },
+        ),
+    )
+    .await;
+
+    let seen = observations.lock().unwrap();
+    let kinds = seen.kinds();
+    // A's reply is `remote_threads_result` and must be absent — if it arrived, the
+    // provider answered and this test proved nothing about a slow one.
+    assert_eq!(
+        seen.count_of("remote_threads_result"),
+        0,
+        "the hanging provider answered, so nothing here was actually slow; saw {kinds:?}"
+    );
+    assert!(
+        seen.count_of("remote_transcript_result") > 0,
+        "the second device was never answered while the first one's request hung; saw {kinds:?}"
+    );
+    assert!(
+        seen.count_of("ping") > 0,
+        "the relay never got to send its own heartbeat either; saw {kinds:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_departing_surface_does_not_stall_the_relay_for_everyone_else() {
     if !broker_session_e2e_enabled() {
