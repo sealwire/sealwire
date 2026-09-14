@@ -27236,6 +27236,42 @@ watchdog settle this Blocked",
         );
     }
 
+    // Not every goal turn comes from the watchdog. A peer's answer wakes the session, and
+    // a review's findings start its author's turn — both charge the goal and both are its
+    // turns. If only the watchdog records which turn it started, a revision during one of
+    // these finds nothing to stop and leaves it working to the objective it replaced.
+    #[tokio::test]
+    async fn a_goal_turn_started_by_a_wake_is_still_the_goals_to_stop() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "dev", Vec::new()).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "the original objective", None, Some(10))
+            .await
+            .expect("the user sets one");
+
+        app.set_review_drain_max_ms(200);
+        {
+            let mut relay = app.relay.write().await;
+            relay.ensure_runtime_for_thread(&thread).active_turn_id =
+                Some("turn-woken".to_string());
+        }
+        // The shape every non-watchdog driver uses: charge, then report it landed.
+        assert!(app.charge_goal_for_driven_turn(&thread).await);
+        app.goal_dispatch_landed(&thread).await;
+
+        app.set_goal(&thread, "a different objective", None, Some(12))
+            .await
+            .expect("the user revises it");
+
+        assert!(
+            provider.stop_was_requested_for("turn-woken").await,
+            "a goal turn started by a wake was left working to the objective it replaced"
+        );
+    }
+
     // Stopping the turn a goal is running means stop. The driver ticks every three
     // seconds, so without this the objective is simply handed back and the session is
     // working again before the user has looked away — and the Stop reads as broken.

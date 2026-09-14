@@ -986,6 +986,7 @@ pub(super) async fn handle_remote_action(
                 &from_peer_id,
                 &challenge_id,
                 &proof,
+                origin.lease,
             )
             .await
         }
@@ -1265,7 +1266,17 @@ pub(super) async fn handle_encrypted_remote_action(
         RemoteActionRequest::ClaimDevice {
             challenge_id,
             proof,
-        } => issue_claim_outcome(state, &device_id, &from_peer_id, &challenge_id, &proof).await,
+        } => {
+            issue_claim_outcome(
+                state,
+                &device_id,
+                &from_peer_id,
+                &challenge_id,
+                &proof,
+                origin.lease,
+            )
+            .await
+        }
         request => {
             match state
                 .mark_remote_device_seen(&device_id, &from_peer_id, Some(origin.lease))
@@ -1969,16 +1980,28 @@ async fn verify_remote_device_claim_init(
     verify_device_claim_init_proof(action_id, device_id, peer_id, &verify_key, proof)
 }
 
+/// Refuse anything admitted on a connection that has since been replaced.
+async fn ensure_lease_is_current(
+    state: &AppState,
+    peer_id: &str,
+    lease: u64,
+) -> Result<(), String> {
+    if state.surface_lease_is_current(peer_id, lease).await {
+        return Ok(());
+    }
+    Err("this connection has been replaced; ask again from the current one".to_string())
+}
+
 async fn issue_claim_challenge_outcome(
     state: &AppState,
     device_id: &str,
     peer_id: &str,
     lease: u64,
 ) -> Result<RemoteActionOutcome, String> {
-    // Under the same lease check as every other action. Exempting it let a signed
-    // challenge queued by a connection that has gone bind the device back to it, and the
-    // challenge is bound to that peer too — so the reply is aimed at a dead socket and
-    // completing it from the live one is refused.
+    // Refused outright, not merely prevented from rebinding: issuing a challenge DELETES
+    // every other one for the device, so a stale request destroys the live connection's
+    // challenge and its claim is then refused as missing.
+    ensure_lease_is_current(state, peer_id, lease).await?;
     state
         .mark_remote_device_seen(device_id, peer_id, Some(lease))
         .await?;
@@ -1997,7 +2020,12 @@ async fn issue_claim_outcome(
     peer_id: &str,
     challenge_id: &str,
     proof: &str,
+    lease: u64,
 ) -> Result<RemoteActionOutcome, String> {
+    // Completing a claim binds the device and mints a token bound to this peer. From a
+    // connection that has gone, both land on a socket nobody reads — and the token that
+    // reaches the live connection fails its own peer check.
+    ensure_lease_is_current(state, peer_id, lease).await?;
     let challenge = state
         .claim_challenge(device_id, challenge_id, peer_id)
         .await?;

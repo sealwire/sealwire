@@ -350,9 +350,23 @@ still be working. Stop the session itself to be sure."
     }
 
     /// The turn a `charge_goal_for_driven_turn` paid for reached the provider.
+    ///
+    /// Records WHICH turn, not just that one landed: a revision has to be able to stop
+    /// the goal's own turn and leave a turn the person typed alone, and every path that
+    /// starts a goal turn owes it that — not only the watchdog's continuation.
     pub(crate) async fn goal_dispatch_landed(&self, thread_id: &str) {
         let mut relay = self.relay.write().await;
         relay.update_goal(thread_id, |goal| goal.dispatch_landed());
+        let generation = relay
+            .goal_for_thread(thread_id)
+            .map(|goal| goal.dispatch_generation)
+            .unwrap_or_default();
+        let started = relay
+            .runtime_for_thread(thread_id)
+            .and_then(|runtime| runtime.active_turn_id.clone());
+        relay.update_goal(thread_id, |goal| {
+            goal.note_dispatch_turn(generation, started)
+        });
         relay.notify();
     }
 

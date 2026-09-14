@@ -1927,8 +1927,26 @@ async fn a_claim_challenge_from_a_closed_connection_does_not_take_the_device_bac
     };
     let state = AppState::from_parts(relay.clone(), HashMap::new(), change_tx);
 
-    let _ = issue_claim_challenge_outcome(&state, "phone-1", "surface-old", stale_lease).await;
+    // The live connection has a challenge in hand.
+    let live = state
+        .issue_claim_challenge("phone-1", "surface-new")
+        .await
+        .expect("the live connection gets a challenge");
 
+    let stale = issue_claim_challenge_outcome(&state, "phone-1", "surface-old", stale_lease).await;
+
+    assert!(
+        stale.is_err(),
+        "a challenge asked for on a connection that has gone must be refused, not served"
+    );
+    assert!(
+        state
+            .claim_challenge("phone-1", &live.challenge_id, "surface-new")
+            .await
+            .is_ok(),
+        "issuing a challenge deletes every other one for the device, so a stale request \
+         takes away the live connection's and its claim is then refused as missing"
+    );
     assert_eq!(
         relay
             .read()
