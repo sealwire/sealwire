@@ -2366,6 +2366,25 @@ export function stopRemoteGoal(threadId) {
   return dispatchGoal(threadId, "stop_goal", {}, "Stopping the goal…");
 }
 
+// A person's `/delegate`, which is not the peer tool an agent calls: the words are
+// expanded into a brief first, because the agent starting from nothing cannot see
+// this conversation.
+export async function delegateRemote(threadId, args = {}) {
+  if (!threadId) {
+    renderLog("No session to delegate from.");
+    return false;
+  }
+  renderLog("Handing it to another agent…");
+  try {
+    await dispatchOrRecover("delegate", { thread_id: threadId, ...args });
+    await syncRemoteSnapshot("post-delegate", true);
+    return true;
+  } catch (error) {
+    renderLog(`Remote delegate failed: ${error.message}`);
+    return false;
+  }
+}
+
 export async function deleteRemoteReview(reviewId) {
   if (!reviewId) {
     renderLog("No review to delete.");

@@ -85,6 +85,7 @@ export function ConversationComposer({
   sendButtonId = "remote-send-button",
   sendLabel = "Send",
   sendPending = false,
+  textareaRef = null,
   stopButtonId = null,
   stopLabel = "Stop",
   stopPending = false,
@@ -97,6 +98,10 @@ export function ConversationComposer({
     disabled: inputDisabled,
     id: messageId,
     placeholder: messagePlaceholder,
+    // Handed the node itself, not looked up by id: a surface that unmounts and
+    // remounts gets a NEW textarea, and anything holding the old one goes quietly
+    // dead rather than erroring.
+    ref: textareaRef || undefined,
     rows,
   };
   if (onPaste) {

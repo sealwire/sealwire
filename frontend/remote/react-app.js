@@ -165,6 +165,8 @@ import {
 import { createWorkflowsCache } from "../shared/workflows-cache.js";
 import { createPanelControl } from "../local/panel-controls.js";
 import { setupHeaderBandSync } from "../local/header-band-sync.js";
+import { createRemoteComposerCommandActions } from "./composer-command-actions.js";
+import { ComposerCommandHost } from "./composer-command-host.js";
 import {
   Composer,
   ControlBanner,
@@ -1175,6 +1177,17 @@ function RemoteApp() {
   // one identity across renders, so they cannot close over this render's thread id.
   const viewedThreadIdRef = useRef(null);
   viewedThreadIdRef.current = remoteViewedThreadId;
+  // Stateless and built once: the controller reads it through a ref, so rebuilding
+  // it every render would only churn.
+  const remoteComposerCommandActions = useMemo(
+    () =>
+      createRemoteComposerCommandActions({
+        setGoal: (threadId, objective) => handlersRef.current.onSetGoal?.(threadId, objective),
+        stopGoal: (threadId) => handlersRef.current.onStopGoal?.(threadId),
+        delegate: (threadId, args) => handlersRef.current.onDelegate?.(threadId, args),
+      }),
+    []
+  );
   const reviewerActions = useMemo(
     () => ({
       ...createGoalActions({
@@ -2426,6 +2439,27 @@ function RemoteApp() {
             }
             return handlers.onUpdateSessionSettings?.(payload);
           },
+          // The same three capabilities the desktop "/" menu drives, reached over the
+          // broker instead of loopback HTTP. Built here because this is where the
+          // catalog and the viewed thread already live.
+          composerCommandsModel: {
+            getCatalog: () => ({
+              providers: remoteUi.providers || [],
+              models: reviewLaunchModel?.models || [],
+              sessions: (currentState.threads || []).map((thread) => ({
+                id: thread.id,
+                name: thread.name || "",
+                provider: thread.provider || "",
+              })),
+            }),
+            getContext: () => ({
+              threadId: remoteViewedThreadId,
+              canReview: canRequestRemoteReview,
+              defaultReviewerProvider: reviewLaunchModel?.defaultProvider || "",
+            }),
+            requestReview: (values) => reviewerActions.onRequestReview(values),
+            ...remoteComposerCommandActions,
+          },
           reviewNudgeModel: {
             canRequest: canRequestRemoteReview,
             reviewModel: reviewLaunchModel,
@@ -3167,6 +3201,7 @@ function RemoteThreadPanel({
   onTakeOver,
   onUpdateSessionSettings,
   pendingAskUserQuestions,
+  composerCommandsModel,
   reviewNudgeModel,
   session,
   sessionView,
@@ -3175,6 +3210,11 @@ function RemoteThreadPanel({
   askUserDetailLoadingRequestIds,
   uiState,
 }) {
+  // The node, not its id: this panel remounts on a session switch and React hands
+  // back a NEW textarea, which a controller holding the old one cannot see.
+  const [commandInput, setCommandInput] = useState(null);
+  const commandControllerRef = useRef(null);
+
   // Computed once and handed to BOTH the transcript and the dock: a review or
   // Code Flow owning the thread hides the question, and a question belonging to
   // another thread was never this conversation's to answer. Two copies of that
@@ -3295,11 +3335,24 @@ function RemoteThreadPanel({
         id: "remote-message-form",
         onSubmit: (event) => {
           event.preventDefault();
+          // Null means the draft is an ordinary message — including a "/word" the
+          // menu does not own, which reaches the agent verbatim.
+          if (commandControllerRef.current?.submit()) return;
           onSendMessage();
         },
       },
       h(Composer, {
         ...composerModel,
+        // Two things share the pre-textarea slot on the desktop too: the "/" host
+        // belongs INSIDE the box so its pills read as part of the field.
+        attachmentArea: composerCommandsModel
+          ? h(ComposerCommandHost, {
+              controllerRef: commandControllerRef,
+              input: commandInput,
+              options: composerCommandsModel,
+            })
+          : null,
+        textareaRef: setCommandInput,
         actionsBeforeSend: session?.active_thread_id
           && (!session?.view_only || session?.settings_writable)
           ? h(SessionSettingsButton, {
