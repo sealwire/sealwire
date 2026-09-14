@@ -335,11 +335,24 @@ async function main() {
     // Type the way a person does, so the controller's own input listener runs.
     await page.click("#remote-message-input");
     await page.type("#remote-message-input", "/", { delay: 30 });
-    await page.waitForFunction(
-      () => document.querySelectorAll(".composer-command-menu [role='option'], .composer-command-menu li").length > 0,
-      null,
-      { timeout: TIMEOUT_MS }
-    );
+    try {
+      await page.waitForFunction(
+        () => document.querySelectorAll(".composer-command-menu [role='option'], .composer-command-menu li").length > 0,
+        null,
+        { timeout: TIMEOUT_MS }
+      );
+    } catch (error) {
+      // A public checkout has no commands to offer and correctly opens nothing. Say so,
+      // rather than reporting the same timeout a real regression produces.
+      const host = await page.$(".composer-command-host");
+      throw new Error(
+        host
+          ? "the \"/\" menu never opened. If this is a public checkout that is expected — " +
+            "the commands are private; build with the private crate swapped in " +
+            "(npm run dev:full, or scripts/with-private.sh) and rebuild web/."
+          : `the composer rendered no "/" host at all: ${error.message}`
+      );
+    }
 
     const open = await readMenu(page);
     assert.ok(
