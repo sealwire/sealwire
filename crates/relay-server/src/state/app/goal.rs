@@ -100,6 +100,7 @@ impl AppState {
         objective: &str,
         device_id: Option<&str>,
         reset_turns: bool,
+        ingress: Option<u64>,
     ) -> Result<(), String> {
         let objective = objective.trim().to_string();
         if objective.is_empty() {
@@ -110,6 +111,11 @@ impl AppState {
         // one the session cannot end.
         let mut relay = self.relay.write().await;
         ensure_thread_in_device_scope(&relay, thread_id, device_id)?;
+        // A frame the wire already superseded. Not an error: the device that sent it did
+        // nothing wrong, and the snapshot it gets back shows what actually happened.
+        if !relay.claim_goal_ingress(thread_id, ingress) {
+            return Ok(());
+        }
         if !thread_can_end_a_goal(&relay, thread_id) {
             return Err(
                 "a goal runs this session on its own, so it needs a session that can \
@@ -170,10 +176,14 @@ to one of your own sessions"
         &self,
         thread_id: &str,
         device_id: Option<&str>,
+        ingress: Option<u64>,
     ) -> Result<(), String> {
         let handed_over = {
             let mut relay = self.relay.write().await;
             ensure_thread_in_device_scope(&relay, thread_id, device_id)?;
+            if !relay.claim_goal_ingress(thread_id, ingress) {
+                return Ok(());
+            }
             let Some(goal) = relay.goal_for_thread(thread_id) else {
                 return Err("this session has no goal".to_string());
             };

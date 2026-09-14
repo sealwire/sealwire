@@ -1507,6 +1507,7 @@ async fn list_threads_action_carries_the_search_query() {
                         ids: None,
                     },
                 },
+                0,
             )
             .await
             .expect("action should succeed");

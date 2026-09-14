@@ -26865,7 +26865,7 @@ mod ask_tests {
         let real_id = format!("{placeholder}-promoted");
         bridge.promote_on_first_turn(&placeholder, &real_id).await;
 
-        app.set_goal(&placeholder, "ship the mobile door", None, false)
+        app.set_goal(&placeholder, "ship the mobile door", None, false, None)
             .await
             .expect("the user sets it");
         app.ask_agent(
@@ -27072,6 +27072,52 @@ watchdog settle this Blocked",
         );
     }
 
+    // Two devices, one session. The relay reads one socket, so the wire order of their
+    // frames is known — but each surface is handled on its own worker, so the LATER Stop
+    // can win the lock first, find a goal to cancel, and then the EARLIER Set runs and
+    // starts one. The stop reported success and the session is working again.
+    #[tokio::test]
+    async fn a_goal_frame_that_arrived_first_cannot_outlive_the_stop_that_followed_it() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "dev", Vec::new()).await;
+        let thread = goal_session(&app, &cwd).await;
+
+        app.set_goal(&thread, "the original objective", None, false, Some(10))
+            .await
+            .expect("the user sets one");
+
+        // Frame 12 is the Stop; frame 11 is the Set that reached the relay before it.
+        app.cancel_goal(&thread, None, Some(12))
+            .await
+            .expect("the other device stops it");
+        let late = app
+            .set_goal(
+                &thread,
+                "a revision nobody asked for last",
+                None,
+                false,
+                Some(11),
+            )
+            .await;
+
+        let status = {
+            let relay = app.relay.read().await;
+            relay.goal_for_thread(&thread).map(|goal| goal.status)
+        };
+        assert!(
+            late.is_ok(),
+            "a superseded frame is not an error to report at the device that sent it: {late:?}"
+        );
+        assert_eq!(
+            status,
+            Some(crate::state::GoalStatus::Cancelled),
+            "the last thing the user did on the wire was stop it"
+        );
+    }
+
     // Stopping the turn a goal is running means stop. The driver ticks every three
     // seconds, so without this the objective is simply handed back and the session is
     // working again before the user has looked away — and the Stop reads as broken.
@@ -27083,7 +27129,7 @@ watchdog settle this Blocked",
         grant_workspace(&app, &cwd).await;
         pair_device(&app, "stopper", Vec::new()).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "ship the mobile door", None, false)
+        app.set_goal(&thread, "ship the mobile door", None, false, None)
             .await
             .expect("the user sets it");
         hand_over_the_goal(&app, &thread).await;
@@ -27792,7 +27838,7 @@ watchdog settle this Blocked",
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
 
-        app.set_goal(&thread, "ship the mobile door", None, false)
+        app.set_goal(&thread, "ship the mobile door", None, false, None)
             .await
             .expect("the user sets it");
         app.ask_agent(
@@ -27991,7 +28037,7 @@ watchdog settle this Blocked",
         }
 
         let err = app
-            .set_goal(&thread, "ship something else", None, false)
+            .set_goal(&thread, "ship something else", None, false, None)
             .await
             .expect_err("a retained Task seat cannot host an ordinary goal");
         assert!(
@@ -28028,7 +28074,7 @@ watchdog settle this Blocked",
             .active_thread_id
             .clone()
             .expect("thread");
-        app.set_goal(&thread, "ship the mobile door", None, false)
+        app.set_goal(&thread, "ship the mobile door", None, false, None)
             .await
             .expect("the goal is set while the thread is free");
 
@@ -28079,7 +28125,7 @@ watchdog settle this Blocked",
             .clone()
             .expect("thread");
 
-        app.set_goal(&thread, "ship the mobile door", None, false)
+        app.set_goal(&thread, "ship the mobile door", None, false, None)
             .await
             .expect("the goal is set while the thread is free");
         let receipt = app
@@ -28126,7 +28172,7 @@ watchdog settle this Blocked",
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "ship the mobile door", None, false)
+        app.set_goal(&thread, "ship the mobile door", None, false, None)
             .await
             .expect("the user sets it");
 
@@ -28183,7 +28229,7 @@ watchdog settle this Blocked",
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "ship the mobile door", None, false)
+        app.set_goal(&thread, "ship the mobile door", None, false, None)
             .await
             .expect("the user sets it");
 
@@ -28236,7 +28282,7 @@ watchdog settle this Blocked",
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
 
-        app.set_goal(&thread, "ship the mobile door", None, false)
+        app.set_goal(&thread, "ship the mobile door", None, false, None)
             .await
             .expect("the user sets it");
         let spent = || async {
@@ -28312,6 +28358,7 @@ watchdog settle this Blocked",
                 "do my bidding over there",
                 Some("narrow-device"),
                 false,
+                None,
             )
             .await
             .expect_err("a thread outside the grant is not one to point a goal at");
@@ -28319,11 +28366,11 @@ watchdog settle this Blocked",
         assert!(app.relay.read().await.goal_for_thread(&hidden).is_none());
 
         // The local operator set it, so only the local operator can stop it.
-        app.set_goal(&hidden, "the user's own objective", None, false)
+        app.set_goal(&hidden, "the user's own objective", None, false, None)
             .await
             .expect("the local operator is not scoped");
         let error = app
-            .cancel_goal(&hidden, Some("narrow-device"))
+            .cancel_goal(&hidden, Some("narrow-device"), None)
             .await
             .expect_err("a thread outside the grant is not one to stop");
         assert!(error.contains("no such session"), "unexpected: {error}");
@@ -28390,7 +28437,7 @@ watchdog settle this Blocked",
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
 
-        app.set_goal(&thread, "ship the mobile door", None, false)
+        app.set_goal(&thread, "ship the mobile door", None, false, None)
             .await
             .expect("the user sets it");
 
@@ -28439,7 +28486,7 @@ watchdog settle this Blocked",
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "keep going", None, false)
+        app.set_goal(&thread, "keep going", None, false, None)
             .await
             .expect("set");
 
@@ -28483,7 +28530,7 @@ watchdog settle this Blocked",
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "ask me something", None, false)
+        app.set_goal(&thread, "ask me something", None, false, None)
             .await
             .expect("set");
         hand_over_the_goal(&app, &thread).await;
@@ -28543,7 +28590,7 @@ watchdog settle this Blocked",
             .expect("thread");
 
         let refused = app
-            .set_goal(&restricted, "ship the mobile door", None, false)
+            .set_goal(&restricted, "ship the mobile door", None, false, None)
             .await
             .expect_err("a session with no way to stop must not be driven");
         assert!(
@@ -28571,7 +28618,7 @@ watchdog settle this Blocked",
         let thread = goal_session(&app, &cwd).await;
         let dump = "x".repeat(crate::state::MAX_GOAL_OBJECTIVE_CHARS + 1);
         let refused = app
-            .set_goal(&thread, &dump, None, false)
+            .set_goal(&thread, &dump, None, false, None)
             .await
             .expect_err("a status dump must not become the standing aim");
         assert!(
@@ -28601,11 +28648,11 @@ watchdog settle this Blocked",
             goal.settle(crate::state::GoalStatus::CompleteClaimed, "agent says done");
             relay.set_goal(goal);
         }
-        app.set_goal(&thread, &long, None, false)
+        app.set_goal(&thread, &long, None, false, None)
             .await
             .expect("resubmitting the stored objective is Keep going, not new authoring");
         let refused_new = app
-            .set_goal(&thread, &format!("{long}!"), None, false)
+            .set_goal(&thread, &format!("{long}!"), None, false, None)
             .await
             .expect_err("changing it to another long dump is still refused");
         assert!(
@@ -28622,7 +28669,7 @@ watchdog settle this Blocked",
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
         let exact = "x".repeat(crate::state::MAX_GOAL_OBJECTIVE_CHARS);
-        app.set_goal(&thread, &exact, None, false)
+        app.set_goal(&thread, &exact, None, false, None)
             .await
             .expect("exactly the cap is allowed");
     }
@@ -28638,7 +28685,7 @@ watchdog settle this Blocked",
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "keep going", None, false)
+        app.set_goal(&thread, "keep going", None, false, None)
             .await
             .expect("set");
 
@@ -28666,7 +28713,7 @@ watchdog settle this Blocked",
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "keep going", None, false)
+        app.set_goal(&thread, "keep going", None, false, None)
             .await
             .expect("set");
 
@@ -28675,7 +28722,7 @@ watchdog settle this Blocked",
             relay.set_active_turn(Some("turn-in-flight".to_string()));
             relay.notify();
         }
-        app.cancel_goal(&thread, None).await.expect("stops");
+        app.cancel_goal(&thread, None, None).await.expect("stops");
 
         let mut working = true;
         for _ in 0..100 {
@@ -28726,7 +28773,7 @@ watchdog settle this Blocked",
             .active_thread_id
             .clone()
             .expect("thread");
-        app.set_goal(&thread, "keep going", None, false)
+        app.set_goal(&thread, "keep going", None, false, None)
             .await
             .expect("set");
 
@@ -28737,7 +28784,7 @@ watchdog settle this Blocked",
         }
 
         let reported = app
-            .cancel_goal(&thread, None)
+            .cancel_goal(&thread, None, None)
             .await
             .expect_err("an unconfirmed stop must not read as a stop");
         assert!(
@@ -28768,7 +28815,7 @@ watchdog settle this Blocked",
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "keep going", None, false)
+        app.set_goal(&thread, "keep going", None, false, None)
             .await
             .expect("set");
 
@@ -28821,7 +28868,7 @@ watchdog settle this Blocked",
             relay.orchestrator_thread_id = Some(thread.clone());
         }
 
-        app.set_goal(&thread, "keep going", None, false)
+        app.set_goal(&thread, "keep going", None, false, None)
             .await
             .expect_err("a thread that answers to something else is not yours to drive");
         assert!(app.relay.read().await.goal_for_thread(&thread).is_none());
@@ -28836,7 +28883,7 @@ watchdog settle this Blocked",
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "ship the mobile door", None, false)
+        app.set_goal(&thread, "ship the mobile door", None, false, None)
             .await
             .expect("set");
 
@@ -28867,7 +28914,7 @@ watchdog settle this Blocked",
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "ship the mobile door", None, false)
+        app.set_goal(&thread, "ship the mobile door", None, false, None)
             .await
             .expect("set");
         hand_over_the_goal(&app, &thread).await;
@@ -28882,8 +28929,8 @@ watchdog settle this Blocked",
             "the sequence needs a goal that really was driven",
         );
 
-        let _ = app.cancel_goal(&thread, None).await;
-        app.set_goal(&thread, "something else entirely", None, false)
+        let _ = app.cancel_goal(&thread, None, None).await;
+        app.set_goal(&thread, "something else entirely", None, false, None)
             .await
             .expect("the user sets a new one");
 
@@ -28913,7 +28960,7 @@ watchdog settle this Blocked",
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "ship the mobile door", None, false)
+        app.set_goal(&thread, "ship the mobile door", None, false, None)
             .await
             .expect("set");
         hand_over_the_goal(&app, &thread).await;
@@ -28927,9 +28974,15 @@ watchdog settle this Blocked",
             .turns;
         assert!(before >= 2, "spent turns to clear");
 
-        app.set_goal(&thread, "ship the mobile door (typo fixed)", None, false)
-            .await
-            .expect("typo fix");
+        app.set_goal(
+            &thread,
+            "ship the mobile door (typo fixed)",
+            None,
+            false,
+            None,
+        )
+        .await
+        .expect("typo fix");
         assert_eq!(
             app.relay
                 .read()
@@ -28941,7 +28994,7 @@ watchdog settle this Blocked",
             "a wording tweak keeps the budget",
         );
 
-        app.set_goal(&thread, "ship the mobile door", None, true)
+        app.set_goal(&thread, "ship the mobile door", None, true, None)
             .await
             .expect("fresh budget");
         assert_eq!(
@@ -28966,7 +29019,7 @@ watchdog settle this Blocked",
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "keep going", None, false)
+        app.set_goal(&thread, "keep going", None, false, None)
             .await
             .expect("set");
         for _ in 0..crate::state::goal_max_turns() {
@@ -29012,7 +29065,7 @@ watchdog settle this Blocked",
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "ship the mobile door", None, false)
+        app.set_goal(&thread, "ship the mobile door", None, false, None)
             .await
             .expect("set");
         hand_over_the_goal(&app, &thread).await;
@@ -29053,7 +29106,7 @@ watchdog settle this Blocked",
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "keep going", None, false)
+        app.set_goal(&thread, "keep going", None, false, None)
             .await
             .expect("set");
 
@@ -29102,7 +29155,7 @@ watchdog settle this Blocked",
             .await
             .expect("review starts");
 
-        app.set_goal(&thread, "keep going", None, false)
+        app.set_goal(&thread, "keep going", None, false, None)
             .await
             .expect_err("something else is already driving this thread");
     }
@@ -29119,7 +29172,7 @@ watchdog settle this Blocked",
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "keep going", None, false)
+        app.set_goal(&thread, "keep going", None, false, None)
             .await
             .expect("set");
 

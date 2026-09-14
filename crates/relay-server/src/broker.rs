@@ -980,9 +980,12 @@ async fn run_broker_session_with_liveness(
         // phone's claim has to land before the action that presents it.
         let mut surfaces: std::collections::HashMap<
             String,
-            tokio::sync::mpsc::Sender<ServerMessage>,
+            tokio::sync::mpsc::Sender<(u64, ServerMessage)>,
         > = std::collections::HashMap::new();
         while let Some(message) = inbound_rx.recv().await {
+            // The one place that sees the wire order. Frames are handled on independent
+            // workers after this, so anything whose order matters carries this with it.
+            let ingress = next_broker_ingress();
             let key = message_ordering_key(&message);
             let departing = matches!(
                 &message,
@@ -996,7 +999,7 @@ async fn run_broker_session_with_liveness(
             // has gone — and an arrival applied out of order would undo one.
             if is_surface_presence(&message) {
                 if let Err(error) =
-                    handle_server_message(&handler_state, &handler_writer, message).await
+                    handle_server_message(&handler_state, &handler_writer, ingress, message).await
                 {
                     let _ = handler_error_tx.try_send(error);
                     return;
@@ -1007,20 +1010,21 @@ async fn run_broker_session_with_liveness(
                 continue;
             }
             let sender = surfaces.entry(key.clone()).or_insert_with(|| {
-                let (tx, mut rx) =
-                    tokio::sync::mpsc::channel::<ServerMessage>(SURFACE_MESSAGE_QUEUE_CAPACITY);
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<(u64, ServerMessage)>(
+                    SURFACE_MESSAGE_QUEUE_CAPACITY,
+                );
                 let state = handler_state.clone();
                 let writer = handler_writer.clone();
                 let report = handler_error_tx.clone();
                 tokio::spawn(async move {
-                    while let Some(message) = rx.recv().await {
+                    while let Some((ingress, message)) = rx.recv().await {
                         let message_name = server_message_name(&message);
                         let started_at = Instant::now();
                         // A handler that panics would otherwise take this surface's queue
                         // with it and report nothing, leaving the socket looking healthy.
                         let handled =
                             futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-                                handle_server_message(&state, &writer, message),
+                                handle_server_message(&state, &writer, ingress, message),
                             ))
                             .await;
                         match handled {
@@ -1057,7 +1061,7 @@ async fn run_broker_session_with_liveness(
             // keeps — push registration is the one that matters — is still lost, and the
             // phone still believes it succeeded. Narrow, because that frame has to be the
             // one that overflows, but real.
-            if let Err(error) = sender.try_send(message) {
+            if let Err(error) = sender.try_send((ingress, message)) {
                 let _ = handler_error_tx.try_send(match error {
                     tokio::sync::mpsc::error::TrySendError::Full(_) => {
                         format!("broker surface {key} fell too far behind to keep its frames")
@@ -1263,6 +1267,15 @@ fn is_surface_presence(message: &ServerMessage) -> bool {
     )
 }
 
+/// Where a frame sat in the order the relay read them off its one socket.
+///
+/// Relay-wide and never reset: a frame left over from a connection that has gone must
+/// still lose to one that arrived after it.
+fn next_broker_ingress() -> u64 {
+    static INGRESS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    INGRESS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 fn message_ordering_key(message: &ServerMessage) -> String {
     match message {
         ServerMessage::Message { from_peer_id, .. } => from_peer_id.clone(),
@@ -1274,6 +1287,7 @@ fn message_ordering_key(message: &ServerMessage) -> String {
 async fn handle_server_message(
     state: &AppState,
     writer: &BrokerWriter,
+    ingress: u64,
     message: ServerMessage,
 ) -> Result<(), String> {
     match message {
@@ -1375,6 +1389,7 @@ async fn handle_server_message(
                     handle_remote_action(
                         state,
                         writer,
+                        ingress,
                         from_peer_id,
                         action_id,
                         session_claim,
@@ -1392,6 +1407,7 @@ async fn handle_server_message(
                     handle_encrypted_remote_action(
                         state,
                         writer,
+                        ingress,
                         from_peer_id,
                         action_id,
                         session_claim,

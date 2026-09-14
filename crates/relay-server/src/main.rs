@@ -822,7 +822,7 @@ async fn set_session_goal(
     let outcome = if input.objective.trim().is_empty() {
         context
             .app
-            .cancel_goal(&input.thread_id, None)
+            .cancel_goal(&input.thread_id, None, None)
             .await
             .map(|()| "Goal stopped.".to_string())
     } else {
@@ -833,6 +833,7 @@ async fn set_session_goal(
                 &input.objective,
                 None,
                 input.reset_turns,
+                None,
             )
             .await
             .map(|()| "Goal set. This session will work toward it and come back when it is done, stuck, or needs you.".to_string())

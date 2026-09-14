@@ -453,6 +453,12 @@ pub struct RelayState {
     /// guards against. Bounded by insertion order instead.
     departed_surface_peer_ids: HashSet<String>,
     departed_surface_peer_order: VecDeque<String>,
+    /// The newest broker arrival position that has changed each thread's goal.
+    ///
+    /// Surfaces are handled on independent workers, so two devices' frames can execute in
+    /// either order. Ordering them by making one wait is what starved the relay; refusing
+    /// the older one instead needs nothing to wait for anything.
+    goal_ingress_by_thread: HashMap<String, u64>,
     /// Which threads each SURFACE is currently looking at, so transcript deltas are
     /// published only where they can be rendered.
     ///
@@ -710,6 +716,7 @@ impl RelayState {
             online_surface_peer_devices: HashMap::new(),
             departed_surface_peer_ids: HashSet::new(),
             departed_surface_peer_order: VecDeque::new(),
+            goal_ingress_by_thread: HashMap::new(),
             watched_threads: HashMap::new(),
             usage_store: crate::usage::store::UsageStore::disabled(),
             codex_usage: crate::usage::CodexUsageTracker::new(),
@@ -5337,6 +5344,23 @@ impl RelayState {
     /// peer may still be wanted, because a presence set can be incomplete.
     pub fn surface_peer_has_departed(&self, peer_id: &str) -> bool {
         self.departed_surface_peer_ids.contains(peer_id)
+    }
+
+    /// Claim this arrival position for a thread's goal, or refuse because a later frame
+    /// already changed it. `None` is a caller outside the broker's arrival order — the
+    /// local HTTP surface — which neither claims nor is refused.
+    pub fn claim_goal_ingress(&mut self, thread_id: &str, ingress: Option<u64>) -> bool {
+        let Some(ingress) = ingress else {
+            return true;
+        };
+        match self.goal_ingress_by_thread.get(thread_id) {
+            Some(applied) if *applied >= ingress => false,
+            _ => {
+                self.goal_ingress_by_thread
+                    .insert(thread_id.to_string(), ingress);
+                true
+            }
+        }
     }
 
     fn remember_departed_surface_peer(&mut self, peer_id: &str) {

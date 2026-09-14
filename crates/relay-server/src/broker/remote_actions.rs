@@ -803,6 +803,7 @@ pub(super) struct RemoteActionOutcome {
 pub(super) async fn handle_remote_action(
     state: &AppState,
     writer: &BrokerWriter,
+    ingress: u64,
     from_peer_id: String,
     action_id: String,
     session_claim: Option<String>,
@@ -881,6 +882,7 @@ pub(super) async fn handle_remote_action(
             &from_peer_id,
             request.bind_device(resolved_device_id.clone(), &from_peer_id),
             false,
+            ingress,
         )
         .await;
     }
@@ -974,6 +976,7 @@ pub(super) async fn handle_remote_action(
                 Ok(()) => match execute_remote_action(
                     state,
                     request.bind_device(resolved_device_id.clone(), &from_peer_id),
+                    ingress,
                 )
                 .await
                 {
@@ -1051,6 +1054,7 @@ pub(super) async fn handle_remote_action(
 pub(super) async fn handle_encrypted_remote_action(
     state: &AppState,
     writer: &BrokerWriter,
+    ingress: u64,
     from_peer_id: String,
     action_id: String,
     session_claim: Option<String>,
@@ -1150,6 +1154,7 @@ pub(super) async fn handle_encrypted_remote_action(
             &from_peer_id,
             request.bind_device(device_id.clone(), &from_peer_id),
             true,
+            ingress,
         )
         .await;
     }
@@ -1236,6 +1241,7 @@ pub(super) async fn handle_encrypted_remote_action(
                     match execute_remote_action(
                         state,
                         request.bind_device(device_id.clone(), &from_peer_id),
+                        ingress,
                     )
                     .await
                     {
@@ -1343,6 +1349,7 @@ struct ResolvedEncryptedAction {
 async fn execute_remote_action(
     state: &AppState,
     request: RemoteActionRequest,
+    ingress: u64,
 ) -> Result<RemoteActionOutcome, String> {
     match request {
         RemoteActionRequest::ClaimChallenge { .. } | RemoteActionRequest::ClaimDevice { .. } => {
@@ -1632,7 +1639,13 @@ async fn execute_remote_action(
         } => {
             let device_id = device_id.ok_or_else(|| "missing device id".to_string())?;
             state
-                .set_goal(&thread_id, &objective, Some(&device_id), reset_turns)
+                .set_goal(
+                    &thread_id,
+                    &objective,
+                    Some(&device_id),
+                    reset_turns,
+                    Some(ingress),
+                )
                 .await
                 .map(|()| RemoteActionOutcome::default())
         }
@@ -1642,7 +1655,7 @@ async fn execute_remote_action(
         } => {
             let device_id = device_id.ok_or_else(|| "missing device id".to_string())?;
             state
-                .cancel_goal(&thread_id, Some(&device_id))
+                .cancel_goal(&thread_id, Some(&device_id), Some(ingress))
                 .await
                 .map(|()| RemoteActionOutcome::default())
         }
@@ -1749,9 +1762,10 @@ async fn execute_fire_and_forget_remote_action(
     peer_id: &str,
     request: RemoteActionRequest,
     encrypted: bool,
+    ingress: u64,
 ) -> Result<(), String> {
     state.mark_remote_device_seen(device_id, peer_id).await?;
-    if let Err(error) = execute_remote_action(state, request).await {
+    if let Err(error) = execute_remote_action(state, request, ingress).await {
         warn!(
             action = action.as_str(),
             peer_id = %peer_id,
