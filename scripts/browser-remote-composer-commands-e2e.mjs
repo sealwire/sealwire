@@ -406,23 +406,6 @@ async function main() {
       `the committed command must be consumed from the field — ${JSON.stringify(committed)}`
     );
 
-    // Back out of the command and send on the now-empty field. This is the failure as
-    // a person meets it: the field looks empty, but whatever the surface still BELIEVES
-    // is in it is what gets sent. Asserting on the wire rather than on React's internals
-    // keeps this readable after a React upgrade — and it is the whole path, composer
-    // wiring included, rather than a stand-in for it.
-    await page.evaluate(() => {
-      window.__sentRequests = [];
-    });
-    const removePill = page.locator(".composer-command-pill button, .composer-command-pill-remove").first();
-    if (await removePill.count()) {
-      await removePill.click({ timeout: TIMEOUT_MS });
-    } else {
-      await page.click("#remote-message-input");
-      await page.keyboard.press("Backspace");
-    }
-    await page.waitForTimeout(200);
-
     assert.ok(
       committed.surfaceDraft.found,
       "this test reads React's own copy of the draft through an internal key; it is gone, " +
@@ -435,7 +418,7 @@ async function main() {
 ordinary message sends THAT instead of what the user types — ${JSON.stringify(committed)}`
     );
 
-    console.log(`remote-composer-commands-e2e OK ${JSON.stringify({ open, committed, committed })}`);
+    console.log(`remote-composer-commands-e2e OK ${JSON.stringify({ open, committed })}`);
   } catch (error) {
     await writeFailureArtifacts({
       scenario: "remote-composer-commands-e2e",

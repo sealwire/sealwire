@@ -132,18 +132,14 @@ impl AppState {
     ///
     /// Returns the peer's thread id: the asker needs it to carry on with the
     /// same agent, and it is the only handle it ever gets.
-    /// Accept a delegate now and do the slow half in the background.
-    ///
-    /// For callers that must not be kept waiting — the broker handles remote actions
-    /// one at a time, so a delegate awaited there stops heartbeats and every other
-    /// device with it. Same shape as `request_review`, for the same reason.
+    /// Accept a delegate now and do the slow half in the background: the broker handles
+    /// remote actions one at a time, so awaiting one there stops every other device too.
     pub(crate) async fn ask_agent_detached(
         &self,
         asker_thread_id: &str,
         request: AskRequest,
     ) -> Result<(), AskError> {
-        // Refusals a person can act on — empty instruction, no such session, out of
-        // scope, past the limit — are answered here. Only the brief and the peer's
+        // Refusals a person can act on are answered here; only the brief and the peer's
         // start happen out of sight.
         self.precheck_ask(asker_thread_id, &request).await?;
 
@@ -162,9 +158,8 @@ impl AppState {
         Ok(())
     }
 
-    /// The checks a caller is entitled to an answer to, and the settings the rest of
-    /// the work needs. Split out so a detached delegate can refuse to the caller's
-    /// face and still leave only the slow half in the background.
+    /// The checks a caller is owed an answer to, and the settings the rest needs —
+    /// split out so a detached delegate can still refuse to the caller's face.
     async fn precheck_ask(
         &self,
         asker_thread_id: &str,
@@ -233,6 +228,15 @@ impl AppState {
             )
         };
 
+        // Up front, not in the branch that would start one: a detached delegate is
+        // acknowledged before it gets there, so a refusal that late reaches nobody.
+        if request.peer_thread_id.is_none() && peers >= MAX_PEERS_PER_ASKER {
+            return Err(AskError::LimitReached(format!(
+                "you already have {peers} agents working, which is the limit. \
+Carry on with one of those instead of bringing in another."
+            )));
+        }
+
         if asks >= MAX_ASKS_PER_ASKER {
             return Err(AskError::LimitReached(format!(
                 "you have asked for help {asks} times in this session, which is the limit. \
@@ -273,6 +277,23 @@ Finish up with what you have and tell the user."
             message
         };
 
+        // Re-read rather than reuse what the precheck saw: writing the brief can take
+        // minutes, and a narrowing in that window must bind the peer. Otherwise the peer
+        // is started with powers its asker no longer has.
+        let (asker_approval, asker_sandbox) = {
+            let relay = self.relay.read().await;
+            let settings = relay.thread_settings(asker_thread_id);
+            (
+                settings
+                    .as_ref()
+                    .map(|s| s.approval_policy.clone())
+                    .unwrap_or(asker_approval),
+                settings
+                    .as_ref()
+                    .map(|s| s.sandbox.clone())
+                    .unwrap_or(asker_sandbox),
+            )
+        };
         let (approval_policy, sandbox) =
             peer_thread_settings(&asker_approval, &asker_sandbox, None, None);
 
@@ -302,12 +323,6 @@ Finish up with what you have and tell the user."
                 (existing.to_string(), provider)
             }
             None => {
-                if peers >= MAX_PEERS_PER_ASKER {
-                    return Err(AskError::LimitReached(format!(
-                        "you already have {peers} agents working, which is the limit. \
-Carry on with one of those instead of bringing in another."
-                    )));
-                }
                 self.start_peer_thread(
                     &asker_cwd,
                     &request,

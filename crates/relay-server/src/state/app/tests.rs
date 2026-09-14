@@ -27177,6 +27177,124 @@ watchdog settle this Blocked",
     }
 
     #[tokio::test]
+    async fn being_past_the_agent_limit_is_refused_to_the_caller_not_in_a_background_task() {
+        // Since a delegate is acknowledged before the slow half runs, a refusal that
+        // happens after the acknowledgement lands nowhere a person looks: the phone has
+        // already said it worked and no ask ever appears.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = goal_session(&app, &cwd).await;
+
+        {
+            let mut relay = app.relay.write().await;
+            for index in 0..5 {
+                relay.insert_ask(crate::state::delegation::Ask::new(
+                    format!("ask-{index}"),
+                    asker.clone(),
+                    format!("peer-{index}"),
+                    "fake".to_string(),
+                    None,
+                    None,
+                    "earlier work".to_string(),
+                    cwd.clone(),
+                    None,
+                    relay_api::delegation::StartedBy::Agent,
+                ));
+            }
+        }
+
+        let refused = app
+            .ask_agent_detached(
+                &asker,
+                AskRequest {
+                    device_id: None,
+                    started_by: relay_api::delegation::StartedBy::Person,
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "and one more".to_string(),
+                },
+            )
+            .await;
+
+        assert!(
+            refused.is_err(),
+            "past the limit is a refusal the caller must be told about, not one to discover by its absence"
+        );
+        assert!(
+            refused.unwrap_err().message().contains("limit"),
+            "and it must say why"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_inherits_what_its_asker_may_do_when_it_starts_not_when_it_was_asked() {
+        // Writing the brief can take minutes, and the settings read before it are stale by
+        // the time the peer is created. Narrowing the asker in that window has to bind the
+        // peer, or delegating is a way to keep powers that were just taken away.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = goal_session(&app, &cwd).await;
+
+        // Hold the asker mid-turn so the brief parks, then narrow it while it is parked.
+        {
+            let mut relay = app.relay.write().await;
+            relay.ensure_runtime_for_thread(&asker).active_turn_id = Some("brief".to_string());
+        }
+        let driving = {
+            let app = app.clone();
+            let asker = asker.clone();
+            tokio::spawn(async move {
+                app.ask_agent(
+                    &asker,
+                    AskRequest {
+                        device_id: None,
+                        started_by: relay_api::delegation::StartedBy::Person,
+                        peer_thread_id: None,
+                        provider: Some("fake".to_string()),
+                        model: None,
+                        effort: None,
+                        message: "look at the retry loop".to_string(),
+                    },
+                )
+                .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        {
+            let mut relay = app.relay.write().await;
+            let mut narrowed = relay.thread_settings(&asker).expect("asker has settings");
+            narrowed.approval_policy = "on-request".to_string();
+            narrowed.sandbox = "read-only".to_string();
+            relay.thread_settings.insert(asker.clone(), narrowed);
+            relay.ensure_runtime_for_thread(&asker).active_turn_id = None;
+        }
+
+        let peer = driving
+            .await
+            .expect("the delegate task should not panic")
+            .expect("the delegate should go through");
+
+        let peer_settings = {
+            let relay = app.relay.read().await;
+            relay.thread_settings(&peer).expect("the peer has settings")
+        };
+        assert_eq!(
+            peer_settings.approval_policy, "on-request",
+            "the peer must not keep an approval its asker no longer has"
+        );
+        assert_eq!(
+            peer_settings.sandbox, "read-only",
+            "nor a sandbox its asker no longer has"
+        );
+    }
+
+    #[tokio::test]
     async fn a_delegate_that_fails_its_checks_is_refused_before_anything_is_started() {
         // Accepting first and failing later would put the refusal somewhere nobody looks.
         let project = TempDir::new().expect("tempdir");
