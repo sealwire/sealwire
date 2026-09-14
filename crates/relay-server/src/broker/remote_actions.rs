@@ -1578,7 +1578,7 @@ async fn execute_remote_action(
             effort,
             device_id,
         } => state
-            .ask_agent(
+            .ask_agent_detached(
                 &thread_id,
                 relay_api::delegation::AskRequest {
                     started_by: relay_api::delegation::StartedBy::Person,

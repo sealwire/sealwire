@@ -70,6 +70,17 @@ fn new_ask_id() -> String {
     format!("ask-{}-{}", unix_now(), super::review::random_suffix())
 }
 
+/// What `precheck_ask` established, so `ask_agent` does not read it all again.
+struct PrecheckedAsk {
+    message: String,
+    asker_cwd: String,
+    asker_approval: String,
+    asker_sandbox: String,
+    asker_provider: String,
+    /// Checked later, inside the branch that would start a NEW peer.
+    peers: usize,
+}
+
 impl AppState {
     /// A token for a surface acting on a person's behalf.
     ///
@@ -121,11 +132,44 @@ impl AppState {
     ///
     /// Returns the peer's thread id: the asker needs it to carry on with the
     /// same agent, and it is the only handle it ever gets.
-    pub(crate) async fn ask_agent(
+    /// Accept a delegate now and do the slow half in the background.
+    ///
+    /// For callers that must not be kept waiting — the broker handles remote actions
+    /// one at a time, so a delegate awaited there stops heartbeats and every other
+    /// device with it. Same shape as `request_review`, for the same reason.
+    pub(crate) async fn ask_agent_detached(
         &self,
         asker_thread_id: &str,
         request: AskRequest,
-    ) -> Result<String, AskError> {
+    ) -> Result<(), AskError> {
+        // Refusals a person can act on — empty instruction, no such session, out of
+        // scope, past the limit — are answered here. Only the brief and the peer's
+        // start happen out of sight.
+        self.precheck_ask(asker_thread_id, &request).await?;
+
+        let app = self.clone();
+        let asker = asker_thread_id.to_string();
+        tokio::spawn(async move {
+            if let Err(error) = app.ask_agent(&asker, request).await {
+                let mut relay = app.relay.write().await;
+                relay.push_log(
+                    "error",
+                    format!("Delegate from {asker} failed: {}", error.message()),
+                );
+                relay.notify();
+            }
+        });
+        Ok(())
+    }
+
+    /// The checks a caller is entitled to an answer to, and the settings the rest of
+    /// the work needs. Split out so a detached delegate can refuse to the caller's
+    /// face and still leave only the slow half in the background.
+    async fn precheck_ask(
+        &self,
+        asker_thread_id: &str,
+        request: &AskRequest,
+    ) -> Result<PrecheckedAsk, AskError> {
         let message = request.message.trim().to_string();
         if message.is_empty() {
             return Err(AskError::Failed(
@@ -195,6 +239,30 @@ impl AppState {
 Finish up with what you have and tell the user."
             )));
         }
+
+        Ok(PrecheckedAsk {
+            message,
+            asker_cwd,
+            asker_approval,
+            asker_sandbox,
+            asker_provider,
+            peers,
+        })
+    }
+
+    pub(crate) async fn ask_agent(
+        &self,
+        asker_thread_id: &str,
+        request: AskRequest,
+    ) -> Result<String, AskError> {
+        let PrecheckedAsk {
+            message,
+            asker_cwd,
+            asker_approval,
+            asker_sandbox,
+            asker_provider,
+            peers,
+        } = self.precheck_ask(asker_thread_id, &request).await?;
 
         // A person's one-liner becomes a brief before anyone else sees it. This
         // costs a turn on the asking agent, which is why it is opt-in: an agent

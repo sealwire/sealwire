@@ -26949,6 +26949,81 @@ watchdog settle this Blocked",
     // to say never settles at all, parking the asker until a four-hour clock calls it
     // "did not answer in time" — which is not what happened and not what to do about it.
     #[tokio::test]
+    async fn a_persons_delegate_returns_without_waiting_for_the_brief() {
+        // The phone's delegate is handled inside the relay's single broker receive loop,
+        // so anything it waits for stops heartbeats, other devices and snapshots too —
+        // and writing the brief is a whole turn on the asking agent, allowed minutes.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+
+        // Hold the asker mid-turn: the brief waits for it to fall idle, which it never does.
+        {
+            let mut relay = app.relay.write().await;
+            relay.ensure_runtime_for_thread(&thread).active_turn_id =
+                Some("asker-turn".to_string());
+        }
+
+        let accepted = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            app.ask_agent_detached(
+                &thread,
+                AskRequest {
+                    device_id: None,
+                    started_by: relay_api::delegation::StartedBy::Person,
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "look at the retry loop".to_string(),
+                },
+            ),
+        )
+        .await;
+
+        assert!(
+            accepted.is_ok(),
+            "the caller must be answered at once; waiting here stalls the whole relay"
+        );
+        assert!(
+            accepted.unwrap().is_ok(),
+            "a delegate that passes its checks is accepted, not refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delegate_that_fails_its_checks_is_refused_before_anything_is_started() {
+        // Accepting first and failing later would put the refusal somewhere nobody looks.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+
+        let refused = app
+            .ask_agent_detached(
+                &thread,
+                AskRequest {
+                    device_id: None,
+                    started_by: relay_api::delegation::StartedBy::Person,
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "   ".to_string(),
+                },
+            )
+            .await;
+
+        assert!(
+            refused.is_err(),
+            "an empty instruction is refused to the caller's face, not in a background task"
+        );
+    }
+
+    #[tokio::test]
     async fn a_peer_waiting_on_its_own_peer_is_not_treated_as_having_gone_quiet() {
         // B answering "I have asked C" and ending its turn is the behaviour we now ask
         // for, so the sweep must not read that idleness as refusing to answer A.

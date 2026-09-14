@@ -22,7 +22,10 @@ import {
   createClaimLifecyclePatch,
 } from "./surface-state.js";
 import { sendBrokerFrame } from "./broker-client.js";
-import { actionDeadlineMs } from "./action-deadlines.js";
+
+// The relay answers every remote action promptly — a delegate now hands its slow half
+// to a task of its own — so one deadline covers them all.
+const REMOTE_ACTION_TIMEOUT_MS = 15_000;
 
 
 let onApplySessionSnapshot = () => {};
@@ -893,7 +896,7 @@ function extendPendingActionDeadline(actionId) {
       actionId,
       new Error(`remote ${pending.actionType} timed out waiting for relay response`)
     );
-  }, actionDeadlineMs(pending.actionType));
+  }, REMOTE_ACTION_TIMEOUT_MS);
 }
 
 function registerPendingAction(actionId, actionType, request) {
@@ -903,7 +906,7 @@ function registerPendingAction(actionId, actionType, request) {
         actionId,
         new Error(`remote ${actionType} timed out waiting for relay response`)
       );
-    }, actionDeadlineMs(actionType));
+    }, REMOTE_ACTION_TIMEOUT_MS);
 
     state.pendingActions.set(actionId, {
       actionType,
