@@ -12,6 +12,7 @@
 // static server over web/ with the relay WebSocket stubbed.
 
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
@@ -68,7 +69,24 @@ async function readMenu(page) {
   });
 }
 
+// Decided from the build, not from the page: a public checkout genuinely has no
+// commands, and guessing that from "nothing opened" blames the build for a broken
+// wiring — which is exactly what it did when the field stopped reaching the controller.
+function isPublicBuild() {
+  const controller = path.join(ROOT, "crates/sealwire-private/frontend/composer-command-controller.js");
+  if (!existsSync(controller)) return true;
+  return readFileSync(controller, "utf8").includes("Public-checkout placeholder");
+}
+
 async function main() {
+  if (isPublicBuild()) {
+    console.log(
+      "remote-composer-commands-e2e SKIPPED — public checkout: the \"/\" commands are private. " +
+        "Swap the private crate in (npm run dev:full, or scripts/with-private.sh), rebuild web/, and re-run."
+    );
+    return;
+  }
+
   const server = await startStaticServer({
     rootDir: WEB_ROOT,
     indexFile: "remote.html",
@@ -342,14 +360,10 @@ async function main() {
         { timeout: TIMEOUT_MS }
       );
     } catch (error) {
-      // A public checkout has no commands to offer and correctly opens nothing. Say so,
-      // rather than reporting the same timeout a real regression produces.
       const host = await page.$(".composer-command-host");
       throw new Error(
         host
-          ? "the \"/\" menu never opened. If this is a public checkout that is expected — " +
-            "the commands are private; build with the private crate swapped in " +
-            "(npm run dev:full, or scripts/with-private.sh) and rebuild web/."
+          ? `the "/" host is mounted but no menu opened — the controller never bound the field: ${error.message}`
           : `the composer rendered no "/" host at all: ${error.message}`
       );
     }
