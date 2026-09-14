@@ -1892,6 +1892,92 @@ async fn managed_broker_state_parts(
     )
 }
 
+/// Falls over where a provider bug would.
+struct PanickingProvider;
+
+#[async_trait::async_trait]
+impl crate::provider::ProviderBridge for PanickingProvider {
+    async fn list_threads(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<crate::protocol::ThreadSummaryView>, String> {
+        panic!("this provider falls over")
+    }
+    async fn list_models(&self) -> Result<Vec<crate::protocol::ModelOptionView>, String> {
+        Ok(Vec::new())
+    }
+    async fn start_thread(
+        &self,
+        _request: crate::provider::StartThreadRequest,
+    ) -> Result<crate::provider::StartThreadResult, String> {
+        Err("not used by this test".to_string())
+    }
+    async fn resume_thread(
+        &self,
+        _thread_id: &str,
+        _approval_policy: &str,
+        _sandbox: &str,
+    ) -> Result<(), String> {
+        Err("not used by this test".to_string())
+    }
+    async fn read_thread(
+        &self,
+        _thread_id: &str,
+    ) -> Result<crate::provider::ThreadSyncData, String> {
+        Err("not used by this test".to_string())
+    }
+    async fn read_thread_entry_detail(
+        &self,
+        _thread_id: &str,
+        _item_id: &str,
+    ) -> Result<Option<crate::protocol::TranscriptEntryView>, String> {
+        Ok(None)
+    }
+    async fn archive_thread(&self, _thread_id: &str) -> Result<(), String> {
+        Err("not used by this test".to_string())
+    }
+    async fn delete_thread_permanently(
+        &self,
+        _thread_id: &str,
+    ) -> Result<crate::codex_local::LocalThreadDeleteSummary, String> {
+        Err("not used by this test".to_string())
+    }
+    async fn start_turn(
+        &self,
+        _thread_id: &str,
+        _text: &str,
+        _model: &str,
+        _effort: &str,
+        _images: &[crate::provider::ProviderImage],
+    ) -> Result<Option<String>, String> {
+        Err("not used by this test".to_string())
+    }
+    async fn request_turn_stop(
+        &self,
+        _thread_id: &str,
+        _turn_id: Option<&str>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn respond_to_approval(
+        &self,
+        _pending: &crate::state::PendingApproval,
+        _input: &crate::protocol::ApprovalDecisionInput,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn respond_to_ask_user_question(
+        &self,
+        _request_id: &str,
+        _answers: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn provider_name(&self) -> &'static str {
+        "panics"
+    }
+}
+
 /// Hangs until the test lets go, so a queue can be filled behind it and then drained.
 struct GatedThreadsProvider {
     entered_list_threads: Arc<tokio::sync::Notify>,
@@ -2823,6 +2909,140 @@ async fn a_result_reaches_the_session_that_asked_again_after_a_reconnect() {
         answered,
         "the second connection asked for the same action and was told nothing, so the \
          phone waits out its deadline for work the relay had already done; saw {kinds:?}"
+    );
+}
+
+/// A handler that panics must still answer the device that asked.
+///
+/// Otherwise the reserved action id sits "still running" until a lazy sweep notices it,
+/// every resend is parked behind an owner that will never finish, and the phone is left
+/// counting down against work whose outcome nobody will ever state.
+#[tokio::test]
+async fn a_panicking_action_answers_the_device_rather_than_going_quiet() {
+    if !broker_session_e2e_enabled() {
+        eprintln!("skipping: set AGENT_RELAY_BROKER_SESSION_E2E=1 to run the broker session e2e");
+        return;
+    }
+
+    let workspace = tempfile::TempDir::new().expect("tmpdir");
+    let cwd = workspace.path().to_string_lossy().to_string();
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener should bind");
+    let address = listener.local_addr().expect("listener should resolve");
+    let observations = Arc::new(std::sync::Mutex::new(BrokerObservations::default()));
+    let broker_view = Arc::clone(&observations);
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("broker should accept");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("handshake should succeed");
+        let welcome = ServerMessage::Welcome {
+            protocol_version: BROKER_PROTOCOL_VERSION,
+            channel_id: "room-e2e".to_string(),
+            peer_id: "relay-e2e".to_string(),
+            peers: vec![surface_peer("surface-a", "phone-1")],
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&welcome).expect("welcome serializes"),
+            ))
+            .await
+            .expect("welcome sends");
+        socket
+            .send(Message::Text(plain_action_frame(
+                "surface-a",
+                "action-panics",
+                serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
+            )))
+            .await
+            .expect("request sends");
+        while let Some(frame) = socket.next().await {
+            let Ok(frame) = frame else { break };
+            match frame {
+                Message::Ping(payload) => {
+                    let _ = socket.send(Message::Pong(payload)).await;
+                }
+                Message::Close(_) => break,
+                Message::Text(text) => {
+                    let payload = serde_json::from_str::<serde_json::Value>(&text).ok();
+                    let field = |name: &str| {
+                        payload
+                            .as_ref()
+                            .and_then(|value| value.get("payload"))
+                            .and_then(|payload| payload.get(name))
+                            .and_then(|found| found.as_str())
+                            .map(str::to_string)
+                    };
+                    let kind = field("kind").unwrap_or_else(|| "unknown".to_string());
+                    let ok = payload
+                        .as_ref()
+                        .and_then(|value| value.get("payload"))
+                        .and_then(|payload| payload.get("ok"))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true);
+                    let label = match field("action_id") {
+                        Some(action_id) => format!("{kind}:{action_id}:{ok}"),
+                        None => kind,
+                    };
+                    broker_view
+                        .lock()
+                        .unwrap()
+                        .frames
+                        .push((label, std::time::Instant::now()));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let config = heartbeat_test_config(format!("ws://{address}")).await;
+    let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> = HashMap::new();
+    providers.insert("panics".to_string(), Arc::new(PanickingProvider));
+    let (state, _relay) = managed_broker_state_parts(&cwd, providers).await;
+    let session_state = state.clone();
+    let session = tokio::spawn(async move {
+        let mut change_rx = session_state.subscribe();
+        let _ = run_broker_session_with_liveness(
+            &session_state,
+            &mut change_rx,
+            &config,
+            BrokerLivenessConfig {
+                ping_interval: Duration::from_secs(30),
+                pong_timeout: Duration::from_secs(30),
+            },
+        )
+        .await;
+    });
+
+    let mut answered = false;
+    for _ in 0..60 {
+        if observations
+            .lock()
+            .unwrap()
+            .kinds()
+            .iter()
+            .any(|kind| kind.contains(":action-panics:"))
+        {
+            answered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    session.abort();
+
+    let kinds = observations.lock().unwrap().kinds();
+    assert!(
+        answered,
+        "a handler that fell over left the device with no answer at all, and its action id \
+         reserved against every resend; saw {kinds:?}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| kind.ends_with(":action-panics:false")),
+        "the answer has to say it did not succeed; saw {kinds:?}"
     );
 }
 

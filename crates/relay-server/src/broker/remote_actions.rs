@@ -974,7 +974,7 @@ pub(super) async fn handle_remote_action(
                 .mark_remote_device_seen(&resolved_device_id, &from_peer_id)
                 .await
             {
-                Ok(()) => match execute_remote_action(
+                Ok(()) => match run_remote_action(
                     state,
                     request.bind_device(resolved_device_id.clone(), &from_peer_id),
                     ingress,
@@ -1240,7 +1240,7 @@ pub(super) async fn handle_encrypted_remote_action(
                 .await
             {
                 Ok(()) => {
-                    match execute_remote_action(
+                    match run_remote_action(
                         state,
                         request.bind_device(device_id.clone(), &from_peer_id),
                         ingress,
@@ -1346,6 +1346,27 @@ struct ResolvedEncryptedAction {
     action_kind: RemoteActionKind,
     request: RemoteActionRequest,
     response_secret: String,
+}
+
+/// `execute_remote_action`, with a fall-over turned into an ordinary refusal.
+///
+/// A panic here would otherwise leave the reserved action id "still running" for every
+/// later resend, with nobody left to finish it and nothing said to the device that asked.
+async fn run_remote_action(
+    state: &AppState,
+    request: RemoteActionRequest,
+    ingress: u64,
+) -> Result<RemoteActionOutcome, String> {
+    match futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        execute_remote_action(state, request, ingress),
+    ))
+    .await
+    {
+        Ok(result) => result,
+        // Deliberately not "it failed": a provider that fell over mid-write may well have
+        // written. Saying so is what stops a retry being sent under a fresh id.
+        Err(_) => Err("the relay fell over running this; check before trying again".to_string()),
+    }
 }
 
 async fn execute_remote_action(
