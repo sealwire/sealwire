@@ -14,6 +14,10 @@ import {
   readActiveProjectId,
   readThreadFilter,
 } from "../shared/thread-list-store.js";
+import {
+  asksForThread,
+  clearRememberedThreadIdentities,
+} from "../shared/reviews-cache.js";
 
 test("switching relays forgets the pinned project", () => {
   const threadListStore = createThreadListStore();
@@ -54,6 +58,30 @@ test("switching relays forgets the bell's retained states", () => {
   // Deliberately NOT reset: the bell being on is a preference about how you want to read
   // a list, not an id that belongs to one relay.
   assert.equal(filter.on, true, "switching relays does not silently turn the bell off");
+});
+
+test("switching relays forgets remembered ask identities", () => {
+  // Thread ids are only unique within a relay; an off-page ask on relay B must not
+  // inherit relay A's remembered name/provider for a colliding id.
+  clearRememberedThreadIdentities();
+  asksForThread(
+    { asks: [{ id: "a1", asker_thread_id: "shared-id", peer_thread_id: "me" }] },
+    "me",
+    [
+      { id: "shared-id", name: "Relay A session", provider: "codex" },
+      { id: "me", name: "Me", provider: "claude_code" },
+    ]
+  );
+
+  resetRelayScopedState({ threadListStore: createThreadListStore() });
+
+  const [ask] = asksForThread(
+    { asks: [{ id: "a1", asker_thread_id: "shared-id", peer_thread_id: "me" }] },
+    "me",
+    [{ id: "me", name: "Me", provider: "claude_code" }]
+  );
+  assert.equal(ask.asker_name, null, "relay A's remembered name must not survive a switch");
+  assert.equal(ask.asker_provider, null);
 });
 
 // Called from an effect whose deps include stores that are null on the first renders of

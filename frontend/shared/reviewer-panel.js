@@ -33,6 +33,17 @@ export function reviewerPreviewEntriesFromPage(session, page) {
   return page?.entries || (Array.isArray(page) ? page : []);
 }
 
+/**
+ * Findings body is the open affordance (design 19a). Links inside the markdown must
+ * stay links — including keyboard activation — so Enter on a focused <a> must not
+ * open the reviewer or preventDefault the navigation.
+ */
+export function shouldOpenReviewerFromPointerEvent(event) {
+  const target = event?.target;
+  if (target?.closest?.("a")) return false;
+  return true;
+}
+
 // While a review is still running, re-fetch the reviewer's latest message on this
 // cadence so the user can watch an in-progress (or stuck) reviewer. Terminal reviews
 // are fetched once. Kept modest because the remote surface fetches via the broker.
@@ -350,6 +361,42 @@ function ReviewSlot({
   const meta = [ledger.roundLabel, ledger.provider, job.reviewer_model]
     .filter(Boolean)
     .join(" · ");
+  // 19a: the middle text is the way into the reviewer session — not a third button
+  // beside Re-review / ···. Same idea as AskThreadCard: click the body.
+  const openReviewer =
+    reviewerThreadId && typeof onOpenThread === "function"
+      ? () => onOpenThread(reviewerThreadId)
+      : null;
+  const preview = [
+    job.error ? h("p", { className: "reviewer-card-error", key: "err" }, job.error) : null,
+    review.status === "loading" && !review.text
+      ? h(
+          "p",
+          { className: "reviewer-card-note", key: "loading" },
+          terminal ? "Loading review…" : "Loading the reviewer's latest message…"
+        )
+      : null,
+    review.status === "error" && !review.text
+      ? h(
+          "p",
+          { className: "reviewer-card-error", key: "load-err" },
+          `Couldn't load the reviewer's messages: ${review.error}`
+        )
+      : null,
+    review.text
+      ? h(
+          "div",
+          { className: "reviewer-findings message-body", key: "findings" },
+          // Labelled only while running, so it is clear this is the reviewer mid-turn
+          // rather than the review it will post back.
+          !terminal
+            ? h("p", { className: "reviewer-card-note" }, "Reviewer's latest message:")
+            : null,
+          renderReviewerText(review.text)
+        )
+      : null,
+    h(RoundRows, { key: "rounds", rounds: ledger.rounds }),
+  ].filter(Boolean);
   return h(
     React.Fragment,
     null,
@@ -380,34 +427,40 @@ function ReviewSlot({
       h(
         "div",
         { className: "reviewer-review-body" },
-        job.error ? h("p", { className: "reviewer-card-error" }, job.error) : null,
-        review.status === "loading" && !review.text
-          ? h(
-              "p",
-              { className: "reviewer-card-note" },
-              terminal ? "Loading review…" : "Loading the reviewer's latest message…"
-            )
-          : null,
-        review.status === "error" && !review.text
-          ? h(
-              "p",
-              { className: "reviewer-card-error" },
-              `Couldn't load the reviewer's messages: ${review.error}`
-            )
-          : null,
-        review.text
+        // Always mount the open target when a reviewer session exists — even before
+        // findings load — otherwise there is no way into a hidden-from-sidebar thread.
+        openReviewer
           ? h(
               "div",
-              { className: "reviewer-findings message-body" },
-              // Labelled only while running, so it is clear this is the reviewer mid-turn
-              // rather than the review it will post back.
-              !terminal
-                ? h("p", { className: "reviewer-card-note" }, "Reviewer's latest message:")
-                : null,
-              renderReviewerText(review.text)
+              {
+                className: "reviewer-review-open",
+                onClick: (event) => {
+                  if (!shouldOpenReviewerFromPointerEvent(event)) return;
+                  openReviewer();
+                },
+              },
+              // Concise AT/keyboard control — the markdown must not be one giant button
+              // (nested links + a mile-long accessible name). Pointer users still click
+              // the body; this stays visually hidden.
+              h(
+                "button",
+                {
+                  type: "button",
+                  className: "reviewer-review-open-sr sr-only",
+                  // Name only via aria-label — visible "Open review" text was the
+                  // button we removed for design 19a; keep the string out of the DOM.
+                  "aria-label": threadName
+                    ? `Open ${threadName}`
+                    : "Open the reviewer's session",
+                  onClick: (event) => {
+                    event.stopPropagation();
+                    openReviewer();
+                  },
+                }
+              ),
+              ...preview
             )
-          : null,
-        h(RoundRows, { rounds: ledger.rounds }),
+          : preview,
         h(
           "div",
           { className: "reviewer-card-actions" },
@@ -444,18 +497,6 @@ function ReviewSlot({
                 disabled: !canRequest,
                 onSubmit: onRequestReview,
               })
-            : null,
-          reviewerThreadId && typeof onOpenThread === "function"
-            ? h(
-                "button",
-                {
-                  className: "reviewer-open-link",
-                  onClick: () => onOpenThread(reviewerThreadId),
-                  title: threadName || "Open the reviewer's session",
-                  type: "button",
-                },
-                "Open review"
-              )
             : null,
           h(LedgerMenu, {
             label: "Review actions",
@@ -534,18 +575,24 @@ function AskThreadCard({ thread, onOpen = null }) {
 
 function AgentGroup({ group, onOpen = null }) {
   const mark = providerMark(group.provider, "reviewer-agent-mark");
+  // Only invent a letter when we have a real name and no shipped mark. Never for
+  // the "another agent" placeholder — that used to paint "a", then "?", both of
+  // which looked like a broken logo rather than an unknown peer.
+  const letter =
+    !mark && group.name && group.name !== "another agent"
+      ? h(
+          "span",
+          { className: "reviewer-agent-mark is-letter", "aria-hidden": "true" },
+          group.name.slice(0, 1).toLowerCase()
+        )
+      : null;
   return h(
     "section",
     { className: "reviewer-agent" },
     h(
       "div",
       { className: "reviewer-agent-head" },
-      mark ||
-        h(
-          "span",
-          { className: "reviewer-agent-mark is-letter", "aria-hidden": "true" },
-          group.name.slice(0, 1).toLowerCase()
-        ),
+      mark || letter,
       h("span", { className: "reviewer-agent-name" }, group.name),
       group.model ? h("span", { className: "reviewer-agent-model" }, group.model) : null,
       h(
@@ -559,7 +606,7 @@ function AgentGroup({ group, onOpen = null }) {
   );
 }
 
-// Join a job to its reviewer thread's display name so "Open review" can name where it goes.
+// Join a job to its reviewer thread's display name so the open target can name where it goes.
 function reviewerThreadName(job, reviewerThreads) {
   const id = job?.reviewer_thread_id;
   if (!id) return null;

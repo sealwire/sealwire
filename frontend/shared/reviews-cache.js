@@ -110,23 +110,97 @@ export function goalForThread(reviews, viewedThreadId) {
  * a resolver: the store diffs slices with `JSON.stringify`, which drops functions.
  * @param {{asks?: Array}|null|undefined} reviews
  * @param {string|null|undefined} viewedThreadId
- * @param {Array<{id?: string, name?: string}>|null|undefined} threads
+ * @param {Array<{id?: string, name?: string, provider?: string}>|null|undefined} threads
  */
+// Survives the sidebar's page: an asker's session falls out of `state.threads` as
+// newer ones arrive, but inbound cards still need its logo. Only ids *absent* from
+// the current page keep remembered fields; a present row is authoritative.
+const rememberedThreadIdentity = new Map();
+const MAX_REMEMBERED_THREAD_IDENTITIES = 256;
+
+export function clearRememberedThreadIdentities() {
+  rememberedThreadIdentity.clear();
+}
+
+export function rememberThreadIdentities(threads, { protectIds } = {}) {
+  const protect = new Set(protectIds || []);
+  for (const thread of threads || []) {
+    if (!thread?.id) continue;
+    // Re-insert so a freshly seen id is treated as newest for the bound below.
+    rememberedThreadIdentity.delete(thread.id);
+    rememberedThreadIdentity.set(thread.id, {
+      // Present row wins, including clears (name/provider null or "").
+      name: thread.name || null,
+      provider: thread.provider || null,
+    });
+  }
+  // Evict unprotected rows first. Ids still referenced by retained asks must survive
+  // a rolling sidebar page, or legacy inbound cards lose their logo again.
+  while (rememberedThreadIdentity.size > MAX_REMEMBERED_THREAD_IDENTITIES) {
+    let victim = null;
+    for (const id of rememberedThreadIdentity.keys()) {
+      if (!protect.has(id)) {
+        victim = id;
+        break;
+      }
+    }
+    if (!victim) break;
+    rememberedThreadIdentity.delete(victim);
+  }
+}
+
 export function asksForThread(reviews, viewedThreadId, threads) {
   if (!viewedThreadId) {
     return [];
   }
-  const nameById = new Map((threads || []).map((thread) => [thread?.id, thread?.name || null]));
+  const protectIds = [];
+  for (const ask of reviews?.asks || []) {
+    if (ask?.asker_thread_id) protectIds.push(ask.asker_thread_id);
+    if (ask?.peer_thread_id) protectIds.push(ask.peer_thread_id);
+  }
+  rememberThreadIdentities(threads, { protectIds });
+  const presentIds = new Set();
+  const nameById = new Map();
+  const providerById = new Map();
+  for (const thread of threads || []) {
+    if (!thread?.id) continue;
+    presentIds.add(thread.id);
+    nameById.set(thread.id, thread.name || null);
+    providerById.set(thread.id, thread.provider || null);
+  }
   return (reviews?.asks || [])
     .filter(
       (ask) =>
         ask?.asker_thread_id === viewedThreadId || ask?.peer_thread_id === viewedThreadId
     )
-    .map((ask) => ({
-      ...ask,
-      asker_name: nameById.get(ask.asker_thread_id) || null,
-      peer_name: nameById.get(ask.peer_thread_id) || null,
-    }));
+    .map((ask) => {
+      const rememberedAsker = rememberedThreadIdentity.get(ask.asker_thread_id) || {};
+      const rememberedPeer = rememberedThreadIdentity.get(ask.peer_thread_id) || {};
+      const askerOnPage = presentIds.has(ask.asker_thread_id);
+      const peerOnPage = presentIds.has(ask.peer_thread_id);
+      // peer_provider can be "" on the wire even when peer_thread_id is set.
+      // Outbound cards group on that field — empty became "another agent" + no logo.
+      const peerProvider =
+        ask.peer_provider ||
+        (peerOnPage ? providerById.get(ask.peer_thread_id) : null) ||
+        rememberedPeer.provider ||
+        null;
+      return {
+        ...ask,
+        asker_name: askerOnPage
+          ? nameById.get(ask.asker_thread_id)
+          : rememberedAsker.name || null,
+        peer_name: peerOnPage
+          ? nameById.get(ask.peer_thread_id)
+          : rememberedPeer.name || null,
+        asker_provider:
+          ask.asker_provider ||
+          (askerOnPage ? providerById.get(ask.asker_thread_id) : null) ||
+          rememberedAsker.provider ||
+          null,
+        peer_provider: peerProvider,
+      };
+    });
 }
 
 /**

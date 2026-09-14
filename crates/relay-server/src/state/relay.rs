@@ -2899,7 +2899,39 @@ impl RelayState {
                 .cmp(&left.updated_at)
                 .then_with(|| right.id.cmp(&left.id))
         });
-        jobs.into_iter().map(|job| job.view()).collect()
+        jobs.into_iter()
+            .map(|job| {
+                let mut view = job.view();
+                // Older asks predate the persisted stamp; fill from the live list.
+                if view.asker_provider.is_none() {
+                    view.asker_provider = self.provider_hint_for_thread(&job.asker_thread_id);
+                }
+                // Reused peers can land with peer_provider "" when the runtime had no
+                // summary at insert time. Outbound cards group on that field.
+                if view.peer_provider.is_empty() {
+                    if let Some(provider) = self.provider_hint_for_thread(&job.peer_thread_id) {
+                        view.peer_provider = provider;
+                    }
+                }
+                view
+            })
+            .collect()
+    }
+
+    /// Best-effort provider for a thread id from the in-process caches. Used to
+    /// stamp ask cards; never a substitute for `find_thread_provider` routing.
+    pub(crate) fn provider_hint_for_thread(&self, thread_id: &str) -> Option<String> {
+        self.threads
+            .iter()
+            .find(|thread| thread.id == thread_id)
+            .map(|thread| thread.provider.clone())
+            .filter(|provider| !provider.is_empty())
+            .or_else(|| {
+                self.search_routing_hints
+                    .get(thread_id)
+                    .map(|thread| thread.provider.clone())
+                    .filter(|provider| !provider.is_empty())
+            })
     }
 
     pub(crate) fn update_review_job<F: FnOnce(&mut ReviewJob)>(
@@ -6633,6 +6665,140 @@ mod tests {
             Some(AskStatus::Done),
             "a settled one is untouched"
         );
+    }
+
+    #[test]
+    fn asks_view_stamps_the_asker_provider_from_the_thread_list() {
+        // Inbound cards on the peer's Agents panel need the asker's logo. peer_provider
+        // names the viewed thread (us), so the view has to carry asker_provider itself.
+        use crate::state::Ask;
+        use relay_api::delegation::AskStatus;
+
+        let mut relay = test_relay();
+        let mut asker = test_thread("asker", "/tmp");
+        asker.provider = "claude_code".to_string();
+        relay.threads = vec![asker, test_thread("peer", "/tmp")];
+
+        let mut ask = Ask::new(
+            "ask-1".to_string(),
+            "asker".to_string(),
+            "peer".to_string(),
+            "codex".to_string(),
+            None,
+            None,
+            "have a look".to_string(),
+            "/tmp".to_string(),
+            None,
+            relay_api::delegation::StartedBy::Agent,
+        );
+        ask.set_status(AskStatus::Done);
+        relay.insert_ask(ask);
+
+        let views = relay.asks_view();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].peer_provider, "codex");
+        assert_eq!(
+            views[0].asker_provider.as_deref(),
+            Some("claude_code"),
+            "the asker's provider is stamped for the inbound logo"
+        );
+    }
+
+    #[test]
+    fn asks_view_fills_an_empty_peer_provider_from_the_thread_list() {
+        // Reusing an existing peer can leave peer_provider "" when the runtime has no
+        // summary yet. Outbound Agents cards group on that field → "another agent".
+        use crate::state::Ask;
+        use relay_api::delegation::AskStatus;
+
+        let mut relay = test_relay();
+        let mut peer = test_thread("peer", "/tmp");
+        peer.provider = "codex".to_string();
+        relay.threads = vec![test_thread("asker", "/tmp"), peer];
+
+        let mut ask = Ask::new(
+            "ask-1".to_string(),
+            "asker".to_string(),
+            "peer".to_string(),
+            String::new(),
+            None,
+            None,
+            "have a look".to_string(),
+            "/tmp".to_string(),
+            None,
+            relay_api::delegation::StartedBy::Agent,
+        );
+        ask.set_status(AskStatus::Done);
+        relay.insert_ask(ask);
+
+        let views = relay.asks_view();
+        assert_eq!(
+            views[0].peer_provider, "codex",
+            "empty peer_provider must be filled from the peer thread"
+        );
+    }
+
+    #[test]
+    fn provider_hint_for_thread_reads_search_routing_hints() {
+        // Creation and asks_view both stamp via this helper; a searched peer that is
+        // off the normal page still has to yield a durable provider.
+        let mut relay = test_relay();
+        relay.threads = vec![];
+        let mut hint = test_thread("searched-peer", "/tmp");
+        hint.provider = "codex".to_string();
+        relay.remember_search_routing_hint(&hint);
+        assert_eq!(
+            relay.provider_hint_for_thread("searched-peer").as_deref(),
+            Some("codex")
+        );
+
+        let mut ask = crate::state::Ask::new(
+            "ask-1".to_string(),
+            "asker".to_string(),
+            "searched-peer".to_string(),
+            String::new(),
+            None,
+            None,
+            "have a look".to_string(),
+            "/tmp".to_string(),
+            None,
+            relay_api::delegation::StartedBy::Agent,
+        );
+        ask.set_status(relay_api::delegation::AskStatus::Done);
+        relay.insert_ask(ask);
+        assert_eq!(relay.asks_view()[0].peer_provider, "codex");
+    }
+
+    #[test]
+    fn asks_view_prefers_the_provider_persisted_on_the_ask() {
+        // The client's sidebar only keeps ~120 rows; the asker of an old inbound
+        // card is often gone from that page. The Ask record has to carry its own
+        // stamp or the panel invents a fake logo.
+        use crate::state::Ask;
+        use relay_api::delegation::AskStatus;
+
+        let mut relay = test_relay();
+        // Deliberately empty — the live list cannot help.
+        relay.threads = vec![];
+
+        let mut ask = Ask::new(
+            "ask-1".to_string(),
+            "asker-gone-from-sidebar".to_string(),
+            "peer".to_string(),
+            "codex".to_string(),
+            None,
+            None,
+            "have a look".to_string(),
+            "/tmp".to_string(),
+            None,
+            relay_api::delegation::StartedBy::Agent,
+        );
+        ask.asker_provider = Some("claude_code".to_string());
+        ask.set_status(AskStatus::Done);
+        relay.insert_ask(ask);
+
+        let views = relay.asks_view();
+        assert_eq!(views[0].asker_provider.as_deref(), Some("claude_code"));
     }
 
     #[test]

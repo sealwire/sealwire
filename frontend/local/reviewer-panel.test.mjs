@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { ReviewerPanel, renderReviewerText } from "../shared/reviewer-panel.js";
+import { ReviewerPanel, renderReviewerText, shouldOpenReviewerFromPointerEvent } from "../shared/reviewer-panel.js";
 import { RightPanelTabs } from "../shared/right-panel-tabs.js";
 import {
   ReviewerChip,
@@ -411,8 +412,9 @@ test("no bare session id is shown for a review — only a short sha, and only a 
   assert.match(withSha, /reviewer-sha[^>]*>2011c69</);
   assert.doesNotMatch(withSha, /2011c6939ab4/, "the full sha never renders");
   assert.doesNotMatch(withSha, /rev-thread-9</, "nor does the reviewer's session id");
-  // What the id was FOR is now a named action instead.
-  assert.match(withSha, /Open review/);
+  // 19a: the findings are the way in — no third "Open review" button beside Re-review / ···.
+  assert.doesNotMatch(withSha, /Open review/);
+  assert.match(withSha, /reviewer-review-open/);
 
   // No sha on the wire → no trailing slot at all, rather than a placeholder.
   const noSha = renderToStaticMarkup(
@@ -422,7 +424,83 @@ test("no bare session id is shown for a review — only a short sha, and only a 
     })
   );
   assert.doesNotMatch(noSha, /reviewer-sha/);
-  assert.doesNotMatch(noSha, /Open review/, "and nothing to open without a reviewer session");
+  assert.doesNotMatch(noSha, /reviewer-review-open/, "and nothing to open without a reviewer session");
+});
+
+test("clicking the review findings opens the reviewer — there is no Open review button", () => {
+  // Design 19a: Re-review + ··· stay on the card; the middle text is the open action.
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      reviewJobs: [
+        {
+          id: "r1",
+          reviewer_provider: "codex",
+          status: "complete",
+          reviewer_thread_id: "rev-9",
+        },
+      ],
+      reviewModel: {
+        providerOptions: [{ label: "Codex", value: "codex" }],
+        models: [],
+        defaultProvider: "codex",
+      },
+      reusableReviewers: [{ reviewerThreadId: "rev-9", provider: "codex", label: "Reviewer" }],
+      canRequest: true,
+      panelId: "review-panel-test",
+      onRequestReview() {},
+      onOpenThread() {},
+      onDeleteReview() {},
+    })
+  );
+  assert.doesNotMatch(html, /Open review/);
+  assert.match(html, /reviewer-review-open/);
+  assert.match(html, /Re-review/);
+  assert.match(html, /reviewer-menu-button/);
+});
+
+test("Enter on a link inside findings must not open the reviewer", () => {
+  const link = { closest: (sel) => (sel === "a" ? link : null) };
+  assert.equal(
+    shouldOpenReviewerFromPointerEvent({ target: link, key: "Enter" }),
+    false
+  );
+  assert.equal(
+    shouldOpenReviewerFromPointerEvent({
+      target: { closest: () => null },
+      key: "Enter",
+    }),
+    true
+  );
+});
+
+test("findings stay clickable without wrapping markdown in a single ARIA button", () => {
+  // Nested interactive (link inside role=button) flattens AT semantics and announces the
+  // whole findings blob as the button name. Keep the body-click product; use a concise
+  // sr-only control for keyboard/AT instead.
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      reviewJobs: [
+        {
+          id: "r1",
+          reviewer_provider: "codex",
+          status: "complete",
+          reviewer_thread_id: "rev-9",
+          findings: "See [file](https://example.com) for details.",
+        },
+      ],
+      canRequest: false,
+      onOpenThread() {},
+    })
+  );
+  assert.match(html, /reviewer-review-open/);
+  assert.doesNotMatch(
+    html,
+    /class="[^"]*reviewer-review-open[^"]*"[^>]*role="button"/,
+    "the markdown subtree must not be one ARIA button"
+  );
+  assert.match(html, /reviewer-review-open-sr/);
+  assert.match(html, /aria-label="Open the reviewer(?:&#x27;|')s session"/);
+  assert.doesNotMatch(html, />Open review</);
 });
 
 test("earlier review attempts collapse to one line each instead of repeating as cards", () => {
@@ -601,6 +679,42 @@ test("a Re-review prefill that is not on offer falls back to a clean reviewer, a
   // (the apostrophe arrives HTML-escaped, so match the half that carries the meaning)
   assert.match(html, /review this working tree/, "and the dialog says why it changed");
   assert.match(html, /starts a clean one/);
+});
+
+test("Agents panel provider marks reuse the session-list colour tokens", () => {
+  // Same story as .session-tab-provider / .provider-mark: Claude gets the brand
+  // mark token (theme-aware); everything else stays --text-tertiary. No new hex.
+  const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(
+    css,
+    /\.reviewer-agent-mark\s*\{[^}]*color:\s*var\(--text-tertiary\)/,
+    "default mark colour matches the sidebar"
+  );
+  assert.match(
+    css,
+    /\.reviewer-agent-mark\[data-provider="claude_code"\]\s*\{[^}]*color:\s*var\(--provider-claude-mark\)/,
+    "Claude reuses --provider-claude-mark (day/night already resolved on the token)"
+  );
+
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      asks: [
+        {
+          id: "ask-1",
+          asker_thread_id: "me",
+          peer_thread_id: "them",
+          peer_provider: "claude_code",
+          message: "check the retry",
+          answer: "ok",
+          status: "done",
+          delivered: true,
+          updated_at: 10,
+        },
+      ],
+      parentThreadId: "me",
+    })
+  );
+  assert.match(html, /class="reviewer-agent-mark"[^>]*data-provider="claude_code"/);
 });
 
 test("an ask renders under its agent's heading, titled by intent rather than by subject", () => {

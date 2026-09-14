@@ -175,7 +175,7 @@ function askRoundSummary(ask) {
  * Asks grouped by the agent on the other end, then by the thread the exchange lives in,
  * so a follow-up is a round inside its thread rather than a second card repeating the
  * same subject. `peer_provider` names the thread being ASKED — on an inbound ask that is
- * us, so those group by the asking session, which is the only identity we have for it.
+ * us, so those group by the asking session and take `asker_provider` for the logo.
  */
 export function askLedger(asks, viewedThreadId) {
   const groups = new Map();
@@ -186,13 +186,17 @@ export function askLedger(asks, viewedThreadId) {
     const groupKey = inbound
       ? `session:${ask.asker_thread_id}`
       : `provider:${ask.peer_provider || "unknown"}`;
+    const groupProvider = inbound ? ask.asker_provider || null : ask.peer_provider || null;
     const group = groups.get(groupKey) || {
       key: groupKey,
       inbound,
+      // Prefer the session's own name; fall back to the provider label before the
+      // generic "another agent", which only exists to avoid an empty heading — and
+      // whose first letter used to become a fake logo ("a").
       name: inbound
-        ? ask.asker_name || "another agent"
+        ? ask.asker_name || providerLabel(ask.asker_provider) || "another agent"
         : providerLabel(ask.peer_provider) || "another agent",
-      provider: inbound ? null : ask.peer_provider || null,
+      provider: groupProvider,
       model: null,
       working: false,
       updatedAt: 0,

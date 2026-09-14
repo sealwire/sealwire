@@ -160,6 +160,7 @@ test("an inbound ask groups by the session that asked, since peer_provider names
         id: "in-1",
         asker_thread_id: "them",
         asker_name: "Retry work",
+        asker_provider: "claude_code",
         peer_thread_id: "me",
         peer_provider: "codex",
         message: "have a look at the retry loop",
@@ -171,8 +172,55 @@ test("an inbound ask groups by the session that asked, since peer_provider names
   );
   assert.equal(groups.length, 1);
   assert.equal(groups[0].name, "Retry work");
+  assert.equal(groups[0].provider, "claude_code", "the asker's provider, not ours");
   assert.equal(groups[0].model, null, "we do not know what model asked us");
   assert.ok(groups[0].threads[0].inbound);
+});
+
+test("an inbound ask with no name still takes the asker's provider logo, not a letter 'a'", () => {
+  // Without asker_provider the panel fell back to name "another agent" and a letter mark
+  // of "a" — which looks like a broken logo, not an unknown peer.
+  const [group] = askLedger(
+    [
+      {
+        id: "in-2",
+        asker_thread_id: "them",
+        asker_name: null,
+        asker_provider: "codex",
+        peer_thread_id: "me",
+        peer_provider: "claude_code",
+        message: "New round, and this one is frontend.",
+        answer: "Ranked findings Critical — …",
+        status: "done",
+        delivered: true,
+        updated_at: 10,
+      },
+    ],
+    "me"
+  );
+  assert.equal(group.provider, "codex");
+  assert.equal(group.name, "Codex", "provider label beats the 'another agent' placeholder");
+});
+
+test("an outbound ask with an empty peer_provider still groups under the peer once stamped", () => {
+  const [group] = askLedger(
+    [
+      {
+        id: "out-1",
+        asker_thread_id: "me",
+        peer_thread_id: "them",
+        peer_provider: "codex",
+        message: "New round, and this one is frontend.",
+        status: "done",
+        delivered: true,
+        updated_at: 10,
+      },
+    ],
+    "me"
+  );
+  assert.equal(group.provider, "codex");
+  assert.equal(group.name, "Codex");
+  assert.equal(group.inbound, false);
 });
 
 test("an answer nobody has been handed yet says so", () => {

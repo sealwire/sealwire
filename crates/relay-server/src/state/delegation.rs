@@ -24,6 +24,11 @@ pub(crate) struct Ask {
     pub(crate) id: String,
     /// The session that asked.
     pub(crate) asker_thread_id: String,
+    /// Who the asker is (claude_code / codex / …). Kept on the record so an inbound
+    /// card on the peer's Agents panel can show a real logo even when the asker's
+    /// session has fallen out of the client's 120-row sidebar page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) asker_provider: Option<String>,
     /// The session that was asked. Empty until one is started: a delegate is recorded
     /// when it is accepted, which is before its brief has been written.
     pub(crate) peer_thread_id: String,
@@ -88,6 +93,7 @@ impl Ask {
         Self {
             id,
             asker_thread_id,
+            asker_provider: None,
             peer_thread_id,
             peer_provider,
             peer_model,
@@ -140,6 +146,7 @@ impl Ask {
             asker_thread_id: self.asker_thread_id.clone(),
             peer_thread_id: self.peer_thread_id.clone(),
             peer_provider: self.peer_provider.clone(),
+            asker_provider: self.asker_provider.clone(),
             peer_model: self.peer_model.clone(),
             peer_effort: self.peer_effort.clone(),
             message: self.message.clone(),

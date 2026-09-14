@@ -15,6 +15,8 @@
 //     project the user never chose. (The switcher fails open on an id it cannot
 //     resolve, so the usual outcome is a harmless no-op — but "usually harmless"
 //     is not the same as correct, and a collision is silent when it happens.)
+//   - Agents-panel ask identity memory is keyed by THREAD id for off-page askers/peers,
+//     so a colliding id on relay B would inherit relay A's remembered name/provider.
 //
 // The session tab set is relay-scoped too — thread ids inside project-keyed workspaces —
 // but it is deliberately NOT reset here, because it is scoped BY CONSTRUCTION rather than
@@ -33,7 +35,10 @@
 // SIGNATURE. Destructuring silently ignores anything it does not name, so a caller passing
 // a store this function no longer accepts gets a no-op with no error — which is the exact
 // class of "the reset forgot a field" bug this module exists to prevent.
+import { clearRememberedThreadIdentities } from "../shared/reviews-cache.js";
+
 export function resetRelayScopedState({ threadListStore } = {}) {
   threadListStore?.getState?.().setThreadFilterRetained?.(new Map());
   threadListStore?.getState?.().setActiveProject?.(null);
+  clearRememberedThreadIdentities();
 }

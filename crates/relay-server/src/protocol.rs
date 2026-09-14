@@ -3134,6 +3134,11 @@ pub struct AskView {
     pub asker_thread_id: String,
     pub peer_thread_id: String,
     pub peer_provider: String,
+    /// Who asked — needed when this ask is inbound on the peer's panel, because
+    /// `peer_provider` then names the viewed thread (us), not the logo to show.
+    /// Absent on older snapshots; clients fall back to their own thread list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asker_provider: Option<String>,
     pub peer_model: Option<String>,
     pub peer_effort: Option<String>,
     pub message: String,

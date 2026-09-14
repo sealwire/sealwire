@@ -6658,24 +6658,42 @@ body.is-resizing-panel {
   color: var(--text-primary);
   cursor: pointer;
 }
+/* 19a: Re-review fills the row; ··· stays a square. */
+.reviewer-review .reviewer-card-actions .review-launch-button {
+  flex: 1 1 auto;
+  justify-content: center;
+  height: 30px;
+}
 .reviewer-card-button:hover:not(:disabled),
 .reviewer-card-actions .review-launch-button:hover:not(:disabled) {
   background: var(--surface-3);
 }
-/* The one link in the panel: it leaves for another session, so it gets the accent that
-   nothing else here is allowed to use. */
-.reviewer-open-link {
-  flex: 1 1 auto;
+/* Findings / rounds are the open action — no separate "Open review" link. */
+.reviewer-review-open {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
   padding: 0;
   border: 0;
   background: transparent;
-  font-size: var(--text-sm);
-  color: var(--accent);
   text-align: left;
   cursor: pointer;
+  border-radius: var(--r-sm);
 }
-.reviewer-open-link:hover {
-  text-decoration: underline;
+/* Focus ring lives on the sr-only open control, not the findings wrapper. */
+.reviewer-review-open-sr:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+  /* sr-only clips; when focused, bring it back so the ring is visible. */
+  position: static;
+  width: auto;
+  height: auto;
+  margin: 0 0 4px;
+  padding: 2px 6px;
+  clip: auto;
+  white-space: normal;
+  border-radius: var(--r-sm);
 }
 
 /* Rounds -------------------------------------------------------------------
@@ -6851,6 +6869,12 @@ body.is-resizing-panel {
   width: 19px;
   height: 19px;
   border-radius: var(--r-sm);
+  /* Same tokens as .session-tab-provider / .provider-mark — Claude's brand mark
+     is theme-aware on --provider-claude-mark; everything else stays muted. */
+  color: var(--text-tertiary);
+}
+.reviewer-agent-mark[data-provider="claude_code"] {
+  color: var(--provider-claude-mark);
 }
 .reviewer-agent-mark.is-letter {
   background: var(--surface-3);

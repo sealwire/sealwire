@@ -148,7 +148,7 @@ impl AppState {
         let ask_id = new_ask_id();
         {
             let mut relay = self.relay.write().await;
-            relay.insert_ask(Ask::new(
+            let mut ask = Ask::new(
                 ask_id.clone(),
                 asker_thread_id.to_string(),
                 // Filled in when the peer exists; until then this is the delegation.
@@ -160,7 +160,10 @@ impl AppState {
                 prechecked.asker_cwd.clone(),
                 None,
                 request.started_by,
-            ));
+            );
+            ask.asker_provider =
+                Some(prechecked.asker_provider.clone()).filter(|provider| !provider.is_empty());
+            relay.insert_ask(ask);
             relay.notify();
         }
 
@@ -250,6 +253,11 @@ impl AppState {
                 .runtime_for_thread(asker_thread_id)
                 .and_then(|runtime| runtime.summary.as_ref())
                 .map(|summary| summary.provider.clone())
+                .filter(|provider| !provider.is_empty())
+                // Resumed/searched sessions can have an empty runtime summary while the
+                // thread list or search routing hint still knows the provider. Persist
+                // that now — asks_view only helps while those caches survive.
+                .or_else(|| relay.provider_hint_for_thread(asker_thread_id))
                 .unwrap_or_default();
             (
                 cwd,
@@ -364,6 +372,12 @@ Finish up with what you have and tell the user."
                         .runtime_for_thread(existing)
                         .and_then(|runtime| runtime.summary.as_ref())
                         .map(|summary| summary.provider.clone())
+                        .filter(|provider| !provider.is_empty())
+                        // Same source as asks_view: thread list + search routing hints.
+                        // A searched/reopened peer can be routable with an empty summary
+                        // and absent from the normal page; leaving "" here made outbound
+                        // cards "another agent" after restart.
+                        .or_else(|| relay.provider_hint_for_thread(existing))
                         .unwrap_or_default()
                 };
                 (existing.to_string(), provider)
@@ -409,10 +423,14 @@ Finish up with what you have and tell the user."
                     ask.peer_provider = peer_provider.clone();
                     ask.message = message.clone();
                     ask.baseline_item_id = baseline_item_id.clone();
+                    if ask.asker_provider.is_none() {
+                        ask.asker_provider =
+                            Some(asker_provider.clone()).filter(|provider| !provider.is_empty());
+                    }
                 });
                 relay.notify();
             } else {
-                relay.insert_ask(Ask::new(
+                let mut ask = Ask::new(
                     ask_id.clone(),
                     asker_thread_id.to_string(),
                     peer_thread_id.clone(),
@@ -423,7 +441,10 @@ Finish up with what you have and tell the user."
                     asker_cwd.to_string(),
                     baseline_item_id,
                     request.started_by,
-                ));
+                );
+                ask.asker_provider =
+                    Some(asker_provider.clone()).filter(|provider| !provider.is_empty());
+                relay.insert_ask(ask);
                 relay.notify();
             }
         }
