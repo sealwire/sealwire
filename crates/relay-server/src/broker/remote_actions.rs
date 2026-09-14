@@ -1980,18 +1980,6 @@ async fn verify_remote_device_claim_init(
     verify_device_claim_init_proof(action_id, device_id, peer_id, &verify_key, proof)
 }
 
-/// Refuse anything admitted on a connection that has since been replaced.
-async fn ensure_lease_is_current(
-    state: &AppState,
-    peer_id: &str,
-    lease: u64,
-) -> Result<(), String> {
-    if state.surface_lease_is_current(peer_id, lease).await {
-        return Ok(());
-    }
-    Err("this connection has been replaced; ask again from the current one".to_string())
-}
-
 async fn issue_claim_challenge_outcome(
     state: &AppState,
     device_id: &str,
@@ -2001,11 +1989,12 @@ async fn issue_claim_challenge_outcome(
     // Refused outright, not merely prevented from rebinding: issuing a challenge DELETES
     // every other one for the device, so a stale request destroys the live connection's
     // challenge and its claim is then refused as missing.
-    ensure_lease_is_current(state, peer_id, lease).await?;
     state
         .mark_remote_device_seen(device_id, peer_id, Some(lease))
         .await?;
-    let challenge = state.issue_claim_challenge(device_id, peer_id).await?;
+    let challenge = state
+        .issue_claim_challenge(device_id, peer_id, lease)
+        .await?;
     Ok(RemoteActionOutcome {
         claim_challenge_id: Some(challenge.challenge_id),
         claim_challenge: Some(challenge.challenge),
@@ -2024,8 +2013,8 @@ async fn issue_claim_outcome(
 ) -> Result<RemoteActionOutcome, String> {
     // Completing a claim binds the device and mints a token bound to this peer. From a
     // connection that has gone, both land on a socket nobody reads — and the token that
-    // reaches the live connection fails its own peer check.
-    ensure_lease_is_current(state, peer_id, lease).await?;
+    // reaches the live connection fails its own peer check. Checked inside the write
+    // itself, because a separate check is a window a departure can land in.
     let challenge = state
         .claim_challenge(device_id, challenge_id, peer_id)
         .await?;
@@ -2039,7 +2028,7 @@ async fn issue_claim_outcome(
     )
     .await?;
     let completed = state
-        .complete_remote_claim(device_id, &challenge.challenge_id, peer_id)
+        .complete_remote_claim(device_id, &challenge.challenge_id, peer_id, lease)
         .await?;
     let claim = issue_session_claim(device_id, peer_id)?;
     let _ = completed;

@@ -340,12 +340,17 @@ impl AppState {
         relay.paired_device_verify_key(device_id)
     }
 
+    /// `lease` is checked under the SAME lock as the write, because the two are a
+    /// check-and-use pair: a departure handled on the router between them would let a
+    /// connection that has gone take away the live one's challenge.
     pub(crate) async fn issue_claim_challenge(
         &self,
         device_id: &str,
         peer_id: &str,
+        lease: u64,
     ) -> Result<super::IssuedClaimChallenge, String> {
         let mut relay = self.relay.write().await;
+        ensure_surface_lease(&relay, peer_id, lease)?;
         relay.issue_claim_challenge(device_id, peer_id, unix_now())
     }
 
@@ -364,8 +369,10 @@ impl AppState {
         device_id: &str,
         challenge_id: &str,
         peer_id: &str,
+        lease: u64,
     ) -> Result<super::CompletedRemoteClaim, String> {
         let mut relay = self.relay.write().await;
+        ensure_surface_lease(&relay, peer_id, lease)?;
         let claim = relay.complete_remote_claim(device_id, challenge_id, peer_id, unix_now())?;
         relay.notify();
         Ok(claim)
@@ -383,4 +390,17 @@ impl AppState {
         relay.mark_paired_device_seen(device_id, peer_id, lease, unix_now())?;
         Ok(())
     }
+}
+
+/// Refuse a write attributed to a connection that has since been replaced. Takes the
+/// guard rather than the state so the caller's lock covers both the check and the write.
+fn ensure_surface_lease(
+    relay: &super::RelayState,
+    peer_id: &str,
+    lease: u64,
+) -> Result<(), String> {
+    if relay.surface_lease_is_current(peer_id, lease) {
+        return Ok(());
+    }
+    Err("this connection has been replaced; ask again from the current one".to_string())
 }

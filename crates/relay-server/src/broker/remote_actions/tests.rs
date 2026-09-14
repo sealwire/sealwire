@@ -1899,7 +1899,7 @@ async fn a_claim_challenge_from_a_closed_connection_does_not_take_the_device_bac
         change_tx.clone(),
         SecurityProfile::private(),
     )));
-    let stale_lease = {
+    let (stale_lease, live_lease) = {
         let mut relay = relay.write().await;
         relay.paired_devices.insert(
             "phone-1".to_string(),
@@ -1923,13 +1923,16 @@ async fn a_claim_challenge_from_a_closed_connection_does_not_take_the_device_bac
         relay
             .mark_paired_device_seen("phone-1", "surface-new", None, 2)
             .expect("bind");
-        stale
+        let live = relay
+            .current_surface_lease("surface-new")
+            .expect("the live connection holds one");
+        (stale, live)
     };
     let state = AppState::from_parts(relay.clone(), HashMap::new(), change_tx);
 
     // The live connection has a challenge in hand.
     let live = state
-        .issue_claim_challenge("phone-1", "surface-new")
+        .issue_claim_challenge("phone-1", "surface-new", live_lease)
         .await
         .expect("the live connection gets a challenge");
 
