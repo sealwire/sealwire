@@ -2725,8 +2725,14 @@ async fn a_result_reaches_the_session_that_asked_again_after_a_reconnect() {
                             .map(str::to_string)
                     };
                     let kind = field("kind").unwrap_or_else(|| "unknown".to_string());
+                    let ok = payload
+                        .as_ref()
+                        .and_then(|value| value.get("payload"))
+                        .and_then(|payload| payload.get("ok"))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
                     let label = match field("action_id") {
-                        Some(action_id) => format!("{kind}:{action_id}"),
+                        Some(action_id) => format!("{kind}:{action_id}:{ok}"),
                         None => kind,
                     };
                     broker_view
@@ -2756,9 +2762,20 @@ async fn a_result_reaches_the_session_that_asked_again_after_a_reconnect() {
         .await;
     });
 
-    // Long enough for the resend to have been decided on, and short enough that it cannot
-    // have been answered by a second run of the provider.
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    // Wait for the resend to have been PARKED rather than for a duration: on a slow run a
+    // sleep can outlast the original, and then the resend is an ordinary replay and this
+    // test passes with the waiting removed entirely.
+    let mut resend_is_waiting = false;
+    for _ in 0..60 {
+        if state
+            .remote_action_waiter_is_current("phone-1", "action-survives", 1)
+            .await
+        {
+            resend_is_waiting = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     let ran_twice = provider_entries.load(std::sync::atomic::Ordering::SeqCst) > 1;
     release_the_hang.notify_waiters();
 
@@ -2769,7 +2786,7 @@ async fn a_result_reaches_the_session_that_asked_again_after_a_reconnect() {
             .unwrap()
             .kinds()
             .iter()
-            .any(|kind| kind.ends_with(":action-survives"))
+            .any(|kind| kind.ends_with(":action-survives:true"))
         {
             answered = true;
             break;
@@ -2783,6 +2800,11 @@ async fn a_result_reaches_the_session_that_asked_again_after_a_reconnect() {
         reached_the_provider,
         "the first session never got as far as the provider, so nothing was in flight \
          across the reconnect"
+    );
+    assert!(
+        resend_is_waiting,
+        "the resend was never parked behind the original, so it was answered as an \
+         ordinary replay and proves nothing about a reconnect; saw {kinds:?}"
     );
     assert!(
         !ran_twice,
@@ -2858,19 +2880,38 @@ async fn an_arrival_queued_before_a_departure_cannot_undo_it() {
             broker_saw_the_hang.store(true, std::sync::atomic::Ordering::SeqCst);
         }
 
-        for kind in [PresenceKind::Joined, PresenceKind::Left] {
-            let presence = ServerMessage::Presence {
-                channel_id: "room-e2e".to_string(),
-                kind,
-                peer: surface_peer("surface-a", "phone-1"),
-            };
-            socket
-                .send(Message::Text(
-                    serde_json::to_string(&presence).expect("presence serializes"),
-                ))
-                .await
-                .expect("presence sends");
-        }
+        let arrival = ServerMessage::Presence {
+            channel_id: "room-e2e".to_string(),
+            kind: PresenceKind::Joined,
+            peer: surface_peer("surface-a", "phone-1"),
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&arrival).expect("presence serializes"),
+            ))
+            .await
+            .expect("presence sends");
+        // Behind the arrival in wire order, so its reply is proof the arrival has been
+        // dealt with — the hanging request's own reply is not, it comes first either way.
+        socket
+            .send(Message::Text(plain_action_frame(
+                "surface-a",
+                "action-after-arrival",
+                serde_json::json!({ "type": "fetch_projects" }),
+            )))
+            .await
+            .expect("marker sends");
+        let departure = ServerMessage::Presence {
+            channel_id: "room-e2e".to_string(),
+            kind: PresenceKind::Left,
+            peer: surface_peer("surface-a", "phone-1"),
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&departure).expect("presence serializes"),
+            ))
+            .await
+            .expect("presence sends");
 
         while let Some(frame) = socket.next().await {
             let Ok(frame) = frame else { break };
@@ -2881,18 +2922,24 @@ async fn an_arrival_queued_before_a_departure_cannot_undo_it() {
                 Message::Close(_) => break,
                 Message::Text(text) => {
                     let payload = serde_json::from_str::<serde_json::Value>(&text).ok();
-                    let kind = payload
-                        .as_ref()
-                        .and_then(|value| value.get("payload"))
-                        .and_then(|payload| payload.get("kind"))
-                        .and_then(|found| found.as_str())
-                        .unwrap_or("unknown")
-                        .to_string();
+                    let field = |name: &str| {
+                        payload
+                            .as_ref()
+                            .and_then(|value| value.get("payload"))
+                            .and_then(|payload| payload.get(name))
+                            .and_then(|found| found.as_str())
+                            .map(str::to_string)
+                    };
+                    let kind = field("kind").unwrap_or_else(|| "unknown".to_string());
+                    let label = match field("action_id") {
+                        Some(action_id) => format!("{kind}:{action_id}"),
+                        None => kind,
+                    };
                     broker_view
                         .lock()
                         .unwrap()
                         .frames
-                        .push((kind, std::time::Instant::now()));
+                        .push((label, std::time::Instant::now()));
                 }
                 _ => {}
             }
@@ -2942,7 +2989,7 @@ async fn an_arrival_queued_before_a_departure_cannot_undo_it() {
             .unwrap()
             .kinds()
             .iter()
-            .any(|kind| kind == "remote_threads_result")
+            .any(|kind| kind.ends_with(":action-after-arrival"))
         {
             queue_drained = true;
             break;
@@ -2969,7 +3016,8 @@ async fn an_arrival_queued_before_a_departure_cannot_undo_it() {
     );
     assert!(
         queue_drained,
-        "the queue never drained, so the arrival never ran; saw {kinds:?}"
+        "nothing queued after the arrival ever ran, so the arrival itself may not have; \
+         saw {kinds:?}"
     );
     assert!(
         still_departed && !back_online,

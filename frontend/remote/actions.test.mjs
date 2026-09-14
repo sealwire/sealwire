@@ -1520,3 +1520,78 @@ test("a push registration stays pending until the relay answers it", async () =>
   state.pendingActions.clear();
   state.socket = null;
 });
+
+// Same for the other half: dropping a subscription the relay never heard about leaves the
+// phone receiving notifications it has already turned off.
+test("a push unregistration stays pending until the relay answers it", async () => {
+  installBrowserStubs();
+  globalThis.window.isSecureContext = true;
+  globalThis.window.PushManager = function PushManager() {};
+  globalThis.window.Notification = { permission: "granted" };
+  Object.defineProperty(globalThis, "navigator", {
+    value: { serviceWorker: {} },
+    configurable: true,
+    writable: true,
+  });
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { disablePushSubscription } = await import("./push-subscribe.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-push-unregister",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-push-off" });
+  state.pendingActions.clear();
+
+  const sent = [];
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      sent.push(JSON.parse(frameText));
+    },
+  };
+  const registration = {
+    pushManager: {
+      async getSubscription() {
+        return {
+          endpoint: "https://push.example.test/abc",
+          async unsubscribe() {
+            return true;
+          },
+        };
+      },
+    },
+  };
+
+  const pending = disablePushSubscription({ registration }).catch(() => {});
+  await nextTick();
+  await nextTick();
+
+  assert.equal(
+    sent.filter((frame) => frame.payload?.request?.type === "unregister_push_subscription").length,
+    1,
+    "the unregistration is sent once"
+  );
+  assert.equal(
+    state.pendingActions.size,
+    1,
+    "and is kept as pending, so a relay that never heard it is asked again rather than "
+      + "the phone going on receiving notifications it turned off"
+  );
+  void pending;
+  state.pendingActions.clear();
+  state.socket = null;
+});
