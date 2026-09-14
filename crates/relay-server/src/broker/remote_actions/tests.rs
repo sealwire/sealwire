@@ -186,7 +186,7 @@ fn fork_session_action_round_trips_and_issues_session_claim() {
     assert_eq!(request.kind(), RemoteActionKind::ForkSession);
     assert_eq!(RemoteActionKind::ForkSession.as_str(), "fork_session");
 
-    match request.bind_device("device-9".to_string(), "surface-test") {
+    match request.bind_device("device-9".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::ForkSession { input } => {
             assert_eq!(input.device_id.as_deref(), Some("device-9"));
             assert_eq!(input.source_thread_id, "thread-source");
@@ -219,7 +219,7 @@ fn fetch_workspace_git_context_round_trips_and_binds_the_requesting_device() {
         "fetch_workspace_git_context"
     );
 
-    match request.bind_device("device-9".to_string(), "surface-test") {
+    match request.bind_device("device-9".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::FetchWorkspaceGitContext { device_id, cwd } => {
             assert_eq!(device_id.as_deref(), Some("device-9"));
             assert_eq!(
@@ -258,7 +258,7 @@ fn fetch_workspace_diff_round_trips_and_bind_device_preserves_thread_id() {
         "fetch_workspace_diff"
     );
 
-    match request.bind_device("device-9".to_string(), "surface-test") {
+    match request.bind_device("device-9".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::FetchWorkspaceDiff {
             device_id,
             thread_id,
@@ -280,7 +280,7 @@ fn fetch_workspace_diff_round_trips_and_bind_device_preserves_thread_id() {
         "type": "fetch_workspace_diff"
     }))
     .expect("legacy fetch_workspace_diff should parse");
-    match legacy.bind_device("device-1".to_string(), "surface-test") {
+    match legacy.bind_device("device-1".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::FetchWorkspaceDiff {
             device_id,
             thread_id,
@@ -307,7 +307,7 @@ fn thread_workspace_actions_round_trip_and_need_no_session_claim() {
         RemoteActionKind::FetchThreadWorkspace.as_str(),
         "fetch_thread_workspace"
     );
-    match fetch.bind_device("device-9".to_string(), "surface-test") {
+    match fetch.bind_device("device-9".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::FetchThreadWorkspace {
             device_id,
             thread_id,
@@ -331,7 +331,7 @@ fn thread_workspace_actions_round_trip_and_need_no_session_claim() {
         "roots_status": true
     }))
     .expect("fetch_thread_workspace should parse with roots_status");
-    match measured.bind_device("device-9".to_string(), "surface-test") {
+    match measured.bind_device("device-9".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::FetchThreadWorkspace { roots_status, .. } => {
             assert!(
                 roots_status,
@@ -351,7 +351,7 @@ fn thread_workspace_actions_round_trip_and_need_no_session_claim() {
     }))
     .expect("set_thread_workspace should parse");
     assert_eq!(pin.kind(), RemoteActionKind::SetThreadWorkspace);
-    match pin.bind_device("device-9".to_string(), "surface-test") {
+    match pin.bind_device("device-9".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::SetThreadWorkspace { device_id, input } => {
             assert_eq!(device_id.as_deref(), Some("device-9"));
             assert_eq!(input.thread_id, "thread-viewed");
@@ -399,7 +399,7 @@ fn project_action_round_trips_and_binds_device_without_claim() {
     assert_eq!(request.kind(), RemoteActionKind::ProjectAction);
     assert_eq!(RemoteActionKind::ProjectAction.as_str(), "project_action");
 
-    match request.bind_device("device-9".to_string(), "surface-test") {
+    match request.bind_device("device-9".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::ProjectAction { input } => {
             assert_eq!(input.device_id.as_deref(), Some("device-9"));
             assert_eq!(
@@ -426,7 +426,7 @@ fn push_subscription_actions_round_trip_and_are_not_claim_gated() {
     .unwrap();
     assert_eq!(reg.kind(), RemoteActionKind::RegisterPushSubscription);
     // device_id is injected server-side by bind_device, never trusted from the wire.
-    match reg.bind_device("device-1".to_string(), "surface-test") {
+    match reg.bind_device("device-1".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::RegisterPushSubscription { input } => {
             assert_eq!(input.device_id.as_deref(), Some("device-1"));
             assert_eq!(input.endpoint, "https://push/x");
@@ -440,7 +440,7 @@ fn push_subscription_actions_round_trip_and_are_not_claim_gated() {
     }))
     .unwrap();
     assert_eq!(unreg.kind(), RemoteActionKind::UnregisterPushSubscription);
-    match unreg.bind_device("device-1".to_string(), "surface-test") {
+    match unreg.bind_device("device-1".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::UnregisterPushSubscription {
             device_id,
             endpoint,
@@ -771,7 +771,7 @@ fn request_review_action_round_trips_and_binds_device() {
     assert_eq!(serialized["input"]["parent_thread_id"], "thread-viewed");
 
     // bind_device stamps the requesting device onto the input WITHOUT dropping parent.
-    match request.bind_device("device-9".to_string(), "surface-test") {
+    match request.bind_device("device-9".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::RequestReview { input } => {
             assert_eq!(input.device_id.as_deref(), Some("device-9"));
             assert_eq!(input.reviewer_provider, "codex");
@@ -812,7 +812,7 @@ fn start_workflow_action_round_trips_and_binds_device() {
     assert_eq!(serialized["input"]["workflow_id"], "code_flow");
     assert_eq!(serialized["input"]["reviewer_provider"], "codex");
 
-    match request.bind_device("device-9".to_string(), "surface-test") {
+    match request.bind_device("device-9".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::StartWorkflow { input } => {
             assert_eq!(input.device_id.as_deref(), Some("device-9"));
             assert_eq!(input.task_prompt, "implement the cache fix");
@@ -847,7 +847,7 @@ fn fetch_reviews_action_round_trips_and_is_not_claim_gated() {
         remote_action_result_kind(RemoteActionKind::FetchReviews),
         RemoteActionResultKind::RemoteTranscriptResult
     ));
-    match request.bind_device("device-7".to_string(), "surface-test") {
+    match request.bind_device("device-7".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::FetchReviews { device_id } => {
             assert_eq!(device_id.as_deref(), Some("device-7"));
         }
@@ -872,7 +872,7 @@ fn dedicated_workflows_and_devices_actions_are_read_only_data_fetches() {
         );
         match (
             expected_kind,
-            request.bind_device("device-12".to_string(), "surface-test"),
+            request.bind_device("device-12".to_string(), "surface-test", test_origin()),
         ) {
             (
                 RemoteActionKind::FetchWorkflows,
@@ -904,7 +904,7 @@ fn fetch_projects_action_round_trips_and_is_not_claim_gated() {
         remote_action_result_kind(RemoteActionKind::FetchProjects),
         RemoteActionResultKind::RemoteTranscriptResult
     ));
-    match request.bind_device("device-11".to_string(), "surface-test") {
+    match request.bind_device("device-11".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::FetchProjects { device_id } => {
             assert_eq!(device_id.as_deref(), Some("device-11"));
         }
@@ -922,7 +922,7 @@ fn resolve_and_delete_review_actions_round_trip_and_bind_device() {
     .expect("resolve_review should parse");
     assert_eq!(resolve.kind(), RemoteActionKind::ResolveReview);
     assert_eq!(RemoteActionKind::ResolveReview.as_str(), "resolve_review");
-    match resolve.bind_device("device-9".to_string(), "surface-test") {
+    match resolve.bind_device("device-9".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::ResolveReview {
             review_job_id,
             device_id,
@@ -944,7 +944,7 @@ fn resolve_and_delete_review_actions_round_trip_and_bind_device() {
         RemoteActionKind::ResolveWorkflow.as_str(),
         "resolve_workflow"
     );
-    match resolve_workflow.bind_device("device-9".to_string(), "surface-test") {
+    match resolve_workflow.bind_device("device-9".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::ResolveWorkflow {
             workflow_run_id,
             device_id,
@@ -962,7 +962,7 @@ fn resolve_and_delete_review_actions_round_trip_and_bind_device() {
     .expect("delete_review should parse");
     assert_eq!(delete.kind(), RemoteActionKind::DeleteReview);
     assert_eq!(RemoteActionKind::DeleteReview.as_str(), "delete_review");
-    match delete.bind_device("device-9".to_string(), "surface-test") {
+    match delete.bind_device("device-9".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::DeleteReview {
             review_id,
             device_id,
@@ -1308,7 +1308,7 @@ fn repair_workspace_round_trips_and_needs_no_session_claim() {
         "repair_workspace"
     );
 
-    match request.bind_device("device-9".to_string(), "surface-test") {
+    match request.bind_device("device-9".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::RepairWorkspace { thread_id, input } => {
             assert_eq!(thread_id, "thread-1");
             assert_eq!(
@@ -1347,7 +1347,7 @@ fn rename_thread_round_trips_the_payload_the_remote_surface_sends() {
 
     // bind_device must stamp the actor WITHOUT dropping the selector — the same
     // rebuild-loses-the-field bug fetch_workspace_diff guards against.
-    match request.bind_device("device-9".to_string(), "surface-test") {
+    match request.bind_device("device-9".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::RenameThread { thread_id, input } => {
             assert_eq!(thread_id, "thread-1");
             assert_eq!(input.name.as_deref(), Some("Auth work"));
@@ -1398,7 +1398,7 @@ fn set_thread_flag_round_trips_the_payload_the_remote_surface_sends() {
 
     // bind_device must stamp the actor WITHOUT dropping the selector — the same
     // rebuild-loses-the-field bug fetch_workspace_diff guards against.
-    match request.bind_device("device-9".to_string(), "surface-test") {
+    match request.bind_device("device-9".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::SetThreadFlag { thread_id, input } => {
             assert_eq!(thread_id, "thread-1");
             assert!(input.flagged);
@@ -1567,9 +1567,16 @@ async fn queueing_a_chunk_train_does_not_block_the_read_loop() {
     let chunks = workspace_diff_chunks("surface-1", 21);
 
     let started_at = tokio::time::Instant::now();
-    publish_remote_action_result_chunks(&state, &writer, chunks, "test chunk train", "surface-1")
-        .await
-        .expect("queueing a train succeeds");
+    publish_remote_action_result_chunks(
+        &state,
+        &writer,
+        chunks,
+        "test chunk train",
+        "surface-1",
+        None,
+    )
+    .await
+    .expect("queueing a train succeeds");
     let blocked_for = started_at.elapsed();
 
     assert!(
@@ -1769,7 +1776,7 @@ fn goal_actions_round_trip_and_bind_device() {
     .expect("set_goal should parse");
     assert_eq!(set.kind(), RemoteActionKind::SetGoal);
     assert_eq!(RemoteActionKind::SetGoal.as_str(), "set_goal");
-    match set.bind_device("device-3".to_string(), "surface-test") {
+    match set.bind_device("device-3".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::SetGoal {
             thread_id,
             objective,
@@ -1789,7 +1796,7 @@ fn goal_actions_round_trip_and_bind_device() {
             .expect("stop_goal should parse");
     assert_eq!(stop.kind(), RemoteActionKind::StopGoal);
     assert_eq!(RemoteActionKind::StopGoal.as_str(), "stop_goal");
-    match stop.bind_device("device-3".to_string(), "surface-test") {
+    match stop.bind_device("device-3".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::StopGoal {
             thread_id,
             device_id,
@@ -1831,7 +1838,7 @@ fn delegating_from_a_paired_device_round_trips_and_binds_it() {
     .expect("delegate should parse");
     assert_eq!(ask.kind(), RemoteActionKind::Delegate);
     assert_eq!(RemoteActionKind::Delegate.as_str(), "delegate");
-    match ask.bind_device("device-4".to_string(), "surface-test") {
+    match ask.bind_device("device-4".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::Delegate {
             thread_id,
             message,
@@ -1864,4 +1871,12 @@ fn the_still_working_notice_outpaces_the_deadline_it_exists_to_hold_off() {
         REMOTE_ACTION_PENDING_NOTICE_INTERVAL,
         CLIENT_REMOTE_ACTION_DEADLINE
     );
+}
+
+/// A frame origin for tests that only care about what `bind_device` stamps.
+fn test_origin() -> FrameOrigin {
+    FrameOrigin {
+        ingress: 1,
+        lease: 1,
+    }
 }

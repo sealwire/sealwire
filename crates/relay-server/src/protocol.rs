@@ -3079,6 +3079,10 @@ pub struct WatchThreadsInput {
     /// declaration that was queued by a connection since replaced.
     #[serde(skip)]
     pub broker_peer_id: Option<String>,
+    /// The lease that connection was on when this declaration was admitted. `serde(skip)`
+    /// for the same reason: only the relay can know it.
+    #[serde(skip)]
+    pub broker_lease: Option<u64>,
     /// Connection generation this declaration belongs to, from the SSE stream that
     /// opened it. A stale page's POST can land after its replacement has already
     /// declared; without this it would overwrite the live watch set, and the new page

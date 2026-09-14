@@ -371,13 +371,16 @@ impl AppState {
         Ok(claim)
     }
 
+    /// `lease` is the surface lease the frame carrying this was admitted under, or `None`
+    /// for a caller that is not a broker frame at all.
     pub(crate) async fn mark_remote_device_seen(
         &self,
         device_id: &str,
         peer_id: &str,
+        lease: Option<u64>,
     ) -> Result<(), String> {
         let mut relay = self.relay.write().await;
-        relay.mark_paired_device_seen(device_id, peer_id, unix_now())?;
+        relay.mark_paired_device_seen(device_id, peer_id, lease, unix_now())?;
         Ok(())
     }
 }

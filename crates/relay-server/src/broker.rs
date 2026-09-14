@@ -897,7 +897,7 @@ async fn run_broker_session_with_liveness(
             for peer in &surface_peers {
                 if let Some(device_id) = peer.device_id.as_deref() {
                     if let Err(error) = state
-                        .mark_remote_device_seen(device_id, &peer.peer_id)
+                        .mark_remote_device_seen(device_id, &peer.peer_id, None)
                         .await
                     {
                         warn!(
@@ -985,13 +985,24 @@ async fn run_broker_session_with_liveness(
         // phone's claim has to land before the action that presents it.
         let mut surfaces: std::collections::HashMap<
             String,
-            tokio::sync::mpsc::Sender<(u64, ServerMessage)>,
+            tokio::sync::mpsc::Sender<(FrameOrigin, ServerMessage)>,
         > = std::collections::HashMap::new();
         while let Some(message) = inbound_rx.recv().await {
             // The one place that sees the wire order. Frames are handled on independent
             // workers after this, so anything whose order matters carries this with it.
             let ingress = next_broker_ingress();
             let key = message_ordering_key(&message);
+            // Read before the frame is handled, so a departure landing afterwards leaves
+            // everything already admitted holding the lease it was admitted under.
+            let lease = if key.is_empty() {
+                0
+            } else {
+                handler_state
+                    .current_surface_lease(&key)
+                    .await
+                    .unwrap_or_default()
+            };
+            let origin = FrameOrigin { ingress, lease };
             let departing = matches!(
                 &message,
                 ServerMessage::Presence {
@@ -1004,7 +1015,7 @@ async fn run_broker_session_with_liveness(
             // has gone — and an arrival applied out of order would undo one.
             if is_surface_presence(&message) {
                 if let Err(error) =
-                    handle_server_message(&handler_state, &handler_writer, ingress, message).await
+                    handle_server_message(&handler_state, &handler_writer, origin, message).await
                 {
                     let _ = handler_error_tx.try_send(error);
                     return;
@@ -1015,21 +1026,21 @@ async fn run_broker_session_with_liveness(
                 continue;
             }
             let sender = surfaces.entry(key.clone()).or_insert_with(|| {
-                let (tx, mut rx) = tokio::sync::mpsc::channel::<(u64, ServerMessage)>(
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<(FrameOrigin, ServerMessage)>(
                     SURFACE_MESSAGE_QUEUE_CAPACITY,
                 );
                 let state = handler_state.clone();
                 let writer = handler_writer.clone();
                 let report = handler_error_tx.clone();
                 tokio::spawn(async move {
-                    while let Some((ingress, message)) = rx.recv().await {
+                    while let Some((origin, message)) = rx.recv().await {
                         let message_name = server_message_name(&message);
                         let started_at = Instant::now();
                         // A handler that panics would otherwise take this surface's queue
                         // with it and report nothing, leaving the socket looking healthy.
                         let handled =
                             futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-                                handle_server_message(&state, &writer, ingress, message),
+                                handle_server_message(&state, &writer, origin, message),
                             ))
                             .await;
                         match handled {
@@ -1066,7 +1077,7 @@ async fn run_broker_session_with_liveness(
             // keeps — push registration is the one that matters — is still lost, and the
             // phone still believes it succeeded. Narrow, because that frame has to be the
             // one that overflows, but real.
-            if let Err(error) = sender.try_send((ingress, message)) {
+            if let Err(error) = sender.try_send((origin, message)) {
                 let _ = handler_error_tx.try_send(match error {
                     tokio::sync::mpsc::error::TrySendError::Full(_) => {
                         format!("broker surface {key} fell too far behind to keep its frames")
@@ -1281,6 +1292,19 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// What the relay knew about a frame as it came off the socket: where it sat in the
+/// order, and which surface lease admitted it.
+///
+/// `lease` is `0` when the sender held no lease at all as this was admitted — which in
+/// practice means a connection that has already gone, since every surface takes a lease
+/// from the welcome that lists it. Zero matches no live lease, so such a frame is stale
+/// by the same comparison as any other.
+#[derive(Clone, Copy)]
+pub(super) struct FrameOrigin {
+    pub(super) ingress: u64,
+    pub(super) lease: u64,
+}
+
 /// Where a frame sat in the order the relay read them off its one socket.
 ///
 /// Relay-wide and never reset: a frame left over from a connection that has gone must
@@ -1301,7 +1325,7 @@ fn message_ordering_key(message: &ServerMessage) -> String {
 async fn handle_server_message(
     state: &AppState,
     writer: &BrokerWriter,
-    ingress: u64,
+    origin: FrameOrigin,
     message: ServerMessage,
 ) -> Result<(), String> {
     match message {
@@ -1320,7 +1344,7 @@ async fn handle_server_message(
                 if matches!(kind, PresenceKind::Joined) {
                     if let Some(device_id) = peer.device_id.as_deref() {
                         if let Err(error) = state
-                            .mark_remote_device_seen(device_id, &peer.peer_id)
+                            .mark_remote_device_seen(device_id, &peer.peer_id, None)
                             .await
                         {
                             warn!(
@@ -1403,7 +1427,7 @@ async fn handle_server_message(
                     handle_remote_action(
                         state,
                         writer,
-                        ingress,
+                        origin,
                         from_peer_id,
                         action_id,
                         session_claim,
@@ -1421,7 +1445,7 @@ async fn handle_server_message(
                     handle_encrypted_remote_action(
                         state,
                         writer,
-                        ingress,
+                        origin,
                         from_peer_id,
                         action_id,
                         session_claim,

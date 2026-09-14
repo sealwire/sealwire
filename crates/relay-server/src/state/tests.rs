@@ -252,7 +252,7 @@ fn a_connection_that_drops_without_a_goodbye_still_counts_its_surfaces_as_gone()
 
     assert!(!relay.surface_peer_is_online("surface-a"));
     assert!(
-        relay.surface_peer_has_departed("surface-a"),
+        relay.current_surface_lease("surface-a").is_none(),
         "a surface known to this connection is gone with it, whether or not a Left arrived"
     );
 }
@@ -3038,7 +3038,7 @@ fn pairing_ticket_registers_remote_device_and_persists_payload_secret() {
         token
     );
     relay
-        .mark_paired_device_seen(&device.device_id, "surface-b", 101)
+        .mark_paired_device_seen(&device.device_id, "surface-b", None, 101)
         .expect("device should remain paired");
     assert_eq!(
         relay
@@ -3128,7 +3128,7 @@ fn broker_targets_require_online_surface_presence() {
     );
 
     relay
-        .mark_paired_device_seen(&device.device_id, "surface-b", 101)
+        .mark_paired_device_seen(&device.device_id, "surface-b", None, 101)
         .expect("device should remain paired");
     assert_eq!(
         relay.broker_targets(),
@@ -3240,7 +3240,7 @@ fn replacing_online_surface_peers_restores_targets_for_reconnected_broker_sessio
 
     relay.set_broker_connection(true);
     relay
-        .mark_paired_device_seen(&device.device_id, "surface-b", 101)
+        .mark_paired_device_seen(&device.device_id, "surface-b", None, 101)
         .unwrap();
     relay.replace_online_surface_peers(["surface-b".to_string()]);
     assert_eq!(

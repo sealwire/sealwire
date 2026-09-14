@@ -242,10 +242,6 @@ pub(crate) struct RemoteActionWait {
     pub(crate) ticket: u64,
 }
 
-/// How many departed surfaces are remembered. Each is a peer id string; a few hundred
-/// covers any plausible backlog of frames still draining from connections that have gone.
-const MAX_REMEMBERED_DEPARTED_SURFACES: usize = 512;
-
 #[derive(Debug, Clone)]
 enum CachedRemoteActionState {
     InFlight {
@@ -444,15 +440,14 @@ pub struct RelayState {
     pub paired_devices: HashMap<String, PairedDevice>,
     online_surface_peer_ids: HashSet<String>,
     online_surface_peer_devices: HashMap<String, String>,
-    /// Surfaces WATCHED leaving, as opposed to ones never known about. Absent from the
-    /// online set means both, and they deserve opposite answers: a reply to a surface we
-    /// saw go is one nobody can read.
+    /// The lease each present surface is on. A surface takes a new one every time it
+    /// arrives and loses it when it leaves, or when the connection carrying it drops.
     ///
-    /// Deliberately outlives the broker connection: the workers still draining that
-    /// surface's frames are detached and outlive it too, and they are exactly what this
-    /// guards against. Bounded by insertion order instead.
-    departed_surface_peer_ids: HashSet<String>,
-    departed_surface_peer_order: VecDeque<String>,
+    /// Frames carry the lease they were admitted under, so "did this come from a
+    /// connection that has gone?" is a comparison — where a list of the departed had to
+    /// be bounded by guesswork and could not tell a rejoin from the connection it replaced.
+    surface_leases: HashMap<String, u64>,
+    next_surface_lease: u64,
     /// The newest broker arrival position that has changed each thread's goal.
     ///
     /// Surfaces are handled on independent workers, so two devices' frames can execute in
@@ -714,8 +709,8 @@ impl RelayState {
             paired_devices: HashMap::new(),
             online_surface_peer_ids: HashSet::new(),
             online_surface_peer_devices: HashMap::new(),
-            departed_surface_peer_ids: HashSet::new(),
-            departed_surface_peer_order: VecDeque::new(),
+            surface_leases: HashMap::new(),
+            next_surface_lease: 1,
             goal_ingress_by_thread: HashMap::new(),
             watched_threads: HashMap::new(),
             usage_store: crate::usage::store::UsageStore::disabled(),
@@ -4765,8 +4760,7 @@ impl RelayState {
         self.orchestrator_proposals = persisted.orchestrator_proposals.clone();
         self.recompute_reviewer_thread_seq();
         self.online_surface_peer_ids.clear();
-        self.departed_surface_peer_ids.clear();
-        self.departed_surface_peer_order.clear();
+        self.surface_leases.clear();
         self.online_surface_peer_devices.clear();
         self.backfill_device_records_from_paired_devices();
         self.pending_pairings.clear();
@@ -5235,7 +5229,7 @@ impl RelayState {
             // before delivering a Left is the ordinary case, not the exotic one.
             let known = std::mem::take(&mut self.online_surface_peer_ids);
             for peer_id in known {
-                self.remember_departed_surface_peer(&peer_id);
+                self.revoke_surface_lease(&peer_id);
             }
             self.online_surface_peer_devices.clear();
             // Broker surfaces are gone with the connection, so their watch sets go too
@@ -5325,7 +5319,7 @@ impl RelayState {
     }
 
     pub fn mark_surface_peer_online(&mut self, peer_id: &str) -> bool {
-        self.forget_departed_surface_peer(peer_id);
+        self.open_surface_lease(peer_id);
         self.online_surface_peer_ids.insert(peer_id.to_string())
     }
 
@@ -5338,12 +5332,27 @@ impl RelayState {
         self.online_surface_peer_ids.contains(peer_id)
     }
 
-    /// Whether this surface was seen leaving, rather than merely never seen.
-    ///
-    /// A reply to a surface we watched go is one nobody will read; a reply to an unknown
-    /// peer may still be wanted, because a presence set can be incomplete.
-    pub fn surface_peer_has_departed(&self, peer_id: &str) -> bool {
-        self.departed_surface_peer_ids.contains(peer_id)
+    /// Start this surface's lease over. Everything admitted under the previous one is
+    /// stale from here, including frames still queued from before a rejoin under the
+    /// same peer id.
+    pub fn open_surface_lease(&mut self, peer_id: &str) -> u64 {
+        let lease = self.next_surface_lease;
+        self.next_surface_lease = self.next_surface_lease.saturating_add(1);
+        self.surface_leases.insert(peer_id.to_string(), lease);
+        lease
+    }
+
+    pub fn revoke_surface_lease(&mut self, peer_id: &str) {
+        self.surface_leases.remove(peer_id);
+    }
+
+    pub fn current_surface_lease(&self, peer_id: &str) -> Option<u64> {
+        self.surface_leases.get(peer_id).copied()
+    }
+
+    /// Whether a frame admitted under this lease still speaks for its surface.
+    pub fn surface_lease_is_current(&self, peer_id: &str, lease: u64) -> bool {
+        self.surface_leases.get(peer_id) == Some(&lease)
     }
 
     /// Claim this arrival position for a thread's goal, or refuse because a later frame
@@ -5363,32 +5372,9 @@ impl RelayState {
         }
     }
 
-    fn remember_departed_surface_peer(&mut self, peer_id: &str) {
-        if !self.departed_surface_peer_ids.insert(peer_id.to_string()) {
-            return;
-        }
-        self.departed_surface_peer_order
-            .push_back(peer_id.to_string());
-        // A surface mints a fresh peer id on every join, so unbounded this grows for as
-        // long as the relay stays up under a client that reconnects in a loop. The oldest
-        // ids are the ones whose frames finished longest ago.
-        while self.departed_surface_peer_order.len() > MAX_REMEMBERED_DEPARTED_SURFACES {
-            if let Some(evicted) = self.departed_surface_peer_order.pop_front() {
-                self.departed_surface_peer_ids.remove(&evicted);
-            }
-        }
-    }
-
-    fn forget_departed_surface_peer(&mut self, peer_id: &str) {
-        if self.departed_surface_peer_ids.remove(peer_id) {
-            self.departed_surface_peer_order
-                .retain(|remembered| remembered != peer_id);
-        }
-    }
-
     pub fn mark_surface_peer_offline(&mut self, peer_id: &str) -> bool {
         self.online_surface_peer_devices.remove(peer_id);
-        self.remember_departed_surface_peer(peer_id);
+        self.revoke_surface_lease(peer_id);
         let removed = self.online_surface_peer_ids.remove(peer_id);
         self.prune_offline_broker_surfaces();
         removed
@@ -5399,11 +5385,14 @@ impl RelayState {
         I: IntoIterator<Item = String>,
     {
         self.online_surface_peer_ids = peer_ids.into_iter().collect();
+        // A welcome is a fresh arrival for everyone it lists, so each takes a new lease
+        // and anything still queued under the old one stops speaking for them.
         let online = self.online_surface_peer_ids.clone();
-        self.departed_surface_peer_ids
-            .retain(|peer_id| !online.contains(peer_id));
-        self.departed_surface_peer_order
-            .retain(|peer_id| !online.contains(peer_id));
+        self.surface_leases
+            .retain(|peer_id, _| online.contains(peer_id));
+        for peer_id in &online {
+            self.open_surface_lease(peer_id);
+        }
         self.online_surface_peer_devices
             .retain(|peer_id, _| self.online_surface_peer_ids.contains(peer_id));
         self.prune_offline_broker_surfaces();
@@ -6040,8 +6029,7 @@ impl RelayState {
         self.orchestrator_proposals = persisted.orchestrator_proposals.clone();
         self.recompute_reviewer_thread_seq();
         self.online_surface_peer_ids.clear();
-        self.departed_surface_peer_ids.clear();
-        self.departed_surface_peer_order.clear();
+        self.surface_leases.clear();
         self.online_surface_peer_devices.clear();
         self.backfill_device_records_from_paired_devices();
         self.pending_pairings.clear();

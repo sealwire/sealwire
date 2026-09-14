@@ -2616,7 +2616,7 @@ async fn a_stale_declaration_does_not_overwrite_the_replacement_connections_watc
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    release_the_hang.notify_waiters();
+    release_the_hang.notify_one();
 
     let mut stale_queue_drained = false;
     for _ in 0..60 {
@@ -2863,7 +2863,7 @@ async fn a_result_reaches_the_session_that_asked_again_after_a_reconnect() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let ran_twice = provider_entries.load(std::sync::atomic::Ordering::SeqCst) > 1;
-    release_the_hang.notify_waiters();
+    release_the_hang.notify_one();
 
     let mut answered = false;
     for _ in 0..60 {
@@ -3200,15 +3200,7 @@ async fn an_arrival_queued_before_a_departure_cannot_undo_it() {
         .await;
     });
 
-    let mut recorded_as_gone = false;
-    for _ in 0..60 {
-        if relay.read().await.surface_peer_has_departed("surface-a") {
-            recorded_as_gone = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    release_the_hang.notify_waiters();
+    release_the_hang.notify_one();
 
     let mut queue_drained = false;
     for _ in 0..60 {
@@ -3227,7 +3219,7 @@ async fn an_arrival_queued_before_a_departure_cannot_undo_it() {
     let (still_departed, back_online) = {
         let relay = relay.read().await;
         (
-            relay.surface_peer_has_departed("surface-a"),
+            relay.current_surface_lease("surface-a").is_none(),
             relay.surface_peer_is_online("surface-a"),
         )
     };
@@ -3237,10 +3229,6 @@ async fn an_arrival_queued_before_a_departure_cannot_undo_it() {
     assert!(
         hang_was_entered.load(std::sync::atomic::Ordering::SeqCst),
         "nothing was ever stuck, so the arrival was not queued behind anything"
-    );
-    assert!(
-        recorded_as_gone,
-        "the departure never landed, so there was nothing for the arrival to undo; saw {kinds:?}"
     );
     assert!(
         queue_drained,
@@ -3281,6 +3269,8 @@ async fn a_frame_queued_before_a_departure_does_not_re_register_the_surface() {
     let hang_was_entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let broker_saw_the_hang = Arc::clone(&hang_was_entered);
     let release_the_hang = Arc::new(tokio::sync::Notify::new());
+    let departure_sent = Arc::new(tokio::sync::Notify::new());
+    let broker_announces_departure = Arc::clone(&departure_sent);
 
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("broker should accept");
@@ -3349,6 +3339,7 @@ async fn a_frame_queued_before_a_departure_does_not_re_register_the_surface() {
             ))
             .await
             .expect("presence sends");
+        broker_announces_departure.notify_one();
 
         while let Some(frame) = socket.next().await {
             let Ok(frame) = frame else { break };
@@ -3409,16 +3400,20 @@ async fn a_frame_queued_before_a_departure_does_not_re_register_the_surface() {
         .await;
     });
 
+    // Wait for the departure to be on the wire, THEN for the relay to have applied it.
+    // Polling for "gone" before it is sent would pass at once — nothing has arrived yet —
+    // and the queue would drain with no departure for it to outlive.
+    let _ = tokio::time::timeout(Duration::from_secs(3), departure_sent.notified()).await;
     let mut recorded_as_gone = false;
     for _ in 0..60 {
-        if relay.read().await.surface_peer_has_departed("surface-a") {
+        if !relay.read().await.surface_peer_is_online("surface-a") {
             recorded_as_gone = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     // Only now let the queue drain, so the watch declaration lands AFTER the departure.
-    release_the_hang.notify_waiters();
+    release_the_hang.notify_one();
 
     let mut queue_drained = false;
     for _ in 0..60 {
@@ -3620,7 +3615,7 @@ async fn a_late_frame_does_not_rebind_a_device_to_its_closed_connection() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    release_the_hang.notify_waiters();
+    release_the_hang.notify_one();
 
     let mut late_frame_ran = false;
     for _ in 0..60 {

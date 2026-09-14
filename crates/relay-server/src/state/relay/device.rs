@@ -816,13 +816,13 @@ impl RelayState {
         &mut self,
         device_id: &str,
         peer_id: &str,
+        lease: Option<u64>,
         now: u64,
     ) -> Result<(), String> {
-        // A frame queued behind a slow action outlives its connection, and the phone has
-        // usually reconnected as a new peer by then. Stamping the closed one here points
-        // every reply at a socket nobody is reading. Presence marks a peer online before
-        // binding it, so a genuine join is never refused by this.
-        if self.surface_peer_has_departed(peer_id) {
+        // A frame queued behind a slow action outlives the connection it came in on, and
+        // the phone has usually reconnected by then. Stamping that connection here points
+        // every reply at a socket nobody is reading.
+        if lease.is_some_and(|lease| !self.surface_lease_is_current(peer_id, lease)) {
             return Ok(());
         }
         let device = self

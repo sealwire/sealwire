@@ -39,7 +39,7 @@ use super::{
     publish_payload, verify_device_claim_challenge_proof, verify_device_claim_init_proof,
     verify_session_claim,
     writer::{BrokerWriter, TrainHandoff},
-    MAX_BROKER_TEXT_FRAME_BYTES,
+    FrameOrigin, MAX_BROKER_TEXT_FRAME_BYTES,
 };
 
 const SESSION_CONTROL_REQUIRED_ERROR: &str =
@@ -329,7 +329,7 @@ impl RemoteActionRequest {
         }
     }
 
-    fn bind_device(self, device_id: String, from_peer_id: &str) -> Self {
+    fn bind_device(self, device_id: String, from_peer_id: &str, origin: FrameOrigin) -> Self {
         match self {
             Self::ClaimChallenge { proof } => Self::ClaimChallenge { proof },
             Self::ClaimDevice {
@@ -374,6 +374,7 @@ impl RemoteActionRequest {
             Self::WatchThreads { mut input } => {
                 input.device_id = Some(device_id);
                 input.broker_peer_id = Some(from_peer_id.to_string());
+                input.broker_lease = Some(origin.lease);
                 Self::WatchThreads { input }
             }
             Self::ListProviders => Self::ListProviders,
@@ -810,7 +811,7 @@ pub(super) struct RemoteActionOutcome {
 pub(super) async fn handle_remote_action(
     state: &AppState,
     writer: &BrokerWriter,
-    ingress: u64,
+    origin: FrameOrigin,
     from_peer_id: String,
     action_id: String,
     session_claim: Option<String>,
@@ -877,6 +878,7 @@ pub(super) async fn handle_remote_action(
                 Some(error),
                 false,
                 result_device_id,
+                Some(origin.lease),
             )
             .await;
         }
@@ -887,9 +889,9 @@ pub(super) async fn handle_remote_action(
             action_kind,
             &resolved_device_id,
             &from_peer_id,
-            request.bind_device(resolved_device_id.clone(), &from_peer_id),
+            request.bind_device(resolved_device_id.clone(), &from_peer_id, origin),
             false,
-            ingress,
+            origin,
         )
         .await;
     }
@@ -906,6 +908,7 @@ pub(super) async fn handle_remote_action(
                 action_id,
                 action_kind,
                 cached,
+                Some(origin.lease),
             )
             .await;
         }
@@ -935,6 +938,7 @@ pub(super) async fn handle_remote_action(
                         action_id,
                         action_kind,
                         cached,
+                        Some(origin.lease),
                     )
                     .await;
                 }
@@ -961,6 +965,7 @@ pub(super) async fn handle_remote_action(
                 action_id,
                 action_kind,
                 cached,
+                Some(origin.lease),
             )
             .await;
         }
@@ -985,13 +990,13 @@ pub(super) async fn handle_remote_action(
         }
         request => {
             match state
-                .mark_remote_device_seen(&resolved_device_id, &from_peer_id)
+                .mark_remote_device_seen(&resolved_device_id, &from_peer_id, Some(origin.lease))
                 .await
             {
                 Ok(()) => match run_remote_action(
                     state,
-                    request.bind_device(resolved_device_id.clone(), &from_peer_id),
-                    ingress,
+                    request.bind_device(resolved_device_id.clone(), &from_peer_id, origin),
+                    origin.ingress,
                 )
                 .await
                 {
@@ -1045,6 +1050,7 @@ pub(super) async fn handle_remote_action(
         action_id,
         action_kind,
         cached,
+        Some(origin.lease),
     )
     .await;
     let elapsed_ms = action_started_at.elapsed().as_millis();
@@ -1069,7 +1075,7 @@ pub(super) async fn handle_remote_action(
 pub(super) async fn handle_encrypted_remote_action(
     state: &AppState,
     writer: &BrokerWriter,
-    ingress: u64,
+    origin: FrameOrigin,
     from_peer_id: String,
     action_id: String,
     session_claim: Option<String>,
@@ -1122,6 +1128,7 @@ pub(super) async fn handle_encrypted_remote_action(
                 Some(error),
                 false,
                 None,
+                Some(origin.lease),
             )
             .await
             {
@@ -1167,9 +1174,9 @@ pub(super) async fn handle_encrypted_remote_action(
             action_kind,
             &device_id,
             &from_peer_id,
-            request.bind_device(device_id.clone(), &from_peer_id),
+            request.bind_device(device_id.clone(), &from_peer_id, origin),
             true,
-            ingress,
+            origin,
         )
         .await;
     }
@@ -1188,6 +1195,7 @@ pub(super) async fn handle_encrypted_remote_action(
                 action_id,
                 action_kind,
                 cached,
+                Some(origin.lease),
             )
             .await;
         }
@@ -1215,6 +1223,7 @@ pub(super) async fn handle_encrypted_remote_action(
                         action_id,
                         action_kind,
                         cached,
+                        Some(origin.lease),
                     )
                     .await;
                 }
@@ -1242,6 +1251,7 @@ pub(super) async fn handle_encrypted_remote_action(
                 action_id,
                 action_kind,
                 cached,
+                Some(origin.lease),
             )
             .await;
         }
@@ -1257,14 +1267,14 @@ pub(super) async fn handle_encrypted_remote_action(
         } => issue_claim_outcome(state, &device_id, &from_peer_id, &challenge_id, &proof).await,
         request => {
             match state
-                .mark_remote_device_seen(&device_id, &from_peer_id)
+                .mark_remote_device_seen(&device_id, &from_peer_id, Some(origin.lease))
                 .await
             {
                 Ok(()) => {
                     match run_remote_action(
                         state,
-                        request.bind_device(device_id.clone(), &from_peer_id),
-                        ingress,
+                        request.bind_device(device_id.clone(), &from_peer_id, origin),
+                        origin.ingress,
                     )
                     .await
                     {
@@ -1328,6 +1338,7 @@ pub(super) async fn handle_encrypted_remote_action(
         action_id,
         action_kind,
         cached,
+        Some(origin.lease),
     )
     .await;
     let elapsed_ms = action_started_at.elapsed().as_millis();
@@ -1806,10 +1817,12 @@ async fn execute_fire_and_forget_remote_action(
     peer_id: &str,
     request: RemoteActionRequest,
     encrypted: bool,
-    ingress: u64,
+    origin: FrameOrigin,
 ) -> Result<(), String> {
-    state.mark_remote_device_seen(device_id, peer_id).await?;
-    if let Err(error) = execute_remote_action(state, request, ingress).await {
+    state
+        .mark_remote_device_seen(device_id, peer_id, Some(origin.lease))
+        .await?;
+    if let Err(error) = execute_remote_action(state, request, origin.ingress).await {
         warn!(
             action = action.as_str(),
             peer_id = %peer_id,
@@ -1960,7 +1973,9 @@ async fn issue_claim_challenge_outcome(
     device_id: &str,
     peer_id: &str,
 ) -> Result<RemoteActionOutcome, String> {
-    state.mark_remote_device_seen(device_id, peer_id).await?;
+    state
+        .mark_remote_device_seen(device_id, peer_id, None)
+        .await?;
     let challenge = state.issue_claim_challenge(device_id, peer_id).await?;
     Ok(RemoteActionOutcome {
         claim_challenge_id: Some(challenge.challenge_id),
@@ -2049,6 +2064,7 @@ async fn publish_plain_remote_action_result(
     error: Option<String>,
     ok: bool,
     _device_id: String,
+    lease: Option<u64>,
 ) -> Result<(), String> {
     let input_transcript_entries = snapshot
         .as_ref()
@@ -2180,6 +2196,7 @@ async fn publish_plain_remote_action_result(
         chunk_payloads,
         "broker action result chunk",
         &target_peer_id,
+        lease,
     )
     .await?
         == TrainHandoff::Busy
@@ -2207,6 +2224,7 @@ async fn publish_remote_action_result_chunks(
     chunk_payloads: Vec<OutboundBrokerPayload>,
     error_context: &str,
     target_peer_id: &str,
+    lease: Option<u64>,
 ) -> Result<TrainHandoff, String> {
     let chunk_count = chunk_payloads.len();
     info!(
@@ -2217,12 +2235,14 @@ async fn publish_remote_action_result_chunks(
     // A train the writer can never abandon: it only stops one whose surface it was TOLD
     // about, and an already-departed peer is recorded as nobody. So the whole reply paces
     // out at someone who has gone, holding the single train slot the entire time.
-    if state.surface_peer_has_departed(target_peer_id).await {
-        info!(
-            chunk_count,
-            error_context, "dropping a chunked reply: its surface already left"
-        );
-        return Ok(TrainHandoff::Dropped);
+    if let Some(lease) = lease {
+        if !state.surface_lease_is_current(target_peer_id, lease).await {
+            info!(
+                chunk_count,
+                error_context, "dropping a chunked reply: its surface already left"
+            );
+            return Ok(TrainHandoff::Dropped);
+        }
     }
     let chunks = chunk_payloads
         .iter()
@@ -2409,6 +2429,7 @@ async fn replay_plain_remote_action_result(
     action_id: String,
     action: RemoteActionKind,
     cached: CachedRemoteActionResult,
+    lease: Option<u64>,
 ) -> Result<(), String> {
     publish_plain_remote_action_result(
         state,
@@ -2443,6 +2464,7 @@ async fn replay_plain_remote_action_result(
         cached.error,
         cached.ok,
         "cached-device".to_string(),
+        lease,
     )
     .await
 }
@@ -2459,6 +2481,7 @@ async fn publish_remote_action_result_private(
     error: Option<String>,
     ok: bool,
     response_secret: Option<&str>,
+    lease: Option<u64>,
 ) -> Result<(), String> {
     let input_transcript_entries = snapshot
         .as_ref()
@@ -2611,6 +2634,7 @@ async fn publish_remote_action_result_private(
         chunk_payloads,
         "encrypted broker action result chunk",
         &target_peer_id,
+        lease,
     )
     .await?
         == TrainHandoff::Busy
@@ -2641,6 +2665,7 @@ async fn replay_encrypted_remote_action_result(
     action_id: String,
     action: RemoteActionKind,
     cached: CachedRemoteActionResult,
+    lease: Option<u64>,
 ) -> Result<(), String> {
     publish_remote_action_result_private(
         state,
@@ -2676,6 +2701,7 @@ async fn replay_encrypted_remote_action_result(
         cached.error,
         cached.ok,
         cached.response_secret.as_deref(),
+        lease,
     )
     .await
 }

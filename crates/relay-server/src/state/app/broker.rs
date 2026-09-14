@@ -87,9 +87,16 @@ impl AppState {
         relay.remote_action_waiter_is_current(device_id, action_id, ticket)
     }
 
-    pub(crate) async fn surface_peer_has_departed(&self, peer_id: &str) -> bool {
+    /// The lease a surface is currently on, if it is present at all.
+    pub(crate) async fn current_surface_lease(&self, peer_id: &str) -> Option<u64> {
         let relay = self.relay.read().await;
-        relay.surface_peer_has_departed(peer_id)
+        relay.current_surface_lease(peer_id)
+    }
+
+    /// Whether a frame admitted under this lease still speaks for its surface.
+    pub(crate) async fn surface_lease_is_current(&self, peer_id: &str, lease: u64) -> bool {
+        let relay = self.relay.read().await;
+        relay.surface_lease_is_current(peer_id, lease)
     }
 
     pub(crate) async fn broker_targets(&self) -> Vec<BrokerTarget> {
