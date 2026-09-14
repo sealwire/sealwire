@@ -4827,7 +4827,7 @@ fn remote_action_replay_cache_blocks_inflight_duplicates() {
     let second = relay
         .reserve_remote_action("device-a", "act-2", "send_message", 101)
         .expect("duplicate inflight action should not re-execute");
-    assert!(matches!(second, RemoteActionReplayDecision::InFlight));
+    assert!(matches!(second, RemoteActionReplayDecision::InFlight(_)));
 }
 
 #[test]

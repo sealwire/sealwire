@@ -18,9 +18,14 @@ use crate::{
     },
     state::{
         AppState, ApprovalError, AskUserAnswerError, CachedRemoteActionResult,
-        PushSubscriptionInput, RemoteActionReplayDecision, ThreadWorkspaceError,
+        PushSubscriptionInput, RemoteActionReplayDecision, RemoteActionWait, ThreadWorkspaceError,
     },
 };
+
+/// How long a reconnected asker waits for an answer someone else is producing. Longer
+/// than the client's own deadline on purpose: the point is to answer the session that is
+/// still there, and a waiter that gave up early would leave the id looking unanswerable.
+const REMOTE_ACTION_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 use super::{
     crypto::{decrypt_json, encrypt_json, EncryptedEnvelope},
@@ -897,19 +902,28 @@ pub(super) async fn handle_remote_action(
             )
             .await;
         }
-        Ok(RemoteActionReplayDecision::InFlight) => {
-            if remote_action_emits_info_log(action_kind) {
-                state
-                    .push_runtime_log(
-                        "info",
-                        format!(
-                            "Ignored duplicate broker action `{}` from {} while the original request is still running.",
-                            action_kind.as_str(),
-                            from_peer_id
-                        ),
+        Ok(RemoteActionReplayDecision::InFlight(wait)) => {
+            // Almost always a phone that reconnected: its first attempt is still running,
+            // and the writer it would have answered through died with the old session.
+            // Answer this one when the original finishes.
+            let state = state.clone();
+            let writer = writer.clone();
+            let device_id = resolved_device_id.clone();
+            tokio::spawn(async move {
+                if let Some(cached) =
+                    await_remote_action_result(&state, &device_id, &action_id, wait).await
+                {
+                    let _ = replay_plain_remote_action_result(
+                        &state,
+                        &writer,
+                        from_peer_id,
+                        action_id,
+                        action_kind,
+                        cached,
                     )
                     .await;
-            }
+                }
+            });
             return Ok(());
         }
         Err(error) => {
@@ -1159,19 +1173,26 @@ pub(super) async fn handle_encrypted_remote_action(
             )
             .await;
         }
-        Ok(RemoteActionReplayDecision::InFlight) => {
-            if remote_action_emits_info_log(action_kind) {
-                state
-                    .push_runtime_log(
-                        "info",
-                        format!(
-                            "Ignored duplicate encrypted broker action `{}` from {} while the original request is still running.",
-                            action_kind.as_str(),
-                            from_peer_id
-                        ),
+        Ok(RemoteActionReplayDecision::InFlight(wait)) => {
+            let state = state.clone();
+            let writer = writer.clone();
+            let waited_device_id = device_id.clone();
+            tokio::spawn(async move {
+                if let Some(cached) =
+                    await_remote_action_result(&state, &waited_device_id, &action_id, wait).await
+                {
+                    let _ = replay_encrypted_remote_action_result(
+                        &state,
+                        &writer,
+                        from_peer_id,
+                        device_id,
+                        action_id,
+                        action_kind,
+                        cached,
                     )
                     .await;
-            }
+                }
+            });
             return Ok(());
         }
         Err(error) => {
@@ -2255,6 +2276,45 @@ fn build_plain_remote_action_result_payload(
             }
         }
     })
+}
+
+/// Wait for an action someone else is already running, and answer only if this asker is
+/// still the most recent one.
+///
+/// Returns `None` when a later resend has taken over, or when the relay gave up on the
+/// original without ever learning its outcome — the caller then answers nothing, which is
+/// what the client's own deadline is for. Never says "it failed": a provider that stopped
+/// mid-write did not necessarily not write.
+async fn await_remote_action_result(
+    state: &AppState,
+    device_id: &str,
+    action_id: &str,
+    wait: RemoteActionWait,
+) -> Option<CachedRemoteActionResult> {
+    // Subscribe BEFORE re-reading, or a result stored between the reservation and here
+    // wakes nobody and this waits out the whole deadline for an answer already on file.
+    let finished = wait.finished.clone();
+    let wake = async move { finished.notified().await };
+    let mut wake = std::pin::pin!(wake);
+    // Poll once so the subscription exists before the cache is re-read: a result stored
+    // between the reservation and here would otherwise wake nobody.
+    let _ = futures_util::poll!(wake.as_mut());
+    if let Some(cached) = state.completed_remote_action(device_id, action_id).await {
+        return Some(cached);
+    }
+    if tokio::time::timeout(REMOTE_ACTION_WAIT_TIMEOUT, wake)
+        .await
+        .is_err()
+    {
+        return None;
+    }
+    if !state
+        .remote_action_waiter_is_current(device_id, action_id, wait.ticket)
+        .await
+    {
+        return None;
+    }
+    state.completed_remote_action(device_id, action_id).await
 }
 
 async fn replay_plain_remote_action_result(

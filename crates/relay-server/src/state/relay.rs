@@ -229,7 +229,17 @@ pub(crate) struct CachedRemoteActionResult {
 pub(crate) enum RemoteActionReplayDecision {
     Execute,
     Replay(CachedRemoteActionResult),
-    InFlight,
+    InFlight(RemoteActionWait),
+}
+
+/// A place to wait for an action someone else is already running.
+///
+/// The ticket is what stops a reply going to a connection that has since been replaced:
+/// only the most recent asker publishes, and every earlier one gives way to it.
+#[derive(Debug, Clone)]
+pub(crate) struct RemoteActionWait {
+    pub(crate) finished: std::sync::Arc<tokio::sync::Notify>,
+    pub(crate) ticket: u64,
 }
 
 /// How many departed surfaces are remembered. Each is a peer id string; a few hundred
@@ -241,10 +251,15 @@ enum CachedRemoteActionState {
     InFlight {
         action_kind: String,
         seen_at: u64,
+        finished: std::sync::Arc<tokio::sync::Notify>,
+        /// Tickets handed out so far. Carried into `Completed` so a waiter can still
+        /// tell whether it is the one that should answer.
+        waiters: u64,
     },
     Completed {
         result: CachedRemoteActionResult,
         seen_at: u64,
+        waiters: u64,
     },
 }
 
@@ -6194,12 +6209,14 @@ impl RelayState {
     ) -> Result<RemoteActionReplayDecision, String> {
         self.prune_remote_action_replays(now);
         let key = remote_action_cache_key(device_id, action_id);
-        let Some(entry) = self.recent_remote_actions.get(&key) else {
+        let Some(entry) = self.recent_remote_actions.get_mut(&key) else {
             self.recent_remote_actions.insert(
                 key,
                 CachedRemoteActionState::InFlight {
                     action_kind: action_kind.to_string(),
                     seen_at: now,
+                    finished: std::sync::Arc::new(tokio::sync::Notify::new()),
+                    waiters: 0,
                 },
             );
             return Ok(RemoteActionReplayDecision::Execute);
@@ -6208,6 +6225,8 @@ impl RelayState {
         match entry {
             CachedRemoteActionState::InFlight {
                 action_kind: existing_kind,
+                finished,
+                waiters,
                 ..
             } => {
                 if existing_kind != action_kind {
@@ -6215,7 +6234,14 @@ impl RelayState {
                         "action_id is already in use for a different remote action".to_string()
                     );
                 }
-                Ok(RemoteActionReplayDecision::InFlight)
+                // Hand out a place to wait rather than an instruction to give up. The
+                // asker is usually a RECONNECTED phone whose first attempt is still
+                // running against a writer that died with the old session.
+                *waiters += 1;
+                Ok(RemoteActionReplayDecision::InFlight(RemoteActionWait {
+                    finished: std::sync::Arc::clone(finished),
+                    ticket: *waiters,
+                }))
             }
             CachedRemoteActionState::Completed { result, .. } => {
                 if result.action_kind != action_kind {
@@ -6236,23 +6262,86 @@ impl RelayState {
         now: u64,
     ) {
         self.prune_remote_action_replays(now);
+        let key = remote_action_cache_key(device_id, action_id);
+        let (finished, waiters) = match self.recent_remote_actions.get(&key) {
+            Some(CachedRemoteActionState::InFlight {
+                finished, waiters, ..
+            }) => (Some(std::sync::Arc::clone(finished)), *waiters),
+            Some(CachedRemoteActionState::Completed { waiters, .. }) => (None, *waiters),
+            None => (None, 0),
+        };
         self.recent_remote_actions.insert(
-            remote_action_cache_key(device_id, action_id),
+            key,
             CachedRemoteActionState::Completed {
                 result,
                 seen_at: now,
+                waiters,
             },
         );
         self.trim_remote_action_replays();
+        if let Some(finished) = finished {
+            finished.notify_waiters();
+        }
+    }
+
+    /// The stored result for an action, if it has one. Read by a waiter that has just
+    /// been woken, and on the way in to close the gap between reserving and subscribing.
+    pub fn completed_remote_action(
+        &self,
+        device_id: &str,
+        action_id: &str,
+    ) -> Option<CachedRemoteActionResult> {
+        match self
+            .recent_remote_actions
+            .get(&remote_action_cache_key(device_id, action_id))
+        {
+            Some(CachedRemoteActionState::Completed { result, .. }) => Some(result.clone()),
+            _ => None,
+        }
+    }
+
+    /// Whether this ticket is still the most recent asker. An earlier one holds the
+    /// writer of a session that has since been replaced, so it must not answer.
+    pub fn remote_action_waiter_is_current(
+        &self,
+        device_id: &str,
+        action_id: &str,
+        ticket: u64,
+    ) -> bool {
+        match self
+            .recent_remote_actions
+            .get(&remote_action_cache_key(device_id, action_id))
+        {
+            Some(
+                CachedRemoteActionState::InFlight { waiters, .. }
+                | CachedRemoteActionState::Completed { waiters, .. },
+            ) => *waiters == ticket,
+            None => false,
+        }
     }
 
     fn prune_remote_action_replays(&mut self, now: u64) {
-        self.recent_remote_actions.retain(|_, entry| match entry {
-            CachedRemoteActionState::InFlight { seen_at, .. }
-            | CachedRemoteActionState::Completed { seen_at, .. } => {
-                seen_at.saturating_add(REMOTE_ACTION_REPLAY_TTL_SECS) > now
+        let mut abandoned = Vec::new();
+        self.recent_remote_actions.retain(|_, entry| {
+            let keep = match entry {
+                CachedRemoteActionState::InFlight { seen_at, .. }
+                | CachedRemoteActionState::Completed { seen_at, .. } => {
+                    seen_at.saturating_add(REMOTE_ACTION_REPLAY_TTL_SECS) > now
+                }
+            };
+            // Dropping an in-flight entry is the relay giving up on an outcome it never
+            // learned. Anyone waiting on it has to be told, or they wait out a deadline
+            // for a wake that can no longer come.
+            if !keep {
+                if let CachedRemoteActionState::InFlight { finished, .. } = entry {
+                    abandoned.push(std::sync::Arc::clone(finished));
+                }
             }
+            keep
         });
+        for finished in abandoned {
+            finished.notify_waiters();
+        }
     }
 
     fn trim_remote_action_replays(&mut self) {

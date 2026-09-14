@@ -68,6 +68,25 @@ impl AppState {
         relay.surface_peer_is_online(peer_id)
     }
 
+    pub(crate) async fn completed_remote_action(
+        &self,
+        device_id: &str,
+        action_id: &str,
+    ) -> Option<CachedRemoteActionResult> {
+        let relay = self.relay.read().await;
+        relay.completed_remote_action(device_id, action_id)
+    }
+
+    pub(crate) async fn remote_action_waiter_is_current(
+        &self,
+        device_id: &str,
+        action_id: &str,
+        ticket: u64,
+    ) -> bool {
+        let relay = self.relay.read().await;
+        relay.remote_action_waiter_is_current(device_id, action_id, ticket)
+    }
+
     pub(crate) async fn surface_peer_has_departed(&self, peer_id: &str) -> bool {
         let relay = self.relay.read().await;
         relay.surface_peer_has_departed(peer_id)

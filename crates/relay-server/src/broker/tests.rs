@@ -1896,6 +1896,7 @@ async fn managed_broker_state_parts(
 struct GatedThreadsProvider {
     entered_list_threads: Arc<tokio::sync::Notify>,
     released: Arc<tokio::sync::Notify>,
+    entries: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[async_trait::async_trait]
@@ -1904,6 +1905,8 @@ impl crate::provider::ProviderBridge for GatedThreadsProvider {
         &self,
         _limit: usize,
     ) -> Result<Vec<crate::protocol::ThreadSummaryView>, String> {
+        self.entries
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.entered_list_threads.notify_one();
         self.released.notified().await;
         Ok(Vec::new())
@@ -2500,6 +2503,7 @@ async fn a_stale_declaration_does_not_overwrite_the_replacement_connections_watc
         Arc::new(GatedThreadsProvider {
             entered_list_threads: Arc::clone(&entered_the_hang),
             released: Arc::clone(&release_the_hang),
+            entries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }),
     );
     let (state, relay) = managed_broker_state_parts(&cwd, providers).await;
@@ -2569,6 +2573,226 @@ async fn a_stale_declaration_does_not_overwrite_the_replacement_connections_watc
         live_still_watched && !stale_watched,
         "the closed connection's declaration was applied to the connection that replaced \
          it, so the phone stopped receiving what it is looking at; saw {kinds:?}"
+    );
+}
+
+/// A reply must reach the connection that ASKED AGAIN, not the one that asked first.
+///
+/// The relay reserves an action id, enters the provider, and the broker connection blips.
+/// The phone resends the same id when the relay is back — deliberately the same id, so the
+/// replay cache answers instead of the action running twice. The relay sees it is still
+/// running and says nothing at all, while the original task publishes its result through
+/// the writer of a session that is gone. The phone waits out its deadline for work that
+/// has in fact been done, which for a write is the one outcome worth avoiding.
+#[tokio::test]
+async fn a_result_reaches_the_session_that_asked_again_after_a_reconnect() {
+    if !broker_session_e2e_enabled() {
+        eprintln!("skipping: set AGENT_RELAY_BROKER_SESSION_E2E=1 to run the broker session e2e");
+        return;
+    }
+
+    let workspace = tempfile::TempDir::new().expect("tmpdir");
+    let cwd = workspace.path().to_string_lossy().to_string();
+    let entered_the_hang = Arc::new(tokio::sync::Notify::new());
+    let release_the_hang = Arc::new(tokio::sync::Notify::new());
+    let provider_entries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> = HashMap::new();
+    providers.insert(
+        "gated".to_string(),
+        Arc::new(GatedThreadsProvider {
+            entered_list_threads: Arc::clone(&entered_the_hang),
+            released: Arc::clone(&release_the_hang),
+            entries: Arc::clone(&provider_entries),
+        }),
+    );
+    let (state, _relay) = managed_broker_state_parts(&cwd, providers).await;
+
+    // Session one: ask, and get as far as the provider.
+    let first_listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener should bind");
+    let first_address = first_listener
+        .local_addr()
+        .expect("listener should resolve");
+    tokio::spawn(async move {
+        let (stream, _) = first_listener.accept().await.expect("broker should accept");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("handshake should succeed");
+        let welcome = ServerMessage::Welcome {
+            protocol_version: BROKER_PROTOCOL_VERSION,
+            channel_id: "room-e2e".to_string(),
+            peer_id: "relay-e2e".to_string(),
+            peers: vec![surface_peer("surface-a", "phone-1")],
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&welcome).expect("welcome serializes"),
+            ))
+            .await
+            .expect("welcome sends");
+        socket
+            .send(Message::Text(plain_action_frame(
+                "surface-a",
+                "action-survives",
+                serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
+            )))
+            .await
+            .expect("request sends");
+        while let Some(frame) = socket.next().await {
+            let Ok(frame) = frame else { break };
+            if let Message::Ping(payload) = frame {
+                let _ = socket.send(Message::Pong(payload)).await;
+            }
+        }
+    });
+
+    let first_config = heartbeat_test_config(format!("ws://{first_address}")).await;
+    let first_state = state.clone();
+    let first_session = tokio::spawn(async move {
+        let mut change_rx = first_state.subscribe();
+        let _ = run_broker_session_with_liveness(
+            &first_state,
+            &mut change_rx,
+            &first_config,
+            BrokerLivenessConfig {
+                ping_interval: Duration::from_secs(30),
+                pong_timeout: Duration::from_secs(30),
+            },
+        )
+        .await;
+    });
+
+    let reached_the_provider =
+        tokio::time::timeout(Duration::from_secs(3), entered_the_hang.notified())
+            .await
+            .is_ok();
+    // The connection dies with the action still inside the provider.
+    first_session.abort();
+
+    // Session two: the same phone, the same action id, a connection that can be answered.
+    let second_listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener should bind");
+    let second_address = second_listener
+        .local_addr()
+        .expect("listener should resolve");
+    let observations = Arc::new(std::sync::Mutex::new(BrokerObservations::default()));
+    let broker_view = Arc::clone(&observations);
+    tokio::spawn(async move {
+        let (stream, _) = second_listener
+            .accept()
+            .await
+            .expect("broker should accept");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("handshake should succeed");
+        let welcome = ServerMessage::Welcome {
+            protocol_version: BROKER_PROTOCOL_VERSION,
+            channel_id: "room-e2e".to_string(),
+            peer_id: "relay-e2e".to_string(),
+            peers: vec![surface_peer("surface-a", "phone-1")],
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&welcome).expect("welcome serializes"),
+            ))
+            .await
+            .expect("welcome sends");
+        socket
+            .send(Message::Text(plain_action_frame(
+                "surface-a",
+                "action-survives",
+                serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
+            )))
+            .await
+            .expect("resend sends");
+        while let Some(frame) = socket.next().await {
+            let Ok(frame) = frame else { break };
+            match frame {
+                Message::Ping(payload) => {
+                    let _ = socket.send(Message::Pong(payload)).await;
+                }
+                Message::Close(_) => break,
+                Message::Text(text) => {
+                    let payload = serde_json::from_str::<serde_json::Value>(&text).ok();
+                    let field = |name: &str| {
+                        payload
+                            .as_ref()
+                            .and_then(|value| value.get("payload"))
+                            .and_then(|payload| payload.get(name))
+                            .and_then(|found| found.as_str())
+                            .map(str::to_string)
+                    };
+                    let kind = field("kind").unwrap_or_else(|| "unknown".to_string());
+                    let label = match field("action_id") {
+                        Some(action_id) => format!("{kind}:{action_id}"),
+                        None => kind,
+                    };
+                    broker_view
+                        .lock()
+                        .unwrap()
+                        .frames
+                        .push((label, std::time::Instant::now()));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let second_config = heartbeat_test_config(format!("ws://{second_address}")).await;
+    let second_state = state.clone();
+    let second_session = tokio::spawn(async move {
+        let mut change_rx = second_state.subscribe();
+        let _ = run_broker_session_with_liveness(
+            &second_state,
+            &mut change_rx,
+            &second_config,
+            BrokerLivenessConfig {
+                ping_interval: Duration::from_secs(30),
+                pong_timeout: Duration::from_secs(30),
+            },
+        )
+        .await;
+    });
+
+    // Long enough for the resend to have been decided on, and short enough that it cannot
+    // have been answered by a second run of the provider.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let ran_twice = provider_entries.load(std::sync::atomic::Ordering::SeqCst) > 1;
+    release_the_hang.notify_waiters();
+
+    let mut answered = false;
+    for _ in 0..60 {
+        if observations
+            .lock()
+            .unwrap()
+            .kinds()
+            .iter()
+            .any(|kind| kind.ends_with(":action-survives"))
+        {
+            answered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    second_session.abort();
+
+    let kinds = observations.lock().unwrap().kinds();
+    assert!(
+        reached_the_provider,
+        "the first session never got as far as the provider, so nothing was in flight \
+         across the reconnect"
+    );
+    assert!(
+        !ran_twice,
+        "the resend ran the action a second time; the replay cache exists precisely so a \
+         resend of a write cannot do that"
+    );
+    assert!(
+        answered,
+        "the second connection asked for the same action and was told nothing, so the \
+         phone waits out its deadline for work the relay had already done; saw {kinds:?}"
     );
 }
 
@@ -2682,6 +2906,7 @@ async fn an_arrival_queued_before_a_departure_cannot_undo_it() {
         Arc::new(GatedThreadsProvider {
             entered_list_threads: Arc::clone(&entered_the_hang),
             released: Arc::clone(&release_the_hang),
+            entries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }),
     );
     let (state, relay) = managed_broker_state_parts(&cwd, providers).await;
@@ -2889,6 +3114,7 @@ async fn a_frame_queued_before_a_departure_does_not_re_register_the_surface() {
         Arc::new(GatedThreadsProvider {
             entered_list_threads: Arc::clone(&entered_the_hang),
             released: Arc::clone(&release_the_hang),
+            entries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }),
     );
     let (state, relay) = managed_broker_state_parts(&cwd, providers).await;
@@ -3085,6 +3311,7 @@ async fn a_late_frame_does_not_rebind_a_device_to_its_closed_connection() {
         Arc::new(GatedThreadsProvider {
             entered_list_threads: Arc::clone(&entered_the_hang),
             released: Arc::clone(&release_the_hang),
+            entries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }),
     );
     let (state, relay) = managed_broker_state_parts(&cwd, providers).await;
