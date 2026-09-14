@@ -8,11 +8,38 @@ import { mountIosInstallHint } from "./ios-install.js";
 import { registerRemotePwa } from "./pwa.js";
 import { renderLog } from "./session-surface.js";
 import { sidebarGestureDebugEnabled } from "./sidebar-debug-flag.js";
-import { applyFileChange, applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent, cancelRemoteThreadSearch, cancelRemoteThreadsPoll, clearSessionRuntime, delegateRemote, deleteRemoteReview, fetchAskUserQuestionDetail, fetchRemoteProviderModels, fetchRemoteProviders, fetchRemoteThreadTranscript, fetchTranscriptEntryDetail, forkRemoteSession, probeRemoteThreadsExist, refreshRemoteThreads, repairRemoteWorkspace, requestRemoteReview, resolveRemoteReview, resolveRemoteWorkflow, resumeRemoteSession, sendMessage, setRemoteGoal, startRemoteSession, startRemoteWorkflow, stopActiveTurn, stopRemoteGoal, submitAskUserAnswer, submitDecision, syncRemoteSnapshot, takeOverControl, updateRemoteSessionSettings, viewRemoteThread } from "./session-ops.js";
+import { applyFileChange, applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent, cancelRemoteThreadSearch, cancelRemoteThreadsPoll, clearSessionRuntime, delegateRemote, deleteRemoteReview, fetchAskUserQuestionDetail, fetchRemoteProviderModels, fetchRemoteProviders, fetchRemoteThreadTranscript, fetchTranscriptEntryDetail, forkRemoteSession, probeRemoteThreadsExist, refreshRemoteThreads, repairRemoteWorkspace, requestRemoteReview, resolveRemoteReview, resolveRemoteWorkflow, resetDeclaredWatchedThreads, resumeRemoteSession, sendMessage, setRemoteGoal, startRemoteSession, startRemoteWorkflow, stopActiveTurn, stopRemoteGoal, submitAskUserAnswer, submitDecision, syncRemoteSnapshot, takeOverControl, updateRemoteSessionSettings, viewRemoteThread } from "./session-ops.js";
 import { clearActiveRelaySelection, ensureDeviceIdentity, hydrateStoredRemoteSecrets, selectRelayProfile, state } from "./state.js";
 import { applyRemoteSurfacePatch, createResetRemoteSurfaceStatePatch } from "./surface-state.js";
 
 let runtimeConfigured = false;
+
+/// What this browser must do about the RELAY coming and going, as opposed to its own
+/// socket. Exported so the recovery it owes can be tested: none of it is observable
+/// through the socket, and all of it is state the relay drops on its side.
+export function handleRelayPresence(kind, peer) {
+  if (peer?.role !== "relay" || !state.remoteAuth) {
+    return;
+  }
+  if (kind === "joined") {
+    void recoverRemoteSession("relay joined");
+    // Anything still unanswered is asked again under its ORIGINAL action id, so a
+    // reply lost while the relay was away is served from its replay cache rather
+    // than by running the action a second time.
+    void resendPendingActions();
+    return;
+  }
+  // The relay ending its own session — which is what a dropped publish now causes —
+  // leaves this browser's socket up, so nothing else here notices. Without this the
+  // pending action just waits out its deadline and reports a failure the user is
+  // liable to answer by redoing a write.
+  suspendPendingActionDeadlines();
+  // The relay drops every broker watch set with its connection, and a declaration is
+  // not a pending action, so nothing above brings it back. The dedupe key is this
+  // browser's own peer id, which has not changed — so without this the phone believes
+  // the set is already declared and the thread on screen stops receiving deltas.
+  resetDeclaredWatchedThreads();
+}
 
 export function ensureRemoteRuntimeConfigured() {
   if (runtimeConfigured) {
@@ -55,24 +82,7 @@ export function ensureRemoteRuntimeConfigured() {
       cancelRemoteThreadsPoll();
       rejectPendingActions("broker socket disconnected");
     },
-    onRelayPresence(kind, peer) {
-      if (peer?.role !== "relay" || !state.remoteAuth) {
-        return;
-      }
-      if (kind === "joined") {
-        void recoverRemoteSession("relay joined");
-        // Anything still unanswered is asked again under its ORIGINAL action id, so a
-        // reply lost while the relay was away is served from its replay cache rather
-        // than by running the action a second time.
-        void resendPendingActions();
-        return;
-      }
-      // The relay ending its own session — which is what a dropped publish now causes —
-      // leaves this browser's socket up, so nothing else here notices. Without this the
-      // pending action just waits out its deadline and reports a failure the user is
-      // liable to answer by redoing a write.
-      suspendPendingActionDeadlines();
-    },
+    onRelayPresence: handleRelayPresence,
   });
 
   configureRemoteActions({

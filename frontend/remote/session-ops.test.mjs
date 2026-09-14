@@ -7437,3 +7437,65 @@ for (const [fromGeneration, toGeneration, label] of [
     );
   });
 }
+
+// The relay deletes every broker watch set when its own connection ends. The phone's
+// socket is untouched by that, so its peer id — and therefore the dedupe key — does not
+// change, and the declaration is suppressed as already sent. The thread on screen then
+// receives no deltas until the user navigates somewhere else and back.
+test("a relay that left makes the phone declare its watch set again", async () => {
+  activeBrowser = installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { declareWatchedThreads } = await import("./session-ops.js");
+  const { handleRelayPresence } = await import("./remote-runtime.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-watch-redeclare",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-redeclare" });
+  state.session = { active_thread_id: "thread-redeclare" };
+  state.realSession = null;
+  state.viewOnlyThreadId = null;
+
+  const declared = [];
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      if (frame.payload?.request?.type === "watch_threads") {
+        declared.push(frame.payload.request.input.thread_ids.join(" "));
+      }
+    },
+  };
+
+  assert.equal(declareWatchedThreads(), true, "the first declaration is sent");
+  assert.equal(
+    declareWatchedThreads(),
+    false,
+    "an unchanged declaration is deduped, which is what makes the relay's loss invisible"
+  );
+
+  handleRelayPresence("left", { role: "relay", peer_id: "relay-1" });
+
+  assert.equal(
+    declareWatchedThreads(),
+    true,
+    "the relay lost this surface's watch set with its connection, so the same set has to "
+      + "be declared again — the phone's own peer id has not changed and cannot say so"
+  );
+
+  state.socket = null;
+});

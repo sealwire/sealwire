@@ -1048,8 +1048,14 @@ async fn run_broker_session_with_liveness(
             });
             // A frame with nowhere to go is a Stop or an approval the user pressed and
             // nothing ever ran: `frontend/remote/actions.js` retries only session-claim
-            // failures. Ending the session is what makes the phone resend its pending
-            // action ids, so shedding is the lossy option here, not the gentle one.
+            // failures. Ending the session is what makes the phone resend, so shedding is
+            // the lossy option here, not the gentle one.
+            //
+            // Resend covers actions that WAIT for a reply, plus the watch declaration the
+            // relay-left handler re-arms. A fire-and-forget action whose reply nobody
+            // keeps — push registration is the one that matters — is still lost, and the
+            // phone still believes it succeeded. Narrow, because that frame has to be the
+            // one that overflows, but real.
             if let Err(error) = sender.try_send(message) {
                 let _ = handler_error_tx.try_send(match error {
                     tokio::sync::mpsc::error::TrySendError::Full(_) => {
