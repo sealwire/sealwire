@@ -250,7 +250,7 @@ still running — the agent may still be working to it. Stop the session itself 
         let slot = self.acquire_session_slot().map_err(|_| {
             "this session is starting a turn right now — try again in a moment".to_string()
         })?;
-        let handed_over = {
+        let (handed_over, goal_turn) = {
             let mut relay = self.relay.write().await;
             ensure_thread_in_device_scope(&relay, thread_id, device_id)?;
             // Claimed before the existence check on purpose: a Stop that finds no goal
@@ -266,11 +266,14 @@ still running — the agent may still be working to it. Stop the session itself 
             // already charged for may be inside the provider call, where no turn
             // is observable yet.
             let handed_over = goal.dispatch_open;
+            // And WHICH turn, for the same reason a revision needs it: "stop this
+            // session's turn" stops whatever the person happens to be doing.
+            let goal_turn = goal.dispatch_turn_id.clone();
             relay.update_goal(thread_id, |goal| {
                 goal.settle(GoalStatus::Cancelled, "stopped by the user")
             });
             relay.notify();
-            handed_over
+            (handed_over, goal_turn)
         };
         // A stop that only clears the card is not a stop: the turn the relay
         // started carries on, and carries on editing. Never trust the cancel
@@ -279,9 +282,22 @@ still running — the agent may still be working to it. Stop the session itself 
         if !handed_over && !self.thread_working(thread_id).await {
             return Ok(());
         }
-        let _ = self.request_thread_stop(thread_id).await;
-        drop(slot);
-        if self.drain_thread_turn(thread_id).await {
+        // Named when the goal knows its turn, so neither the stop nor the wait can land
+        // on one the person started. Falls back to the thread only when the goal was
+        // charged for a turn whose id it never learned.
+        let drained = match goal_turn {
+            Some(turn_id) => {
+                self.request_provider_stop(thread_id, Some(&turn_id)).await;
+                drop(slot);
+                self.drain_specific_turn(thread_id, &turn_id).await
+            }
+            None => {
+                let _ = self.request_thread_stop(thread_id).await;
+                drop(slot);
+                self.drain_thread_turn(thread_id).await
+            }
+        };
+        if drained {
             return Ok(());
         }
         Err(

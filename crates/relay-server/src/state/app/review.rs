@@ -3124,7 +3124,22 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
                 return false;
             }
             if Instant::now() >= next_retry {
-                self.request_provider_stop(thread_id, Some(turn_id)).await;
+                // Under the session slot, and re-read while holding it. Two providers
+                // ignore the turn id and cancel whatever is current, so a turn that ends
+                // between reading it and asking would have its replacement cancelled.
+                // A slot we cannot get means someone is mid-send; waiting is right.
+                if let Ok(_slot) = self.acquire_session_slot() {
+                    let still_running = {
+                        let relay = self.relay.read().await;
+                        relay
+                            .runtime_for_thread(thread_id)
+                            .and_then(|runtime| runtime.active_turn_id.clone())
+                    };
+                    if still_running.as_deref() != Some(turn_id) {
+                        return true;
+                    }
+                    self.request_provider_stop(thread_id, Some(turn_id)).await;
+                }
                 next_retry = Instant::now() + INTERRUPT_RETRY_INTERVAL;
             }
             tokio::select! {

@@ -27198,6 +27198,15 @@ watchdog settle this Blocked",
             !provider.stop_was_requested_for("turn-mine").await,
             "revising the goal cancelled a turn the goal never started"
         );
+        assert_eq!(
+            app.relay
+                .read()
+                .await
+                .goal_for_thread(&thread)
+                .map(|goal| goal.objective.clone()),
+            Some("a different objective".to_string()),
+            "and the revision itself happened"
+        );
     }
 
     // `dispatch_open` says a hand-over was charged, not that the turn now running is the
@@ -27226,12 +27235,26 @@ watchdog settle this Blocked",
             relay.ensure_runtime_for_thread(&thread).active_turn_id = Some("turn-mine".to_string());
         }
 
-        // The revision may well report that it cannot vouch for the turn the goal owes —
-        // it has no id for it. What it must never do is cancel a turn that is not that.
-        let _ = app
+        // The revision reports that it cannot vouch for the turn the goal owes — it has no
+        // id for it — but it still APPLIES. Both halves matter: refusing to change the
+        // objective at all would also pass the assertion below.
+        let revised = app
             .set_goal(&thread, "a different objective", None, false, Some(12))
             .await;
 
+        assert!(
+            revised.is_err(),
+            "with a turn owed and no id for it, the revision cannot vouch for it: {revised:?}"
+        );
+        assert_eq!(
+            app.relay
+                .read()
+                .await
+                .goal_for_thread(&thread)
+                .map(|goal| goal.objective.clone()),
+            Some("a different objective".to_string()),
+            "the revision the user asked for has to have happened"
+        );
         assert!(
             !provider.stop_was_requested_for("turn-mine").await,
             "revising the goal cancelled a turn the person had typed themselves"
@@ -27349,7 +27372,7 @@ watchdog settle this Blocked",
         grant_workspace(&app, &cwd).await;
         pair_device(&app, "dev", Vec::new()).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "the original objective", None, Some(10))
+        app.set_goal(&thread, "the original objective", None, false, Some(10))
             .await
             .expect("the user sets one");
 
@@ -27358,7 +27381,7 @@ watchdog settle this Blocked",
 
         let stopped = app.cancel_goal(&thread, None, Some(11)).await;
         let revised = app
-            .set_goal(&thread, "something else", None, Some(12))
+            .set_goal(&thread, "something else", None, false, Some(12))
             .await;
 
         assert!(
@@ -27375,6 +27398,44 @@ watchdog settle this Blocked",
         app.cancel_goal(&thread, None, Some(13))
             .await
             .expect("stopping works once the send is done");
+    }
+
+    // Stopping a goal must stop the goal's turn, not "whatever this session is doing".
+    // The thread-wide wait retries against whatever is current, so a goal turn that ends
+    // while the stop is in flight leaves the retry cancelling the turn that replaced it.
+    #[tokio::test]
+    async fn stopping_a_goal_never_asks_an_unrelated_turn_to_stop() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "dev", Vec::new()).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "the original objective", None, false, Some(10))
+            .await
+            .expect("the user sets one");
+
+        app.set_review_drain_max_ms(200);
+        {
+            let mut relay = app.relay.write().await;
+            relay.update_goal(&thread, |goal| goal.hand_over());
+            let generation = relay
+                .goal_for_thread(&thread)
+                .map(|goal| goal.dispatch_generation)
+                .expect("the goal exists");
+            relay.update_goal(&thread, |goal| {
+                goal.note_dispatch_turn(generation, Some("turn-goal".to_string()))
+            });
+            // The goal's turn has already ended and the person has started their own.
+            relay.ensure_runtime_for_thread(&thread).active_turn_id = Some("turn-user".to_string());
+        }
+
+        let _ = app.cancel_goal(&thread, None, Some(11)).await;
+
+        assert!(
+            !provider.stop_was_requested_for("turn-user").await,
+            "stopping the goal asked a turn the person had started to stop"
+        );
     }
 
     // Stopping the turn a goal is running means stop. The driver ticks every three

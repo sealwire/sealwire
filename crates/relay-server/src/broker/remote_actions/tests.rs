@@ -1899,7 +1899,7 @@ async fn a_claim_challenge_from_a_closed_connection_does_not_take_the_device_bac
         change_tx.clone(),
         SecurityProfile::private(),
     )));
-    let (stale_lease, live_lease) = {
+    {
         let mut relay = relay.write().await;
         relay.paired_devices.insert(
             "phone-1".to_string(),
@@ -1915,20 +1915,62 @@ async fn a_claim_challenge_from_a_closed_connection_does_not_take_the_device_bac
                 path_scope: Vec::new(),
             },
         );
-        // The old connection's lease, then it goes, then the phone comes back as a new
-        // peer and becomes the one the device is bound to.
-        let stale = relay.open_surface_lease("surface-old");
+        relay.mark_surface_peer_online("surface-old")
+    };
+    let state = AppState::from_parts(relay.clone(), HashMap::new(), change_tx);
+    let stale_lease = relay
+        .read()
+        .await
+        .current_surface_lease("surface-old")
+        .expect("the old connection holds one");
+
+    // The old connection got a challenge of its own while it was still live — so what
+    // refuses it below has to be the lease, not the challenge's own peer binding.
+    let old_challenge = state
+        .issue_claim_challenge("phone-1", "surface-old", stale_lease)
+        .await
+        .expect("the live connection of the day gets a challenge");
+
+    // Then it goes, and the phone comes back as a new peer the device binds to.
+    let live_lease = {
+        let mut relay = relay.write().await;
         relay.mark_surface_peer_offline("surface-old");
         relay.mark_surface_peer_online("surface-new");
         relay
             .mark_paired_device_seen("phone-1", "surface-new", None, 2)
             .expect("bind");
-        let live = relay
+        relay
             .current_surface_lease("surface-new")
-            .expect("the live connection holds one");
-        (stale, live)
+            .expect("the live connection holds one")
     };
-    let state = AppState::from_parts(relay.clone(), HashMap::new(), change_tx);
+
+    // Completing the OLD connection's own challenge, before anything prunes it: it is
+    // still on file and still belongs to that peer, so the only thing left to refuse it
+    // is the lease. This is the half that binds the device and mints a token.
+    assert!(
+        state
+            .complete_remote_claim(
+                "phone-1",
+                &old_challenge.challenge_id,
+                "surface-old",
+                stale_lease
+            )
+            .await
+            .is_err(),
+        "a claim completed from a connection that has gone binds the device to a dead \
+         socket and mints a token the live connection cannot use"
+    );
+    assert_eq!(
+        relay
+            .read()
+            .await
+            .paired_devices
+            .get("phone-1")
+            .and_then(|device| device.last_peer_id.clone())
+            .as_deref(),
+        Some("surface-new"),
+        "and must leave the binding where it was"
+    );
 
     // The live connection has a challenge in hand.
     let live = state
