@@ -425,6 +425,10 @@ pub struct RelayState {
     pub paired_devices: HashMap<String, PairedDevice>,
     online_surface_peer_ids: HashSet<String>,
     online_surface_peer_devices: HashMap<String, String>,
+    /// Surfaces this broker connection WATCHED leave, as opposed to ones it never knew
+    /// about. Absent from the online set means both, and they deserve opposite answers:
+    /// a reply to a surface we saw go is one nobody can read.
+    departed_surface_peer_ids: HashSet<String>,
     /// Which threads each SURFACE is currently looking at, so transcript deltas are
     /// published only where they can be rendered.
     ///
@@ -680,6 +684,7 @@ impl RelayState {
             paired_devices: HashMap::new(),
             online_surface_peer_ids: HashSet::new(),
             online_surface_peer_devices: HashMap::new(),
+            departed_surface_peer_ids: HashSet::new(),
             watched_threads: HashMap::new(),
             usage_store: crate::usage::store::UsageStore::disabled(),
             codex_usage: crate::usage::CodexUsageTracker::new(),
@@ -4728,6 +4733,7 @@ impl RelayState {
         self.orchestrator_proposals = persisted.orchestrator_proposals.clone();
         self.recompute_reviewer_thread_seq();
         self.online_surface_peer_ids.clear();
+        self.departed_surface_peer_ids.clear();
         self.online_surface_peer_devices.clear();
         self.backfill_device_records_from_paired_devices();
         self.pending_pairings.clear();
@@ -5192,6 +5198,7 @@ impl RelayState {
         self.broker_connected = connected;
         if !connected {
             self.online_surface_peer_ids.clear();
+            self.departed_surface_peer_ids.clear();
             self.online_surface_peer_devices.clear();
             // Broker surfaces are gone with the connection, so their watch sets go too
             // (the client re-declares on reconnect). LOCAL tabs are NOT affected — they
@@ -5280,6 +5287,7 @@ impl RelayState {
     }
 
     pub fn mark_surface_peer_online(&mut self, peer_id: &str) -> bool {
+        self.departed_surface_peer_ids.remove(peer_id);
         self.online_surface_peer_ids.insert(peer_id.to_string())
     }
 
@@ -5292,8 +5300,17 @@ impl RelayState {
         self.online_surface_peer_ids.contains(peer_id)
     }
 
+    /// Whether this surface was seen leaving, rather than merely never seen.
+    ///
+    /// A reply to a surface we watched go is one nobody will read; a reply to an unknown
+    /// peer may still be wanted, because a presence set can be incomplete.
+    pub fn surface_peer_has_departed(&self, peer_id: &str) -> bool {
+        self.departed_surface_peer_ids.contains(peer_id)
+    }
+
     pub fn mark_surface_peer_offline(&mut self, peer_id: &str) -> bool {
         self.online_surface_peer_devices.remove(peer_id);
+        self.departed_surface_peer_ids.insert(peer_id.to_string());
         let removed = self.online_surface_peer_ids.remove(peer_id);
         self.prune_offline_broker_surfaces();
         removed
@@ -5304,6 +5321,8 @@ impl RelayState {
         I: IntoIterator<Item = String>,
     {
         self.online_surface_peer_ids = peer_ids.into_iter().collect();
+        self.departed_surface_peer_ids
+            .retain(|peer_id| !self.online_surface_peer_ids.contains(peer_id));
         self.online_surface_peer_devices
             .retain(|peer_id, _| self.online_surface_peer_ids.contains(peer_id));
         self.prune_offline_broker_surfaces();
@@ -5940,6 +5959,7 @@ impl RelayState {
         self.orchestrator_proposals = persisted.orchestrator_proposals.clone();
         self.recompute_reviewer_thread_seq();
         self.online_surface_peer_ids.clear();
+        self.departed_surface_peer_ids.clear();
         self.online_surface_peer_devices.clear();
         self.backfill_device_records_from_paired_devices();
         self.pending_pairings.clear();

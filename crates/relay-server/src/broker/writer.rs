@@ -86,6 +86,8 @@ const SLOW_FRAME_WRITE_WARN_MILLIS: u128 = 500;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TrainHandoff {
     Queued,
+    /// Never queued: the surface it was for had already left the room.
+    Dropped,
     /// Too many large replies already outstanding. The caller must answer the client
     /// some other way rather than wait — see `send_train`.
     Busy,

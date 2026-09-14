@@ -2132,6 +2132,16 @@ async fn publish_remote_action_result_chunks(
         publish_interval_ms = REMOTE_ACTION_RESULT_CHUNK_PUBLISH_INTERVAL_MILLIS,
         "queueing broker remote action result chunks"
     );
+    // A train the writer can never abandon: it only stops one whose surface it was TOLD
+    // about, and an already-departed peer is recorded as nobody. So the whole reply paces
+    // out at someone who has gone, holding the single train slot the entire time.
+    if state.surface_peer_has_departed(target_peer_id).await {
+        info!(
+            chunk_count,
+            error_context, "dropping a chunked reply: its surface already left"
+        );
+        return Ok(TrainHandoff::Dropped);
+    }
     let chunks = chunk_payloads
         .iter()
         .map(frame_message_for_payload)

@@ -1194,6 +1194,13 @@ marking idle locally."
         let broker_peer_id = relay.paired_device_peer_id(&device_id);
         let surface_id = match broker_peer_id {
             Some(peer_id) => {
+                // A declaration queued behind a slow action outlives its surface. Honouring
+                // it here would restore the watch the departure pruned, and nothing prunes
+                // it a second time — the provider then produces deltas for a phone that is
+                // gone until the relay's whole broker connection resets.
+                if relay.surface_peer_has_departed(&peer_id) {
+                    return Ok(());
+                }
                 relay.register_broker_surface(&peer_id);
                 peer_id
             }

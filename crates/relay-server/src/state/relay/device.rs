@@ -818,6 +818,13 @@ impl RelayState {
         peer_id: &str,
         now: u64,
     ) -> Result<(), String> {
+        // A frame queued behind a slow action outlives its connection, and the phone has
+        // usually reconnected as a new peer by then. Stamping the closed one here points
+        // every reply at a socket nobody is reading. Presence marks a peer online before
+        // binding it, so a genuine join is never refused by this.
+        if self.surface_peer_has_departed(peer_id) {
+            return Ok(());
+        }
         let device = self
             .paired_devices
             .get_mut(device_id)

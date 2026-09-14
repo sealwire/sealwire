@@ -68,6 +68,11 @@ impl AppState {
         relay.surface_peer_is_online(peer_id)
     }
 
+    pub(crate) async fn surface_peer_has_departed(&self, peer_id: &str) -> bool {
+        let relay = self.relay.read().await;
+        relay.surface_peer_has_departed(peer_id)
+    }
+
     pub(crate) async fn broker_targets(&self) -> Vec<BrokerTarget> {
         let relay = self.relay.read().await;
         relay

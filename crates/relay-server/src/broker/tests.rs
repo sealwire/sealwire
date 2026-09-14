@@ -1892,6 +1892,97 @@ async fn managed_broker_state_parts(
     )
 }
 
+/// Hangs until the test lets go, so a queue can be filled behind it and then drained.
+struct GatedThreadsProvider {
+    entered_list_threads: Arc<tokio::sync::Notify>,
+    released: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::provider::ProviderBridge for GatedThreadsProvider {
+    async fn list_threads(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<crate::protocol::ThreadSummaryView>, String> {
+        self.entered_list_threads.notify_one();
+        self.released.notified().await;
+        Ok(Vec::new())
+    }
+    async fn list_models(&self) -> Result<Vec<crate::protocol::ModelOptionView>, String> {
+        Ok(Vec::new())
+    }
+    async fn start_thread(
+        &self,
+        _request: crate::provider::StartThreadRequest,
+    ) -> Result<crate::provider::StartThreadResult, String> {
+        Err("not used by this test".to_string())
+    }
+    async fn resume_thread(
+        &self,
+        _thread_id: &str,
+        _approval_policy: &str,
+        _sandbox: &str,
+    ) -> Result<(), String> {
+        Err("not used by this test".to_string())
+    }
+    async fn read_thread(
+        &self,
+        _thread_id: &str,
+    ) -> Result<crate::provider::ThreadSyncData, String> {
+        Err("not used by this test".to_string())
+    }
+    async fn read_thread_entry_detail(
+        &self,
+        _thread_id: &str,
+        _item_id: &str,
+    ) -> Result<Option<crate::protocol::TranscriptEntryView>, String> {
+        Ok(None)
+    }
+    async fn archive_thread(&self, _thread_id: &str) -> Result<(), String> {
+        Err("not used by this test".to_string())
+    }
+    async fn delete_thread_permanently(
+        &self,
+        _thread_id: &str,
+    ) -> Result<crate::codex_local::LocalThreadDeleteSummary, String> {
+        Err("not used by this test".to_string())
+    }
+    async fn start_turn(
+        &self,
+        _thread_id: &str,
+        _text: &str,
+        _model: &str,
+        _effort: &str,
+        _images: &[crate::provider::ProviderImage],
+    ) -> Result<Option<String>, String> {
+        Err("not used by this test".to_string())
+    }
+    async fn request_turn_stop(
+        &self,
+        _thread_id: &str,
+        _turn_id: Option<&str>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn respond_to_approval(
+        &self,
+        _pending: &crate::state::PendingApproval,
+        _input: &crate::protocol::ApprovalDecisionInput,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn respond_to_ask_user_question(
+        &self,
+        _request_id: &str,
+        _answers: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn provider_name(&self) -> &'static str {
+        "gated"
+    }
+}
+
 /// Answers nothing, slowly. A cold provider catalog is the real shape of this: Codex
 /// alone is allowed thirty seconds, and the relay awaits it inside the receive loop.
 struct NeverAnswersProvider {
@@ -2254,6 +2345,572 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
     );
 }
 
+/// A surface's queued frames outlive its departure. They must not put it back.
+///
+/// The departure prunes the surface's watch set, but a `watch_threads` already queued
+/// behind a slow action runs afterwards and re-registers it. Nothing prunes it again, so
+/// the provider keeps producing deltas for a phone that has gone, until the relay's whole
+/// broker connection resets.
+#[tokio::test]
+async fn a_frame_queued_before_a_departure_does_not_re_register_the_surface() {
+    if !broker_session_e2e_enabled() {
+        eprintln!("skipping: set AGENT_RELAY_BROKER_SESSION_E2E=1 to run the broker session e2e");
+        return;
+    }
+
+    let workspace = tempfile::TempDir::new().expect("tmpdir");
+    let cwd = workspace.path().to_string_lossy().to_string();
+
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener should bind");
+    let address = listener.local_addr().expect("listener should resolve");
+    let observations = Arc::new(std::sync::Mutex::new(BrokerObservations::default()));
+    let broker_view = Arc::clone(&observations);
+    let entered_the_hang = Arc::new(tokio::sync::Notify::new());
+    let broker_waits_for_the_hang = Arc::clone(&entered_the_hang);
+    let hang_was_entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let broker_saw_the_hang = Arc::clone(&hang_was_entered);
+    let release_the_hang = Arc::new(tokio::sync::Notify::new());
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("broker should accept");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("handshake should succeed");
+
+        let welcome = ServerMessage::Welcome {
+            protocol_version: BROKER_PROTOCOL_VERSION,
+            channel_id: "room-e2e".to_string(),
+            peer_id: "relay-e2e".to_string(),
+            peers: vec![surface_peer("surface-a", "phone-1")],
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&welcome).expect("welcome serializes"),
+            ))
+            .await
+            .expect("welcome sends");
+
+        socket
+            .send(Message::Text(plain_action_frame(
+                "surface-a",
+                "action-hangs",
+                serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
+            )))
+            .await
+            .expect("hanging request sends");
+        if tokio::time::timeout(Duration::from_secs(2), broker_waits_for_the_hang.notified())
+            .await
+            .is_ok()
+        {
+            broker_saw_the_hang.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        // Both queue behind the hang. The second one only exists so the test can tell
+        // when the first has run: a watch declaration is answered with nothing.
+        socket
+            .send(Message::Text(plain_action_frame(
+                "surface-a",
+                "action-watch",
+                serde_json::json!({
+                    "type": "watch_threads",
+                    "input": { "thread_ids": ["thread-x"], "device_id": "phone-1" }
+                }),
+            )))
+            .await
+            .expect("watch request sends");
+        socket
+            .send(Message::Text(plain_action_frame(
+                "surface-a",
+                "action-after-watch",
+                serde_json::json!({ "type": "fetch_projects" }),
+            )))
+            .await
+            .expect("follow-up request sends");
+
+        let left = ServerMessage::Presence {
+            channel_id: "room-e2e".to_string(),
+            kind: PresenceKind::Left,
+            peer: surface_peer("surface-a", "phone-1"),
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&left).expect("presence serializes"),
+            ))
+            .await
+            .expect("presence sends");
+
+        while let Some(frame) = socket.next().await {
+            let Ok(frame) = frame else { break };
+            match frame {
+                Message::Ping(payload) => {
+                    let _ = socket.send(Message::Pong(payload)).await;
+                }
+                Message::Close(_) => break,
+                Message::Text(text) => {
+                    let payload = serde_json::from_str::<serde_json::Value>(&text).ok();
+                    let field = |name: &str| {
+                        payload
+                            .as_ref()
+                            .and_then(|value| value.get("payload"))
+                            .and_then(|payload| payload.get(name))
+                            .and_then(|found| found.as_str())
+                            .map(str::to_string)
+                    };
+                    let kind = field("kind").unwrap_or_else(|| "unknown".to_string());
+                    let label = match field("action_id") {
+                        Some(action_id) => format!("{kind}:{action_id}"),
+                        None => kind,
+                    };
+                    broker_view
+                        .lock()
+                        .unwrap()
+                        .frames
+                        .push((label, std::time::Instant::now()));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let config = heartbeat_test_config(format!("ws://{address}")).await;
+    let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> = HashMap::new();
+    providers.insert(
+        "gated".to_string(),
+        Arc::new(GatedThreadsProvider {
+            entered_list_threads: Arc::clone(&entered_the_hang),
+            released: Arc::clone(&release_the_hang),
+        }),
+    );
+    let (state, relay) = managed_broker_state_parts(&cwd, providers).await;
+    let session_state = state.clone();
+    let session = tokio::spawn(async move {
+        let mut change_rx = session_state.subscribe();
+        let _ = run_broker_session_with_liveness(
+            &session_state,
+            &mut change_rx,
+            &config,
+            BrokerLivenessConfig {
+                ping_interval: Duration::from_secs(30),
+                pong_timeout: Duration::from_secs(30),
+            },
+        )
+        .await;
+    });
+
+    let mut recorded_as_gone = false;
+    for _ in 0..60 {
+        if relay.read().await.surface_peer_has_departed("surface-a") {
+            recorded_as_gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Only now let the queue drain, so the watch declaration lands AFTER the departure.
+    release_the_hang.notify_waiters();
+
+    let mut queue_drained = false;
+    for _ in 0..60 {
+        if observations
+            .lock()
+            .unwrap()
+            .kinds()
+            .iter()
+            .any(|kind| kind.ends_with(":action-after-watch"))
+        {
+            queue_drained = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let still_watched = relay.read().await.any_device_watches_thread("thread-x");
+    session.abort();
+
+    let kinds = observations.lock().unwrap().kinds();
+    assert!(
+        hang_was_entered.load(std::sync::atomic::Ordering::SeqCst),
+        "nothing was ever stuck, so the frames below were not queued behind anything"
+    );
+    assert!(
+        recorded_as_gone,
+        "the surface never departed, so re-registering it would be correct; saw {kinds:?}"
+    );
+    assert!(
+        queue_drained,
+        "the frames queued behind the hang never ran, so this proves nothing about what \
+         they did; saw {kinds:?}"
+    );
+    assert!(
+        !still_watched,
+        "a watch declaration queued before the departure put the departed surface back, \
+         so the provider keeps producing deltas nobody will read; saw {kinds:?}"
+    );
+}
+
+/// A late frame from a gone connection must not steal the device back from the live one.
+///
+/// Every action stamps "this device was last seen at this peer". A frame queued behind a
+/// slow action runs after its phone has reconnected as a NEW peer, and stamping the old
+/// one there points every reply at a connection that is closed.
+#[tokio::test]
+async fn a_late_frame_does_not_rebind_a_device_to_its_closed_connection() {
+    if !broker_session_e2e_enabled() {
+        eprintln!("skipping: set AGENT_RELAY_BROKER_SESSION_E2E=1 to run the broker session e2e");
+        return;
+    }
+
+    let workspace = tempfile::TempDir::new().expect("tmpdir");
+    let cwd = workspace.path().to_string_lossy().to_string();
+
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener should bind");
+    let address = listener.local_addr().expect("listener should resolve");
+    let observations = Arc::new(std::sync::Mutex::new(BrokerObservations::default()));
+    let broker_view = Arc::clone(&observations);
+    let entered_the_hang = Arc::new(tokio::sync::Notify::new());
+    let broker_waits_for_the_hang = Arc::clone(&entered_the_hang);
+    let hang_was_entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let broker_saw_the_hang = Arc::clone(&hang_was_entered);
+    let release_the_hang = Arc::new(tokio::sync::Notify::new());
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("broker should accept");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("handshake should succeed");
+
+        let welcome = ServerMessage::Welcome {
+            protocol_version: BROKER_PROTOCOL_VERSION,
+            channel_id: "room-e2e".to_string(),
+            peer_id: "relay-e2e".to_string(),
+            peers: vec![surface_peer("surface-old", "phone-1")],
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&welcome).expect("welcome serializes"),
+            ))
+            .await
+            .expect("welcome sends");
+
+        socket
+            .send(Message::Text(plain_action_frame(
+                "surface-old",
+                "action-hangs",
+                serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
+            )))
+            .await
+            .expect("hanging request sends");
+        if tokio::time::timeout(Duration::from_secs(2), broker_waits_for_the_hang.notified())
+            .await
+            .is_ok()
+        {
+            broker_saw_the_hang.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        socket
+            .send(Message::Text(plain_action_frame(
+                "surface-old",
+                "action-late",
+                serde_json::json!({ "type": "fetch_projects" }),
+            )))
+            .await
+            .expect("late request sends");
+
+        // The phone drops and comes back as a new peer, which is what a reconnect looks
+        // like from here: same device id, different connection.
+        for (kind, peer) in [
+            (PresenceKind::Left, "surface-old"),
+            (PresenceKind::Joined, "surface-new"),
+        ] {
+            let presence = ServerMessage::Presence {
+                channel_id: "room-e2e".to_string(),
+                kind,
+                peer: surface_peer(peer, "phone-1"),
+            };
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&presence).expect("presence serializes"),
+                ))
+                .await
+                .expect("presence sends");
+        }
+
+        while let Some(frame) = socket.next().await {
+            let Ok(frame) = frame else { break };
+            match frame {
+                Message::Ping(payload) => {
+                    let _ = socket.send(Message::Pong(payload)).await;
+                }
+                Message::Close(_) => break,
+                Message::Text(text) => {
+                    let payload = serde_json::from_str::<serde_json::Value>(&text).ok();
+                    let field = |name: &str| {
+                        payload
+                            .as_ref()
+                            .and_then(|value| value.get("payload"))
+                            .and_then(|payload| payload.get(name))
+                            .and_then(|found| found.as_str())
+                            .map(str::to_string)
+                    };
+                    let kind = field("kind").unwrap_or_else(|| "unknown".to_string());
+                    let label = match field("action_id") {
+                        Some(action_id) => format!("{kind}:{action_id}"),
+                        None => kind,
+                    };
+                    broker_view
+                        .lock()
+                        .unwrap()
+                        .frames
+                        .push((label, std::time::Instant::now()));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let config = heartbeat_test_config(format!("ws://{address}")).await;
+    let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> = HashMap::new();
+    providers.insert(
+        "gated".to_string(),
+        Arc::new(GatedThreadsProvider {
+            entered_list_threads: Arc::clone(&entered_the_hang),
+            released: Arc::clone(&release_the_hang),
+        }),
+    );
+    let (state, relay) = managed_broker_state_parts(&cwd, providers).await;
+    let session_state = state.clone();
+    let session = tokio::spawn(async move {
+        let mut change_rx = session_state.subscribe();
+        let _ = run_broker_session_with_liveness(
+            &session_state,
+            &mut change_rx,
+            &config,
+            BrokerLivenessConfig {
+                ping_interval: Duration::from_secs(30),
+                pong_timeout: Duration::from_secs(30),
+            },
+        )
+        .await;
+    });
+
+    let mut reconnected = false;
+    for _ in 0..60 {
+        if relay
+            .read()
+            .await
+            .paired_device_peer_id("phone-1")
+            .as_deref()
+            == Some("surface-new")
+        {
+            reconnected = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    release_the_hang.notify_waiters();
+
+    let mut late_frame_ran = false;
+    for _ in 0..60 {
+        if observations
+            .lock()
+            .unwrap()
+            .kinds()
+            .iter()
+            .any(|kind| kind.ends_with(":action-late"))
+        {
+            late_frame_ran = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let bound_to = relay.read().await.paired_device_peer_id("phone-1");
+    session.abort();
+
+    let kinds = observations.lock().unwrap().kinds();
+    assert!(
+        hang_was_entered.load(std::sync::atomic::Ordering::SeqCst),
+        "nothing was ever stuck, so the late frame was not queued behind anything"
+    );
+    assert!(
+        reconnected,
+        "the device never moved to the new connection, so there was nothing to steal back; \
+         saw {kinds:?}"
+    );
+    assert!(
+        late_frame_ran,
+        "the queued frame never ran, so this proves nothing about what it did; saw {kinds:?}"
+    );
+    assert_eq!(
+        bound_to.as_deref(),
+        Some("surface-new"),
+        "a frame from the closed connection took the device back, so replies now go to a \
+         peer that is gone; saw {kinds:?}"
+    );
+}
+
+/// A big reply is not paced at a surface the relay WATCHED leave.
+///
+/// The writer abandons a train only when it was told which surface the train is for, and
+/// `publish_remote_action_result_chunks` only records that when the surface is online as
+/// the train is queued. So a departure that lands first turns the reply into one nobody
+/// can stop: it paces to the end, holding the single train slot against everyone else.
+/// Realistically the departure arrives mid-action; sending the request afterwards is the
+/// same publisher decision with none of the timing.
+#[tokio::test]
+async fn a_big_reply_is_not_paced_at_a_surface_the_relay_saw_leave() {
+    if !broker_session_e2e_enabled() {
+        eprintln!("skipping: set AGENT_RELAY_BROKER_SESSION_E2E=1 to run the broker session e2e");
+        return;
+    }
+
+    let workspace = workspace_with_a_large_diff();
+    let cwd = workspace.path().to_string_lossy().to_string();
+
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener should bind");
+    let address = listener.local_addr().expect("listener should resolve");
+    let observations = Arc::new(std::sync::Mutex::new(BrokerObservations::default()));
+    let broker_view = Arc::clone(&observations);
+    let arrival_was_seen = Arc::new(tokio::sync::Notify::new());
+    let broker_waits_for_arrival = Arc::clone(&arrival_was_seen);
+    let departure_was_seen = Arc::new(tokio::sync::Notify::new());
+    let broker_waits_for_departure = Arc::clone(&departure_was_seen);
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("broker should accept");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("handshake should succeed");
+
+        let welcome = ServerMessage::Welcome {
+            protocol_version: BROKER_PROTOCOL_VERSION,
+            channel_id: "room-e2e".to_string(),
+            peer_id: "relay-e2e".to_string(),
+            peers: vec![surface_peer("surface-a", "phone-1")],
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&welcome).expect("welcome serializes"),
+            ))
+            .await
+            .expect("welcome sends");
+
+        let _ =
+            tokio::time::timeout(Duration::from_secs(3), broker_waits_for_arrival.notified()).await;
+        let left = ServerMessage::Presence {
+            channel_id: "room-e2e".to_string(),
+            kind: PresenceKind::Left,
+            peer: surface_peer("surface-a", "phone-1"),
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&left).expect("presence serializes"),
+            ))
+            .await
+            .expect("presence sends");
+
+        let _ = tokio::time::timeout(
+            Duration::from_secs(3),
+            broker_waits_for_departure.notified(),
+        )
+        .await;
+        socket
+            .send(Message::Text(plain_action_frame(
+                "surface-a",
+                "action-diff",
+                serde_json::json!({ "type": "fetch_workspace_diff" }),
+            )))
+            .await
+            .expect("diff request sends");
+
+        while let Some(frame) = socket.next().await {
+            let Ok(frame) = frame else { break };
+            match frame {
+                Message::Ping(payload) => {
+                    let _ = socket.send(Message::Pong(payload)).await;
+                }
+                Message::Close(_) => break,
+                Message::Text(text) => {
+                    let kind = serde_json::from_str::<serde_json::Value>(&text)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("payload")
+                                .and_then(|payload| payload.get("kind"))
+                                .and_then(|kind| kind.as_str())
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_else(|| "unknown".to_string());
+                    broker_view
+                        .lock()
+                        .unwrap()
+                        .frames
+                        .push((kind, std::time::Instant::now()));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let config = heartbeat_test_config(format!("ws://{address}")).await;
+    let (state, relay) = managed_broker_state_parts(&cwd, HashMap::new()).await;
+    let session_state = state.clone();
+    let session = tokio::spawn(async move {
+        let mut change_rx = session_state.subscribe();
+        let _ = run_broker_session_with_liveness(
+            &session_state,
+            &mut change_rx,
+            &config,
+            BrokerLivenessConfig {
+                ping_interval: Duration::from_secs(30),
+                pong_timeout: Duration::from_secs(30),
+            },
+        )
+        .await;
+    });
+
+    let mut was_ever_online = false;
+    for _ in 0..60 {
+        if relay.read().await.surface_peer_is_online("surface-a") {
+            was_ever_online = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    arrival_was_seen.notify_one();
+    let mut recorded_as_gone = false;
+    if was_ever_online {
+        for _ in 0..60 {
+            if !relay.read().await.surface_peer_is_online("surface-a") {
+                recorded_as_gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    departure_was_seen.notify_one();
+    // Long enough for a full train to have paced: ~10 chunks at 250ms.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    session.abort();
+
+    let seen = observations.lock().unwrap();
+    let kinds = seen.kinds();
+    assert!(
+        was_ever_online && recorded_as_gone,
+        "the departure was never recorded, so the reply below was not aimed at a surface \
+         the relay knew had gone; saw {kinds:?}"
+    );
+    let chunks = seen.count_of("remote_action_result_chunk");
+    assert!(
+        chunks <= 1,
+        "the relay paced {chunks} chunks at a surface it had already watched leave, and \
+         held the one train slot for the length of it; saw {kinds:?}"
+    );
+}
+
 /// A phone that has gone must be recorded as gone, even while its own last request hangs.
 ///
 /// Until it is, the relay still believes it is there: replies keep being addressed at it
@@ -2279,6 +2936,8 @@ async fn a_departure_is_recorded_while_that_surface_is_still_hanging() {
     // makes it land fast enough that arrival and departure can both pass between polls.
     let arrival_was_seen = Arc::new(tokio::sync::Notify::new());
     let broker_waits_for_arrival = Arc::clone(&arrival_was_seen);
+    let hang_was_entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let broker_saw_the_hang = Arc::clone(&hang_was_entered);
 
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("broker should accept");
@@ -2308,8 +2967,12 @@ async fn a_departure_is_recorded_while_that_surface_is_still_hanging() {
             .await
             .expect("hanging request sends");
 
-        let _ = tokio::time::timeout(Duration::from_secs(2), broker_waits_for_the_hang.notified())
-            .await;
+        if tokio::time::timeout(Duration::from_secs(2), broker_waits_for_the_hang.notified())
+            .await
+            .is_ok()
+        {
+            broker_saw_the_hang.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         let _ =
             tokio::time::timeout(Duration::from_secs(3), broker_waits_for_arrival.notified()).await;
 
@@ -2386,6 +3049,11 @@ async fn a_departure_is_recorded_while_that_surface_is_still_hanging() {
     session.abort();
 
     assert!(
+        hang_was_entered.load(std::sync::atomic::Ordering::SeqCst),
+        "the request never reached the hanging provider, so the departure below overtook \
+         nothing"
+    );
+    assert!(
         was_ever_online,
         "the surface was never recorded as present, so its departure is not evidence of \
          anything"
@@ -2418,6 +3086,8 @@ async fn a_full_surface_queue_ends_the_session_rather_than_shedding_a_frame() {
     let address = listener.local_addr().expect("listener should resolve");
     let entered_the_hang = Arc::new(tokio::sync::Notify::new());
     let broker_waits_for_the_hang = Arc::clone(&entered_the_hang);
+    let hang_was_entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let broker_saw_the_hang = Arc::clone(&hang_was_entered);
     let overflowed_by = 8_usize;
 
     tokio::spawn(async move {
@@ -2449,8 +3119,12 @@ async fn a_full_surface_queue_ends_the_session_rather_than_shedding_a_frame() {
             .expect("hanging request sends");
 
         // Only once its worker is stuck does anything sent after it have nowhere to go.
-        let _ = tokio::time::timeout(Duration::from_secs(2), broker_waits_for_the_hang.notified())
-            .await;
+        if tokio::time::timeout(Duration::from_secs(2), broker_waits_for_the_hang.notified())
+            .await
+            .is_ok()
+        {
+            broker_saw_the_hang.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
 
         for index in 0..(SURFACE_MESSAGE_QUEUE_CAPACITY + overflowed_by) {
             socket
@@ -2506,7 +3180,14 @@ async fn a_full_surface_queue_ends_the_session_rather_than_shedding_a_frame() {
     );
     let error = ended.expect_err("an overflowed surface queue must end the session");
     assert!(
-        error.message().contains("surface"),
+        hang_was_entered.load(std::sync::atomic::Ordering::SeqCst),
+        "the buried frames were sent before anything was actually stuck, so the queue \
+         filled for some other reason than a slow action"
+    );
+    // The exact reason, not just "surface": a worker that died or panicked ends the session
+    // too, and would otherwise satisfy this test without any frame having overflowed.
+    assert!(
+        error.message().contains("fell too far behind"),
         "the session ended for some other reason than the overflow: {}",
         error.message()
     );
