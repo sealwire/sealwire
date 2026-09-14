@@ -991,6 +991,20 @@ async fn run_broker_session_with_liveness(
                     ..
                 }
             );
+            // A departure is two state writes and no provider call, and it cannot wait:
+            // until it lands the relay counts a gone phone as present and keeps addressing
+            // it. Its queued frames still run — only the presence overtakes them, so no
+            // work the surface already asked for is thrown away.
+            if is_surface_departure(&message) {
+                if let Err(error) =
+                    handle_server_message(&handler_state, &handler_writer, message).await
+                {
+                    let _ = handler_error_tx.try_send(error);
+                    return;
+                }
+                surfaces.remove(&key);
+                continue;
+            }
             let sender = surfaces.entry(key.clone()).or_insert_with(|| {
                 let (tx, mut rx) =
                     tokio::sync::mpsc::channel::<ServerMessage>(SURFACE_MESSAGE_QUEUE_CAPACITY);
@@ -1233,6 +1247,19 @@ fn decode_server_frame(frame: Message) -> Result<Option<ServerMessage>, String> 
 /// Which frames must stay in order with each other: a surface's own, keyed by it.
 /// Everything else shares one key, which keeps the session's own frames ordered without
 /// putting them behind any surface.
+/// A surface announcing it has gone. Its own queued frames may be slow; this one is the
+/// relay's own bookkeeping and is the reason the queue exists to be overtaken.
+fn is_surface_departure(message: &ServerMessage) -> bool {
+    matches!(
+        message,
+        ServerMessage::Presence {
+            kind: PresenceKind::Left,
+            peer,
+            ..
+        } if peer.role == PeerRole::Surface
+    )
+}
+
 fn message_ordering_key(message: &ServerMessage) -> String {
     match message {
         ServerMessage::Message { from_peer_id, .. } => from_peer_id.clone(),

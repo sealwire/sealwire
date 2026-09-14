@@ -1854,6 +1854,15 @@ async fn managed_broker_state_with_providers(
     cwd: &str,
     providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>>,
 ) -> AppState {
+    managed_broker_state_parts(cwd, providers).await.0
+}
+
+/// Also hands back the relay itself: `AppState` keeps it private, and some of what the
+/// broker does is only observable as state while a session is still running.
+async fn managed_broker_state_parts(
+    cwd: &str,
+    providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>>,
+) -> (AppState, Arc<RwLock<RelayState>>) {
     let (change_tx, _) = watch::channel(0_u64);
     let relay = Arc::new(RwLock::new(RelayState::new(
         cwd.to_string(),
@@ -1877,7 +1886,10 @@ async fn managed_broker_state_with_providers(
             path_scope: Vec::new(),
         },
     );
-    AppState::from_parts(relay, providers, change_tx)
+    (
+        AppState::from_parts(Arc::clone(&relay), providers, change_tx),
+        relay,
+    )
 }
 
 /// Answers nothing, slowly. A cold provider catalog is the real shape of this: Codex
@@ -2239,6 +2251,149 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
     assert!(
         seen.count_of("ping") > 0,
         "the relay never got to send its own heartbeat either; saw {kinds:?}"
+    );
+}
+
+/// A phone that has gone must be recorded as gone, even while its own last request hangs.
+///
+/// Until it is, the relay still believes it is there: replies keep being addressed at it
+/// and it still counts as a watcher. Nothing about that gets better by waiting for a
+/// provider call the departed phone will never read the answer to.
+#[tokio::test]
+async fn a_departure_is_recorded_while_that_surface_is_still_hanging() {
+    if !broker_session_e2e_enabled() {
+        eprintln!("skipping: set AGENT_RELAY_BROKER_SESSION_E2E=1 to run the broker session e2e");
+        return;
+    }
+
+    let workspace = tempfile::TempDir::new().expect("tmpdir");
+    let cwd = workspace.path().to_string_lossy().to_string();
+
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener should bind");
+    let address = listener.local_addr().expect("listener should resolve");
+    let entered_the_hang = Arc::new(tokio::sync::Notify::new());
+    let broker_waits_for_the_hang = Arc::clone(&entered_the_hang);
+    // The departure must not be sent until the test has SEEN the surface online: the fix
+    // makes it land fast enough that arrival and departure can both pass between polls.
+    let arrival_was_seen = Arc::new(tokio::sync::Notify::new());
+    let broker_waits_for_arrival = Arc::clone(&arrival_was_seen);
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("broker should accept");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("handshake should succeed");
+
+        let welcome = ServerMessage::Welcome {
+            protocol_version: BROKER_PROTOCOL_VERSION,
+            channel_id: "room-e2e".to_string(),
+            peer_id: "relay-e2e".to_string(),
+            peers: vec![surface_peer("surface-a", "phone-1")],
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&welcome).expect("welcome serializes"),
+            ))
+            .await
+            .expect("welcome sends");
+
+        socket
+            .send(Message::Text(plain_action_frame(
+                "surface-a",
+                "action-hangs",
+                serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
+            )))
+            .await
+            .expect("hanging request sends");
+
+        let _ = tokio::time::timeout(Duration::from_secs(2), broker_waits_for_the_hang.notified())
+            .await;
+        let _ =
+            tokio::time::timeout(Duration::from_secs(3), broker_waits_for_arrival.notified()).await;
+
+        let left = ServerMessage::Presence {
+            channel_id: "room-e2e".to_string(),
+            kind: PresenceKind::Left,
+            peer: surface_peer("surface-a", "phone-1"),
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&left).expect("presence serializes"),
+            ))
+            .await
+            .expect("presence sends");
+
+        while let Some(frame) = socket.next().await {
+            let Ok(frame) = frame else { break };
+            match frame {
+                Message::Ping(payload) => {
+                    let _ = socket.send(Message::Pong(payload)).await;
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    });
+
+    let config = heartbeat_test_config(format!("ws://{address}")).await;
+    let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> = HashMap::new();
+    providers.insert(
+        "never-answers".to_string(),
+        Arc::new(NeverAnswersProvider {
+            entered_list_threads: Arc::clone(&entered_the_hang),
+        }),
+    );
+    let (state, relay) = managed_broker_state_parts(&cwd, providers).await;
+
+    let session_state = state.clone();
+    let session = tokio::spawn(async move {
+        let mut change_rx = session_state.subscribe();
+        let _ = run_broker_session_with_liveness(
+            &session_state,
+            &mut change_rx,
+            &config,
+            BrokerLivenessConfig {
+                ping_interval: Duration::from_secs(30),
+                pong_timeout: Duration::from_secs(30),
+            },
+        )
+        .await;
+    });
+
+    // "Not online" is also true before the relay has connected at all, so the arrival has
+    // to be witnessed first or the departure below proves nothing.
+    let mut was_ever_online = false;
+    for _ in 0..60 {
+        if relay.read().await.surface_peer_is_online("surface-a") {
+            was_ever_online = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    arrival_was_seen.notify_one();
+    let mut recorded_as_gone = false;
+    if was_ever_online {
+        for _ in 0..60 {
+            if !relay.read().await.surface_peer_is_online("surface-a") {
+                recorded_as_gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    session.abort();
+
+    assert!(
+        was_ever_online,
+        "the surface was never recorded as present, so its departure is not evidence of \
+         anything"
+    );
+    assert!(
+        recorded_as_gone,
+        "the relay still has the departed surface online: its departure is queued behind \
+         its own hung request, which is exactly the frame that cannot wait"
     );
 }
 
