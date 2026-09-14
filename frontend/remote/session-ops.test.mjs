@@ -7552,8 +7552,11 @@ test("a relay coming back re-sends a pairing request that was still in flight", 
   };
 
   handleRelayPresence("joined", { role: "relay", peer_id: "relay-1" });
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
+  // Polled rather than counted in ticks: the request is several awaits deep (device
+  // identity, signing), and a fixed number of turns is a coin flip under a loaded run.
+  for (let attempt = 0; attempt < 200 && !sent.includes("pairing_request"); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 
   assert.ok(
     sent.includes("pairing_request"),
