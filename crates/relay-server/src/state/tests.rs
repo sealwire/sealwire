@@ -239,6 +239,25 @@ fn test_thread(id: &str, cwd: &str) -> ThreadSummaryView {
 }
 
 #[test]
+fn a_connection_that_drops_without_a_goodbye_still_counts_its_surfaces_as_gone() {
+    // The ordinary disconnect: the socket dies before any Left arrives. The frames those
+    // surfaces queued are still draining on detached workers, so "we never heard it go"
+    // must not read as "it is still here".
+    let (change_tx, _) = watch::channel(0_u64);
+    let mut relay = RelayState::new("/tmp".to_string(), change_tx, SecurityProfile::managed());
+    relay.mark_surface_peer_online("surface-a");
+    relay.set_broker_connection(true);
+
+    relay.set_broker_connection(false);
+
+    assert!(!relay.surface_peer_is_online("surface-a"));
+    assert!(
+        relay.surface_peer_has_departed("surface-a"),
+        "a surface known to this connection is gone with it, whether or not a Left arrived"
+    );
+}
+
+#[test]
 fn sort_threads_by_recency_orders_threads_across_providers() {
     let mut codex_old = test_thread("codex-old", "/tmp/project");
     codex_old.provider = "codex".to_string();

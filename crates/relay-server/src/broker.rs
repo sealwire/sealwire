@@ -991,12 +991,9 @@ async fn run_broker_session_with_liveness(
                     ..
                 }
             );
-            // Presence is two state writes and no provider call, and it cannot wait: until
-            // a departure lands the relay counts a gone phone as present and keeps
-            // addressing it. Arrivals come through here for the same reason and for one
-            // more — handling only departures inline would let an arrival that came FIRST
-            // be applied last, marking a surface that has gone present again. Queued frames
-            // still run either way, so no work the surface already asked for is lost.
+            // Presence is handled here, in arrival order, because a departure that waits
+            // behind its own surface's slow frame leaves the relay addressing a phone that
+            // has gone — and an arrival applied out of order would undo one.
             if is_surface_presence(&message) {
                 if let Err(error) =
                     handle_server_message(&handler_state, &handler_writer, message).await

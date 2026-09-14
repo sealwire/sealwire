@@ -5223,10 +5223,13 @@ impl RelayState {
     pub fn set_broker_connection(&mut self, connected: bool) {
         self.broker_connected = connected;
         if !connected {
-            self.online_surface_peer_ids.clear();
-            // Departed peers are deliberately NOT cleared here. The workers still draining
-            // their frames are detached and outlive this connection, so forgetting now
-            // drops the record exactly while the thing it guards against is still running.
+            // Every surface we knew about goes to DEPARTED, not to forgotten. Their
+            // frames are still draining on detached workers, and a connection that drops
+            // before delivering a Left is the ordinary case, not the exotic one.
+            let known = std::mem::take(&mut self.online_surface_peer_ids);
+            for peer_id in known {
+                self.remember_departed_surface_peer(&peer_id);
+            }
             self.online_surface_peer_devices.clear();
             // Broker surfaces are gone with the connection, so their watch sets go too
             // (the client re-declares on reconnect). LOCAL tabs are NOT affected — they

@@ -22,9 +22,7 @@ use crate::{
     },
 };
 
-/// How long a reconnected asker waits for an answer someone else is producing. Longer
-/// than the client's own deadline on purpose: the point is to answer the session that is
-/// still there, and a waiter that gave up early would leave the id looking unanswerable.
+/// How long a reconnected asker waits for an answer someone else is producing.
 const REMOTE_ACTION_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 use super::{
@@ -2278,13 +2276,10 @@ fn build_plain_remote_action_result_payload(
     })
 }
 
-/// Wait for an action someone else is already running, and answer only if this asker is
-/// still the most recent one.
+/// Wait for an action someone else is already running.
 ///
-/// Returns `None` when a later resend has taken over, or when the relay gave up on the
-/// original without ever learning its outcome — the caller then answers nothing, which is
-/// what the client's own deadline is for. Never says "it failed": a provider that stopped
-/// mid-write did not necessarily not write.
+/// Answers nothing when a later resend has taken over, or when the outcome was never
+/// learned: a provider that stopped mid-write did not necessarily not write.
 async fn await_remote_action_result(
     state: &AppState,
     device_id: &str,
@@ -2296,18 +2291,20 @@ async fn await_remote_action_result(
     let finished = wait.finished.clone();
     let wake = async move { finished.notified().await };
     let mut wake = std::pin::pin!(wake);
-    // Poll once so the subscription exists before the cache is re-read: a result stored
-    // between the reservation and here would otherwise wake nobody.
-    let _ = futures_util::poll!(wake.as_mut());
-    if let Some(cached) = state.completed_remote_action(device_id, action_id).await {
-        return Some(cached);
-    }
-    if tokio::time::timeout(REMOTE_ACTION_WAIT_TIMEOUT, wake)
-        .await
-        .is_err()
+    // Subscribe before reading the cache, or a result stored in between wakes nobody.
+    let woken_already = matches!(
+        futures_util::poll!(wake.as_mut()),
+        std::task::Poll::Ready(())
+    );
+    if !woken_already
+        && tokio::time::timeout(REMOTE_ACTION_WAIT_TIMEOUT, wake)
+            .await
+            .is_err()
     {
         return None;
     }
+    // Checked on every path, including the one where the answer was already on file: an
+    // earlier asker holds the writer of a session that has since been replaced.
     if !state
         .remote_action_waiter_is_current(device_id, action_id, wait.ticket)
         .await
