@@ -282,19 +282,29 @@ still running — the agent may still be working to it. Stop the session itself 
         if !handed_over && !self.thread_working(thread_id).await {
             return Ok(());
         }
-        // Named when the goal knows its turn, so neither the stop nor the wait can land
-        // on one the person started. Falls back to the thread only when the goal was
-        // charged for a turn whose id it never learned.
+        // Only ever the goal's own turn, and only while it is still the one running. Two
+        // providers ignore the id they are given and cancel whatever is current, so
+        // asking about a turn that has already ended is how the turn that REPLACED it
+        // gets cancelled — and "we are owed a turn" was never evidence that the turn
+        // running now is it.
         let drained = match goal_turn {
-            Some(turn_id) => {
+            Some(turn_id)
+                if self.thread_active_turn_id(thread_id).await.as_deref()
+                    == Some(turn_id.as_str()) =>
+            {
                 self.request_provider_stop(thread_id, Some(&turn_id)).await;
                 drop(slot);
                 self.drain_specific_turn(thread_id, &turn_id).await
             }
-            None => {
-                let _ = self.request_thread_stop(thread_id).await;
+            Some(_) => {
                 drop(slot);
-                self.drain_thread_turn(thread_id).await
+                true
+            }
+            // Charged and never told which turn it became. The driver stops what it
+            // started once it sees the goal settled; there is nothing safe to do here.
+            None => {
+                drop(slot);
+                !handed_over
             }
         };
         if drained {

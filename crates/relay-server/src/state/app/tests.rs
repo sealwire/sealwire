@@ -27436,6 +27436,44 @@ watchdog settle this Blocked",
             !provider.stop_was_requested_for("turn-user").await,
             "stopping the goal asked a turn the person had started to stop"
         );
+        // And asked for NOTHING. Two providers ignore the id they are given and cancel
+        // whatever is running, so asking about a turn that has already ended is how the
+        // person's turn gets cancelled on those — invisible to a double that honours ids.
+        assert!(
+            !provider.stop_was_requested_for("turn-goal").await,
+            "the goal's turn had already ended, so asking about it can only reach whatever \
+             replaced it"
+        );
+    }
+
+    // The same, for a goal that was charged for a turn whose id it never learned. "We are
+    // owed a turn" is not evidence that the turn running now is it.
+    #[tokio::test]
+    async fn stopping_a_goal_with_no_turn_of_its_own_stops_nothing() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "dev", Vec::new()).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "the original objective", None, Some(10))
+            .await
+            .expect("the user sets one");
+
+        app.set_review_drain_max_ms(200);
+        {
+            let mut relay = app.relay.write().await;
+            // Charged, never learned an id — a dispatch that failed or was uncertain.
+            relay.update_goal(&thread, |goal| goal.hand_over());
+            relay.ensure_runtime_for_thread(&thread).active_turn_id = Some("turn-user".to_string());
+        }
+
+        let _ = app.cancel_goal(&thread, None, Some(11)).await;
+
+        assert!(
+            !provider.stop_was_requested_for("turn-user").await,
+            "stopping the goal stopped a turn it had no reason to believe was its own"
+        );
     }
 
     // Stopping the turn a goal is running means stop. The driver ticks every three
@@ -29038,8 +29076,18 @@ watchdog settle this Blocked",
             .expect("set");
 
         {
+            // What the driver does: charge the hand-over, then record the turn it became.
+            // The goal stops the turn it started, so the turn has to BE the one it started.
             let mut relay = app.relay.write().await;
             relay.set_active_turn(Some("turn-in-flight".to_string()));
+            relay.update_goal(&thread, |goal| goal.hand_over());
+            let generation = relay
+                .goal_for_thread(&thread)
+                .map(|goal| goal.dispatch_generation)
+                .expect("the goal exists");
+            relay.update_goal(&thread, |goal| {
+                goal.note_dispatch_turn(generation, Some("turn-in-flight".to_string()))
+            });
             relay.notify();
         }
         app.cancel_goal(&thread, None, None).await.expect("stops");
@@ -29100,6 +29148,14 @@ watchdog settle this Blocked",
         {
             let mut relay = app.relay.write().await;
             relay.set_active_turn(Some("turn-that-will-not-die".to_string()));
+            relay.update_goal(&thread, |goal| goal.hand_over());
+            let generation = relay
+                .goal_for_thread(&thread)
+                .map(|goal| goal.dispatch_generation)
+                .expect("the goal exists");
+            relay.update_goal(&thread, |goal| {
+                goal.note_dispatch_turn(generation, Some("turn-that-will-not-die".to_string()))
+            });
             relay.notify();
         }
 
