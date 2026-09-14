@@ -191,6 +191,7 @@ import { matchesApplePlatform } from "./shared/composer-keys.js";
 import { createComposerCommandController } from "./local/composer-commands.js";
 import { canRequestReview, selectReviewLaunchModel } from "./shared/review-state.js";
 import { createGoalActions } from "./shared/goal-actions.js";
+import { prepareAuthoredGoalObjective } from "./shared/goal-objective.js";
 import { createProjectsStore } from "./shared/projects-store.js";
 import { createDevicesCache } from "./shared/devices-cache.js";
 import { createReviewsCache } from "./shared/reviews-cache.js";
@@ -2851,9 +2852,9 @@ const composerCommands = createComposerCommandController({
   // an instruction with no referent.
   askAgent: (callerThreadId, args) =>
     postRelayCommand("/api/session/delegate", { thread_id: callerThreadId, ...args }),
-  // The only way an objective is ever written. There is no agent-facing
-  // equivalent on purpose.
-  setGoal: postSessionGoal,
+  // Authoring via /goal — length-gated. "Keep going" on the Agents card uses
+  // createGoalActions → postSessionGoal directly so a pre-cap dump can resume.
+  setGoal: postSessionGoalFromComposer,
   log: logLine,
 });
 
@@ -2877,7 +2878,16 @@ async function postRelayCommand(path, body) {
 }
 
 function postSessionGoal(threadId, objective) {
+  // Ungated: "Keep going" resubmits a stored objective that may predate the cap.
   return postRelayCommand("/api/session/goal", { thread_id: threadId, objective });
+}
+
+function postSessionGoalFromComposer(threadId, objective) {
+  const prepared = prepareAuthoredGoalObjective(objective);
+  if (prepared.refuse) {
+    return Promise.resolve({ text: prepared.refuse, isError: true });
+  }
+  return postSessionGoal(threadId, prepared.objective);
 }
 
 // Drive a composer submit. The draft text and the target thread are captured

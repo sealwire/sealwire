@@ -238,7 +238,16 @@ function GoalSlot({ goal, onStop = null, onResume = null }) {
     h(
       "article",
       { className: `reviewer-card reviewer-goal${working ? " is-live" : ""}` },
-      h("p", { className: "reviewer-card-title" }, goal.objective),
+      h(
+        "p",
+        {
+          className: "reviewer-card-title reviewer-goal-title",
+          // Full text on hover — the card clamps so a pasted status dump cannot
+          // push every other delegation out of the panel.
+          title: goal.objective || undefined,
+        },
+        goal.objective
+      ),
       goal.outcome
         ? h(
             "p",

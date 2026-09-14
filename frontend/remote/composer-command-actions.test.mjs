@@ -43,6 +43,20 @@ test("a real objective reaches the relay trimmed", async () => {
   assert.equal(stopGoal.calls.length, 0);
 });
 
+test("a status-dump objective is refused before it reaches the relay", async () => {
+  const setGoal = spy();
+  const actions = createRemoteComposerCommandActions({
+    setGoal,
+    stopGoal: spy(),
+    delegate: spy(),
+  });
+  const dump = "x".repeat(501);
+  const answer = await actions.setGoal("thread-1", dump);
+  assert.equal(answer.isError, true);
+  assert.match(answer.text, /at most 500/);
+  assert.equal(setGoal.calls.length, 0);
+});
+
 test("a refused write comes back as an error so the draft is not cleared", async () => {
   const actions = createRemoteComposerCommandActions({
     setGoal: spy(false),

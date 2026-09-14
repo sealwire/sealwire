@@ -859,6 +859,20 @@ test("ReviewerChip surfaces a running goal, and an ask, with no review in sight"
   assert.match(settled, /is-done/);
 });
 
+test("a long goal objective is clamped on the Agents card, with the full text on title", () => {
+  const dump = `${"Aim: ship it.\n".repeat(20)}And a trailing status dump.`;
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      goal: { objective: dump, status: "active", turns: 1, max_turns: 20 },
+      reviewJobs: [],
+      canRequest: false,
+    })
+  );
+  assert.match(html, /reviewer-goal-title/);
+  assert.match(html, /title="/);
+  assert.match(html, /Aim: ship it/);
+});
+
 // A goal that stopped to ask you something is not a finished one. The chip is the whole
 // signal on a phone, so reading "✓ complete" is worse than showing nothing.
 test("a goal that stopped for the user reads as needing attention, not as done", () => {

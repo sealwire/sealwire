@@ -99,6 +99,10 @@ impl From<String> for GoalStatus {
 /// Reaching it must never read as success — see `OutOfTurns`.
 pub(crate) const MAX_GOAL_TURNS: u32 = 20;
 
+/// Hard cap on the standing objective. The relay re-injects it every turn; a
+/// status dump here is not an aim, burns tokens, and blows up the Agents card.
+pub(crate) const MAX_GOAL_OBJECTIVE_CHARS: usize = 500;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Goal {

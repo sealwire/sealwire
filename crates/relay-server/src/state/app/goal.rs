@@ -135,6 +135,17 @@ to one of your own sessions"
                     .to_string(),
             );
         }
+        // "Keep going" resubmits the stored objective. Cap new/changed aims only —
+        // otherwise a pre-cap status dump can never be resumed.
+        let resuming_same = relay
+            .goal_for_thread(thread_id)
+            .is_some_and(|goal| goal.objective == objective);
+        if !resuming_same && objective.chars().count() > crate::state::MAX_GOAL_OBJECTIVE_CHARS {
+            return Err(format!(
+                "keep the goal short (at most {} characters) — what to aim for, not a status report",
+                crate::state::MAX_GOAL_OBJECTIVE_CHARS
+            ));
+        }
         // Revising keeps the turns spent so far: a clarification is not a fresh
         // budget, or the cap could be reset forever by nudging the wording.
         if relay.goal_for_thread(thread_id).is_some() {

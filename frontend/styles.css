@@ -6751,6 +6751,13 @@ body.is-resizing-panel {
   border-color: var(--border-subtle);
   background: var(--surface-1);
 }
+/* Standing aim only — clamp a pasted dump; full text stays on the title tooltip. */
+.reviewer-goal-title {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 
 /* Review -------------------------------------------------------------------
    The only permanently pinned delegation, because it is the only one that decides

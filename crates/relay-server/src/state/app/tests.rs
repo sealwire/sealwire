@@ -28557,6 +28557,72 @@ watchdog settle this Blocked",
     }
 
     #[tokio::test]
+    async fn a_status_dump_objective_is_refused() {
+        // The objective is re-injected every turn; a pasted handover is not an aim.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        let dump = "x".repeat(crate::state::MAX_GOAL_OBJECTIVE_CHARS + 1);
+        let refused = app
+            .set_goal(&thread, &dump, None)
+            .await
+            .expect_err("a status dump must not become the standing aim");
+        assert!(
+            refused.contains("status report") || refused.contains("short"),
+            "refusal names the problem: {refused}"
+        );
+        assert!(
+            app.relay.read().await.goal_for_thread(&thread).is_none(),
+            "and nothing is recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn keep_going_may_resubmit_a_preexisting_long_objective() {
+        // The cap is for new aims. "Keep going" resends the stored text; stranding a
+        // pre-cap dump would leave Stop/Keep going dead with no supported recovery.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        let long = "x".repeat(crate::state::MAX_GOAL_OBJECTIVE_CHARS + 50);
+        {
+            let mut relay = app.relay.write().await;
+            let mut goal =
+                crate::state::Goal::new("goal-long".to_string(), thread.clone(), long.clone());
+            goal.settle(crate::state::GoalStatus::CompleteClaimed, "agent says done");
+            relay.set_goal(goal);
+        }
+        app.set_goal(&thread, &long, None)
+            .await
+            .expect("resubmitting the stored objective is Keep going, not new authoring");
+        let refused_new = app
+            .set_goal(&thread, &format!("{long}!"), None)
+            .await
+            .expect_err("changing it to another long dump is still refused");
+        assert!(
+            refused_new.contains("status report") || refused_new.contains("short"),
+            "{refused_new}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exactly_max_goal_chars_is_accepted() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        let exact = "x".repeat(crate::state::MAX_GOAL_OBJECTIVE_CHARS);
+        app.set_goal(&thread, &exact, None)
+            .await
+            .expect("exactly the cap is allowed");
+    }
+
+    #[tokio::test]
     async fn a_send_that_never_reached_the_provider_does_not_spend_a_turn() {
         // Spending before sending is right for a send that lands. A send refused
         // before the provider ever saw it — budget cap, workspace gone — would

@@ -1,3 +1,5 @@
+import { prepareAuthoredGoalObjective } from "../shared/goal-objective.js";
+
 // The "/" controller expects capabilities that answer `{text, isError}`; the remote
 // helpers answer a boolean and render their own reason. Adapting in one place keeps
 // either side from having to know the other's shape.
@@ -19,10 +21,16 @@ async function settled(run) {
 export function createRemoteComposerCommandActions({ setGoal, stopGoal, delegate } = {}) {
   return {
     setGoal: (threadId, objective) => {
-      const trimmed = (objective || "").trim();
       // Two capabilities rather than one with an empty string: the relay gates and
       // logs them separately, and "/goal" on its own means call it off.
-      return settled(() => (trimmed ? setGoal(threadId, trimmed) : stopGoal(threadId)));
+      const prepared = prepareAuthoredGoalObjective(objective);
+      if (prepared.refuse) {
+        return Promise.resolve({ text: prepared.refuse, isError: true });
+      }
+      if (!prepared.objective) {
+        return settled(() => stopGoal(threadId));
+      }
+      return settled(() => setGoal(threadId, prepared.objective));
     },
     askAgent: (threadId, args) => settled(() => delegate(threadId, args)),
   };
