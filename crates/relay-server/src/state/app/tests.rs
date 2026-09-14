@@ -27149,27 +27149,23 @@ watchdog settle this Blocked",
             });
         }
 
-        app.set_goal(&thread, "a different objective", None, false, Some(12))
-            .await
-            .expect("the other device revises it");
+        // A provider that ignores the stop, which real ones do. Without this the double
+        // ends the turn inside `request_turn_stop`, and "asked" and "saw it stop" are
+        // indistinguishable — deleting the wait would leave this green.
+        provider.ignore_stops_for("turn-old").await;
+
+        let revised = app
+            .set_goal(&thread, "a different objective", None, false, Some(12))
+            .await;
 
         assert!(
             provider.stop_was_requested_for("turn-old").await,
             "the turn handed the old objective was left running against a goal that has \
              been replaced"
         );
-        // Asked is not stopped. The revision waits for the turn to really end, the same
-        // way a stop does, because an agent still editing toward the old objective is the
-        // whole reason for asking.
-        let still_running = {
-            let relay = app.relay.read().await;
-            relay
-                .runtime_for_thread(&thread)
-                .and_then(|runtime| runtime.active_turn_id.clone())
-        };
-        assert_eq!(
-            still_running, None,
-            "the revision reported success while the old objective's turn was still running"
+        assert!(
+            revised.is_err(),
+            "a revision that could not confirm the old turn stopped must say so: {revised:?}"
         );
     }
 

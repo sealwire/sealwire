@@ -481,6 +481,8 @@ pub struct FakeProviderBridge {
     /// Models Claude, whose session does not exist until its first user message.
     promote_on_start: Arc<Mutex<HashMap<String, String>>>,
     stopped_turns: Arc<Mutex<HashSet<String>>>,
+    /// Every stop ASKED for, whatever the configured behaviour did with it.
+    stop_requests: Arc<Mutex<HashSet<String>>>,
     scenario_harness: Option<FakeScenarioHarness>,
     /// `(cwd, system_prompt)` for every thread opened with a persona. The fake
     /// has no model to feed it to, so recording is the whole point: it lets a
@@ -493,7 +495,16 @@ impl FakeProviderBridge {
     /// Whether a stop was asked for this exact turn. Read by tests that need to prove a
     /// turn left working against a superseded objective was actually told to stop.
     pub async fn stop_was_requested_for(&self, turn_id: &str) -> bool {
-        self.stopped_turns.lock().await.contains(turn_id)
+        self.stop_requests.lock().await.contains(turn_id)
+    }
+
+    /// Make this turn ignore a stop, the way a real provider sometimes does. Without it a
+    /// test cannot tell "asked for a stop" apart from "waited to see it happen".
+    pub async fn ignore_stops_for(&self, turn_id: &str) {
+        self.turn_stop_behaviors
+            .lock()
+            .await
+            .insert(turn_id.to_string(), FakeStopBehavior::Ignore);
     }
 
     /// Make `start_thread` take `ms` to answer.
@@ -560,6 +571,7 @@ impl FakeProviderBridge {
             turn_stop_behaviors: Arc::new(Mutex::new(HashMap::new())),
             promote_on_start: Arc::new(Mutex::new(HashMap::new())),
             stopped_turns: Arc::new(Mutex::new(HashSet::new())),
+            stop_requests: Arc::new(Mutex::new(HashSet::new())),
             scenario_harness,
             system_prompts: Arc::new(Mutex::new(Vec::new())),
         })
@@ -1813,6 +1825,9 @@ impl ProviderBridge for FakeProviderBridge {
                 .runtime_for_thread(thread_id)
                 .and_then(|runtime| runtime.active_turn_id.clone()),
         };
+        if let Some(turn_id) = resolved_turn_id.as_deref() {
+            self.stop_requests.lock().await.insert(turn_id.to_string());
+        }
         let behavior = match resolved_turn_id.as_deref() {
             Some(turn_id) => self
                 .turn_stop_behaviors
