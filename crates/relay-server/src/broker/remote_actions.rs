@@ -906,6 +906,7 @@ pub(super) async fn handle_remote_action(
             // Almost always a phone that reconnected: its first attempt is still running,
             // and the writer it would have answered through died with the old session.
             // Answer this one when the original finishes.
+            publish_remote_action_pending(writer, &from_peer_id, &action_id).await;
             let state = state.clone();
             let writer = writer.clone();
             let device_id = resolved_device_id.clone();
@@ -1177,6 +1178,7 @@ pub(super) async fn handle_encrypted_remote_action(
             .await;
         }
         Ok(RemoteActionReplayDecision::InFlight(wait)) => {
+            publish_remote_action_pending(writer, &from_peer_id, &action_id).await;
             let state = state.clone();
             let writer = writer.clone();
             let waited_device_id = device_id.clone();
@@ -2294,6 +2296,26 @@ fn build_plain_remote_action_result_payload(
 ///
 /// Answers nothing when a later resend has taken over, or when the outcome was never
 /// learned: a provider that stopped mid-write did not necessarily not write.
+/// Tell the asker its request is still being worked on by an earlier attempt.
+///
+/// Without it the phone's own deadline decides, and it is shorter than a slow provider
+/// call: it reports a failure for a write that is about to land, and the retry the user
+/// then makes carries a NEW id that no replay cache can recognise.
+async fn publish_remote_action_pending(
+    writer: &BrokerWriter,
+    target_peer_id: &str,
+    action_id: &str,
+) {
+    let _ = publish_payload(
+        writer,
+        OutboundBrokerPayload::RemoteActionPending {
+            action_id: action_id.to_string(),
+            target_peer_id: target_peer_id.to_string(),
+        },
+    )
+    .await;
+}
+
 async fn await_remote_action_result(
     state: &AppState,
     device_id: &str,

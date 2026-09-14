@@ -94,6 +94,15 @@ export async function handleRemoteBrokerPayload(payload) {
     return;
   }
 
+  // Not an answer, so it must not settle anything: the relay is telling this browser that
+  // an earlier attempt at the same action is still running. Its own deadline is shorter
+  // than a slow provider call, and the failure it would report invites a retry under a
+  // NEW id that no replay cache can recognise.
+  if (kind === "remote_action_pending") {
+    extendPendingActionDeadline(payload.action_id);
+    return;
+  }
+
   if (isRemoteActionResultKind(kind)) {
     handleRemoteActionResult(payload.action_id, payload);
     return;

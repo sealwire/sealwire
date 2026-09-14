@@ -2807,6 +2807,14 @@ async fn a_result_reaches_the_session_that_asked_again_after_a_reconnect() {
          ordinary replay and proves nothing about a reconnect; saw {kinds:?}"
     );
     assert!(
+        kinds
+            .iter()
+            .any(|kind| kind.starts_with("remote_action_pending:action-survives")),
+        "the parked resend was never told it was still being worked on, so the phone \
+         counts down against it and reports a failure for work still in progress; saw \
+         {kinds:?}"
+    );
+    assert!(
         !ran_twice,
         "the resend ran the action a second time; the replay cache exists precisely so a \
          resend of a write cannot do that"

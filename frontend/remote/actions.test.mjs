@@ -1595,3 +1595,69 @@ test("a push unregistration stays pending until the relay answers it", async () 
   state.pendingActions.clear();
   state.socket = null;
 });
+
+// The relay's deadline for an action someone else is already running is far longer than
+// this browser's, so without a word from the relay the phone reports a failure for a
+// write that is about to land — and the retry the user then makes carries a NEW id that
+// no replay cache recognises, which is how one message gets sent twice.
+test("a relay saying it is still working restarts the phone's deadline", async () => {
+  installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-still-working",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "private",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-waiting" });
+  state.pendingActions.clear();
+
+  const cleared = [];
+  let nextTimerId = 900;
+  globalThis.window.setTimeout = () => {
+    nextTimerId += 1;
+    return nextTimerId;
+  };
+  globalThis.window.clearTimeout = (id) => {
+    cleared.push(id);
+  };
+
+  let rejected = false;
+  state.pendingActions.set("action-waiting", {
+    actionType: "send_message",
+    request: { text: "hello" },
+    timeoutId: 4242,
+    reject: () => {
+      rejected = true;
+    },
+    resolve: () => {},
+  });
+
+  await handleRemoteBrokerPayload({ kind: "remote_action_pending", action_id: "action-waiting" });
+
+  assert.equal(rejected, false, "a relay still working on it must not fail the action");
+  assert.ok(
+    cleared.includes(4242),
+    "the old deadline is stood down, so the phone is not counting against a reply the "
+      + "relay has told it is still coming"
+  );
+  assert.notEqual(
+    state.pendingActions.get("action-waiting")?.timeoutId,
+    4242,
+    "and a fresh one is armed in its place"
+  );
+  state.pendingActions.clear();
+});

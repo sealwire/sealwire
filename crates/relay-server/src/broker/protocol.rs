@@ -77,6 +77,12 @@ pub(super) enum OutboundBrokerPayload {
         ok: bool,
         error: Option<String>,
     },
+    /// Not an answer: "someone is already running this, keep waiting". Sent in the clear
+    /// in every mode, because it carries only the action id the broker routed on anyway.
+    RemoteActionPending {
+        action_id: String,
+        target_peer_id: String,
+    },
     RemoteApprovalResult {
         action_id: String,
         target_peer_id: String,
@@ -276,6 +282,10 @@ pub(super) fn summarize_outbound_payload(payload: &OutboundBrokerPayload) -> Str
             snapshot.logs.len(),
             snapshot.current_status,
         ),
+        OutboundBrokerPayload::RemoteActionPending {
+            action_id,
+            target_peer_id,
+        } => format!("kind=remote_action_pending action_id={action_id} target_peer_id={target_peer_id}"),
         OutboundBrokerPayload::RemoteActionAck {
             action_id,
             target_peer_id,
