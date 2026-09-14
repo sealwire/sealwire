@@ -767,6 +767,9 @@ struct GoalInput {
     /// Empty cancels: "/goal" with nothing after it stops the current one.
     #[serde(default)]
     objective: String,
+    /// Fresh continuation budget. Leave false (default) for a wording tweak.
+    #[serde(default)]
+    reset_turns: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -825,7 +828,12 @@ async fn set_session_goal(
     } else {
         context
             .app
-            .set_goal(&input.thread_id, &input.objective, None)
+            .set_goal(
+                &input.thread_id,
+                &input.objective,
+                None,
+                input.reset_turns,
+            )
             .await
             .map(|()| "Goal set. This session will work toward it and come back when it is done, stuck, or needs you.".to_string())
     };

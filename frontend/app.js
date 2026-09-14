@@ -2877,9 +2877,14 @@ async function postRelayCommand(path, body) {
   }
 }
 
-function postSessionGoal(threadId, objective) {
+function postSessionGoal(threadId, objective, { resetTurns = false } = {}) {
   // Ungated: "Keep going" resubmits a stored objective that may predate the cap.
-  return postRelayCommand("/api/session/goal", { thread_id: threadId, objective });
+  // `resetTurns` is opt-in — a typo fix must keep the turns already spent.
+  return postRelayCommand("/api/session/goal", {
+    thread_id: threadId,
+    objective,
+    reset_turns: Boolean(resetTurns),
+  });
 }
 
 function postSessionGoalFromComposer(threadId, objective) {

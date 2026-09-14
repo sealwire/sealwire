@@ -249,6 +249,9 @@ pub(super) enum RemoteActionRequest {
     SetGoal {
         thread_id: String,
         objective: String,
+        /// Fresh continuation budget. Leave false (default) for a wording tweak.
+        #[serde(default)]
+        reset_turns: bool,
         #[serde(default)]
         device_id: Option<String>,
     },
@@ -517,10 +520,12 @@ impl RemoteActionRequest {
             Self::SetGoal {
                 thread_id,
                 objective,
+                reset_turns,
                 ..
             } => Self::SetGoal {
                 thread_id,
                 objective,
+                reset_turns,
                 device_id: Some(device_id),
             },
             Self::StopGoal { thread_id, .. } => Self::StopGoal {
@@ -1598,11 +1603,12 @@ async fn execute_remote_action(
         RemoteActionRequest::SetGoal {
             thread_id,
             objective,
+            reset_turns,
             device_id,
         } => {
             let device_id = device_id.ok_or_else(|| "missing device id".to_string())?;
             state
-                .set_goal(&thread_id, &objective, Some(&device_id))
+                .set_goal(&thread_id, &objective, Some(&device_id), reset_turns)
                 .await
                 .map(|()| RemoteActionOutcome::default())
         }

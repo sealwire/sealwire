@@ -148,8 +148,8 @@ pub enum AskError {
     NoSuchPeer,
     /// The directory the asking session ran in no longer exists.
     WorkspaceGone,
-    /// The asker is already at its limit — too many peers, or too many rounds.
-    /// Carries the message to hand back, which is the agent's cue to stop.
+    /// The asker is already at its peer limit. Carries the message to hand back,
+    /// which is the agent's cue to stop. Ask rounds themselves are uncapped.
     LimitReached(String),
     /// Everything else, already phrased for a human.
     Failed(String),

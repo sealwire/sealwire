@@ -2367,8 +2367,13 @@ async function dispatchGoal(threadId, action, payload, note) {
   }
 }
 
-export function setRemoteGoal(threadId, objective) {
-  return dispatchGoal(threadId, "set_goal", { objective }, "Setting the goal…");
+export function setRemoteGoal(threadId, objective, { resetTurns = false } = {}) {
+  return dispatchGoal(
+    threadId,
+    "set_goal",
+    { objective, reset_turns: Boolean(resetTurns) },
+    "Setting the goal…"
+  );
 }
 
 export function stopRemoteGoal(threadId) {

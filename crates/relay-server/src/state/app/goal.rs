@@ -92,11 +92,14 @@ fn thread_is_lent_to_a_review(relay: &crate::state::RelayState, thread_id: &str)
 impl AppState {
     /// Set or replace the goal for a thread. A person's action, always.
     /// `device_id` is `None` for the local operator, which is scoped by relay roots alone.
+    /// `reset_turns` asks for a fresh continuation budget; leave it false for a
+    /// wording tweak that should keep the turns already spent.
     pub(crate) async fn set_goal(
         &self,
         thread_id: &str,
         objective: &str,
         device_id: Option<&str>,
+        reset_turns: bool,
     ) -> Result<(), String> {
         let objective = objective.trim().to_string();
         if objective.is_empty() {
@@ -146,10 +149,12 @@ to one of your own sessions"
                 crate::state::MAX_GOAL_OBJECTIVE_CHARS
             ));
         }
-        // Revising keeps the turns spent so far: a clarification is not a fresh
-        // budget, or the cap could be reset forever by nudging the wording.
+        // A wording tweak keeps the turns spent so far. Pass `reset_turns` when
+        // the person wants a fresh budget; out-of-turns still resets on its own.
         if relay.goal_for_thread(thread_id).is_some() {
-            relay.update_goal(thread_id, |goal| goal.revise(objective.clone()));
+            relay.update_goal(thread_id, |goal| {
+                goal.revise(objective.clone(), reset_turns)
+            });
         } else {
             relay.set_goal(Goal::new(
                 format!("goal-{}-{}", unix_now(), super::review::random_suffix()),

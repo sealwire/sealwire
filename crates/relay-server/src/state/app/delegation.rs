@@ -12,12 +12,9 @@ use crate::provider::StartThreadRequest;
 use crate::state::{unix_now, AppState};
 
 /// How many peers one session may have brought in. A runaway asker is a runaway
-/// bill, and a sidebar nobody can read.
+/// bill, and a sidebar nobody can read. Ask *rounds* to those peers are not
+/// capped — the goal turn budget already bounds the loop that drives them.
 const MAX_PEERS_PER_ASKER: usize = 5;
-
-/// How many times one session may ask, across all its peers. The asker decides
-/// when to stop; this is what happens when it does not.
-const MAX_ASKS_PER_ASKER: usize = 20;
 
 /// Appended to every task handed to a peer.
 ///
@@ -77,8 +74,6 @@ struct PrecheckedAsk {
     asker_approval: String,
     asker_sandbox: String,
     asker_provider: String,
-    /// Checked later, inside the branch that would start a NEW peer.
-    peers: usize,
 }
 
 impl AppState {
@@ -205,7 +200,7 @@ impl AppState {
         // The asker's own settings are the ceiling for the peer's. Read them
         // before anything else so a missing asker fails before a thread is
         // started rather than after.
-        let (asker_cwd, asker_approval, asker_sandbox, asker_provider, peers, asks) = {
+        let (asker_cwd, asker_approval, asker_sandbox, asker_provider, peers) = {
             let relay = self.relay.read().await;
             let cwd = relay
                 .thread_cwd(asker_thread_id)
@@ -265,7 +260,6 @@ impl AppState {
                 defaults_sandbox,
                 provider,
                 distinct_peers,
-                mine.len(),
             )
         };
 
@@ -278,20 +272,12 @@ Carry on with one of those instead of bringing in another."
             )));
         }
 
-        if asks >= MAX_ASKS_PER_ASKER {
-            return Err(AskError::LimitReached(format!(
-                "you have asked for help {asks} times in this session, which is the limit. \
-Finish up with what you have and tell the user."
-            )));
-        }
-
         Ok(PrecheckedAsk {
             message,
             asker_cwd,
             asker_approval,
             asker_sandbox,
             asker_provider,
-            peers,
         })
     }
 
@@ -317,7 +303,6 @@ Finish up with what you have and tell the user."
             asker_approval,
             asker_sandbox,
             asker_provider,
-            peers,
         } = self
             .precheck_ask(asker_thread_id, &request, existing_ask_id.as_deref())
             .await?;

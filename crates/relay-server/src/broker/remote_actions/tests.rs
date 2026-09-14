@@ -1769,10 +1769,12 @@ fn goal_actions_round_trip_and_bind_device() {
         RemoteActionRequest::SetGoal {
             thread_id,
             objective,
+            reset_turns,
             device_id,
         } => {
             assert_eq!(thread_id, "thread-1");
             assert_eq!(objective, "Ship the mobile surface");
+            assert!(!reset_turns, "omitted reset_turns defaults to false");
             assert_eq!(device_id.as_deref(), Some("device-3"));
         }
         other => panic!("unexpected: {other:?}"),

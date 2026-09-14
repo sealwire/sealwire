@@ -123,8 +123,8 @@ pub(crate) struct Goal {
     ///
     /// This, not the turn count, is what makes a report admissible. A count
     /// cannot tell the turn that was given THIS objective from one that predates
-    /// it — revising keeps the turns already spent — and it cannot tell a first
-    /// report from a second one talking over it.
+    /// it — revising keeps the turns already spent unless asked to reset — and
+    /// it cannot tell a first report from a second one talking over it.
     pub(crate) dispatch_open: bool,
     /// Whether that hand-over actually reached the provider. An open dispatch
     /// that never landed is a session that cannot be driven at all.
@@ -164,12 +164,12 @@ impl Goal {
 
     /// The user's, and only the user's. Revising resumes work: a clarification
     /// with nothing driving it afterwards would silently do nothing.
-    pub(crate) fn revise(&mut self, objective: String) {
-        // Turns spent otherwise carry over, so the cap cannot be reset forever by
-        // nudging the wording. Past the cap is the exception: the cap exists to
-        // stop an agent grinding on unwatched, and a person pressing "keep going"
-        // is the authority it was deferring to all along.
-        if self.status == GoalStatus::OutOfTurns {
+    ///
+    /// `reset_turns` is how a person asks for a fresh budget. A typo fix leaves
+    /// it false so spent turns stay. Past the cap always resets: otherwise the
+    /// next turn would announce itself as "21 of 20" and expire immediately.
+    pub(crate) fn revise(&mut self, objective: String, reset_turns: bool) {
+        if reset_turns || self.status == GoalStatus::OutOfTurns {
             self.turns = 0;
         }
         self.objective = objective;
@@ -292,7 +292,7 @@ mod tests {
         // A clarification that left the goal settled would silently do nothing.
         let mut goal = goal();
         goal.settle(GoalStatus::Blocked, "cannot find the file");
-        goal.revise("ship the mobile door, ignoring tablets".into());
+        goal.revise("ship the mobile door, ignoring tablets".into(), false);
         assert_eq!(goal.status, GoalStatus::Active);
         assert_eq!(goal.outcome, None, "the old reason is not left hanging");
     }
@@ -309,7 +309,7 @@ mod tests {
         }
         assert_eq!(goal.status, GoalStatus::OutOfTurns);
 
-        goal.revise("ship the mobile door".into());
+        goal.revise("ship the mobile door".into(), false);
 
         assert_eq!(goal.status, GoalStatus::Active);
         assert_eq!(goal.turns, 0, "a budget it can actually spend");
@@ -317,12 +317,23 @@ mod tests {
 
     #[test]
     fn revising_a_live_goal_keeps_the_turns_already_spent() {
-        // Otherwise the cap resets forever by nudging the wording.
+        // A typo fix must not mint a fresh budget — otherwise the cap resets
+        // forever by nudging the wording.
         let mut goal = goal();
         goal.hand_over();
         goal.hand_over();
-        goal.revise("ship the mobile door, ignoring tablets".into());
+        goal.revise("ship the mobile door, ignoring tablets".into(), false);
         assert_eq!(goal.turns, 2);
+    }
+
+    #[test]
+    fn revising_with_reset_turns_starts_a_fresh_budget() {
+        let mut goal = goal();
+        goal.hand_over();
+        goal.hand_over();
+        goal.revise("ship the mobile door".into(), true);
+        assert_eq!(goal.turns, 0);
+        assert_eq!(goal.status, GoalStatus::Active);
     }
 
     #[test]
