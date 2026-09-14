@@ -1821,6 +1821,7 @@ export async function updateRemoteSessionSettings({ approval_policy, sandbox, ef
     return false;
   }
 
+  const threadId = input.thread_id;
   try {
     await dispatchOrRecover("update_session_settings", { input });
     const parts = [];
@@ -1829,6 +1830,9 @@ export async function updateRemoteSessionSettings({ approval_policy, sandbox, ef
     if (input.effort) parts.push(`effort=${input.effort}`);
     if (input.model) parts.push(`model=${input.model}`);
     renderLog(`Updated remote session settings: ${parts.join(", ")}`);
+    // Same thread-scoped clear as a successful send: only this thread's
+    // failure is resolved here.
+    setComposerError(threadId, "");
     if (state.session?.view_only && state.session.active_thread_id === input.thread_id) {
       applyRenderedSession(
         {
@@ -1844,6 +1848,11 @@ export async function updateRemoteSessionSettings({ approval_policy, sandbox, ef
     return true;
   } catch (error) {
     renderLog(`Remote settings update failed: ${error.message}`);
+    // Model/effort picks go through this endpoint on the phone. Swallowing the
+    // refusal into the client log made "I chose Spark" look like a no-op when
+    // the relay rejected it (turn in progress, etc.) — same class of bug the
+    // local composer already guards against.
+    setComposerError(threadId, error.message);
     return false;
   }
 }

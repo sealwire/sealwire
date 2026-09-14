@@ -2490,6 +2490,137 @@ test("sendMessage clears pending state when the relay does not reply", async () 
   assert.equal(await pending, false);
 });
 
+test("a failed remote settings change records the reason for the composer, not just the log", async () => {
+  // Choosing Spark (or any model) on the phone POSTs update_session_settings.
+  // A refusal while a turn is in progress used to vanish into the client log,
+  // so the chip looked selected and Send looked inert.
+  activeBrowser || installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { updateRemoteSessionSettings } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  state.composerErrors = {};
+  state.session = {
+    active_thread_id: "thread-1",
+    available_models: [],
+    model: "gpt-5.6-sol",
+  };
+  state.socket = {
+    readyState: 1,
+    send() {
+      throw new Error("cannot change session settings while a turn is in progress");
+    },
+  };
+
+  assert.equal(
+    await updateRemoteSessionSettings({
+      model: "gpt-5.3-codex-spark",
+      effort: "xhigh",
+    }),
+    false
+  );
+  assert.match(
+    String(state.composerErrors?.["thread-1"]),
+    /while a turn is in progress/,
+    "a refused Spark pick must be visible on the composer, not only in the log"
+  );
+});
+
+test("a successful remote settings update clears only that thread's composer error", async () => {
+  // The success path must not be a global wipe: thread-2's real failure has to
+  // survive thread-1's later settings OK (same race the local surface guards).
+  activeBrowser || installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { updateRemoteSessionSettings } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  state.composerErrors = {
+    "thread-1": "cannot change session settings while a turn is in progress",
+    "thread-2": "that thread is busy with a turn",
+  };
+  state.session = {
+    active_thread_id: "thread-1",
+    available_models: [],
+    model: "gpt-5.6-sol",
+  };
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      setImmediate(() => {
+        void handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "update_session_settings",
+          ok: true,
+          snapshot: {
+            active_thread_id: "thread-1",
+            model: "gpt-5.3-codex-spark",
+            reasoning_effort: "xhigh",
+            available_models: [],
+            transcript: [],
+          },
+        });
+      });
+    },
+  };
+
+  assert.equal(
+    await updateRemoteSessionSettings({
+      model: "gpt-5.3-codex-spark",
+      effort: "xhigh",
+    }),
+    true
+  );
+  assert.equal(
+    state.composerErrors?.["thread-1"],
+    undefined,
+    "thread-1's own prior settings failure is cleared by its success"
+  );
+  assert.match(
+    String(state.composerErrors?.["thread-2"]),
+    /busy with a turn/,
+    "thread-1's settings success must not silence thread-2's failure"
+  );
+});
+
 test("a failed remote send records the reason for the composer, not just the log", async () => {
   activeBrowser || installBrowserStubs();
 
