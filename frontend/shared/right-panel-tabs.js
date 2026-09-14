@@ -15,6 +15,15 @@ function useStoreState(store) {
   );
 }
 
+// Every goal state the relay cannot move past on its own. Kept as a set, not a
+// not-active check: "cancelled" is also not active and needs nobody.
+const GOAL_STATES_NEEDING_USER = new Set([
+  "awaiting_user",
+  "complete_claimed",
+  "blocked",
+  "out_of_turns",
+]);
+
 const EMPTY_REVIEW = {
   reviewJobs: [],
   workflowRuns: [],
@@ -51,13 +60,17 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
   // A goal being worked on belongs in the tab's dot too: it is the longest-lived
   // thing this panel shows.
   const goalWorking = review.goal?.status === "active" ? 1 : 0;
+  // And a goal that has STOPPED for the user outranks it. Marking only the running
+  // case left the relay waiting on an answer behind an idle-looking tab, which is
+  // how a question sat unseen: the state needing them most was the one shown least.
+  const goalNeedsUser = GOAL_STATES_NEEDING_USER.has(review.goal?.status);
 
   // NEVER auto-switch the tab — the review must not yank the user's view around.
   // A running/blocked review only surfaces PASSIVELY here: the tab label gets a dot
   // ("Reviewer •") or a warning ("Reviewer ⚠"), and the user switches when they want.
   // "Agents", not "Reviewer": a reviewer is just one of the agents this session
   // can bring in, and the panel now lists the others beside it.
-  const reviewerLabel = blocked
+  const reviewerLabel = blocked || goalNeedsUser
     ? "Agents ⚠"
     : inProgress > 0 || workflowInProgress > 0 || asksInProgress > 0 || goalWorking > 0
     ? "Agents •"

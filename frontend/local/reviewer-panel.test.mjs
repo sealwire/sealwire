@@ -193,6 +193,41 @@ test("RightPanelTabs shows the Changes body by default and both tab labels", () 
   assert.match(html, />Agents</);
 });
 
+test("RightPanelTabs marks the tab for every goal state that cannot move without the user", () => {
+  // Reported by the user as "I never saw the box". The goal had stopped to ask them
+  // something, the relay was waiting, and the tab they were not on looked idle — the
+  // dot only ever meant "a goal is running", which is the case needing them LEAST.
+  const label = (status) =>
+    renderToStaticMarkup(
+      h(RightPanelTabs, {
+        store: makeStore({
+          activeTab: "changes",
+          review: {
+            reviewJobs: [],
+            reviewModel: {},
+            canRequest: false,
+            blocked: false,
+            goal: { id: "g", status, objective: "ship it", turns: 1, max_turns: 20 },
+          },
+        }),
+        panelId: "review-panel-test",
+        reviewer: {},
+        changes: h("div", null, "CHANGES-BODY"),
+      })
+    );
+
+  for (const status of ["awaiting_user", "complete_claimed", "blocked", "out_of_turns"]) {
+    assert.match(
+      label(status),
+      /Agents ⚠/,
+      `a goal that is "${status}" is waiting on the user; an unmarked tab hides it`
+    );
+  }
+
+  assert.match(label("active"), /Agents •/, "a running goal is busy, not asking");
+  assert.doesNotMatch(label("cancelled"), /Agents [⚠•]/, "a goal called off needs nothing");
+});
+
 test("RightPanelTabs flags the Reviewer tab when a review is blocked, and renders the reviewer body when selected", () => {
   const blockedLabel = renderToStaticMarkup(
     h(RightPanelTabs, {
