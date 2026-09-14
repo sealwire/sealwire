@@ -160,17 +160,10 @@ to one of your own sessions"
         // A wording tweak keeps the turns spent so far. Pass `reset_turns` when
         // the person wants a fresh budget; out-of-turns still resets on its own.
         let superseded_turn = if let Some(goal) = relay.goal_for_thread(thread_id) {
-            // Only a turn the relay handed THIS goal. A person typing into the same
-            // session has a turn too, and another device revising the goal is not
-            // permission to cancel it — `dispatch_open` is the difference.
-            let running = goal
-                .dispatch_open
-                .then(|| {
-                    relay
-                        .runtime_for_thread(thread_id)
-                        .and_then(|runtime| runtime.active_turn_id.clone())
-                })
-                .flatten();
+            // The turn this goal actually started, never merely the one running now: a
+            // hand-over stays open when its turn ends without reporting, and the person
+            // may well have typed one of their own in that window.
+            let running = goal.dispatch_turn_id.clone();
             relay.update_goal(thread_id, |goal| {
                 goal.revise(objective.clone(), reset_turns)
             });
@@ -428,7 +421,7 @@ still be working. Stop the session itself to be sure."
             // Everything the decision rests on is re-read under this one write
             // lock, because each was checked against a snapshot that has since
             // been dropped.
-            let prompt = {
+            let (prompt, generation) = {
                 let mut relay = self.relay.write().await;
                 let Some(goal) = relay.goal_for_thread(&thread_id) else {
                     continue;
@@ -491,8 +484,12 @@ running — set the goal again once it is free",
                 let text =
                     continuation(&goal.objective, goal.turns, crate::state::goal_max_turns());
                 relay.update_goal(&thread_id, |goal| goal.hand_over());
+                let generation = relay
+                    .goal_for_thread(&thread_id)
+                    .map(|goal| goal.dispatch_generation)
+                    .unwrap_or_default();
                 relay.notify();
-                text
+                (text, generation)
             };
 
             match self
@@ -514,20 +511,31 @@ running — set the goal again once it is free",
                 // the send returns.
                 Ok(dispatched) => {
                     let landed_on = dispatched.thread_id;
-                    let cancelled = {
+                    let superseded = {
                         let mut relay = self.relay.write().await;
                         relay.update_goal(&landed_on, |goal| goal.dispatch_landed());
+                        let started = relay
+                            .runtime_for_thread(&landed_on)
+                            .and_then(|runtime| runtime.active_turn_id.clone());
+                        relay.update_goal(&landed_on, |goal| {
+                            goal.note_dispatch_turn(generation, started)
+                        });
                         relay.notify();
                         let relay = relay.downgrade();
+                        // Anything that happened to the goal while this send was inside
+                        // the provider — a stop, or a revision to another objective —
+                        // leaves the turn we have just started working to an objective
+                        // that is already gone. A generation covers both; the status
+                        // alone only ever caught the stop.
                         relay
                             .goal_for_thread(&landed_on)
-                            .map(|goal| goal.status == GoalStatus::Cancelled)
+                            .map(|goal| {
+                                goal.status == GoalStatus::Cancelled
+                                    || goal.dispatch_generation != generation
+                            })
                             .unwrap_or(true)
                     };
-                    // Stop landed while we were inside the provider call. It
-                    // cleared the card and found nothing running; this is the turn
-                    // it was trying to stop.
-                    if cancelled {
+                    if superseded {
                         self.request_thread_stop(&landed_on).await;
                     }
                 }

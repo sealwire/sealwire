@@ -27140,6 +27140,13 @@ watchdog settle this Blocked",
             let mut relay = app.relay.write().await;
             relay.ensure_runtime_for_thread(&thread).active_turn_id = Some("turn-old".to_string());
             relay.update_goal(&thread, |goal| goal.hand_over());
+            let generation = relay
+                .goal_for_thread(&thread)
+                .map(|goal| goal.dispatch_generation)
+                .expect("the goal exists");
+            relay.update_goal(&thread, |goal| {
+                goal.note_dispatch_turn(generation, Some("turn-old".to_string()))
+            });
         }
 
         app.set_goal(&thread, "a different objective", None, false, Some(12))
@@ -27194,6 +27201,42 @@ watchdog settle this Blocked",
         assert!(
             !provider.stop_was_requested_for("turn-mine").await,
             "revising the goal cancelled a turn the goal never started"
+        );
+    }
+
+    // `dispatch_open` says a hand-over was charged, not that the turn now running is the
+    // one it paid for: a goal turn that finishes without reporting leaves it open. So a
+    // person typing into the same session in that window had their turn cancelled by
+    // another device merely revising the goal.
+    #[tokio::test]
+    async fn revising_a_goal_leaves_a_user_turn_alone_even_with_a_dispatch_still_open() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "dev", Vec::new()).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "the original objective", None, false, Some(10))
+            .await
+            .expect("the user sets one");
+
+        app.set_review_drain_max_ms(200);
+        {
+            let mut relay = app.relay.write().await;
+            // The goal's own turn was handed over and has since ended without settling
+            // the goal, which is what leaves the dispatch open.
+            relay.update_goal(&thread, |goal| goal.hand_over());
+            // And the person typed one of their own.
+            relay.ensure_runtime_for_thread(&thread).active_turn_id = Some("turn-mine".to_string());
+        }
+
+        app.set_goal(&thread, "a different objective", None, false, Some(12))
+            .await
+            .expect("the other device revises it");
+
+        assert!(
+            !provider.stop_was_requested_for("turn-mine").await,
+            "revising the goal cancelled a turn the person had typed themselves"
         );
     }
 

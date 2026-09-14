@@ -129,6 +129,18 @@ pub(crate) struct Goal {
     /// Whether that hand-over actually reached the provider. An open dispatch
     /// that never landed is a session that cannot be driven at all.
     pub(crate) dispatch_landed: bool,
+    /// The turn the relay actually started for this goal, once it knows it.
+    ///
+    /// `dispatch_open` only says a hand-over was charged — it stays open when a turn ends
+    /// without reporting — so it cannot say whether the turn running NOW is the goal's or
+    /// one the person typed.
+    #[serde(default)]
+    pub(crate) dispatch_turn_id: Option<String>,
+    /// Bumped by every hand-over and by anything that supersedes one. A send still inside
+    /// the provider compares it on the way out: if it moved, the turn it just started
+    /// belongs to an objective that is already gone.
+    #[serde(default)]
+    pub(crate) dispatch_generation: u64,
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
 }
@@ -145,6 +157,8 @@ impl Goal {
             outcome: None,
             dispatch_open: false,
             dispatch_landed: false,
+            dispatch_turn_id: None,
+            dispatch_generation: 0,
             created_at: now,
             updated_at: now,
         }
@@ -178,6 +192,7 @@ impl Goal {
         // A turn already in flight was handed the OLD objective, so nothing it
         // says afterwards is about this one.
         self.close_dispatch();
+        self.dispatch_generation = self.dispatch_generation.saturating_add(1);
         self.updated_at = unix_now();
     }
 
@@ -188,6 +203,8 @@ impl Goal {
         self.turns = self.turns.saturating_add(1);
         self.dispatch_open = true;
         self.dispatch_landed = false;
+        self.dispatch_turn_id = None;
+        self.dispatch_generation = self.dispatch_generation.saturating_add(1);
         self.updated_at = unix_now();
         if self.turns >= MAX_GOAL_TURNS {
             self.status = GoalStatus::OutOfTurns;
@@ -211,6 +228,15 @@ impl Goal {
     fn close_dispatch(&mut self) {
         self.dispatch_open = false;
         self.dispatch_landed = false;
+        self.dispatch_turn_id = None;
+    }
+
+    /// Remember which turn the relay started for this goal, if the hand-over that paid
+    /// for it is still the current one.
+    pub(crate) fn note_dispatch_turn(&mut self, generation: u64, turn_id: Option<String>) {
+        if self.dispatch_generation == generation && self.dispatch_open {
+            self.dispatch_turn_id = turn_id;
+        }
     }
 
     /// A hand-over that was charged for but never became a turn. One is a
