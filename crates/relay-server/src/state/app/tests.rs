@@ -27276,6 +27276,48 @@ watchdog settle this Blocked",
     }
 
     #[tokio::test]
+    async fn a_delegate_is_visible_to_the_phone_before_its_agent_exists() {
+        // The panel filters an ask on BOTH ends resolving in scope, and the record written
+        // on acceptance has no peer yet — so the card meant to show "this is under way",
+        // and any failure it later carries, was filtered out of the surface it was for.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "phone", vec![cwd.clone()]).await;
+        let asker = goal_session(&app, &cwd).await;
+
+        let ask_id = app
+            .ask_agent_detached(
+                &asker,
+                AskRequest {
+                    device_id: None,
+                    started_by: relay_api::delegation::StartedBy::Person,
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "look at the retry loop".to_string(),
+                },
+            )
+            .await
+            .expect("the delegate is accepted");
+
+        let seen = {
+            let relay = app.relay.read().await;
+            relay
+                .reviews_response(Some("phone"))
+                .asks
+                .into_iter()
+                .any(|ask| ask.id == ask_id)
+        };
+        assert!(
+            seen,
+            "a phone scoped to this workspace must see its own delegate while it is starting"
+        );
+    }
+
+    #[tokio::test]
     async fn the_record_written_on_acceptance_does_not_count_against_its_own_delegate() {
         // It is written with no peer yet, so counting distinct peers sees "" as one more
         // agent: the caller is told yes at four, and the background half then refuses the

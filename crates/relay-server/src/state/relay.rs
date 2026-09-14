@@ -3244,6 +3244,19 @@ impl RelayState {
     /// to the terminal `Interrupted` state: after a restart there is no orchestrator
     /// to drive it, so it must never come back `Running` (the failure
     /// `persistence.rs` warns about for review jobs). Terminal runs restore as-is.
+    fn restored_asks(persisted: &HashMap<String, Ask>) -> HashMap<String, Ask> {
+        persisted
+            .iter()
+            .map(|(id, ask)| {
+                let mut ask = ask.clone();
+                if !ask.status.is_terminal() {
+                    ask.fail("it was still under way when the relay restarted".to_string());
+                }
+                (id.clone(), ask)
+            })
+            .collect()
+    }
+
     fn restored_workflow_jobs(
         persisted: &HashMap<String, WorkflowRun>,
     ) -> HashMap<String, WorkflowRun> {
@@ -3420,7 +3433,13 @@ impl RelayState {
             asks: self
                 .asks_view()
                 .into_iter()
-                .filter(|ask| in_scope(&ask.asker_thread_id) && in_scope(&ask.peer_thread_id))
+                // An ask accepted but not yet started has no peer to place. Requiring one
+                // is about not surfacing an agent from another workspace; an agent that
+                // does not exist reveals nothing, and hiding it hides the card entirely.
+                .filter(|ask| {
+                    in_scope(&ask.asker_thread_id)
+                        && (ask.peer_thread_id.is_empty() || in_scope(&ask.peer_thread_id))
+                })
                 .collect(),
             // Same fence: the objective is the user's own words.
             goals: self
@@ -4635,15 +4654,10 @@ impl RelayState {
             .filter(|(_, job)| job.status.is_terminal())
             .map(|(id, job)| (id.clone(), job.clone()))
             .collect();
-        // Defense in depth, same as reviews: the writer already filters, but a
-        // hand-edited or future-written state file must not restore a delegation
-        // that has no driver.
-        self.asks = persisted
-            .asks
-            .iter()
-            .filter(|(_, job)| job.status.is_terminal())
-            .map(|(id, job)| (id.clone(), job.clone()))
-            .collect();
+        // Nothing drives a delegation across a restart, so one that was under way comes
+        // back settled rather than live — kept, so the person who asked can see it
+        // stopped, rather than finding no trace of what they were told was accepted.
+        self.asks = Self::restored_asks(&persisted.asks);
         // A goal survives, but never running: whatever was driving it died with
         // the process, and picking the work back up unasked — minutes or days
         // later — is its own surprise.
@@ -5852,15 +5866,10 @@ impl RelayState {
             .filter(|(_, job)| job.status.is_terminal())
             .map(|(id, job)| (id.clone(), job.clone()))
             .collect();
-        // Defense in depth, same as reviews: the writer already filters, but a
-        // hand-edited or future-written state file must not restore a delegation
-        // that has no driver.
-        self.asks = persisted
-            .asks
-            .iter()
-            .filter(|(_, job)| job.status.is_terminal())
-            .map(|(id, job)| (id.clone(), job.clone()))
-            .collect();
+        // Nothing drives a delegation across a restart, so one that was under way comes
+        // back settled rather than live — kept, so the person who asked can see it
+        // stopped, rather than finding no trace of what they were told was accepted.
+        self.asks = Self::restored_asks(&persisted.asks);
         // A goal survives, but never running: whatever was driving it died with
         // the process, and picking the work back up unasked — minutes or days
         // later — is its own surprise.
@@ -6558,12 +6567,12 @@ mod tests {
     }
 
     #[test]
-    fn only_settled_asks_survive_a_restart() {
-        // A live ask has nothing watching it after a restart, so restoring one
-        // would show work nobody is doing. The writer filters and the restore
-        // side filters again, so a hand-edited file cannot reintroduce it.
-        // This goes through real JSON: an in-memory round trip would not notice
-        // the status encoding breaking.
+    fn a_live_delegation_comes_back_settled_rather_than_running() {
+        // The rule changed deliberately: it used to be dropped, which lost an accepted
+        // request silently. Now it is kept and settled on the way back in — what must
+        // never happen is it returning LIVE, with nothing driving it.
+        // Through real JSON, because an in-memory round trip would not notice the status
+        // encoding breaking.
         use crate::state::Ask;
         use relay_api::delegation::AskStatus;
 
@@ -6591,9 +6600,8 @@ mod tests {
         let persisted = PersistedRelayState::from_relay(&relay);
         let mut written: Vec<&str> = persisted.asks.keys().map(String::as_str).collect();
         written.sort_unstable();
-        assert_eq!(written, ["done"], "only settled asks are written");
+        assert_eq!(written, ["done", "live"], "both are written now");
 
-        // Through the disk format, not just the in-memory struct.
         let json = serde_json::to_string(&persisted).expect("state encodes");
         let mut reloaded: PersistedRelayState = serde_json::from_str(&json).expect("state decodes");
         assert_eq!(
@@ -6607,9 +6615,77 @@ mod tests {
             .insert("smuggled".to_string(), ask("smuggled", AskStatus::Working));
         let mut restored = test_relay();
         restored.apply_persisted(&reloaded);
-        let mut back: Vec<&str> = restored.asks.keys().map(String::as_str).collect();
-        back.sort_unstable();
-        assert_eq!(back, ["done"], "a smuggled live ask is refused on restore");
+
+        for id in ["live", "smuggled"] {
+            assert!(
+                restored
+                    .asks
+                    .get(id)
+                    .expect("kept")
+                    .status
+                    .is_terminal(),
+                "{id} must not come back live — a hand-edited file cannot reintroduce a driverless delegation"
+            );
+        }
+        assert_eq!(
+            restored.asks.get("done").map(|ask| ask.status),
+            Some(AskStatus::Done),
+            "a settled one is untouched"
+        );
+    }
+
+    #[test]
+    fn a_delegate_that_was_under_way_comes_back_as_interrupted_not_as_nothing() {
+        // Dropping a live delegation on restart loses an accepted request silently: the
+        // person was told it was under way and then finds no trace of it. Kept, and
+        // reconciled the way a workflow run is, so it comes back saying what happened
+        // instead of coming back running with nothing behind it.
+        use crate::state::Ask;
+        use relay_api::delegation::AskStatus;
+
+        fn ask(id: &str, status: AskStatus) -> Ask {
+            let mut ask = Ask::new(
+                id.to_string(),
+                "asker".to_string(),
+                "peer".to_string(),
+                "codex".to_string(),
+                None,
+                None,
+                "do the thing".to_string(),
+                "/tmp".to_string(),
+                None,
+                relay_api::delegation::StartedBy::Agent,
+            );
+            ask.set_status(status);
+            ask
+        }
+
+        let mut relay = test_relay();
+        relay.insert_ask(ask("under-way", AskStatus::Working));
+        relay.insert_ask(ask("done", AskStatus::Done));
+
+        let persisted = PersistedRelayState::from_relay(&relay);
+        let json = serde_json::to_string(&persisted).expect("state encodes");
+        let reloaded: PersistedRelayState = serde_json::from_str(&json).expect("state decodes");
+
+        let mut restored = test_relay();
+        restored.apply_persisted(&reloaded);
+
+        let back = restored.asks.get("under-way").expect("the record survives");
+        assert!(
+            back.status.is_terminal(),
+            "nothing is driving it after a restart, so it must not come back live"
+        );
+        assert!(
+            back.error.as_deref().unwrap_or("").contains("restart"),
+            "and it must say why it stopped: {:?}",
+            back.error
+        );
+        assert_eq!(
+            restored.asks.get("done").map(|a| a.status),
+            Some(AskStatus::Done),
+            "a settled one is untouched"
+        );
     }
 
     #[test]

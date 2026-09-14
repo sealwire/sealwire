@@ -128,9 +128,10 @@ pub(super) struct PersistedRelayState {
     /// map).
     #[serde(default)]
     pub(super) review_jobs: std::collections::HashMap<String, ReviewJob>,
-    /// Completed (TERMINAL) delegation cards. Same rule and same reason as
-    /// `review_jobs`: an in-flight job's driver dies with the process, so
-    /// restoring one would show a delegation that nothing is driving.
+    /// Delegation cards, INCLUDING live ones — unlike `review_jobs`. Nothing drives an
+    /// ask after a restart either, so the restore side reconciles a live one to a
+    /// terminal state; dropping it instead lost a request the person was told was
+    /// accepted.
     #[serde(default)]
     pub(super) asks: std::collections::HashMap<String, Ask>,
     /// Goals, INCLUDING active ones — the opposite rule to `asks`, on purpose.
@@ -301,13 +302,10 @@ impl PersistedRelayState {
                 .filter(|(_, job)| job.status.is_terminal())
                 .map(|(id, job)| (id.clone(), job.clone()))
                 .collect(),
-            // Same rule for delegations, same reason.
-            asks: relay
-                .asks
-                .iter()
-                .filter(|(_, job)| job.status.is_terminal())
-                .map(|(id, job)| (id.clone(), job.clone()))
-                .collect(),
+            // Delegations follow the WORKFLOW rule, not the review one: a live ask is
+            // kept and reconciled on restore. Dropping it lost an accepted request with
+            // nothing to show the person who was told it was under way.
+            asks: relay.asks.clone(),
             // …and the opposite rule for goals: keep the live ones too.
             goals: relay.goals.clone(),
             // Persist ALL workflow runs (terminal cards AND non-terminal): a
