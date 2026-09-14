@@ -242,6 +242,15 @@ pub(crate) struct RemoteActionWait {
     pub(crate) ticket: u64,
 }
 
+/// Where something sat in the single order the relay does everything in.
+///
+/// Process-wide and never reset: a frame left over from a connection that has gone must
+/// still lose to anything that happened after it, whichever surface it came from.
+pub fn next_relay_ingress() -> u64 {
+    static INGRESS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    INGRESS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Debug, Clone)]
 enum CachedRemoteActionState {
     InFlight {
@@ -5355,13 +5364,14 @@ impl RelayState {
         self.surface_leases.get(peer_id) == Some(&lease)
     }
 
-    /// Claim this arrival position for a thread's goal, or refuse because a later frame
-    /// already changed it. `None` is a caller outside the broker's arrival order — the
-    /// local HTTP surface — which neither claims nor is refused.
+    /// Claim this arrival position for a thread's goal, or refuse because something later
+    /// already changed it.
+    ///
+    /// `None` is a caller with no position of its own — the relay's own web surface, which
+    /// is not read off the broker socket. It takes one NOW, which is exactly its place:
+    /// after everything already admitted, before anything admitted afterwards.
     pub fn claim_goal_ingress(&mut self, thread_id: &str, ingress: Option<u64>) -> bool {
-        let Some(ingress) = ingress else {
-            return true;
-        };
+        let ingress = ingress.unwrap_or_else(next_relay_ingress);
         match self.goal_ingress_by_thread.get(thread_id) {
             Some(applied) if *applied >= ingress => false,
             _ => {

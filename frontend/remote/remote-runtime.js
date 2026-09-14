@@ -9,7 +9,7 @@ import { registerRemotePwa } from "./pwa.js";
 import { renderLog } from "./session-surface.js";
 import { sidebarGestureDebugEnabled } from "./sidebar-debug-flag.js";
 import { applyFileChange, applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent, cancelRemoteThreadSearch, cancelRemoteThreadsPoll, clearSessionRuntime, delegateRemote, deleteRemoteReview, fetchAskUserQuestionDetail, fetchRemoteProviderModels, fetchRemoteProviders, fetchRemoteThreadTranscript, fetchTranscriptEntryDetail, forkRemoteSession, probeRemoteThreadsExist, refreshRemoteThreads, repairRemoteWorkspace, requestRemoteReview, resolveRemoteReview, resolveRemoteWorkflow, resetDeclaredWatchedThreads, resumeRemoteSession, sendMessage, setRemoteGoal, startRemoteSession, startRemoteWorkflow, stopActiveTurn, stopRemoteGoal, submitAskUserAnswer, submitDecision, syncRemoteSnapshot, takeOverControl, updateRemoteSessionSettings, viewRemoteThread } from "./session-ops.js";
-import { clearActiveRelaySelection, ensureDeviceIdentity, hydrateStoredRemoteSecrets, selectRelayProfile, state } from "./state.js";
+import { clearActiveRelaySelection, ensureDeviceIdentity, hasActivePairing, hydrateStoredRemoteSecrets, selectRelayProfile, state } from "./state.js";
 import { applyRemoteSurfacePatch, createResetRemoteSurfaceStatePatch } from "./surface-state.js";
 
 let runtimeConfigured = false;
@@ -18,7 +18,22 @@ let runtimeConfigured = false;
 /// socket. Exported so the recovery it owes can be tested: none of it is observable
 /// through the socket, and all of it is state the relay drops on its side.
 export function handleRelayPresence(kind, peer) {
-  if (peer?.role !== "relay" || !state.remoteAuth) {
+  if (peer?.role !== "relay") {
+    return;
+  }
+  // Pairing first, because it is the case with no `remoteAuth` to check: the request is
+  // sent once and is not a pending action, so if the relay's session ended before it was
+  // acted on, nothing else ever asks again and this browser waits for an approval the
+  // laptop was never shown.
+  if (hasActivePairing()) {
+    if (kind === "joined") {
+      void sendPairingRequest().catch((error) => {
+        renderLog(`Pairing request could not be re-sent: ${error.message}`);
+      });
+    }
+    return;
+  }
+  if (!state.remoteAuth) {
     return;
   }
   if (kind === "joined") {

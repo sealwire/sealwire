@@ -7518,3 +7518,47 @@ test("the runtime registers the relay-presence handler with the broker client", 
       + "that went away while this browser's own socket stayed up"
   );
 });
+
+// A pairing request is sent once and is not a pending action, so nothing resends it. If
+// the relay's own broker session ends between reading that frame and acting on it — which
+// it now can, since the router is torn down with the session — the phone sits on "waiting
+// for approval" forever while the laptop was never asked anything.
+test("a relay coming back re-sends a pairing request that was still in flight", async () => {
+  activeBrowser = installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { seedPairingState } = await import("./test-support/state-fixtures.mjs");
+  const { handleRelayPresence } = await import("./remote-runtime.js");
+
+  state.remoteAuth = null;
+  seedPairingState(state, {
+    pairingTicket: {
+      pairing_id: "pair-live",
+      pairing_secret: "secret",
+      broker_url: "wss://broker.example.test",
+      broker_channel_id: "pairing-room",
+      relay_peer_id: "relay-1",
+      expires_at: Math.floor(Date.now() / 1000) + 300,
+    },
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-pairing" });
+
+  const sent = [];
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      sent.push(JSON.parse(frameText)?.payload?.kind);
+    },
+  };
+
+  handleRelayPresence("joined", { role: "relay", peer_id: "relay-1" });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.ok(
+    sent.includes("pairing_request"),
+    `a relay that came back has never been asked to pair; sent ${JSON.stringify(sent)}`
+  );
+  state.socket = null;
+  seedPairingState(state);
+});

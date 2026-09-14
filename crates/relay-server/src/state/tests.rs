@@ -239,6 +239,24 @@ fn test_thread(id: &str, cwd: &str) -> ThreadSummaryView {
 }
 
 #[test]
+fn a_local_goal_change_takes_its_place_in_the_same_order_as_a_phone() {
+    // The relay's own web surface does not come through the broker, so it had no arrival
+    // position at all — and a phone's frame still queued behind something slow would land
+    // afterwards and overwrite what was just done on the laptop.
+    let (change_tx, _) = watch::channel(0_u64);
+    let mut relay = RelayState::new("/tmp".to_string(), change_tx, SecurityProfile::managed());
+
+    assert!(
+        relay.claim_goal_ingress("thread-1", None),
+        "a local change is always allowed to happen"
+    );
+    assert!(
+        !relay.claim_goal_ingress("thread-1", Some(1)),
+        "a broker frame read before that local change must not land on top of it"
+    );
+}
+
+#[test]
 fn a_connection_that_drops_without_a_goodbye_still_counts_its_surfaces_as_gone() {
     // The ordinary disconnect: the socket dies before any Left arrives. The frames those
     // surfaces queued are still draining on detached workers, so "we never heard it go"

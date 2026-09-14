@@ -970,7 +970,7 @@ async fn run_broker_session_with_liveness(
     // slow action — a cold provider catalog is minutes — stopped the relay reading
     // anything at all, from any device, including its own heartbeat.
     let (inbound_tx, mut inbound_rx) =
-        tokio::sync::mpsc::channel::<ServerMessage>(INBOUND_MESSAGE_QUEUE_CAPACITY);
+        tokio::sync::mpsc::channel::<(u64, ServerMessage)>(INBOUND_MESSAGE_QUEUE_CAPACITY);
     let (handler_error_tx, mut handler_error) = tokio::sync::mpsc::channel::<String>(1);
     let handler_state = state.clone();
     let handler_writer = writer.clone();
@@ -987,10 +987,7 @@ async fn run_broker_session_with_liveness(
             String,
             tokio::sync::mpsc::Sender<(FrameOrigin, ServerMessage)>,
         > = std::collections::HashMap::new();
-        while let Some(message) = inbound_rx.recv().await {
-            // The one place that sees the wire order. Frames are handled on independent
-            // workers after this, so anything whose order matters carries this with it.
-            let ingress = next_broker_ingress();
+        while let Some((ingress, message)) = inbound_rx.recv().await {
             let key = message_ordering_key(&message);
             // Read before the frame is handled, so a departure landing afterwards leaves
             // everything already admitted holding the lease it was admitted under.
@@ -1247,7 +1244,10 @@ async fn run_broker_session_with_liveness(
                 {
                     // Handed over rather than awaited. A full queue means the handler is
                     // that far behind, which is a session to end, not a frame to drop.
-                    if inbound_tx.try_send(message).is_err() {
+                    if inbound_tx
+                        .try_send((crate::state::next_relay_ingress(), message))
+                        .is_err()
+                    {
                         return Err(BrokerSessionError::after_connected(
                             "broker inbound queue overflowed".to_string(),
                             connected_at,
@@ -1303,15 +1303,6 @@ impl Drop for AbortOnDrop {
 pub(super) struct FrameOrigin {
     pub(super) ingress: u64,
     pub(super) lease: u64,
-}
-
-/// Where a frame sat in the order the relay read them off its one socket.
-///
-/// Relay-wide and never reset: a frame left over from a connection that has gone must
-/// still lose to one that arrived after it.
-fn next_broker_ingress() -> u64 {
-    static INGRESS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    INGRESS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 fn message_ordering_key(message: &ServerMessage) -> String {

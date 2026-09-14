@@ -24,8 +24,8 @@ pub(crate) use self::relay::IdSpace;
 #[cfg(test)]
 use self::relay::TranscriptRecord;
 pub(crate) use self::relay::{
-    load_or_generate_vapid, parse_ask_user_questions, thread_status_is_working, vapid_key_path,
-    ApprovalKind, BrokerPendingMessage, CachedRemoteActionResult, ClaimChallenge,
+    load_or_generate_vapid, next_relay_ingress, parse_ask_user_questions, thread_status_is_working,
+    vapid_key_path, ApprovalKind, BrokerPendingMessage, CachedRemoteActionResult, ClaimChallenge,
     CompletedRemoteClaim, DeviceRecord, IssuedClaimChallenge, PairedDevice, PendingApproval,
     PendingAskUserQuestion, PendingPairingResult, PendingTranscriptDelta, PushDispatcher,
     PushSubscription, PushSubscriptionInput, RelayState, RemoteActionReplayDecision,
