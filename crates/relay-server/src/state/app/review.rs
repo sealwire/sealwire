@@ -3096,6 +3096,45 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
 
     /// Wait for a thread's turn to actually end (real provider completion),
     /// re-issuing interrupts. Returns true once it ends, false at the drain max.
+    /// Wait for ONE named turn to end, asking only that turn to stop.
+    ///
+    /// `drain_thread_turn` watches the thread and retries against whatever is current, so
+    /// a turn that ends while it waits leaves its replacement being told to stop. When the
+    /// caller knows which turn it means — a goal stopping its own — that is never right.
+    pub(super) async fn drain_specific_turn(&self, thread_id: &str, turn_id: &str) -> bool {
+        let drain_max = Duration::from_millis(
+            self.review_drain_max_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
+        let mut rx = self.subscribe();
+        let hard_deadline = Instant::now() + drain_max;
+        let mut next_retry = Instant::now() + INTERRUPT_RETRY_INTERVAL;
+        loop {
+            let active = {
+                let relay = self.relay.read().await;
+                relay
+                    .runtime_for_thread(thread_id)
+                    .and_then(|runtime| runtime.active_turn_id.clone())
+            };
+            // Gone, or replaced by one this caller has no business stopping.
+            if active.as_deref() != Some(turn_id) {
+                return true;
+            }
+            if Instant::now() >= hard_deadline {
+                return false;
+            }
+            if Instant::now() >= next_retry {
+                self.request_provider_stop(thread_id, Some(turn_id)).await;
+                next_retry = Instant::now() + INTERRUPT_RETRY_INTERVAL;
+            }
+            tokio::select! {
+                _ = rx.changed() => {}
+                _ = tokio::time::sleep_until(next_retry) => {}
+                _ = tokio::time::sleep_until(hard_deadline) => {}
+            }
+        }
+    }
+
     pub(super) async fn drain_thread_turn(&self, thread_id: &str) -> bool {
         let drain_max = Duration::from_millis(
             self.review_drain_max_ms

@@ -159,7 +159,12 @@ to one of your own sessions"
         }
         // A wording tweak keeps the turns spent so far. Pass `reset_turns` when
         // the person wants a fresh budget; out-of-turns still resets on its own.
+        let mut dispatch_in_flight = false;
         let superseded_turn = if let Some(goal) = relay.goal_for_thread(thread_id) {
+            // Charged but not yet sent: the goal owes a turn that has no id to stop. The
+            // send is inside the provider right now and will start one for an objective
+            // this call is replacing.
+            dispatch_in_flight = goal.dispatch_open && goal.dispatch_turn_id.is_none();
             // The turn this goal actually started, never merely the one running now: a
             // hand-over stays open when its turn ends without reporting, and the person
             // may well have typed one of their own in that window.
@@ -182,6 +187,17 @@ to one of your own sessions"
         // toward something the user has already changed. This is also what makes a
         // superseded Stop safe to drop: whichever frame wins, the old turn is stopped.
         let Some(turn_id) = superseded_turn else {
+            if dispatch_in_flight {
+                // The driver stops what it started once it sees the objective moved, but
+                // it cannot report back here and a provider may ignore it. Saying so is
+                // the difference between a user who checks and one who assumes.
+                return Err(
+                    "the goal is revised, but a turn for the objective it replaced was \
+already on its way to the agent — it may still be working to that one. Check the session \
+before relying on this."
+                        .to_string(),
+                );
+            }
             return Ok(());
         };
         // Re-read rather than trust what the lock said: two providers cancel whatever
@@ -191,10 +207,10 @@ to one of your own sessions"
             return Ok(());
         }
         self.request_provider_stop(thread_id, Some(&turn_id)).await;
-        // Never trust the ack, exactly as a stop does: a provider can reject it, ignore
-        // it, or time out, and an agent still editing toward the old objective is the
-        // whole reason this stop exists.
-        if self.drain_thread_turn(thread_id).await {
+        // Never trust the ack — a provider can reject it, ignore it, or time out — and
+        // wait on THAT turn, not on the thread: waiting on the thread retries against
+        // whatever is current, which after the old turn ends is someone else's.
+        if self.drain_specific_turn(thread_id, &turn_id).await {
             return Ok(());
         }
         Err(

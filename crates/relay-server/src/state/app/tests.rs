@@ -27226,9 +27226,11 @@ watchdog settle this Blocked",
             relay.ensure_runtime_for_thread(&thread).active_turn_id = Some("turn-mine".to_string());
         }
 
-        app.set_goal(&thread, "a different objective", None, false, Some(12))
-            .await
-            .expect("the other device revises it");
+        // The revision may well report that it cannot vouch for the turn the goal owes —
+        // it has no id for it. What it must never do is cancel a turn that is not that.
+        let _ = app
+            .set_goal(&thread, "a different objective", None, false, Some(12))
+            .await;
 
         assert!(
             !provider.stop_was_requested_for("turn-mine").await,
@@ -27248,7 +27250,7 @@ watchdog settle this Blocked",
         grant_workspace(&app, &cwd).await;
         pair_device(&app, "dev", Vec::new()).await;
         let thread = goal_session(&app, &cwd).await;
-        app.set_goal(&thread, "the original objective", None, Some(10))
+        app.set_goal(&thread, "the original objective", None, false, Some(10))
             .await
             .expect("the user sets one");
 
@@ -27262,13 +27264,76 @@ watchdog settle this Blocked",
         assert!(app.charge_goal_for_driven_turn(&thread).await);
         app.goal_dispatch_landed(&thread).await;
 
-        app.set_goal(&thread, "a different objective", None, Some(12))
+        app.set_goal(&thread, "a different objective", None, false, Some(12))
             .await
             .expect("the user revises it");
 
         assert!(
             provider.stop_was_requested_for("turn-woken").await,
             "a goal turn started by a wake was left working to the objective it replaced"
+        );
+    }
+
+    // A hand-over is charged BEFORE the send, so there is a window where the goal owes a
+    // turn and no turn id exists yet. A revision landing in it used to find nothing to
+    // stop and report plain success, while the send it raced went on to start a turn
+    // working to the objective that had just been replaced.
+    #[tokio::test]
+    async fn revising_during_a_hand_over_does_not_report_success_it_cannot_stand_behind() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _provider, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "dev", Vec::new()).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "the original objective", None, false, Some(10))
+            .await
+            .expect("the user sets one");
+
+        app.set_review_drain_max_ms(200);
+        {
+            // Charged, not yet sent: open with no turn id, which is exactly the window.
+            let mut relay = app.relay.write().await;
+            relay.update_goal(&thread, |goal| goal.hand_over());
+        }
+
+        let revised = app
+            .set_goal(&thread, "a different objective", None, false, Some(12))
+            .await;
+
+        assert!(
+            revised.is_err(),
+            "a revision racing a hand-over cannot know the turn it started was stopped, so \
+             it must not report plain success: {revised:?}"
+        );
+    }
+
+    // Waiting on the THREAD retries against whatever turn is current, so a turn that ends
+    // while the wait runs leaves its replacement being told to stop — someone else's work,
+    // cancelled by a goal that had nothing to do with it.
+    #[tokio::test]
+    async fn waiting_for_one_turn_to_end_never_asks_a_different_one_to_stop() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_review_drain_max_ms(200);
+
+        // The turn we are waiting for has already ended; another has taken its place.
+        {
+            let mut relay = app.relay.write().await;
+            relay.ensure_runtime_for_thread(&thread).active_turn_id =
+                Some("turn-someone-else".to_string());
+        }
+
+        assert!(
+            app.drain_specific_turn(&thread, "turn-old").await,
+            "the turn being waited for is gone, which is the whole point of waiting"
+        );
+        assert!(
+            !provider.stop_was_requested_for("turn-someone-else").await,
+            "waiting for one turn to end asked a different, live turn to stop"
         );
     }
 
