@@ -2923,7 +2923,7 @@ tree would review commits this thread never made"
     pub(super) async fn latest_assistant_entry_with_turn(
         &self,
         thread_id: &str,
-    ) -> Option<(String, String, Option<String>)> {
+    ) -> Option<(String, String, Option<String>, String)> {
         {
             let relay = self.relay.read().await;
             if let Some(runtime) = relay.runtime_for_thread(thread_id) {
@@ -3459,13 +3459,22 @@ fn reviewer_failure_message(outcome: &WaitOutcome) -> &'static str {
 
 fn latest_agent_entry_with_turn(
     views: &[TranscriptEntryView],
-) -> Option<(String, String, Option<String>)> {
+) -> Option<(String, String, Option<String>, String)> {
+    // The turn comes off the SAME row as the text. Read separately, a turn that has not
+    // written yet would lend its id to an older reply, and callers use the pair to decide
+    // whether a reply answers the thing they asked.
+    let (item_id, text) = latest_agent_entry(views)?;
     let turn = views
         .iter()
         .rev()
-        .find(|entry| entry.kind == TranscriptEntryKind::AgentText)
-        .and_then(|entry| entry.turn_id.clone());
-    latest_agent_entry(views).map(|(item_id, text)| (item_id, text, turn))
+        .find(|entry| {
+            entry.kind == TranscriptEntryKind::AgentText
+                && (entry.row_id.as_deref() == Some(item_id.as_str())
+                    || entry.item_id.as_deref() == Some(item_id.as_str()))
+        })
+        .map(|entry| (entry.turn_id.clone(), entry.status.clone()))
+        .unwrap_or_default();
+    Some((item_id, text, turn.0, turn.1))
 }
 
 fn latest_agent_entry(views: &[TranscriptEntryView]) -> Option<(String, String)> {
@@ -3502,7 +3511,49 @@ fn latest_agent_entry(views: &[TranscriptEntryView]) -> Option<(String, String)>
 #[cfg(test)]
 mod latest_agent_entry_tests {
     use super::latest_agent_entry;
+    use super::latest_agent_entry_with_turn;
     use crate::protocol::{TranscriptContentState, TranscriptEntryKind, TranscriptEntryView};
+
+    #[test]
+    fn the_turn_reported_is_the_turn_the_text_came_from() {
+        // The turn was read off the newest agent row and the text off the newest agent
+        // row WITH text — different rows whenever the latest turn has not written yet.
+        // Callers use the pair to decide "is this the reply I asked for", so a spliced
+        // pair hands one turn's work to another turn's question.
+        let row = |item: &str, turn: &str, text: Option<&str>, status: &str| TranscriptEntryView {
+            row_id: Some(item.to_string()),
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some(item.to_string()),
+            kind: TranscriptEntryKind::AgentText,
+            text: text.map(str::to_string),
+            status: status.to_string(),
+            turn_id: Some(turn.to_string()),
+            tool: None,
+            content_state: TranscriptContentState::Full,
+        };
+
+        let views = vec![
+            row(
+                "i1",
+                "turn-user",
+                Some("sure, the CSS is in styles.css"),
+                "completed",
+            ),
+            // The turn we actually asked, which has not produced text yet.
+            row("i2", "turn-brief", None, "in_progress"),
+        ];
+
+        let (item_id, text, turn, _status) =
+            latest_agent_entry_with_turn(&views).expect("there is agent text");
+        assert_eq!(item_id, "i1");
+        assert_eq!(text, "sure, the CSS is in styles.css");
+        assert_eq!(
+            turn.as_deref(),
+            Some("turn-user"),
+            "the turn must belong to the text being returned, not to a later empty row"
+        );
+    }
 
     #[test]
     fn assistant_identity_falls_back_when_item_ids_are_empty() {

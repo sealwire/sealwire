@@ -27003,7 +27003,7 @@ watchdog settle this Blocked",
         // Let the peer actually say something, so there is a reply to misattribute.
         let mut reply_turn = None;
         for _ in 0..50 {
-            if let Some((_, _, turn)) = app.latest_assistant_entry_with_turn(&peer).await {
+            if let Some((_, _, turn, _)) = app.latest_assistant_entry_with_turn(&peer).await {
                 reply_turn = turn;
                 break;
             }
@@ -27273,6 +27273,76 @@ watchdog settle this Blocked",
                 .unwrap_or(false),
             "and it must say why, on the record: {settled:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_record_written_on_acceptance_does_not_count_against_its_own_delegate() {
+        // It is written with no peer yet, so counting distinct peers sees "" as one more
+        // agent: the caller is told yes at four, and the background half then refuses the
+        // fifth against a limit its own placeholder pushed it over.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = goal_session(&app, &cwd).await;
+
+        {
+            let mut relay = app.relay.write().await;
+            for index in 0..4 {
+                relay.insert_ask(crate::state::delegation::Ask::new(
+                    format!("ask-{index}"),
+                    asker.clone(),
+                    format!("peer-{index}"),
+                    "fake".to_string(),
+                    None,
+                    None,
+                    "earlier work".to_string(),
+                    cwd.clone(),
+                    None,
+                    relay_api::delegation::StartedBy::Agent,
+                ));
+            }
+        }
+
+        let ask_id = app
+            .ask_agent_detached(
+                &asker,
+                AskRequest {
+                    device_id: None,
+                    started_by: relay_api::delegation::StartedBy::Person,
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "the fifth, which is allowed".to_string(),
+                },
+            )
+            .await
+            .expect("four peers is under the limit of five");
+
+        let mut outcome = None;
+        for _ in 0..50 {
+            let ask = {
+                let relay = app.relay.read().await;
+                relay.ask(&ask_id).cloned()
+            };
+            if ask
+                .as_ref()
+                .map(|a| a.status.is_terminal())
+                .unwrap_or(false)
+            {
+                outcome = ask;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+
+        if let Some(settled) = outcome {
+            assert!(
+                !settled.error.as_deref().unwrap_or("").contains("limit"),
+                "accepted at four peers, then refused for being at five — the placeholder counted itself: {settled:?}"
+            );
+        }
     }
 
     #[tokio::test]

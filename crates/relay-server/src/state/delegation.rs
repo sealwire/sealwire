@@ -274,15 +274,19 @@ pub(crate) fn peer_is_wider_than_asker(
 /// and lets an agent hand out something weaker than itself on purpose.
 /// Whether the asker's latest reply is the expansion we asked for.
 ///
-/// Not merely "something new": while the expansion is being written the person can
-/// send an unrelated message, and its reply would otherwise be handed to the peer as
-/// the instruction. A half-written reply from a stopped turn is the same mistake.
+/// Not merely "something new": while it is being written the person can send an
+/// unrelated message, whose reply would otherwise be handed to the peer instead.
 pub(crate) fn brief_from_reply(
-    entry: Option<(String, String, Option<String>)>,
+    entry: Option<(String, String, Option<String>, String)>,
     baseline_item_id: Option<&str>,
     dispatched_turn_id: Option<&str>,
 ) -> Option<String> {
-    let (item_id, text, turn_id) = entry?;
+    let (item_id, text, turn_id, status) = entry?;
+    // A stopped turn leaves real text carrying the right turn id. Half an instruction
+    // is not a shorter instruction — the peer would act on the part that got written.
+    if status != "completed" {
+        return None;
+    }
     if baseline_item_id == Some(item_id.as_str()) {
         return None;
     }
@@ -406,8 +410,36 @@ mod brief_reply_tests {
         item: &str,
         text: &str,
         turn: Option<&str>,
-    ) -> Option<(String, String, Option<String>)> {
-        Some((item.to_string(), text.to_string(), turn.map(str::to_string)))
+    ) -> Option<(String, String, Option<String>, String)> {
+        row(item, text, turn, "completed")
+    }
+
+    fn row(
+        item: &str,
+        text: &str,
+        turn: Option<&str>,
+        status: &str,
+    ) -> Option<(String, String, Option<String>, String)> {
+        Some((
+            item.to_string(),
+            text.to_string(),
+            turn.map(str::to_string),
+            status.to_string(),
+        ))
+    }
+
+    #[test]
+    fn a_turn_stopped_partway_is_not_a_brief() {
+        // The text is real and the turn matches; only the status says the person pressed
+        // stop before it finished saying what it meant.
+        assert_eq!(
+            brief_from_reply(
+                row("i2", "Inspect the auth", Some("t1"), "in_progress"),
+                Some("i1"),
+                Some("t1")
+            ),
+            None
+        );
     }
 
     #[test]

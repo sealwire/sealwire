@@ -231,9 +231,12 @@ impl AppState {
                 .map(|s| s.sandbox.clone())
                 .unwrap_or_default();
             let mine: Vec<&Ask> = relay.asks_of_asker(asker_thread_id).into_iter().collect();
+            // A record written on acceptance has no peer yet. Counting "" as an agent
+            // makes a delegate refuse itself, and makes concurrent ones share one slot.
             let distinct_peers = mine
                 .iter()
                 .map(|ask| ask.peer_thread_id.as_str())
+                .filter(|id| !id.is_empty())
                 .collect::<std::collections::HashSet<_>>()
                 .len();
             let provider = relay
@@ -842,8 +845,8 @@ impl AppState {
                 let salvaged = self
                     .latest_assistant_entry_with_turn(&peer_thread_id)
                     .await
-                    .filter(|(item_id, _, _)| baseline.as_deref() != Some(item_id.as_str()))
-                    .map(|(_, text, _)| text);
+                    .filter(|(item_id, _, _, _)| baseline.as_deref() != Some(item_id.as_str()))
+                    .map(|(_, text, _, _)| text);
                 let mut relay = self.relay.write().await;
                 relay.update_ask(&ask_id, |ask| match salvaged {
                     Some(text) => ask.finish(text),
@@ -862,7 +865,7 @@ impl AppState {
             // Idle, said something new, AND said it in the turn this ask
             // dispatched. The last part is what stops a reply the user prompted
             // in the meantime from being handed back as the answer.
-            let Some((item_id, text, reply_turn)) =
+            let Some((item_id, text, reply_turn, _)) =
                 self.latest_assistant_entry_with_turn(&peer_thread_id).await
             else {
                 continue;
@@ -945,10 +948,10 @@ impl AppState {
         for ask in live {
             let salvaged = latest
                 .as_ref()
-                .filter(|(item_id, _, reply_turn)| {
+                .filter(|(item_id, _, reply_turn, _)| {
                     reply_answers_ask(&ask, item_id, reply_turn.as_deref())
                 })
-                .map(|(_, text, _)| text.clone());
+                .map(|(_, text, _, _)| text.clone());
             relay.update_ask(&ask.id, |ask| match salvaged {
                 Some(text) => ask.finish(text),
                 None => ask.fail(format!(
