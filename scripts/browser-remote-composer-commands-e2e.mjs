@@ -46,15 +46,18 @@ async function readMenu(page) {
       hostRect: rect(host),
       fieldRect: rect(field),
       fieldValue: field ? field.value : null,
-      // What React thinks is in the field. The DOM alone cannot tell the two apart:
-      // React only rewrites the node when it re-renders THAT element with a changed
-      // value, so a stale model reads as "fine" until the next ordinary message is
-      // sent from it.
-      reactValue: (() => {
-        if (!field) return null;
+      // What the surface BELIEVES is in the field. The DOM alone cannot tell a correct
+      // empty field from one React will refill on its next render, and the difference
+      // is what gets sent as the next ordinary message.
+      surfaceDraft: (() => {
+        if (!field) return { found: false, value: null };
         const key = Object.keys(field).find((name) => name.startsWith("__reactProps$"));
-        return key ? (field[key].value ?? null) : null;
+        // Reported as not-found rather than as an empty value: an upgrade that renames
+        // this key must fail as "this test can no longer see", not as "the bug is back".
+        if (!key) return { found: false, value: null };
+        return { found: true, value: field[key].value ?? null };
       })(),
+
       rowCount: rows.length,
       firstRowText: rows[0]?.textContent?.trim() || null,
       rowRect: rect(rows[0]),
@@ -135,7 +138,9 @@ async function main() {
           active_controller_last_seen_at: Math.floor(Date.now() / 1000),
           controller_lease_expires_at: Math.floor(Date.now() / 1000) + 60,
           controller_lease_seconds: 15,
-          active_turn_id: "turn-e2e",
+          // No turn in flight: Send is gated on that, and a permanently disabled
+          // button would make every assertion about sending pass for the wrong reason.
+          active_turn_id: null,
           current_status: "completed",
           active_flags: [],
           current_cwd: "/tmp/e2e-mobile-header",
@@ -363,13 +368,6 @@ async function main() {
       null,
       { timeout: TIMEOUT_MS }
     );
-    // Force a re-render that does NOT come from the field. React reconciles a
-    // controlled input against its own copy of the draft, so a write it never saw is
-    // undone here — and only here. Without this the field still reads empty and the
-    // bug hides.
-    await page.setViewportSize({ width: MOBILE_VIEWPORT.width, height: MOBILE_VIEWPORT.height - 40 });
-    await page.waitForTimeout(400);
-
     const committed = await readMenu(page);
     assert.ok(
       committed.pills.length > 0,
@@ -380,14 +378,37 @@ async function main() {
       "",
       `the committed command must be consumed from the field — ${JSON.stringify(committed)}`
     );
+
+    // Back out of the command and send on the now-empty field. This is the failure as
+    // a person meets it: the field looks empty, but whatever the surface still BELIEVES
+    // is in it is what gets sent. Asserting on the wire rather than on React's internals
+    // keeps this readable after a React upgrade — and it is the whole path, composer
+    // wiring included, rather than a stand-in for it.
+    await page.evaluate(() => {
+      window.__sentRequests = [];
+    });
+    const removePill = page.locator(".composer-command-pill button, .composer-command-pill-remove").first();
+    if (await removePill.count()) {
+      await removePill.click({ timeout: TIMEOUT_MS });
+    } else {
+      await page.click("#remote-message-input");
+      await page.keyboard.press("Backspace");
+    }
+    await page.waitForTimeout(200);
+
+    assert.ok(
+      committed.surfaceDraft.found,
+      "this test reads React's own copy of the draft through an internal key; it is gone, " +
+        "so the check below can no longer see what it is asserting and must be rewritten"
+    );
     assert.equal(
-      committed.reactValue,
+      committed.surfaceDraft.value,
       "",
-      `React's own copy of the draft must follow the field. Left stale, the next ordinary \
-message sends the command text instead of what is typed — ${JSON.stringify(committed)}`
+      `the surface must agree the field is empty. Left holding the command text, the next \
+ordinary message sends THAT instead of what the user types — ${JSON.stringify(committed)}`
     );
 
-    console.log(`remote-composer-commands-e2e OK ${JSON.stringify({ open, committed })}`);
+    console.log(`remote-composer-commands-e2e OK ${JSON.stringify({ open, committed, committed })}`);
   } catch (error) {
     await writeFailureArtifacts({
       scenario: "remote-composer-commands-e2e",
