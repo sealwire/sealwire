@@ -1032,10 +1032,20 @@ async fn run_broker_session_with_liveness(
                 });
                 tx
             });
-            // Shed this surface's frame rather than the whole session: one phone falling
-            // behind is its problem, and it retries. Blocking here would make it everyone's.
-            if sender.try_send(message).is_err() {
-                warn!(surface = %key, "broker surface queue is full; dropping a frame");
+            // A frame with nowhere to go is a Stop or an approval the user pressed and
+            // nothing ever ran: `frontend/remote/actions.js` retries only session-claim
+            // failures. Ending the session is what makes the phone resend its pending
+            // action ids, so shedding is the lossy option here, not the gentle one.
+            if let Err(error) = sender.try_send(message) {
+                let _ = handler_error_tx.try_send(match error {
+                    tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                        format!("broker surface {key} fell too far behind to keep its frames")
+                    }
+                    tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                        format!("broker surface {key} stopped handling frames")
+                    }
+                });
+                return;
             }
             // Its worker drains what is queued and then stops, which is also what keeps
             // this map from growing for the length of the session.

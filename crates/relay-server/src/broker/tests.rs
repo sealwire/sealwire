@@ -1847,6 +1847,13 @@ fn workspace_with_a_large_diff() -> tempfile::TempDir {
 /// publish path under test is shared with the encrypted one — both reach
 /// `publish_remote_action_result_chunks` — so this exercises the same coupling.
 async fn managed_broker_state(cwd: &str) -> AppState {
+    managed_broker_state_with_providers(cwd, HashMap::new()).await
+}
+
+async fn managed_broker_state_with_providers(
+    cwd: &str,
+    providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>>,
+) -> AppState {
     let (change_tx, _) = watch::channel(0_u64);
     let relay = Arc::new(RwLock::new(RelayState::new(
         cwd.to_string(),
@@ -1870,7 +1877,7 @@ async fn managed_broker_state(cwd: &str) -> AppState {
             path_scope: Vec::new(),
         },
     );
-    AppState::from_parts(relay, HashMap::new(), change_tx)
+    AppState::from_parts(relay, providers, change_tx)
 }
 
 /// Answers nothing, slowly. A cold provider catalog is the real shape of this: Codex
@@ -2232,6 +2239,121 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
     assert!(
         seen.count_of("ping") > 0,
         "the relay never got to send its own heartbeat either; saw {kinds:?}"
+    );
+}
+
+/// A frame the relay cannot queue must not simply vanish.
+///
+/// `frontend/remote/actions.js` retries only session-claim failures, so a shed frame is
+/// a Stop or an approval the user pressed and nothing ever did. Ending the session is
+/// lossy in appearance only: the phone resends its pending action ids on reconnect.
+#[tokio::test]
+async fn a_full_surface_queue_ends_the_session_rather_than_shedding_a_frame() {
+    if !broker_session_e2e_enabled() {
+        eprintln!("skipping: set AGENT_RELAY_BROKER_SESSION_E2E=1 to run the broker session e2e");
+        return;
+    }
+
+    let workspace = tempfile::TempDir::new().expect("tmpdir");
+    let cwd = workspace.path().to_string_lossy().to_string();
+
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener should bind");
+    let address = listener.local_addr().expect("listener should resolve");
+    let entered_the_hang = Arc::new(tokio::sync::Notify::new());
+    let broker_waits_for_the_hang = Arc::clone(&entered_the_hang);
+    let overflowed_by = 8_usize;
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("broker should accept");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("handshake should succeed");
+
+        let welcome = ServerMessage::Welcome {
+            protocol_version: BROKER_PROTOCOL_VERSION,
+            channel_id: "room-e2e".to_string(),
+            peer_id: "relay-e2e".to_string(),
+            peers: vec![surface_peer("surface-a", "phone-1")],
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&welcome).expect("welcome serializes"),
+            ))
+            .await
+            .expect("welcome sends");
+
+        socket
+            .send(Message::Text(plain_action_frame(
+                "surface-a",
+                "action-hangs",
+                serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
+            )))
+            .await
+            .expect("hanging request sends");
+
+        // Only once its worker is stuck does anything sent after it have nowhere to go.
+        let _ = tokio::time::timeout(Duration::from_secs(2), broker_waits_for_the_hang.notified())
+            .await;
+
+        for index in 0..(SURFACE_MESSAGE_QUEUE_CAPACITY + overflowed_by) {
+            socket
+                .send(Message::Text(plain_action_frame(
+                    "surface-a",
+                    &format!("action-buried-{index}"),
+                    serde_json::json!({ "type": "fetch_projects" }),
+                )))
+                .await
+                .expect("buried request sends");
+        }
+
+        while let Some(frame) = socket.next().await {
+            let Ok(frame) = frame else { break };
+            match frame {
+                Message::Ping(payload) => {
+                    let _ = socket.send(Message::Pong(payload)).await;
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    });
+
+    let config = heartbeat_test_config(format!("ws://{address}")).await;
+    let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> = HashMap::new();
+    providers.insert(
+        "never-answers".to_string(),
+        Arc::new(NeverAnswersProvider {
+            entered_list_threads: Arc::clone(&entered_the_hang),
+        }),
+    );
+    let state = managed_broker_state_with_providers(&cwd, providers).await;
+    let mut change_rx = state.subscribe();
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_broker_session_with_liveness(
+            &state,
+            &mut change_rx,
+            &config,
+            BrokerLivenessConfig {
+                ping_interval: Duration::from_secs(30),
+                pong_timeout: Duration::from_secs(30),
+            },
+        ),
+    )
+    .await;
+
+    let ended = outcome.expect(
+        "the relay carried on after a surface's queue overflowed, so the frames past it \
+         were dropped and nothing will ever ask for them again",
+    );
+    let error = ended.expect_err("an overflowed surface queue must end the session");
+    assert!(
+        error.message().contains("surface"),
+        "the session ended for some other reason than the overflow: {}",
+        error.message()
     );
 }
 
