@@ -4,9 +4,20 @@ import { createComposerCommandController } from "../local/composer-commands.js";
 
 const h = React.createElement;
 
-// Split from the component so the lifetime rule can be tested without a DOM: the
-// controller holds a specific textarea node, and the phone — unlike the desktop —
-// throws that node away and makes a new one every time the panel remounts.
+// The one list. The model is held against it in composer-commands-model.test.mjs, so
+// a capability added here without being supplied there fails before it can ship.
+export const CONTROLLER_CAPABILITIES = [
+  "getCatalog",
+  "getContext",
+  "askAgent",
+  "setGoal",
+  "requestReview",
+  "log",
+];
+
+// Split from the component so the lifetime rule can be tested without a DOM. The
+// controller binds one textarea node for its whole life, so anything that replaces
+// that node — a remount, a surface swap — has to hand the new one over.
 export function attachComposerCommands({
   input,
   mount,
@@ -33,14 +44,15 @@ export function ComposerCommandHost({ controllerRef, input, options }) {
     const { controller, release } = attachComposerCommands({
       input,
       mount: mountRef.current,
-      buildOptions: () => ({
-        getCatalog: () => latest.current.getCatalog(),
-        getContext: () => latest.current.getContext(),
-        askAgent: (threadId, args) => latest.current.askAgent(threadId, args),
-        setGoal: (threadId, objective) => latest.current.setGoal(threadId, objective),
-        requestReview: (values) => latest.current.requestReview(values),
-        log: (text) => latest.current.log(text),
-      }),
+      buildOptions: () =>
+        Object.fromEntries(
+          CONTROLLER_CAPABILITIES.map((name) => [
+            name,
+            // Optional: a capability the model forgot must not throw AFTER the relay
+            // has already done the work. The model's own test is what catches it.
+            (...args) => latest.current?.[name]?.(...args),
+          ])
+        ),
     });
     if (controllerRef) controllerRef.current = controller;
     return () => {

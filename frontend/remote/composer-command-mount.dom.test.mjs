@@ -1,9 +1,9 @@
 // The "/" host on the phone, rendered for real.
 //
 // Two things only a DOM can answer: that the host lands INSIDE the composer box
-// (a banner above it reads as a separate thing, not as part of the field), and
-// that the controller is handed the live textarea — the phone remounts this panel
-// on a session switch, and a controller holding the old node goes silently dead.
+// (a banner above it reads as a separate thing, not as part of the field), and that
+// the caller is handed the textarea NODE — an id lookup binds whichever surface
+// mounted last, and a controller on the wrong node goes silently dead.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
@@ -70,7 +70,7 @@ test("the textarea reaches the caller as a node, not by id", () => {
   );
 });
 
-test("a remount hands over the new textarea, and the old controller is released", () => {
+test("a replaced surface hands over its new textarea, and the old controller is released", () => {
   const first = render();
   const firstInput = first.input();
 

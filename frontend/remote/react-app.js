@@ -167,6 +167,8 @@ import { createPanelControl } from "../local/panel-controls.js";
 import { setupHeaderBandSync } from "../local/header-band-sync.js";
 import { createRemoteComposerCommandActions } from "./composer-command-actions.js";
 import { ComposerCommandHost } from "./composer-command-host.js";
+import { createComposerCommandsModel } from "./composer-commands-model.js";
+import { createCommandSubmit } from "./composer-command-submit.js";
 import {
   Composer,
   ControlBanner,
@@ -2442,7 +2444,7 @@ function RemoteApp() {
           // The same three capabilities the desktop "/" menu drives, reached over the
           // broker instead of loopback HTTP. Built here because this is where the
           // catalog and the viewed thread already live.
-          composerCommandsModel: {
+          composerCommandsModel: createComposerCommandsModel({
             getCatalog: () => ({
               providers: remoteUi.providers || [],
               models: reviewLaunchModel?.models || [],
@@ -2458,8 +2460,9 @@ function RemoteApp() {
               defaultReviewerProvider: reviewLaunchModel?.defaultProvider || "",
             }),
             requestReview: (values) => reviewerActions.onRequestReview(values),
-            ...remoteComposerCommandActions,
-          },
+            log: renderLog,
+            actions: remoteComposerCommandActions,
+          }),
           reviewNudgeModel: {
             canRequest: canRequestRemoteReview,
             reviewModel: reviewLaunchModel,
@@ -3210,10 +3213,24 @@ function RemoteThreadPanel({
   askUserDetailLoadingRequestIds,
   uiState,
 }) {
-  // The node, not its id: this panel remounts on a session switch and React hands
-  // back a NEW textarea, which a controller holding the old one cannot see.
+  // The node, not its id: two surfaces render a textarea, and an id lookup binds
+  // whichever mounted last rather than this composer's own.
   const [commandInput, setCommandInput] = useState(null);
+  const [commandPending, setCommandPending] = useState(false);
   const commandControllerRef = useRef(null);
+  const commandPendingRef = useRef(false);
+  commandPendingRef.current = commandPending;
+  const submitComposer = useMemo(
+    () =>
+      createCommandSubmit({
+        getController: () => commandControllerRef.current,
+        isPending: () => commandPendingRef.current,
+        setPending: setCommandPending,
+        sendMessage: () => onSendMessage(),
+        log: renderLog,
+      }),
+    [onSendMessage]
+  );
 
   // Computed once and handed to BOTH the transcript and the dock: a review or
   // Code Flow owning the thread hides the question, and a question belonging to
@@ -3335,10 +3352,7 @@ function RemoteThreadPanel({
         id: "remote-message-form",
         onSubmit: (event) => {
           event.preventDefault();
-          // Null means the draft is an ordinary message — including a "/word" the
-          // menu does not own, which reaches the agent verbatim.
-          if (commandControllerRef.current?.submit()) return;
-          onSendMessage();
+          submitComposer();
         },
       },
       h(Composer, {
@@ -3353,6 +3367,9 @@ function RemoteThreadPanel({
             })
           : null,
         textareaRef: setCommandInput,
+        // Frozen the way the desktop freezes a submit: the field the command is
+        // about to rewrite must not be edited while the relay is still working.
+        sendPending: composerModel.sendPending || commandPending,
         actionsBeforeSend: session?.active_thread_id
           && (!session?.view_only || session?.settings_writable)
           ? h(SessionSettingsButton, {

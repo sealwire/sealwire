@@ -38,9 +38,9 @@ function mountControlledComposer(initial) {
 }
 
 test("a programmatic write reaches a CONTROLLED composer's state", () => {
-  // React keeps its own copy of the last value it rendered. Assigning `node.value`
-  // leaves that copy untouched, so React treats the input event as a no-op and the
-  // next render puts the old text back — the command the user just picked reappears.
+  // Assigning `node.value` runs React's own setter, which updates the tracker the
+  // input event is checked against — so the event reads as no change and the next
+  // render puts the old text back; the command the user just picked reappears.
   const seen = mountControlledComposer("/goal ship it");
 
   act(() => {
