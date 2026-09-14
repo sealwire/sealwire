@@ -27177,6 +27177,105 @@ watchdog settle this Blocked",
     }
 
     #[tokio::test]
+    async fn an_accepted_delegate_is_on_record_before_the_caller_is_answered() {
+        // The slow half runs in a task. Without a record written first, a restart in the
+        // minutes it takes loses an accepted request with nothing to show for it, and the
+        // person who asked has only the relay's word that it worked.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = goal_session(&app, &cwd).await;
+
+        let ask_id = app
+            .ask_agent_detached(
+                &asker,
+                AskRequest {
+                    device_id: None,
+                    started_by: relay_api::delegation::StartedBy::Person,
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "look at the retry loop".to_string(),
+                },
+            )
+            .await
+            .expect("the delegate is accepted");
+
+        // By id, so this cannot pass by racing the background task into existence.
+        let recorded = {
+            let relay = app.relay.read().await;
+            relay.ask(&ask_id).cloned()
+        };
+        let recorded = recorded.expect("the delegate is on record the moment it is accepted");
+        assert_eq!(recorded.asker_thread_id, asker);
+        assert_eq!(
+            recorded.message, "look at the retry loop",
+            "and it carries what was asked, so the record is readable on its own"
+        );
+        assert!(
+            !recorded.status.is_terminal(),
+            "an accepted delegate is live, not finished"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delegate_that_fails_in_the_background_says_so_on_its_record() {
+        // The caller has already been told it was accepted, so a failure after that has
+        // only one place left to surface: the record the panel is showing.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = goal_session(&app, &cwd).await;
+
+        let ask_id = app
+            .ask_agent_detached(
+                &asker,
+                AskRequest {
+                    device_id: None,
+                    started_by: relay_api::delegation::StartedBy::Person,
+                    peer_thread_id: None,
+                    // No such provider: the background half cannot get anywhere.
+                    provider: Some("nonexistent-provider".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "look at the retry loop".to_string(),
+                },
+            )
+            .await
+            .expect("the checks a caller is owed still pass");
+
+        let mut settled = None;
+        for _ in 0..50 {
+            let ask = {
+                let relay = app.relay.read().await;
+                relay.ask(&ask_id).cloned()
+            };
+            if ask
+                .as_ref()
+                .map(|a| a.status.is_terminal())
+                .unwrap_or(false)
+            {
+                settled = ask;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+
+        let settled = settled.expect("a delegate that cannot proceed must not stay live forever");
+        assert!(
+            settled
+                .error
+                .as_deref()
+                .map(|e| !e.is_empty())
+                .unwrap_or(false),
+            "and it must say why, on the record: {settled:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn being_past_the_agent_limit_is_refused_to_the_caller_not_in_a_background_task() {
         // Since a delegate is acknowledged before the slow half runs, a refusal that
         // happens after the acknowledgement lands nowhere a person looks: the phone has

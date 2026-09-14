@@ -138,24 +138,47 @@ impl AppState {
         &self,
         asker_thread_id: &str,
         request: AskRequest,
-    ) -> Result<(), AskError> {
+    ) -> Result<String, AskError> {
         // Refusals a person can act on are answered here; only the brief and the peer's
         // start happen out of sight.
-        self.precheck_ask(asker_thread_id, &request).await?;
+        let prechecked = self.precheck_ask(asker_thread_id, &request).await?;
+
+        // Written before the caller is answered: a restart during the minutes the brief
+        // takes would otherwise lose an accepted delegate with nothing to show for it.
+        let ask_id = new_ask_id();
+        {
+            let mut relay = self.relay.write().await;
+            relay.insert_ask(Ask::new(
+                ask_id.clone(),
+                asker_thread_id.to_string(),
+                // Filled in when the peer exists; until then this is the delegation.
+                String::new(),
+                request.provider.clone().unwrap_or_default(),
+                request.model.clone(),
+                request.effort.clone(),
+                prechecked.message.clone(),
+                prechecked.asker_cwd.clone(),
+                None,
+                request.started_by,
+            ));
+            relay.notify();
+        }
 
         let app = self.clone();
         let asker = asker_thread_id.to_string();
+        let background_ask_id = ask_id.clone();
         tokio::spawn(async move {
-            if let Err(error) = app.ask_agent(&asker, request).await {
+            if let Err(error) = app
+                .ask_agent_filling(&asker, request, Some(background_ask_id.clone()))
+                .await
+            {
+                // On the record the panel is showing, not in a log the phone never renders.
                 let mut relay = app.relay.write().await;
-                relay.push_log(
-                    "error",
-                    format!("Delegate from {asker} failed: {}", error.message()),
-                );
+                relay.update_ask(&background_ask_id, |ask| ask.fail(error.message()));
                 relay.notify();
             }
         });
-        Ok(())
+        Ok(ask_id)
     }
 
     /// The checks a caller is owed an answer to, and the settings the rest needs —
@@ -259,6 +282,17 @@ Finish up with what you have and tell the user."
         asker_thread_id: &str,
         request: AskRequest,
     ) -> Result<String, AskError> {
+        self.ask_agent_filling(asker_thread_id, request, None).await
+    }
+
+    /// `existing_ask_id` fills in a record written before the caller was answered, so an
+    /// accepted delegate survives a restart of the slow half.
+    async fn ask_agent_filling(
+        &self,
+        asker_thread_id: &str,
+        request: AskRequest,
+        existing_ask_id: Option<String>,
+    ) -> Result<String, AskError> {
         let PrecheckedAsk {
             message,
             asker_cwd,
@@ -354,22 +388,32 @@ Finish up with what you have and tell the user."
         // Record BEFORE sending: a send that lands but is never recorded leaves a
         // peer working with nobody waiting for it. The reverse — recorded but not
         // sent — is visible and settles as a failure.
-        let ask_id = new_ask_id();
+        let ask_id = existing_ask_id.clone().unwrap_or_else(new_ask_id);
         {
             let mut relay = self.relay.write().await;
-            relay.insert_ask(Ask::new(
-                ask_id.clone(),
-                asker_thread_id.to_string(),
-                peer_thread_id.clone(),
-                peer_provider.clone(),
-                request.model.clone(),
-                request.effort.clone(),
-                message.clone(),
-                asker_cwd.to_string(),
-                baseline_item_id,
-                request.started_by,
-            ));
-            relay.notify();
+            if existing_ask_id.is_some() {
+                relay.update_ask(&ask_id, |ask| {
+                    ask.peer_thread_id = peer_thread_id.clone();
+                    ask.peer_provider = peer_provider.clone();
+                    ask.message = message.clone();
+                    ask.baseline_item_id = baseline_item_id.clone();
+                });
+                relay.notify();
+            } else {
+                relay.insert_ask(Ask::new(
+                    ask_id.clone(),
+                    asker_thread_id.to_string(),
+                    peer_thread_id.clone(),
+                    peer_provider.clone(),
+                    request.model.clone(),
+                    request.effort.clone(),
+                    message.clone(),
+                    asker_cwd.to_string(),
+                    baseline_item_id,
+                    request.started_by,
+                ));
+                relay.notify();
+            }
         }
 
         match self
