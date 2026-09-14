@@ -1872,7 +1872,11 @@ async fn managed_broker_state(cwd: &str) -> AppState {
 
 /// Answers nothing, slowly. A cold provider catalog is the real shape of this: Codex
 /// alone is allowed thirty seconds, and the relay awaits it inside the receive loop.
-struct NeverAnswersProvider;
+struct NeverAnswersProvider {
+    /// Signalled on the way into the hang: "A got no reply" is also what a frame nobody
+    /// ever handled looks like, so a test has to prove the hang before reading absence.
+    entered_list_threads: Arc<tokio::sync::Notify>,
+}
 
 #[async_trait::async_trait]
 impl crate::provider::ProviderBridge for NeverAnswersProvider {
@@ -1880,6 +1884,7 @@ impl crate::provider::ProviderBridge for NeverAnswersProvider {
         &self,
         _limit: usize,
     ) -> Result<Vec<crate::protocol::ThreadSummaryView>, String> {
+        self.entered_list_threads.notify_one();
         std::future::pending().await
     }
     async fn list_models(&self) -> Result<Vec<crate::protocol::ModelOptionView>, String> {
@@ -2034,6 +2039,8 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
     let address = listener.local_addr().expect("listener should resolve");
     let observations = Arc::new(std::sync::Mutex::new(BrokerObservations::default()));
     let broker_view = Arc::clone(&observations);
+    let entered_the_hang = Arc::new(tokio::sync::Notify::new());
+    let broker_waits_for_the_hang = Arc::clone(&entered_the_hang);
 
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("broker should accept");
@@ -2066,6 +2073,20 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
             )))
             .await
             .expect("threads request sends");
+
+        // Nothing else goes out until that request is demonstrably inside the provider.
+        // Sending straight away makes both "A got nothing" assertions hold even when A's
+        // frames were never handled at all, which is not the property under test.
+        if tokio::time::timeout(Duration::from_secs(2), broker_waits_for_the_hang.notified())
+            .await
+            .is_ok()
+        {
+            broker_view
+                .lock()
+                .unwrap()
+                .frames
+                .push(("entered-the-hang".to_string(), std::time::Instant::now()));
+        }
 
         // A asks a SECOND thing, behind its own hung one. Same surface, so it must wait.
         socket
@@ -2151,7 +2172,12 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
         );
         let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> =
             HashMap::new();
-        providers.insert("never-answers".to_string(), Arc::new(NeverAnswersProvider));
+        providers.insert(
+            "never-answers".to_string(),
+            Arc::new(NeverAnswersProvider {
+                entered_list_threads: Arc::clone(&entered_the_hang),
+            }),
+        );
         AppState::from_parts(relay, providers, change_tx)
     };
     let mut change_rx = state.subscribe();
@@ -2172,6 +2198,13 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
 
     let seen = observations.lock().unwrap();
     let kinds = seen.kinds();
+    // Read this one first: every assertion below is about what A did NOT get, and none of
+    // them is evidence unless A's request actually reached the provider and stayed there.
+    assert!(
+        seen.count_of("entered-the-hang") > 0,
+        "A's request never reached the hanging provider, so nothing below tells us anything \
+         about a slow action; saw {kinds:?}"
+    );
     // A's reply is `remote_threads_result` and must be absent — if it arrived, the
     // provider answered and this test proved nothing about a slow one.
     assert_eq!(
