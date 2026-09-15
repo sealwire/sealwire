@@ -153,6 +153,30 @@ test("asks group by agent, and a follow-up to one thread is a round inside it", 
   assert.equal(research.result, "Keep it a relay-owned record in the JSON state file, not SQLite.");
 });
 
+test("a server ask preview is not normalized a second time by the ledger", () => {
+  // Ask::view() already stripped markdown and wrote the title/result into the legacy
+  // fields. Re-running intentTitle/oneLineResult treats a leading "2." / year as a
+  // list marker and drops digits that were part of the preview itself.
+  const [group] = askLedger(
+    [
+      {
+        id: "preview-1",
+        asker_thread_id: "me",
+        peer_thread_id: "codex-1",
+        peer_provider: "codex",
+        message: "2. Investigate auth retries",
+        answer: "2026. Fixed the retry behavior",
+        status: "done",
+        delivered: true,
+        updated_at: 1,
+      },
+    ],
+    "me"
+  );
+  assert.equal(group.threads[0].title, "2. Investigate auth retries");
+  assert.equal(group.threads[0].result, "2026. Fixed the retry behavior");
+});
+
 test("an inbound ask groups by the session that asked, since peer_provider names us", () => {
   const groups = askLedger(
     [

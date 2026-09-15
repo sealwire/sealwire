@@ -154,6 +154,33 @@ export function reviewOutcome(job) {
   return { text: reviewStatusLabel(job.status), tone: reviewChipTone(job.status) };
 }
 
+/** An already-bounded single-line preview from a new relay — do not re-strip. */
+function isLedgerPreview(text, max) {
+  const raw = String(text || "");
+  if (!raw || raw.includes("\n")) {
+    return false;
+  }
+  // Ellipsis may push one past the source max when content was cut.
+  return raw.length <= max + 1;
+}
+
+/** Title for a card: trust a server preview; still reduce legacy full prompts. */
+export function ledgerTitle(message) {
+  if (isLedgerPreview(message, TITLE_MAX)) {
+    return String(message).trim() || null;
+  }
+  return intentTitle(message);
+}
+
+/** Result line: same split — previews stay intact, legacy bodies still flatten. */
+export function ledgerResult(text) {
+  if (isLedgerPreview(text, RESULT_MAX)) {
+    const raw = String(text || "").trim();
+    return raw || null;
+  }
+  return oneLineResult(text);
+}
+
 function askState(ask) {
   if (ask.status === "working") {
     return "working";
@@ -168,7 +195,7 @@ function askState(ask) {
 }
 
 function askRoundSummary(ask) {
-  return oneLineResult(ask.answer) || oneLineResult(ask.error) || askState(ask);
+  return ledgerResult(ask.answer) || ledgerResult(ask.error) || askState(ask);
 }
 
 /**
@@ -222,8 +249,8 @@ export function askLedger(asks, viewedThreadId) {
             inbound: group.inbound,
             latest,
             state: askState(latest),
-            title: intentTitle(latest.message) || "Untitled request",
-            result: oneLineResult(latest.answer) || oneLineResult(latest.error),
+            title: ledgerTitle(latest.message) || "Untitled request",
+            result: ledgerResult(latest.answer) || ledgerResult(latest.error),
             updatedAt: latest.updated_at || 0,
             rounds: asks
               .slice(0, -1)

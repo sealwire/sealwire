@@ -192,8 +192,11 @@ fn intent_title(message: &str) -> Option<String> {
     }
 
     // A long opening paragraph usually states the request in its first sentence.
+    // Match JS `/^(.{16,76}?[.?!])(?:\s|$)/`: punctuation only after 16 leading
+    // characters (index >= 16), allowed through index 76.
     let chars: Vec<char> = first.chars().collect();
-    let sentence_end = (15..ASK_TITLE_MAX_CHARS.min(chars.len())).find(|&index| {
+    let upper = (ASK_TITLE_MAX_CHARS + 1).min(chars.len());
+    let sentence_end = (16..upper).find(|&index| {
         matches!(chars[index], '.' | '?' | '!')
             && chars.get(index + 1).is_none_or(|next| next.is_whitespace())
     });
@@ -340,6 +343,32 @@ mod tests {
             "{answer}"
         );
         assert!(!answer.contains("TAIL"));
+    }
+
+    #[test]
+    fn intent_title_sentence_cut_matches_the_js_ledger() {
+        // JS: /^(.{16,76}?[.?!])(?:\s|$)/ — punctuation only after 16 leading
+        // characters (index >= 16), and allowed through index 76.
+        let too_early = format!(
+            "Context summary. Investigate the actual retry-loop failure {}",
+            "x".repeat(80)
+        );
+        let title = intent_title(&too_early).expect("title");
+        assert!(
+            title.starts_with("Context summary. Investigate"),
+            "a period at index 15 must not win; got {title}"
+        );
+        assert_ne!(title, "Context summary.");
+
+        let mut long = "a".repeat(76);
+        long.push('.');
+        long.push(' ');
+        long.push_str(&"b".repeat(20));
+        assert_eq!(
+            intent_title(&long).as_deref(),
+            Some(format!("{}.", "a".repeat(76)).as_str()),
+            "punctuation at index 76 is still a sentence end in the JS helper"
+        );
     }
 
     #[test]
