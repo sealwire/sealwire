@@ -6740,6 +6740,47 @@ async fn pruning_keeps_buckets_that_are_still_in_debt() {
     );
 }
 
+/// Sliding-window limiter must prune stale keys and refuse unbounded unique-key churn.
+#[tokio::test(start_paused = true)]
+async fn sliding_window_rate_limiter_bounds_unique_key_churn() {
+    let limiter = SlidingWindowRateLimiter::default();
+    let window = Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
+
+    assert!(limiter.allow("hot".to_string(), 2).await);
+    assert!(limiter.allow("hot".to_string(), 2).await);
+    assert!(!limiter.allow("hot".to_string(), 2).await);
+
+    for index in 0..(RATE_LIMIT_BUCKET_PRUNE_THRESHOLD * 2) {
+        let _ = limiter.allow(format!("filler-{index}"), 1).await;
+    }
+    assert!(
+        limiter.bucket_count_for_test().await <= RATE_LIMIT_BUCKET_PRUNE_THRESHOLD,
+        "unique-key churn must not grow the map past the hard cardinality cap"
+    );
+    assert!(
+        !limiter.allow("hot".to_string(), 2).await,
+        "hot key must keep its window through unrelated unique-key churn"
+    );
+    assert!(
+        !limiter.allow("overflow-new".to_string(), 1).await,
+        "new keys past the cardinality cap must be refused without inserting"
+    );
+    assert_eq!(
+        limiter.bucket_count_for_test().await,
+        RATE_LIMIT_BUCKET_PRUNE_THRESHOLD
+    );
+
+    tokio::time::advance(window + Duration::from_millis(1)).await;
+    assert!(
+        limiter.allow("hot".to_string(), 2).await,
+        "after the window elapses, prune frees expired fillers and hot is allowed again"
+    );
+    assert!(
+        limiter.bucket_count_for_test().await < RATE_LIMIT_BUCKET_PRUNE_THRESHOLD,
+        "expired windows must be pruned once the map is at the cardinality cap"
+    );
+}
+
 /// A rejected join's error frame counts as egress too.
 ///
 /// `reject_socket` writes its `ServerMessage` on a path of its own, so it was invisible to

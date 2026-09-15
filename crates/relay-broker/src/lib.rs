@@ -181,6 +181,10 @@ const GLOBAL_EGRESS_WARN_BYTES_PER_MINUTE: u64 = 2 * 1024 * 1024 * 1024;
 /// does not grow without bound across churning peers. Amortised: pruning is O(n) but only
 /// runs once the map is already large.
 const BYTE_BUCKET_PRUNE_THRESHOLD: usize = 1_024;
+/// Same idea for [`SlidingWindowRateLimiter`]: prune empty/expired windows once the map
+/// grows past this. New keys are refused (counted as limited) while at the cap after
+/// prune so arbitrary IP/key churn cannot grow the map without bound.
+const RATE_LIMIT_BUCKET_PRUNE_THRESHOLD: usize = 1_024;
 const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 24;
 const DEFAULT_MAX_TEXT_FRAME_BYTES: usize = 64 * 1024;
 /// Floor under [`BrokerHardeningConfig::max_text_frame_bytes`].
@@ -1031,6 +1035,22 @@ impl SlidingWindowRateLimiter {
         let now = Instant::now();
         let cutoff = now.checked_sub(window).unwrap_or(now);
         let mut buckets = self.buckets.lock().await;
+        // Prune empty/expired windows at the cardinality cap so churn can free slots.
+        // Without this, refusing inserts at the cap would also prevent prune from ever
+        // running (it used to require len > threshold), leaving a permanent full map.
+        if buckets.len() >= RATE_LIMIT_BUCKET_PRUNE_THRESHOLD {
+            buckets.retain(|_, bucket| {
+                while bucket.front().is_some_and(|timestamp| *timestamp <= cutoff) {
+                    bucket.pop_front();
+                }
+                !bucket.is_empty()
+            });
+        }
+        // After prune, refuse brand-new keys when still at the cardinality cap so
+        // churn cannot grow the map without bound. Existing keys keep refining.
+        if buckets.len() >= RATE_LIMIT_BUCKET_PRUNE_THRESHOLD && !buckets.contains_key(&key) {
+            return false;
+        }
         let bucket = buckets.entry(key).or_default();
         while bucket.front().is_some_and(|timestamp| *timestamp <= cutoff) {
             bucket.pop_front();
@@ -1040,6 +1060,11 @@ impl SlidingWindowRateLimiter {
         }
         bucket.push_back(now);
         true
+    }
+
+    #[cfg(test)]
+    async fn bucket_count_for_test(&self) -> usize {
+        self.buckets.lock().await.len()
     }
 }
 
