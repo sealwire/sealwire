@@ -1222,6 +1222,10 @@ function RemoteApp() {
         Promise.resolve(handlersRef.current.onFetchReviewerTranscript?.(threadId)).then(
           (entries) => entries || []
         ),
+      fetchAskDetail: (askId) =>
+        Promise.resolve(handlersRef.current.onFetchAskDetail?.(askId)).then(
+          (detail) => detail || null
+        ),
     }),
     []
   );

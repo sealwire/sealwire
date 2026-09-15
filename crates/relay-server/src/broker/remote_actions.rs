@@ -5,16 +5,16 @@ use tracing::{info, warn};
 
 use crate::{
     protocol::{
-        ApplyFileChangeInput, ApprovalDecisionInput, ApprovalReceipt, AskUserAnswerReceipt,
-        AskUserQuestionDetailResponse, DevicesResponse, ForkSessionInput, HeartbeatInput,
-        ModelOptionView, ProjectActionInput, ProjectsResponse, ReadThreadEntryDetailInput,
-        ReadThreadTranscriptInput, RenameThreadInput, RepairWorkspaceInput, RequestReviewInput,
-        ResolvedWorkspace, ResumeSessionInput, ReviewsResponse, SendMessageInput, SessionSnapshot,
-        SetThreadFlagInput, StartSessionInput, StartWorkflowInput, StopTurnInput,
-        SubmitAskUserAnswerInput, TakeOverInput, ThreadEntryDetailResponse, ThreadSettingsView,
-        ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput,
-        WatchThreadsInput, WorkflowActionInput, WorkflowsResponse, WorkspaceDiffResponse,
-        WorkspaceGitContextView,
+        ApplyFileChangeInput, ApprovalDecisionInput, ApprovalReceipt, AskDetailResponse,
+        AskUserAnswerReceipt, AskUserQuestionDetailResponse, DevicesResponse, ForkSessionInput,
+        HeartbeatInput, ModelOptionView, ProjectActionInput, ProjectsResponse,
+        ReadThreadEntryDetailInput, ReadThreadTranscriptInput, RenameThreadInput,
+        RepairWorkspaceInput, RequestReviewInput, ResolvedWorkspace, ResumeSessionInput,
+        ReviewsResponse, SendMessageInput, SessionSnapshot, SetThreadFlagInput, StartSessionInput,
+        StartWorkflowInput, StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput,
+        ThreadEntryDetailResponse, ThreadSettingsView, ThreadTranscriptResponse, ThreadsQuery,
+        ThreadsResponse, UpdateSessionSettingsInput, WatchThreadsInput, WorkflowActionInput,
+        WorkflowsResponse, WorkspaceDiffResponse, WorkspaceGitContextView,
     },
     state::{
         AppState, ApprovalError, AskUserAnswerError, CachedRemoteActionResult,
@@ -215,6 +215,12 @@ pub(super) enum RemoteActionRequest {
         #[serde(default)]
         device_id: Option<String>,
     },
+    /// Full ask bodies for Agents card hover. Same fence as FetchReviews / ask_detail HTTP.
+    FetchAsk {
+        ask_id: String,
+        #[serde(default)]
+        device_id: Option<String>,
+    },
     SubmitAskUserAnswer {
         request_id: String,
         input: SubmitAskUserAnswerInput,
@@ -315,6 +321,7 @@ impl RemoteActionRequest {
             Self::FetchDevices { .. } => RemoteActionKind::FetchDevices,
             Self::FetchProjects { .. } => RemoteActionKind::FetchProjects,
             Self::FetchAskUserQuestionDetail { .. } => RemoteActionKind::FetchAskUserQuestionDetail,
+            Self::FetchAsk { .. } => RemoteActionKind::FetchAsk,
             Self::SubmitAskUserAnswer { .. } => RemoteActionKind::SubmitAskUserAnswer,
             Self::RequestReview { .. } => RemoteActionKind::RequestReview,
             Self::StartWorkflow { .. } => RemoteActionKind::StartWorkflow,
@@ -483,6 +490,10 @@ impl RemoteActionRequest {
                     device_id: Some(device_id),
                 }
             }
+            Self::FetchAsk { ask_id, .. } => Self::FetchAsk {
+                ask_id,
+                device_id: Some(device_id),
+            },
             Self::SubmitAskUserAnswer {
                 request_id,
                 mut input,
@@ -591,6 +602,7 @@ pub(super) enum RemoteActionKind {
     FetchDevices,
     FetchProjects,
     FetchAskUserQuestionDetail,
+    FetchAsk,
     SubmitAskUserAnswer,
     RequestReview,
     StartWorkflow,
@@ -639,6 +651,7 @@ impl RemoteActionKind {
             Self::FetchDevices => "fetch_devices",
             Self::FetchProjects => "fetch_projects",
             Self::FetchAskUserQuestionDetail => "fetch_ask_user_question_detail",
+            Self::FetchAsk => "fetch_ask",
             Self::SubmitAskUserAnswer => "submit_ask_user_answer",
             Self::RequestReview => "request_review",
             Self::StartWorkflow => "start_workflow",
@@ -686,6 +699,8 @@ struct RemoteActionResultPlaintext {
     projects: Option<ProjectsResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ask_user_question_detail: Option<AskUserQuestionDetailResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ask_detail: Option<AskDetailResponse>,
     session_claim: Option<String>,
     session_claim_expires_at: Option<u64>,
     claim_challenge_id: Option<String>,
@@ -727,6 +742,7 @@ fn busy_remote_action_result(
         devices: None,
         projects: None,
         ask_user_question_detail: None,
+        ask_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
         claim_challenge_id: None,
@@ -777,6 +793,7 @@ struct RemoteActionResultSizeBreakdown {
     devices_bytes: usize,
     projects_bytes: usize,
     ask_user_question_detail_bytes: usize,
+    ask_detail_bytes: usize,
     session_claim_bytes: usize,
     claim_challenge_bytes: usize,
     error_bytes: usize,
@@ -801,6 +818,7 @@ pub(super) struct RemoteActionOutcome {
     pub(super) devices: Option<DevicesResponse>,
     pub(super) projects: Option<ProjectsResponse>,
     pub(super) ask_user_question_detail: Option<AskUserQuestionDetailResponse>,
+    pub(super) ask_detail: Option<AskDetailResponse>,
     pub(super) session_claim: Option<String>,
     pub(super) session_claim_expires_at: Option<u64>,
     pub(super) claim_challenge_id: Option<String>,
@@ -1750,6 +1768,13 @@ async fn execute_remote_action(
                 ask_user_question_detail: Some(ask_user_question_detail),
                 ..RemoteActionOutcome::default()
             }),
+        RemoteActionRequest::FetchAsk { ask_id, device_id } => state
+            .ask_detail(ask_id, device_id)
+            .await
+            .map(|ask_detail| RemoteActionOutcome {
+                ask_detail: Some(ask_detail),
+                ..RemoteActionOutcome::default()
+            }),
         RemoteActionRequest::SubmitAskUserAnswer { request_id, input } => state
             .submit_ask_user_answer(&request_id, input)
             .await
@@ -1810,6 +1835,7 @@ fn remote_action_emits_info_log(action: RemoteActionKind) -> bool {
             | RemoteActionKind::FetchDevices
             | RemoteActionKind::FetchProjects
             | RemoteActionKind::FetchAskUserQuestionDetail
+            | RemoteActionKind::FetchAsk
     )
 }
 
@@ -2133,6 +2159,7 @@ async fn publish_plain_remote_action_result(
         devices,
         projects,
         ask_user_question_detail,
+        ask_detail,
         session_claim,
         session_claim_expires_at,
         claim_challenge_id,
@@ -2159,6 +2186,7 @@ async fn publish_plain_remote_action_result(
         devices.as_ref(),
         projects.as_ref(),
         ask_user_question_detail.as_ref(),
+        ask_detail.as_ref(),
         session_claim.as_ref(),
         session_claim_expires_at,
         claim_challenge_id.as_ref(),
@@ -2187,6 +2215,7 @@ async fn publish_plain_remote_action_result(
         devices,
         projects,
         ask_user_question_detail,
+        ask_detail,
         session_claim,
         session_claim_expires_at,
         claim_challenge_id,
@@ -2371,6 +2400,7 @@ fn build_plain_remote_action_result_payload(
                 devices: result.devices.clone(),
                 projects: result.projects.clone(),
                 ask_user_question_detail: result.ask_user_question_detail.clone(),
+                ask_detail: result.ask_detail.clone(),
                 error: result.error.clone(),
             }
         }
@@ -2478,6 +2508,7 @@ async fn replay_plain_remote_action_result(
             devices: cached.devices,
             projects: cached.projects,
             ask_user_question_detail: cached.ask_user_question_detail,
+            ask_detail: cached.ask_detail,
             session_claim: cached.session_claim,
             session_claim_expires_at: cached.session_claim_expires_at,
             claim_challenge_id: cached.claim_challenge_id,
@@ -2550,6 +2581,7 @@ async fn publish_remote_action_result_private(
         devices,
         projects,
         ask_user_question_detail,
+        ask_detail,
         session_claim,
         session_claim_expires_at,
         claim_challenge_id,
@@ -2580,6 +2612,7 @@ async fn publish_remote_action_result_private(
         devices.as_ref(),
         projects.as_ref(),
         ask_user_question_detail.as_ref(),
+        ask_detail.as_ref(),
         session_claim.as_ref(),
         session_claim_expires_at,
         claim_challenge_id.as_ref(),
@@ -2608,6 +2641,7 @@ async fn publish_remote_action_result_private(
         devices,
         projects,
         ask_user_question_detail,
+        ask_detail,
         session_claim,
         session_claim_expires_at,
         claim_challenge_id,
@@ -2715,6 +2749,7 @@ async fn replay_encrypted_remote_action_result(
             devices: cached.devices,
             projects: cached.projects,
             ask_user_question_detail: cached.ask_user_question_detail,
+            ask_detail: cached.ask_detail,
             session_claim: cached.session_claim,
             session_claim_expires_at: cached.session_claim_expires_at,
             claim_challenge_id: cached.claim_challenge_id,
@@ -2943,6 +2978,7 @@ fn cached_remote_action_result(
         devices: outcome.devices,
         projects: outcome.projects,
         ask_user_question_detail: outcome.ask_user_question_detail,
+        ask_detail: outcome.ask_detail,
         session_claim: outcome.session_claim,
         session_claim_expires_at: outcome.session_claim_expires_at,
         claim_challenge_id: outcome.claim_challenge_id,
@@ -2972,6 +3008,7 @@ fn measure_remote_action_result_sizes(
     devices: Option<&DevicesResponse>,
     projects: Option<&ProjectsResponse>,
     ask_user_question_detail: Option<&AskUserQuestionDetailResponse>,
+    ask_detail: Option<&AskDetailResponse>,
     session_claim: Option<&String>,
     session_claim_expires_at: Option<u64>,
     claim_challenge_id: Option<&String>,
@@ -2999,6 +3036,7 @@ fn measure_remote_action_result_sizes(
         devices,
         projects,
         ask_user_question_detail,
+        ask_detail,
         session_claim,
         session_claim_expires_at,
         claim_challenge_id,
@@ -3021,6 +3059,7 @@ fn measure_remote_action_result_sizes(
         devices_bytes: maybe_serialized_json_bytes(devices),
         projects_bytes: maybe_serialized_json_bytes(projects),
         ask_user_question_detail_bytes: maybe_serialized_json_bytes(ask_user_question_detail),
+        ask_detail_bytes: maybe_serialized_json_bytes(ask_detail),
         session_claim_bytes: session_claim
             .map(|claim| serialized_json_bytes(&(claim, session_claim_expires_at)))
             .unwrap_or(0),
@@ -3062,6 +3101,7 @@ fn log_remote_action_result_sizes(
         devices_bytes = breakdown.devices_bytes,
         projects_bytes = breakdown.projects_bytes,
         ask_user_question_detail_bytes = breakdown.ask_user_question_detail_bytes,
+        ask_detail_bytes = breakdown.ask_detail_bytes,
         session_claim_bytes = breakdown.session_claim_bytes,
         claim_challenge_bytes = breakdown.claim_challenge_bytes,
         error_bytes = breakdown.error_bytes,
@@ -3089,6 +3129,7 @@ fn log_remote_action_result_sizes(
             thread_transcript_bytes = breakdown.thread_transcript_bytes,
             workspace_diff_bytes = breakdown.workspace_diff_bytes,
             ask_user_question_detail_bytes = breakdown.ask_user_question_detail_bytes,
+            ask_detail_bytes = breakdown.ask_detail_bytes,
             session_claim_bytes = breakdown.session_claim_bytes,
             claim_challenge_bytes = breakdown.claim_challenge_bytes,
             error_bytes = breakdown.error_bytes,
@@ -3150,6 +3191,7 @@ struct RemoteActionResultPlaintextRef<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     projects: Option<&'a ProjectsResponse>,
     ask_user_question_detail: Option<&'a AskUserQuestionDetailResponse>,
+    ask_detail: Option<&'a AskDetailResponse>,
     session_claim: Option<&'a String>,
     session_claim_expires_at: Option<u64>,
     claim_challenge_id: Option<&'a String>,
@@ -3191,9 +3233,8 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         | RemoteActionKind::FetchWorkflows
         | RemoteActionKind::FetchDevices
         | RemoteActionKind::FetchProjects
-        | RemoteActionKind::FetchAskUserQuestionDetail => {
-            RemoteActionResultKind::RemoteTranscriptResult
-        }
+        | RemoteActionKind::FetchAskUserQuestionDetail
+        | RemoteActionKind::FetchAsk => RemoteActionResultKind::RemoteTranscriptResult,
         RemoteActionKind::DecideApproval | RemoteActionKind::SubmitAskUserAnswer => {
             RemoteActionResultKind::RemoteApprovalResult
         }

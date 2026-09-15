@@ -438,6 +438,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
         devices: None,
         projects: None,
         ask_user_question_detail: None,
+        ask_detail: None,
         session_claim: Some("claim-1".to_string()),
         session_claim_expires_at: Some(120),
         claim_challenge_id: None,

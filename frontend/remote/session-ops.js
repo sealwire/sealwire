@@ -2174,6 +2174,17 @@ export async function fetchAskUserQuestionDetail(requestId) {
   return result.ask_user_question_detail?.request || null;
 }
 
+// Full ask bodies for Agents card hover. The reviews list only ships ledger previews.
+export async function fetchAskDetail(askId) {
+  if (!askId) {
+    return null;
+  }
+  const result = await dispatchOrRecover("fetch_ask", {
+    ask_id: askId,
+  });
+  return result.ask_detail || null;
+}
+
 export async function applyFileChange(itemId, direction) {
   if (!itemId) {
     renderLog("No file change selected.");
