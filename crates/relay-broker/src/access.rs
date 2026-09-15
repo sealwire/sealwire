@@ -62,6 +62,8 @@ pub enum AccessDenialCode {
     Internal,
     /// Credential / token material rejected (transition parity with scrubbed 401s).
     Unauthorized,
+    /// Named resource does not exist (admin/operator lookups).
+    NotFound,
 }
 
 /// Typed access denial: safe public fields + optional internal cause for logs.
@@ -111,6 +113,11 @@ impl AccessDenial {
         Self::new(AccessDenialCode::Unauthorized, "request failed")
     }
 
+    /// Named resource missing (stable 404 for operator/admin surfaces).
+    pub fn not_found(public_message: impl Into<String>) -> Self {
+        Self::new(AccessDenialCode::NotFound, public_message)
+    }
+
     fn new(code: AccessDenialCode, public_message: impl Into<String>) -> Self {
         Self {
             code,
@@ -151,6 +158,7 @@ impl AccessDenial {
             AccessDenialCode::Unavailable => "unavailable",
             AccessDenialCode::Internal => "internal",
             AccessDenialCode::Unauthorized => "unauthorized",
+            AccessDenialCode::NotFound => "not_found",
         }
     }
 
@@ -165,6 +173,7 @@ impl AccessDenial {
                 StatusCode::SERVICE_UNAVAILABLE
             }
             AccessDenialCode::Unauthorized => StatusCode::UNAUTHORIZED,
+            AccessDenialCode::NotFound => StatusCode::NOT_FOUND,
         }
     }
 
@@ -461,6 +470,14 @@ mod tests {
         assert_eq!(
             AccessDenial::unauthorized().http_status(),
             StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            AccessDenial::not_found("missing").http_status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AccessDenial::not_found("missing").public_error_code(),
+            "not_found"
         );
     }
 }
