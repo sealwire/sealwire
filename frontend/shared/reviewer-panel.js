@@ -222,6 +222,8 @@ const GOAL_STATUS_LABEL = {
 function GoalSlot({ goal, onStop = null, onResume = null }) {
   const working = goal.status === "active";
   const status = GOAL_STATUS_LABEL[goal.status] || goal.status;
+  const [expanded, setExpanded] = React.useState(false);
+  const toggleExpanded = () => setExpanded((open) => !open);
   return h(
     React.Fragment,
     null,
@@ -241,10 +243,22 @@ function GoalSlot({ goal, onStop = null, onResume = null }) {
       h(
         "p",
         {
-          className: "reviewer-card-title reviewer-goal-title",
-          // Full text on hover — the card clamps so a pasted status dump cannot
-          // push every other delegation out of the panel.
-          title: goal.objective || undefined,
+          className: `reviewer-card-title reviewer-goal-title${expanded ? " is-expanded" : ""}`,
+          // Clamped by default so a dump cannot push the panel; click expands in place.
+          onClick: toggleExpanded,
+          onKeyDown: (event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            toggleExpanded();
+          },
+          role: "button",
+          tabIndex: 0,
+          "aria-expanded": expanded,
+          title: expanded
+            ? "Show less"
+            : goal.objective
+              ? "Show full goal"
+              : undefined,
         },
         goal.objective
       ),

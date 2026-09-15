@@ -859,7 +859,7 @@ test("ReviewerChip surfaces a running goal, and an ask, with no review in sight"
   assert.match(settled, /is-done/);
 });
 
-test("a long goal objective is clamped on the Agents card, with the full text on title", () => {
+test("a long goal objective is clamped on the Agents card, and can be expanded", () => {
   const dump = `${"Aim: ship it.\n".repeat(20)}And a trailing status dump.`;
   const html = renderToStaticMarkup(
     h(ReviewerPanel, {
@@ -869,8 +869,18 @@ test("a long goal objective is clamped on the Agents card, with the full text on
     })
   );
   assert.match(html, /reviewer-goal-title/);
-  assert.match(html, /title="/);
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /title="Show full goal"/);
   assert.match(html, /Aim: ship it/);
+  assert.doesNotMatch(html, /is-expanded/);
+});
+
+test("goal title focus ring uses box-shadow like other controls", () => {
+  // --focus-ring is `0 0 0 2px …`; using it as `outline` computes to none.
+  const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  const block = css.match(/\.reviewer-goal-title:focus-visible\s*\{[^}]+\}/)?.[0] || "";
+  assert.match(block, /box-shadow:\s*var\(--focus-ring\)/);
+  assert.doesNotMatch(block, /outline:\s*var\(--focus-ring\)/);
 });
 
 // A goal that stopped to ask you something is not a finished one. The chip is the whole

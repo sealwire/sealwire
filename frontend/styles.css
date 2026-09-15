@@ -6751,12 +6751,24 @@ body.is-resizing-panel {
   border-color: var(--border-subtle);
   background: var(--surface-1);
 }
-/* Standing aim only — clamp a pasted dump; full text stays on the title tooltip. */
+/* Standing aim — clamp by default; click the title to expand in place. */
 .reviewer-goal-title {
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+}
+.reviewer-goal-title.is-expanded {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
+.reviewer-goal-title:focus-visible {
+  /* --focus-ring is a box-shadow value, not an outline shorthand. */
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 /* Review -------------------------------------------------------------------
