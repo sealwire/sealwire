@@ -1,4 +1,9 @@
 # Match maintainer host: .node-version / rustc 1.94.0 (see rust-toolchain.toml).
+#
+# SELF-HOST / OpenAccess ONLY. This image builds the public `relay-broker`
+# binary. SealWire Cloud (licensed) is built from the private repository as
+# `sealwire-broker-private` and must never use this Dockerfile as its production
+# image.
 FROM node:25.2.1-bookworm AS frontend-build
 WORKDIR /app
 

@@ -1,3 +1,5 @@
+# Self-host OpenAccess broker only — not SealWire Cloud.
+# Cloud production uses the private `sealwire-broker-private` image.
 services:
   relay-broker:
     build:
