@@ -453,6 +453,40 @@ async fn a_directed_remote_action_result_still_fans_out() {
     }
 }
 
+#[tokio::test]
+async fn force_close_room_removes_all_peers() {
+    let state = BrokerState::default();
+    state
+        .join("room-x", "relay-1", PeerRole::Relay, None, None)
+        .await
+        .expect("relay");
+    state
+        .join("room-x", "phone-1", PeerRole::Surface, None, None)
+        .await
+        .expect("surface");
+    assert_eq!(state.room_peer_count("room-x").await, 2);
+    let epoch_before = state.access_epoch_for_test().await;
+    assert_eq!(
+        state
+            .force_close_room("room-x", "access_released", "released")
+            .await,
+        2
+    );
+    assert_eq!(state.room_peer_count("room-x").await, 0);
+    assert!(state.access_epoch_for_test().await > epoch_before);
+    let epoch_empty = state.access_epoch_for_test().await;
+    assert_eq!(
+        state
+            .force_close_room("room-x", "access_released", "released")
+            .await,
+        0
+    );
+    assert!(
+        state.access_epoch_for_test().await > epoch_empty,
+        "empty-room force-close must still bump the access epoch"
+    );
+}
+
 async fn drain_presence(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<ServerMessage>) {
     while matches!(receiver.try_recv(), Ok(ServerMessage::Presence { .. })) {}
 }

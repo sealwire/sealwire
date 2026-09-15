@@ -96,13 +96,15 @@ async function makeFixture() {
   git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init", "--no-verify");
 
   // The private checkout. PRIVATE_MARKER stands in for "closed sources are
-  // here"; the relay-api path is the one the script rewrites on the way in.
+  // here"; relay-api and optional relay-broker paths are rewritten on the way in.
   mkdirSync(path.join(priv, "src"), { recursive: true });
   writeFileSync(path.join(priv, "PRIVATE_MARKER"), "closed sources\n");
   writeFileSync(
     path.join(priv, "Cargo.toml"),
     '[package]\nname = "sealwire-private"\nversion = "0.1.0"\n\n' +
-      '[dependencies]\nrelay-api = { path = "../agent-relay/crates/relay-api" }\n'
+      "[dependencies]\n" +
+      'relay-api = { path = "../agent-relay/crates/relay-api" }\n' +
+      'relay-broker = { path = "../agent-relay/crates/relay-broker", optional = true }\n'
   );
   writeFileSync(path.join(priv, "src/lib.rs"), "// the real thing\n");
 
@@ -165,6 +167,28 @@ test("the swap excludes the private checkout's node_modules", async () => {
 
   assert.equal(res.status, 0, res.stderr);
   assert.ok(isStub(repo), "stub was not restored after the filtered swap");
+});
+
+test("swap rewrites relay-api and relay-broker paths then restores stub and lock", async () => {
+  const { repo, priv } = await makeFixture();
+
+  const res = run(repo, priv, [
+    "bash",
+    "-c",
+    [
+      "set -e",
+      'grep -F \'path = "../relay-api"\' crates/sealwire-private/Cargo.toml',
+      'grep -F \'path = "../relay-broker"\' crates/sealwire-private/Cargo.toml',
+      '! grep -F \'../agent-relay/crates/relay-api\' crates/sealwire-private/Cargo.toml',
+      '! grep -F \'../agent-relay/crates/relay-broker\' crates/sealwire-private/Cargo.toml',
+    ].join(" && "),
+  ]);
+
+  assert.equal(res.status, 0, res.stderr || res.stdout);
+  assert.ok(isStub(repo), "stub was not restored after path rewrite check");
+  assert.ok(!hasPrivate(repo), "private sources left after path rewrite check");
+  const lock = readFileSync(path.join(repo, "Cargo.lock"), "utf8");
+  assert.equal(lock, CLEAN_LOCK, "Cargo.lock was not restored to the clean snapshot");
 });
 
 test("a failing command still restores, and its status propagates", async () => {

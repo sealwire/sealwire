@@ -18,6 +18,10 @@ pub struct BrokerState {
 struct Inner {
     rooms: HashMap<String, RoomState>,
     next_connection_id: u64,
+    /// Process-global room-access epoch (constant cardinality). Bumped by every
+    /// [`BrokerState::force_close_room`], including when the room is empty, so a
+    /// join that captured an older epoch cannot seat after access release.
+    access_epoch: u64,
 }
 
 struct RoomState {
@@ -65,6 +69,11 @@ impl BrokerState {
         }
     }
 
+    /// Snapshot the process-global access epoch before an async access check.
+    pub async fn access_epoch(&self) -> u64 {
+        self.inner.lock().await.access_epoch
+    }
+
     /// Seat a peer in a channel.
     ///
     /// `pairing_id` is set for a surface admitted by a pairing join ticket — the
@@ -83,6 +92,41 @@ impl BrokerState {
         device_id: Option<String>,
         pairing_id: Option<String>,
     ) -> Result<JoinResult, String> {
+        self.join_with_access_epoch(channel_id, peer_id, role, device_id, pairing_id, None)
+            .await
+    }
+
+    /// Like [`Self::join`], but fails if `expected_epoch` no longer matches the
+    /// process-global access epoch (a concurrent access release won the race).
+    pub async fn join_if_access_epoch(
+        &self,
+        channel_id: &str,
+        peer_id: &str,
+        role: PeerRole,
+        device_id: Option<String>,
+        pairing_id: Option<String>,
+        expected_epoch: u64,
+    ) -> Result<JoinResult, String> {
+        self.join_with_access_epoch(
+            channel_id,
+            peer_id,
+            role,
+            device_id,
+            pairing_id,
+            Some(expected_epoch),
+        )
+        .await
+    }
+
+    async fn join_with_access_epoch(
+        &self,
+        channel_id: &str,
+        peer_id: &str,
+        role: PeerRole,
+        device_id: Option<String>,
+        pairing_id: Option<String>,
+        expected_epoch: Option<u64>,
+    ) -> Result<JoinResult, String> {
         let (tx, rx) = mpsc::unbounded_channel();
         let joined_peer = PeerSummary {
             peer_id: peer_id.to_string(),
@@ -90,6 +134,11 @@ impl BrokerState {
             device_id: device_id.clone(),
         };
         let mut inner = self.inner.lock().await;
+        if let Some(expected_epoch) = expected_epoch {
+            if inner.access_epoch != expected_epoch {
+                return Err("access epoch changed; join rejected".to_string());
+            }
+        }
         inner.next_connection_id = inner.next_connection_id.wrapping_add(1).max(1);
         let connection_id = inner.next_connection_id;
         let room = inner
@@ -226,6 +275,52 @@ impl BrokerState {
             existing_peers,
             receiver: rx,
         })
+    }
+
+    /// Force-close every peer currently seated in `channel_id` (relay and
+    /// surfaces). Always bumps the process-global access epoch (even when the
+    /// room is empty) so in-flight joins that captured an older epoch cannot
+    /// seat after access release. Sends a terminal error frame, records
+    /// disconnects, and drops the room. Returns how many peers were closed.
+    pub async fn force_close_room(&self, channel_id: &str, code: &str, message: &str) -> usize {
+        let mut inner = self.inner.lock().await;
+        inner.access_epoch = inner.access_epoch.saturating_add(1);
+        let Some(room) = inner.rooms.remove(channel_id) else {
+            return 0;
+        };
+        let mut closed = 0usize;
+        for (peer_id, handle) in room.peers {
+            let _ = handle.tx.send(ServerMessage::Error {
+                code: code.to_string(),
+                message: message.to_string(),
+            });
+            self.record_event(UsageEvent::new(
+                UsageEventKind::Disconnect,
+                channel_id,
+                &peer_id,
+                handle.role,
+                handle.device_id,
+            ));
+            closed = closed.saturating_add(1);
+        }
+        closed
+    }
+
+    /// Test/helper: how many peers are seated in `channel_id`.
+    #[cfg(test)]
+    pub async fn room_peer_count(&self, channel_id: &str) -> usize {
+        let inner = self.inner.lock().await;
+        inner
+            .rooms
+            .get(channel_id)
+            .map(|room| room.peers.len())
+            .unwrap_or(0)
+    }
+
+    /// Test/helper: current access epoch.
+    #[cfg(test)]
+    pub async fn access_epoch_for_test(&self) -> u64 {
+        self.access_epoch().await
     }
 
     pub async fn leave(&self, channel_id: &str, peer_id: &str) {

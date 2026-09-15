@@ -1687,6 +1687,7 @@ dependencies = [
 name = "relay-broker"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "base64",
  "ed25519-dalek",
@@ -1730,6 +1731,7 @@ dependencies = [
  "futures-util",
  "hkdf",
  "hmac",
+ "libc",
  "p256",
  "qrcode",
  "rand 0.8.8",
@@ -1738,6 +1740,7 @@ dependencies = [
  "relay-http",
  "relay-util",
  "reqwest",
+ "rpassword",
  "rusqlite",
  "sealwire-private",
  "serde",
@@ -1751,6 +1754,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -1769,6 +1773,7 @@ dependencies = [
  "base64",
  "bytes",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -1788,12 +1793,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots 1.0.9",
 ]
@@ -1820,6 +1827,27 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rpassword"
+version = "7.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2da316a15f47e3d053de9cb2c439650bd8fa4aaeb9365f2e5f27f492ff73c196"
+dependencies = [
+ "libc",
+ "rtoolbox",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rtoolbox"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a1efe12a1469752d0e6ff5ebec0b6ef4924cc5c4c71046b0ec730040535819d"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2793,6 +2821,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81941cd78d0c92026c33e5e01312845a4cb1e9af3407f9134b100dd03144103e"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

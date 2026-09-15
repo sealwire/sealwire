@@ -1,10 +1,15 @@
+mod access_release;
+mod activation;
 mod auth;
 mod credentials;
 mod crypto;
+mod lifecycle;
 mod protocol;
 mod remote_actions;
 mod session_claim;
 mod writer;
+
+pub use access_release::run_cloud_access_release;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -19,6 +24,7 @@ use relay_broker::join_ticket::unix_now;
 use relay_broker::protocol::{PeerRole, PresenceKind, ServerMessage};
 use relay_util::{trimmed_option_string, trimmed_string};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tokio::time::{sleep_until, Instant};
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
@@ -29,13 +35,21 @@ use crate::state::{
     AppState, BrokerPendingMessage, BrokerTarget, PendingTranscriptDelta, TranscriptDeltaKind,
 };
 
+use self::activation::{
+    activation_override_env_present, cloud_activation_required,
+    discard_oneshot_activation_file_input, resolve_activation_credential, scrub_activation_env,
+    scrub_all_cloud_activation_env_for_normal_start, CLOUD_ACCESS_KEY_ENV,
+    CLOUD_ACCESS_KEY_FILE_ENV, CLOUD_ACTIVATION_ENV, LEGACY_LICENSE_CODE_ENV,
+};
 use self::auth::{
-    complete_public_relay_enrollment, request_public_relay_enrollment_challenge, BrokerAuthConfig,
-    BrokerJoinCredential, ClientBrokerGrant, DeviceBrokerCredential, PublicRelayRegistration,
+    build_control_plane_client, complete_public_relay_enrollment, parse_control_plane_url,
+    request_public_relay_enrollment_challenge, BrokerAuthConfig, BrokerJoinCredential,
+    ClientBrokerGrant, DeviceBrokerCredential, PublicRelayRegistration,
     RELAY_BROKER_CONTROL_URL_ENV, RELAY_BROKER_REGISTRATION_PATH_ENV, RELAY_BROKER_RELAY_ID_ENV,
     RELAY_BROKER_RELAY_REFRESH_TOKEN_ENV,
 };
 use self::crypto::{decrypt_json, encrypt_json, EncryptedEnvelope};
+use self::lifecycle::{bearer_fingerprint, BrokerLifecycleLock, RegistrationIdentity};
 #[cfg(test)]
 use self::protocol::summarize_thread_transcript_response;
 use self::protocol::{
@@ -57,7 +71,96 @@ const BROKER_RECONNECT_STABLE_SESSION_SECS: u64 = 60;
 const BROKER_PING_INTERVAL_SECS: u64 = 20;
 const BROKER_PONG_TIMEOUT_SECS: u64 = 10;
 const PUBLIC_RELAY_AUTH_REQUEST_RETRY_SECS: u64 = 5;
-const PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION: u32 = 1;
+
+pub(crate) use self::activation::{
+    CLOUD_EXPECTED_BEARER_FP_ENV, CLOUD_EXPECTED_CONTROL_URL_ENV, CLOUD_EXPECTED_RELAY_ID_ENV,
+    CLOUD_EXPECTED_ROOM_ID_ENV, CLOUD_REQUIRE_CACHED_REGISTRATION_ENV,
+};
+
+fn cloud_registration_required_from_env() -> bool {
+    matches!(
+        std::env::var(CLOUD_REQUIRE_CACHED_REGISTRATION_ENV)
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
+}
+
+fn expected_registration_from_env() -> Result<RegistrationIdentity, String> {
+    let invalid = || {
+        "cloud launch registration witness is incomplete or invalid; refusing anonymous \
+         enrollment. Re-run `sealwire cloud`."
+            .to_string()
+    };
+    let control_url = std::env::var(CLOUD_EXPECTED_CONTROL_URL_ENV).map_err(|_| invalid())?;
+    let relay_id = std::env::var(CLOUD_EXPECTED_RELAY_ID_ENV).map_err(|_| invalid())?;
+    let broker_room_id = std::env::var(CLOUD_EXPECTED_ROOM_ID_ENV).map_err(|_| invalid())?;
+    let bearer_fingerprint = std::env::var(CLOUD_EXPECTED_BEARER_FP_ENV).map_err(|_| invalid())?;
+    if control_url.trim().is_empty()
+        || relay_id.trim().is_empty()
+        || broker_room_id.trim().is_empty()
+        || bearer_fingerprint.trim().is_empty()
+        || bearer_fingerprint.trim().len() != lifecycle::BEARER_FINGERPRINT_HEX_CHARS
+        || !bearer_fingerprint
+            .trim()
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(invalid());
+    }
+    let control_url = parse_control_plane_url(control_url.trim()).map_err(|_| invalid())?;
+    Ok(RegistrationIdentity {
+        control_url: control_url.as_str().to_string(),
+        relay_id: relay_id.trim().to_string(),
+        broker_room_id: broker_room_id.trim().to_string(),
+        bearer_fingerprint: bearer_fingerprint.trim().to_ascii_lowercase(),
+    })
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct BrokerStartupContext {
+    cloud_registration: CloudRegistrationRequirement,
+}
+
+#[derive(Debug, Default)]
+enum CloudRegistrationRequirement {
+    #[default]
+    None,
+    Required(RegistrationIdentity),
+    Invalid(String),
+}
+
+fn emit_cloud_launch_witness(identity: &RegistrationIdentity) {
+    // Machine-readable, secret-free witness for the Node launcher → long-lived child.
+    let payload = serde_json::json!({
+        "v": 1,
+        "control_url": identity.control_url,
+        "relay_id": identity.relay_id,
+        "broker_room_id": identity.broker_room_id,
+        "bearer_fingerprint": identity.bearer_fingerprint,
+    });
+    println!("sealwire-cloud-witness:{payload}");
+}
+
+/// Capture the secret-free preflight witness exactly once, then unconditionally
+/// scrub every activation variable before AppState/provider construction.
+/// Cloud-activate (subcommand) must run before this normal-start path.
+pub fn capture_and_scrub_activation_for_normal_start() -> BrokerStartupContext {
+    let cloud_registration = if cloud_registration_required_from_env() {
+        match expected_registration_from_env() {
+            Ok(identity) => CloudRegistrationRequirement::Required(identity),
+            Err(error) => CloudRegistrationRequirement::Invalid(error),
+        }
+    } else {
+        // Partial/ambient witness fields without the explicit requirement have
+        // no startup semantics. They are scrubbed below and never reach a child.
+        CloudRegistrationRequirement::None
+    };
+    scrub_all_cloud_activation_env_for_normal_start();
+    BrokerStartupContext { cloud_registration }
+}
+
+pub(crate) const PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION: u32 = 1;
 const PUBLIC_RELAY_IDENTITY_SCHEMA_VERSION: u32 = 1;
 const SNAPSHOT_PUBLISH_MIN_INTERVAL_MILLIS: u64 = 500;
 const TRANSCRIPT_DELTA_PUBLISH_WINDOW_MILLIS: u64 = 100;
@@ -79,32 +182,92 @@ const RELAY_PROTOCOL_VERSION: u64 = 2;
 
 type BrokerSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct BrokerConfig {
     public_base_url: String,
     url: Url,
     broker_room_id: String,
     relay_peer_id: String,
     auth: BrokerAuthConfig,
+    /// Public-mode only: watch the registration cache so an external `cloud unbind`
+    /// stops reconnect retries instead of looping forever on a revoked refresh token.
+    registration_watch: Option<RegistrationWatch>,
 }
 
+impl std::fmt::Debug for BrokerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrokerConfig")
+            .field("public_base_url", &self.public_base_url)
+            .field("url", &self.url)
+            .field("broker_room_id", &self.broker_room_id)
+            .field("relay_peer_id", &self.relay_peer_id)
+            .field("auth", &self.auth)
+            .field("registration_watch", &self.registration_watch)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RegistrationWatch {
+    path: PathBuf,
+    control_url: String,
+    relay_id: String,
+    broker_room_id: String,
+    /// Truncated one-way fingerprint of the refresh bearer (never the bearer itself).
+    refresh_fingerprint: String,
+}
+
+#[derive(Debug)]
 enum BrokerConfigResolution {
     Disabled,
     Ready(BrokerConfig),
     PendingPublicEnrollment(PendingPublicEnrollment),
 }
 
-/// License code the user sets to activate this relay against the public broker.
-/// Only required when the broker has `RELAY_BROKER_REQUIRE_LICENSE_CODE=1`.
-const RELAY_LICENSE_CODE_ENV: &str = "RELAY_LICENSE_CODE";
-
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone)]
 struct PendingPublicEnrollment {
     control_url: Url,
     registration_path: PathBuf,
     identity_path: PathBuf,
-    /// License code to present at enrollment; `None` if not configured.
-    license_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnrollmentDisposition {
+    Existing,
+    Enrolled,
+}
+
+/// A registration selected or created while the lifecycle lock remains held.
+/// Callers that reload broker configuration can therefore consume the exact
+/// cache selected by the critical section before activate/unbind may proceed.
+struct LockedPublicRelayRegistration {
+    registration: PublicRelayRegistration,
+    disposition: EnrollmentDisposition,
+    #[allow(dead_code)]
+    lifecycle: BrokerLifecycleLock,
+}
+
+#[derive(Debug)]
+enum EnrollmentCriticalError {
+    /// Lock/cache/save failures must stop: retrying could overwrite a different
+    /// origin or issue a second remote completion after an uncertain save.
+    Fatal(String),
+    /// A remote enrollment attempt failed before a registration was available.
+    Retryable(String),
+}
+
+impl EnrollmentCriticalError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Fatal(message) | Self::Retryable(message) => message,
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            Self::Fatal(message) | Self::Retryable(message) => message,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -293,8 +456,8 @@ impl Default for BrokerLivenessConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedPublicRelayRegistration {
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct PersistedPublicRelayRegistration {
     schema_version: u32,
     control_url: String,
     relay_id: String,
@@ -302,11 +465,50 @@ struct PersistedPublicRelayRegistration {
     relay_refresh_token: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl std::fmt::Debug for PersistedPublicRelayRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PersistedPublicRelayRegistration")
+            .field("schema_version", &self.schema_version)
+            .field("control_url", &self.control_url)
+            .field("relay_id", &self.relay_id)
+            .field("broker_room_id", &self.broker_room_id)
+            .field("relay_refresh_token", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 struct PersistedPublicRelayIdentity {
     schema_version: u32,
     control_url: String,
     relay_signing_seed: String,
+}
+
+impl std::fmt::Debug for PersistedPublicRelayIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PersistedPublicRelayIdentity")
+            .field("schema_version", &self.schema_version)
+            .field("control_url", &self.control_url)
+            .field("relay_signing_seed", &"<redacted>")
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod identity_debug_tests {
+    use super::*;
+
+    #[test]
+    fn persisted_identity_debug_redacts_signing_seed() {
+        let identity = PersistedPublicRelayIdentity {
+            schema_version: 1,
+            control_url: "http://127.0.0.1:9".into(),
+            relay_signing_seed: "super-secret-seed-bytes".into(),
+        };
+        let rendered = format!("{identity:?}");
+        assert!(!rendered.contains("super-secret-seed-bytes"));
+        assert!(rendered.contains("redacted"));
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -327,7 +529,16 @@ impl BrokerConfig {
     }
 
     async fn from_env_resolution() -> Result<BrokerConfigResolution, String> {
-        Self::from_parts_resolution(
+        Self::from_env_resolution_with_startup_context(BrokerStartupContext::default()).await
+    }
+
+    async fn from_env_resolution_with_startup_context(
+        startup_context: BrokerStartupContext,
+    ) -> Result<BrokerConfigResolution, String> {
+        // Never forward activation env into provider children: consume-or-scrub
+        // happens during resolution / enrollment. Legacy RELAY_LICENSE_CODE is
+        // only accepted as a one-shot compatibility input inside activation.rs.
+        Self::from_parts_resolution_with_startup_context(
             std::env::var("RELAY_BROKER_URL").ok(),
             std::env::var("RELAY_BROKER_PUBLIC_URL").ok(),
             std::env::var(RELAY_BROKER_CONTROL_URL_ENV).ok(),
@@ -340,7 +551,7 @@ impl BrokerConfig {
             std::env::var(RELAY_BROKER_IDENTITY_PATH_ENV).ok(),
             std::env::var(RELAY_BROKER_REGISTRATION_PATH_ENV).ok(),
             std::env::var(self::auth::RELAY_BROKER_DEVICE_JOIN_TTL_SECS_ENV).ok(),
-            std::env::var(RELAY_LICENSE_CODE_ENV).ok(),
+            startup_context,
         )
         .await
     }
@@ -375,7 +586,6 @@ impl BrokerConfig {
             relay_identity_path,
             registration_path,
             device_join_ttl_secs,
-            None, // license_code — not used by the test wrapper
         )
         .await?
         {
@@ -401,9 +611,59 @@ impl BrokerConfig {
         relay_identity_path: Option<String>,
         registration_path: Option<String>,
         device_join_ttl_secs: Option<String>,
-        license_code: Option<String>,
     ) -> Result<BrokerConfigResolution, String> {
+        Self::from_parts_resolution_with_startup_context(
+            url,
+            public_url,
+            control_url,
+            broker_room_id,
+            relay_peer_id,
+            auth_mode,
+            join_ticket_secret,
+            relay_id,
+            relay_refresh_token,
+            relay_identity_path,
+            registration_path,
+            device_join_ttl_secs,
+            BrokerStartupContext::default(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn from_parts_resolution_with_startup_context(
+        url: Option<String>,
+        public_url: Option<String>,
+        control_url: Option<String>,
+        broker_room_id: Option<String>,
+        relay_peer_id: Option<String>,
+        auth_mode: Option<String>,
+        join_ticket_secret: Option<String>,
+        relay_id: Option<String>,
+        relay_refresh_token: Option<String>,
+        relay_identity_path: Option<String>,
+        registration_path: Option<String>,
+        device_join_ttl_secs: Option<String>,
+        startup_context: BrokerStartupContext,
+    ) -> Result<BrokerConfigResolution, String> {
+        let explicit_cloud_requirement = match &startup_context.cloud_registration {
+            CloudRegistrationRequirement::None => false,
+            CloudRegistrationRequirement::Required(_) => true,
+            CloudRegistrationRequirement::Invalid(error) => {
+                scrub_activation_env();
+                return Err(error.clone());
+            }
+        };
+
         let Some(url) = url.and_then(trimmed_string) else {
+            scrub_activation_env();
+            if explicit_cloud_requirement {
+                return Err(
+                    "cloud launch requires RELAY_BROKER_URL; refusing to start without the \
+                     preflight-selected broker. Re-run `sealwire cloud`."
+                        .to_string(),
+                );
+            }
             return Ok(BrokerConfigResolution::Disabled);
         };
         let relay_peer_id =
@@ -412,6 +672,14 @@ impl BrokerConfig {
             .and_then(trimmed_string)
             .unwrap_or_else(|| url.clone());
         let auth_mode = BrokerAuthMode::parse(auth_mode)?;
+        if explicit_cloud_requirement && !matches!(auth_mode, BrokerAuthMode::PublicControlPlane) {
+            scrub_activation_env();
+            return Err(
+                "cloud launch requires public broker auth mode; refusing self-hosted or \
+                 mismatched configuration. Re-run `sealwire cloud`."
+                    .to_string(),
+            );
+        }
 
         let mut broker_url = Url::parse(&url)
             .map_err(|error| format!("invalid RELAY_BROKER_URL `{url}`: {error}"))?;
@@ -440,9 +708,16 @@ impl BrokerConfig {
             resolve_public_relay_registration_path(&current_dir, registration_path);
         let identity_path = resolve_public_relay_identity_path(&current_dir, relay_identity_path);
 
-        let (broker_room_id, relay_id, relay_refresh_token, pending_public_enrollment) =
-            match auth_mode {
-                BrokerAuthMode::SelfHostedSharedSecret => (
+        let (
+            broker_room_id,
+            relay_id,
+            relay_refresh_token,
+            pending_public_enrollment,
+            registration_watch,
+        ) = match auth_mode {
+            BrokerAuthMode::SelfHostedSharedSecret => {
+                scrub_activation_env();
+                (
                     trimmed_option_string(broker_room_id).ok_or_else(|| {
                         "RELAY_BROKER_CHANNEL_ID is required when RELAY_BROKER_URL is set"
                             .to_string()
@@ -450,74 +725,108 @@ impl BrokerConfig {
                     trimmed_option_string(relay_id),
                     trimmed_option_string(relay_refresh_token),
                     None,
-                ),
-                BrokerAuthMode::PublicControlPlane => {
-                    let control_url_string = trimmed_option_string(control_url.clone())
-                        .ok_or_else(|| {
-                            format!(
+                    None,
+                )
+            }
+            BrokerAuthMode::PublicControlPlane => {
+                let control_url_string =
+                    trimmed_option_string(control_url.clone()).ok_or_else(|| {
+                        format!(
                             "{RELAY_BROKER_CONTROL_URL_ENV} is required in public broker auth mode"
                         )
-                        })?;
-                    let control_url = Url::parse(&control_url_string).map_err(|error| {
-                        format!(
-                        "invalid {RELAY_BROKER_CONTROL_URL_ENV} `{control_url_string}`: {error}"
-                    )
                     })?;
-                    let scheme = control_url.scheme().to_ascii_lowercase();
-                    if scheme != "http" && scheme != "https" {
-                        return Err(format!(
-                            "{RELAY_BROKER_CONTROL_URL_ENV} must use http:// or https://"
-                        ));
+                let control_url = parse_control_plane_url(&control_url_string)?;
+                let (require_cached, expected_cached) = match startup_context.cloud_registration {
+                    CloudRegistrationRequirement::None => (false, None),
+                    CloudRegistrationRequirement::Required(identity) => (true, Some(identity)),
+                    CloudRegistrationRequirement::Invalid(error) => {
+                        scrub_activation_env();
+                        return Err(error);
                     }
+                };
 
-                    if let (Some(broker_room_id), Some(relay_id), Some(relay_refresh_token)) = (
-                        trimmed_option_string(broker_room_id.clone()),
-                        trimmed_option_string(relay_id.clone()),
-                        trimmed_option_string(relay_refresh_token.clone()),
-                    ) {
-                        (
-                            broker_room_id,
-                            Some(relay_id),
-                            Some(relay_refresh_token),
-                            None,
-                        )
-                    } else if let Some(cached) =
-                        load_public_relay_registration(&registration_path, control_url.as_str())
-                            .await?
-                    {
-                        // F4: warn if a license code is set but the cached registration
-                        // is used instead — the code was only needed at initial enrollment.
-                        // If the relay's license has expired/been revoked, delete the cache
-                        // file to force re-enrollment with a new code.
-                        if trimmed_option_string(license_code.clone()).is_some() {
-                            warn!(
-                                registration_path = %registration_path.display(),
-                                "RELAY_LICENSE_CODE is set but a cached registration already \
-                                 exists — the code is ignored. To re-enroll with a new code, \
-                                 delete the registration file and restart."
+                if let (Some(broker_room_id), Some(relay_id), Some(relay_refresh_token)) = (
+                    trimmed_option_string(broker_room_id.clone()),
+                    trimmed_option_string(relay_id.clone()),
+                    trimmed_option_string(relay_refresh_token.clone()),
+                ) {
+                    if require_cached {
+                        scrub_activation_env();
+                        return Err(
+                            "cloud launch requires the just-validated registration cache; \
+                             env-supplied relay credentials are not accepted for this path"
+                                .to_string(),
+                        );
+                    }
+                    scrub_activation_env();
+                    (
+                        broker_room_id,
+                        Some(relay_id),
+                        Some(relay_refresh_token),
+                        None,
+                        None,
+                    )
+                } else if let Some(cached) =
+                    load_public_relay_registration(&registration_path, control_url.as_str()).await?
+                {
+                    if require_cached {
+                        let actual = RegistrationIdentity {
+                            control_url: control_url.as_str().to_string(),
+                            relay_id: cached.relay_id.clone(),
+                            broker_room_id: cached.broker_room_id.clone(),
+                            bearer_fingerprint: bearer_fingerprint(&cached.relay_refresh_token),
+                        };
+                        if expected_cached.as_ref() != Some(&actual) {
+                            scrub_activation_env();
+                            return Err(
+                                "cloud registration changed or was replaced after preflight; \
+                                 refusing anonymous re-enrollment. Re-run `sealwire cloud`."
+                                    .to_string(),
                             );
                         }
-                        (
-                            cached.broker_room_id,
-                            Some(cached.relay_id),
-                            Some(cached.relay_refresh_token),
-                            None,
-                        )
-                    } else {
-                        (
-                            String::new(),
-                            None,
-                            None,
-                            Some(PendingPublicEnrollment {
-                                control_url,
-                                registration_path: registration_path.clone(),
-                                identity_path: identity_path.clone(),
-                                license_code: trimmed_option_string(license_code),
-                            }),
-                        )
                     }
+                    if activation_override_env_present() {
+                        scrub_activation_env();
+                        return Err("already linked; run `sealwire cloud unbind` first".to_string());
+                    }
+                    scrub_activation_env();
+                    let watch = RegistrationWatch {
+                        path: registration_path.clone(),
+                        control_url: control_url.as_str().to_string(),
+                        relay_id: cached.relay_id.clone(),
+                        broker_room_id: cached.broker_room_id.clone(),
+                        refresh_fingerprint: refresh_token_fingerprint(&cached.relay_refresh_token),
+                    };
+                    (
+                        cached.broker_room_id,
+                        Some(cached.relay_id),
+                        Some(cached.relay_refresh_token),
+                        None,
+                        Some(watch),
+                    )
+                } else {
+                    if require_cached {
+                        scrub_activation_env();
+                        return Err("cloud registration required but missing after preflight; \
+                             refusing anonymous enrollment. Re-run `sealwire cloud`."
+                            .to_string());
+                    }
+                    // Leave activation env for the enrollment loop to consume
+                    // (generic `--broker` auto-enroll path only).
+                    (
+                        String::new(),
+                        None,
+                        None,
+                        Some(PendingPublicEnrollment {
+                            control_url,
+                            registration_path: registration_path.clone(),
+                            identity_path: identity_path.clone(),
+                        }),
+                        None,
+                    )
                 }
-            };
+            }
+        };
 
         if let Some(pending) = pending_public_enrollment {
             return Ok(BrokerConfigResolution::PendingPublicEnrollment(pending));
@@ -547,6 +856,7 @@ impl BrokerConfig {
             broker_room_id,
             relay_peer_id,
             auth,
+            registration_watch,
         }))
     }
 
@@ -589,8 +899,12 @@ impl BrokerConfig {
     }
 }
 
-pub async fn spawn_broker_task(state: AppState) -> Result<(), String> {
-    let resolution = BrokerConfig::from_env_resolution().await?;
+pub async fn spawn_broker_task(
+    state: AppState,
+    startup_context: BrokerStartupContext,
+) -> Result<(), String> {
+    let resolution =
+        BrokerConfig::from_env_resolution_with_startup_context(startup_context).await?;
     launch_broker(state, resolution).await;
     Ok(())
 }
@@ -684,6 +998,23 @@ async fn run_broker_loop(
         Duration::from_secs(BROKER_RECONNECT_MAX_DELAY_SECS),
     );
     loop {
+        if registration_watch_diverged(&config).await {
+            info!(
+                broker_room_id = config.broker_room_id(),
+                peer_id = config.relay_peer_id(),
+                "public broker registration cache removed or replaced; stopping broker loop"
+            );
+            state
+                .push_runtime_log(
+                    "info",
+                    "Broker registration cache was removed or replaced; stopping cloud reconnects."
+                        .to_string(),
+                )
+                .await;
+            state.set_broker_connection(false).await;
+            return;
+        }
+
         let connected_duration = match run_broker_session(&state, &mut change_rx, &config).await {
             Ok(connected_duration) => {
                 debug!("broker session ended cleanly");
@@ -709,6 +1040,23 @@ async fn run_broker_loop(
         };
 
         state.set_broker_connection(false).await;
+
+        if registration_watch_diverged(&config).await {
+            info!(
+                broker_room_id = config.broker_room_id(),
+                peer_id = config.relay_peer_id(),
+                "public broker registration cache removed or replaced after disconnect; stopping broker loop"
+            );
+            state
+                .push_runtime_log(
+                    "info",
+                    "Broker registration cache was removed or replaced; stopping cloud reconnects."
+                        .to_string(),
+                )
+                .await;
+            return;
+        }
+
         let retry = {
             let mut rng = rand::thread_rng();
             reconnect_backoff.next_delay(&mut rng)
@@ -728,37 +1076,104 @@ async fn run_broker_loop(
     }
 }
 
+async fn registration_watch_diverged(config: &BrokerConfig) -> bool {
+    let Some(watch) = config.registration_watch.as_ref() else {
+        return false;
+    };
+    match load_public_relay_registration(&watch.path, &watch.control_url).await {
+        Ok(Some(cached)) => {
+            cached.relay_id != watch.relay_id
+                || cached.broker_room_id != watch.broker_room_id
+                || refresh_token_fingerprint(&cached.relay_refresh_token)
+                    != watch.refresh_fingerprint
+        }
+        Ok(None) => true,
+        Err(error) => {
+            warn!(
+                registration_path = %watch.path.display(),
+                error = %error,
+                "failed to read broker registration cache while checking reconnect; treating as diverged"
+            );
+            true
+        }
+    }
+}
+
+fn refresh_token_fingerprint(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
+        .chars()
+        .take(16)
+        .collect()
+}
+
 async fn run_public_broker_enrollment_loop(state: AppState, pending: PendingPublicEnrollment) {
-    let client = reqwest::Client::new();
+    // Explicit cloud activation belongs only in `cloud-activate` preflight.
+    // Generic public `--broker` auto-enrolls with no access key (open brokers).
+    // Never honor ambient RELAY_CLOUD_ACTIVATION here.
+    scrub_all_cloud_activation_env_for_normal_start();
+    let client = match build_control_plane_client() {
+        Ok(client) => client,
+        Err(error) => {
+            state
+                .push_runtime_log(
+                    "error",
+                    format!("Failed to build broker control client: {error}"),
+                )
+                .await;
+            return;
+        }
+    };
     let mut retry_backoff = RetryBackoff::new(
         Duration::from_secs(PUBLIC_RELAY_AUTH_REQUEST_RETRY_SECS),
         Duration::from_secs(BROKER_RECONNECT_MAX_DELAY_SECS),
     );
     loop {
-        match perform_public_relay_enrollment(&client, &pending).await {
-            Ok(registration) => match BrokerConfig::from_env().await {
-                Ok(Some(config)) => {
-                    let change_rx = state.subscribe();
-                    state
-                        .set_broker_channel(
-                            Some(config.broker_room_id().to_string()),
-                            Some(config.relay_peer_id().to_string()),
-                        )
-                        .await;
-                    state
-                        .push_runtime_log(
-                            "info",
-                            format!(
-                                "Public broker enrollment completed for room {}.",
-                                config.broker_room_id()
-                            ),
-                        )
-                        .await;
-                    run_broker_loop(state.clone(), change_rx, config).await;
-                }
-                Ok(None) => return,
-                Err(error) => {
-                    state
+        match enroll_public_relay_if_absent(&pending, || {
+            request_public_relay_enrollment(&client, &pending, None)
+        })
+        .await
+        {
+            Ok(locked) => {
+                let registration = locked.registration.clone();
+                let disposition = locked.disposition;
+                // Reload while the same lifecycle lock is still held. A
+                // concurrently completed cloud activation is therefore used
+                // exactly; generic enrollment neither completes again nor
+                // overwrites it.
+                let config_result = BrokerConfig::from_env().await;
+                drop(locked);
+                match config_result {
+                    Ok(Some(config)) => {
+                        let change_rx = state.subscribe();
+                        state
+                            .set_broker_channel(
+                                Some(config.broker_room_id().to_string()),
+                                Some(config.relay_peer_id().to_string()),
+                            )
+                            .await;
+                        state
+                            .push_runtime_log(
+                                "info",
+                                format!(
+                                    "Public broker registration {} for room {}.",
+                                    match disposition {
+                                        EnrollmentDisposition::Existing => "became available",
+                                        EnrollmentDisposition::Enrolled => "completed",
+                                    },
+                                    config.broker_room_id(),
+                                ),
+                            )
+                            .await;
+                        run_broker_loop(state.clone(), change_rx, config).await;
+                        return;
+                    }
+                    Ok(None) => return,
+                    Err(error) => {
+                        state
                             .push_runtime_log(
                                 "warn",
                                 format!(
@@ -767,15 +1182,24 @@ async fn run_public_broker_enrollment_loop(state: AppState, pending: PendingPubl
                                 ),
                             )
                             .await;
+                        return;
+                    }
                 }
-            },
+            }
             Err(error) => {
+                let fatal = matches!(error, EnrollmentCriticalError::Fatal(_));
                 state
                     .push_runtime_log(
                         "warn",
-                        format!("Automatic public broker enrollment failed: {error}"),
+                        format!(
+                            "Automatic public broker enrollment failed: {}",
+                            error.message()
+                        ),
                     )
                     .await;
+                if fatal {
+                    return;
+                }
             }
         }
 
@@ -794,9 +1218,147 @@ async fn run_public_broker_enrollment_loop(state: AppState, pending: PendingPubl
     }
 }
 
+/// Short-lived preflight used by `sealwire cloud` before starting the long-lived
+/// relay. Consumes the access key here so the long-lived child never sees it.
+pub async fn run_cloud_activate() -> i32 {
+    run_cloud_activate_core(true).await
+}
+
+/// Test/production core for cloud activation. `allow_tty=false` forces the
+/// non-interactive missing-key failure path used by CI and scripted callers.
+pub(crate) async fn run_cloud_activate_core(allow_tty: bool) -> i32 {
+    if !cloud_activation_required() {
+        eprintln!(
+            "sealwire: cloud-activate requires {CLOUD_ACTIVATION_ENV}=1 (set by `sealwire cloud`)"
+        );
+        scrub_activation_env();
+        return 2;
+    }
+
+    let control_url_raw = match std::env::var(RELAY_BROKER_CONTROL_URL_ENV)
+        .ok()
+        .and_then(trimmed_string)
+    {
+        Some(url) => url,
+        None => {
+            eprintln!("sealwire: cloud activation requires {RELAY_BROKER_CONTROL_URL_ENV}");
+            scrub_activation_env();
+            return 1;
+        }
+    };
+    let control_url = match parse_control_plane_url(&control_url_raw) {
+        Ok(url) => url,
+        Err(error) => {
+            eprintln!("sealwire: cloud activation failed: {error}");
+            scrub_activation_env();
+            return 1;
+        }
+    };
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            eprintln!("sealwire: cloud activation failed: {error}");
+            scrub_activation_env();
+            return 1;
+        }
+    };
+    let registration_path = resolve_public_relay_registration_path(
+        &cwd,
+        std::env::var(RELAY_BROKER_REGISTRATION_PATH_ENV).ok(),
+    );
+    let identity_path = resolve_public_relay_identity_path(
+        &cwd,
+        std::env::var(RELAY_BROKER_IDENTITY_PATH_ENV).ok(),
+    );
+
+    let pending = PendingPublicEnrollment {
+        control_url,
+        registration_path,
+        identity_path,
+    };
+    let activation_override = activation_override_env_present();
+    let result = enroll_public_relay_if_absent(&pending, || async {
+        let client = build_control_plane_client()?;
+        let secret = match resolve_activation_credential(allow_tty)? {
+            Some((secret, source)) => {
+                eprintln!("sealwire: activating SealWire Cloud access ({source:?})…");
+                secret
+            }
+            None => {
+                return Err(format!(
+                    "SealWire Cloud enrollment requires a Cloud access key. \
+                     Set {CLOUD_ACCESS_KEY_ENV} or {CLOUD_ACCESS_KEY_FILE_ENV}, \
+                     or run interactively in a TTY. Deprecated: {LEGACY_LICENSE_CODE_ENV}."
+                ));
+            }
+        };
+        request_public_relay_enrollment(&client, &pending, Some(secret.as_str())).await
+    })
+    .await;
+
+    match result {
+        Ok(locked) if locked.disposition == EnrollmentDisposition::Existing => {
+            if activation_override {
+                // Consume/unlink only a regular one-shot entry so it cannot
+                // linger forever; discard never opens or overwrites its target.
+                discard_oneshot_activation_file_input();
+                scrub_activation_env();
+                eprintln!("sealwire: already linked; run `sealwire cloud unbind` first");
+                return 1;
+            }
+            let registration = &locked.registration;
+            let identity = RegistrationIdentity {
+                control_url: pending.control_url.as_str().to_string(),
+                relay_id: registration.relay_id.clone(),
+                broker_room_id: registration.broker_room_id.clone(),
+                bearer_fingerprint: bearer_fingerprint(&registration.relay_refresh_token),
+            };
+            scrub_activation_env();
+            eprintln!("sealwire: already linked to SealWire Cloud for this control origin.");
+            emit_cloud_launch_witness(&identity);
+            0
+        }
+        Ok(locked) => {
+            let registration = &locked.registration;
+            let identity = RegistrationIdentity {
+                control_url: pending.control_url.as_str().to_string(),
+                relay_id: registration.relay_id.clone(),
+                broker_room_id: registration.broker_room_id.clone(),
+                bearer_fingerprint: bearer_fingerprint(&registration.relay_refresh_token),
+            };
+            eprintln!(
+                "sealwire: cloud access linked (relay {}). Starting local relay…",
+                registration.relay_id
+            );
+            scrub_activation_env();
+            emit_cloud_launch_witness(&identity);
+            0
+        }
+        Err(error) => {
+            scrub_activation_env();
+            eprintln!("sealwire: cloud activation failed: {}", error.message());
+            1
+        }
+    }
+}
+
 async fn perform_public_relay_enrollment(
     client: &reqwest::Client,
     pending: &PendingPublicEnrollment,
+    enrollment_token: Option<&str>,
+) -> Result<PublicRelayRegistration, String> {
+    let locked = enroll_public_relay_if_absent(pending, || {
+        request_public_relay_enrollment(client, pending, enrollment_token)
+    })
+    .await
+    .map_err(EnrollmentCriticalError::into_message)?;
+    Ok(locked.registration.clone())
+}
+
+async fn request_public_relay_enrollment(
+    client: &reqwest::Client,
+    pending: &PendingPublicEnrollment,
+    enrollment_token: Option<&str>,
 ) -> Result<PublicRelayRegistration, String> {
     let identity =
         load_or_create_public_relay_identity(&pending.identity_path, pending.control_url.as_str())
@@ -823,23 +1385,16 @@ async fn perform_public_relay_enrollment(
             )
             .to_bytes(),
     );
-    let registration = complete_public_relay_enrollment(
+    complete_public_relay_enrollment(
         client,
         &pending.control_url,
         verify_key_b64,
         challenge.challenge_id,
         challenge_signature,
         None,
-        pending.license_code.clone(),
+        enrollment_token,
     )
-    .await?;
-    save_public_relay_registration(
-        &pending.registration_path,
-        pending.control_url.as_str(),
-        &registration,
-    )
-    .await?;
-    Ok(registration)
+    .await
 }
 
 async fn run_broker_session(
@@ -2058,7 +2613,10 @@ async fn publish_targeted_messages(
 /// the launch directory: they are *this relay's* identity to the broker, so a
 /// per-directory copy would re-enroll as a brand new relay and orphan the
 /// devices already paired with the old one. See [`crate::state_paths`].
-fn resolve_public_relay_registration_path(cwd: &Path, configured: Option<String>) -> PathBuf {
+pub(crate) fn resolve_public_relay_registration_path(
+    cwd: &Path,
+    configured: Option<String>,
+) -> PathBuf {
     crate::state_paths::sibling_state_file(
         cwd,
         RELAY_BROKER_REGISTRATION_PATH_ENV,
@@ -2076,12 +2634,13 @@ fn resolve_public_relay_identity_path(cwd: &Path, configured: Option<String>) ->
     )
 }
 
-async fn load_public_relay_registration(
+pub(crate) fn load_public_relay_registration_raw(
     path: &Path,
-    expected_control_url: &str,
-) -> Result<Option<PublicRelayRegistration>, String> {
-    let contents = match tokio::fs::read(path).await {
-        Ok(contents) => contents,
+) -> Result<Option<PersistedPublicRelayRegistration>, String> {
+    const MAX_REGISTRATION_BYTES: usize = 256 * 1024;
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(format!(
@@ -2090,7 +2649,34 @@ async fn load_public_relay_registration(
             ))
         }
     };
-
+    if let Ok(meta) = file.metadata() {
+        if meta.len() > MAX_REGISTRATION_BYTES as u64 {
+            return Err(format!(
+                "broker registration cache {} exceeds {MAX_REGISTRATION_BYTES} bytes",
+                path.display()
+            ));
+        }
+    }
+    let mut contents = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = file.read(&mut chunk).map_err(|error| {
+            format!(
+                "failed to read broker registration cache {}: {error}",
+                path.display()
+            )
+        })?;
+        if n == 0 {
+            break;
+        }
+        if contents.len().saturating_add(n) > MAX_REGISTRATION_BYTES {
+            return Err(format!(
+                "broker registration cache {} exceeds {MAX_REGISTRATION_BYTES} bytes",
+                path.display()
+            ));
+        }
+        contents.extend_from_slice(&chunk[..n]);
+    }
     let persisted: PersistedPublicRelayRegistration =
         serde_json::from_slice(&contents).map_err(|error| {
             format!(
@@ -2098,6 +2684,115 @@ async fn load_public_relay_registration(
                 path.display()
             )
         })?;
+    Ok(Some(persisted))
+}
+
+fn load_matching_registration_for_enrollment(
+    pending: &PendingPublicEnrollment,
+) -> Result<Option<PublicRelayRegistration>, String> {
+    let Some(persisted) = load_public_relay_registration_raw(&pending.registration_path)? else {
+        return Ok(None);
+    };
+    if persisted.schema_version != PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported broker registration cache schema {} in {}",
+            persisted.schema_version,
+            pending.registration_path.display()
+        ));
+    }
+    if persisted.control_url != pending.control_url.as_str() {
+        return Err(format!(
+            "broker registration cache {} belongs to a different control origin; \
+             refusing to overwrite it",
+            pending.registration_path.display()
+        ));
+    }
+    if persisted.relay_id.trim().is_empty()
+        || persisted.broker_room_id.trim().is_empty()
+        || persisted.relay_refresh_token.trim().is_empty()
+    {
+        return Err(format!(
+            "broker registration cache {} is incomplete; refusing to overwrite it",
+            pending.registration_path.display()
+        ));
+    }
+    Ok(Some(PublicRelayRegistration {
+        relay_id: persisted.relay_id,
+        broker_room_id: persisted.broker_room_id,
+        relay_refresh_token: persisted.relay_refresh_token,
+    }))
+}
+
+/// Production critical section shared by generic enrollment and explicit cloud
+/// activation. It re-reads the cache only after obtaining the lifecycle lock,
+/// calls the remote enrollment operation only when still absent, and retains
+/// the lock through the atomic save and caller handoff.
+async fn enroll_public_relay_if_absent<F, Fut>(
+    pending: &PendingPublicEnrollment,
+    enroll_missing: F,
+) -> Result<LockedPublicRelayRegistration, EnrollmentCriticalError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<PublicRelayRegistration, String>>,
+{
+    enroll_public_relay_if_absent_after_acquire(pending, enroll_missing, || {}).await
+}
+
+/// Same as [`enroll_public_relay_if_absent`], with a test-only hook invoked
+/// immediately after the lifecycle lock is held and before any registration
+/// read or remote enrollment. Production callers pass a no-op.
+async fn enroll_public_relay_if_absent_after_acquire<F, Fut, H>(
+    pending: &PendingPublicEnrollment,
+    enroll_missing: F,
+    after_acquire: H,
+) -> Result<LockedPublicRelayRegistration, EnrollmentCriticalError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<PublicRelayRegistration, String>>,
+    H: FnOnce(),
+{
+    let lifecycle = BrokerLifecycleLock::acquire_for_registration(&pending.registration_path)
+        .map_err(EnrollmentCriticalError::Fatal)?;
+    after_acquire();
+    if let Some(registration) = load_matching_registration_for_enrollment(pending)
+        .map_err(EnrollmentCriticalError::Fatal)?
+    {
+        return Ok(LockedPublicRelayRegistration {
+            registration,
+            disposition: EnrollmentDisposition::Existing,
+            lifecycle,
+        });
+    }
+
+    let registration = enroll_missing()
+        .await
+        .map_err(EnrollmentCriticalError::Retryable)?;
+    save_public_relay_registration(
+        &pending.registration_path,
+        pending.control_url.as_str(),
+        &registration,
+    )
+    .await
+    .map_err(EnrollmentCriticalError::Fatal)?;
+    Ok(LockedPublicRelayRegistration {
+        registration,
+        disposition: EnrollmentDisposition::Enrolled,
+        lifecycle,
+    })
+}
+
+async fn load_public_relay_registration(
+    path: &Path,
+    expected_control_url: &str,
+) -> Result<Option<PublicRelayRegistration>, String> {
+    let path_owned = path.to_path_buf();
+    let persisted =
+        tokio::task::spawn_blocking(move || load_public_relay_registration_raw(&path_owned))
+            .await
+            .map_err(|error| format!("registration cache read task panicked: {error}"))??;
+    let Some(persisted) = persisted else {
+        return Ok(None);
+    };
     if persisted.schema_version != PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION {
         return Err(format!(
             "unsupported broker registration cache schema {} in {}",
@@ -2128,7 +2823,7 @@ async fn persist_bytes_atomically(path: &Path, payload: Vec<u8>) -> Result<(), S
     let temporary_path = path.with_extension("tmp");
     let write_path = temporary_path.clone();
     tokio::task::spawn_blocking(move || {
-        crate::instance_lock::write_new_exclusive(&write_path, &payload)
+        crate::instance_lock::write_new_exclusive_with_mode(&write_path, &payload, Some(0o600))
     })
     .await
     .map_err(|error| format!("temp file write task panicked: {error}"))?
@@ -2136,6 +2831,11 @@ async fn persist_bytes_atomically(path: &Path, payload: Vec<u8>) -> Result<(), S
     tokio::fs::rename(&temporary_path, path)
         .await
         .map_err(|error| format!("failed to replace {}: {error}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
     Ok(())
 }
 
@@ -2165,25 +2865,12 @@ async fn load_or_create_public_relay_identity(
     path: &Path,
     control_url: &str,
 ) -> Result<PublicRelayIdentity, String> {
-    let contents = match tokio::fs::read(path).await {
-        Ok(contents) => Some(contents),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(format!(
-                "failed to read broker relay identity {}: {error}",
-                path.display()
-            ))
-        }
-    };
+    let path_owned = path.to_path_buf();
+    let loaded = tokio::task::spawn_blocking(move || load_public_relay_identity_raw(&path_owned))
+        .await
+        .map_err(|error| format!("relay identity read task panicked: {error}"))??;
 
-    if let Some(contents) = contents {
-        let persisted: PersistedPublicRelayIdentity =
-            serde_json::from_slice(&contents).map_err(|error| {
-                format!(
-                    "failed to decode broker relay identity {}: {error}",
-                    path.display()
-                )
-            })?;
+    if let Some(persisted) = loaded {
         if persisted.schema_version != PUBLIC_RELAY_IDENTITY_SCHEMA_VERSION {
             return Err(format!(
                 "unsupported broker relay identity schema {} in {}",
@@ -2226,6 +2913,59 @@ async fn load_or_create_public_relay_identity(
     };
     save_public_relay_identity(path, control_url, &identity).await?;
     Ok(identity)
+}
+
+fn load_public_relay_identity_raw(
+    path: &Path,
+) -> Result<Option<PersistedPublicRelayIdentity>, String> {
+    const MAX_IDENTITY_BYTES: usize = 64 * 1024;
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "failed to read broker relay identity {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    if let Ok(meta) = file.metadata() {
+        if meta.len() > MAX_IDENTITY_BYTES as u64 {
+            return Err(format!(
+                "broker relay identity {} exceeds {MAX_IDENTITY_BYTES} bytes",
+                path.display()
+            ));
+        }
+    }
+    let mut contents = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = file.read(&mut chunk).map_err(|error| {
+            format!(
+                "failed to read broker relay identity {}: {error}",
+                path.display()
+            )
+        })?;
+        if n == 0 {
+            break;
+        }
+        if contents.len().saturating_add(n) > MAX_IDENTITY_BYTES {
+            return Err(format!(
+                "broker relay identity {} exceeds {MAX_IDENTITY_BYTES} bytes",
+                path.display()
+            ));
+        }
+        contents.extend_from_slice(&chunk[..n]);
+    }
+    let persisted: PersistedPublicRelayIdentity =
+        serde_json::from_slice(&contents).map_err(|error| {
+            format!(
+                "failed to decode broker relay identity {}: {error}",
+                path.display()
+            )
+        })?;
+    Ok(Some(persisted))
 }
 
 async fn save_public_relay_identity(

@@ -188,6 +188,23 @@ struct LocalImageInput {
 
 #[tokio::main]
 async fn main() {
+    match std::env::args().nth(1).as_deref() {
+        Some("cloud-access-release") => {
+            let code = broker::run_cloud_access_release().await;
+            std::process::exit(code);
+        }
+        Some("cloud-activate") => {
+            let code = broker::run_cloud_activate().await;
+            std::process::exit(code);
+        }
+        _ => {}
+    }
+
+    // Preserve only a complete, secret-free preflight witness, then scrub all
+    // activation env before AppState / provider construction. Only the
+    // short-lived cloud-activate subcommand (handled above) may read raw keys.
+    let broker_startup = broker::capture_and_scrub_activation_for_normal_start();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG")
@@ -278,7 +295,7 @@ async fn main() {
         }
     };
 
-    let state = AppState::new()
+    let state = AppState::new(broker_startup)
         .await
         .expect("failed to initialize Codex app-server bridge");
     // Register the private orchestration engines, when this build has them. The

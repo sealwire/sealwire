@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use relay_broker::{
     auth::BrokerAuthMode,
     join_ticket::{unix_now, JoinTicketClaims, JoinTicketKey, JOIN_TICKET_SECRET_ENV},
@@ -6,13 +8,13 @@ use relay_broker::{
         DeviceGrantBulkRevokeResponse, DeviceGrantRequest, DeviceGrantResponse,
         DeviceGrantRevokeRequest, DeviceGrantRevokeResponse, PairingWsTokenRequest,
         PairingWsTokenResponse, RelayEnrollmentChallengeRequest, RelayEnrollmentChallengeResponse,
-        RelayEnrollmentCompleteRequest, RelayEnrollmentResponse, RelayWsTokenRequest,
-        RelayWsTokenResponse,
+        RelayEnrollmentResponse, RelayWsTokenRequest, RelayWsTokenResponse,
     },
 };
 use relay_util::trimmed_option_string;
-use reqwest::Client;
+use reqwest::{redirect::Policy, Client};
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use url::Url;
 
 pub(crate) const RELAY_BROKER_CONTROL_URL_ENV: &str = "RELAY_BROKER_CONTROL_URL";
@@ -21,23 +23,57 @@ pub(crate) const RELAY_BROKER_RELAY_REFRESH_TOKEN_ENV: &str = "RELAY_BROKER_RELA
 pub(crate) const RELAY_BROKER_REGISTRATION_PATH_ENV: &str = "RELAY_BROKER_REGISTRATION_PATH";
 pub(crate) const RELAY_BROKER_DEVICE_JOIN_TTL_SECS_ENV: &str = "RELAY_BROKER_DEVICE_JOIN_TTL_SECS";
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+const CONTROL_PLANE_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_CONTROL_PLANE_RESPONSE_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub(crate) struct PublicRelayRegistration {
     pub(crate) relay_id: String,
     pub(crate) broker_room_id: String,
     pub(crate) relay_refresh_token: String,
 }
 
-#[derive(Clone, Debug)]
+impl std::fmt::Debug for PublicRelayRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublicRelayRegistration")
+            .field("relay_id", &self.relay_id)
+            .field("broker_room_id", &self.broker_room_id)
+            .field("relay_refresh_token", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct BrokerJoinCredential {
     pub(crate) token: String,
     pub(crate) expires_at: Option<u64>,
 }
 
-#[derive(Clone, Debug)]
+impl std::fmt::Debug for BrokerJoinCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrokerJoinCredential")
+            .field("token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct DeviceBrokerCredential {
     pub(crate) join_credential: BrokerJoinCredential,
     pub(crate) refresh_token: Option<String>,
+}
+
+impl std::fmt::Debug for DeviceBrokerCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceBrokerCredential")
+            .field("join_credential", &self.join_credential)
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -56,7 +92,7 @@ pub(crate) struct ClientBrokerGrant {
     pub(crate) relay_label: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) enum BrokerAuthConfig {
     SelfHostedSharedSecret {
         join_ticket_key: JoinTicketKey,
@@ -68,6 +104,32 @@ pub(crate) enum BrokerAuthConfig {
         relay_refresh_token: String,
         client: Client,
     },
+}
+
+impl std::fmt::Debug for BrokerAuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SelfHostedSharedSecret {
+                device_join_ttl_secs,
+                ..
+            } => f
+                .debug_struct("SelfHostedSharedSecret")
+                .field("join_ticket_key", &"<redacted>")
+                .field("device_join_ttl_secs", device_join_ttl_secs)
+                .finish(),
+            Self::PublicControlPlane {
+                control_url,
+                relay_id,
+                ..
+            } => f
+                .debug_struct("PublicControlPlane")
+                .field("control_url", control_url)
+                .field("relay_id", relay_id)
+                .field("relay_refresh_token", &"<redacted>")
+                .field("client", &"<client>")
+                .finish(),
+        }
+    }
 }
 
 impl BrokerAuthConfig {
@@ -109,20 +171,12 @@ impl BrokerAuthConfig {
                         "{RELAY_BROKER_RELAY_REFRESH_TOKEN_ENV} is required in public broker auth mode"
                     )
                 })?;
-                let control_url = Url::parse(&control_url).map_err(|error| {
-                    format!("invalid {RELAY_BROKER_CONTROL_URL_ENV} `{control_url}`: {error}")
-                })?;
-                let scheme = control_url.scheme().to_ascii_lowercase();
-                if scheme != "http" && scheme != "https" {
-                    return Err(format!(
-                        "{RELAY_BROKER_CONTROL_URL_ENV} must use http:// or https://"
-                    ));
-                }
+                let control_url = parse_control_plane_url(&control_url)?;
                 Ok(Self::PublicControlPlane {
                     control_url,
                     relay_id,
                     relay_refresh_token,
-                    client: Client::new(),
+                    client: build_control_plane_client()?,
                 })
             }
         }
@@ -420,12 +474,6 @@ pub(crate) struct PublicRelayEnrollmentChallenge {
     pub(crate) expires_at: u64,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct ControlPlaneErrorResponse {
-    message: Option<String>,
-    error: Option<String>,
-}
-
 pub(crate) async fn request_public_relay_enrollment_challenge(
     client: &Client,
     control_url: &Url,
@@ -456,18 +504,29 @@ pub(crate) async fn complete_public_relay_enrollment(
     challenge_id: String,
     challenge_signature: String,
     relay_label: Option<String>,
-    license_code: Option<String>,
+    enrollment_token: Option<&str>,
 ) -> Result<PublicRelayRegistration, String> {
+    #[derive(Serialize)]
+    struct CompleteBody<'a> {
+        relay_verify_key: &'a str,
+        challenge_id: &'a str,
+        challenge_signature: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        relay_label: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        enrollment_token: Option<&'a str>,
+    }
+
     let response: RelayEnrollmentResponse = post_control_plane_without_auth(
         client,
         control_url,
         "/api/public/relay-enrollment/complete",
-        &RelayEnrollmentCompleteRequest {
-            relay_verify_key,
-            challenge_id,
-            challenge_signature,
-            relay_label,
-            license_code,
+        &CompleteBody {
+            relay_verify_key: &relay_verify_key,
+            challenge_id: &challenge_id,
+            challenge_signature: &challenge_signature,
+            relay_label: relay_label.as_deref(),
+            enrollment_token,
         },
     )
     .await?;
@@ -478,6 +537,36 @@ pub(crate) async fn complete_public_relay_enrollment(
     })
 }
 
+pub(crate) fn build_control_plane_client() -> Result<Client, String> {
+    build_control_plane_client_with_timeout(CONTROL_PLANE_TIMEOUT)
+}
+
+pub(crate) fn build_control_plane_client_with_timeout(timeout: Duration) -> Result<Client, String> {
+    Client::builder()
+        .redirect(Policy::none())
+        .timeout(timeout)
+        .build()
+        .map_err(|error| format!("failed to build broker control-plane client: {error}"))
+}
+
+pub(crate) fn parse_control_plane_url(raw: &str) -> Result<Url, String> {
+    let url = Url::parse(raw).map_err(|_| {
+        format!("invalid {RELAY_BROKER_CONTROL_URL_ENV}: could not parse control URL")
+    })?;
+    let scheme = url.scheme().to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return Err(format!(
+            "{RELAY_BROKER_CONTROL_URL_ENV} must use http:// or https://"
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(format!(
+            "{RELAY_BROKER_CONTROL_URL_ENV} must not include userinfo credentials"
+        ));
+    }
+    Ok(url)
+}
+
 async fn post_control_plane<TReq, TResp>(
     client: &Client,
     base_url: &Url,
@@ -486,7 +575,7 @@ async fn post_control_plane<TReq, TResp>(
     request: &TReq,
 ) -> Result<TResp, String>
 where
-    TReq: serde::Serialize + ?Sized,
+    TReq: Serialize + ?Sized,
     TResp: DeserializeOwned,
 {
     let mut url = base_url.clone();
@@ -510,7 +599,7 @@ async fn post_control_plane_without_auth<TReq, TResp>(
     request: &TReq,
 ) -> Result<TResp, String>
 where
-    TReq: serde::Serialize + ?Sized,
+    TReq: Serialize + ?Sized,
     TResp: DeserializeOwned,
 {
     let mut url = base_url.clone();
@@ -534,20 +623,86 @@ async fn decode_control_plane_response<TResp>(
 where
     TResp: DeserializeOwned,
 {
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        if let Ok(parsed) = serde_json::from_str::<ControlPlaneErrorResponse>(&body) {
-            if let Some(message) = parsed.message.or(parsed.error) {
-                return Err(scrub_sensitive_control_plane_message(&message));
-            }
-        }
-        return Err(format!("broker control-plane {url} returned {status}"));
+    let status = response.status();
+    if status.is_redirection() {
+        return Err(format!(
+            "broker control-plane {url} refused a redirect (HTTP {status})"
+        ));
     }
 
-    response.json::<TResp>().await.map_err(|error| {
+    if let Some(len) = response.content_length() {
+        if len > MAX_CONTROL_PLANE_RESPONSE_BYTES as u64 {
+            return Err(format!(
+                "broker control-plane response exceeded {MAX_CONTROL_PLANE_RESPONSE_BYTES} bytes"
+            ));
+        }
+    }
+
+    let bytes = read_body_bounded(response, MAX_CONTROL_PLANE_RESPONSE_BYTES).await?;
+
+    if !status.is_success() {
+        let code = serde_json::from_slice::<ControlPlaneErrorResponse>(&bytes)
+            .ok()
+            .and_then(|parsed| parsed.error)
+            .unwrap_or_else(|| "unavailable".to_string());
+        return Err(map_control_plane_failure(status.as_u16(), &code));
+    }
+
+    serde_json::from_slice::<TResp>(&bytes).map_err(|error| {
         format!("failed to decode broker control-plane response from {url}: {error}")
     })
+}
+
+async fn read_body_bounded(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    use futures_util::StreamExt;
+    let mut stream = response.bytes_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("failed to read control-plane body: {error}"))?;
+        if buf.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(format!(
+                "broker control-plane response exceeded {max_bytes} bytes"
+            ));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ControlPlaneErrorResponse {
+    error: Option<String>,
+}
+
+fn map_control_plane_failure(status: u16, code: &str) -> String {
+    if let Some(message) = known_control_plane_error_code(code) {
+        return message.to_string();
+    }
+    match status {
+        429 => "broker control-plane rate-limited; try again later".to_string(),
+        403 => "broker control-plane request forbidden".to_string(),
+        409 => "broker enrollment conflict or already bound".to_string(),
+        401 => "cloud access key is invalid, expired, or revoked".to_string(),
+        503 => "broker control-plane temporarily unavailable".to_string(),
+        _ => "broker control-plane request failed".to_string(),
+    }
+}
+
+fn known_control_plane_error_code(code: &str) -> Option<&'static str> {
+    match code {
+        "device_limit_reached" => Some("device limit reached"),
+        "rate_limited" => Some("broker control-plane rate-limited; try again later"),
+        "forbidden" => Some("broker control-plane request forbidden"),
+        "unavailable" => Some("broker control-plane temporarily unavailable"),
+        "conflict" => Some("broker enrollment conflict or already bound"),
+        "unauthorized" | "invalid" | "expired" | "revoked" => {
+            Some("cloud access key is invalid, expired, or revoked")
+        }
+        _ => None,
+    }
 }
 
 fn ensure_room_binding(expected: &str, actual: &str) -> Result<(), String> {
@@ -587,20 +742,57 @@ fn parse_optional_u64_env(name: &str, value: Option<String>) -> Result<Option<u6
         .map_err(|error| format!("{name} must be a positive integer: {error}"))
 }
 
-fn scrub_sensitive_control_plane_message(message: &str) -> String {
-    let lower = message.to_ascii_lowercase();
-    if [
-        "pairing_secret",
-        "refresh_token",
-        "join_ticket",
-        "ws_token",
-        "authorization",
-        "bearer ",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-    {
-        return "broker control-plane request failed".to_string();
+#[cfg(test)]
+mod control_plane_tests {
+    use super::*;
+
+    #[test]
+    fn public_relay_registration_debug_redacts_refresh_token() {
+        let reg = PublicRelayRegistration {
+            relay_id: "r1".into(),
+            broker_room_id: "room".into(),
+            relay_refresh_token: "secret-refresh".into(),
+        };
+        let rendered = format!("{reg:?}");
+        assert!(!rendered.contains("secret-refresh"));
+        assert!(rendered.contains("redacted"));
     }
-    message.to_string()
+
+    #[test]
+    fn parse_control_plane_url_rejects_userinfo() {
+        let err = parse_control_plane_url("https://user:pass@broker.example/").unwrap_err();
+        assert!(err.contains("userinfo"));
+        assert!(!err.contains("pass"));
+        assert!(!err.contains("user:"));
+    }
+
+    #[test]
+    fn parse_control_plane_url_malformed_secret_is_not_echoed() {
+        let secret = "exact-secret-in-malformed-url";
+        let err = parse_control_plane_url(&format!("not a url {secret}")).unwrap_err();
+        assert!(!err.contains(secret), "got: {err}");
+        assert!(err.contains("could not parse"));
+    }
+
+    #[test]
+    fn map_control_plane_status_never_echoes_remote_prose() {
+        let msg = map_control_plane_failure(400, "invalid");
+        assert!(!msg.contains("bad "));
+        assert!(msg.contains("invalid") || msg.contains("expired") || msg.contains("revoked"));
+    }
+
+    #[test]
+    fn map_control_plane_preserves_device_limit_code() {
+        let msg = map_control_plane_failure(403, "device_limit_reached");
+        assert!(msg.contains("device limit"));
+        assert!(!msg.contains("license allows"));
+    }
+
+    #[test]
+    fn map_control_plane_never_interpolates_unknown_remote_code() {
+        let secret = "exact-secret-as-error-code";
+        let msg = map_control_plane_failure(400, secret);
+        assert!(!msg.contains(secret));
+        assert_eq!(msg, "broker control-plane request failed");
+    }
 }

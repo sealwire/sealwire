@@ -28,6 +28,11 @@ const defaultPort = "8787";
 const defaultHost = "127.0.0.1";
 const LAUNCH_ID_ENV = "SEALWIRE_LAUNCH_ID";
 const KNOWN_COMMANDS = new Set(["local", "cloud"]);
+/** Preferred generic automation input for cloud activation (consumed by cloud-activate). */
+const CLOUD_ACCESS_KEY_ENV = "SEALWIRE_CLOUD_ACCESS_KEY";
+const CLOUD_ACCESS_KEY_FILE_ENV = "SEALWIRE_CLOUD_ACCESS_KEY_FILE";
+/** Explicit cloud-link mode — only `sealwire cloud` sets this for preflight. */
+const CLOUD_ACTIVATION_ENV = "RELAY_CLOUD_ACTIVATION";
 
 const args = parseArgs(process.argv.slice(2));
 
@@ -49,6 +54,38 @@ if (args.cloud && args.noBroker) {
     "sealwire: `cloud` cannot be combined with `local`/`--no-broker`; pick one."
   );
   process.exit(2);
+}
+
+if (args.unbind) {
+  if (!args.cloud) {
+    console.error("sealwire: `unbind` is only valid as `sealwire cloud unbind`.");
+    process.exit(2);
+  }
+  process.exit(runCloudUnbind());
+}
+
+// Capture activation inputs immediately after argument validation and BEFORE any
+// binary/PATH probes that spawn subprocesses (cargo/codex --version inherit env).
+let capturedAccessKey = process.env[CLOUD_ACCESS_KEY_ENV] ?? null;
+let capturedAccessKeyFile = process.env[CLOUD_ACCESS_KEY_FILE_ENV] ?? null;
+let capturedLegacyLicense = process.env.RELAY_LICENSE_CODE ?? null;
+delete process.env[CLOUD_ACCESS_KEY_ENV];
+delete process.env[CLOUD_ACCESS_KEY_FILE_ENV];
+delete process.env.RELAY_LICENSE_CODE;
+// Strip ambient cloud mode/witness from the parent process immediately so they
+// cannot leak into PATH probes or non-cloud children.
+delete process.env[CLOUD_ACTIVATION_ENV];
+delete process.env.RELAY_CLOUD_REQUIRE_CACHED_REGISTRATION;
+delete process.env.RELAY_CLOUD_EXPECTED_CONTROL_URL;
+delete process.env.RELAY_CLOUD_EXPECTED_RELAY_ID;
+delete process.env.RELAY_CLOUD_EXPECTED_ROOM_ID;
+delete process.env.RELAY_CLOUD_EXPECTED_BEARER_FP;
+
+if (!args.cloud) {
+  // Non-cloud modes never consume captured secrets — drop reachable plaintext now.
+  capturedAccessKey = null;
+  capturedAccessKeyFile = null;
+  capturedLegacyLicense = null;
 }
 
 const relayServerBinary = resolveRelayServerBinary();
@@ -85,6 +122,7 @@ const env = {
   CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || defaultCargoTargetDir(),
   [LAUNCH_ID_ENV]: launchId,
 };
+stripActivationSecrets(env);
 
 // OFF is *absence*, not "SEALWIRE_BETA=0", so this can never re-lock a user who
 // set the variable themselves (dev scripts do).
@@ -150,8 +188,38 @@ if (brokerConfig) {
 } else {
   console.warn(
     "sealwire: no public broker configured; starting localhost-only relay. " +
-      "Set AGENT_RELAY_PUBLIC_BROKER_URL or pass --broker to enable remote pairing."
+      "Set AGENT_RELAY_PUBLIC_BROKER_URL or pass `--broker` to enable remote pairing."
   );
+}
+
+if (args.cloud) {
+  const activate = runCloudActivate({
+    brokerConfig,
+    relayServerBinary,
+    accessKey: capturedAccessKey,
+    accessKeyFile: capturedAccessKeyFile,
+    legacyLicense: capturedLegacyLicense,
+    baseEnv: env,
+  });
+  // Drop reachable plaintext from the long-lived Node parent after preflight.
+  capturedAccessKey = null;
+  capturedAccessKeyFile = null;
+  capturedLegacyLicense = null;
+  if (activate.code !== 0) {
+    process.exit(activate.code);
+  }
+  if (activate.witness) {
+    env.RELAY_CLOUD_REQUIRE_CACHED_REGISTRATION = "1";
+    env.RELAY_CLOUD_EXPECTED_CONTROL_URL = activate.witness.control_url;
+    env.RELAY_CLOUD_EXPECTED_RELAY_ID = activate.witness.relay_id;
+    env.RELAY_CLOUD_EXPECTED_ROOM_ID = activate.witness.broker_room_id;
+    env.RELAY_CLOUD_EXPECTED_BEARER_FP = activate.witness.bearer_fingerprint;
+  } else {
+    console.error(
+      "sealwire: cloud activation succeeded but did not emit a launch witness; refusing to start."
+    );
+    process.exit(1);
+  }
 }
 
 console.log(`sealwire: serving local relay at http://${env.BIND_HOST}:${env.PORT}`);
@@ -217,6 +285,7 @@ function parseArgs(argv) {
     noOpen: false,
     port: null,
     rest: [],
+    unbind: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -242,12 +311,20 @@ function parseArgs(argv) {
       //   `cloud` — the mirror image: an explicit "go online" request that
       //     attaches to the hosted public broker (defaulting to it when the
       //     user has configured no broker origin of their own).
+      //   `cloud unbind` — release cloud access without starting the relay.
       parsed.command = arg;
       if (arg === "local") {
         parsed.noBroker = true;
       } else if (arg === "cloud") {
         parsed.cloud = true;
       }
+    } else if (
+      parsed.cloud &&
+      !parsed.unbind &&
+      !arg.startsWith("-") &&
+      arg === "unbind"
+    ) {
+      parsed.unbind = true;
     } else if (arg === "--broker") {
       parsed.broker = requireValue(argv, (index += 1), arg);
     } else if (arg.startsWith("--broker=")) {
@@ -266,6 +343,194 @@ function parseArgs(argv) {
   }
 
   return parsed;
+}
+
+/**
+ * Short-lived cloud activation before the long-lived relay starts. Fails the
+ * whole `sealwire cloud` command (no browser/UI) when enrollment cannot proceed.
+ * Returns `{ code, witness }` — witness is secret-free registration fingerprint.
+ */
+function runCloudActivate({
+  brokerConfig,
+  relayServerBinary,
+  accessKey,
+  accessKeyFile,
+  legacyLicense,
+  baseEnv,
+}) {
+  if (!brokerConfig) {
+    console.error("sealwire: cloud activation requires a broker origin");
+    return { code: 1, witness: null };
+  }
+
+  const preflightEnv = {
+    ...baseEnv,
+    RELAY_BROKER_URL: brokerConfig.websocketUrl,
+    RELAY_BROKER_PUBLIC_URL: brokerConfig.websocketUrl,
+    RELAY_BROKER_CONTROL_URL: brokerConfig.controlUrl,
+    RELAY_BROKER_AUTH_MODE: "public",
+    [CLOUD_ACTIVATION_ENV]: "1",
+  };
+  // Do not inherit PORT bind for preflight — it must not open the long-lived UI.
+  delete preflightEnv.PORT;
+  delete preflightEnv.BIND_HOST;
+  delete preflightEnv[LAUNCH_ID_ENV];
+
+  if (accessKey) {
+    preflightEnv[CLOUD_ACCESS_KEY_ENV] = accessKey;
+  }
+  if (accessKeyFile) {
+    preflightEnv[CLOUD_ACCESS_KEY_FILE_ENV] = accessKeyFile;
+  }
+  if (legacyLicense) {
+    preflightEnv.RELAY_LICENSE_CODE = legacyLicense;
+  }
+
+  const command = relayServerBinary || "cargo";
+  const commandArgs = relayServerBinary
+    ? ["cloud-activate"]
+    : [
+        "run",
+        "--release",
+        "--manifest-path",
+        path.join(packageRoot, "Cargo.toml"),
+        "-p",
+        "relay-server",
+        "--",
+        "cloud-activate",
+      ];
+
+  console.log(
+    `sealwire: checking SealWire Cloud access for ${brokerConfig.controlUrl}`
+  );
+  const result = spawnSync(command, commandArgs, {
+    cwd: userCwd,
+    env: preflightEnv,
+    encoding: "utf8",
+    // stderr inherits so user-facing status lines stay interactive; stdout is
+    // captured for the secret-free launch witness line.
+    stdio: ["inherit", "pipe", "inherit"],
+  });
+  if (result.error) {
+    console.error(`sealwire: cloud activation failed: ${result.error.message}`);
+    return { code: 1, witness: null };
+  }
+  const stdout = result.stdout || "";
+  if (stdout) {
+    process.stdout.write(stdout);
+  }
+  const witness = parseCloudLaunchWitness(stdout);
+  return { code: result.status ?? 1, witness };
+}
+
+function parseCloudLaunchWitness(stdout) {
+  const prefix = "sealwire-cloud-witness:";
+  for (const line of String(stdout).split(/\r?\n/)) {
+    if (!line.startsWith(prefix)) {
+      continue;
+    }
+    try {
+      const payload = JSON.parse(line.slice(prefix.length));
+      if (
+        payload &&
+        typeof payload.control_url === "string" &&
+        typeof payload.relay_id === "string" &&
+        typeof payload.broker_room_id === "string" &&
+        typeof payload.bearer_fingerprint === "string" &&
+        payload.control_url &&
+        payload.relay_id &&
+        payload.broker_room_id &&
+        payload.bearer_fingerprint
+      ) {
+        return {
+          control_url: payload.control_url,
+          relay_id: payload.relay_id,
+          broker_room_id: payload.broker_room_id,
+          bearer_fingerprint: payload.bearer_fingerprint,
+        };
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function stripActivationSecrets(env) {
+  delete env[CLOUD_ACCESS_KEY_ENV];
+  delete env[CLOUD_ACCESS_KEY_FILE_ENV];
+  delete env.RELAY_LICENSE_CODE;
+  delete env[CLOUD_ACTIVATION_ENV];
+  delete env.RELAY_CLOUD_REQUIRE_CACHED_REGISTRATION;
+  delete env.RELAY_CLOUD_EXPECTED_CONTROL_URL;
+  delete env.RELAY_CLOUD_EXPECTED_RELAY_ID;
+  delete env.RELAY_CLOUD_EXPECTED_ROOM_ID;
+  delete env.RELAY_CLOUD_EXPECTED_BEARER_FP;
+}
+
+/**
+ * Release SealWire Cloud access for the selected control origin. Does not start
+ * the local relay or open a browser. Reuses relay-server's registration path
+ * and access-release client (`cloud-access-release` subcommand).
+ */
+function runCloudUnbind() {
+  // Scrub activation secrets before any cargo/binary probe spawns.
+  delete process.env[CLOUD_ACCESS_KEY_ENV];
+  delete process.env[CLOUD_ACCESS_KEY_FILE_ENV];
+  delete process.env.RELAY_LICENSE_CODE;
+
+  const brokerOrigin =
+    args.broker ||
+    process.env.AGENT_RELAY_PUBLIC_BROKER_URL ||
+    process.env.AGENT_RELAY_PUBLIC_BROKER_ORIGIN ||
+    process.env.npm_package_config_public_broker_origin ||
+    readPackagedBrokerOrigin() ||
+    HOSTED_PUBLIC_BROKER_ORIGIN;
+  const brokerConfig = normalizeBrokerOrigin(brokerOrigin);
+
+  const relayServerBinary = resolveRelayServerBinary();
+  if (!relayServerBinary) {
+    ensureCommand(
+      "cargo",
+      "No prebuilt relay-server binary was found, and Rust/Cargo is required for the source fallback."
+    );
+  }
+
+  const env = {
+    ...process.env,
+    RELAY_BROKER_CONTROL_URL: brokerConfig.controlUrl,
+    RELAY_BROKER_AUTH_MODE: "public",
+    CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || defaultCargoTargetDir(),
+  };
+  stripActivationSecrets(env);
+
+  const command = relayServerBinary || "cargo";
+  const commandArgs = relayServerBinary
+    ? ["cloud-access-release"]
+    : [
+        "run",
+        "--release",
+        "--manifest-path",
+        path.join(packageRoot, "Cargo.toml"),
+        "-p",
+        "relay-server",
+        "--",
+        "cloud-access-release",
+      ];
+
+  console.log(
+    `sealwire: unbinding cloud access for ${brokerConfig.controlUrl} (does not start the local relay)`
+  );
+  const result = spawnSync(command, commandArgs, {
+    cwd: userCwd,
+    env,
+    stdio: "inherit",
+  });
+  if (result.error) {
+    console.error(`sealwire: failed to run cloud unbind: ${result.error.message}`);
+    return 1;
+  }
+  return result.status ?? 1;
 }
 
 function stripBrokerEnv(env) {
@@ -293,8 +558,17 @@ function normalizeBrokerOrigin(value) {
   let parsed;
   try {
     parsed = new URL(value);
-  } catch (error) {
-    console.error(`sealwire: invalid broker URL \`${value}\`: ${error.message}`);
+  } catch {
+    console.error(
+      "sealwire: invalid broker URL (could not parse; credentials if present were not logged)."
+    );
+    process.exit(2);
+  }
+
+  if (parsed.username || parsed.password) {
+    console.error(
+      "sealwire: broker URL must not include username or password (userinfo)."
+    );
     process.exit(2);
   }
 
@@ -572,6 +846,7 @@ Run a local relay-server from the npm package.
 
 Usage:
   sealwire [local|cloud] [--beta] [--broker <url>] [--port <port>] [--host <ip>] [--no-broker] [--no-open]
+  sealwire cloud unbind [--broker <url>]
 
 Commands:
   local         Run with no broker; remote pairing is disabled (alias for
@@ -583,7 +858,15 @@ Commands:
                 (the opposite of local). Uses a configured broker origin if one
                 is set (--broker / AGENT_RELAY_PUBLIC_BROKER_URL / packaged
                 default); otherwise falls back to ${HOSTED_PUBLIC_BROKER_ORIGIN}.
-                Cannot be combined with local/--no-broker.
+                Runs a short-lived cloud-activate preflight first: prompts for a
+                SealWire Cloud access key (echo disabled) unless
+                SEALWIRE_CLOUD_ACCESS_KEY or SEALWIRE_CLOUD_ACCESS_KEY_FILE is
+                set. Non-TTY without a key exits nonzero before the local relay
+                starts. Cannot be combined with local/--no-broker.
+  cloud unbind  Release this machine's SealWire Cloud access for the selected
+                control origin and remove the local registration cache. Does
+                not start the local relay or open a browser. Preserves the
+                relay identity key for later re-enrollment.
 
 Flags:
   --beta        Unlock in-development features (currently: Tasks). Off by
@@ -607,6 +890,8 @@ Examples:
   sealwire
   sealwire local
   sealwire cloud
+  sealwire cloud unbind
+  SEALWIRE_CLOUD_ACCESS_KEY=... sealwire cloud --no-open
   sealwire --broker https://broker.example.com
   AGENT_RELAY_PUBLIC_BROKER_URL=https://broker.example.com npx sealwire
   sealwire --no-broker

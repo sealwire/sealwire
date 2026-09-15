@@ -34,6 +34,11 @@ use tokio::{
 
 use super::session_claim::{decode_and_verify_session_claim, unix_now};
 
+fn cloud_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 fn temp_registration_path(prefix: &str) -> String {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -597,7 +602,6 @@ async fn broker_config_public_mode_returns_pending_enrollment_until_cached_regis
         Some(identity_path.clone()),
         Some(registration_path.clone()),
         None,
-        None, // license_code
     )
     .await
     .expect("config resolution should parse");
@@ -610,7 +614,7 @@ async fn broker_config_public_mode_returns_pending_enrollment_until_cached_regis
         panic!("expected pending public enrollment");
     };
     let client = reqwest::Client::new();
-    let registration = perform_public_relay_enrollment(&client, &pending)
+    let registration = perform_public_relay_enrollment(&client, &pending, None)
         .await
         .expect("challenge enrollment should succeed");
     assert_eq!(registration.relay_id, "relay-enrolled");
@@ -819,10 +823,9 @@ async fn perform_public_relay_enrollment_uses_relay_keypair_challenge_flow() {
         control_url: Url::parse(&control_url).expect("control url should parse"),
         registration_path: std::path::PathBuf::from(&registration_path),
         identity_path: std::path::PathBuf::from(&identity_path),
-        license_code: None,
     };
 
-    let registration = perform_public_relay_enrollment(&reqwest::Client::new(), &pending)
+    let registration = perform_public_relay_enrollment(&reqwest::Client::new(), &pending, None)
         .await
         .expect("automatic relay enrollment should succeed");
 
@@ -4629,4 +4632,1424 @@ async fn a_handler_error_after_parsing_does_not_end_the_session() {
         "the sealed request must still be answered after the plaintext one was refused. \
          A handler error belongs to the surface that caused it, not to the room. Saw {kinds:?}"
     );
+}
+
+#[tokio::test]
+async fn public_cached_registration_rejects_activation_override() {
+    let control_url = spawn_public_control_mock().await;
+    let registration_path = temp_registration_path("agent-relay-public-registration-override");
+    let identity_path = temp_registration_path("agent-relay-public-identity-override");
+    let pending = PendingPublicEnrollment {
+        control_url: Url::parse(&control_url).expect("control url"),
+        registration_path: std::path::PathBuf::from(&registration_path),
+        identity_path: std::path::PathBuf::from(&identity_path),
+    };
+    perform_public_relay_enrollment(&reqwest::Client::new(), &pending, Some("first-key"))
+        .await
+        .expect("enroll");
+
+    std::env::set_var(
+        crate::broker::activation::CLOUD_ACCESS_KEY_ENV,
+        "second-key",
+    );
+    let err = BrokerConfig::from_parts_resolution(
+        Some("wss://broker.example.com".to_string()),
+        Some("wss://public-broker.example.com".to_string()),
+        Some(control_url),
+        None,
+        Some("relay-auto".to_string()),
+        Some("public".to_string()),
+        None,
+        None,
+        None,
+        Some(identity_path),
+        Some(registration_path),
+        None,
+    )
+    .await
+    .expect_err("override while linked must fail");
+    assert!(
+        err.contains("already linked") && err.contains("unbind"),
+        "got: {err}"
+    );
+    assert!(
+        std::env::var(crate::broker::activation::CLOUD_ACCESS_KEY_ENV).is_err(),
+        "activation env must be scrubbed even on the reject path"
+    );
+}
+
+#[tokio::test]
+async fn registration_watch_diverged_when_cache_removed() {
+    let control_url = spawn_public_control_mock().await;
+    let registration_path = temp_registration_path("agent-relay-public-registration-watch");
+    let identity_path = temp_registration_path("agent-relay-public-identity-watch");
+    let pending = PendingPublicEnrollment {
+        control_url: Url::parse(&control_url).expect("control url"),
+        registration_path: std::path::PathBuf::from(&registration_path),
+        identity_path: std::path::PathBuf::from(&identity_path),
+    };
+    perform_public_relay_enrollment(&reqwest::Client::new(), &pending, None)
+        .await
+        .expect("enroll");
+
+    let config = BrokerConfig::from_parts(
+        Some("wss://broker.example.com".to_string()),
+        Some("wss://public-broker.example.com".to_string()),
+        Some(control_url),
+        None,
+        Some("relay-auto".to_string()),
+        Some("public".to_string()),
+        None,
+        None,
+        None,
+        Some(identity_path),
+        Some(registration_path.clone()),
+        None,
+    )
+    .await
+    .expect("parse")
+    .expect("enabled");
+    assert!(
+        config.registration_watch.is_some(),
+        "public cached config must retain a registration watch"
+    );
+    assert!(!registration_watch_diverged(&config).await);
+    std::fs::remove_file(&registration_path).expect("remove cache");
+    assert!(registration_watch_diverged(&config).await);
+}
+
+#[test]
+fn enrollment_complete_request_uses_enrollment_token_with_license_alias() {
+    let via_new = serde_json::from_value::<
+        relay_broker::public_control::RelayEnrollmentCompleteRequest,
+    >(serde_json::json!({
+        "relay_verify_key": "k",
+        "challenge_id": "c",
+        "challenge_signature": "s",
+        "enrollment_token": "tok-new"
+    }))
+    .expect("deserialize enrollment_token");
+    assert_eq!(via_new.enrollment_token.as_deref(), Some("tok-new"));
+
+    let via_alias = serde_json::from_value::<
+        relay_broker::public_control::RelayEnrollmentCompleteRequest,
+    >(serde_json::json!({
+        "relay_verify_key": "k",
+        "challenge_id": "c",
+        "challenge_signature": "s",
+        "license_code": "tok-legacy"
+    }))
+    .expect("deserialize license_code alias");
+    assert_eq!(via_alias.enrollment_token.as_deref(), Some("tok-legacy"));
+
+    let encoded = serde_json::to_value(&via_new).expect("serialize");
+    assert!(encoded.get("enrollment_token").is_some());
+    assert!(encoded.get("license_code").is_none());
+}
+
+#[tokio::test]
+async fn enrollment_complete_refuses_redirect_and_does_not_exfiltrate_token() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        routing::post,
+        Router,
+    };
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use tower::ServiceExt;
+
+    let redirected = Arc::new(AtomicBool::new(false));
+    let redirected_flag = redirected.clone();
+    let app = Router::new()
+        .route(
+            "/api/public/relay-enrollment/complete",
+            post(|| async {
+                (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [(axum::http::header::LOCATION, "http://evil.example/steal")],
+                )
+            }),
+        )
+        .route(
+            "/steal",
+            post(move |req: Request<Body>| {
+                let redirected_flag = redirected_flag.clone();
+                async move {
+                    redirected_flag.store(true, Ordering::SeqCst);
+                    let body = axum::body::to_bytes(req.into_body(), 64 * 1024)
+                        .await
+                        .unwrap_or_default();
+                    assert!(
+                        !String::from_utf8_lossy(&body).contains("secret-enroll-token"),
+                        "redirect target must never receive the enrollment token"
+                    );
+                    StatusCode::OK
+                }
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = crate::broker::auth::build_control_plane_client().unwrap();
+    let control = url::Url::parse(&format!("http://{addr}")).unwrap();
+    let err = crate::broker::auth::complete_public_relay_enrollment(
+        &client,
+        &control,
+        "vk".into(),
+        "cid".into(),
+        "sig".into(),
+        None,
+        Some("secret-enroll-token"),
+    )
+    .await
+    .expect_err("redirect must fail closed");
+    assert!(err.to_ascii_lowercase().contains("redirect"), "got: {err}");
+    assert!(!err.contains("secret-enroll-token"));
+    assert!(
+        !redirected.load(Ordering::SeqCst),
+        "client must not follow the redirect"
+    );
+}
+
+#[tokio::test]
+async fn enrollment_maps_reflected_key_error_to_safe_message() {
+    use axum::{routing::post, Json, Router};
+
+    let app = Router::new().route(
+        "/api/public/relay-enrollment/complete",
+        post(|| async {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid",
+                    "message": "bad secret-enroll-token"
+                })),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = crate::broker::auth::build_control_plane_client().unwrap();
+    let control = url::Url::parse(&format!("http://{addr}")).unwrap();
+    let err = crate::broker::auth::complete_public_relay_enrollment(
+        &client,
+        &control,
+        "vk".into(),
+        "cid".into(),
+        "sig".into(),
+        None,
+        Some("secret-enroll-token"),
+    )
+    .await
+    .expect_err("invalid enrollment must fail");
+    assert!(!err.contains("secret-enroll-token"), "got: {err}");
+    assert!(
+        err.contains("invalid") || err.contains("expired") || err.contains("revoked"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn enrollment_error_code_equal_to_secret_is_not_reflected() {
+    use axum::{routing::post, Json, Router};
+
+    let secret = "exact-secret-as-error-code";
+    let app = Router::new().route(
+        "/api/public/relay-enrollment/complete",
+        post(|| async {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "exact-secret-as-error-code"
+                })),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = crate::broker::auth::build_control_plane_client().unwrap();
+    let control = url::Url::parse(&format!("http://{addr}")).unwrap();
+    let err = crate::broker::auth::complete_public_relay_enrollment(
+        &client,
+        &control,
+        "vk".into(),
+        "cid".into(),
+        "sig".into(),
+        None,
+        Some(secret),
+    )
+    .await
+    .expect_err("unknown error code must fail closed");
+    assert!(!err.contains(secret), "got: {err}");
+    assert_eq!(err, "broker control-plane request failed");
+}
+
+#[tokio::test]
+async fn cloud_require_cached_fails_closed_when_registration_missing() {
+    let _guard = cloud_env_lock().lock().unwrap();
+    std::env::set_var(crate::broker::CLOUD_REQUIRE_CACHED_REGISTRATION_ENV, "1");
+    std::env::set_var(
+        crate::broker::CLOUD_EXPECTED_CONTROL_URL_ENV,
+        "http://127.0.0.1:9",
+    );
+    std::env::set_var(crate::broker::CLOUD_EXPECTED_RELAY_ID_ENV, "relay-x");
+    std::env::set_var(crate::broker::CLOUD_EXPECTED_ROOM_ID_ENV, "room-x");
+    std::env::set_var(
+        crate::broker::CLOUD_EXPECTED_BEARER_FP_ENV,
+        "deadbeefdeadbeef",
+    );
+    let startup = crate::broker::capture_and_scrub_activation_for_normal_start();
+    let registration_path = temp_registration_path("agent-relay-require-cached-missing");
+    let err = BrokerConfig::from_parts_resolution_with_startup_context(
+        Some("wss://broker.example.com".to_string()),
+        Some("wss://public-broker.example.com".to_string()),
+        Some("http://127.0.0.1:9".to_string()),
+        None,
+        Some("relay-auto".to_string()),
+        Some("public".to_string()),
+        None,
+        None,
+        None,
+        None,
+        Some(registration_path),
+        None,
+        startup,
+    )
+    .await
+    .expect_err("missing cache must fail closed for cloud require path");
+    std::env::remove_var(crate::broker::CLOUD_REQUIRE_CACHED_REGISTRATION_ENV);
+    std::env::remove_var(crate::broker::CLOUD_EXPECTED_CONTROL_URL_ENV);
+    std::env::remove_var(crate::broker::CLOUD_EXPECTED_RELAY_ID_ENV);
+    std::env::remove_var(crate::broker::CLOUD_EXPECTED_ROOM_ID_ENV);
+    std::env::remove_var(crate::broker::CLOUD_EXPECTED_BEARER_FP_ENV);
+    assert!(
+        err.contains("missing") || err.contains("refusing anonymous"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn cloud_require_cached_fails_closed_when_registration_replaced() {
+    let _guard = cloud_env_lock().lock().unwrap();
+    let control_url = spawn_public_control_mock().await;
+    let registration_path = temp_registration_path("agent-relay-require-cached-replaced");
+    let identity_path = temp_registration_path("agent-relay-require-cached-id");
+    let pending = PendingPublicEnrollment {
+        control_url: Url::parse(&control_url).expect("control url"),
+        registration_path: std::path::PathBuf::from(&registration_path),
+        identity_path: std::path::PathBuf::from(&identity_path),
+    };
+    let registration = perform_public_relay_enrollment(&reqwest::Client::new(), &pending, None)
+        .await
+        .expect("enroll");
+    let expected_fp = super::lifecycle::bearer_fingerprint(&registration.relay_refresh_token);
+
+    // Replace with a different bearer after preflight witnessed the old one.
+    let replaced = PublicRelayRegistration {
+        relay_id: registration.relay_id.clone(),
+        broker_room_id: registration.broker_room_id.clone(),
+        relay_refresh_token: "replaced-token-after-preflight".into(),
+    };
+    save_public_relay_registration(
+        std::path::Path::new(&registration_path),
+        &control_url,
+        &replaced,
+    )
+    .await
+    .expect("replace");
+
+    std::env::set_var(crate::broker::CLOUD_REQUIRE_CACHED_REGISTRATION_ENV, "1");
+    std::env::set_var(crate::broker::CLOUD_EXPECTED_CONTROL_URL_ENV, &control_url);
+    std::env::set_var(
+        crate::broker::CLOUD_EXPECTED_RELAY_ID_ENV,
+        &registration.relay_id,
+    );
+    std::env::set_var(
+        crate::broker::CLOUD_EXPECTED_ROOM_ID_ENV,
+        &registration.broker_room_id,
+    );
+    std::env::set_var(crate::broker::CLOUD_EXPECTED_BEARER_FP_ENV, &expected_fp);
+    let startup = crate::broker::capture_and_scrub_activation_for_normal_start();
+
+    let err = BrokerConfig::from_parts_resolution_with_startup_context(
+        Some("wss://broker.example.com".to_string()),
+        Some("wss://public-broker.example.com".to_string()),
+        Some(control_url),
+        None,
+        Some("relay-auto".to_string()),
+        Some("public".to_string()),
+        None,
+        None,
+        None,
+        Some(identity_path),
+        Some(registration_path),
+        None,
+        startup,
+    )
+    .await
+    .expect_err("replaced cache must fail closed");
+    std::env::remove_var(crate::broker::CLOUD_REQUIRE_CACHED_REGISTRATION_ENV);
+    std::env::remove_var(crate::broker::CLOUD_EXPECTED_CONTROL_URL_ENV);
+    std::env::remove_var(crate::broker::CLOUD_EXPECTED_RELAY_ID_ENV);
+    std::env::remove_var(crate::broker::CLOUD_EXPECTED_ROOM_ID_ENV);
+    std::env::remove_var(crate::broker::CLOUD_EXPECTED_BEARER_FP_ENV);
+    assert!(
+        err.contains("changed") || err.contains("replaced") || err.contains("refusing"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn cloud_launch_capture_scrub_then_matching_config_succeeds() {
+    let _guard = cloud_env_lock().lock().unwrap();
+    let control_url = crate::broker::auth::parse_control_plane_url("http://127.0.0.1:9")
+        .expect("control url")
+        .as_str()
+        .to_string();
+    let registration_path = temp_registration_path("agent-relay-witness-matching");
+    let registration = PublicRelayRegistration {
+        relay_id: "relay-match".into(),
+        broker_room_id: "room-match".into(),
+        relay_refresh_token: "refresh-independent-secret".into(),
+    };
+    save_public_relay_registration(
+        std::path::Path::new(&registration_path),
+        &control_url,
+        &registration,
+    )
+    .await
+    .unwrap();
+    std::env::set_var(crate::broker::CLOUD_REQUIRE_CACHED_REGISTRATION_ENV, "1");
+    std::env::set_var(crate::broker::CLOUD_EXPECTED_CONTROL_URL_ENV, &control_url);
+    std::env::set_var(crate::broker::CLOUD_EXPECTED_RELAY_ID_ENV, "relay-match");
+    std::env::set_var(crate::broker::CLOUD_EXPECTED_ROOM_ID_ENV, "room-match");
+    std::env::set_var(
+        crate::broker::CLOUD_EXPECTED_BEARER_FP_ENV,
+        super::lifecycle::bearer_fingerprint("refresh-independent-secret"),
+    );
+
+    let startup = crate::broker::capture_and_scrub_activation_for_normal_start();
+    assert!(std::env::var_os(crate::broker::CLOUD_REQUIRE_CACHED_REGISTRATION_ENV).is_none());
+    assert!(std::env::var_os(crate::broker::CLOUD_EXPECTED_RELAY_ID_ENV).is_none());
+
+    // An unrelated ordinary resolution has no ownership of the captured value.
+    let disabled = BrokerConfig::from_parts_resolution(
+        None, None, None, None, None, None, None, None, None, None, None, None,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(disabled, BrokerConfigResolution::Disabled));
+
+    let result = BrokerConfig::from_parts_resolution_with_startup_context(
+        Some("wss://broker.example.com".into()),
+        Some("wss://public-broker.example.com".into()),
+        Some(control_url.clone()),
+        None,
+        Some("relay-auto".into()),
+        Some("public".into()),
+        None,
+        None,
+        None,
+        None,
+        Some(registration_path),
+        None,
+        startup,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, BrokerConfigResolution::Ready(_)));
+}
+
+#[tokio::test]
+async fn cloud_launch_partial_or_malformed_required_witness_fails_closed_after_scrub() {
+    let _guard = cloud_env_lock().lock().unwrap();
+    for malformed_fingerprint in [None, Some("not-hex")] {
+        crate::broker::activation::scrub_activation_env();
+        std::env::set_var(crate::broker::CLOUD_REQUIRE_CACHED_REGISTRATION_ENV, "1");
+        std::env::set_var(
+            crate::broker::CLOUD_EXPECTED_CONTROL_URL_ENV,
+            "http://127.0.0.1:9",
+        );
+        std::env::set_var(crate::broker::CLOUD_EXPECTED_RELAY_ID_ENV, "relay-x");
+        std::env::set_var(crate::broker::CLOUD_EXPECTED_ROOM_ID_ENV, "room-x");
+        if let Some(value) = malformed_fingerprint {
+            std::env::set_var(crate::broker::CLOUD_EXPECTED_BEARER_FP_ENV, value);
+        }
+        let startup = crate::broker::capture_and_scrub_activation_for_normal_start();
+        let error = BrokerConfig::from_parts_resolution_with_startup_context(
+            Some("wss://broker.example.com".into()),
+            Some("wss://public-broker.example.com".into()),
+            Some("http://127.0.0.1:9".into()),
+            None,
+            Some("relay-auto".into()),
+            Some("public".into()),
+            None,
+            None,
+            None,
+            None,
+            Some(temp_registration_path("agent-relay-witness-invalid")),
+            None,
+            startup,
+        )
+        .await
+        .expect_err("required partial/malformed witness must fail");
+        assert!(error.contains("incomplete or invalid"), "got: {error}");
+    }
+}
+
+#[tokio::test]
+async fn ambient_partial_witness_without_require_is_ignored_after_scrub() {
+    let _guard = cloud_env_lock().lock().unwrap();
+    crate::broker::activation::scrub_activation_env();
+    // Ambient junk without RELAY_CLOUD_REQUIRE_CACHED_REGISTRATION must not
+    // force fail-closed cloud semantics on ordinary/public broker startup.
+    std::env::set_var(crate::broker::CLOUD_EXPECTED_RELAY_ID_ENV, "ambient-relay");
+    std::env::set_var(
+        crate::broker::CLOUD_EXPECTED_BEARER_FP_ENV,
+        "not-a-fingerprint",
+    );
+    let startup = crate::broker::capture_and_scrub_activation_for_normal_start();
+    assert!(std::env::var_os(crate::broker::CLOUD_EXPECTED_RELAY_ID_ENV).is_none());
+    assert!(std::env::var_os(crate::broker::CLOUD_EXPECTED_BEARER_FP_ENV).is_none());
+
+    let result = BrokerConfig::from_parts_resolution_with_startup_context(
+        Some("wss://broker.example.com".into()),
+        Some("wss://public-broker.example.com".into()),
+        Some("http://127.0.0.1:9".into()),
+        None,
+        Some("relay-auto".into()),
+        Some("public".into()),
+        None,
+        None,
+        None,
+        None,
+        Some(temp_registration_path("agent-relay-ambient-witness")),
+        None,
+        startup,
+    )
+    .await
+    .expect("ambient partial witness must not poison generic public startup");
+    assert!(matches!(
+        result,
+        BrokerConfigResolution::PendingPublicEnrollment(_)
+    ));
+}
+
+#[tokio::test]
+async fn required_cloud_witness_fails_closed_when_broker_url_missing() {
+    let _guard = cloud_env_lock().lock().unwrap();
+    crate::broker::activation::scrub_activation_env();
+    std::env::set_var(crate::broker::CLOUD_REQUIRE_CACHED_REGISTRATION_ENV, "1");
+    std::env::set_var(
+        crate::broker::CLOUD_EXPECTED_CONTROL_URL_ENV,
+        "http://127.0.0.1:9/",
+    );
+    std::env::set_var(crate::broker::CLOUD_EXPECTED_RELAY_ID_ENV, "relay-x");
+    std::env::set_var(crate::broker::CLOUD_EXPECTED_ROOM_ID_ENV, "room-x");
+    std::env::set_var(
+        crate::broker::CLOUD_EXPECTED_BEARER_FP_ENV,
+        "deadbeefdeadbeef",
+    );
+    let startup = crate::broker::capture_and_scrub_activation_for_normal_start();
+    let error = BrokerConfig::from_parts_resolution_with_startup_context(
+        None, None, None, None, None, None, None, None, None, None, None, None, startup,
+    )
+    .await
+    .expect_err("required cloud witness must not disappear into Disabled");
+    assert!(
+        error.contains("RELAY_BROKER_URL") || error.contains("refusing"),
+        "got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn required_cloud_witness_fails_closed_for_self_hosted_auth() {
+    let _guard = cloud_env_lock().lock().unwrap();
+    crate::broker::activation::scrub_activation_env();
+    std::env::set_var(crate::broker::CLOUD_REQUIRE_CACHED_REGISTRATION_ENV, "1");
+    std::env::set_var(
+        crate::broker::CLOUD_EXPECTED_CONTROL_URL_ENV,
+        "http://127.0.0.1:9/",
+    );
+    std::env::set_var(crate::broker::CLOUD_EXPECTED_RELAY_ID_ENV, "relay-x");
+    std::env::set_var(crate::broker::CLOUD_EXPECTED_ROOM_ID_ENV, "room-x");
+    std::env::set_var(
+        crate::broker::CLOUD_EXPECTED_BEARER_FP_ENV,
+        "deadbeefdeadbeef",
+    );
+    let startup = crate::broker::capture_and_scrub_activation_for_normal_start();
+    let error = BrokerConfig::from_parts_resolution_with_startup_context(
+        Some("wss://broker.example.com".into()),
+        Some("wss://broker.example.com".into()),
+        None,
+        Some("channel-1".into()),
+        None,
+        Some("self_hosted".into()),
+        Some("join-secret".into()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        startup,
+    )
+    .await
+    .expect_err("required cloud witness must refuse self-hosted auth");
+    assert!(
+        error.contains("public") || error.contains("refusing"),
+        "got: {error}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn registration_and_identity_files_are_mode_0600() {
+    let control_url = spawn_public_control_mock().await;
+    let registration_path = temp_registration_path("agent-relay-mode-reg");
+    let identity_path = temp_registration_path("agent-relay-mode-id");
+    let pending = PendingPublicEnrollment {
+        control_url: Url::parse(&control_url).expect("control url"),
+        registration_path: std::path::PathBuf::from(&registration_path),
+        identity_path: std::path::PathBuf::from(&identity_path),
+    };
+    perform_public_relay_enrollment(&reqwest::Client::new(), &pending, None)
+        .await
+        .expect("enroll");
+    use std::os::unix::fs::PermissionsExt;
+    let reg_mode = std::fs::metadata(&registration_path)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    let id_mode = std::fs::metadata(&identity_path)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(reg_mode, 0o600, "registration must be owner-only");
+    assert_eq!(id_mode, 0o600, "identity must be owner-only");
+}
+
+#[tokio::test]
+async fn cloud_activate_non_tty_missing_key_exits_nonzero() {
+    let _guard = cloud_env_lock().lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let reg = dir.path().join("public-broker-registration.json");
+    let identity = dir.path().join("public-broker-identity.json");
+    std::env::set_var(crate::broker::activation::CLOUD_ACTIVATION_ENV, "1");
+    std::env::set_var(
+        crate::broker::auth::RELAY_BROKER_CONTROL_URL_ENV,
+        "http://127.0.0.1:9",
+    );
+    std::env::set_var(
+        crate::broker::auth::RELAY_BROKER_REGISTRATION_PATH_ENV,
+        &reg,
+    );
+    std::env::set_var(crate::broker::RELAY_BROKER_IDENTITY_PATH_ENV, &identity);
+    // Ensure no credentials.
+    crate::broker::activation::scrub_activation_env();
+    std::env::set_var(crate::broker::activation::CLOUD_ACTIVATION_ENV, "1");
+
+    let code = crate::broker::run_cloud_activate_core(false).await;
+
+    std::env::remove_var(crate::broker::activation::CLOUD_ACTIVATION_ENV);
+    std::env::remove_var(crate::broker::auth::RELAY_BROKER_CONTROL_URL_ENV);
+    std::env::remove_var(crate::broker::auth::RELAY_BROKER_REGISTRATION_PATH_ENV);
+    std::env::remove_var(crate::broker::RELAY_BROKER_IDENTITY_PATH_ENV);
+    assert_ne!(
+        code, 0,
+        "non-TTY cloud-activate without a key must fail closed"
+    );
+}
+
+#[tokio::test]
+async fn cloud_activate_cached_registration_emits_witness_without_prompt() {
+    let _guard = cloud_env_lock().lock().unwrap();
+    let control_url = spawn_public_control_mock().await;
+    let registration_path = temp_registration_path("agent-relay-cloud-cached-witness");
+    let identity_path = temp_registration_path("agent-relay-cloud-cached-id");
+    let pending = PendingPublicEnrollment {
+        control_url: Url::parse(&control_url).unwrap(),
+        registration_path: std::path::PathBuf::from(&registration_path),
+        identity_path: std::path::PathBuf::from(&identity_path),
+    };
+    perform_public_relay_enrollment(&reqwest::Client::new(), &pending, None)
+        .await
+        .expect("enroll");
+
+    std::env::set_var(crate::broker::activation::CLOUD_ACTIVATION_ENV, "1");
+    std::env::set_var(
+        crate::broker::auth::RELAY_BROKER_CONTROL_URL_ENV,
+        &control_url,
+    );
+    std::env::set_var(
+        crate::broker::auth::RELAY_BROKER_REGISTRATION_PATH_ENV,
+        &registration_path,
+    );
+    std::env::set_var(
+        crate::broker::RELAY_BROKER_IDENTITY_PATH_ENV,
+        &identity_path,
+    );
+    crate::broker::activation::scrub_activation_env();
+    std::env::set_var(crate::broker::activation::CLOUD_ACTIVATION_ENV, "1");
+
+    let code = crate::broker::run_cloud_activate().await;
+
+    std::env::remove_var(crate::broker::activation::CLOUD_ACTIVATION_ENV);
+    std::env::remove_var(crate::broker::auth::RELAY_BROKER_CONTROL_URL_ENV);
+    std::env::remove_var(crate::broker::auth::RELAY_BROKER_REGISTRATION_PATH_ENV);
+    std::env::remove_var(crate::broker::RELAY_BROKER_IDENTITY_PATH_ENV);
+    assert_eq!(code, 0);
+    assert!(std::path::Path::new(&registration_path).exists());
+}
+
+#[tokio::test]
+async fn enroll_release_reenroll_different_key_lifecycle() {
+    use axum::{
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        routing::post,
+        Json, Router,
+    };
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct Plane {
+        enrollments: Arc<Mutex<Vec<String>>>,
+        released: Arc<Mutex<Vec<String>>>,
+        next_refresh: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    async fn challenge(
+        Json(request): Json<RelayEnrollmentChallengeRequest>,
+    ) -> Json<RelayEnrollmentChallengeResponse> {
+        Json(RelayEnrollmentChallengeResponse {
+            relay_verify_key: request.relay_verify_key,
+            challenge_id: "rch-lifecycle".into(),
+            challenge: "rc-lifecycle".into(),
+            expires_at: unix_now() + 300,
+        })
+    }
+
+    async fn complete(
+        State(plane): State<Plane>,
+        Json(request): Json<RelayEnrollmentCompleteRequest>,
+    ) -> Json<RelayEnrollmentResponse> {
+        let token = request
+            .enrollment_token
+            .clone()
+            .unwrap_or_else(|| "anonymous".into());
+        plane.enrollments.lock().unwrap().push(token);
+        let refresh_number = plane
+            .next_refresh
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Refresh tokens and room/relay ids must never echo the submitted
+        // activation key — persisted registration JSON is secret-free of it.
+        Json(RelayEnrollmentResponse {
+            relay_id: format!("relay-{refresh_number}"),
+            broker_room_id: format!("room-{refresh_number}"),
+            relay_refresh_token: format!("refresh-token-{refresh_number}"),
+            created_at: unix_now(),
+            relay_label: None,
+        })
+    }
+
+    async fn release(
+        State(plane): State<Plane>,
+        headers: HeaderMap,
+        Json(body): Json<relay_broker::public_control::AccessReleaseRequest>,
+    ) -> (StatusCode, Json<serde_json::Value>) {
+        let auth = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        plane.released.lock().unwrap().push(auth);
+        let _ = body;
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({ "released": true })),
+        )
+    }
+
+    let plane = Plane {
+        enrollments: Arc::new(Mutex::new(Vec::new())),
+        released: Arc::new(Mutex::new(Vec::new())),
+        next_refresh: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+    };
+    let app = Router::new()
+        .route("/api/public/relay-enrollment/challenge", post(challenge))
+        .route("/api/public/relay-enrollment/complete", post(complete))
+        .route("/api/public/relay/access/release", post(release))
+        .with_state(plane.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let control_url = format!("http://{addr}");
+
+    let registration_path = temp_registration_path("agent-relay-lifecycle-reg");
+    let identity_path = temp_registration_path("agent-relay-lifecycle-id");
+    let marker = std::path::PathBuf::from(&registration_path)
+        .parent()
+        .unwrap()
+        .join("public-broker-pending-release.json");
+    let pending = PendingPublicEnrollment {
+        control_url: Url::parse(&control_url).unwrap(),
+        registration_path: std::path::PathBuf::from(&registration_path),
+        identity_path: std::path::PathBuf::from(&identity_path),
+    };
+    let client = reqwest::Client::new();
+
+    let first = perform_public_relay_enrollment(&client, &pending, Some("key-a"))
+        .await
+        .expect("enroll A");
+    assert!(!first.relay_refresh_token.contains("key-a"));
+
+    let outcome = crate::broker::access_release::release_cloud_access(
+        &control_url,
+        std::path::Path::new(&registration_path),
+        &marker,
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        crate::broker::access_release::ReleaseOutcome::Released
+    );
+    assert!(!std::path::Path::new(&registration_path).exists());
+
+    let second = perform_public_relay_enrollment(&client, &pending, Some("key-b"))
+        .await
+        .expect("enroll B");
+    assert!(!second.relay_refresh_token.contains("key-b"));
+    assert_ne!(first.relay_refresh_token, second.relay_refresh_token);
+    assert_eq!(
+        plane.enrollments.lock().unwrap().as_slice(),
+        ["key-a", "key-b"]
+    );
+    assert_eq!(plane.released.lock().unwrap().len(), 1);
+    let persisted = std::fs::read_to_string(&registration_path).unwrap();
+    assert!(!persisted.contains("key-a"));
+    assert!(!persisted.contains("key-b"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_production_enrollment_critical_sections_complete_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let pending = PendingPublicEnrollment {
+        control_url: Url::parse("http://127.0.0.1:9").unwrap(),
+        registration_path: dir.path().join("public-broker-registration.json"),
+        identity_path: dir.path().join("public-broker-identity.json"),
+    };
+    let completions = Arc::new(AtomicUsize::new(0));
+    let make = |submitted_key: &'static str| {
+        let pending = pending.clone();
+        let completions = completions.clone();
+        tokio::spawn(async move {
+            enroll_public_relay_if_absent(&pending, || async move {
+                let sequence = completions.fetch_add(1, Ordering::SeqCst) + 1;
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                Ok(PublicRelayRegistration {
+                    relay_id: "relay-shared".into(),
+                    broker_room_id: "room-shared".into(),
+                    // Fake remote bearer generation is deliberately independent
+                    // from the submitted activation key.
+                    relay_refresh_token: format!("server-refresh-{sequence}"),
+                })
+            })
+            .await
+            .map(|locked| {
+                (
+                    locked.disposition,
+                    locked.registration.clone(),
+                    submitted_key,
+                )
+            })
+        })
+    };
+
+    let (first, second) = tokio::join!(make("activation-key-a"), make("activation-key-b"));
+    let first = first.unwrap().unwrap();
+    let second = second.unwrap().unwrap();
+    assert_eq!(completions.load(Ordering::SeqCst), 1);
+    let dispositions = [first.0, second.0];
+    assert!(dispositions.contains(&EnrollmentDisposition::Enrolled));
+    assert!(dispositions.contains(&EnrollmentDisposition::Existing));
+    assert_eq!(first.1.relay_refresh_token, second.1.relay_refresh_token);
+    let persisted = std::fs::read_to_string(&pending.registration_path).unwrap();
+    assert!(!persisted.contains(first.2));
+    assert!(!persisted.contains(second.2));
+    assert!(persisted.contains("server-refresh-1"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_generic_enrollment_rechecks_after_activation_writes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let pending = PendingPublicEnrollment {
+        control_url: Url::parse("http://127.0.0.1:9").unwrap(),
+        registration_path: dir.path().join("public-broker-registration.json"),
+        identity_path: dir.path().join("public-broker-identity.json"),
+    };
+    let remote_calls = Arc::new(AtomicUsize::new(0));
+    let lock = BrokerLifecycleLock::acquire_for_registration(&pending.registration_path).unwrap();
+    let generic_pending = pending.clone();
+    let generic_calls = remote_calls.clone();
+    let generic = tokio::spawn(async move {
+        enroll_public_relay_if_absent(&generic_pending, || async move {
+            generic_calls.fetch_add(1, Ordering::SeqCst);
+            Err("generic remote completion must not run".to_string())
+        })
+        .await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    let activated = PublicRelayRegistration {
+        relay_id: "relay-activated".into(),
+        broker_room_id: "room-activated".into(),
+        relay_refresh_token: "refresh-created-by-activation".into(),
+    };
+    save_public_relay_registration(
+        &pending.registration_path,
+        pending.control_url.as_str(),
+        &activated,
+    )
+    .await
+    .unwrap();
+    drop(lock);
+
+    let observed = generic.await.unwrap().unwrap();
+    assert_eq!(observed.disposition, EnrollmentDisposition::Existing);
+    assert_eq!(remote_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        observed.registration.relay_refresh_token,
+        activated.relay_refresh_token
+    );
+    let persisted = load_matching_registration_for_enrollment(&pending)
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.relay_refresh_token, activated.relay_refresh_token);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_activate_then_matching_release_clears() {
+    use axum::{routing::post, Json, Router};
+
+    let app = Router::new().route(
+        "/api/public/relay/access/release",
+        post(|| async { Json(serde_json::json!({ "released": true })) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let control_url = format!("http://{addr}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let registration_path = dir.path().join("public-broker-registration.json");
+    let identity_path = dir.path().join("public-broker-identity.json");
+    let marker = dir.path().join("public-broker-pending-release.json");
+    let pending = PendingPublicEnrollment {
+        control_url: Url::parse(&control_url).unwrap(),
+        registration_path: registration_path.clone(),
+        identity_path,
+    };
+
+    let locked = enroll_public_relay_if_absent(&pending, || async {
+        Ok(PublicRelayRegistration {
+            relay_id: "relay-live".into(),
+            broker_room_id: "room-live".into(),
+            relay_refresh_token: "refresh-live".into(),
+        })
+    })
+    .await
+    .unwrap();
+    assert_eq!(locked.disposition, EnrollmentDisposition::Enrolled);
+    drop(locked);
+
+    let outcome = crate::broker::access_release::release_cloud_access(
+        &control_url,
+        &registration_path,
+        &marker,
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        crate::broker::access_release::ReleaseOutcome::Released
+    );
+    assert!(!registration_path.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_stale_release_refuses_after_locked_activation_rebind() {
+    use axum::{routing::post, Json, Router};
+    use std::sync::Arc;
+
+    let started = Arc::new(std::sync::Barrier::new(2));
+    let started_server = started.clone();
+    let app = Router::new().route(
+        "/api/public/relay/access/release",
+        post(move || {
+            let started_server = started_server.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    started_server.wait();
+                })
+                .await
+                .ok();
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                Json(serde_json::json!({ "released": true }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let control_url = format!("http://{addr}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let registration_path = dir.path().join("public-broker-registration.json");
+    let marker = dir.path().join("public-broker-pending-release.json");
+    save_public_relay_registration(
+        &registration_path,
+        &control_url,
+        &PublicRelayRegistration {
+            relay_id: "relay-shared".into(),
+            broker_room_id: "room-shared".into(),
+            relay_refresh_token: "refresh-old".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // release_cloud_access holds the lifecycle lock across HTTP. Replace the
+    // registration under that same lock using the production enroll critical
+    // section only after release has loaded the old identity and entered HTTP —
+    // which requires a writer that does not take the lock (hostile/stale). The
+    // production enroll path itself cannot interleave mid-release; assert the
+    // CAS outcome when a newer registration appears before deletion.
+    let reg_clone = registration_path.clone();
+    let marker_clone = marker.clone();
+    let origin_clone = control_url.clone();
+    let release_task = tokio::spawn(async move {
+        crate::broker::access_release::release_cloud_access(
+            &origin_clone,
+            &reg_clone,
+            &marker_clone,
+        )
+        .await
+    });
+
+    tokio::task::spawn_blocking(move || {
+        started.wait();
+    })
+    .await
+    .unwrap();
+    save_public_relay_registration(
+        &registration_path,
+        &control_url,
+        &PublicRelayRegistration {
+            relay_id: "relay-shared".into(),
+            broker_room_id: "room-shared".into(),
+            relay_refresh_token: "refresh-new".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let outcome = release_task.await.unwrap();
+    assert!(
+        matches!(
+            outcome,
+            crate::broker::access_release::ReleaseOutcome::Failed(ref msg)
+                if msg.contains("replaced") || msg.contains("newer") || msg.contains("untouched")
+        ),
+        "got: {outcome:?}"
+    );
+    let persisted = std::fs::read_to_string(&registration_path).unwrap();
+    assert!(persisted.contains("refresh-new"));
+    assert!(!persisted.contains("refresh-old"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn production_release_first_then_activate_under_contended_lock() {
+    use axum::{routing::post, Json, Router};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    let remote_enrolls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/api/public/relay/access/release",
+        post(|| async { Json(serde_json::json!({ "released": true })) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let control_url = format!("http://{addr}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let registration_path = dir.path().join("public-broker-registration.json");
+    let identity_path = dir.path().join("public-broker-identity.json");
+    let marker = dir.path().join("public-broker-pending-release.json");
+    let pending = PendingPublicEnrollment {
+        control_url: Url::parse(&control_url).unwrap(),
+        registration_path: registration_path.clone(),
+        identity_path,
+    };
+    save_public_relay_registration(
+        &registration_path,
+        &control_url,
+        &PublicRelayRegistration {
+            relay_id: "relay-seed".into(),
+            broker_room_id: "room-seed".into(),
+            relay_refresh_token: "refresh-seed".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Force release→activate by pausing release immediately after it holds the
+    // real lifecycle lock (before it reads/mutates registration), then starting
+    // activate while that lock is still held. No sleep/FIFO assumptions.
+    let release_acquired = Arc::new(Barrier::new(2));
+    let release_proceed = Arc::new(Barrier::new(2));
+    let activate_acquired = Arc::new(AtomicBool::new(false));
+    let release = {
+        let control_url = control_url.clone();
+        let registration_path = registration_path.clone();
+        let release_acquired = release_acquired.clone();
+        let release_proceed = release_proceed.clone();
+        tokio::spawn(async move {
+            crate::broker::access_release::release_cloud_access_after_acquire(
+                &control_url,
+                &registration_path,
+                &marker,
+                move || {
+                    release_acquired.wait();
+                    release_proceed.wait();
+                },
+            )
+            .await
+        })
+    };
+    tokio::task::spawn_blocking({
+        let release_acquired = release_acquired.clone();
+        move || {
+            release_acquired.wait();
+        }
+    })
+    .await
+    .unwrap();
+
+    let enrolls = remote_enrolls.clone();
+    let activate_acquired_flag = activate_acquired.clone();
+    let activate = {
+        let pending = pending.clone();
+        tokio::spawn(async move {
+            enroll_public_relay_if_absent_after_acquire(
+                &pending,
+                || async move {
+                    enrolls.fetch_add(1, Ordering::SeqCst);
+                    Ok(PublicRelayRegistration {
+                        relay_id: "relay-after-release".into(),
+                        broker_room_id: "room-after-release".into(),
+                        relay_refresh_token: "refresh-after-release".into(),
+                    })
+                },
+                move || {
+                    activate_acquired_flag.store(true, Ordering::SeqCst);
+                },
+            )
+            .await
+        })
+    };
+    // Release still holds the lock at its after-acquire pause; activate must
+    // not have entered its critical section yet.
+    tokio::task::yield_now().await;
+    assert!(
+        !activate_acquired.load(Ordering::SeqCst),
+        "activate must remain blocked on the lifecycle lock while release holds it"
+    );
+    assert!(
+        registration_path.exists(),
+        "seed registration must still be present before release mutates"
+    );
+    let seed = std::fs::read_to_string(&registration_path).unwrap();
+    assert!(seed.contains("refresh-seed"));
+
+    tokio::task::spawn_blocking(move || {
+        release_proceed.wait();
+    })
+    .await
+    .unwrap();
+
+    let released = release.await.unwrap();
+    let activated = activate.await.unwrap().unwrap();
+    assert_eq!(
+        released,
+        crate::broker::access_release::ReleaseOutcome::Released
+    );
+    assert_eq!(activated.disposition, EnrollmentDisposition::Enrolled);
+    assert_eq!(remote_enrolls.load(Ordering::SeqCst), 1);
+    assert!(activate_acquired.load(Ordering::SeqCst));
+    let persisted = std::fs::read_to_string(&registration_path).unwrap();
+    assert!(persisted.contains("refresh-after-release"));
+    assert!(!persisted.contains("refresh-seed"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn production_activate_first_then_release_under_contended_lock() {
+    use axum::{routing::post, Json, Router};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    let remote_enrolls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/api/public/relay/access/release",
+        post(|| async { Json(serde_json::json!({ "released": true })) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let control_url = format!("http://{addr}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let registration_path = dir.path().join("public-broker-registration.json");
+    let identity_path = dir.path().join("public-broker-identity.json");
+    let marker = dir.path().join("public-broker-pending-release.json");
+    let pending = PendingPublicEnrollment {
+        control_url: Url::parse(&control_url).unwrap(),
+        registration_path: registration_path.clone(),
+        identity_path,
+    };
+
+    // Force activate→release by pausing activate immediately after it holds the
+    // real lifecycle lock (before enroll/save), then starting release while that
+    // lock is still held.
+    let activate_acquired = Arc::new(Barrier::new(2));
+    let activate_proceed = Arc::new(Barrier::new(2));
+    let release_acquired = Arc::new(AtomicBool::new(false));
+    let enrolls = remote_enrolls.clone();
+    let activate = {
+        let pending = pending.clone();
+        let activate_acquired = activate_acquired.clone();
+        let activate_proceed = activate_proceed.clone();
+        tokio::spawn(async move {
+            let locked = enroll_public_relay_if_absent_after_acquire(
+                &pending,
+                || async move {
+                    enrolls.fetch_add(1, Ordering::SeqCst);
+                    Ok(PublicRelayRegistration {
+                        relay_id: "relay-first".into(),
+                        broker_room_id: "room-first".into(),
+                        relay_refresh_token: "refresh-first".into(),
+                    })
+                },
+                move || {
+                    activate_acquired.wait();
+                    activate_proceed.wait();
+                },
+            )
+            .await?;
+            let disposition = locked.disposition;
+            let registration = locked.registration.clone();
+            // Drop the lifecycle lock before returning so the queued release can
+            // proceed; holding it across the join would deadlock the test.
+            drop(locked);
+            Ok::<_, EnrollmentCriticalError>((disposition, registration))
+        })
+    };
+    tokio::task::spawn_blocking({
+        let activate_acquired = activate_acquired.clone();
+        move || {
+            activate_acquired.wait();
+        }
+    })
+    .await
+    .unwrap();
+
+    let release_acquired_flag = release_acquired.clone();
+    let release = {
+        let control_url = control_url.clone();
+        let registration_path = registration_path.clone();
+        tokio::spawn(async move {
+            crate::broker::access_release::release_cloud_access_after_acquire(
+                &control_url,
+                &registration_path,
+                &marker,
+                move || {
+                    release_acquired_flag.store(true, Ordering::SeqCst);
+                },
+            )
+            .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(
+        !release_acquired.load(Ordering::SeqCst),
+        "release must remain blocked on the lifecycle lock while activate holds it"
+    );
+    assert!(
+        !registration_path.exists(),
+        "activation must not have written registration before after-acquire pause lifts"
+    );
+
+    tokio::task::spawn_blocking(move || {
+        activate_proceed.wait();
+    })
+    .await
+    .unwrap();
+
+    let activated = activate.await.unwrap().unwrap();
+    let released = release.await.unwrap();
+    assert_eq!(activated.0, EnrollmentDisposition::Enrolled);
+    assert_eq!(activated.1.relay_refresh_token, "refresh-first");
+    assert_eq!(remote_enrolls.load(Ordering::SeqCst), 1);
+    assert!(release_acquired.load(Ordering::SeqCst));
+    assert_eq!(
+        released,
+        crate::broker::access_release::ReleaseOutcome::Released
+    );
+    assert!(
+        !registration_path.exists(),
+        "release after activate must clear the just-written registration"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_release_then_activate_reenrolls_cleanly() {
+    use axum::{routing::post, Json, Router};
+
+    let app = Router::new().route(
+        "/api/public/relay/access/release",
+        post(|| async { Json(serde_json::json!({ "released": true })) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let control_url = format!("http://{addr}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let registration_path = dir.path().join("public-broker-registration.json");
+    let identity_path = dir.path().join("public-broker-identity.json");
+    let marker = dir.path().join("public-broker-pending-release.json");
+    let pending = PendingPublicEnrollment {
+        control_url: Url::parse(&control_url).unwrap(),
+        registration_path: registration_path.clone(),
+        identity_path,
+    };
+    save_public_relay_registration(
+        &registration_path,
+        &control_url,
+        &PublicRelayRegistration {
+            relay_id: "relay-old".into(),
+            broker_room_id: "room-old".into(),
+            relay_refresh_token: "refresh-old".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let outcome = crate::broker::access_release::release_cloud_access(
+        &control_url,
+        &registration_path,
+        &marker,
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        crate::broker::access_release::ReleaseOutcome::Released
+    );
+    assert!(!registration_path.exists());
+
+    let locked = enroll_public_relay_if_absent(&pending, || async {
+        Ok(PublicRelayRegistration {
+            relay_id: "relay-new".into(),
+            broker_room_id: "room-new".into(),
+            relay_refresh_token: "refresh-new-independent".into(),
+        })
+    })
+    .await
+    .unwrap();
+    assert_eq!(locked.disposition, EnrollmentDisposition::Enrolled);
+    let persisted = std::fs::read_to_string(&registration_path).unwrap();
+    assert!(persisted.contains("refresh-new-independent"));
+    assert!(!persisted.contains("refresh-old"));
+}
+
+#[tokio::test]
+async fn already_linked_discards_oneshot_file_input() {
+    let _guard = cloud_env_lock().lock().unwrap();
+    let control_url = spawn_public_control_mock().await;
+    let registration_path = temp_registration_path("agent-relay-discard-file-reg");
+    let identity_path = temp_registration_path("agent-relay-discard-file-id");
+    let pending = PendingPublicEnrollment {
+        control_url: Url::parse(&control_url).unwrap(),
+        registration_path: std::path::PathBuf::from(&registration_path),
+        identity_path: std::path::PathBuf::from(&identity_path),
+    };
+    perform_public_relay_enrollment(&reqwest::Client::new(), &pending, None)
+        .await
+        .expect("enroll");
+
+    let dir = tempfile::tempdir().unwrap();
+    let oneshot = dir.path().join("oneshot.key");
+    crate::broker::activation::write_token_file_0600(&oneshot, "must-be-unlinked\n").unwrap();
+
+    std::env::set_var(crate::broker::activation::CLOUD_ACTIVATION_ENV, "1");
+    std::env::set_var(
+        crate::broker::auth::RELAY_BROKER_CONTROL_URL_ENV,
+        &control_url,
+    );
+    std::env::set_var(
+        crate::broker::auth::RELAY_BROKER_REGISTRATION_PATH_ENV,
+        &registration_path,
+    );
+    std::env::set_var(
+        crate::broker::RELAY_BROKER_IDENTITY_PATH_ENV,
+        &identity_path,
+    );
+    std::env::set_var(
+        crate::broker::activation::CLOUD_ACCESS_KEY_FILE_ENV,
+        &oneshot,
+    );
+
+    let code = crate::broker::run_cloud_activate().await;
+
+    std::env::remove_var(crate::broker::activation::CLOUD_ACTIVATION_ENV);
+    std::env::remove_var(crate::broker::auth::RELAY_BROKER_CONTROL_URL_ENV);
+    std::env::remove_var(crate::broker::auth::RELAY_BROKER_REGISTRATION_PATH_ENV);
+    std::env::remove_var(crate::broker::RELAY_BROKER_IDENTITY_PATH_ENV);
+    std::env::remove_var(crate::broker::activation::CLOUD_ACCESS_KEY_FILE_ENV);
+
+    assert_eq!(code, 1, "override while linked must fail");
+    assert!(!oneshot.exists(), "oneshot file must be consumed/unlinked");
 }

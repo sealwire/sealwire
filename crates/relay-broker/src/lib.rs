@@ -1,3 +1,4 @@
+pub mod access;
 pub mod auth;
 pub mod blocklist;
 pub mod events;
@@ -7,11 +8,18 @@ pub mod protocol;
 pub mod public_control;
 mod state;
 
+pub use access::{
+    AccessDenial, AccessDenialCode, AccessOperation, AccessRequestContext, BrokerAccessStrategy,
+    DeviceAccessDecision, EnrollmentBindDecision, LicenseStoreAccessAdapter, OpenAccessStrategy,
+    UnavailableAccessStrategy,
+};
+pub use auth::BrokerAuthMode;
 pub use blocklist::{Blocklist, BANNED_IPS_POSTGRES_URL_ENV};
 pub use events::{
     usage_event_sink_from_env, FileUsageEventSink, PostgresUsageEventSink, UsageEvent,
     UsageEventKind, UsageEventSink, USAGE_EVENTS_PATH_ENV, USAGE_EVENTS_POSTGRES_URL_ENV,
 };
+pub use public_control::PUBLIC_ISSUER_SECRET_ENV;
 pub use state::BrokerState;
 
 use std::path::PathBuf;
@@ -22,7 +30,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use auth::BrokerAuthMode;
 use axum::{
     extract::{
         connect_info::ConnectInfo,
@@ -42,10 +49,11 @@ use protocol::{
     BROKER_PROTOCOL_VERSION,
 };
 use public_control::{
-    ClientClaimRequest, ClientClaimResponse, ClientGrantRequest, ClientGrantResponse,
-    ClientIdentityRevokeResponse, ClientIdentityRotateResponse, ClientRelaysResponse,
-    ClientSessionResponse, DeviceGrantBulkRevokeRequest, DeviceGrantBulkRevokeResponse,
-    DeviceGrantRequest, DeviceGrantResponse, DeviceGrantRevokeRequest, DeviceGrantRevokeResponse,
+    AccessReleaseRequest, AccessReleaseResponse, ClientClaimRequest, ClientClaimResponse,
+    ClientGrantRequest, ClientGrantResponse, ClientIdentityRevokeResponse,
+    ClientIdentityRotateResponse, ClientRelaysResponse, ClientSessionResponse,
+    DeviceGrantBulkRevokeRequest, DeviceGrantBulkRevokeResponse, DeviceGrantRequest,
+    DeviceGrantResponse, DeviceGrantRevokeRequest, DeviceGrantRevokeResponse,
     DeviceSessionResponse, DeviceWsTokenResponse, PairingWsTokenRequest, PairingWsTokenResponse,
     PublicControlPlane, RelayEnrollmentChallengeRequest, RelayEnrollmentChallengeResponse,
     RelayEnrollmentCompleteRequest, RelayEnrollmentResponse, RelayRegistrationSnapshot,
@@ -211,15 +219,6 @@ const HSTS_VALUE_ENV: &str = "RELAY_BROKER_HSTS_VALUE";
 const BROKER_WEB_ROOT_ENV: &str = "RELAY_BROKER_WEB_ROOT";
 
 pub async fn app(state: BrokerState) -> Router {
-    let join_verifier = BrokerJoinVerifier::from_env().await;
-    let hardening = BrokerHardeningConfig::from_env().unwrap_or_else(|error| {
-        warn!(%error, "invalid broker hardening config; using safe defaults");
-        BrokerHardeningConfig::default()
-    });
-    let security_headers = security_headers_from_env().unwrap_or_else(|error| {
-        warn!(%error, "invalid broker security header config; HSTS will stay disabled");
-        SecurityHeadersConfig::default()
-    });
     let ban_guard = BanGuard::from_env().await;
     // RELAY_BROKER_REQUIRE_LICENSE_CODE is read once here and threaded through
     // independently of the store so we can fail closed when the store is None
@@ -234,17 +233,124 @@ pub async fn app(state: BrokerState) -> Router {
             None
         }
     };
-    app_with_web_root_and_verifier_and_hardening_and_licenses(
+    let access =
+        LicenseStoreAccessAdapter::from_public_env(license_store.clone(), license_required);
+    app_with_access_strategy_parts(
         state,
         default_web_root(),
-        join_verifier,
-        hardening,
-        security_headers,
+        BrokerJoinVerifier::from_env().await,
+        BrokerHardeningConfig::from_env().unwrap_or_else(|error| {
+            warn!(%error, "invalid broker hardening config; using safe defaults");
+            BrokerHardeningConfig::default()
+        }),
+        security_headers_from_env().unwrap_or_else(|error| {
+            warn!(%error, "invalid broker security header config; HSTS will stay disabled");
+            SecurityHeadersConfig::default()
+        }),
+        access,
+        // Admin attribution still reads the temporary license store directly.
         license_store,
-        license_required, // may be true even when store=None (DB failure → fail closed)
         admin_token_from_env(),
     )
     .layer(middleware::from_fn_with_state(ban_guard, reject_banned_ips))
+}
+
+/// Build the broker HTTP app with a caller-injected access strategy.
+///
+/// Private deployments use this to supply their access policy without the public
+/// broker knowing product tiers. The standard [`app`] entry builds the temporary
+/// license adapter (or open/fail-closed defaults) from environment instead.
+///
+/// This entry follows the same auth-mode defaults as [`app`] (including
+/// self-hosted). Deployments that must never listen without a validated public
+/// control plane should use [`app_with_access_strategy_required_public`] or
+/// [`app_with_access_strategy_and_public_control`] instead.
+pub async fn app_with_access_strategy(
+    state: BrokerState,
+    access: Arc<dyn BrokerAccessStrategy>,
+) -> Router {
+    let ban_guard = BanGuard::from_env().await;
+    app_with_access_strategy_parts(
+        state,
+        default_web_root(),
+        BrokerJoinVerifier::from_env().await,
+        BrokerHardeningConfig::from_env().unwrap_or_else(|error| {
+            warn!(%error, "invalid broker hardening config; using safe defaults");
+            BrokerHardeningConfig::default()
+        }),
+        security_headers_from_env().unwrap_or_else(|error| {
+            warn!(%error, "invalid broker security header config; HSTS will stay disabled");
+            SecurityHeadersConfig::default()
+        }),
+        access,
+        None,
+        admin_token_from_env(),
+    )
+    .layer(middleware::from_fn_with_state(ban_guard, reject_banned_ips))
+}
+
+/// Build a broker app that requires a successfully constructed public control
+/// plane. Fails closed (no router) when auth mode is not `public` or when
+/// issuer/persistence config cannot build a control plane.
+///
+/// Prefer resolving the plane once with [`required_public_control_plane_from_env`]
+/// and passing it to [`app_with_access_strategy_and_public_control`] when startup
+/// must validate public control before other I/O.
+///
+/// Open/self-host callers must keep using [`app_with_access_strategy`].
+pub async fn app_with_access_strategy_required_public(
+    state: BrokerState,
+    access: Arc<dyn BrokerAccessStrategy>,
+) -> Result<Router, String> {
+    let control_plane = required_public_control_plane_from_env().await?;
+    Ok(app_with_access_strategy_and_public_control(state, access, control_plane).await)
+}
+
+/// Build a broker app from an already-validated [`PublicControlPlane`].
+/// Product-neutral: no license/tier wording. Does not re-read auth env.
+pub async fn app_with_access_strategy_and_public_control(
+    state: BrokerState,
+    access: Arc<dyn BrokerAccessStrategy>,
+    control_plane: PublicControlPlane,
+) -> Router {
+    let ban_guard = BanGuard::from_env().await;
+    app_with_access_strategy_parts(
+        state,
+        default_web_root(),
+        BrokerJoinVerifier::PublicControlPlane(control_plane),
+        BrokerHardeningConfig::from_env().unwrap_or_else(|error| {
+            warn!(%error, "invalid broker hardening config; using safe defaults");
+            BrokerHardeningConfig::default()
+        }),
+        security_headers_from_env().unwrap_or_else(|error| {
+            warn!(%error, "invalid broker security header config; HSTS will stay disabled");
+            SecurityHeadersConfig::default()
+        }),
+        access,
+        None,
+        admin_token_from_env(),
+    )
+    .layer(middleware::from_fn_with_state(ban_guard, reject_banned_ips))
+}
+
+/// Fail closed unless auth mode is explicitly `public` (no I/O).
+pub fn require_public_auth_mode_from_env() -> Result<(), String> {
+    match BrokerAuthMode::from_env()? {
+        BrokerAuthMode::PublicControlPlane => Ok(()),
+        BrokerAuthMode::SelfHostedSharedSecret => Err(
+            "public control plane is required (set RELAY_BROKER_AUTH_MODE=public with a valid issuer/persistence config)"
+                .to_string(),
+        ),
+    }
+}
+
+/// Resolve a public control plane for deployments that must not fall back to
+/// self-host/open join verification. Product-neutral: no license/tier wording.
+pub async fn required_public_control_plane_from_env() -> Result<PublicControlPlane, String> {
+    require_public_auth_mode_from_env()?;
+    PublicControlPlane::from_env()
+        .await
+        .map_err(|error| format!("public control plane is required but invalid: {error}"))
 }
 
 const TRUSTED_CLIENT_IP_HEADER_ENV: &str = "RELAY_BROKER_TRUSTED_CLIENT_IP_HEADER";
@@ -485,13 +591,13 @@ struct BrokerAppState {
     join_verifier: BrokerJoinVerifier,
     hardening: BrokerHardeningState,
     public_monitoring: PublicMonitoringState,
+    /// Injected access policy (open / fail-closed / license adapter / private).
+    access: Arc<dyn BrokerAccessStrategy>,
+    /// Temporary: license store kept for admin attribution enrichment only.
+    /// Gate decisions go through [`Self::access`]. Round 2 can drop this.
     license_store: Option<licenses::LicenseStore>,
-    /// Whether `RELAY_BROKER_REQUIRE_LICENSE_CODE=1` was set. Tracked separately
-    /// so handlers can reject when `required=true` but `license_store=None` (the
-    /// store failed to connect — we must fail closed, not open).
-    license_required: bool,
     /// Per-verify-key locks that serialize relay enrollment completion so that
-    /// enroll + license-redeem is one atomic transition for a given identity.
+    /// enroll + access-bind is one atomic transition for a given identity.
     /// This prevents concurrent `/complete` calls for the same verify key from
     /// racing (where one request's rollback could delete a registration created
     /// by another). Keyed by relay verify key.
@@ -527,6 +633,7 @@ enum BrokerJoinVerifier {
 
 #[derive(Debug)]
 struct VerifiedBrokerJoin {
+    kind: JoinTicketKind,
     peer_id: Option<String>,
     device_id: Option<String>,
     pairing_id: Option<String>,
@@ -1113,6 +1220,7 @@ impl BrokerJoinVerifier {
                 role,
             )
             .map(|claims| VerifiedBrokerJoin {
+                kind: claims.kind,
                 peer_id: claims.peer_id,
                 device_id: claims.device_id,
                 pairing_id: claims.pairing_id,
@@ -1124,6 +1232,7 @@ impl BrokerJoinVerifier {
                 role,
             )
             .map(|claims| VerifiedBrokerJoin {
+                kind: claims.kind,
                 peer_id: claims.peer_id,
                 device_id: claims.device_id,
                 pairing_id: claims.pairing_id,
@@ -1192,7 +1301,7 @@ impl BrokerJoinVerifier {
 }
 
 // Licensing-free convenience wrapper used by the test harness. `app()` uses the
-// `_and_licenses` variant directly.
+// access-strategy builder directly.
 #[cfg(test)]
 fn app_with_web_root_and_verifier_and_hardening(
     state: BrokerState,
@@ -1201,22 +1310,21 @@ fn app_with_web_root_and_verifier_and_hardening(
     hardening_config: BrokerHardeningConfig,
     security_headers: SecurityHeadersConfig,
 ) -> Router {
-    app_with_web_root_and_verifier_and_hardening_and_licenses(
+    app_with_access_strategy_parts(
         state,
         web_root,
         join_verifier,
         hardening_config,
         security_headers,
+        Arc::new(OpenAccessStrategy),
         None,
-        false, // no license store → licensing disabled, no enforcement
-        None,  // no admin token → /api/admin/stats not mounted
+        None, // no admin token → /api/admin/stats not mounted
     )
 }
 
-// `license_required` is passed separately from `license_store` so the production
-// path in `app()` can keep `license_required=true` even when `license_store` is
-// `None` due to a DB failure at startup (fail closed, not open). Test callers
-// should derive `license_required` from the store's `.required` field.
+// Test helper: wraps a license store in the temporary adapter so existing
+// callers keep passing store + required while gates go through the seam.
+#[cfg(test)]
 fn app_with_web_root_and_verifier_and_hardening_and_licenses(
     state: BrokerState,
     web_root: PathBuf,
@@ -1225,6 +1333,30 @@ fn app_with_web_root_and_verifier_and_hardening_and_licenses(
     security_headers: SecurityHeadersConfig,
     license_store: Option<licenses::LicenseStore>,
     license_required: bool,
+    admin_token: Option<Arc<str>>,
+) -> Router {
+    let access =
+        LicenseStoreAccessAdapter::from_public_env(license_store.clone(), license_required);
+    app_with_access_strategy_parts(
+        state,
+        web_root,
+        join_verifier,
+        hardening_config,
+        security_headers,
+        access,
+        license_store,
+        admin_token,
+    )
+}
+
+fn app_with_access_strategy_parts(
+    state: BrokerState,
+    web_root: PathBuf,
+    join_verifier: BrokerJoinVerifier,
+    hardening_config: BrokerHardeningConfig,
+    security_headers: SecurityHeadersConfig,
+    access: Arc<dyn BrokerAccessStrategy>,
+    license_store: Option<licenses::LicenseStore>,
     admin_token: Option<Arc<str>>,
 ) -> Router {
     if !web_root.join("remote.html").exists() {
@@ -1253,6 +1385,10 @@ fn app_with_web_root_and_verifier_and_hardening_and_licenses(
         .route(
             "/api/public/relay/ws-token",
             post(public_issue_relay_ws_token),
+        )
+        .route(
+            "/api/public/relay/access/release",
+            post(public_release_relay_access),
         )
         .route(
             "/api/public/pairing/ws-token",
@@ -1352,8 +1488,8 @@ fn app_with_web_root_and_verifier_and_hardening_and_licenses(
                 connection_tracker: ActiveConnectionTracker::default(),
             },
             public_monitoring: PublicMonitoringState::default(),
+            access,
             license_store,
-            license_required,
             enrollment_locks: Arc::new(StdMutex::new(HashMap::new())),
             admin_token,
         })
@@ -1444,6 +1580,30 @@ async fn health(State(state): State<BrokerAppState>) -> impl IntoResponse {
 struct ApiErrorBody {
     error: &'static str,
     message: String,
+    /// Optional retry hint (seconds), used for access/rate-limit denials.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after_secs: Option<u64>,
+    /// Set only on access-release when strategy release succeeded but public
+    /// registration cleanup failed (reload-unknown / persistence). Clients use
+    /// this to distinguish post-strategy cleanup failure from pre-strategy 503.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    access_released: Option<bool>,
+}
+
+impl ApiErrorBody {
+    fn new(error: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            error,
+            message: message.into(),
+            retry_after_secs: None,
+            access_released: None,
+        }
+    }
+
+    fn with_access_released(mut self, released: bool) -> Self {
+        self.access_released = Some(released);
+        self
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1547,19 +1707,19 @@ async fn admin_stats(
         AdminAuthOutcome::Disabled => {
             return Err((
                 StatusCode::NOT_FOUND,
-                Json(ApiErrorBody {
-                    error: "not_found",
-                    message: "admin endpoint is disabled".to_string(),
-                }),
+                Json(ApiErrorBody::new(
+                    "not_found",
+                    "admin endpoint is disabled".to_string(),
+                )),
             ));
         }
         AdminAuthOutcome::Unauthorized => {
             return Err((
                 StatusCode::UNAUTHORIZED,
-                Json(ApiErrorBody {
-                    error: "unauthorized",
-                    message: "invalid or missing admin token".to_string(),
-                }),
+                Json(ApiErrorBody::new(
+                    "unauthorized",
+                    "invalid or missing admin token".to_string(),
+                )),
             ));
         }
     }
@@ -1642,18 +1802,9 @@ async fn public_complete_relay_enrollment(
 ) -> Result<Json<RelayEnrollmentResponse>, (StatusCode, Json<ApiErrorBody>)> {
     enforce_public_api_rate_limit(&state, remote_addr, "relay_enrollment_complete").await?;
 
-    let license_code = trimmed_option_string(input.license_code.clone());
+    let enrollment_token = trimmed_option_string(input.enrollment_token.clone());
 
-    // --- License pre-flight (before touching the control-plane) ---
-    //
-    // F1: fail closed when required but store unavailable (DB outage at startup).
-    if state.license_required && state.license_store.is_none() {
-        return Err(public_api_error(
-            "license service unavailable; try again later".to_string(),
-        ));
-    }
-
-    // Serialize enroll + license-redeem per identity: two `/complete` calls for
+    // Serialize enroll + access-bind per identity: two `/complete` calls for
     // the same verify key must not interleave, or one request's rollback could
     // delete a registration created by the other. Held for the whole operation.
     let verify_key = trimmed_option_string(Some(input.relay_verify_key.clone()));
@@ -1669,11 +1820,11 @@ async fn public_complete_relay_enrollment(
 
     // Snapshot any existing registration for this verify key. Because we hold the
     // per-identity lock this is a consistent view, and the snapshot lets us restore
-    // the relay's original refresh credential if re-licensing fails after enrollment
+    // the relay's original refresh credential if binding fails after enrollment
     // replaced its token. Used to:
-    // (a) detect same-code re-enrollment after cache loss (Renewal path),
+    // (a) detect same-token re-enrollment after cache loss (AlreadyBound path),
     // (b) identify the relay_id whose expired/revoked binding to clear, and
-    // (c) restore the previous credential on redeem failure (else new relay → delete).
+    // (c) restore the previous credential on bind failure (else new relay → delete).
     let previous_registration: Option<RelayRegistrationSnapshot> = match &verify_key {
         Some(vk) => control_plane.snapshot_relay_registration(vk).await,
         None => None,
@@ -1682,25 +1833,19 @@ async fn public_complete_relay_enrollment(
         .as_ref()
         .map(|snap| snap.relay_id().to_string());
 
-    // Validate the license code BEFORE enrollment so a bad code never causes a
-    // registration to be persisted. Also handles re-enrollment (F2): if the code
-    // is already bound to this relay_id, return Renewal and skip redeem.
-    let enrollment_action = if let Some(store) = &state.license_store {
-        match license_code.as_deref() {
-            Some(code) => Some(
-                store
-                    .validate_code_or_reenroll(code, existing_relay_id.as_deref())
-                    .await
-                    .map_err(|msg| public_api_error(msg))?,
-            ),
-            None if state.license_required => {
-                return Err(public_api_error("license_code is required".to_string()));
-            }
-            None => None,
-        }
-    } else {
-        None
-    };
+    // Authorize via the injected access strategy BEFORE enrollment so a denied
+    // token never causes a registration to be persisted.
+    let access_ctx =
+        AccessRequestContext::new(remote_addr.ip(), AccessOperation::EnrollmentComplete);
+    let bind_decision = state
+        .access
+        .authorize_enrollment(
+            &access_ctx,
+            enrollment_token.as_deref(),
+            existing_relay_id.as_deref(),
+        )
+        .await
+        .map_err(access_denial_error)?;
 
     // Enrollment — persists (or re-persists) the relay registration.
     let response = control_plane
@@ -1708,42 +1853,54 @@ async fn public_complete_relay_enrollment(
         .await
         .map_err(|msg| public_api_error(msg))?;
 
-    // Bind the license code to the relay_id, unless this is a Renewal (same relay
-    // re-enrolling with the same code after cache loss — binding already exists).
-    if let (Some(store), Some(code), Some(action)) = (
-        &state.license_store,
-        license_code.as_deref(),
-        &enrollment_action,
-    ) {
-        if *action == licenses::LicenseEnrollmentAction::Fresh {
-            // Clear any expired/revoked binding for this relay so the UNIQUE
-            // constraint doesn't block re-licensing after expiry/revocation.
-            if let Some(ref existing_id) = existing_relay_id {
-                let _ = store
-                    .clear_expired_or_revoked_binding(existing_id, code)
-                    .await;
-            }
-            if let Err(msg) = store.redeem(code, &response.relay_id).await {
-                // Enrollment already replaced the relay's registration (new refresh
-                // token). On redeem failure we must not leave the relay with a token
-                // the client never received:
-                //   - existing relay (had a registration): restore its previous
-                //     registration so the client's originally-cached token still works.
-                //   - brand-new relay (no prior registration): delete what we created,
-                //     keyed by this request's refresh token (safe no-op if replaced).
-                // Both are safe because we hold the per-identity enrollment lock.
-                match previous_registration {
-                    Some(previous) => {
-                        control_plane.restore_relay_registration(previous).await;
-                    }
-                    None => {
-                        control_plane
-                            .rollback_relay_enrollment_by_token(&response.relay_refresh_token)
-                            .await;
-                    }
+    // Bind after enrollment when the strategy asked for a fresh bind step.
+    if bind_decision == EnrollmentBindDecision::Bind {
+        let Some(token) = enrollment_token.as_deref() else {
+            // Strategy asked to bind but no token was presented — treat as a
+            // programming error in the strategy and roll back enrollment.
+            match previous_registration {
+                Some(previous) => {
+                    control_plane.restore_relay_registration(previous).await;
                 }
-                return Err(public_api_error(msg));
+                None => {
+                    control_plane
+                        .rollback_relay_enrollment_by_token(&response.relay_refresh_token)
+                        .await;
+                }
             }
+            return Err(access_denial_error(AccessDenial::internal().with_internal(
+                "access strategy requested bind without an enrollment token",
+            )));
+        };
+        if let Err(denial) = state
+            .access
+            .bind_enrollment(
+                &access_ctx,
+                token,
+                &response.relay_id,
+                existing_relay_id.as_deref(),
+            )
+            .await
+        {
+            // Enrollment already replaced the relay's registration (new refresh
+            // token). On bind failure we must not leave the relay with a token
+            // the client never received:
+            //   - existing relay (had a registration): restore its previous
+            //     registration so the client's originally-cached token still works.
+            //   - brand-new relay (no prior registration): delete what we created,
+            //     keyed by this request's refresh token (safe no-op if replaced).
+            // Both are safe because we hold the per-identity enrollment lock.
+            match previous_registration {
+                Some(previous) => {
+                    control_plane.restore_relay_registration(previous).await;
+                }
+                None => {
+                    control_plane
+                        .rollback_relay_enrollment_by_token(&response.relay_refresh_token)
+                        .await;
+                }
+            }
+            return Err(access_denial_error(denial));
         }
     }
 
@@ -1767,24 +1924,16 @@ async fn public_issue_relay_ws_token(
         .await
     {
         Ok(response) => {
-            // License check after successful authentication: deny the token if the
-            // relay's license has expired or been revoked, or if the store is
-            // required but unavailable (fail closed).
-            if state.license_required {
-                match &state.license_store {
-                    None => {
-                        return Err(public_api_error(
-                            "license service unavailable; try again later".to_string(),
-                        ));
-                    }
-                    Some(store) => {
-                        store
-                            .check_relay_access(&response.relay_id)
-                            .await
-                            .map_err(|msg| public_api_error(msg))?;
-                    }
-                }
-            }
+            // Access check after successful authentication: deny the token when
+            // the injected strategy refuses the relay lease (expired/revoked
+            // access, fail-closed backend, or a custom deny policy).
+            let access_ctx =
+                AccessRequestContext::new(remote_addr.ip(), AccessOperation::RelayLease);
+            state
+                .access
+                .authorize_relay(&access_ctx, &response.relay_id)
+                .await
+                .map_err(access_denial_error)?;
             state
                 .public_monitoring
                 .record_refresh_success(RefreshChainKind::RelayWsToken)
@@ -1797,6 +1946,87 @@ async fn public_issue_relay_ws_token(
                 .record_refresh_failure(RefreshChainKind::RelayWsToken, bearer, &error)
                 .await;
             Err(public_api_error(error))
+        }
+    }
+}
+
+/// Tear down authenticated relay access: strategy release first, then public
+/// registration/grant cleanup, then always force-close room sockets.
+///
+/// Ordering: rate limit → auth → same-identity lifecycle lock → re-auth →
+/// `release_access` → attempt revoke/cleanup → **always** `force_close_room` →
+/// return the cleanup result. Strategy denial preserves registration and live
+/// sockets.
+///
+/// Cleanup failure returns typed unavailable. Sockets are closed either way so a
+/// seated peer cannot outlive a successful strategy release. When cleanup fails
+/// after a successful reload/reconcile that already removed this relay's
+/// registration and scoped grants, cleanup is treated as effective success.
+/// When the durable outcome is reload-unknown, the HTTP body stays a generic
+/// unavailable; clients may retry the same bearer, and an Unauthorized after an
+/// earlier authenticated 503 can be treated as already released (Round 3B will
+/// document the client contract). Internal logs keep a redacted diagnostic.
+async fn public_release_relay_access(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<BrokerAppState>,
+    headers: HeaderMap,
+    Json(input): Json<AccessReleaseRequest>,
+) -> Result<Json<AccessReleaseResponse>, (StatusCode, Json<ApiErrorBody>)> {
+    enforce_public_api_rate_limit(&state, remote_addr, "relay_access_release").await?;
+    let control_plane = require_public_control_plane(&state)?;
+    let bearer = bearer_token(&headers)?;
+
+    // Discover the opaque same-identity lock key before taking the lock.
+    let first_auth = control_plane
+        .authenticate_relay_access(bearer, &input.relay_id, &input.broker_room_id)
+        .await
+        .map_err(public_api_error)?;
+    let enrollment_lock = acquire_enrollment_lock(&state, &first_auth.lifecycle_lock_key);
+    let _lifecycle_guard = enrollment_lock.lock().await;
+
+    // Re-authenticate under the lock so concurrent re-enrollment cannot rotate
+    // the bearer between auth and cleanup.
+    let auth = control_plane
+        .authenticate_relay_access(bearer, &input.relay_id, &input.broker_room_id)
+        .await
+        .map_err(public_api_error)?;
+    debug_assert_eq!(auth.relay_id, input.relay_id);
+    debug_assert_eq!(auth.broker_room_id, input.broker_room_id);
+
+    let access_ctx = AccessRequestContext::new(remote_addr.ip(), AccessOperation::AccessRelease);
+    state
+        .access
+        .release_access(&access_ctx, &input.relay_id)
+        .await
+        .map_err(access_denial_error)?;
+
+    // Cleanup first so a join that seats while registration still exists is
+    // caught by the final force-close; a join after successful cleanup fails
+    // room registration lookup.
+    let cleanup_result = control_plane
+        .revoke_relay_registration_chain(bearer, &input.relay_id, &input.broker_room_id)
+        .await;
+
+    let _ = state
+        .broker
+        .force_close_room(
+            &input.broker_room_id,
+            "access_released",
+            "relay access was released",
+        )
+        .await;
+
+    match cleanup_result {
+        Ok(()) => Ok(Json(AccessReleaseResponse { released: true })),
+        Err(error) => {
+            // Strategy release already succeeded and sockets are closed. Signal
+            // that phase so clients can commit a pending-release marker and
+            // later treat matching 401 as already-released — without treating
+            // a pre-strategy 503 the same way.
+            let (status, Json(mut body)) =
+                access_denial_error(AccessDenial::unavailable().with_internal(error));
+            body = body.with_access_released(true);
+            Err((status, Json(body)))
         }
     }
 }
@@ -1826,16 +2056,21 @@ async fn public_issue_device_grant(
     enforce_public_api_rate_limit(&state, remote_addr, "device_grant").await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
-    // Authenticate the relay BEFORE consulting license state, so an unauthenticated
-    // caller cannot probe which relays have active/expired/revoked licenses (the
-    // license lookup below returns a distinguishable 400 vs. the auth 401).
+    // Authenticate the relay BEFORE consulting access policy, so an unauthenticated
+    // caller cannot probe which relays are allowed/denied (the access lookup below
+    // returns a distinguishable status vs. the auth 401).
     control_plane
         .authenticate_relay_bearer(bearer, &input.relay_id, &input.broker_room_id)
         .await
         .map_err(public_api_error)?;
-    // Resolve the per-license device cap (and gate on license validity). `None` =
-    // uncapped (licensing disabled, or no cap set for this license).
-    let device_limit = resolve_device_limit(&state, &input.relay_id).await?;
+    // Authorize the device grant and resolve any cap. `None` = uncapped.
+    let access_ctx = AccessRequestContext::new(remote_addr.ip(), AccessOperation::DeviceGrant);
+    let device_limit = state
+        .access
+        .authorize_device(&access_ctx, &input.relay_id)
+        .await
+        .map_err(access_denial_error)?
+        .device_limit;
     control_plane
         .issue_device_grant(bearer, input, device_limit)
         .await
@@ -1851,47 +2086,10 @@ fn device_grant_error(error: String) -> (StatusCode, Json<ApiErrorBody>) {
     if error.starts_with(DEVICE_LIMIT_REACHED_ERROR_PREFIX) {
         return (
             StatusCode::FORBIDDEN,
-            Json(ApiErrorBody {
-                error: "device_limit_reached",
-                message: error,
-            }),
+            Json(ApiErrorBody::new("device_limit_reached", error)),
         );
     }
     public_api_error(error)
-}
-
-/// Authorize a device grant against the relay's license and resolve its cap.
-///
-/// - Licensing disabled → `None` (uncapped; self-hosted/trusted mode).
-/// - Licensing required but the store is unavailable → fail CLOSED with an error,
-///   matching the ws-token / enrollment posture (else "DB down" would silently
-///   grant unlimited devices).
-/// - Licensing required → the relay's license must be present, unexpired, and
-///   unrevoked (`check_relay_access`); otherwise the grant is denied. This closes
-///   the gap where a relay with no valid/bound license resolved to "unlimited",
-///   and disambiguates "no license row" from "license with a NULL limit".
-/// - Passing that gate → the license's configured limit (`None` = unlimited).
-async fn resolve_device_limit(
-    state: &BrokerAppState,
-    relay_id: &str,
-) -> Result<Option<u32>, (StatusCode, Json<ApiErrorBody>)> {
-    if !state.license_required {
-        return Ok(None);
-    }
-    let Some(store) = &state.license_store else {
-        return Err(public_api_error(
-            "license service unavailable; try again later".to_string(),
-        ));
-    };
-    // Gate first: a relay without a valid, bound license may not add devices.
-    store
-        .check_relay_access(relay_id)
-        .await
-        .map_err(public_api_error)?;
-    store
-        .device_limit_for_relay(relay_id)
-        .await
-        .map_err(public_api_error)
 }
 
 async fn public_issue_client_grant(
@@ -2402,6 +2600,36 @@ async fn handle_socket(
         }
     };
 
+    // Capture the access epoch before the async policy check so a concurrent
+    // access release (which bumps the epoch even for an empty room) cannot let
+    // this join seat afterward.
+    let access_epoch = state.broker.access_epoch().await;
+
+    // After ticket verification, consult access policy before seating. Public
+    // control-plane rooms resolve to their registered relay_id so tickets cannot
+    // target a victim. Self-host / open mode has no registration table — strategy
+    // still runs with the room id as a neutral key (OpenAccess allows;
+    // Unavailable fails closed). Missing registration in public mode fails closed.
+    if let Err(reason) =
+        authorize_verified_join_access(&state, remote_addr.ip(), &channel_id, &verified_join).await
+    {
+        debug!(
+            remote_ip = %remote_addr.ip(),
+            broker_room_id = %channel_id,
+            role = ?query.role,
+            reason = %reason,
+            "broker join rejected by access strategy"
+        );
+        reject_socket(
+            &state.hardening.publish_metrics,
+            socket,
+            "join_rejected",
+            state.join_verifier.client_join_error_message(),
+        )
+        .await;
+        return;
+    }
+
     // Only a ticket that PINS a peer_id (a relay join) may have it echoed back in
     // the query — the equality check below then validates the match. A surface
     // ticket pins nothing, so honoring the query parameter let a surface name
@@ -2439,12 +2667,13 @@ async fn handle_socket(
         }
         match state
             .broker
-            .join(
+            .join_if_access_epoch(
                 &channel_id,
                 &candidate,
                 query.role,
                 verified_join.device_id.clone(),
                 verified_join.pairing_id.clone(),
+                access_epoch,
             )
             .await
         {
@@ -2453,6 +2682,22 @@ async fn handle_socket(
                 break join;
             }
             Err(message) => {
+                if message.contains("access epoch changed") {
+                    debug!(
+                        remote_ip = %remote_addr.ip(),
+                        broker_room_id = %channel_id,
+                        role = ?query.role,
+                        "broker join rejected because access was released during authorization"
+                    );
+                    reject_socket(
+                        &state.hardening.publish_metrics,
+                        socket,
+                        "join_rejected",
+                        state.join_verifier.client_join_error_message(),
+                    )
+                    .await;
+                    return;
+                }
                 if peer_id.is_none() && message.contains("is already connected") {
                     continue;
                 }
@@ -2874,11 +3119,10 @@ fn require_public_control_plane(
     state.join_verifier.public_control_plane().ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            Json(ApiErrorBody {
-                error: "not_found",
-                message: "public control-plane endpoints are unavailable in this auth mode"
-                    .to_string(),
-            }),
+            Json(ApiErrorBody::new(
+                "not_found",
+                "public control-plane endpoints are unavailable in this auth mode".to_string(),
+            )),
         )
     })
 }
@@ -2923,10 +3167,10 @@ fn device_refresh_token_scoped<'a>(
     }
     Err((
         StatusCode::UNAUTHORIZED,
-        Json(ApiErrorBody {
-            error: "unauthorized",
-            message: "missing bearer token".to_string(),
-        }),
+        Json(ApiErrorBody::new(
+            "unauthorized",
+            "missing bearer token".to_string(),
+        )),
     ))
 }
 
@@ -2945,10 +3189,7 @@ fn validate_room_id(room: &str) -> Result<(), (StatusCode, Json<ApiErrorBody>)> 
     } else {
         Err((
             StatusCode::BAD_REQUEST,
-            Json(ApiErrorBody {
-                error: "bad_request",
-                message: "invalid room".to_string(),
-            }),
+            Json(ApiErrorBody::new("bad_request", "invalid room".to_string())),
         ))
     }
 }
@@ -2977,10 +3218,10 @@ fn bearer_token(headers: &HeaderMap) -> Result<&str, (StatusCode, Json<ApiErrorB
         .ok_or_else(|| {
             (
                 StatusCode::UNAUTHORIZED,
-                Json(ApiErrorBody {
-                    error: "unauthorized",
-                    message: "missing bearer token".to_string(),
-                }),
+                Json(ApiErrorBody::new(
+                    "unauthorized",
+                    "missing bearer token".to_string(),
+                )),
             )
         })?;
     Ok(value)
@@ -3102,10 +3343,7 @@ fn build_session_cookie(
     .map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
-            Json(ApiErrorBody {
-                error: "bad_request",
-                message: error_message.to_string(),
-            }),
+            Json(ApiErrorBody::new("bad_request", error_message.to_string())),
         )
     })
 }
@@ -3131,15 +3369,71 @@ fn public_api_error(message: String) -> (StatusCode, Json<ApiErrorBody>) {
     };
     (
         status,
-        Json(ApiErrorBody {
-            error: if status == StatusCode::UNAUTHORIZED {
+        Json(ApiErrorBody::new(
+            if status == StatusCode::UNAUTHORIZED {
                 "unauthorized"
             } else {
                 "bad_request"
             },
             message,
-        }),
+        )),
     )
+}
+
+/// Map a typed access denial to the public HTTP error body. Internal causes are
+/// logged here and never copied into the response.
+fn access_denial_error(denial: AccessDenial) -> (StatusCode, Json<ApiErrorBody>) {
+    denial.log_internal();
+    let mut body = ApiErrorBody::new(denial.public_error_code(), denial.public_message());
+    body.retry_after_secs = denial.retry_after_secs();
+    (denial.http_status(), Json(body))
+}
+
+/// Post-ticket access gate for websocket joins. Never logs tickets or tokens.
+async fn authorize_verified_join_access(
+    state: &BrokerAppState,
+    remote_ip: IpAddr,
+    broker_room_id: &str,
+    verified: &VerifiedBrokerJoin,
+) -> Result<(), &'static str> {
+    let relay_id = match state.join_verifier.public_control_plane() {
+        Some(control_plane) => match control_plane.relay_id_for_broker_room(broker_room_id).await {
+            Some(relay_id) => relay_id,
+            // Public mode requires a live registration for the room. Released /
+            // never-enrolled rooms fail closed even if the HMAC ticket is still
+            // within its short TTL.
+            None => return Err("broker room has no active relay registration"),
+        },
+        // Self-host shared-secret mode: no registration table. Use the room id as
+        // a neutral key so OpenAccess still allows and Unavailable still denies.
+        None => broker_room_id.to_string(),
+    };
+
+    match verified.kind {
+        JoinTicketKind::RelayJoin => {
+            let ctx = AccessRequestContext::new(remote_ip, AccessOperation::RelaySocketJoin);
+            state
+                .access
+                .authorize_relay(&ctx, &relay_id)
+                .await
+                .map_err(|denial| {
+                    denial.log_internal();
+                    "relay access denied for socket join"
+                })?;
+        }
+        JoinTicketKind::DeviceSurfaceJoin | JoinTicketKind::PairingSurfaceJoin => {
+            let ctx = AccessRequestContext::new(remote_ip, AccessOperation::DeviceSocketJoin);
+            state
+                .access
+                .authorize_device(&ctx, &relay_id)
+                .await
+                .map_err(|denial| {
+                    denial.log_internal();
+                    "device access denied for socket join"
+                })?;
+        }
+    }
+    Ok(())
 }
 
 fn public_api_auth_failure(message: &str) -> bool {
@@ -3168,10 +3462,10 @@ async fn enforce_public_api_rate_limit(
 
     Err((
         StatusCode::TOO_MANY_REQUESTS,
-        Json(ApiErrorBody {
-            error: "rate_limited",
-            message: "public broker control-plane rate limit exceeded".to_string(),
-        }),
+        Json(ApiErrorBody::new(
+            "rate_limited",
+            "public broker control-plane rate limit exceeded".to_string(),
+        )),
     ))
 }
 

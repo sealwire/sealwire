@@ -21,13 +21,13 @@ use super::*;
 use crate::auth::BrokerAuthMode;
 use crate::join_ticket::{JoinTicketClaims, JoinTicketKey};
 use crate::public_control::{
-    client_claim_message, ClientClaimRequest, ClientClaimResponse, ClientGrantRequest,
-    ClientGrantResponse, ClientIdentityRevokeResponse, ClientIdentityRotateResponse,
-    ClientRelaysResponse, ClientSessionResponse, DeviceGrantBulkRevokeRequest,
-    DeviceGrantBulkRevokeResponse, DeviceGrantRequest, DeviceGrantResponse,
-    DeviceGrantRevokeRequest, DeviceGrantRevokeResponse, DeviceSessionResponse,
-    DeviceWsTokenResponse, PairingWsTokenRequest, PairingWsTokenResponse, PublicControlPlane,
-    RelayEnrollmentChallengeRequest, RelayEnrollmentChallengeResponse,
+    client_claim_message, AccessReleaseRequest, AccessReleaseResponse, ClientClaimRequest,
+    ClientClaimResponse, ClientGrantRequest, ClientGrantResponse, ClientIdentityRevokeResponse,
+    ClientIdentityRotateResponse, ClientRelaysResponse, ClientSessionResponse,
+    DeviceGrantBulkRevokeRequest, DeviceGrantBulkRevokeResponse, DeviceGrantRequest,
+    DeviceGrantResponse, DeviceGrantRevokeRequest, DeviceGrantRevokeResponse,
+    DeviceSessionResponse, DeviceWsTokenResponse, PairingWsTokenRequest, PairingWsTokenResponse,
+    PublicControlPlane, RelayEnrollmentChallengeRequest, RelayEnrollmentChallengeResponse,
     RelayEnrollmentCompleteRequest, RelayEnrollmentResponse, RelayWsTokenRequest,
     RelayWsTokenResponse,
 };
@@ -116,6 +116,24 @@ async fn next_server_message(
         .expect("frame should decode");
     let text = frame.into_text().expect("frame should be text");
     serde_json::from_str(&text).expect("server message should parse")
+}
+
+async fn assert_ws_closed_after_access_released(
+    label: &str,
+    stream: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) {
+    match next_server_message(stream).await {
+        ServerMessage::Error { code, .. } => assert_eq!(code, "access_released", "{label}"),
+        other => panic!("{label}: expected access_released, got {other:?}"),
+    }
+    match stream.next().await {
+        None | Some(Ok(Message::Close(_))) | Some(Err(_)) => {}
+        Some(Ok(other)) => {
+            panic!("{label}: expected socket end after access_released, got {other:?}")
+        }
+    }
 }
 
 async fn http_get(address: SocketAddr, path: &str) -> String {
@@ -1723,7 +1741,7 @@ async fn public_relay_challenge_enrollment_can_issue_registration_and_relay_toke
             challenge_id: challenge.challenge_id,
             challenge_signature,
             relay_label: Some("Laptop".to_string()),
-            license_code: None,
+            enrollment_token: None,
         })
         .send()
         .await
@@ -3671,7 +3689,7 @@ async fn enroll_relay(
             challenge_id: challenge.challenge_id,
             challenge_signature: sig_b64,
             relay_label: None,
-            license_code: license_code.map(ToString::to_string),
+            enrollment_token: license_code.map(ToString::to_string),
         })
         .send()
         .await
@@ -3926,12 +3944,18 @@ async fn license_required_store_unavailable_rejects_enrollment() {
     let (status, body) = enroll_relay(address, "verify-key-7", None)
         .await
         .expect_err("must reject when store is unavailable");
-    assert!(
-        status.is_client_error(),
-        "must return a 4xx error, got {status}"
+    assert_eq!(
+        status,
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "unavailable backend must fail closed with 503, got {status}"
     );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("error JSON");
+    assert_eq!(json["error"], "unavailable");
     assert!(
-        body.contains("unavailable"),
+        json["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("unavailable"),
         "error should say service unavailable, got: {body}"
     );
 }
@@ -4050,12 +4074,16 @@ async fn failed_relicense_preserves_existing_refresh_credential() {
 
     // Re-enroll the same verify key with code B: enrollment replaces the token,
     // but redeem fails. The previous registration must be restored.
-    let (status, _) = enroll_relay(address, "verify-key-10", Some("REG-PRESERVE-B"))
+    let (status, body) = enroll_relay(address, "verify-key-10", Some("REG-PRESERVE-B"))
         .await
         .expect_err("re-license must fail when redeem is injected to fail");
+    assert!(!status.is_success(), "re-license must fail, got {status}");
+    // Unknown/injected bind failures must not echo backend text to clients.
     assert!(
-        status.is_client_error(),
-        "must return a 4xx error, got {status}"
+        !body
+            .to_ascii_lowercase()
+            .contains("injected redeem failure"),
+        "must not leak internal redeem failure text, got {body}"
     );
 
     // The crux: the relay's ORIGINAL refresh token must still authenticate — the
@@ -4157,6 +4185,1376 @@ async fn concurrent_enrollment_same_verify_key_preserves_registration() {
         reqwest::StatusCode::OK,
         "the most recently issued refresh token must authenticate"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Injected BrokerAccessStrategy handler tests
+// ---------------------------------------------------------------------------
+// These go through the real HTTP stack with a caller-supplied strategy so the
+// public seam (not only the license adapter) is proven end-to-end.
+
+async fn spawn_public_mode_app_with_access(
+    access: std::sync::Arc<dyn BrokerAccessStrategy>,
+) -> SocketAddr {
+    spawn_public_mode_app_with_access_and_state(access, BrokerState::default())
+        .await
+        .0
+}
+
+async fn spawn_public_mode_app_with_access_and_state(
+    access: std::sync::Arc<dyn BrokerAccessStrategy>,
+    broker: BrokerState,
+) -> (SocketAddr, BrokerState, PublicControlPlane) {
+    spawn_public_mode_app_with_access_hardening(access, broker, BrokerHardeningConfig::default())
+        .await
+}
+
+async fn spawn_public_mode_app_with_access_hardening(
+    access: std::sync::Arc<dyn BrokerAccessStrategy>,
+    broker: BrokerState,
+    hardening: BrokerHardeningConfig,
+) -> (SocketAddr, BrokerState, PublicControlPlane) {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener should bind");
+    let address = listener.local_addr().expect("listener should have address");
+    let control_plane = test_public_control_plane().await;
+    let app = app_with_access_strategy_parts(
+        broker.clone(),
+        test_web_root(),
+        BrokerJoinVerifier::PublicControlPlane(control_plane.clone()),
+        hardening,
+        SecurityHeadersConfig::default(),
+        access,
+        None,
+        None,
+    );
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .expect("broker should serve");
+    });
+    (address, broker, control_plane)
+}
+
+/// Test double: optional typed denials per gate; otherwise open. Records every
+/// request context so tests can assert operation + ConnectInfo IP.
+struct ScriptedAccessStrategy {
+    deny_enrollment: Option<AccessDenial>,
+    deny_relay: Option<AccessDenial>,
+    deny_relay_socket: Option<AccessDenial>,
+    deny_device: Option<AccessDenial>,
+    deny_device_socket: Option<AccessDenial>,
+    deny_release: Option<AccessDenial>,
+    device_limit: Option<u32>,
+    /// Optional pause before returning from authorize_* (for TOCTOU tests).
+    authorize_hook: Option<std::sync::Arc<dyn Fn(&AccessRequestContext) + Send + Sync>>,
+    seen: std::sync::Mutex<Vec<AccessRequestContext>>,
+}
+
+impl ScriptedAccessStrategy {
+    fn allow() -> Self {
+        Self {
+            deny_enrollment: None,
+            deny_relay: None,
+            deny_relay_socket: None,
+            deny_device: None,
+            deny_device_socket: None,
+            deny_release: None,
+            device_limit: None,
+            authorize_hook: None,
+            seen: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn seen_contexts(&self) -> Vec<AccessRequestContext> {
+        self.seen.lock().expect("seen lock").clone()
+    }
+
+    fn record(&self, ctx: &AccessRequestContext) {
+        self.seen.lock().expect("seen lock").push(ctx.clone());
+        if let Some(hook) = &self.authorize_hook {
+            hook(ctx);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl BrokerAccessStrategy for ScriptedAccessStrategy {
+    async fn authorize_enrollment(
+        &self,
+        ctx: &AccessRequestContext,
+        _enrollment_token: Option<&str>,
+        _existing_relay_id: Option<&str>,
+    ) -> Result<EnrollmentBindDecision, AccessDenial> {
+        self.record(ctx);
+        match &self.deny_enrollment {
+            Some(denial) => Err(denial.clone()),
+            None => Ok(EnrollmentBindDecision::Skip),
+        }
+    }
+
+    async fn bind_enrollment(
+        &self,
+        ctx: &AccessRequestContext,
+        _enrollment_token: &str,
+        _relay_id: &str,
+        _existing_relay_id: Option<&str>,
+    ) -> Result<(), AccessDenial> {
+        self.record(ctx);
+        Ok(())
+    }
+
+    async fn authorize_relay(
+        &self,
+        ctx: &AccessRequestContext,
+        _relay_id: &str,
+    ) -> Result<(), AccessDenial> {
+        self.record(ctx);
+        if ctx.operation == AccessOperation::RelaySocketJoin {
+            if let Some(denial) = &self.deny_relay_socket {
+                return Err(denial.clone());
+            }
+        }
+        match &self.deny_relay {
+            Some(denial) => Err(denial.clone()),
+            None => Ok(()),
+        }
+    }
+
+    async fn authorize_device(
+        &self,
+        ctx: &AccessRequestContext,
+        _relay_id: &str,
+    ) -> Result<DeviceAccessDecision, AccessDenial> {
+        self.record(ctx);
+        if ctx.operation == AccessOperation::DeviceSocketJoin {
+            if let Some(denial) = &self.deny_device_socket {
+                return Err(denial.clone());
+            }
+        }
+        match &self.deny_device {
+            Some(denial) => Err(denial.clone()),
+            None => Ok(DeviceAccessDecision {
+                device_limit: self.device_limit,
+            }),
+        }
+    }
+
+    async fn release_access(
+        &self,
+        ctx: &AccessRequestContext,
+        _relay_id: &str,
+    ) -> Result<(), AccessDenial> {
+        self.record(ctx);
+        match &self.deny_release {
+            Some(denial) => Err(denial.clone()),
+            None => Ok(()),
+        }
+    }
+}
+
+fn parse_api_error(body: &str) -> (String, String, Option<u64>) {
+    let json: serde_json::Value = serde_json::from_str(body).expect("error JSON");
+    (
+        json["error"].as_str().unwrap_or_default().to_string(),
+        json["message"].as_str().unwrap_or_default().to_string(),
+        json["retry_after_secs"].as_u64(),
+    )
+}
+
+#[tokio::test]
+async fn injected_open_strategy_allows_enrollment_without_token() {
+    let address = spawn_public_mode_app_with_access(std::sync::Arc::new(OpenAccessStrategy)).await;
+    enroll_relay(address, "access-open", None)
+        .await
+        .expect("open/self-host strategy must allow enrollment without a token");
+}
+
+#[tokio::test]
+async fn injected_conflict_denial_returns_409_with_machine_code() {
+    let access = std::sync::Arc::new(ScriptedAccessStrategy {
+        deny_enrollment: Some(AccessDenial::conflict("enrollment token is already bound")),
+        ..ScriptedAccessStrategy::allow()
+    });
+    let address = spawn_public_mode_app_with_access(access.clone()).await;
+    let (status, body) = enroll_relay(address, "access-conflict", None)
+        .await
+        .expect_err("conflict must reject enrollment");
+    assert_eq!(status, reqwest::StatusCode::CONFLICT);
+    let (error, message, _) = parse_api_error(&body);
+    assert_eq!(error, "conflict");
+    assert!(message.contains("already bound"));
+    let seen = access.seen_contexts();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].operation, AccessOperation::EnrollmentComplete);
+    assert_eq!(
+        seen[0].remote_ip,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    );
+}
+
+#[tokio::test]
+async fn injected_rate_limited_denial_returns_429_with_retry_metadata() {
+    let access = std::sync::Arc::new(ScriptedAccessStrategy {
+        deny_enrollment: Some(AccessDenial::rate_limited(
+            "too many enrollment attempts",
+            Some(42),
+        )),
+        ..ScriptedAccessStrategy::allow()
+    });
+    let address = spawn_public_mode_app_with_access(access).await;
+    let (status, body) = enroll_relay(address, "access-rate", None)
+        .await
+        .expect_err("rate limit must reject enrollment");
+    assert_eq!(status, reqwest::StatusCode::TOO_MANY_REQUESTS);
+    let (error, message, retry) = parse_api_error(&body);
+    assert_eq!(error, "rate_limited");
+    assert!(message.contains("too many"));
+    assert_eq!(retry, Some(42));
+}
+
+#[tokio::test]
+async fn injected_unavailable_strategy_is_fail_closed_on_enrollment() {
+    let access = std::sync::Arc::new(UnavailableAccessStrategy::new());
+    let address = spawn_public_mode_app_with_access(access).await;
+    let (status, body) = enroll_relay(address, "access-unavailable", None)
+        .await
+        .expect_err("unavailable strategy must fail closed");
+    assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let (error, message, _) = parse_api_error(&body);
+    assert_eq!(error, "unavailable");
+    assert!(message.contains("unavailable"));
+}
+
+#[tokio::test]
+async fn injected_forbidden_denial_blocks_relay_ws_token_after_auth() {
+    let access = std::sync::Arc::new(ScriptedAccessStrategy {
+        deny_relay: Some(AccessDenial::forbidden(
+            "relay lease denied by injected policy",
+        )),
+        ..ScriptedAccessStrategy::allow()
+    });
+    let address = spawn_public_mode_app_with_access(access.clone()).await;
+    let enrolled = enroll_relay(address, "access-deny-relay", None)
+        .await
+        .expect("enrollment should succeed under allow-enroll script");
+    let resp = reqwest::Client::new()
+        .post(format!("http://{address}/api/public/relay/ws-token"))
+        .header(
+            "Authorization",
+            format!("Bearer {}", enrolled.relay_refresh_token),
+        )
+        .json(&RelayWsTokenRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            relay_peer_id: "relay-peer".to_string(),
+        })
+        .send()
+        .await
+        .expect("ws-token request");
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    let body = resp.text().await.unwrap_or_default();
+    let (error, message, _) = parse_api_error(&body);
+    assert_eq!(error, "forbidden");
+    assert!(message.contains("relay lease denied"));
+    let ops: Vec<_> = access
+        .seen_contexts()
+        .into_iter()
+        .map(|c| c.operation)
+        .collect();
+    assert!(ops.contains(&AccessOperation::EnrollmentComplete));
+    assert!(ops.contains(&AccessOperation::RelayLease));
+}
+
+#[tokio::test]
+async fn injected_forbidden_denial_blocks_device_grant_after_auth() {
+    let access = std::sync::Arc::new(ScriptedAccessStrategy {
+        deny_device: Some(AccessDenial::forbidden(
+            "device grant denied by injected policy",
+        )),
+        ..ScriptedAccessStrategy::allow()
+    });
+    let address = spawn_public_mode_app_with_access(access.clone()).await;
+    let enrolled = enroll_relay(address, "access-deny-device", None)
+        .await
+        .expect("enrollment should succeed");
+    let resp = reqwest::Client::new()
+        .post(format!("http://{address}/api/public/devices"))
+        .header(
+            "Authorization",
+            format!("Bearer {}", enrolled.relay_refresh_token),
+        )
+        .json(&DeviceGrantRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            device_id: "phone".to_string(),
+        })
+        .send()
+        .await
+        .expect("device grant request");
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    let body = resp.text().await.unwrap_or_default();
+    let (error, message, _) = parse_api_error(&body);
+    assert_eq!(error, "forbidden");
+    assert!(message.contains("device grant denied"));
+    assert!(
+        !body.contains("sql") && !body.contains("postgres"),
+        "must not leak backend text: {body}"
+    );
+    let seen = access.seen_contexts();
+    assert!(seen
+        .iter()
+        .any(|c| c.operation == AccessOperation::DeviceGrant
+            && c.remote_ip == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)));
+}
+
+#[tokio::test]
+async fn injected_strategy_observes_connect_info_ip_on_enrollment() {
+    let access = std::sync::Arc::new(ScriptedAccessStrategy::allow());
+    let address = spawn_public_mode_app_with_access(access.clone()).await;
+    enroll_relay(address, "access-ctx-ip", None)
+        .await
+        .expect("open script allows enrollment");
+    let seen = access.seen_contexts();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].operation, AccessOperation::EnrollmentComplete);
+    // axum ConnectInfo for loopback clients is 127.0.0.1 today.
+    assert_eq!(
+        seen[0].remote_ip,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    );
+}
+
+#[tokio::test]
+async fn access_release_orders_auth_before_strategy_and_revokes_on_success() {
+    let access = std::sync::Arc::new(ScriptedAccessStrategy::allow());
+    let (address, broker, control) =
+        spawn_public_mode_app_with_access_and_state(access.clone(), BrokerState::default()).await;
+    let enrolled = enroll_relay(address, "release-ok", None)
+        .await
+        .expect("enroll");
+
+    let relay_token: RelayWsTokenResponse = public_post(
+        address,
+        "/api/public/relay/ws-token",
+        &enrolled.relay_refresh_token,
+        &RelayWsTokenRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            relay_peer_id: "relay-peer".to_string(),
+        },
+    )
+    .await;
+    let device_grant: DeviceGrantResponse = public_post(
+        address,
+        "/api/public/devices",
+        &enrolled.relay_refresh_token,
+        &DeviceGrantRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            device_id: "device-1".to_string(),
+        },
+    )
+    .await;
+    assert!(
+        control
+            .device_grant_count_for_test(&enrolled.relay_id, &enrolled.broker_room_id)
+            .await
+            >= 1
+    );
+
+    let client_signing = SigningKey::from_bytes(&[0xC1_u8; 32]);
+    let _client = public_client_pair(
+        address,
+        &enrolled.relay_refresh_token,
+        &client_signing,
+        &ClientGrantRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            device_id: "device-1".to_string(),
+            client_verify_key: STANDARD.encode(client_signing.verifying_key().to_bytes()),
+            client_label: Some("Phone".to_string()),
+            device_label: Some("Phone".to_string()),
+        },
+    )
+    .await;
+    assert!(
+        control
+            .client_relay_grant_count_for_test(&enrolled.relay_id, &enrolled.broker_room_id)
+            .await
+            > 0,
+        "client grant must exist before release so cleanup is proven"
+    );
+
+    let (mut relay_ws, _) = connect_async(format!(
+        "ws://{address}/ws/{}?role=relay&peer_id=relay-peer&join_ticket={}",
+        enrolled.broker_room_id, relay_token.relay_ws_token
+    ))
+    .await
+    .expect("relay should join");
+    let _ = next_server_message(&mut relay_ws).await;
+
+    let (mut device_ws, _) = connect_async(format!(
+        "ws://{address}/ws/{}?role=surface&join_ticket={}",
+        enrolled.broker_room_id, device_grant.device_ws_token
+    ))
+    .await
+    .expect("device should join");
+    let _ = next_server_message(&mut device_ws).await;
+    // Relay sees the surface join; drain so force-close is the next message.
+    match next_server_message(&mut relay_ws).await {
+        ServerMessage::Presence { kind, .. } => {
+            assert_eq!(kind, protocol::PresenceKind::Joined);
+        }
+        other => panic!("expected surface presence on relay, got {other:?}"),
+    }
+    assert_eq!(broker.room_peer_count(&enrolled.broker_room_id).await, 2);
+
+    let released: AccessReleaseResponse = public_post(
+        address,
+        "/api/public/relay/access/release",
+        &enrolled.relay_refresh_token,
+        &AccessReleaseRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+        },
+    )
+    .await;
+    assert!(released.released);
+    assert_eq!(broker.room_peer_count(&enrolled.broker_room_id).await, 0);
+
+    assert_ws_closed_after_access_released("relay", &mut relay_ws).await;
+    assert_ws_closed_after_access_released("device", &mut device_ws).await;
+
+    assert!(
+        !control
+            .has_relay_registration(&enrolled.relay_id, &enrolled.broker_room_id)
+            .await
+    );
+    assert_eq!(
+        control
+            .device_grant_count_for_test(&enrolled.relay_id, &enrolled.broker_room_id)
+            .await,
+        0
+    );
+    assert_eq!(
+        control
+            .client_relay_grant_count_for_test(&enrolled.relay_id, &enrolled.broker_room_id)
+            .await,
+        0
+    );
+
+    let ops: Vec<_> = access
+        .seen_contexts()
+        .into_iter()
+        .map(|c| c.operation)
+        .collect();
+    assert!(ops.contains(&AccessOperation::AccessRelease));
+
+    let again = public_post_response(
+        address,
+        "/api/public/relay/access/release",
+        &enrolled.relay_refresh_token,
+        &AccessReleaseRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+        },
+    )
+    .await;
+    assert_eq!(again.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    for (role, peer, ticket) in [
+        (
+            "relay",
+            Some("relay-peer"),
+            relay_token.relay_ws_token.as_str(),
+        ),
+        ("surface", None, device_grant.device_ws_token.as_str()),
+    ] {
+        let url = match peer {
+            Some(peer_id) => format!(
+                "ws://{address}/ws/{}?role={role}&peer_id={peer_id}&join_ticket={ticket}",
+                enrolled.broker_room_id
+            ),
+            None => format!(
+                "ws://{address}/ws/{}?role={role}&join_ticket={ticket}",
+                enrolled.broker_room_id
+            ),
+        };
+        let (mut ws, _) = connect_async(url).await.expect("tcp");
+        match next_server_message(&mut ws).await {
+            ServerMessage::Error { code, .. } => assert_eq!(code, "join_rejected"),
+            other => panic!("expected join_rejected for {role}, got {other:?}"),
+        }
+        assert_eq!(broker.room_peer_count(&enrolled.broker_room_id).await, 0);
+    }
+}
+
+#[tokio::test]
+async fn access_release_strategy_denial_preserves_registration_and_sockets() {
+    let access = std::sync::Arc::new(ScriptedAccessStrategy {
+        deny_release: Some(AccessDenial::forbidden("release denied by policy")),
+        ..ScriptedAccessStrategy::allow()
+    });
+    let (address, broker, control) =
+        spawn_public_mode_app_with_access_and_state(access.clone(), BrokerState::default()).await;
+    let enrolled = enroll_relay(address, "release-deny", None)
+        .await
+        .expect("enroll");
+    let relay_token: RelayWsTokenResponse = public_post(
+        address,
+        "/api/public/relay/ws-token",
+        &enrolled.relay_refresh_token,
+        &RelayWsTokenRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            relay_peer_id: "relay-peer".to_string(),
+        },
+    )
+    .await;
+    let (mut relay_ws, _) = connect_async(format!(
+        "ws://{address}/ws/{}?role=relay&peer_id=relay-peer&join_ticket={}",
+        enrolled.broker_room_id, relay_token.relay_ws_token
+    ))
+    .await
+    .expect("relay should join");
+    let _ = next_server_message(&mut relay_ws).await;
+    assert_eq!(broker.room_peer_count(&enrolled.broker_room_id).await, 1);
+
+    let denied = public_post_response(
+        address,
+        "/api/public/relay/access/release",
+        &enrolled.relay_refresh_token,
+        &AccessReleaseRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+        },
+    )
+    .await;
+    assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(broker.room_peer_count(&enrolled.broker_room_id).await, 1);
+    assert!(
+        control
+            .has_relay_registration(&enrolled.relay_id, &enrolled.broker_room_id)
+            .await
+    );
+
+    let _still: RelayWsTokenResponse = public_post(
+        address,
+        "/api/public/relay/ws-token",
+        &enrolled.relay_refresh_token,
+        &RelayWsTokenRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            relay_peer_id: "relay-peer-2".to_string(),
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn access_release_wrong_room_and_wrong_relay_cannot_target_victim() {
+    let access = std::sync::Arc::new(ScriptedAccessStrategy::allow());
+    let address = spawn_public_mode_app_with_access(access.clone()).await;
+    let a = enroll_relay(address, "release-a", None).await.expect("a");
+    let b = enroll_relay(address, "release-b", None).await.expect("b");
+
+    let wrong_room = public_post_response(
+        address,
+        "/api/public/relay/access/release",
+        &a.relay_refresh_token,
+        &AccessReleaseRequest {
+            relay_id: a.relay_id.clone(),
+            broker_room_id: b.broker_room_id.clone(),
+        },
+    )
+    .await;
+    assert_eq!(wrong_room.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let wrong_relay = public_post_response(
+        address,
+        "/api/public/relay/access/release",
+        &a.relay_refresh_token,
+        &AccessReleaseRequest {
+            relay_id: b.relay_id.clone(),
+            broker_room_id: a.broker_room_id.clone(),
+        },
+    )
+    .await;
+    assert_eq!(wrong_relay.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert!(
+        !access
+            .seen_contexts()
+            .iter()
+            .any(|c| c.operation == AccessOperation::AccessRelease),
+        "strategy must not run before auth succeeds"
+    );
+
+    let _ok: RelayWsTokenResponse = public_post(
+        address,
+        "/api/public/relay/ws-token",
+        &b.relay_refresh_token,
+        &RelayWsTokenRequest {
+            relay_id: b.relay_id.clone(),
+            broker_room_id: b.broker_room_id.clone(),
+            relay_peer_id: "relay-b".to_string(),
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn unavailable_strategy_fails_closed_on_access_release() {
+    let access = std::sync::Arc::new(ScriptedAccessStrategy {
+        deny_release: Some(AccessDenial::unavailable()),
+        ..ScriptedAccessStrategy::allow()
+    });
+    let address = spawn_public_mode_app_with_access(access).await;
+    let enrolled = enroll_relay(address, "release-unavail", None)
+        .await
+        .expect("enroll");
+    let denied = public_post_response(
+        address,
+        "/api/public/relay/access/release",
+        &enrolled.relay_refresh_token,
+        &AccessReleaseRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+        },
+    )
+    .await;
+    assert_eq!(denied.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let _ok: RelayWsTokenResponse = public_post(
+        address,
+        "/api/public/relay/ws-token",
+        &enrolled.relay_refresh_token,
+        &RelayWsTokenRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            relay_peer_id: "relay-peer".to_string(),
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn open_access_release_still_revokes_registration() {
+    let open = spawn_public_mode_app_with_access(std::sync::Arc::new(OpenAccessStrategy)).await;
+    let enrolled = enroll_relay(open, "release-open", None)
+        .await
+        .expect("enroll");
+    let released: AccessReleaseResponse = public_post(
+        open,
+        "/api/public/relay/access/release",
+        &enrolled.relay_refresh_token,
+        &AccessReleaseRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+        },
+    )
+    .await;
+    assert!(released.released);
+    let again = public_post_response(
+        open,
+        "/api/public/relay/ws-token",
+        &enrolled.relay_refresh_token,
+        &RelayWsTokenRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            relay_peer_id: "relay-peer".to_string(),
+        },
+    )
+    .await;
+    assert_eq!(again.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn socket_join_consults_strategy_after_ticket_verify() {
+    let access = std::sync::Arc::new(ScriptedAccessStrategy {
+        deny_relay_socket: Some(
+            AccessDenial::forbidden("relay socket denied")
+                .with_internal("internal cause must be logged not serialized"),
+        ),
+        ..ScriptedAccessStrategy::allow()
+    });
+    let address = spawn_public_mode_app_with_access(access.clone()).await;
+    let enrolled = enroll_relay(address, "sock-deny", None)
+        .await
+        .expect("enroll");
+    let relay_token: RelayWsTokenResponse = public_post(
+        address,
+        "/api/public/relay/ws-token",
+        &enrolled.relay_refresh_token,
+        &RelayWsTokenRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            relay_peer_id: "relay-peer".to_string(),
+        },
+    )
+    .await;
+    let (mut ws, _) = connect_async(format!(
+        "ws://{address}/ws/{}?role=relay&peer_id=relay-peer&join_ticket={}",
+        enrolled.broker_room_id, relay_token.relay_ws_token
+    ))
+    .await
+    .expect("tcp connect");
+    let msg = next_server_message(&mut ws).await;
+    match msg {
+        ServerMessage::Error { code, message } => {
+            assert_eq!(code, "join_rejected");
+            assert!(!message.contains("internal cause"));
+        }
+        other => panic!("expected join_rejected, got {other:?}"),
+    }
+    assert!(access
+        .seen_contexts()
+        .iter()
+        .any(|c| c.operation == AccessOperation::RelaySocketJoin));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn released_ticket_cannot_seat_after_concurrent_access_release() {
+    use std::sync::mpsc::sync_channel;
+
+    let (at_auth_tx, at_auth_rx) = sync_channel::<()>(0);
+    let (go_tx, go_rx) = sync_channel::<()>(0);
+    let go_rx = std::sync::Mutex::new(go_rx);
+    let once = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let once_h = std::sync::Arc::clone(&once);
+    let access = std::sync::Arc::new(ScriptedAccessStrategy {
+        authorize_hook: Some(std::sync::Arc::new(move |ctx: &AccessRequestContext| {
+            if ctx.operation != AccessOperation::RelaySocketJoin {
+                return;
+            }
+            if once_h.fetch_add(1, std::sync::atomic::Ordering::SeqCst) != 0 {
+                return;
+            }
+            // Park off the runtime so release HTTP can still be served.
+            tokio::task::block_in_place(|| {
+                let _ = at_auth_tx.send(());
+                let _ = go_rx.lock().unwrap().recv();
+            });
+        })),
+        ..ScriptedAccessStrategy::allow()
+    });
+    let (address, broker, _) =
+        spawn_public_mode_app_with_access_and_state(access, BrokerState::default()).await;
+    let enrolled = enroll_relay(address, "release-toctou", None)
+        .await
+        .expect("enroll");
+    let relay_token: RelayWsTokenResponse = public_post(
+        address,
+        "/api/public/relay/ws-token",
+        &enrolled.relay_refresh_token,
+        &RelayWsTokenRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            relay_peer_id: "relay-peer".to_string(),
+        },
+    )
+    .await;
+
+    let join_url = format!(
+        "ws://{address}/ws/{}?role=relay&peer_id=relay-peer&join_ticket={}",
+        enrolled.broker_room_id, relay_token.relay_ws_token
+    );
+    let join_task = tokio::spawn(async move {
+        let (mut ws, _) = connect_async(join_url).await.expect("tcp");
+        next_server_message(&mut ws).await
+    });
+
+    tokio::task::spawn_blocking(move || at_auth_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let released: AccessReleaseResponse = public_post(
+        address,
+        "/api/public/relay/access/release",
+        &enrolled.relay_refresh_token,
+        &AccessReleaseRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+        },
+    )
+    .await;
+    assert!(released.released);
+    go_tx.send(()).unwrap();
+
+    match join_task.await.unwrap() {
+        ServerMessage::Error { code, .. } => assert_eq!(code, "join_rejected"),
+        ServerMessage::Welcome { .. } => panic!("stale ticket must not Welcome after release"),
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(broker.room_peer_count(&enrolled.broker_room_id).await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn released_device_ticket_cannot_seat_after_concurrent_access_release() {
+    use std::sync::mpsc::sync_channel;
+
+    let (at_auth_tx, at_auth_rx) = sync_channel::<()>(0);
+    let (go_tx, go_rx) = sync_channel::<()>(0);
+    let go_rx = std::sync::Mutex::new(go_rx);
+    let once = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let once_h = std::sync::Arc::clone(&once);
+    let access = std::sync::Arc::new(ScriptedAccessStrategy {
+        authorize_hook: Some(std::sync::Arc::new(move |ctx: &AccessRequestContext| {
+            if ctx.operation != AccessOperation::DeviceSocketJoin {
+                return;
+            }
+            if once_h.fetch_add(1, std::sync::atomic::Ordering::SeqCst) != 0 {
+                return;
+            }
+            tokio::task::block_in_place(|| {
+                let _ = at_auth_tx.send(());
+                let _ = go_rx.lock().unwrap().recv();
+            });
+        })),
+        ..ScriptedAccessStrategy::allow()
+    });
+    let (address, broker, _) =
+        spawn_public_mode_app_with_access_and_state(access, BrokerState::default()).await;
+    let enrolled = enroll_relay(address, "release-toctou-device", None)
+        .await
+        .expect("enroll");
+    let device_grant: DeviceGrantResponse = public_post(
+        address,
+        "/api/public/devices",
+        &enrolled.relay_refresh_token,
+        &DeviceGrantRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            device_id: "device-race".to_string(),
+        },
+    )
+    .await;
+
+    let join_url = format!(
+        "ws://{address}/ws/{}?role=surface&join_ticket={}",
+        enrolled.broker_room_id, device_grant.device_ws_token
+    );
+    let join_task = tokio::spawn(async move {
+        let (mut ws, _) = connect_async(join_url).await.expect("tcp");
+        next_server_message(&mut ws).await
+    });
+    tokio::task::spawn_blocking(move || at_auth_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let released: AccessReleaseResponse = public_post(
+        address,
+        "/api/public/relay/access/release",
+        &enrolled.relay_refresh_token,
+        &AccessReleaseRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+        },
+    )
+    .await;
+    assert!(released.released);
+    go_tx.send(()).unwrap();
+    match join_task.await.unwrap() {
+        ServerMessage::Error { code, .. } => assert_eq!(code, "join_rejected"),
+        ServerMessage::Welcome { .. } => panic!("device ticket must not Welcome after release"),
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(broker.room_peer_count(&enrolled.broker_room_id).await, 0);
+}
+
+#[tokio::test]
+async fn access_release_cleanup_failpoint_closes_sockets_and_retries() {
+    let access = std::sync::Arc::new(ScriptedAccessStrategy::allow());
+    let (address, broker, control) =
+        spawn_public_mode_app_with_access_and_state(access, BrokerState::default()).await;
+    let enrolled = enroll_relay(address, "release-failpoint", None)
+        .await
+        .expect("enroll");
+    let relay_token: RelayWsTokenResponse = public_post(
+        address,
+        "/api/public/relay/ws-token",
+        &enrolled.relay_refresh_token,
+        &RelayWsTokenRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            relay_peer_id: "relay-peer".to_string(),
+        },
+    )
+    .await;
+    let (mut relay_ws, _) = connect_async(format!(
+        "ws://{address}/ws/{}?role=relay&peer_id=relay-peer&join_ticket={}",
+        enrolled.broker_room_id, relay_token.relay_ws_token
+    ))
+    .await
+    .expect("join");
+    let _ = next_server_message(&mut relay_ws).await;
+
+    control.arm_save_failpoint_for_test(1);
+    let failed = public_post_response(
+        address,
+        "/api/public/relay/access/release",
+        &enrolled.relay_refresh_token,
+        &AccessReleaseRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+        },
+    )
+    .await;
+    assert_eq!(failed.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = failed.json().await.expect("json");
+    assert_eq!(body["error"], "unavailable");
+    let body_text = body.to_string();
+    assert!(!body_text.to_ascii_lowercase().contains("sql"));
+    assert_eq!(broker.room_peer_count(&enrolled.broker_room_id).await, 0);
+    assert!(
+        control
+            .has_relay_registration(&enrolled.relay_id, &enrolled.broker_room_id)
+            .await
+    );
+
+    let retried: AccessReleaseResponse = public_post(
+        address,
+        "/api/public/relay/access/release",
+        &enrolled.relay_refresh_token,
+        &AccessReleaseRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+        },
+    )
+    .await;
+    assert!(retried.released);
+    assert!(
+        !control
+            .has_relay_registration(&enrolled.relay_id, &enrolled.broker_room_id)
+            .await
+    );
+}
+
+#[tokio::test]
+async fn access_release_reload_uncertain_returns_503_even_when_memory_target_cleared() {
+    let access = std::sync::Arc::new(ScriptedAccessStrategy::allow());
+    let (address, broker, control) =
+        spawn_public_mode_app_with_access_and_state(access, BrokerState::default()).await;
+    let enrolled = enroll_relay(address, "release-reload-uncertain", None)
+        .await
+        .expect("enroll");
+    let relay_token: RelayWsTokenResponse = public_post(
+        address,
+        "/api/public/relay/ws-token",
+        &enrolled.relay_refresh_token,
+        &RelayWsTokenRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            relay_peer_id: "relay-peer".to_string(),
+        },
+    )
+    .await;
+    let (mut relay_ws, _) = connect_async(format!(
+        "ws://{address}/ws/{}?role=relay&peer_id=relay-peer&join_ticket={}",
+        enrolled.broker_room_id, relay_token.relay_ws_token
+    ))
+    .await
+    .expect("join");
+    let _ = next_server_message(&mut relay_ws).await;
+
+    // Simulate Postgres save+reload failure: memory is target-cleared but durable
+    // outcome is unknown — must be 503, never released=true.
+    control.arm_reload_uncertain_failpoint_for_test(1);
+    let failed = public_post_response(
+        address,
+        "/api/public/relay/access/release",
+        &enrolled.relay_refresh_token,
+        &AccessReleaseRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+        },
+    )
+    .await;
+    assert_eq!(failed.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = failed.json().await.expect("json");
+    assert_eq!(body["error"], "unavailable");
+    assert_eq!(
+        body["access_released"],
+        true,
+        "post-strategy cleanup failure must signal access_released so clients can commit a pending-release marker"
+    );
+    assert!(!body.to_string().to_ascii_lowercase().contains("sql"));
+    assert_eq!(broker.room_peer_count(&enrolled.broker_room_id).await, 0);
+    assert_ws_closed_after_access_released("relay", &mut relay_ws).await;
+
+    // Memory was left target-cleared without a confirmed durable commit; a
+    // follow-up with the same bearer is Unauthorized (ambiguous 503→Unauthorized
+    // = treat as already released for clients).
+    let again = public_post_response(
+        address,
+        "/api/public/relay/access/release",
+        &enrolled.relay_refresh_token,
+        &AccessReleaseRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+        },
+    )
+    .await;
+    assert_eq!(again.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn access_release_rate_limit_runs_before_auth_and_strategy() {
+    let access = std::sync::Arc::new(ScriptedAccessStrategy::allow());
+    let mut hardening = BrokerHardeningConfig::default();
+    hardening.public_api_rate_limit_per_minute = 1;
+    let (address, _, _) = spawn_public_mode_app_with_access_hardening(
+        access.clone(),
+        BrokerState::default(),
+        hardening,
+    )
+    .await;
+    let enrolled = enroll_relay(address, "release-limit", None)
+        .await
+        .expect("enroll");
+    // First release succeeds and consumes the single per-route budget.
+    let released: AccessReleaseResponse = public_post(
+        address,
+        "/api/public/relay/access/release",
+        &enrolled.relay_refresh_token,
+        &AccessReleaseRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+        },
+    )
+    .await;
+    assert!(released.released);
+    assert_eq!(
+        access
+            .seen_contexts()
+            .iter()
+            .filter(|c| c.operation == AccessOperation::AccessRelease)
+            .count(),
+        1
+    );
+
+    // Second call is rate-limited before auth/strategy (would otherwise be 401
+    // because the refresh chain is already gone).
+    let limited = public_post_response(
+        address,
+        "/api/public/relay/access/release",
+        &enrolled.relay_refresh_token,
+        &AccessReleaseRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+        },
+    )
+    .await;
+    assert_eq!(limited.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        access
+            .seen_contexts()
+            .iter()
+            .filter(|c| c.operation == AccessOperation::AccessRelease)
+            .count(),
+        1,
+        "spam rejection must never call release_access again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_access_release_force_closes_stale_join_seated_during_cleanup() {
+    use std::sync::mpsc::sync_channel;
+
+    let (at_cleanup_tx, at_cleanup_rx) = sync_channel::<()>(0);
+    let (go_tx, go_rx) = sync_channel::<()>(0);
+    let go_rx = std::sync::Mutex::new(go_rx);
+    let (address, broker, control) = spawn_public_mode_app_with_access_and_state(
+        std::sync::Arc::new(OpenAccessStrategy),
+        BrokerState::default(),
+    )
+    .await;
+    let enrolled = enroll_relay(address, "open-cleanup-race", None)
+        .await
+        .expect("enroll");
+    let relay_token: RelayWsTokenResponse = public_post(
+        address,
+        "/api/public/relay/ws-token",
+        &enrolled.relay_refresh_token,
+        &RelayWsTokenRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            relay_peer_id: "relay-peer".to_string(),
+        },
+    )
+    .await;
+
+    control.arm_cleanup_pause_for_test(std::sync::Arc::new(move || {
+        tokio::task::block_in_place(|| {
+            let _ = at_cleanup_tx.send(());
+            let _ = go_rx.lock().unwrap().recv();
+        });
+    }));
+
+    let release_url = format!("http://{address}/api/public/relay/access/release");
+    let release_token = enrolled.relay_refresh_token.clone();
+    let release_body = AccessReleaseRequest {
+        relay_id: enrolled.relay_id.clone(),
+        broker_room_id: enrolled.broker_room_id.clone(),
+    };
+    let release_task = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(release_url)
+            .bearer_auth(release_token)
+            .json(&release_body)
+            .send()
+            .await
+            .expect("release request")
+    });
+
+    tokio::task::spawn_blocking(move || at_cleanup_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Registration still exists during the pause; OpenAccess allows seating.
+    // Peer id must match the ticket pin or join is rejected before seating.
+    let join_url = format!(
+        "ws://{address}/ws/{}?role=relay&peer_id=relay-peer&join_ticket={}",
+        enrolled.broker_room_id, relay_token.relay_ws_token
+    );
+    let (mut stale_ws, _) = connect_async(join_url).await.expect("stale join tcp");
+    match next_server_message(&mut stale_ws).await {
+        ServerMessage::Welcome { .. } => {}
+        other => panic!("stale ticket must Welcome during cleanup pause, got {other:?}"),
+    }
+    assert_eq!(broker.room_peer_count(&enrolled.broker_room_id).await, 1);
+
+    go_tx.send(()).unwrap();
+    let response = release_task.await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: AccessReleaseResponse = response.json().await.expect("json");
+    assert!(body.released);
+    // Final force-close must have cleared the seat before released=true returned.
+    assert_eq!(broker.room_peer_count(&enrolled.broker_room_id).await, 0);
+    assert_ws_closed_after_access_released("stale", &mut stale_ws).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn release_and_same_identity_reenrollment_serialize_on_lifecycle_lock() {
+    use std::sync::mpsc::sync_channel;
+
+    // Case A: release holds the lock; re-enrollment waits; old bearer dies; new works.
+    let (at_release_tx, at_release_rx) = sync_channel::<()>(0);
+    let (go_tx, go_rx) = sync_channel::<()>(0);
+    let go_rx = std::sync::Mutex::new(go_rx);
+    let once = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let once_h = std::sync::Arc::clone(&once);
+    let access = std::sync::Arc::new(ScriptedAccessStrategy {
+        authorize_hook: Some(std::sync::Arc::new(move |ctx: &AccessRequestContext| {
+            if ctx.operation != AccessOperation::AccessRelease {
+                return;
+            }
+            if once_h.fetch_add(1, std::sync::atomic::Ordering::SeqCst) != 0 {
+                return;
+            }
+            tokio::task::block_in_place(|| {
+                let _ = at_release_tx.send(());
+                let _ = go_rx.lock().unwrap().recv();
+            });
+        })),
+        ..ScriptedAccessStrategy::allow()
+    });
+    let (address, _, _) =
+        spawn_public_mode_app_with_access_and_state(access.clone(), BrokerState::default()).await;
+    let enrolled = enroll_relay(address, "release-vs-reenroll", None)
+        .await
+        .expect("enroll");
+    let old_token = enrolled.relay_refresh_token.clone();
+
+    let release_url = format!("http://{address}/api/public/relay/access/release");
+    let release_body = AccessReleaseRequest {
+        relay_id: enrolled.relay_id.clone(),
+        broker_room_id: enrolled.broker_room_id.clone(),
+    };
+    let release_task = tokio::spawn({
+        let old_token = old_token.clone();
+        async move {
+            reqwest::Client::new()
+                .post(release_url)
+                .bearer_auth(old_token)
+                .json(&release_body)
+                .send()
+                .await
+                .expect("release")
+        }
+    });
+    tokio::task::spawn_blocking(move || at_release_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let reenroll_task =
+        tokio::spawn(async move { enroll_relay(address, "release-vs-reenroll", None).await });
+    // Give re-enroll a moment to block on the lifecycle lock.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    go_tx.send(()).unwrap();
+
+    let release_response = release_task.await.unwrap();
+    assert_eq!(release_response.status(), reqwest::StatusCode::OK);
+    let reenrolled = reenroll_task
+        .await
+        .unwrap()
+        .expect("re-enrollment must succeed after release");
+    assert_ne!(reenrolled.relay_refresh_token, old_token);
+
+    let old_denied = public_post_response(
+        address,
+        "/api/public/relay/ws-token",
+        &old_token,
+        &RelayWsTokenRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            relay_peer_id: "old".to_string(),
+        },
+    )
+    .await;
+    assert_eq!(old_denied.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let _new_ok: RelayWsTokenResponse = public_post(
+        address,
+        "/api/public/relay/ws-token",
+        &reenrolled.relay_refresh_token,
+        &RelayWsTokenRequest {
+            relay_id: reenrolled.relay_id.clone(),
+            broker_room_id: reenrolled.broker_room_id.clone(),
+            relay_peer_id: "new".to_string(),
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn release_after_reenroll_fails_reauth_before_strategy() {
+    let access = std::sync::Arc::new(ScriptedAccessStrategy::allow());
+    let address = spawn_public_mode_app_with_access(access.clone()).await;
+    let enrolled = enroll_relay(address, "reenroll-wins", None)
+        .await
+        .expect("enroll");
+    let old_token = enrolled.relay_refresh_token.clone();
+    let reenrolled = enroll_relay(address, "reenroll-wins", None)
+        .await
+        .expect("re-enroll");
+    assert_ne!(reenrolled.relay_refresh_token, old_token);
+
+    let denied = public_post_response(
+        address,
+        "/api/public/relay/access/release",
+        &old_token,
+        &AccessReleaseRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+        },
+    )
+    .await;
+    assert_eq!(denied.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert!(
+        !access
+            .seen_contexts()
+            .iter()
+            .any(|c| c.operation == AccessOperation::AccessRelease),
+        "stale bearer must fail re-auth before strategy; must not unbind the new identity"
+    );
+
+    let _still: RelayWsTokenResponse = public_post(
+        address,
+        "/api/public/relay/ws-token",
+        &reenrolled.relay_refresh_token,
+        &RelayWsTokenRequest {
+            relay_id: reenrolled.relay_id.clone(),
+            broker_room_id: reenrolled.broker_room_id.clone(),
+            relay_peer_id: "still".to_string(),
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn required_public_control_plane_from_env_rejects_self_hosted_and_missing_issuer() {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+    let prev_auth = std::env::var(crate::auth::BROKER_AUTH_MODE_ENV).ok();
+    let prev_issuer = std::env::var(PUBLIC_ISSUER_SECRET_ENV).ok();
+    let prev_state = std::env::var(crate::public_control::PUBLIC_STATE_PATH_ENV).ok();
+    let prev_pg = std::env::var(crate::public_control::PUBLIC_POSTGRES_URL_ENV).ok();
+
+    fn restore(key: &str, prev: Option<String>) {
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    std::env::remove_var(crate::auth::BROKER_AUTH_MODE_ENV);
+    assert!(
+        require_public_auth_mode_from_env().is_err(),
+        "default self_hosted (no I/O)"
+    );
+    assert!(
+        required_public_control_plane_from_env().await.is_err(),
+        "default self_hosted"
+    );
+
+    std::env::set_var(crate::auth::BROKER_AUTH_MODE_ENV, "self_hosted");
+    let err = match required_public_control_plane_from_env().await {
+        Ok(_) => panic!("explicit self_hosted must fail"),
+        Err(e) => e,
+    };
+    assert!(err.contains("public control plane is required"));
+
+    std::env::set_var(crate::auth::BROKER_AUTH_MODE_ENV, "public");
+    std::env::remove_var(PUBLIC_ISSUER_SECRET_ENV);
+    std::env::remove_var(crate::public_control::PUBLIC_STATE_PATH_ENV);
+    std::env::remove_var(crate::public_control::PUBLIC_POSTGRES_URL_ENV);
+    let err = match required_public_control_plane_from_env().await {
+        Ok(_) => panic!("public without issuer must fail"),
+        Err(e) => e,
+    };
+    assert!(
+        err.contains("public control plane is required but invalid")
+            || err.contains("RELAY_BROKER_PUBLIC_ISSUER_SECRET"),
+        "{err}"
+    );
+
+    // Valid public config constructs once without binding a listener.
+    let dir = tempfile_dir("required-public-ok");
+    let state_path = dir.join("public-control.json");
+    std::env::set_var(PUBLIC_ISSUER_SECRET_ENV, "unit-test-issuer-secret");
+    std::env::set_var(
+        crate::public_control::PUBLIC_STATE_PATH_ENV,
+        state_path.to_str().unwrap(),
+    );
+    let plane = required_public_control_plane_from_env()
+        .await
+        .expect("valid public config");
+    assert!(plane.has_persistent_state());
+
+    restore(crate::auth::BROKER_AUTH_MODE_ENV, prev_auth);
+    restore(PUBLIC_ISSUER_SECRET_ENV, prev_issuer);
+    restore(crate::public_control::PUBLIC_STATE_PATH_ENV, prev_state);
+    restore(crate::public_control::PUBLIC_POSTGRES_URL_ENV, prev_pg);
+}
+
+fn tempfile_dir(label: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "relay-broker-{label}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    dir
 }
 
 #[test]

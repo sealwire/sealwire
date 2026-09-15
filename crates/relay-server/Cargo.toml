@@ -19,6 +19,7 @@ ed25519-dalek.workspace = true
 futures-util.workspace = true
 hkdf.workspace = true
 hmac.workspace = true
+libc.workspace = true
 p256.workspace = true
 qrcode.workspace = true
 rand.workspace = true
@@ -43,6 +44,8 @@ tracing-subscriber.workspace = true
 url.workspace = true
 crypto_secretbox.workspace = true
 fs4 = "1.1.0"
+rpassword = "7.3"
+zeroize = "1.8"
 
 [dev-dependencies]
 tempfile = "3"

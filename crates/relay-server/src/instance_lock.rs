@@ -336,13 +336,35 @@ fn reject_if_symlink(path: &Path) -> io::Result<()> {
 /// `state::persistence::save`'s temp file (via `spawn_blocking`, since that
 /// caller is async and this is sync I/O).
 pub(crate) fn write_new_exclusive(path: &Path, contents: &[u8]) -> io::Result<()> {
+    write_new_exclusive_with_mode(path, contents, None)
+}
+
+/// Like [`write_new_exclusive`], optionally applying a Unix file mode (e.g. 0o600)
+/// on the newly created file before returning. Best-effort elsewhere.
+pub(crate) fn write_new_exclusive_with_mode(
+    path: &Path,
+    contents: &[u8],
+    mode: Option<u32>,
+) -> io::Result<()> {
     const ATTEMPTS: u8 = 5;
     let mut last_error = None;
     for _ in 0..ATTEMPTS {
-        match OpenOptions::new().write(true).create_new(true).open(path) {
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(mode);
+        }
+        match opts.open(path) {
             Ok(mut file) => {
                 use std::io::Write;
                 file.write_all(contents)?;
+                #[cfg(unix)]
+                if let Some(mode) = mode {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = file.set_permissions(std::fs::Permissions::from_mode(mode));
+                }
                 return Ok(());
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {

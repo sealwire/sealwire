@@ -458,3 +458,13 @@ On first startup without a cached registration, the relay creates a local
 broker identity, requests an enrollment challenge from the broker, signs it,
 and caches the returned registration automatically. No shared broker admin
 token is required for the default public-mode bootstrap path.
+
+An authenticated relay can call `POST /api/public/relay/access/release` to
+tear down its access binding. After the injected access strategy accepts the
+release, the broker attempts public registration/grant cleanup, then always
+force-closes live room sockets, and returns the cleanup result. Strategy denial
+leaves registration and sockets intact. A typed unavailable cleanup failure
+still closes sockets; clients may retry with the same bearer when it remains
+valid. If an earlier authenticated release returned 503 and a later retry gets
+Unauthorized, the binding may already be gone (ambiguous durable outcome — treat
+as released).

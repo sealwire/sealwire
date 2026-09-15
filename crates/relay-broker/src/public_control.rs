@@ -80,6 +80,27 @@ pub struct RelayWsTokenRequest {
     pub relay_peer_id: String,
 }
 
+/// Authenticated request to tear down relay access (release binding + revoke registration).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessReleaseRequest {
+    pub relay_id: String,
+    pub broker_room_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessReleaseResponse {
+    pub released: bool,
+}
+
+/// Opaque authenticated relay identity used for same-identity lifecycle locking.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedRelayIdentity {
+    pub relay_id: String,
+    pub broker_room_id: String,
+    /// Same-identity lock key shared with enrollment (verify key when present).
+    pub lifecycle_lock_key: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayWsTokenResponse {
     pub relay_id: String,
@@ -103,20 +124,36 @@ pub struct RelayEnrollmentChallengeResponse {
     pub expires_at: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RelayEnrollmentCompleteRequest {
     pub relay_verify_key: String,
     pub challenge_id: String,
     pub challenge_signature: String,
     #[serde(default)]
     pub relay_label: Option<String>,
-    /// License code the relay presents at enrollment. Required when the broker
-    /// has `RELAY_BROKER_REQUIRE_LICENSE_CODE=1`; ignored otherwise.
-    #[serde(default)]
-    pub license_code: Option<String>,
+    /// Cloud access / enrollment credential the relay presents at enrollment.
+    /// Required when the broker enforces access tokens; ignored otherwise.
+    /// `license_code` remains accepted as a temporary wire alias.
+    #[serde(default, alias = "license_code")]
+    pub enrollment_token: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl std::fmt::Debug for RelayEnrollmentCompleteRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayEnrollmentCompleteRequest")
+            .field("relay_verify_key", &self.relay_verify_key)
+            .field("challenge_id", &self.challenge_id)
+            .field("challenge_signature", &"<redacted>")
+            .field("relay_label", &self.relay_label)
+            .field(
+                "enrollment_token",
+                &self.enrollment_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RelayEnrollmentResponse {
     pub relay_id: String,
     pub broker_room_id: String,
@@ -124,6 +161,37 @@ pub struct RelayEnrollmentResponse {
     pub created_at: u64,
     #[serde(default)]
     pub relay_label: Option<String>,
+}
+
+impl std::fmt::Debug for RelayEnrollmentResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayEnrollmentResponse")
+            .field("relay_id", &self.relay_id)
+            .field("broker_room_id", &self.broker_room_id)
+            .field("relay_refresh_token", &"<redacted>")
+            .field("created_at", &self.created_at)
+            .field("relay_label", &self.relay_label)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod enrollment_response_debug_tests {
+    use super::*;
+
+    #[test]
+    fn relay_enrollment_response_debug_redacts_refresh_token() {
+        let response = RelayEnrollmentResponse {
+            relay_id: "r1".into(),
+            broker_room_id: "room".into(),
+            relay_refresh_token: "secret-refresh-token".into(),
+            created_at: 1,
+            relay_label: None,
+        };
+        let rendered = format!("{response:?}");
+        assert!(!rendered.contains("secret-refresh-token"));
+        assert!(rendered.contains("redacted"));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,6 +380,18 @@ struct PublicControlPlaneInner {
     state: Mutex<PublicControlStateStore>,
     relay_enrollment_challenges: Mutex<HashMap<String, PendingRelayEnrollmentChallenge>>,
     pending_client_claims: Mutex<HashMap<String, PendingClientClaim>>,
+    /// Test-only: next N persistence saves fail after mutating memory so callers
+    /// can exercise definite-failure restore / retry paths.
+    #[cfg(test)]
+    save_fail_remaining: std::sync::atomic::AtomicU64,
+    /// Test-only: next N revokes simulate shared save+reload failure (memory
+    /// stays as intended next / often target-cleared, but outcome is unknown).
+    #[cfg(test)]
+    reload_uncertain_fail_remaining: std::sync::atomic::AtomicU64,
+    /// Test-only: optional pause at the start of registration-chain revoke so
+    /// concurrent joins can seat while registration still exists.
+    #[cfg(test)]
+    cleanup_pause: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
 }
 
 #[derive(Clone)]
@@ -577,6 +657,12 @@ impl PublicControlPlane {
                 state: Mutex::new(state),
                 relay_enrollment_challenges: Mutex::new(HashMap::new()),
                 pending_client_claims: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                save_fail_remaining: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(test)]
+                reload_uncertain_fail_remaining: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(test)]
+                cleanup_pause: std::sync::Mutex::new(None),
             }),
         })
     }
@@ -787,18 +873,225 @@ impl PublicControlPlane {
     }
 
     /// Authenticate a relay bearer against `(relay_id, broker_room_id)` with no
-    /// side effects. Handlers call this before consulting license state so an
-    /// unauthenticated caller cannot probe which relays have active / expired /
-    /// revoked licenses — a bad bearer fails identically regardless of that state.
+    /// side effects. Handlers call this before consulting access policy so an
+    /// unauthenticated caller cannot probe which relays have active / released
+    /// access — a bad bearer fails identically regardless of that state.
     pub async fn authenticate_relay_bearer(
         &self,
         bearer_token: &str,
         relay_id: &str,
         broker_room_id: &str,
     ) -> Result<(), String> {
-        self.authenticate_relay(bearer_token, relay_id, broker_room_id)
+        self.authenticate_relay_access(bearer_token, relay_id, broker_room_id)
             .await
             .map(|_| ())
+    }
+
+    /// Authenticate and return the opaque same-identity lifecycle lock key.
+    pub async fn authenticate_relay_access(
+        &self,
+        bearer_token: &str,
+        relay_id: &str,
+        broker_room_id: &str,
+    ) -> Result<AuthenticatedRelayIdentity, String> {
+        let registration = self
+            .authenticate_relay(bearer_token, relay_id, broker_room_id)
+            .await?;
+        let lifecycle_lock_key = registration
+            .relay_verify_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("relay:{}", registration.relay_id));
+        Ok(AuthenticatedRelayIdentity {
+            relay_id: registration.relay_id,
+            broker_room_id: registration.broker_room_id,
+            lifecycle_lock_key,
+        })
+    }
+
+    /// Look up the relay id currently registered for `broker_room_id`, if any.
+    /// Used after join-ticket verification so socket access checks bind to the
+    /// authenticated registration rather than a caller-chosen victim id.
+    pub async fn relay_id_for_broker_room(&self, broker_room_id: &str) -> Option<String> {
+        let store = self.lock_state().await.ok()?;
+        store
+            .relay_registrations_by_hash
+            .values()
+            .find(|registration| registration.broker_room_id == broker_room_id)
+            .map(|registration| registration.relay_id.clone())
+    }
+
+    /// Whether any registration still exists for this relay/room pair.
+    #[cfg(test)]
+    pub async fn has_relay_registration(&self, relay_id: &str, broker_room_id: &str) -> bool {
+        let Ok(store) = self.lock_state().await else {
+            return true; // fail closed: assume still present if we cannot check
+        };
+        store
+            .relay_registrations_by_hash
+            .values()
+            .any(|reg| reg.relay_id == relay_id && reg.broker_room_id == broker_room_id)
+    }
+
+    /// Count device grants for a relay/room (test/assertion helper).
+    #[cfg(test)]
+    pub async fn device_grant_count_for_test(&self, relay_id: &str, broker_room_id: &str) -> usize {
+        let store = self.lock_state().await.expect("lock");
+        store
+            .grants_by_hash
+            .values()
+            .filter(|g| g.relay_id == relay_id && g.broker_room_id == broker_room_id)
+            .count()
+    }
+
+    /// Count client↔relay grants for a relay/room (test/assertion helper).
+    #[cfg(test)]
+    pub async fn client_relay_grant_count_for_test(
+        &self,
+        relay_id: &str,
+        broker_room_id: &str,
+    ) -> usize {
+        let store = self.lock_state().await.expect("lock");
+        store
+            .client_relay_grants_by_key
+            .values()
+            .filter(|g| g.relay_id == relay_id && g.broker_room_id == broker_room_id)
+            .count()
+    }
+
+    /// Arm N failing persistence saves (test-only).
+    #[cfg(test)]
+    pub fn arm_save_failpoint_for_test(&self, count: u64) {
+        self.inner
+            .save_fail_remaining
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Arm N shared save+reload-unknown failures (test-only). Leaves memory as
+    /// the intended next state (typically target-cleared) and returns
+    /// reload-uncertain — never success.
+    #[cfg(test)]
+    pub fn arm_reload_uncertain_failpoint_for_test(&self, count: u64) {
+        self.inner
+            .reload_uncertain_fail_remaining
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Install a one-shot pause at the start of revoke cleanup (test-only).
+    #[cfg(test)]
+    pub fn arm_cleanup_pause_for_test(&self, hook: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        *self.inner.cleanup_pause.lock().expect("cleanup pause lock") = Some(hook);
+    }
+
+    /// After a successful access-strategy release: drop the authenticated relay
+    /// registration and every device/client grant scoped to that room. On a
+    /// definite persistence failure, restores in-memory state from the pre-mutation
+    /// snapshot. Shared Postgres backends keep their own reconciliation in `save`.
+    ///
+    /// Reload-unknown (save and reconciling reload both failed) always returns
+    /// Err even when in-memory looks target-cleared. When a shared save fails but
+    /// a successful reload shows this relay's registration and all scoped grants
+    /// are already absent, cleanup is treated as effective success. If target
+    /// state remains after a successful reconcile, returns a safe unavailable
+    /// diagnostic so a still-valid bearer can retry. Sockets are closed by the
+    /// caller either way. Errors are safe to map to typed unavailable HTTP bodies
+    /// (no path/SQL leakage).
+    pub async fn revoke_relay_registration_chain(
+        &self,
+        bearer_token: &str,
+        relay_id: &str,
+        broker_room_id: &str,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(hook) = self
+            .inner
+            .cleanup_pause
+            .lock()
+            .expect("cleanup pause lock")
+            .take()
+        {
+            hook();
+        }
+
+        let mut store = self.lock_state().await?;
+        let token_hash = sha256_hex(bearer_token.trim());
+        let registration = store
+            .relay_registrations_by_hash
+            .get(&token_hash)
+            .cloned()
+            .ok_or_else(|| "relay refresh token is invalid".to_string())?;
+        if registration.relay_id != relay_id {
+            return Err("relay refresh token does not match relay_id".to_string());
+        }
+        if registration.broker_room_id != broker_room_id {
+            return Err("relay refresh token does not match broker_room_id".to_string());
+        }
+        let snapshot = store.clone();
+        store.relay_registrations_by_hash.remove(&token_hash);
+        store
+            .relay_registrations_by_hash
+            .retain(|_, reg| !(reg.relay_id == relay_id && reg.broker_room_id == broker_room_id));
+        store.remove_device_grants(relay_id, Some(broker_room_id), None);
+        store.remove_client_relay_grants(relay_id, Some(broker_room_id), None);
+
+        #[cfg(test)]
+        if self
+            .inner
+            .reload_uncertain_fail_remaining
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |n| n.checked_sub(1),
+            )
+            .is_ok()
+        {
+            // Leave memory as intended next (target cleared) but report unknown
+            // durable outcome — same shape as Postgres save+reload failure.
+            return shared_release_cleanup_after_save_error(
+                true,
+                target_access_fully_cleared(&store, relay_id, broker_room_id),
+            );
+        }
+
+        #[cfg(test)]
+        if self
+            .inner
+            .save_fail_remaining
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |n| n.checked_sub(1),
+            )
+            .is_ok()
+        {
+            *store = snapshot;
+            return Err(sanitize_persistence_error(
+                "public control-plane persistence failed (local restore)".to_string(),
+            ));
+        }
+
+        match self.inner.persistence.save(&mut store).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // Definite local rollback for non-shared backends.
+                if !self.inner.persistence.shared_backend() {
+                    *store = snapshot;
+                    return Err(sanitize_persistence_error(error));
+                }
+                // Shared backend: check reload-unknown FIRST. When both save and
+                // reconciling reload failed, memory still holds the intended next
+                // (often target-absent) but durable outcome is unknown — never
+                // claim success. Only after a successful reconcile (needs_reload
+                // false) may target-absent count as effective success.
+                let _ = error; // raw backend text never leaves this function
+                shared_release_cleanup_after_save_error(
+                    self.inner.persistence.reload_forced(),
+                    target_access_fully_cleared(&store, relay_id, broker_room_id),
+                )
+            }
+        }
     }
 
     /// Issue a device grant for a relay-authenticated request.
@@ -1760,6 +2053,15 @@ impl PublicControlPersistence {
         matches!(self, Self::Postgres { .. })
     }
 
+    /// True when a prior save failed and the reconciling reload also failed, so
+    /// the next operation must repair from the database before trusting memory.
+    fn reload_forced(&self) -> bool {
+        match self {
+            Self::Postgres { needs_reload, .. } => needs_reload.load(Ordering::SeqCst),
+            _ => false,
+        }
+    }
+
     /// Persist a single device grant's `last_seen` with a targeted O(1) UPDATE,
     /// deliberately avoiding the whole-state `save()` (which wipes and rebuilds
     /// every table). This is a Postgres-only, best-effort activity marker: for
@@ -2168,6 +2470,140 @@ fn redact_postgres_url(url: &str) -> String {
     match url.split_once('@') {
         Some((_credentials, host_and_rest)) => host_and_rest.to_string(),
         None => url.to_string(),
+    }
+}
+
+/// Public cleanup errors must never carry filesystem paths or SQL/backend text.
+/// Keep a short redacted class for operator diagnostics (logged via
+/// `AccessDenial::with_internal`); HTTP clients only see typed unavailable.
+fn sanitize_persistence_error(error: String) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("reload-uncertain") || lower.contains("needs_reload") {
+        "public control-plane persistence failed (reload-uncertain)".to_string()
+    } else if lower.contains("target still present") {
+        "public control-plane persistence failed (target still present)".to_string()
+    } else if lower.contains("local restore") {
+        "public control-plane persistence failed (local restore)".to_string()
+    } else if lower.contains("indeterminate") {
+        "public control-plane persistence failed (indeterminate)".to_string()
+    } else {
+        "public control-plane persistence failed".to_string()
+    }
+}
+
+/// Decide release cleanup after a shared (Postgres) save error.
+///
+/// `reload_forced` means save *and* reconciling reload failed — durable outcome
+/// unknown even if in-memory looks target-cleared. That must stay Err so the
+/// next op is forced to reload; never report released=true for that case.
+/// When reload succeeded (`reload_forced` false), target-absent is effective Ok.
+fn shared_release_cleanup_after_save_error(
+    reload_forced: bool,
+    target_cleared: bool,
+) -> Result<(), String> {
+    if reload_forced {
+        return Err("public control-plane persistence failed (reload-uncertain)".to_string());
+    }
+    if target_cleared {
+        return Ok(());
+    }
+    Err("public control-plane persistence failed (target still present)".to_string())
+}
+
+/// Release cleanup is effective when this relay/room has no registration and no
+/// scoped device/client grants, even if unrelated control-plane rows differ.
+fn target_access_fully_cleared(
+    store: &PublicControlStateStore,
+    relay_id: &str,
+    broker_room_id: &str,
+) -> bool {
+    let registration_present = store
+        .relay_registrations_by_hash
+        .values()
+        .any(|reg| reg.relay_id == relay_id && reg.broker_room_id == broker_room_id);
+    if registration_present {
+        return false;
+    }
+    let device_present = store
+        .grants_by_hash
+        .values()
+        .any(|g| g.relay_id == relay_id && g.broker_room_id == broker_room_id);
+    if device_present {
+        return false;
+    }
+    !store
+        .client_relay_grants_by_key
+        .values()
+        .any(|g| g.relay_id == relay_id && g.broker_room_id == broker_room_id)
+}
+
+#[cfg(test)]
+mod release_cleanup_helpers {
+    use super::{
+        sanitize_persistence_error, shared_release_cleanup_after_save_error,
+        target_access_fully_cleared, PersistedRelayRegistration, PublicControlStateStore,
+    };
+
+    #[test]
+    fn shared_release_cleanup_checks_reload_forced_before_target_cleared() {
+        // Reload-unknown + in-memory target-absent must NOT succeed.
+        assert!(shared_release_cleanup_after_save_error(true, true)
+            .unwrap_err()
+            .contains("reload-uncertain"));
+        assert!(shared_release_cleanup_after_save_error(true, false)
+            .unwrap_err()
+            .contains("reload-uncertain"));
+        // Successful reconcile + target gone ⇒ effective success.
+        assert!(shared_release_cleanup_after_save_error(false, true).is_ok());
+        // Successful reconcile + target still present ⇒ unavailable/retry.
+        assert!(shared_release_cleanup_after_save_error(false, false)
+            .unwrap_err()
+            .contains("target still present"));
+    }
+
+    #[test]
+    fn target_access_fully_cleared_is_true_only_when_reg_and_grants_gone() {
+        let empty = PublicControlStateStore::default();
+        assert!(target_access_fully_cleared(&empty, "relay-a", "room-a"));
+
+        let mut with_reg = PublicControlStateStore::default();
+        with_reg.relay_registrations_by_hash.insert(
+            "hash".to_string(),
+            PersistedRelayRegistration {
+                relay_id: "relay-a".to_string(),
+                broker_room_id: "room-a".to_string(),
+                refresh_token_hash: "hash".to_string(),
+                created_at: 1,
+                relay_label: None,
+                relay_verify_key: None,
+            },
+        );
+        assert!(!target_access_fully_cleared(&with_reg, "relay-a", "room-a"));
+        assert!(target_access_fully_cleared(&with_reg, "relay-b", "room-a"));
+    }
+
+    #[test]
+    fn sanitize_persistence_error_keeps_redacted_operator_class() {
+        assert!(sanitize_persistence_error(
+            "failed to write /var/lib/secret/state.json: permission denied".into()
+        )
+        .contains("public control-plane persistence failed"));
+        assert!(!sanitize_persistence_error(
+            "failed to write /var/lib/secret/state.json: permission denied".into()
+        )
+        .contains("/var/lib"));
+        assert_eq!(
+            sanitize_persistence_error(
+                "public control-plane persistence failed (reload-uncertain)".into()
+            ),
+            "public control-plane persistence failed (reload-uncertain)"
+        );
+        assert_eq!(
+            sanitize_persistence_error(
+                "public control-plane persistence failed (target still present)".into()
+            ),
+            "public control-plane persistence failed (target still present)"
+        );
     }
 }
 
@@ -4708,6 +5144,9 @@ mod postgres_persistence_opt_tests {
                 state: Mutex::new(PublicControlStateStore::default()),
                 relay_enrollment_challenges: Mutex::new(HashMap::new()),
                 pending_client_claims: Mutex::new(HashMap::new()),
+                save_fail_remaining: std::sync::atomic::AtomicU64::new(0),
+                reload_uncertain_fail_remaining: std::sync::atomic::AtomicU64::new(0),
+                cleanup_pause: std::sync::Mutex::new(None),
             }),
         }
     }

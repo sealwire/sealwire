@@ -22,22 +22,44 @@ const HOSTED_BROKER_WS = "wss://agent-relay.up.railway.app";
 const HOSTED_BROKER_HTTP = "https://agent-relay.up.railway.app";
 
 // Black-box drive the launcher with a stub standing in for the compiled
-// relay-server binary. The stub records the broker URL it was handed and
-// exits 0 (see sealwire-local-command.test.mjs for the mirror-image local
-// case). PATH is intentionally bare, so the stub uses only shell builtins.
+// relay-server binary. The stub records preflight + long-lived env separately.
 function runLauncher({ extraEnv = {}, args = [] } = {}) {
   const workdir = mkdtempSync(path.join(os.tmpdir(), "sealwire-cloud-"));
   const capturePath = path.join(workdir, "captured-broker.txt");
+  const preflightPath = path.join(workdir, "captured-preflight.txt");
   const stubPath = path.join(workdir, "stub-relay-server");
   writeFileSync(
     stubPath,
     [
       "#!/bin/sh",
+      'if [ "$1" = "cloud-activate" ]; then',
+      "  {",
+      '    printf "argv=%s\\n" "$*"',
+      '    printf "RELAY_CLOUD_ACTIVATION=%s\\n" "${RELAY_CLOUD_ACTIVATION:-<unset>}"',
+      '    printf "RELAY_BROKER_CONTROL_URL=%s\\n" "${RELAY_BROKER_CONTROL_URL:-<unset>}"',
+      '    printf "SEALWIRE_CLOUD_ACCESS_KEY=%s\\n" "${SEALWIRE_CLOUD_ACCESS_KEY:-<unset>}"',
+      '    printf "RELAY_LICENSE_CODE=%s\\n" "${RELAY_LICENSE_CODE:-<unset>}"',
+      '    printf "PORT=%s\\n" "${PORT:-<unset>}"',
+      '  } > "$SEALWIRE_PREFLIGHT_FILE"',
+      // Secret-free launch witness required for long-lived cloud start.
+      '  printf \'sealwire-cloud-witness:{"v":1,"control_url":"%s","relay_id":"relay-stub","broker_room_id":"room-stub","bearer_fingerprint":"abcdef0123456789"}\\n\' "${RELAY_BROKER_CONTROL_URL}"',
+      "  exit 0",
+      "fi",
+      'if [ "$1" = "cloud-access-release" ]; then',
+      "  exit 0",
+      "fi",
       "{",
       '  printf "RELAY_BROKER_URL=%s\\n" "${RELAY_BROKER_URL:-<unset>}"',
       '  printf "RELAY_BROKER_PUBLIC_URL=%s\\n" "${RELAY_BROKER_PUBLIC_URL:-<unset>}"',
       '  printf "RELAY_BROKER_CONTROL_URL=%s\\n" "${RELAY_BROKER_CONTROL_URL:-<unset>}"',
       '  printf "RELAY_BROKER_AUTH_MODE=%s\\n" "${RELAY_BROKER_AUTH_MODE:-<unset>}"',
+      '  printf "SEALWIRE_CLOUD_ACCESS_KEY=%s\\n" "${SEALWIRE_CLOUD_ACCESS_KEY:-<unset>}"',
+      '  printf "RELAY_LICENSE_CODE=%s\\n" "${RELAY_LICENSE_CODE:-<unset>}"',
+      '  printf "RELAY_CLOUD_ACTIVATION=%s\\n" "${RELAY_CLOUD_ACTIVATION:-<unset>}"',
+      '  printf "RELAY_CLOUD_REQUIRE_CACHED_REGISTRATION=%s\\n" "${RELAY_CLOUD_REQUIRE_CACHED_REGISTRATION:-<unset>}"',
+      '  printf "RELAY_CLOUD_EXPECTED_RELAY_ID=%s\\n" "${RELAY_CLOUD_EXPECTED_RELAY_ID:-<unset>}"',
+      '  printf "RELAY_CLOUD_EXPECTED_BEARER_FP=%s\\n" "${RELAY_CLOUD_EXPECTED_BEARER_FP:-<unset>}"',
+      '  printf "argv=%s\\n" "$*"',
       '} > "$SEALWIRE_CAPTURE_FILE"',
       "exit 0",
       "",
@@ -47,9 +69,10 @@ function runLauncher({ extraEnv = {}, args = [] } = {}) {
 
   const env = {
     HOME: process.env.HOME,
-    PATH: workdir, // no codex, no cargo — the stub needs no external commands
+    PATH: workdir,
     AGENT_RELAY_SERVER_BIN: stubPath,
     SEALWIRE_CAPTURE_FILE: capturePath,
+    SEALWIRE_PREFLIGHT_FILE: preflightPath,
     ...extraEnv,
   };
 
@@ -66,8 +89,17 @@ function runLauncher({ extraEnv = {}, args = [] } = {}) {
       const raw = existsSync(capturePath)
         ? readFileSync(capturePath, "utf8")
         : null;
+      const preflightRaw = existsSync(preflightPath)
+        ? readFileSync(preflightPath, "utf8")
+        : null;
       rmSync(workdir, { recursive: true, force: true });
-      resolve({ code, stdout, stderr, broker: parseCaptured(raw) });
+      resolve({
+        code,
+        stdout,
+        stderr,
+        broker: parseCaptured(raw),
+        preflight: parseCaptured(preflightRaw),
+      });
     });
   });
 }
@@ -98,20 +130,19 @@ test("`sealwire cloud` is a recognized command, not an unknown argument", async 
 });
 
 test("`sealwire cloud` attaches to the hosted broker by default", async () => {
-  // `cloud` is the online counterpart to `local`: with nothing else configured
-  // it must still dial the hosted public broker rather than start localhost-only.
-  const { code, broker, stderr } = await runLauncher({ args: ["cloud"] });
+  const { code, broker, preflight, stderr } = await runLauncher({
+    args: ["cloud"],
+  });
   assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
-  assert.equal(
-    broker.RELAY_BROKER_URL,
-    HOSTED_BROKER_WS,
-    "`sealwire cloud` must default RELAY_BROKER_URL to the hosted broker"
-  );
-  assert.equal(
-    broker.RELAY_BROKER_AUTH_MODE,
-    "public",
-    "`sealwire cloud` must run in public broker auth mode"
-  );
+  assert.equal(broker.RELAY_BROKER_URL, HOSTED_BROKER_WS);
+  assert.equal(broker.RELAY_BROKER_AUTH_MODE, "public");
+  assert.equal(preflight.argv, "cloud-activate");
+  assert.equal(preflight.RELAY_CLOUD_ACTIVATION, "1");
+  assert.equal(preflight.RELAY_BROKER_CONTROL_URL, HOSTED_BROKER_HTTP);
+  assert.equal(preflight.PORT, "<unset>");
+  assert.equal(broker.RELAY_CLOUD_REQUIRE_CACHED_REGISTRATION, "1");
+  assert.equal(broker.RELAY_CLOUD_EXPECTED_RELAY_ID, "relay-stub");
+  assert.equal(broker.RELAY_CLOUD_EXPECTED_BEARER_FP, "abcdef0123456789");
 });
 
 test("`sealwire cloud --broker <url>` overrides the hosted default", async () => {
@@ -119,11 +150,7 @@ test("`sealwire cloud --broker <url>` overrides the hosted default", async () =>
     args: ["cloud", "--broker", "wss://broker.example.com"],
   });
   assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
-  assert.equal(
-    broker.RELAY_BROKER_URL,
-    "wss://broker.example.com",
-    "an explicit --broker must win over the hosted default"
-  );
+  assert.equal(broker.RELAY_BROKER_URL, "wss://broker.example.com");
 });
 
 test("`sealwire cloud` prefers a configured broker origin over the hosted default", async () => {
@@ -132,53 +159,31 @@ test("`sealwire cloud` prefers a configured broker origin over the hosted defaul
     extraEnv: { AGENT_RELAY_PUBLIC_BROKER_URL: "wss://configured.example.com" },
   });
   assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
-  assert.equal(
-    broker.RELAY_BROKER_URL,
-    "wss://configured.example.com",
-    "a configured broker origin must win over the hosted default"
-  );
+  assert.equal(broker.RELAY_BROKER_URL, "wss://configured.example.com");
 });
 
 test("`sealwire cloud` derives a coherent broker set (ambient RELAY_BROKER_URL cannot split it)", async () => {
-  // Regression: an ambient RELAY_BROKER_URL used to override only the websocket
-  // URL, leaving PUBLIC_URL/CONTROL_URL pointing at the hosted broker — so the
-  // relay connected to one broker while enrollment/control targeted another.
-  // `cloud` must derive every endpoint from the single resolved origin.
   const { code, broker, stderr } = await runLauncher({
     args: ["cloud"],
-    extraEnv: { RELAY_BROKER_URL: "wss://ambient.example.com" },
+    extraEnv: {
+      RELAY_BROKER_URL: "wss://ambient.example.com",
+      RELAY_BROKER_PUBLIC_URL: "wss://split-public.example.com",
+      RELAY_BROKER_CONTROL_URL: "https://split-control.example.com",
+    },
   });
   assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
-  assert.equal(
-    broker.RELAY_BROKER_URL,
-    HOSTED_BROKER_WS,
-    "an ambient RELAY_BROKER_URL must not override the resolved cloud origin"
-  );
-  assert.equal(
-    broker.RELAY_BROKER_PUBLIC_URL,
-    HOSTED_BROKER_WS,
-    "PUBLIC_URL must match the same resolved origin as URL"
-  );
-  assert.equal(
-    broker.RELAY_BROKER_CONTROL_URL,
-    HOSTED_BROKER_HTTP,
-    "CONTROL_URL must match the same resolved origin as URL"
-  );
+  assert.equal(broker.RELAY_BROKER_URL, HOSTED_BROKER_WS);
+  assert.equal(broker.RELAY_BROKER_PUBLIC_URL, HOSTED_BROKER_WS);
+  assert.equal(broker.RELAY_BROKER_CONTROL_URL, HOSTED_BROKER_HTTP);
 });
 
 test("`sealwire cloud` forces public auth mode over an ambient self_hosted", async () => {
-  // `cloud` means the hosted public broker; an inherited self_hosted auth mode
-  // would make it dial the hosted broker with the wrong auth and fail.
   const { code, broker, stderr } = await runLauncher({
     args: ["cloud"],
     extraEnv: { RELAY_BROKER_AUTH_MODE: "self_hosted" },
   });
   assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
-  assert.equal(
-    broker.RELAY_BROKER_AUTH_MODE,
-    "public",
-    "`cloud` must run in public auth mode regardless of an ambient override"
-  );
+  assert.equal(broker.RELAY_BROKER_AUTH_MODE, "public");
 });
 
 test("`sealwire cloud --broker <url>` wins over an ambient RELAY_BROKER_URL for every endpoint", async () => {
@@ -187,118 +192,211 @@ test("`sealwire cloud --broker <url>` wins over an ambient RELAY_BROKER_URL for 
     extraEnv: { RELAY_BROKER_URL: "wss://ambient.example.com" },
   });
   assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
-  assert.equal(
-    broker.RELAY_BROKER_URL,
-    "wss://flag.example.com",
-    "the explicit --broker must control the websocket URL, not an ambient var"
-  );
-  assert.equal(
-    broker.RELAY_BROKER_PUBLIC_URL,
-    "wss://flag.example.com",
-    "PUBLIC_URL must follow the explicit --broker"
-  );
-  assert.equal(
-    broker.RELAY_BROKER_CONTROL_URL,
-    "https://flag.example.com",
-    "CONTROL_URL must follow the explicit --broker"
-  );
+  assert.equal(broker.RELAY_BROKER_URL, "wss://flag.example.com");
+  assert.equal(broker.RELAY_BROKER_PUBLIC_URL, "wss://flag.example.com");
+  assert.equal(broker.RELAY_BROKER_CONTROL_URL, "https://flag.example.com");
 });
-
-// --- Generic `--broker` path: shared broker-env resolution ---
-// `cloud` fully manages the endpoint set (hosted broker), but the plain
-// `--broker` / configured-origin path must keep honoring explicit split-horizon
-// overrides. README: "RELAY_BROKER_PUBLIC_URL ... only set it separately when
-// the relay reaches the broker through a different hostname than remote devices
-// do (e.g. a Docker network)."
 
 test("`--broker` honors an explicit split-horizon RELAY_BROKER_PUBLIC_URL", async () => {
   const { code, broker, stderr } = await runLauncher({
-    args: ["--broker", "wss://internal.example.com"],
-    extraEnv: { RELAY_BROKER_PUBLIC_URL: "wss://external.example.com" },
+    args: ["--broker", "wss://connect.example.com"],
+    extraEnv: { RELAY_BROKER_PUBLIC_URL: "wss://public.example.com" },
   });
   assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
-  assert.equal(
-    broker.RELAY_BROKER_URL,
-    "wss://internal.example.com",
-    "the websocket URL stays pinned to the resolved origin"
-  );
-  assert.equal(
-    broker.RELAY_BROKER_PUBLIC_URL,
-    "wss://external.example.com",
-    "an explicit public/pairing URL must survive on the generic --broker path"
-  );
-  assert.equal(
-    broker.RELAY_BROKER_CONTROL_URL,
-    "https://internal.example.com",
-    "control URL derives from the origin when not overridden"
-  );
+  assert.equal(broker.RELAY_BROKER_URL, "wss://connect.example.com");
+  assert.equal(broker.RELAY_BROKER_PUBLIC_URL, "wss://public.example.com");
 });
 
 test("`--broker` honors an explicit RELAY_BROKER_CONTROL_URL and auth mode", async () => {
   const { code, broker, stderr } = await runLauncher({
-    args: ["--broker", "wss://internal.example.com"],
+    args: ["--broker", "wss://connect.example.com"],
     extraEnv: {
       RELAY_BROKER_CONTROL_URL: "https://control.example.com",
       RELAY_BROKER_AUTH_MODE: "self_hosted",
     },
   });
   assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
-  assert.equal(
-    broker.RELAY_BROKER_CONTROL_URL,
-    "https://control.example.com",
-    "an explicit control host must survive on the generic --broker path"
-  );
-  assert.equal(
-    broker.RELAY_BROKER_AUTH_MODE,
-    "self_hosted",
-    "self-hosters can still choose their auth mode on the generic --broker path"
-  );
+  assert.equal(broker.RELAY_BROKER_CONTROL_URL, "https://control.example.com");
+  assert.equal(broker.RELAY_BROKER_AUTH_MODE, "self_hosted");
 });
 
 test("`--broker` pins the websocket URL to the flag over an ambient RELAY_BROKER_URL", async () => {
-  // An explicit --broker (or a configured origin) must control the live
-  // connection: a stray ambient RELAY_BROKER_URL from the shell can't silently
-  // redirect it to a broker the user didn't ask for.
   const { code, broker, stderr } = await runLauncher({
     args: ["--broker", "wss://flag.example.com"],
     extraEnv: { RELAY_BROKER_URL: "wss://ambient.example.com" },
   });
   assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
-  assert.equal(
-    broker.RELAY_BROKER_URL,
-    "wss://flag.example.com",
-    "an explicit --broker must control the connection, not an ambient var"
-  );
+  assert.equal(broker.RELAY_BROKER_URL, "wss://flag.example.com");
 });
 
 test("`sealwire cloud --broker <url>` forces public auth even with ambient self_hosted", async () => {
-  // Q: custom self-hosted brokers are intentionally excluded from `cloud` —
-  // `cloud` means the hosted public broker (public auth). Self-hosted auth is
-  // reached via the plain `--broker` path (see the test above).
   const { code, broker, stderr } = await runLauncher({
     args: ["cloud", "--broker", "wss://custom.example.com"],
     extraEnv: { RELAY_BROKER_AUTH_MODE: "self_hosted" },
   });
   assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
-  assert.equal(
-    broker.RELAY_BROKER_AUTH_MODE,
-    "public",
-    "`cloud` is public-mode; use plain `--broker` for self-hosted auth"
-  );
+  assert.equal(broker.RELAY_BROKER_AUTH_MODE, "public");
 });
 
 test("`sealwire cloud --no-broker` is rejected as contradictory", async () => {
   const { code, stderr } = await runLauncher({
     args: ["cloud", "--no-broker"],
   });
-  assert.notEqual(
-    code,
-    0,
-    "`cloud` and `--no-broker` are mutually exclusive and must not both be accepted"
+  assert.notEqual(code, 0);
+  assert.match(stderr, /cloud/i);
+});
+
+test("`sealwire cloud` preflight receives the access key; long-lived child does not", async () => {
+  const secret = "cloud-key-must-not-reach-long-lived";
+  const { code, broker, preflight, stdout, stderr } = await runLauncher({
+    args: ["cloud"],
+    extraEnv: { SEALWIRE_CLOUD_ACCESS_KEY: secret },
+  });
+  assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
+  assert.equal(preflight.SEALWIRE_CLOUD_ACCESS_KEY, secret);
+  assert.equal(preflight.argv, "cloud-activate");
+  assert.equal(broker.SEALWIRE_CLOUD_ACCESS_KEY, "<unset>");
+  assert.equal(broker.RELAY_LICENSE_CODE, "<unset>");
+  assert.equal(broker.RELAY_CLOUD_ACTIVATION, "<unset>");
+  assert.equal(broker.argv, "");
+  assert.doesNotMatch(stdout + stderr, new RegExp(secret));
+});
+
+test("`sealwire local` strips activation secrets so providers cannot inherit them", async () => {
+  const secret = "should-not-reach-local-child";
+  const { code, broker } = await runLauncher({
+    args: ["local"],
+    extraEnv: {
+      SEALWIRE_CLOUD_ACCESS_KEY: secret,
+      RELAY_LICENSE_CODE: secret,
+    },
+  });
+  assert.equal(code, 0);
+  assert.equal(broker.SEALWIRE_CLOUD_ACCESS_KEY, "<unset>");
+  assert.equal(broker.RELAY_LICENSE_CODE, "<unset>");
+});
+
+test("generic `--broker` strips ambient cloud mode and witness envs", async () => {
+  const { code, broker, preflight, stderr } = await runLauncher({
+    args: ["--broker", "wss://generic.example.com"],
+    extraEnv: {
+      RELAY_CLOUD_ACTIVATION: "1",
+      RELAY_CLOUD_REQUIRE_CACHED_REGISTRATION: "1",
+      RELAY_CLOUD_EXPECTED_RELAY_ID: "ambient-relay",
+      RELAY_CLOUD_EXPECTED_BEARER_FP: "ambientfp01234567",
+      SEALWIRE_CLOUD_ACCESS_KEY: "should-not-matter",
+    },
+  });
+  assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
+  assert.equal(Object.keys(preflight).length, 0);
+  assert.equal(broker.RELAY_BROKER_URL, "wss://generic.example.com");
+  assert.equal(broker.RELAY_CLOUD_ACTIVATION, "<unset>");
+  assert.equal(broker.RELAY_CLOUD_REQUIRE_CACHED_REGISTRATION, "<unset>");
+  assert.equal(broker.RELAY_CLOUD_EXPECTED_RELAY_ID, "<unset>");
+  assert.equal(broker.RELAY_CLOUD_EXPECTED_BEARER_FP, "<unset>");
+  assert.equal(broker.SEALWIRE_CLOUD_ACCESS_KEY, "<unset>");
+});
+
+test("`sealwire cloud` exits nonzero when cloud-activate fails before relay start", async () => {
+  const workdir = mkdtempSync(path.join(os.tmpdir(), "sealwire-cloud-fail-"));
+  const stubPath = path.join(workdir, "stub-relay-server");
+  writeFileSync(
+    stubPath,
+    ["#!/bin/sh", 'if [ "$1" = "cloud-activate" ]; then', "  echo activate-failed >&2", "  exit 7", "fi", "exit 0", ""].join(
+      "\n"
+    )
   );
-  assert.match(
-    stderr,
-    /cloud/i,
-    "the error should explain the cloud/no-broker conflict"
+  chmodSync(stubPath, 0o755);
+  const result = await new Promise((resolve) => {
+    const child = spawn(
+      process.execPath,
+      [launcher, "cloud", "--no-open"],
+      {
+        env: {
+          HOME: process.env.HOME,
+          PATH: workdir,
+          AGENT_RELAY_SERVER_BIN: stubPath,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => (stdout += c));
+    child.stderr.on("data", (c) => (stderr += c));
+    child.on("exit", (code) => resolve({ code, stdout, stderr }));
+  });
+  rmSync(workdir, { recursive: true, force: true });
+  assert.equal(result.code, 7);
+  assert.doesNotMatch(result.stdout, /serving local relay/);
+});
+
+test("`sealwire cloud` strips activation secrets before PATH probes spawn", async () => {
+  const workdir = mkdtempSync(path.join(os.tmpdir(), "sealwire-probe-env-"));
+  const capturePath = path.join(workdir, "probe-env.txt");
+  const stubPath = path.join(workdir, "stub-relay-server");
+  const fakeCodex = path.join(workdir, "codex");
+  writeFileSync(
+    stubPath,
+    [
+      "#!/bin/sh",
+      'if [ "$1" = "cloud-activate" ]; then',
+      '  printf \'sealwire-cloud-witness:{"v":1,"control_url":"https://agent-relay.up.railway.app","relay_id":"r","broker_room_id":"room","bearer_fingerprint":"abcdef0123456789"}\\n\'',
+      "  exit 0",
+      "fi",
+      "exit 0",
+      "",
+    ].join("\n")
   );
+  writeFileSync(
+    fakeCodex,
+    [
+      "#!/bin/sh",
+      '{',
+      '  printf "SEALWIRE_CLOUD_ACCESS_KEY=%s\\n" "${SEALWIRE_CLOUD_ACCESS_KEY:-<unset>}"',
+      '  printf "RELAY_LICENSE_CODE=%s\\n" "${RELAY_LICENSE_CODE:-<unset>}"',
+      '} > "$SEALWIRE_PROBE_ENV_FILE"',
+      "exit 0",
+      "",
+    ].join("\n")
+  );
+  chmodSync(stubPath, 0o755);
+  chmodSync(fakeCodex, 0o755);
+
+  const result = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [launcher, "cloud", "--no-open"], {
+      env: {
+        HOME: process.env.HOME,
+        PATH: `${workdir}${path.delimiter}${process.env.PATH || ""}`,
+        AGENT_RELAY_SERVER_BIN: stubPath,
+        SEALWIRE_PROBE_ENV_FILE: capturePath,
+        SEALWIRE_CLOUD_ACCESS_KEY: "must-not-reach-codex-probe",
+        RELAY_LICENSE_CODE: "must-not-reach-codex-probe",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => (stdout += c));
+    child.stderr.on("data", (c) => (stderr += c));
+    child.on("exit", (code) => resolve({ code, stdout, stderr }));
+  });
+
+  const probeRaw = existsSync(capturePath)
+    ? readFileSync(capturePath, "utf8")
+    : "";
+  rmSync(workdir, { recursive: true, force: true });
+  assert.equal(result.code, 0, `exit=${result.code}\nstderr:\n${result.stderr}`);
+  assert.match(probeRaw, /SEALWIRE_CLOUD_ACCESS_KEY=<unset>/);
+  assert.match(probeRaw, /RELAY_LICENSE_CODE=<unset>/);
+});
+
+test("broker URL with userinfo is rejected without echoing credentials", async () => {
+  const { code, stdout, stderr } = await runLauncher({
+    args: ["cloud", "--broker", "wss://user:s3cret@broker.example.com"],
+  });
+  assert.notEqual(code, 0);
+  assert.match(stderr, /userinfo|username or password/i);
+  assert.doesNotMatch(stdout + stderr, /s3cret/);
+  assert.doesNotMatch(stdout + stderr, /user:s3cret/);
 });

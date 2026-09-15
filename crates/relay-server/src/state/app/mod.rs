@@ -487,7 +487,7 @@ impl AppState {
         }
     }
 
-    pub async fn new() -> Result<Self, String> {
+    pub async fn new(broker_startup: crate::broker::BrokerStartupContext) -> Result<Self, String> {
         let security = SecurityProfile::from_env()?;
         let cwd = std::env::current_dir()
             .map_err(|error| format!("failed to resolve current directory: {error}"))?
@@ -693,7 +693,7 @@ impl AppState {
         // only be routed once the providers that own them exist.
         state.validate_paused_team_runs().await;
 
-        crate::broker::spawn_broker_task(state.clone()).await?;
+        crate::broker::spawn_broker_task(state.clone(), broker_startup).await?;
 
         Ok(state)
     }

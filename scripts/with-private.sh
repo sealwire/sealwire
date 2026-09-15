@@ -146,6 +146,7 @@ rm -f "$target/STUB"
 # The private checkout points at the relay by a path that only makes sense from
 # outside the workspace; in here it is a plain sibling crate.
 perl -pi -e 's{path = "\.\./agent-relay/crates/relay-api"}{path = "../relay-api"}' "$target/Cargo.toml"
+perl -pi -e 's{path = "\.\./agent-relay/crates/relay-broker"}{path = "../relay-broker"}' "$target/Cargo.toml"
 
 # Run the command in the BACKGROUND and wait on it, forwarding signals.
 #
