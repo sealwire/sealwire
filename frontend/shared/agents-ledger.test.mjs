@@ -154,18 +154,22 @@ test("asks group by agent, and a follow-up to one thread is a round inside it", 
 });
 
 test("a server ask preview is not normalized a second time by the ledger", () => {
-  // Ask::view() already stripped markdown and wrote the title/result into the legacy
-  // fields. Re-running intentTitle/oneLineResult treats a leading "2." / year as a
-  // list marker and drops digits that were part of the preview itself.
-  const [group] = askLedger(
+  // New relays set `title`/`result`. That — not a length guess — is what must stop
+  // a second intentTitle/oneLineResult pass from stripping digits or disagreeing
+  // with Rust's Unicode-scalar bounds under emoji.
+  const emojiTitle = `2. ${"😀".repeat(38)}`;
+  const emojiResult = `2026. ${"😀".repeat(78)}`;
+  const [projected] = askLedger(
     [
       {
         id: "preview-1",
         asker_thread_id: "me",
         peer_thread_id: "codex-1",
         peer_provider: "codex",
-        message: "2. Investigate auth retries",
-        answer: "2026. Fixed the retry behavior",
+        title: emojiTitle,
+        result: emojiResult,
+        message: emojiTitle,
+        answer: emojiResult,
         status: "done",
         delivered: true,
         updated_at: 1,
@@ -173,8 +177,28 @@ test("a server ask preview is not normalized a second time by the ledger", () =>
     ],
     "me"
   );
-  assert.equal(group.threads[0].title, "2. Investigate auth retries");
-  assert.equal(group.threads[0].result, "2026. Fixed the retry behavior");
+  assert.equal(projected.threads[0].title, emojiTitle);
+  assert.equal(projected.threads[0].result, emojiResult);
+
+  // A short legacy body without `title` still goes through the markdown stripper.
+  const [legacy] = askLedger(
+    [
+      {
+        id: "legacy-1",
+        asker_thread_id: "me",
+        peer_thread_id: "codex-1",
+        peer_provider: "codex",
+        message: "## 2. Investigate auth retries",
+        answer: "- **Fixed** the retry",
+        status: "done",
+        delivered: true,
+        updated_at: 2,
+      },
+    ],
+    "me"
+  );
+  assert.equal(legacy.threads[0].title, "2. Investigate auth retries");
+  assert.equal(legacy.threads[0].result, "Fixed the retry");
 });
 
 test("an inbound ask groups by the session that asked, since peer_provider names us", () => {

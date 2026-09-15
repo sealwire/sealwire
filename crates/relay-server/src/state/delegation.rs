@@ -146,6 +146,12 @@ impl Ask {
     }
 
     pub(crate) fn view(&self) -> crate::protocol::AskView {
+        let title = intent_title(&self.message).unwrap_or_default();
+        let result = self
+            .answer
+            .as_deref()
+            .and_then(one_line_result)
+            .or_else(|| self.error.as_deref().and_then(one_line_result));
         crate::protocol::AskView {
             id: self.id.clone(),
             asker_thread_id: self.asker_thread_id.clone(),
@@ -154,9 +160,10 @@ impl Ask {
             asker_provider: self.asker_provider.clone(),
             peer_model: self.peer_model.clone(),
             peer_effort: self.peer_effort.clone(),
-            // Preserve the legacy field names so older surfaces still show useful
-            // cards. Their values are deliberately previews on this list-only view.
-            message: intent_title(&self.message).unwrap_or_default(),
+            title: title.clone(),
+            result: result.clone(),
+            // Legacy names: same previews, so an old panel still shows a useful card.
+            message: title,
             answer: self.answer.as_deref().and_then(one_line_result),
             status: self.status.as_str().to_string(),
             error: self.error.as_deref().and_then(one_line_result),
@@ -323,11 +330,13 @@ mod tests {
             "Keep it a relay-owned record\n\nin the JSON state file, not SQLite.".to_string(),
         );
         let view = job.view();
-        assert_eq!(view.message, "Research · where /goal should live");
+        assert_eq!(view.title, "Research · where /goal should live");
+        assert_eq!(view.message, view.title, "legacy alias stays in lockstep");
         assert_eq!(
-            view.answer.as_deref(),
+            view.result.as_deref(),
             Some("Keep it a relay-owned record in the JSON state file, not SQLite.")
         );
+        assert_eq!(view.answer, view.result);
         assert!(!view.message.contains("long body"));
     }
 

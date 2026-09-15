@@ -154,31 +154,28 @@ export function reviewOutcome(job) {
   return { text: reviewStatusLabel(job.status), tone: reviewChipTone(job.status) };
 }
 
-/** An already-bounded single-line preview from a new relay — do not re-strip. */
-function isLedgerPreview(text, max) {
-  const raw = String(text || "");
-  if (!raw || raw.includes("\n")) {
-    return false;
-  }
-  // Ellipsis may push one past the source max when content was cut.
-  return raw.length <= max + 1;
+/** New relays project the ledger onto `title`/`result`. That field is the discriminator —
+ * not a length heuristic, which cannot tell a preview from a short legacy body and also
+ * disagrees with Rust's Unicode-scalar bounds under emoji. */
+function askHasProjectedLedger(ask) {
+  return typeof ask?.title === "string";
 }
 
-/** Title for a card: trust a server preview; still reduce legacy full prompts. */
-export function ledgerTitle(message) {
-  if (isLedgerPreview(message, TITLE_MAX)) {
-    return String(message).trim() || null;
+function cardTitle(ask) {
+  if (askHasProjectedLedger(ask)) {
+    const title = String(ask.title || "").trim();
+    return title || "Untitled request";
   }
-  return intentTitle(message);
+  return intentTitle(ask?.message) || "Untitled request";
 }
 
-/** Result line: same split — previews stay intact, legacy bodies still flatten. */
-export function ledgerResult(text) {
-  if (isLedgerPreview(text, RESULT_MAX)) {
-    const raw = String(text || "").trim();
+function cardResult(ask) {
+  if (askHasProjectedLedger(ask)) {
+    const direct = ask.result ?? ask.answer ?? ask.error;
+    const raw = String(direct || "").trim();
     return raw || null;
   }
-  return oneLineResult(text);
+  return oneLineResult(ask?.answer) || oneLineResult(ask?.error);
 }
 
 function askState(ask) {
@@ -188,14 +185,14 @@ function askState(ask) {
   if (ask.error) {
     return "failed";
   }
-  if (ask.answer) {
+  if (ask.answer || ask.result) {
     return ask.delivered ? "answered" : "not handed back";
   }
   return ask.status || "done";
 }
 
 function askRoundSummary(ask) {
-  return ledgerResult(ask.answer) || ledgerResult(ask.error) || askState(ask);
+  return cardResult(ask) || askState(ask);
 }
 
 /**
@@ -249,8 +246,8 @@ export function askLedger(asks, viewedThreadId) {
             inbound: group.inbound,
             latest,
             state: askState(latest),
-            title: ledgerTitle(latest.message) || "Untitled request",
-            result: ledgerResult(latest.answer) || ledgerResult(latest.error),
+            title: cardTitle(latest),
+            result: cardResult(latest),
             updatedAt: latest.updated_at || 0,
             rounds: asks
               .slice(0, -1)

@@ -7010,15 +7010,20 @@ mod tests {
 
         let response = relay.reviews_response(None);
         let listed = response.asks.first().expect("listed ask");
-        assert_eq!(listed.message, "Investigate the retry loop");
-        assert!(
-            listed.answer.as_ref().is_some_and(|answer| {
-                answer.starts_with("Fixed the backoff and verified the focused tests.")
-                    && answer.ends_with('…')
-                    && answer.chars().count() <= 161
-            }),
-            "the answer is the same bounded, one-line result shown by the ledger"
+        assert_eq!(listed.title, "Investigate the retry loop");
+        assert_eq!(
+            listed.message, listed.title,
+            "legacy alias stays in lockstep"
         );
+        assert!(
+            listed.result.as_ref().is_some_and(|result| {
+                result.starts_with("Fixed the backoff and verified the focused tests.")
+                    && result.ends_with('…')
+                    && result.chars().count() <= 161
+            }),
+            "the result is the same bounded, one-line preview shown by the ledger"
+        );
+        assert_eq!(listed.answer, listed.result);
 
         let json = serde_json::to_string(&response).expect("reviews response serializes");
         assert!(
