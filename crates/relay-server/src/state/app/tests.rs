@@ -29122,9 +29122,13 @@ watchdog settle this Blocked",
             .set_goal(&thread, &dump, None, false, None)
             .await
             .expect_err("a status dump must not become the standing aim");
+        // Every caller keeps what was written, so the refusal has to say how much to
+        // cut — "too long" leaves the writer counting characters by hand.
         assert!(
-            refused.contains("status report") || refused.contains("short"),
-            "refusal names the problem: {refused}"
+            refused.contains(&format!("{}", crate::state::MAX_GOAL_OBJECTIVE_CHARS + 1))
+                && refused.contains(&format!("{}", crate::state::MAX_GOAL_OBJECTIVE_CHARS))
+                && refused.contains("trim 1 "),
+            "refusal names what was written, the limit, and the difference: {refused}"
         );
         assert!(
             app.relay.read().await.goal_for_thread(&thread).is_none(),
@@ -29156,10 +29160,7 @@ watchdog settle this Blocked",
             .set_goal(&thread, &format!("{long}!"), None, false, None)
             .await
             .expect_err("changing it to another long dump is still refused");
-        assert!(
-            refused_new.contains("status report") || refused_new.contains("short"),
-            "{refused_new}"
-        );
+        assert!(refused_new.contains("trim 51 "), "{refused_new}");
     }
 
     #[tokio::test]
