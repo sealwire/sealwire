@@ -166,6 +166,7 @@ import { createWorkflowsCache } from "../shared/workflows-cache.js";
 import { createPanelControl } from "../local/panel-controls.js";
 import { setupHeaderBandSync } from "../local/header-band-sync.js";
 import { createRemoteComposerCommandActions } from "./composer-command-actions.js";
+import { goalErrorFrom } from "../shared/goal-errors.js";
 import { ComposerCommandHost } from "./composer-command-host.js";
 import { createComposerCommandsModel } from "./composer-commands-model.js";
 import { createCommandSubmit } from "./composer-command-submit.js";
@@ -364,6 +365,7 @@ function RemoteApp() {
     undefined,
     createInitialRemoteTranscriptUiState
   );
+  const remoteGoalErrors = currentState.goalErrors;
   // Read by the submit callback, which must not re-fire for a request already in
   // flight and must not be re-created (and re-memoised) on every state change.
   const transcriptUiRef = useRef(transcriptUiState);
@@ -1187,6 +1189,10 @@ function RemoteApp() {
         setGoal: (threadId, objective) => handlersRef.current.onSetGoal?.(threadId, objective),
         stopGoal: (threadId) => handlersRef.current.onStopGoal?.(threadId),
         delegate: (threadId, args) => handlersRef.current.onDelegate?.(threadId, args),
+        setComposerError: (threadId, message) =>
+          handlersRef.current.onComposerError?.(threadId, message),
+        // The other door onto the same goal, so the card's last word stops being current.
+        beginGoalAction: (threadId) => handlersRef.current.onBeginGoalAction?.(threadId),
       }),
     []
   );
@@ -1196,9 +1202,14 @@ function RemoteApp() {
         getThreadId: () => viewedThreadIdRef.current,
         setGoal: (threadId, objective) => handlersRef.current.onSetGoal?.(threadId, objective),
         stopGoal: (threadId) => handlersRef.current.onStopGoal?.(threadId),
+        setGoalError: (threadId, message, generation) =>
+          handlersRef.current.onGoalError?.(threadId, message, generation),
+        beginGoalAction: (threadId) => handlersRef.current.onBeginGoalAction?.(threadId) || 0,
       }),
       // The Agents card's Open button. View-only navigation, not a resume: the thread
       // being read may be another agent's and may be mid-turn.
+      onDismissGoalError: () =>
+        handlersRef.current.onDismissGoalError?.(viewedThreadIdRef.current),
       onOpenThread: (threadId) => handlersRef.current.onViewThread?.(threadId),
       onRequestReview: (values) => handlersRef.current.onRequestReview?.(values),
       onStartWorkflow: (values) => handlersRef.current.onStartWorkflow?.(values),
@@ -1425,8 +1436,9 @@ function RemoteApp() {
     const reviewsData = remoteReviews || { review_jobs: [], reviewer_threads: [] };
     const workflowsData = remoteWorkflows || { workflow_runs: [] };
     const remoteThreadWorkflowRuns = workflowRunsForThread(workflowsData, remoteViewedThreadId);
+    const panelSlice = agentsPanelSlice(reviewsData, remoteViewedThreadId, remoteThreadList);
     getRemoteWorkspaceDiffStore().setReview({
-      ...agentsPanelSlice(reviewsData, remoteViewedThreadId, remoteThreadList),
+      ...panelSlice,
       workflowRuns: remoteThreadWorkflowRuns,
       reviewModel: {
         ...selectReviewLaunchModel({
@@ -1461,9 +1473,12 @@ function RemoteApp() {
       canStartWorkflow: hasControllerLease && canStartWorkflow(session, remoteViewedThreadId),
       blocked:
         isReviewBlocked(session) || isWorkflowBlocked(session),
+      goalError: goalErrorFrom(remoteGoalErrors, remoteViewedThreadId),
     });
   }, [
     session,
+    remoteGoalErrors,
+    remoteViewedThreadId,
     remoteReviews,
     remoteWorkflows,
     remoteThreadList,

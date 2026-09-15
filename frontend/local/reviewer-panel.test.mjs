@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { ReviewerPanel, renderReviewerText, shouldOpenReviewerFromPointerEvent } from "../shared/reviewer-panel.js";
 import { RightPanelTabs } from "../shared/right-panel-tabs.js";
+import { LONG_GOAL_OBJECTIVE_CHARS } from "../shared/goal-objective.js";
 import {
   ReviewerChip,
   WorkspaceDiffModalTitle,
@@ -882,6 +883,75 @@ test("goal title focus ring uses box-shadow like other controls", () => {
   const block = css.match(/\.reviewer-goal-title:focus-visible\s*\{[^}]+\}/)?.[0] || "";
   assert.match(block, /box-shadow:\s*var\(--focus-ring\)/);
   assert.doesNotMatch(block, /outline:\s*var\(--focus-ring\)/);
+});
+
+// On a phone the panel is opened as a native <dialog>, which makes everything behind it
+// inert — so a refused Stop reported to the composer is literally underneath the modal
+// the button lives in. The refusal has to render where the button is.
+test("a refused goal action is reported on the card itself", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      goal: { objective: "ship it", status: "active", turns: 1, max_turns: 20 },
+      goalError: "that thread is busy with a turn",
+      reviewJobs: [],
+      canRequest: false,
+    })
+  );
+  assert.match(html, /that thread is busy with a turn/);
+  assert.match(html, /reviewer-goal-error/);
+  assert.match(html, /role="alert"/, "it is a failure, and screen readers should say so");
+});
+
+// Stop settles the goal AND warns that its turn is still running. The card it was
+// pressed on is gone by then; the warning still has to be readable.
+test("a warning about a goal that has just gone still has somewhere to be", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      goal: null,
+      goalError: "the goal is stopped, but the turn it started is still running",
+      reviewJobs: [],
+      canRequest: false,
+    })
+  );
+  assert.match(html, /still running/);
+  assert.match(html, /role="alert"/);
+});
+
+test("no goal error renders no alert region at all", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      goal: { objective: "ship it", status: "active", turns: 1, max_turns: 20 },
+      reviewJobs: [],
+      canRequest: false,
+    })
+  );
+  assert.doesNotMatch(html, /reviewer-goal-error/);
+});
+
+// The per-turn cost of a long aim is invisible from the composer, and the card is the
+// one place the objective is actually looked at afterwards.
+test("a long goal says on the card that it is re-sent every turn", () => {
+  const long = `Aim: ${"x".repeat(LONG_GOAL_OBJECTIVE_CHARS)}`;
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      goal: { objective: long, status: "active", turns: 2, max_turns: 20 },
+      reviewJobs: [],
+      canRequest: false,
+    })
+  );
+  assert.match(html, /re-sent in full every turn/);
+  assert.match(html, new RegExp(String(LONG_GOAL_OBJECTIVE_CHARS + 5)), "and how long it is");
+});
+
+test("an ordinary goal carries no such notice", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      goal: { objective: "ship the phone menu", status: "active", turns: 2, max_turns: 20 },
+      reviewJobs: [],
+      canRequest: false,
+    })
+  );
+  assert.doesNotMatch(html, /every turn/);
 });
 
 // A goal that stopped to ask you something is not a finished one. The chip is the whole

@@ -24,6 +24,7 @@ import {
   startTaskDialogMount,
   composerAttachments,
   composerCommandMount,
+  composerError,
   connectionForm,
   controlBanner,
   copyPairingLinkButton,
@@ -192,7 +193,14 @@ import { matchesApplePlatform } from "./shared/composer-keys.js";
 import { createComposerCommandController } from "./local/composer-commands.js";
 import { canRequestReview, selectReviewLaunchModel } from "./shared/review-state.js";
 import { createGoalActions } from "./shared/goal-actions.js";
-import { prepareAuthoredGoalObjective } from "./shared/goal-objective.js";
+import { createGoalAuthor } from "./local/goal-authoring.js";
+import { recordComposerError, syncComposerError } from "./local/composer-error.js";
+import {
+  beginLocalGoalAction,
+  clearGoalError,
+  goalErrorFor,
+  recordGoalError,
+} from "./local/goal-error.js";
 import { createProjectsStore } from "./shared/projects-store.js";
 import { createDevicesCache } from "./shared/devices-cache.js";
 import { createReviewsCache } from "./shared/reviews-cache.js";
@@ -723,7 +731,14 @@ const reviewerActions = {
     // The loopback route's own contract: an empty objective is how it cancels.
     stopGoal: (threadId) => postSessionGoal(threadId, ""),
     log: logLine,
+    setGoalError: showGoalError,
+    beginGoalAction: openGoalAction,
   }),
+  // The warning a cancelled goal leaves behind has no buttons of its own to supersede it.
+  onDismissGoalError: () => {
+    clearGoalError(viewedThreadId());
+    publishGoalError();
+  },
   onStartWorkflow: (values) => state.controller?.startWorkflow(values),
   onResolveReview: (reviewJobId) => state.controller?.resolveReview(reviewJobId),
   onResolveWorkflow: (workflowRunId) => state.controller?.resolveWorkflow(workflowRunId),
@@ -2891,12 +2906,43 @@ function postSessionGoal(threadId, objective, { resetTurns = false } = {}) {
   });
 }
 
+const goalAuthor = createGoalAuthor({
+  setGoal: (threadId, objective) => postSessionGoal(threadId, objective),
+  setComposerError: showComposerError,
+  // The other door onto the same goal: what the card's buttons last said stops being
+  // the current word the moment the user writes a goal here.
+  beginGoalAction: openGoalAction,
+});
+
+// The composer's failure line, as a function DECLARATION: reviewerActions is built
+// near the top of this file and would otherwise read it before it is initialised.
+function showComposerError(threadId, message) {
+  recordComposerError({ threadId, message });
+  syncComposerError(composerError, viewedThreadId());
+}
+
+// The goal card's own failure line. A declaration for the same reason, and it pushes
+// the slice itself: nothing else re-renders the rail when only this changed.
+function showGoalError(threadId, message, generation) {
+  recordGoalError(threadId, message, generation);
+  publishGoalError();
+}
+
+// Opening an action clears the last one's word, so the panel has to be told as well.
+function openGoalAction(threadId) {
+  const generation = beginLocalGoalAction(threadId);
+  publishGoalError();
+  return generation;
+}
+
+function publishGoalError() {
+  workspaceDiffStore.setReview({ goalError: goalErrorFor(viewedThreadId()) });
+}
+
+// A function declaration, like postRelayCommand above: the composer controller is
+// handed this name before this line is reached.
 function postSessionGoalFromComposer(threadId, objective) {
-  const prepared = prepareAuthoredGoalObjective(objective);
-  if (prepared.refuse) {
-    return Promise.resolve({ text: prepared.refuse, isError: true });
-  }
-  return postSessionGoal(threadId, prepared.objective);
+  return goalAuthor(threadId, objective);
 }
 
 // Drive a composer submit. The draft text and the target thread are captured

@@ -53,6 +53,13 @@ function assertClearedSessionPatch(patch) {
   assert.ok(patch.transcriptLiveEntryDetails instanceof Map);
   assert.equal(patch.transcriptLiveEntryDetails.size, 0);
   assert.equal(patch.transcriptLiveEntryThreadId, null);
+  // Both failure channels are keyed by thread id, and thread ids are only unique WITHIN
+  // a relay: carried across, one relay's refusal renders against an unrelated thread
+  // that happens to share an id on the next. The goal channel is worse — its generation
+  // would still be current, so a request the switch rejected can settle afterwards and
+  // file the old relay's failure into the new relay's state.
+  assert.deepEqual(patch.composerErrors, {});
+  assert.deepEqual(patch.goalErrors, {});
 }
 
 test("createClearedRemoteSurfaceSessionStatePatch clears session, threads, current approval, and transcript caches", () => {

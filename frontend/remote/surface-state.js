@@ -22,6 +22,11 @@ export function createClearedRemoteSurfaceSessionStatePatch() {
     // Results belong to the relay that answered them, and thread ids are only unique
     // within a relay — the same reason fetched Projects are forgotten below.
     threadSearch: { ...EMPTY_THREAD_SEARCH },
+    // Both failure channels for the same reason. The goal one also carries the action
+    // generation, and leaving it standing lets a request this reset rejected settle
+    // afterwards and file the old relay's failure against the new one.
+    composerErrors: {},
+    goalErrors: {},
     ...createClearedTranscriptEntryDetailsPatch(),
   };
 }

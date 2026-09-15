@@ -2544,6 +2544,248 @@ test("a failed remote settings change records the reason for the composer, not j
   );
 });
 
+test("a /goal refused by the relay puts its reason on the phone's composer", async () => {
+  // Worse on the phone than anywhere else: its client-log drawer is `display: none`
+  // with nothing to open it, so the log is not a second-best channel, it is no channel.
+  activeBrowser || installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { setComposerError, setRemoteGoal, stopRemoteGoal, delegateRemote } = await import(
+    "./session-ops.js"
+  );
+  const { createRemoteComposerCommandActions } = await import("./composer-command-actions.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  state.composerErrors = {};
+  state.session = { active_thread_id: "thread-1", available_models: [] };
+  state.socket = {
+    readyState: 1,
+    send() {
+      throw new Error("that thread is busy with a turn");
+    },
+  };
+
+  const actions = createRemoteComposerCommandActions({
+    setGoal: setRemoteGoal,
+    stopGoal: stopRemoteGoal,
+    delegate: delegateRemote,
+    setComposerError,
+  });
+
+  assert.equal((await actions.setGoal("thread-1", "ship the phone menu")).isError, true);
+  assert.match(
+    String(state.composerErrors?.["thread-1"]),
+    /busy with a turn/,
+    "a refused goal must be visible on the composer it was typed into"
+  );
+});
+
+test("a /goal that works clears the line its own earlier attempt left", async () => {
+  // Recording without clearing is its own defect: the line outlives the problem and
+  // the next real failure is indistinguishable from the stale one.
+  activeBrowser || installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { setComposerError, setRemoteGoal, stopRemoteGoal, delegateRemote } = await import(
+    "./session-ops.js"
+  );
+  const { createRemoteComposerCommandActions } = await import("./composer-command-actions.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  state.composerErrors = {
+    "thread-1": "that thread is busy with a turn",
+    "thread-2": "a real failure that is none of thread-1's business",
+  };
+  state.session = { active_thread_id: "thread-1", available_models: [] };
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      setImmediate(() => {
+        void handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "set_goal",
+          ok: true,
+          snapshot: { active_thread_id: "thread-1", available_models: [], transcript: [] },
+        });
+      });
+    },
+  };
+
+  const actions = createRemoteComposerCommandActions({
+    setGoal: setRemoteGoal,
+    stopGoal: stopRemoteGoal,
+    delegate: delegateRemote,
+    setComposerError,
+  });
+
+  assert.equal((await actions.setGoal("thread-1", "ship the phone menu")).isError, false);
+  assert.equal(state.composerErrors?.["thread-1"], undefined, "its own stale line is gone");
+  assert.match(
+    String(state.composerErrors?.["thread-2"]),
+    /none of thread-1/,
+    "and no other thread's failure was swept up with it"
+  );
+});
+
+// Built from the REAL session-ops writer rather than a spy. With a spy the optional
+// chain through react-app and remote-runtime can be deleted and this still passes —
+// which is exactly how the phone ended up with no channel in the first place.
+test("an over-limit /goal from the phone reaches the real composer-error writer", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { setComposerError, setRemoteGoal, stopRemoteGoal, delegateRemote } = await import(
+    "./session-ops.js"
+  );
+  const { createRemoteComposerCommandActions } = await import("./composer-command-actions.js");
+  const { MAX_GOAL_OBJECTIVE_CHARS } = await import("../shared/goal-objective.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  state.composerErrors = {};
+  state.session = { active_thread_id: "thread-1", available_models: [] };
+
+  const actions = createRemoteComposerCommandActions({
+    setGoal: setRemoteGoal,
+    stopGoal: stopRemoteGoal,
+    delegate: delegateRemote,
+    setComposerError,
+  });
+
+  const answer = await actions.setGoal("thread-1", "x".repeat(MAX_GOAL_OBJECTIVE_CHARS + 1));
+
+  assert.equal(answer.isError, true);
+  assert.match(
+    String(state.composerErrors?.["thread-1"]),
+    new RegExp(String(MAX_GOAL_OBJECTIVE_CHARS)),
+    "the refusal has to land in the state the remote composer actually renders"
+  );
+});
+
+// On this surface the goal card is opened as a native <dialog>, which makes the page
+// behind it inert. A refused Stop reported to the composer would be underneath that
+// layer: unreadable, and not dismissable without abandoning the panel.
+test("a refused Stop from the goal card lands on the card, not behind the modal", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { beginGoalActionOn, setGoalError, setRemoteGoal, stopRemoteGoal } = await import(
+    "./session-ops.js"
+  );
+  const { createGoalActions } = await import("../shared/goal-actions.js");
+  const { goalErrorFrom } = await import("../shared/goal-errors.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  state.composerErrors = {};
+  state.goalErrors = {};
+  state.session = { active_thread_id: "thread-1", available_models: [] };
+  state.socket = {
+    readyState: 1,
+    send() {
+      throw new Error("that thread is busy with a turn");
+    },
+  };
+
+  const actions = createGoalActions({
+    getThreadId: () => "thread-1",
+    setGoal: setRemoteGoal,
+    stopGoal: stopRemoteGoal,
+    setGoalError,
+    beginGoalAction: beginGoalActionOn,
+  });
+
+  actions.onStopGoal();
+  for (let i = 0; i < 50 && !state.goalErrors?.["thread-1"]?.message; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.match(
+    goalErrorFrom(state.goalErrors, "thread-1"),
+    /busy with a turn/,
+    "the reason belongs beside the button that was refused"
+  );
+  assert.equal(
+    goalErrorFrom(beginGoalActionOn("thread-1") && state.goalErrors, "thread-1"),
+    "",
+    "and the next user action on this goal takes it down"
+  );
+  assert.equal(
+    state.composerErrors?.["thread-1"],
+    undefined,
+    "and not on the composer, which the modal covers"
+  );
+});
+
 test("a successful remote settings update clears only that thread's composer error", async () => {
   // The success path must not be a global wipe: thread-2's real failure has to
   // survive thread-1's later settings OK (same race the local surface guards).

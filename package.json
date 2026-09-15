@@ -69,6 +69,7 @@
     "test:browser:tasks": "npm run build && npm run build:relay:private && E2E_USE_BUILT_BINARIES=1 node scripts/browser-tasks-screen-e2e.mjs",
     "test:browser:orch-proposal-scroll": "node scripts/browser-orchestrator-proposal-scroll-e2e.mjs",
     "test:browser:remote-composer-commands": "npm run build && node scripts/browser-remote-composer-commands-e2e.mjs",
+    "test:browser:goal-length": "npm run build && node scripts/browser-goal-length-e2e.mjs",
     "test:browser:goal-question": "npm run build && node scripts/browser-goal-question-readable-e2e.mjs",
     "build": "vite build",
     "build:relay": "cargo build -p relay-server",

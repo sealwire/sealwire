@@ -32,6 +32,10 @@ export const state = {
   // Keyed by thread so a request settling after the user navigated can only
   // affect the thread it targeted (see shared/composer-errors.js).
   composerErrors: {},
+  // thread id -> why that thread's goal CARD button was refused. Separate from
+  // composerErrors because the card is inside a modal on this surface, and because
+  // that slot also carries send/settings failures the card must not claim.
+  goalErrors: {},
   currentApprovalId: null,
   deviceIdentityPromise: null,
   deviceKeypair: null,
