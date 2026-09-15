@@ -579,9 +579,9 @@ function AskThreadCard({ thread, onOpen = null }) {
     h(
       "div",
       { className: "reviewer-ask-head" },
-      // The prompt itself never renders — the title carries the intent, the tooltip
-      // carries the wording, and the session behind the card carries the rest.
-      h("h3", { className: "reviewer-card-title", title: thread.prompt || undefined }, thread.title),
+      // The session behind the card carries the complete exchange. Do not attach raw
+      // legacy prompts to `title=`: browsers would retain multi-KB strings in the DOM.
+      h("h3", { className: "reviewer-card-title" }, thread.title),
       h(
         "span",
         { className: `reviewer-ask-state is-${live ? "live" : thread.state.replace(/\s+/g, "-")}` },

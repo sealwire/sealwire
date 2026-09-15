@@ -3459,10 +3459,11 @@ impl RelayState {
         acc
     }
 
-    /// The full, UNCOMPACTED reviewer-panel payload (review cards + reviewer threads +
-    /// the matching revision). Served on demand via `/api/session/reviews` (local) and the
-    /// `fetch_reviews` broker action (remote), decoupled from the byte-budgeted snapshot so
-    /// the panel stays populated even while a live turn drains `active_review_jobs`.
+    /// The dedicated reviewer-panel payload (review cards + reviewer threads + the matching
+    /// revision). Served on demand via `/api/session/reviews` (local) and the `fetch_reviews`
+    /// broker action (remote), decoupled from the byte-budgeted snapshot so the panel stays
+    /// populated even while a live turn drains `active_review_jobs`. Ask entries are bounded
+    /// ledger previews; the complete exchanges remain in their session transcripts.
     pub(crate) fn reviews_response(
         &self,
         device_id: Option<&str>,
@@ -3503,9 +3504,8 @@ impl RelayState {
                 .into_iter()
                 .filter(|view| in_scope(&view.parent_thread_id))
                 .collect(),
-            // BOTH ends, not either: an exchange is only visible to a device
-            // that may see the whole of it. The card carries the question and
-            // the answer verbatim, so half a fence is no fence.
+            // BOTH ends, not either: an exchange is only visible to a device that may see
+            // the whole of it. Even previews disclose user work, so half a fence is no fence.
             asks: self
                 .asks_view()
                 .into_iter()
@@ -6973,6 +6973,71 @@ mod tests {
 
         let views = relay.asks_view();
         assert_eq!(views[0].asker_provider.as_deref(), Some("claude_code"));
+    }
+
+    #[test]
+    fn reviews_response_lists_only_ask_previews() {
+        // The Reviews channel backs a compact ledger. The full exchange already lives in
+        // the two session transcripts, so cloning it here made opening Agents wait on a
+        // payload that grew with every agent-written prompt and answer.
+        use crate::state::Ask;
+
+        let mut relay = test_relay();
+        relay.threads = vec![test_thread("asker", "/tmp"), test_thread("peer", "/tmp")];
+
+        let full_message = format!(
+            "## Investigate the retry loop\n\n{}QUESTION_BODY_MUST_NOT_BE_LISTED",
+            "question context ".repeat(2_000)
+        );
+        let full_answer = format!(
+            "- Fixed the backoff and verified the focused tests. {}ANSWER_BODY_MUST_NOT_BE_LISTED",
+            "implementation detail ".repeat(2_000)
+        );
+        let mut ask = Ask::new(
+            "ask-large".to_string(),
+            "asker".to_string(),
+            "peer".to_string(),
+            "codex".to_string(),
+            None,
+            None,
+            full_message.clone(),
+            "/tmp".to_string(),
+            None,
+            relay_api::delegation::StartedBy::Agent,
+        );
+        ask.finish(full_answer.clone());
+        relay.insert_ask(ask);
+
+        let response = relay.reviews_response(None);
+        let listed = response.asks.first().expect("listed ask");
+        assert_eq!(listed.message, "Investigate the retry loop");
+        assert!(
+            listed.answer.as_ref().is_some_and(|answer| {
+                answer.starts_with("Fixed the backoff and verified the focused tests.")
+                    && answer.ends_with('…')
+                    && answer.chars().count() <= 161
+            }),
+            "the answer is the same bounded, one-line result shown by the ledger"
+        );
+
+        let json = serde_json::to_string(&response).expect("reviews response serializes");
+        assert!(
+            json.len() < 1_024,
+            "one huge ask should still produce a sub-KiB list payload; got {} bytes",
+            json.len()
+        );
+        assert!(!json.contains("QUESTION_BODY_MUST_NOT_BE_LISTED"));
+        assert!(!json.contains("ANSWER_BODY_MUST_NOT_BE_LISTED"));
+        assert_eq!(
+            relay.ask("ask-large").map(|ask| ask.message.as_str()),
+            Some(full_message.as_str()),
+            "previewing the list must not truncate the durable ask record"
+        );
+        assert_eq!(
+            relay.ask("ask-large").and_then(|ask| ask.answer.as_deref()),
+            Some(full_answer.as_str()),
+            "the peer transcript handoff still needs the complete stored answer"
+        );
     }
 
     #[test]

@@ -3135,9 +3135,9 @@ pub struct GoalView {
     pub updated_at: u64,
 }
 
-/// One ask: A handed B a message and is waiting. `message` and `answer` are
-/// both carried because a person never typed either one — an agent did, so the
-/// card is the only place the exchange is auditable.
+/// One ask: A handed B a message and is waiting. This is a list/card projection;
+/// `message`, `answer`, and `error` carry bounded ledger previews rather than the
+/// complete agent-written exchange. The peer sessions retain the full transcripts.
 #[derive(Debug, Clone, Serialize)]
 pub struct AskView {
     pub id: String,
@@ -3151,9 +3151,13 @@ pub struct AskView {
     pub asker_provider: Option<String>,
     pub peer_model: Option<String>,
     pub peer_effort: Option<String>,
+    /// Intent title preview (76 source characters at most, plus an ellipsis when cut).
+    /// The legacy name is retained so older clients still render a useful card.
     pub message: String,
+    /// One-line result preview (160 source characters at most, plus an ellipsis when cut).
     pub answer: Option<String>,
     pub status: String,
+    /// One-line failure preview, bounded like `answer`.
     pub error: Option<String>,
     pub delivered: bool,
     pub updated_at: u64,

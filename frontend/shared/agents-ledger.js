@@ -1,7 +1,7 @@
 // The Agents panel is a LEDGER of delegations, not a chat log. What distinguishes two
-// delegations is what was asked, which round, and how it turned out — all of which the
-// relay only carries as raw agent-written prose. These functions reduce that prose to a
-// ledger row, and collapse repeat delegations to one agent into a single thread.
+// delegations is what was asked, which round, and how it turned out. New relays send those
+// fields as bounded previews; these functions also reduce legacy raw prose to the same
+// ledger row and collapse repeat delegations to one agent into a single thread.
 //
 // Pure on purpose: the grouping is the part worth testing, and it must not need a DOM.
 
@@ -223,9 +223,6 @@ export function askLedger(asks, viewedThreadId) {
             latest,
             state: askState(latest),
             title: intentTitle(latest.message) || "Untitled request",
-            // The raw prompt never renders; the title carries the intent and the
-            // tooltip carries the rest.
-            prompt: String(latest.message || "").trim() || null,
             result: oneLineResult(latest.answer) || oneLineResult(latest.error),
             updatedAt: latest.updated_at || 0,
             rounds: asks

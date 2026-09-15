@@ -16,6 +16,11 @@ use relay_api::delegation::AskStatus;
 
 use super::unix_now;
 
+// Keep these in step with frontend/shared/agents-ledger.js. AskView is the wire shape
+// for that ledger, not a second copy of the peer sessions' transcripts.
+const ASK_TITLE_MAX_CHARS: usize = 76;
+const ASK_RESULT_MAX_CHARS: usize = 160;
+
 /// `Default` + `#[serde(default)]` give forward-compat: a record written by a
 /// future build still decodes, missing fields fall back, unknown ones are ignored.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -37,8 +42,8 @@ pub(crate) struct Ask {
     /// Kept so a finished card can say what the peer actually ran at. The view
     /// carries it too: without it nobody can reconstruct the configuration.
     pub(crate) peer_effort: Option<String>,
-    /// What was sent. Recorded so the pair is auditable from the card alone —
-    /// the person never typed it, an agent did.
+    /// What was sent. The durable record keeps the complete body for handoff and
+    /// persistence; `AskView` reduces it to the title the Agents ledger displays.
     pub(crate) message: String,
     /// The peer's last assistant message at the moment it was asked.
     ///
@@ -149,14 +154,142 @@ impl Ask {
             asker_provider: self.asker_provider.clone(),
             peer_model: self.peer_model.clone(),
             peer_effort: self.peer_effort.clone(),
-            message: self.message.clone(),
-            answer: self.answer.clone(),
+            // Preserve the legacy field names so older surfaces still show useful
+            // cards. Their values are deliberately previews on this list-only view.
+            message: intent_title(&self.message).unwrap_or_default(),
+            answer: self.answer.as_deref().and_then(one_line_result),
             status: self.status.as_str().to_string(),
-            error: self.error.clone(),
+            error: self.error.as_deref().and_then(one_line_result),
             delivered: self.delivered,
             updated_at: self.updated_at,
         }
     }
+}
+
+/// Match the ledger's first-meaningful-line cleanup without putting a JS parser in the
+/// request path. Markdown decoration is presentation noise, and fenced code commonly
+/// precedes the actual ask title.
+fn intent_title(message: &str) -> Option<String> {
+    let mut fenced = false;
+    let first = message.lines().find_map(|raw| {
+        if raw.trim().starts_with("```") {
+            fenced = !fenced;
+            return None;
+        }
+        if fenced {
+            return None;
+        }
+        let line = strip_ledger_markers(raw);
+        if line.is_empty() || is_separator(&line) {
+            None
+        } else {
+            Some(line)
+        }
+    })?;
+
+    if first.chars().count() <= ASK_TITLE_MAX_CHARS {
+        return Some(first);
+    }
+
+    // A long opening paragraph usually states the request in its first sentence.
+    let chars: Vec<char> = first.chars().collect();
+    let sentence_end = (15..ASK_TITLE_MAX_CHARS.min(chars.len())).find(|&index| {
+        matches!(chars[index], '.' | '?' | '!')
+            && chars.get(index + 1).is_none_or(|next| next.is_whitespace())
+    });
+    match sentence_end {
+        Some(index) => Some(chars[..=index].iter().collect()),
+        None => Some(truncate_ledger_text(first, ASK_TITLE_MAX_CHARS)),
+    }
+}
+
+/// Match `oneLineResult`: markdown-light cleanup, whitespace flattening, and a bounded
+/// result that carries an explicit ellipsis whenever content was omitted.
+fn one_line_result(value: &str) -> Option<String> {
+    let flat = value
+        .lines()
+        .map(strip_ledger_markers)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!flat.is_empty()).then(|| truncate_ledger_text(flat, ASK_RESULT_MAX_CHARS))
+}
+
+fn strip_ledger_markers(line: &str) -> String {
+    let trimmed = line.trim_start();
+    let bytes = trimmed.as_bytes();
+    let marker_len = if bytes.first() == Some(&b'#') {
+        let count = bytes.iter().take_while(|byte| **byte == b'#').count();
+        (1..=6)
+            .contains(&count)
+            .then_some(count)
+            .filter(|&end| starts_with_whitespace(&trimmed[end..]))
+    } else if bytes.first() == Some(&b'>') {
+        let count = bytes.iter().take_while(|byte| **byte == b'>').count();
+        Some(count).filter(|&end| starts_with_whitespace(&trimmed[end..]))
+    } else if bytes
+        .first()
+        .is_some_and(|byte| matches!(*byte, b'-' | b'*' | b'+'))
+    {
+        Some(1).filter(|&end| starts_with_whitespace(&trimmed[end..]))
+    } else {
+        let digits = bytes
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        (digits > 0
+            && bytes
+                .get(digits)
+                .is_some_and(|byte| matches!(*byte, b'.' | b')')))
+        .then_some(digits + 1)
+        .filter(|&end| starts_with_whitespace(&trimmed[end..]))
+    };
+
+    let content = marker_len
+        .map(|end| trimmed[end..].trim_start())
+        .unwrap_or(trimmed);
+    let mut cleaned = content
+        .chars()
+        .filter(|ch| !matches!(ch, '*' | '_' | '`'))
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if cleaned.ends_with(':') {
+        cleaned.pop();
+        cleaned = cleaned.trim_end().to_string();
+    }
+    cleaned
+}
+
+fn starts_with_whitespace(value: &str) -> bool {
+    value.chars().next().is_some_and(char::is_whitespace)
+}
+
+fn is_separator(value: &str) -> bool {
+    value.chars().count() >= 3 && value.chars().all(|ch| matches!(ch, '-' | '=' | '_'))
+}
+
+fn truncate_ledger_text(value: String, max_chars: usize) -> String {
+    let mut chars: Vec<char> = value.chars().collect();
+    if chars.len() <= max_chars {
+        return value;
+    }
+    chars.truncate(max_chars);
+    if let Some(space) = chars.iter().rposition(|ch| *ch == ' ') {
+        if space * 10 > max_chars * 6 {
+            chars.truncate(space);
+        }
+    }
+    while chars.last().is_some_and(|ch| {
+        ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '.' | '–' | '—' | '-')
+    }) {
+        chars.pop();
+    }
+    chars.push('…');
+    chars.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -176,6 +309,37 @@ mod tests {
             None,
             relay_api::delegation::StartedBy::Agent,
         )
+    }
+
+    #[test]
+    fn ask_view_uses_the_intent_title_not_the_body() {
+        let mut job = ask();
+        job.message =
+            "## Research · where /goal should live\n\nSome long body that must not ship.".into();
+        job.finish(
+            "Keep it a relay-owned record\n\nin the JSON state file, not SQLite.".to_string(),
+        );
+        let view = job.view();
+        assert_eq!(view.message, "Research · where /goal should live");
+        assert_eq!(
+            view.answer.as_deref(),
+            Some("Keep it a relay-owned record in the JSON state file, not SQLite.")
+        );
+        assert!(!view.message.contains("long body"));
+    }
+
+    #[test]
+    fn ask_view_bounds_a_runaway_answer() {
+        let mut job = ask();
+        job.finish(format!("{}TAIL", "word ".repeat(80)));
+        let view = job.view();
+        let answer = view.answer.expect("preview");
+        assert!(answer.ends_with('…'), "{answer}");
+        assert!(
+            answer.chars().count() <= ASK_RESULT_MAX_CHARS + 1,
+            "{answer}"
+        );
+        assert!(!answer.contains("TAIL"));
     }
 
     #[test]

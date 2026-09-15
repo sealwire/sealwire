@@ -745,10 +745,11 @@ test("an ask renders under its agent's heading, titled by intent rather than by 
   assert.match(html, /reviewer-agent-model[^>]*>gpt-5-codex</);
   assert.match(html, /Asked<[\s\S]*1 thread</);
   // The card carries the intent and the result — never "You asked codex", and never the
-  // raw prompt, which only survives on the tooltip.
+  // raw prompt (including in a DOM title tooltip).
   assert.doesNotMatch(html, /You asked/);
   assert.match(html, /reviewer-card-title[^>]*>have a look at the retry loop</);
-  assert.match(html, /hundreds of words of context follow/, "…on the title attribute");
+  assert.doesNotMatch(html, /hundreds of words of context follow/);
+  assert.doesNotMatch(html, /reviewer-card-title[^>]*title=/);
   assert.match(html, /reviewer-card-result[^>]*>Fixed the backoff\.</);
   assert.match(html, /reviewer-ask-state is-answered/);
 
