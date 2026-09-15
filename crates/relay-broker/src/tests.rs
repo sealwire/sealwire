@@ -3596,13 +3596,13 @@ async fn spawn_public_mode_app_full(admin_token: Option<std::sync::Arc<str>>) ->
         .await
         .expect("listener should bind");
     let address = listener.local_addr().expect("listener should have address");
-    let app = app_with_access_strategy_parts(
+    // Uses the same access-selection path as production `app()`.
+    let app = app_with_standard_public_access_for_test(
         BrokerState::default(),
         test_web_root(),
         BrokerJoinVerifier::PublicControlPlane(test_public_control_plane().await),
         BrokerHardeningConfig::default(),
         SecurityHeadersConfig::default(),
-        std::sync::Arc::new(OpenAccessStrategy),
         admin_token,
     );
     tokio::spawn(async move {
@@ -3614,6 +3614,28 @@ async fn spawn_public_mode_app_full(admin_token: Option<std::sync::Arc<str>>) ->
         .expect("broker should serve");
     });
     address
+}
+
+/// Try to obtain a relay ws-token with the given refresh token. Returns the HTTP
+/// status, so tests can assert whether the credential authenticates.
+async fn relay_ws_token_status(
+    address: SocketAddr,
+    refresh_token: &str,
+    relay_id: &str,
+    broker_room_id: &str,
+) -> reqwest::StatusCode {
+    reqwest::Client::new()
+        .post(format!("http://{address}/api/public/relay/ws-token"))
+        .bearer_auth(refresh_token)
+        .json(&RelayWsTokenRequest {
+            relay_id: relay_id.to_string(),
+            broker_room_id: broker_room_id.to_string(),
+            relay_peer_id: "relay-peer".to_string(),
+        })
+        .send()
+        .await
+        .expect("ws-token request should complete")
+        .status()
 }
 
 /// Enroll a relay against the test public control-plane, optionally supplying an
@@ -3686,10 +3708,13 @@ async fn enroll_relay(
 }
 
 /// Fake required-token strategy: tracks binds for conflict/idempotence/race tests.
+/// `fail_bind` forces `authorize_enrollment` → Bind then `bind_enrollment` → Err,
+/// so tests can prove post-complete rollback / restore.
 struct FakeTokenAccessStrategy {
     tokens: std::sync::Mutex<std::collections::HashMap<String, String>>,
     device_limit: Option<u32>,
     deny_device_after_bind: std::sync::atomic::AtomicBool,
+    fail_bind: std::sync::atomic::AtomicBool,
 }
 
 impl FakeTokenAccessStrategy {
@@ -3698,12 +3723,18 @@ impl FakeTokenAccessStrategy {
             tokens: std::sync::Mutex::new(std::collections::HashMap::new()),
             device_limit,
             deny_device_after_bind: std::sync::atomic::AtomicBool::new(false),
+            fail_bind: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     fn force_deny_device(&self) {
         self.deny_device_after_bind
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn set_fail_bind(&self, fail: bool) {
+        self.fail_bind
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -3718,6 +3749,10 @@ impl BrokerAccessStrategy for FakeTokenAccessStrategy {
         let Some(token) = enrollment_token.map(str::trim).filter(|t| !t.is_empty()) else {
             return Err(AccessDenial::bad_request("enrollment token is required"));
         };
+        if self.fail_bind.load(std::sync::atomic::Ordering::SeqCst) {
+            // Deterministically exercise the post-complete bind path.
+            return Ok(EnrollmentBindDecision::Bind);
+        }
         let map = self.tokens.lock().expect("tokens");
         match map.get(token) {
             Some(bound) if existing_relay_id == Some(bound.as_str()) => {
@@ -3735,6 +3770,10 @@ impl BrokerAccessStrategy for FakeTokenAccessStrategy {
         relay_id: &str,
         _existing_relay_id: Option<&str>,
     ) -> Result<(), AccessDenial> {
+        if self.fail_bind.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(AccessDenial::conflict("injected bind failure")
+                .with_internal("test-only bind failure must not appear in the public body"));
+        }
         let mut map = self.tokens.lock().expect("tokens");
         match map.get(enrollment_token) {
             Some(bound) if bound == relay_id => Ok(()),
@@ -3773,31 +3812,37 @@ impl BrokerAccessStrategy for FakeTokenAccessStrategy {
 
 #[tokio::test]
 async fn standard_public_app_stays_open_despite_removed_legacy_env() {
-    // Removed commercial env must never flip the standard public app closed.
-    let prev_req = std::env::var("RELAY_BROKER_REQUIRE_LICENSE_CODE").ok();
-    let prev_tier = std::env::var("RELAY_BROKER_TIER_DEVICE_LIMITS").ok();
-    let prev_legacy = std::env::var("RELAY_LICENSE_CODE").ok();
+    // Must go through `select_standard_public_access_strategy` (same as `app()`).
+    // A helper that hard-codes OpenAccessStrategy would stay green even if `app()`
+    // started consulting removed commercial env and fail-closed.
+    use std::sync::{Mutex, OnceLock};
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+    let keys = [
+        "RELAY_BROKER_REQUIRE_LICENSE_CODE",
+        "RELAY_BROKER_TIER_DEVICE_LIMITS",
+        "RELAY_LICENSE_CODE",
+    ];
+    let prev: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
     std::env::set_var("RELAY_BROKER_REQUIRE_LICENSE_CODE", "1");
     std::env::set_var("RELAY_BROKER_TIER_DEVICE_LIMITS", "free:2,pro:10");
     std::env::set_var("RELAY_LICENSE_CODE", "must-not-activate");
 
-    let address = spawn_public_mode_app_full(None).await;
-    enroll_relay(address, "legacy-env-open", None)
-        .await
-        .expect("standard public app must stay open when legacy commercial env is set");
+    let result = async {
+        let address = spawn_public_mode_app_full(None).await;
+        enroll_relay(address, "legacy-env-open", None).await
+    }
+    .await;
 
-    match prev_req {
-        Some(v) => std::env::set_var("RELAY_BROKER_REQUIRE_LICENSE_CODE", v),
-        None => std::env::remove_var("RELAY_BROKER_REQUIRE_LICENSE_CODE"),
+    for (key, value) in prev {
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
     }
-    match prev_tier {
-        Some(v) => std::env::set_var("RELAY_BROKER_TIER_DEVICE_LIMITS", v),
-        None => std::env::remove_var("RELAY_BROKER_TIER_DEVICE_LIMITS"),
-    }
-    match prev_legacy {
-        Some(v) => std::env::set_var("RELAY_LICENSE_CODE", v),
-        None => std::env::remove_var("RELAY_LICENSE_CODE"),
-    }
+
+    result.expect("standard public app selection must stay open when legacy commercial env is set");
 }
 
 #[tokio::test]
@@ -3887,7 +3932,7 @@ async fn enrollment_rejects_legacy_license_code_wire_field() {
 }
 
 #[tokio::test]
-async fn injected_required_token_and_conflict_idempotence_race() {
+async fn injected_required_token_conflict_idempotence_and_same_identity_race() {
     let access = std::sync::Arc::new(FakeTokenAccessStrategy::new(None));
     let address = spawn_public_mode_app_with_access(access.clone()).await;
 
@@ -3909,20 +3954,39 @@ async fn injected_required_token_and_conflict_idempotence_race() {
         .expect_err("token cannot bind a second relay");
     assert_eq!(status, reqwest::StatusCode::CONFLICT);
 
-    // Concurrent same-verify-key enrollments: enrollment lock + AlreadyBound/Bind.
+    // Same verify key + same fresh token, concurrent completes: per-identity
+    // serialization makes enroll+bind atomic so both succeed (Bind then
+    // AlreadyBound) without deleting the registration.
     let a = address;
     let t1 = tokio::spawn(async move { enroll_relay(a, "tok-race", Some("TOKEN-RACE")).await });
     let t2 = tokio::spawn(async move { enroll_relay(a, "tok-race", Some("TOKEN-RACE")).await });
-    let r1 = t1.await.expect("join1");
-    let r2 = t2.await.expect("join2");
-    assert!(
-        r1.is_ok() || r2.is_ok(),
-        "at least one concurrent enrollment must succeed, got {r1:?} / {r2:?}"
+    let (r1, r2) = tokio::join!(t1, t2);
+    let reg_a = r1
+        .expect("join1")
+        .expect("concurrent enrollment a must succeed");
+    let reg_b = r2
+        .expect("join2")
+        .expect("concurrent enrollment b must succeed");
+    assert_eq!(
+        reg_a.relay_id, reg_b.relay_id,
+        "same identity must share relay_id"
     );
-    // Follow-up enroll with the same verify key must remain idempotent.
-    enroll_relay(address, "tok-race", Some("TOKEN-RACE"))
+
+    let reg_c = enroll_relay(address, "tok-race", Some("TOKEN-RACE"))
         .await
-        .expect("post-race re-enroll must succeed");
+        .expect("follow-up re-enrollment must still succeed");
+    assert_eq!(reg_c.relay_id, reg_a.relay_id);
+    assert_eq!(
+        relay_ws_token_status(
+            address,
+            &reg_c.relay_refresh_token,
+            &reg_c.relay_id,
+            &reg_c.broker_room_id
+        )
+        .await,
+        reqwest::StatusCode::OK,
+        "the most recently issued refresh token must authenticate"
+    );
 }
 
 #[tokio::test]
@@ -4027,18 +4091,90 @@ async fn ws_token_access_check_requires_auth_first() {
 }
 
 #[tokio::test]
-async fn failed_bind_does_not_persist_relay_registration() {
+async fn failed_bind_rolls_back_new_relay_and_restores_existing_refresh() {
     let access = std::sync::Arc::new(FakeTokenAccessStrategy::new(None));
-    // Pre-bind so a different verify key hits conflict at bind/authorize.
-    {
-        let mut map = access.tokens.lock().expect("tokens");
-        map.insert("RACE-001".to_string(), "relay-already-enrolled".to_string());
-    }
-    let address = spawn_public_mode_app_with_access(access).await;
-    let (status, _) = enroll_relay(address, "verify-key-6", Some("RACE-001"))
+    let (address, _, control) =
+        spawn_public_mode_app_with_access_and_state(access.clone(), BrokerState::default()).await;
+
+    let relays_before = control.admin_stats(10).await.expect("stats").totals.relays;
+
+    // New relay: authorize returns Bind, complete persists, bind fails → delete.
+    access.set_fail_bind(true);
+    let (status, body) = enroll_relay(address, "bind-fail-new", Some("BIND-FAIL-NEW"))
         .await
-        .expect_err("pre-bound token must fail");
-    assert!(status.is_client_error());
+        .expect_err("bind failure must reject enrollment");
+    assert!(status.is_client_error(), "got {status}");
+    assert!(
+        !body.to_ascii_lowercase().contains("test-only bind failure"),
+        "must not leak internal bind failure text, got {body}"
+    );
+    let relays_after = control.admin_stats(10).await.expect("stats").totals.relays;
+    assert_eq!(
+        relays_after, relays_before,
+        "failed bind must not leave an orphan registration"
+    );
+    // Derive the same verify key enroll_relay uses for this seed label.
+    let seed: [u8; 32] = {
+        let b = b"bind-fail-new";
+        let mut s = [0xABu8; 32];
+        for (i, byte) in b.iter().take(32).enumerate() {
+            s[i] = *byte;
+        }
+        s
+    };
+    let verify_key_b64 = STANDARD.encode(SigningKey::from_bytes(&seed).verifying_key().to_bytes());
+    assert!(
+        control
+            .snapshot_relay_registration(&verify_key_b64)
+            .await
+            .is_none(),
+        "rolled-back verify key must have no registration"
+    );
+
+    // Existing relay: first enroll succeeds; failed re-bind must restore the
+    // original cached refresh bearer.
+    access.set_fail_bind(false);
+    let first = enroll_relay(address, "bind-fail-existing", Some("BIND-KEEP"))
+        .await
+        .expect("initial enroll");
+    assert_eq!(
+        relay_ws_token_status(
+            address,
+            &first.relay_refresh_token,
+            &first.relay_id,
+            &first.broker_room_id
+        )
+        .await,
+        reqwest::StatusCode::OK,
+        "original token must authenticate after enrollment"
+    );
+
+    access.set_fail_bind(true);
+    let (status, body) = enroll_relay(address, "bind-fail-existing", Some("BIND-REPLACE"))
+        .await
+        .expect_err("re-enroll bind failure must fail closed");
+    assert!(!status.is_success(), "got {status}");
+    assert!(
+        !body.to_ascii_lowercase().contains("test-only bind failure"),
+        "must not leak internal bind failure text, got {body}"
+    );
+    assert_eq!(
+        relay_ws_token_status(
+            address,
+            &first.relay_refresh_token,
+            &first.relay_id,
+            &first.broker_room_id
+        )
+        .await,
+        reqwest::StatusCode::OK,
+        "original refresh token must still authenticate after a failed bind"
+    );
+    assert!(
+        control
+            .has_relay_registration(&first.relay_id, &first.broker_room_id)
+            .await,
+        "existing registration must remain after failed re-bind"
+    );
 }
 
 #[tokio::test]
@@ -4078,7 +4214,7 @@ async fn admin_stats_contain_no_commercial_attribution() {
 // Injected BrokerAccessStrategy handler tests
 // ---------------------------------------------------------------------------
 // These go through the real HTTP stack with a caller-supplied strategy so the
-// public seam (not only the license adapter) is proven end-to-end.
+// public access seam is proven end-to-end.
 
 async fn spawn_public_mode_app_with_access(
     access: std::sync::Arc<dyn BrokerAccessStrategy>,

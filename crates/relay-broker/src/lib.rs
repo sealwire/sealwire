@@ -217,12 +217,22 @@ const ENABLE_HSTS_ENV: &str = "RELAY_BROKER_ENABLE_HSTS";
 const HSTS_VALUE_ENV: &str = "RELAY_BROKER_HSTS_VALUE";
 const BROKER_WEB_ROOT_ENV: &str = "RELAY_BROKER_WEB_ROOT";
 
+/// Select the access strategy for the standard public [`app`] entry.
+///
+/// Always open. Intentionally ignores removed legacy commercial env vars
+/// (`RELAY_BROKER_REQUIRE_LICENSE_CODE`, `RELAY_BROKER_TIER_DEVICE_LIMITS`,
+/// `RELAY_LICENSE_CODE`, …). Required/private deployments must inject a
+/// strategy via [`app_with_access_strategy`] / required-public builders instead.
+fn select_standard_public_access_strategy() -> Arc<dyn BrokerAccessStrategy> {
+    standard_public_access_strategy()
+}
+
 pub async fn app(state: BrokerState) -> Router {
     let ban_guard = BanGuard::from_env().await;
-    // Standard public broker is always open. Removed legacy commercial env vars
-    // (e.g. RELAY_BROKER_REQUIRE_LICENSE_CODE) are ignored and never select a
-    // commercial backend from public code. Required/private deployments must
-    // inject a strategy via [`app_with_access_strategy`] / required-public builders.
+    // Standard public broker is always open via
+    // [`select_standard_public_access_strategy`]. Required/private deployments
+    // must inject a strategy via [`app_with_access_strategy`] / required-public
+    // builders.
     app_with_access_strategy_parts(
         state,
         default_web_root(),
@@ -235,7 +245,7 @@ pub async fn app(state: BrokerState) -> Router {
             warn!(%error, "invalid broker security header config; HSTS will stay disabled");
             SecurityHeadersConfig::default()
         }),
-        standard_public_access_strategy(),
+        select_standard_public_access_strategy(),
         admin_token_from_env(),
     )
     .layer(middleware::from_fn_with_state(ban_guard, reject_banned_ips))
@@ -292,7 +302,7 @@ pub async fn app_with_access_strategy_required_public(
 }
 
 /// Build a broker app from an already-validated [`PublicControlPlane`].
-/// Product-neutral: no license/tier wording. Does not re-read auth env.
+/// Does not re-read auth env.
 pub async fn app_with_access_strategy_and_public_control(
     state: BrokerState,
     access: Arc<dyn BrokerAccessStrategy>,
@@ -329,7 +339,7 @@ pub fn require_public_auth_mode_from_env() -> Result<(), String> {
 }
 
 /// Resolve a public control plane for deployments that must not fall back to
-/// self-host/open join verification. Product-neutral: no license/tier wording.
+/// self-host/open join verification.
 pub async fn required_public_control_plane_from_env() -> Result<PublicControlPlane, String> {
     require_public_auth_mode_from_env()?;
     PublicControlPlane::from_env()
@@ -1281,8 +1291,9 @@ impl BrokerJoinVerifier {
     }
 }
 
-// Licensing-free convenience wrapper used by the test harness. `app()` uses the
-// access-strategy builder directly.
+// Test harness: open-access wrapper when the call site does not care which
+// strategy is used. Prefer [`app_with_standard_public_access_for_test`] when
+// asserting the standard [`app`] access-selection path.
 #[cfg(test)]
 fn app_with_web_root_and_verifier_and_hardening(
     state: BrokerState,
@@ -1299,6 +1310,32 @@ fn app_with_web_root_and_verifier_and_hardening(
         security_headers,
         Arc::new(OpenAccessStrategy),
         None, // no admin token → /api/admin/stats not mounted
+    )
+}
+
+/// Test-only constructor that uses the **same** access-strategy selection as
+/// production [`app`] ([`select_standard_public_access_strategy`]), while
+/// allowing an injected join verifier / web root so unit tests do not depend on
+/// live env for the public control plane. If `app()` started consulting removed
+/// commercial env to choose access, regressions that go through this helper
+/// fail the same way production would.
+#[cfg(test)]
+fn app_with_standard_public_access_for_test(
+    state: BrokerState,
+    web_root: PathBuf,
+    join_verifier: BrokerJoinVerifier,
+    hardening_config: BrokerHardeningConfig,
+    security_headers: SecurityHeadersConfig,
+    admin_token: Option<Arc<str>>,
+) -> Router {
+    app_with_access_strategy_parts(
+        state,
+        web_root,
+        join_verifier,
+        hardening_config,
+        security_headers,
+        select_standard_public_access_strategy(),
+        admin_token,
     )
 }
 
@@ -1754,7 +1791,7 @@ async fn public_complete_relay_enrollment(
     // the relay's original refresh credential if binding fails after enrollment
     // replaced its token. Used to:
     // (a) detect same-token re-enrollment after cache loss (AlreadyBound path),
-    // (b) identify the relay_id whose expired/revoked binding to clear, and
+    // (b) identify the relay_id whose access binding may need clearing, and
     // (c) restore the previous credential on bind failure (else new relay → delete).
     let previous_registration: Option<RelayRegistrationSnapshot> = match &verify_key {
         Some(vk) => control_plane.snapshot_relay_registration(vk).await,
@@ -1847,7 +1884,7 @@ async fn public_issue_relay_ws_token(
     enforce_public_api_rate_limit(&state, remote_addr, "relay_ws_token").await?;
 
     // Authenticate first so an unauthenticated caller cannot probe relay IDs to
-    // learn which relays have active/expired/revoked licenses (F3).
+    // learn which relays the access strategy would allow or deny.
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
     match control_plane
@@ -1856,8 +1893,8 @@ async fn public_issue_relay_ws_token(
     {
         Ok(response) => {
             // Access check after successful authentication: deny the token when
-            // the injected strategy refuses the relay lease (expired/revoked
-            // access, fail-closed backend, or a custom deny policy).
+            // the injected strategy refuses the relay lease (revoked access,
+            // fail-closed backend, or a custom deny policy).
             let access_ctx =
                 AccessRequestContext::new(remote_addr.ip(), AccessOperation::RelayLease);
             state
@@ -2009,10 +2046,10 @@ async fn public_issue_device_grant(
         .map_err(device_grant_error)
 }
 
-/// Map a device-grant error. The per-license cap becomes a machine-readable
-/// `device_limit_reached` (403) so the relay and UI can distinguish it from a
-/// generic failure and show "remove a device"; everything else uses the standard
-/// mapping.
+/// Map a device-grant error. A numeric device-cap rejection becomes a
+/// machine-readable `device_limit_reached` (403) so the relay and UI can
+/// distinguish it from a generic failure and show "remove a device"; everything
+/// else uses the standard mapping.
 fn device_grant_error(error: String) -> (StatusCode, Json<ApiErrorBody>) {
     if error.starts_with(DEVICE_LIMIT_REACHED_ERROR_PREFIX) {
         return (

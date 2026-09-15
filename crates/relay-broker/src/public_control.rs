@@ -125,6 +125,9 @@ pub struct RelayEnrollmentChallengeResponse {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+// Strict schema is deliberate: removed credential field names (e.g. the old
+// `license_code` alias) must fail closed rather than silently degrade to
+// anonymous enrollment when an access strategy requires a token.
 #[serde(deny_unknown_fields)]
 pub struct RelayEnrollmentCompleteRequest {
     pub relay_verify_key: String,

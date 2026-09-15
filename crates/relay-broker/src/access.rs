@@ -411,11 +411,33 @@ mod tests {
             .expect_err("must deny");
     }
 
-    #[test]
-    fn standard_public_access_is_open() {
+    #[tokio::test]
+    async fn standard_public_access_is_open_even_with_removed_legacy_env() {
+        use std::sync::{Mutex, OnceLock};
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let keys = [
+            "RELAY_BROKER_REQUIRE_LICENSE_CODE",
+            "RELAY_BROKER_TIER_DEVICE_LIMITS",
+            "RELAY_LICENSE_CODE",
+        ];
+        let prev: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        std::env::set_var("RELAY_BROKER_REQUIRE_LICENSE_CODE", "1");
+        std::env::set_var("RELAY_LICENSE_CODE", "ignored");
+
         let strategy = standard_public_access_strategy();
-        // Sync probe via block_on-free type check: Arc must be OpenAccessStrategy.
-        let _ = Arc::as_ptr(&strategy);
+        let decision = strategy
+            .authorize_enrollment(&ctx(AccessOperation::EnrollmentComplete), None, None)
+            .await
+            .expect("standard public selection must ignore removed commercial env");
+        assert_eq!(decision, EnrollmentBindDecision::Skip);
+
+        for (key, value) in prev {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
     }
 
     #[test]
