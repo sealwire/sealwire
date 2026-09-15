@@ -1,32 +1,26 @@
-//! Regression guard for the Railway deploy config (`railway.toml`).
+//! Regression guard for the **self-host** Railway example config.
 //!
-//! Bug: the VAPID keypair is persisted to `<cwd>/.agent-relay/vapid.key`
-//! (`push.rs::vapid_key_path`, defaulting to the process cwd). In the broker
-//! image that cwd is `WORKDIR /app` — the *ephemeral* container filesystem, not
-//! the `/data` volume. `railway.toml` pinned the state/postgres paths to the
-//! volume but never set `RELAY_VAPID_KEY_PATH`, so every redeploy/restart
-//! regenerated the keypair. Existing web-push subscriptions are bound (via
-//! `applicationServerKey`) to the *old* VAPID public key, so after a restart the
-//! relay signs pushes with a mismatched private key and FCM returns 403 — which
-//! `send_one` does not prune, so delivery silently stops forever.
+//! Hosted SealWire Cloud is deployed from the private repository. The public
+//! tree only keeps an explicit example under `examples/self-host-broker/`.
 //!
-//! This test locks in that the deploy start command persists the VAPID key on
-//! the durable volume (`$state_dir`, i.e. `${RAILWAY_VOLUME_MOUNT_PATH:-/data}`).
+//! Bug (historical): the VAPID keypair was persisted under the ephemeral
+//! container cwd. The self-host example must keep `RELAY_VAPID_KEY_PATH` on the
+//! `/data` volume.
 
 use std::path::PathBuf;
 
 fn railway_toml() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../railway.toml");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/self-host-broker/railway.toml");
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
 
-/// Extract the single-line `startCommand = "..."` value from `[deploy]`.
 fn start_command(toml: &str) -> String {
     let line = toml
         .lines()
         .find(|l| l.trim_start().starts_with("startCommand"))
-        .expect("railway.toml [deploy] must define startCommand");
+        .expect("self-host railway.toml [deploy] must define startCommand");
     let first = line.find('"').expect("startCommand value must be quoted");
     let last = line.rfind('"').expect("startCommand value must be quoted");
     assert!(last > first, "malformed startCommand quoting: {line}");
@@ -34,23 +28,32 @@ fn start_command(toml: &str) -> String {
 }
 
 #[test]
-fn deploy_persists_vapid_key_on_the_volume() {
+fn root_railway_toml_is_absent() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../railway.toml");
+    assert!(
+        !root.exists(),
+        "public repo must not ship a root railway.toml (would enable accidental OpenAccess Cloud deploy)"
+    );
+}
+
+#[test]
+fn self_host_example_persists_vapid_key_on_the_volume() {
     let cmd = start_command(&railway_toml());
 
-    // The start command exposes the persistent volume as the `state_dir` shell
-    // var (`${RAILWAY_VOLUME_MOUNT_PATH:-/data}`) and already pins state/postgres
-    // there. Web push only survives restarts if the VAPID key lives there too.
     assert!(
         cmd.contains("RELAY_VAPID_KEY_PATH"),
-        "railway.toml startCommand must export RELAY_VAPID_KEY_PATH so the VAPID \
-         keypair persists across restarts; otherwise it is regenerated on the \
-         ephemeral container FS each deploy and existing web-push subscriptions \
-         start getting FCM 403s.\nstartCommand: {cmd}"
+        "self-host railway.toml startCommand must export RELAY_VAPID_KEY_PATH.\nstartCommand: {cmd}"
     );
-
     assert!(
         cmd.contains("state_dir/vapid.key"),
-        "RELAY_VAPID_KEY_PATH must resolve under $state_dir (the /data volume), \
-         not the ephemeral container filesystem (WORKDIR /app).\nstartCommand: {cmd}"
+        "RELAY_VAPID_KEY_PATH must resolve under $state_dir (/data volume).\nstartCommand: {cmd}"
+    );
+    assert!(
+        cmd.contains("exec relay-broker"),
+        "self-host example must start the public relay-broker binary"
+    );
+    assert!(
+        !cmd.contains("sealwire-broker-private"),
+        "self-host example must not start the private commercial binary"
     );
 }

@@ -2,13 +2,9 @@
 //!
 //! The public broker does not encode product tiers or pricing policy. Call sites
 //! that gate enrollment, relay leases, and device grants consult an injected
-//! [`BrokerAccessStrategy`]. The default is open/self-host; private deployments
-//! inject their own implementation. During the transition, [`LicenseStoreAccessAdapter`]
-//! preserves today's public license-gate behaviour behind this seam.
-//!
-//! Denials are typed ([`AccessDenial`]): stable public `error` codes and messages
-//! map to HTTP status through a closed table. Internal causes are loggable only
-//! and must never be serialized to clients.
+//! [`BrokerAccessStrategy`]. The standard public default is open/self-host;
+//! required/private deployments inject their own implementation (or
+//! [`UnavailableAccessStrategy`] when a backing service is required but missing).
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -16,8 +12,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::http::StatusCode;
 use tracing::warn;
-
-use crate::licenses::{LicenseEnrollmentAction, LicenseStore};
 
 /// Which control-plane operation is asking the access strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +62,8 @@ pub enum AccessDenialCode {
     Internal,
     /// Credential / token material rejected (transition parity with scrubbed 401s).
     Unauthorized,
+    /// Named resource does not exist (admin/operator lookups).
+    NotFound,
 }
 
 /// Typed access denial: safe public fields + optional internal cause for logs.
@@ -117,6 +113,11 @@ impl AccessDenial {
         Self::new(AccessDenialCode::Unauthorized, "request failed")
     }
 
+    /// Named resource missing (stable 404 for operator/admin surfaces).
+    pub fn not_found(public_message: impl Into<String>) -> Self {
+        Self::new(AccessDenialCode::NotFound, public_message)
+    }
+
     fn new(code: AccessDenialCode, public_message: impl Into<String>) -> Self {
         Self {
             code,
@@ -157,6 +158,7 @@ impl AccessDenial {
             AccessDenialCode::Unavailable => "unavailable",
             AccessDenialCode::Internal => "internal",
             AccessDenialCode::Unauthorized => "unauthorized",
+            AccessDenialCode::NotFound => "not_found",
         }
     }
 
@@ -171,6 +173,7 @@ impl AccessDenial {
                 StatusCode::SERVICE_UNAVAILABLE
             }
             AccessDenialCode::Unauthorized => StatusCode::UNAUTHORIZED,
+            AccessDenialCode::NotFound => StatusCode::NOT_FOUND,
         }
     }
 
@@ -308,11 +311,6 @@ impl UnavailableAccessStrategy {
     pub fn new() -> Self {
         Self
     }
-
-    /// Transition helper name used by the public env builder.
-    pub fn license_backend_unavailable() -> Self {
-        Self
-    }
 }
 
 #[async_trait]
@@ -361,156 +359,10 @@ impl BrokerAccessStrategy for UnavailableAccessStrategy {
     }
 }
 
-/// Temporary adapter that routes the existing [`LicenseStore`] gate through the
-/// strategy seam. Round 2 can replace this with the private implementation.
-#[derive(Clone)]
-pub struct LicenseStoreAccessAdapter {
-    store: Option<LicenseStore>,
-    required: bool,
-}
-
-impl LicenseStoreAccessAdapter {
-    pub fn new(store: Option<LicenseStore>, required: bool) -> Self {
-        Self { store, required }
-    }
-
-    /// Build the strategy the public `app()` entry uses: open when enforcement
-    /// is off and no store is configured; fail-closed when required but the
-    /// store is missing; otherwise the license adapter.
-    pub fn from_public_env(
-        store: Option<LicenseStore>,
-        required: bool,
-    ) -> Arc<dyn BrokerAccessStrategy> {
-        match (required, store) {
-            (false, None) => Arc::new(OpenAccessStrategy),
-            (true, None) => Arc::new(UnavailableAccessStrategy::license_backend_unavailable()),
-            (required, store) => Arc::new(Self::new(store, required)),
-        }
-    }
-}
-
-/// Translate a legacy license-store string into a typed denial without leaking
-/// backend/SQL text. Known phrases keep transition-compatible public messages;
-/// anything else becomes a safe unavailable/internal denial with the raw text
-/// attached as an internal cause only.
-fn map_license_store_error(raw: String) -> AccessDenial {
-    let lower = raw.to_ascii_lowercase();
-    if lower.contains("unavailable") {
-        return AccessDenial::unavailable().with_internal(raw);
-    }
-    if lower.contains("license_code is required") || lower == "license_code is required" {
-        return AccessDenial::bad_request("license_code is required");
-    }
-    if lower.contains("already been used") || lower.contains("already bound") {
-        return AccessDenial::conflict("enrollment token is already bound").with_internal(raw);
-    }
-    if lower.contains("invalid") {
-        // Historical public_api_error scrubbed any "invalid" message to a 401
-        // "request failed". Preserve that status/body for existing license tests.
-        return AccessDenial::unauthorized().with_internal(raw);
-    }
-    if lower.contains("expired") || lower.contains("revoked") || lower.contains("no license") {
-        return AccessDenial::forbidden("access denied for this relay").with_internal(raw);
-    }
-    if lower.contains("failed to")
-        || lower.contains("postgres")
-        || lower.contains("sql")
-        || lower.contains("connection")
-        || lower.contains("schema")
-    {
-        return AccessDenial::unavailable().with_internal(raw);
-    }
-    // Default fail-closed: never echo unknown backend text to clients.
-    AccessDenial::unavailable().with_internal(raw)
-}
-
-#[async_trait]
-impl BrokerAccessStrategy for LicenseStoreAccessAdapter {
-    async fn authorize_enrollment(
-        &self,
-        _ctx: &AccessRequestContext,
-        enrollment_token: Option<&str>,
-        existing_relay_id: Option<&str>,
-    ) -> Result<EnrollmentBindDecision, AccessDenial> {
-        if self.required && self.store.is_none() {
-            return Err(AccessDenial::unavailable());
-        }
-        let Some(store) = &self.store else {
-            return Ok(EnrollmentBindDecision::Skip);
-        };
-        match enrollment_token {
-            Some(code) => match store
-                .validate_code_or_reenroll(code, existing_relay_id)
-                .await
-            {
-                Ok(LicenseEnrollmentAction::Fresh) => Ok(EnrollmentBindDecision::Bind),
-                Ok(LicenseEnrollmentAction::Renewal) => Ok(EnrollmentBindDecision::AlreadyBound),
-                Err(raw) => Err(map_license_store_error(raw)),
-            },
-            None if self.required => Err(AccessDenial::bad_request("license_code is required")),
-            None => Ok(EnrollmentBindDecision::Skip),
-        }
-    }
-
-    async fn bind_enrollment(
-        &self,
-        _ctx: &AccessRequestContext,
-        enrollment_token: &str,
-        relay_id: &str,
-        existing_relay_id: Option<&str>,
-    ) -> Result<(), AccessDenial> {
-        let Some(store) = &self.store else {
-            return Ok(());
-        };
-        if let Some(existing_id) = existing_relay_id {
-            let _ = store
-                .clear_expired_or_revoked_binding(existing_id, enrollment_token)
-                .await;
-        }
-        store
-            .redeem(enrollment_token, relay_id)
-            .await
-            .map_err(map_license_store_error)
-    }
-
-    async fn authorize_relay(
-        &self,
-        _ctx: &AccessRequestContext,
-        relay_id: &str,
-    ) -> Result<(), AccessDenial> {
-        if !self.required {
-            return Ok(());
-        }
-        let Some(store) = &self.store else {
-            return Err(AccessDenial::unavailable());
-        };
-        store
-            .check_relay_access(relay_id)
-            .await
-            .map_err(map_license_store_error)
-    }
-
-    async fn authorize_device(
-        &self,
-        _ctx: &AccessRequestContext,
-        relay_id: &str,
-    ) -> Result<DeviceAccessDecision, AccessDenial> {
-        if !self.required {
-            return Ok(DeviceAccessDecision { device_limit: None });
-        }
-        let Some(store) = &self.store else {
-            return Err(AccessDenial::unavailable());
-        };
-        store
-            .check_relay_access(relay_id)
-            .await
-            .map_err(map_license_store_error)?;
-        let device_limit = store
-            .device_limit_for_relay(relay_id)
-            .await
-            .map_err(map_license_store_error)?;
-        Ok(DeviceAccessDecision { device_limit })
-    }
+/// Standard public `app()` entry: always open. Removed legacy commercial env vars
+/// are ignored and must never select a commercial backend from public code.
+pub fn standard_public_access_strategy() -> Arc<dyn BrokerAccessStrategy> {
+    Arc::new(OpenAccessStrategy)
 }
 
 #[cfg(test)]
@@ -569,74 +421,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn license_adapter_required_without_store_denies() {
-        let strategy = LicenseStoreAccessAdapter::new(None, true);
-        let err = strategy
+    async fn standard_public_access_is_open_even_with_removed_legacy_env() {
+        use std::sync::{Mutex, OnceLock};
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let keys = [
+            "RELAY_BROKER_REQUIRE_LICENSE_CODE",
+            "RELAY_BROKER_TIER_DEVICE_LIMITS",
+            "RELAY_LICENSE_CODE",
+        ];
+        let prev: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        std::env::set_var("RELAY_BROKER_REQUIRE_LICENSE_CODE", "1");
+        std::env::set_var("RELAY_LICENSE_CODE", "ignored");
+
+        let strategy = standard_public_access_strategy();
+        let decision = strategy
             .authorize_enrollment(&ctx(AccessOperation::EnrollmentComplete), None, None)
             .await
-            .expect_err("fail closed");
-        assert_eq!(err.code(), AccessDenialCode::Unavailable);
-    }
+            .expect("standard public selection must ignore removed commercial env");
+        assert_eq!(decision, EnrollmentBindDecision::Skip);
 
-    #[tokio::test]
-    async fn license_adapter_optional_without_store_is_open() {
-        let strategy = LicenseStoreAccessAdapter::new(None, false);
-        assert_eq!(
-            strategy
-                .authorize_enrollment(&ctx(AccessOperation::EnrollmentComplete), None, None)
-                .await
-                .unwrap(),
-            EnrollmentBindDecision::Skip
-        );
-    }
-
-    #[tokio::test]
-    async fn from_public_env_picks_open_unavailable_or_adapter() {
-        let open = LicenseStoreAccessAdapter::from_public_env(None, false);
-        assert_eq!(
-            open.authorize_enrollment(&ctx(AccessOperation::EnrollmentComplete), None, None)
-                .await
-                .unwrap(),
-            EnrollmentBindDecision::Skip
-        );
-
-        let closed = LicenseStoreAccessAdapter::from_public_env(None, true);
-        let err = closed
-            .authorize_enrollment(&ctx(AccessOperation::EnrollmentComplete), None, None)
-            .await
-            .expect_err("required without store must fail closed");
-        assert_eq!(err.code(), AccessDenialCode::Unavailable);
-
-        let store = LicenseStore::for_test(vec![("CODE-1", None)]);
-        let gated = LicenseStoreAccessAdapter::from_public_env(Some(store), true);
-        let missing = gated
-            .authorize_enrollment(&ctx(AccessOperation::EnrollmentComplete), None, None)
-            .await
-            .expect_err("required mode needs a token");
-        assert_eq!(missing.code(), AccessDenialCode::BadRequest);
-        assert_eq!(
-            gated
-                .authorize_enrollment(
-                    &ctx(AccessOperation::EnrollmentComplete),
-                    Some("CODE-1"),
-                    None
-                )
-                .await
-                .unwrap(),
-            EnrollmentBindDecision::Bind
-        );
-    }
-
-    #[test]
-    fn map_license_store_error_does_not_leak_sql() {
-        let denial = map_license_store_error(
-            "failed to query licenses: error returned from database: relation \"licenses\" does not exist"
-                .to_string(),
-        );
-        assert_eq!(denial.code(), AccessDenialCode::Unavailable);
-        assert!(!denial.public_message().contains("relation"));
-        assert!(!denial.public_message().contains("licenses\""));
-        assert!(denial.internal_cause().unwrap().contains("relation"));
+        for (key, value) in prev {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
     }
 
     #[test]
@@ -660,6 +470,14 @@ mod tests {
         assert_eq!(
             AccessDenial::unauthorized().http_status(),
             StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            AccessDenial::not_found("missing").http_status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AccessDenial::not_found("missing").public_error_code(),
+            "not_found"
         );
     }
 }

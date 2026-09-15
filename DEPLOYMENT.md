@@ -1,5 +1,20 @@
 # Deployment
 
+## Hosted Cloud vs self-host OpenAccess
+
+Two different products share related code; do not confuse them:
+
+| | SealWire Cloud (hosted) | Public self-host broker |
+|--|-------------------------|-------------------------|
+| How users attach | `npx sealwire cloud` (or `RELAY_BROKER_URL` to the hosted origin) | You run your own broker |
+| Binary | **`sealwire-broker-private`** (private repo, commercial license policy) | Public **`relay-broker`** (`docker/broker.Dockerfile`) |
+| Deploy config | Private repository only | Explicit example: `examples/self-host-broker/` |
+| Default in this repo | **No** root Railway config / **no** auto-deploy workflow | Docker Compose / example Railway.toml you opt into |
+
+The public repository must **not** automatically deploy OpenAccess `relay-broker`
+onto the hosted Cloud service. There is intentionally **no** root `railway.toml`
+and **no** GitHub Action that runs `railway up` for the broker.
+
 ## Recommended shape
 
 The recommended deployment model today is:
@@ -110,10 +125,12 @@ By default `npx sealwire` starts a **localhost-only** relay; it does not attach
 to a broker unless you tell it to. Commands and flags:
 
 ```bash
-# pair remote devices through the hosted public broker
-sealwire cloud                          # attach to the hosted broker (default
+# pair remote devices through the hosted licensed Cloud broker
+sealwire cloud                          # attach to hosted Cloud (default
                                         # wss://agent-relay.up.railway.app)
-sealwire --broker wss://agent-relay.up.railway.app  # or point at your own
+                                        # — commercial policy runs server-side;
+                                        # this public package never ships it
+sealwire --broker wss://agent-relay.up.railway.app  # or point at your own self-host broker
 
 sealwire local                          # no broker (alias for --no-broker)
 sealwire --no-broker                    # same: run without a broker
@@ -249,9 +266,9 @@ a message pointing at the running one instead of corrupting the file. With
 shared state that means one relay per machine by default; give a second relay
 its own `RELAY_STATE_PATH` to run it alongside.
 
-## Self-hosted broker
+## Self-hosted broker (OpenAccess)
 
-Build and run it with Docker Compose:
+Build and run the **public** `relay-broker` image (not SealWire Cloud):
 
 ```bash
 docker compose up --build relay-broker
@@ -263,6 +280,10 @@ Or directly with Docker:
 docker build -f docker/broker.Dockerfile -t agent-relay-broker .
 docker run --rm -p 8788:8788 -e BIND_HOST=0.0.0.0 agent-relay-broker
 ```
+
+For an explicit Railway self-host layout (volume, VAPID path, single replica),
+see [`examples/self-host-broker/`](examples/self-host-broker/). That example is
+opt-in; copying it is a conscious choice and never the hosted Cloud deploy path.
 
 Then point your local relay-server at that broker:
 
@@ -323,8 +344,8 @@ Broker env:
   invariants — operations are still read-modify-write outside the SQL transaction,
   so e.g. two instances can each pass the same device-limit check and both insert
   a grant. True multi-broker HA needs database-level locking, which this flag does
-  not provide. A single-replica deployment (`railway.toml numReplicas = 1`, no
-  deploy overlap) does not need it.
+  not provide. A single-replica self-host deployment (`examples/self-host-broker/railway.toml`
+  `numReplicas = 1`, no deploy overlap) does not need it.
 - optional `RELAY_BROKER_PUBLIC_RELAY_WS_TTL_SECS`
 - optional `RELAY_BROKER_PUBLIC_DEVICE_WS_TTL_SECS`
 

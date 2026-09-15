@@ -3,15 +3,14 @@ pub mod auth;
 pub mod blocklist;
 pub mod events;
 pub mod join_ticket;
-pub mod licenses;
 pub mod protocol;
 pub mod public_control;
 mod state;
 
 pub use access::{
-    AccessDenial, AccessDenialCode, AccessOperation, AccessRequestContext, BrokerAccessStrategy,
-    DeviceAccessDecision, EnrollmentBindDecision, LicenseStoreAccessAdapter, OpenAccessStrategy,
-    UnavailableAccessStrategy,
+    standard_public_access_strategy, AccessDenial, AccessDenialCode, AccessOperation,
+    AccessRequestContext, BrokerAccessStrategy, DeviceAccessDecision, EnrollmentBindDecision,
+    OpenAccessStrategy, UnavailableAccessStrategy,
 };
 pub use auth::BrokerAuthMode;
 pub use blocklist::{Blocklist, BANNED_IPS_POSTGRES_URL_ENV};
@@ -182,6 +181,10 @@ const GLOBAL_EGRESS_WARN_BYTES_PER_MINUTE: u64 = 2 * 1024 * 1024 * 1024;
 /// does not grow without bound across churning peers. Amortised: pruning is O(n) but only
 /// runs once the map is already large.
 const BYTE_BUCKET_PRUNE_THRESHOLD: usize = 1_024;
+/// Same idea for [`SlidingWindowRateLimiter`]: prune empty/expired windows once the map
+/// grows past this. New keys are refused (counted as limited) while at the cap after
+/// prune so arbitrary IP/key churn cannot grow the map without bound.
+const RATE_LIMIT_BUCKET_PRUNE_THRESHOLD: usize = 1_024;
 const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 24;
 const DEFAULT_MAX_TEXT_FRAME_BYTES: usize = 64 * 1024;
 /// Floor under [`BrokerHardeningConfig::max_text_frame_bytes`].
@@ -218,23 +221,22 @@ const ENABLE_HSTS_ENV: &str = "RELAY_BROKER_ENABLE_HSTS";
 const HSTS_VALUE_ENV: &str = "RELAY_BROKER_HSTS_VALUE";
 const BROKER_WEB_ROOT_ENV: &str = "RELAY_BROKER_WEB_ROOT";
 
+/// Select the access strategy for the standard public [`app`] entry.
+///
+/// Always open. Intentionally ignores removed legacy commercial env vars
+/// (`RELAY_BROKER_REQUIRE_LICENSE_CODE`, `RELAY_BROKER_TIER_DEVICE_LIMITS`,
+/// `RELAY_LICENSE_CODE`, …). Required/private deployments must inject a
+/// strategy via [`app_with_access_strategy`] / required-public builders instead.
+fn select_standard_public_access_strategy() -> Arc<dyn BrokerAccessStrategy> {
+    standard_public_access_strategy()
+}
+
 pub async fn app(state: BrokerState) -> Router {
     let ban_guard = BanGuard::from_env().await;
-    // RELAY_BROKER_REQUIRE_LICENSE_CODE is read once here and threaded through
-    // independently of the store so we can fail closed when the store is None
-    // but required=true (e.g. DB outage at startup).
-    let license_required = licenses::license_required_from_env();
-    let license_store = match licenses::LicenseStore::from_env().await {
-        Ok(store) => store,
-        Err(error) => {
-            // Required but DB unavailable: log loudly, keep store=None.
-            // Handlers see required=true + store=None and reject (fail closed).
-            warn!(%error, "FATAL: license backend unavailable; enrollment will be rejected until fixed");
-            None
-        }
-    };
-    let access =
-        LicenseStoreAccessAdapter::from_public_env(license_store.clone(), license_required);
+    // Standard public broker is always open via
+    // [`select_standard_public_access_strategy`]. Required/private deployments
+    // must inject a strategy via [`app_with_access_strategy`] / required-public
+    // builders.
     app_with_access_strategy_parts(
         state,
         default_web_root(),
@@ -247,9 +249,7 @@ pub async fn app(state: BrokerState) -> Router {
             warn!(%error, "invalid broker security header config; HSTS will stay disabled");
             SecurityHeadersConfig::default()
         }),
-        access,
-        // Admin attribution still reads the temporary license store directly.
-        license_store,
+        select_standard_public_access_strategy(),
         admin_token_from_env(),
     )
     .layer(middleware::from_fn_with_state(ban_guard, reject_banned_ips))
@@ -258,8 +258,8 @@ pub async fn app(state: BrokerState) -> Router {
 /// Build the broker HTTP app with a caller-injected access strategy.
 ///
 /// Private deployments use this to supply their access policy without the public
-/// broker knowing product tiers. The standard [`app`] entry builds the temporary
-/// license adapter (or open/fail-closed defaults) from environment instead.
+/// broker knowing product tiers. The standard [`app`] entry always uses
+/// [`OpenAccessStrategy`].
 ///
 /// This entry follows the same auth-mode defaults as [`app`] (including
 /// self-hosted). Deployments that must never listen without a validated public
@@ -283,7 +283,6 @@ pub async fn app_with_access_strategy(
             SecurityHeadersConfig::default()
         }),
         access,
-        None,
         admin_token_from_env(),
     )
     .layer(middleware::from_fn_with_state(ban_guard, reject_banned_ips))
@@ -307,7 +306,7 @@ pub async fn app_with_access_strategy_required_public(
 }
 
 /// Build a broker app from an already-validated [`PublicControlPlane`].
-/// Product-neutral: no license/tier wording. Does not re-read auth env.
+/// Does not re-read auth env.
 pub async fn app_with_access_strategy_and_public_control(
     state: BrokerState,
     access: Arc<dyn BrokerAccessStrategy>,
@@ -327,7 +326,6 @@ pub async fn app_with_access_strategy_and_public_control(
             SecurityHeadersConfig::default()
         }),
         access,
-        None,
         admin_token_from_env(),
     )
     .layer(middleware::from_fn_with_state(ban_guard, reject_banned_ips))
@@ -345,7 +343,7 @@ pub fn require_public_auth_mode_from_env() -> Result<(), String> {
 }
 
 /// Resolve a public control plane for deployments that must not fall back to
-/// self-host/open join verification. Product-neutral: no license/tier wording.
+/// self-host/open join verification.
 pub async fn required_public_control_plane_from_env() -> Result<PublicControlPlane, String> {
     require_public_auth_mode_from_env()?;
     PublicControlPlane::from_env()
@@ -591,11 +589,8 @@ struct BrokerAppState {
     join_verifier: BrokerJoinVerifier,
     hardening: BrokerHardeningState,
     public_monitoring: PublicMonitoringState,
-    /// Injected access policy (open / fail-closed / license adapter / private).
+    /// Injected access policy (open / fail-closed / private).
     access: Arc<dyn BrokerAccessStrategy>,
-    /// Temporary: license store kept for admin attribution enrichment only.
-    /// Gate decisions go through [`Self::access`]. Round 2 can drop this.
-    license_store: Option<licenses::LicenseStore>,
     /// Per-verify-key locks that serialize relay enrollment completion so that
     /// enroll + access-bind is one atomic transition for a given identity.
     /// This prevents concurrent `/complete` calls for the same verify key from
@@ -1040,6 +1035,22 @@ impl SlidingWindowRateLimiter {
         let now = Instant::now();
         let cutoff = now.checked_sub(window).unwrap_or(now);
         let mut buckets = self.buckets.lock().await;
+        // Prune empty/expired windows at the cardinality cap so churn can free slots.
+        // Without this, refusing inserts at the cap would also prevent prune from ever
+        // running (it used to require len > threshold), leaving a permanent full map.
+        if buckets.len() >= RATE_LIMIT_BUCKET_PRUNE_THRESHOLD {
+            buckets.retain(|_, bucket| {
+                while bucket.front().is_some_and(|timestamp| *timestamp <= cutoff) {
+                    bucket.pop_front();
+                }
+                !bucket.is_empty()
+            });
+        }
+        // After prune, refuse brand-new keys when still at the cardinality cap so
+        // churn cannot grow the map without bound. Existing keys keep refining.
+        if buckets.len() >= RATE_LIMIT_BUCKET_PRUNE_THRESHOLD && !buckets.contains_key(&key) {
+            return false;
+        }
         let bucket = buckets.entry(key).or_default();
         while bucket.front().is_some_and(|timestamp| *timestamp <= cutoff) {
             bucket.pop_front();
@@ -1049,6 +1060,11 @@ impl SlidingWindowRateLimiter {
         }
         bucket.push_back(now);
         true
+    }
+
+    #[cfg(test)]
+    async fn bucket_count_for_test(&self) -> usize {
+        self.buckets.lock().await.len()
     }
 }
 
@@ -1300,8 +1316,9 @@ impl BrokerJoinVerifier {
     }
 }
 
-// Licensing-free convenience wrapper used by the test harness. `app()` uses the
-// access-strategy builder directly.
+// Test harness: open-access wrapper when the call site does not care which
+// strategy is used. Prefer [`app_with_standard_public_access_for_test`] when
+// asserting the standard [`app`] access-selection path.
 #[cfg(test)]
 fn app_with_web_root_and_verifier_and_hardening(
     state: BrokerState,
@@ -1317,34 +1334,32 @@ fn app_with_web_root_and_verifier_and_hardening(
         hardening_config,
         security_headers,
         Arc::new(OpenAccessStrategy),
-        None,
         None, // no admin token → /api/admin/stats not mounted
     )
 }
 
-// Test helper: wraps a license store in the temporary adapter so existing
-// callers keep passing store + required while gates go through the seam.
+/// Test-only constructor that uses the **same** access-strategy selection as
+/// production [`app`] ([`select_standard_public_access_strategy`]), while
+/// allowing an injected join verifier / web root so unit tests do not depend on
+/// live env for the public control plane. If `app()` started consulting removed
+/// commercial env to choose access, regressions that go through this helper
+/// fail the same way production would.
 #[cfg(test)]
-fn app_with_web_root_and_verifier_and_hardening_and_licenses(
+fn app_with_standard_public_access_for_test(
     state: BrokerState,
     web_root: PathBuf,
     join_verifier: BrokerJoinVerifier,
     hardening_config: BrokerHardeningConfig,
     security_headers: SecurityHeadersConfig,
-    license_store: Option<licenses::LicenseStore>,
-    license_required: bool,
     admin_token: Option<Arc<str>>,
 ) -> Router {
-    let access =
-        LicenseStoreAccessAdapter::from_public_env(license_store.clone(), license_required);
     app_with_access_strategy_parts(
         state,
         web_root,
         join_verifier,
         hardening_config,
         security_headers,
-        access,
-        license_store,
+        select_standard_public_access_strategy(),
         admin_token,
     )
 }
@@ -1356,7 +1371,6 @@ fn app_with_access_strategy_parts(
     hardening_config: BrokerHardeningConfig,
     security_headers: SecurityHeadersConfig,
     access: Arc<dyn BrokerAccessStrategy>,
-    license_store: Option<licenses::LicenseStore>,
     admin_token: Option<Arc<str>>,
 ) -> Router {
     if !web_root.join("remote.html").exists() {
@@ -1489,7 +1503,6 @@ fn app_with_access_strategy_parts(
             },
             public_monitoring: PublicMonitoringState::default(),
             access,
-            license_store,
             enrollment_locks: Arc::new(StdMutex::new(HashMap::new())),
             admin_token,
         })
@@ -1629,10 +1642,6 @@ struct AdminRelayRow {
     device_count: u64,
     client_count: u64,
     last_seen: Option<u64>,
-    /// License attribution (code/tier/revoked/…), present when a license store is
-    /// configured and the relay has a bound license.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    license: Option<licenses::LicenseSummary>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1691,8 +1700,7 @@ fn unix_now_secs() -> u64 {
         .as_secs()
 }
 
-/// Operator stats: per-relay device/client counts (busiest first) with license
-/// attribution, so a spammy relay can be traced to its code and revoked. Gated by
+/// Operator stats: per-relay device/client counts (busiest first). Gated by
 /// [`ADMIN_TOKEN_ENV`]; disabled (404) when no token is configured.
 async fn admin_stats(
     State(state): State<BrokerAppState>,
@@ -1731,31 +1739,16 @@ async fn admin_stats(
         .await
         .map_err(public_api_error)?;
 
-    // Enrich with license attribution when a license store is configured.
-    let relay_ids: Vec<String> = stats.relays.iter().map(|r| r.relay_id.clone()).collect();
-    let mut licenses_by_relay = if let Some(store) = &state.license_store {
-        store
-            .license_summaries_for_relays(&relay_ids)
-            .await
-            .map_err(public_api_error)?
-    } else {
-        HashMap::new()
-    };
-
     let relays = stats
         .relays
         .into_iter()
-        .map(|relay| {
-            let license = licenses_by_relay.remove(&relay.relay_id);
-            AdminRelayRow {
-                relay_id: relay.relay_id,
-                broker_room_id: relay.broker_room_id,
-                relay_label: relay.relay_label,
-                device_count: relay.device_count,
-                client_count: relay.client_count,
-                last_seen: relay.last_seen,
-                license,
-            }
+        .map(|relay| AdminRelayRow {
+            relay_id: relay.relay_id,
+            broker_room_id: relay.broker_room_id,
+            relay_label: relay.relay_label,
+            device_count: relay.device_count,
+            client_count: relay.client_count,
+            last_seen: relay.last_seen,
         })
         .collect();
 
@@ -1823,7 +1816,7 @@ async fn public_complete_relay_enrollment(
     // the relay's original refresh credential if binding fails after enrollment
     // replaced its token. Used to:
     // (a) detect same-token re-enrollment after cache loss (AlreadyBound path),
-    // (b) identify the relay_id whose expired/revoked binding to clear, and
+    // (b) identify the relay_id whose access binding may need clearing, and
     // (c) restore the previous credential on bind failure (else new relay → delete).
     let previous_registration: Option<RelayRegistrationSnapshot> = match &verify_key {
         Some(vk) => control_plane.snapshot_relay_registration(vk).await,
@@ -1916,7 +1909,7 @@ async fn public_issue_relay_ws_token(
     enforce_public_api_rate_limit(&state, remote_addr, "relay_ws_token").await?;
 
     // Authenticate first so an unauthenticated caller cannot probe relay IDs to
-    // learn which relays have active/expired/revoked licenses (F3).
+    // learn which relays the access strategy would allow or deny.
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
     match control_plane
@@ -1925,8 +1918,8 @@ async fn public_issue_relay_ws_token(
     {
         Ok(response) => {
             // Access check after successful authentication: deny the token when
-            // the injected strategy refuses the relay lease (expired/revoked
-            // access, fail-closed backend, or a custom deny policy).
+            // the injected strategy refuses the relay lease (revoked access,
+            // fail-closed backend, or a custom deny policy).
             let access_ctx =
                 AccessRequestContext::new(remote_addr.ip(), AccessOperation::RelayLease);
             state
@@ -2078,10 +2071,10 @@ async fn public_issue_device_grant(
         .map_err(device_grant_error)
 }
 
-/// Map a device-grant error. The per-license cap becomes a machine-readable
-/// `device_limit_reached` (403) so the relay and UI can distinguish it from a
-/// generic failure and show "remove a device"; everything else uses the standard
-/// mapping.
+/// Map a device-grant error. A numeric device-cap rejection becomes a
+/// machine-readable `device_limit_reached` (403) so the relay and UI can
+/// distinguish it from a generic failure and show "remove a device"; everything
+/// else uses the standard mapping.
 fn device_grant_error(error: String) -> (StatusCode, Json<ApiErrorBody>) {
     if error.starts_with(DEVICE_LIMIT_REACHED_ERROR_PREFIX) {
         return (

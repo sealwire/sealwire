@@ -1,3 +1,14 @@
+# EXPLICIT SELF-HOST / OpenAccess EXAMPLE ONLY.
+#
+# This is NOT SealWire Cloud production config. The hosted licensed Cloud
+# service is deployed from the private repository as `sealwire-broker-private`.
+# Pointing Railway (or any host) at this file deploys the public `relay-broker`
+# OpenAccess binary — never use it as the default for the hosted Cloud service.
+#
+# To use: copy consciously into a self-host Railway project and set the service
+# root / Dockerfile path yourself. There is no root railway.toml in this repo
+# precisely so accidental `railway up` from the repo root cannot replace Cloud.
+
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "docker/broker.Dockerfile"
@@ -9,11 +20,12 @@ watchPatterns = [
   "frontend/**",
   "package-lock.json",
   "package.json",
-  "railway.toml",
+  "examples/self-host-broker/railway.toml",
   "vite.config.js",
 ]
 
 [deploy]
+# OpenAccess public broker binary — self-host only.
 startCommand = "sh -c 'state_dir=${RAILWAY_VOLUME_MOUNT_PATH:-/data}; mkdir -p $state_dir; export RELAY_BROKER_AUTH_MODE=${RELAY_BROKER_AUTH_MODE:-public} RUST_LOG=${RUST_LOG:-relay_broker=info,tower_http=info} RELAY_VAPID_KEY_PATH=${RELAY_VAPID_KEY_PATH:-$state_dir/vapid.key}; if [ -z \"${RELAY_BROKER_PUBLIC_POSTGRES_URL:-}\" ]; then export RELAY_BROKER_PUBLIC_STATE_PATH=${RELAY_BROKER_PUBLIC_STATE_PATH:-$state_dir/public-control.json}; fi; exec relay-broker'"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 30

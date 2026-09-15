@@ -133,16 +133,16 @@ test("times out instead of reporting an in-progress deployment as successful", a
   );
 });
 
-test("workflow pins the CLI and uses the single-upload deploy script", async () => {
+test("public railway-deploy helper stays available for explicit self-host tooling", async () => {
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  const workflow = await readFile(
-    path.join(repoRoot, ".github/workflows/railway-broker-deploy.yml"),
-    "utf8"
+  const script = await readFile(path.join(repoRoot, "scripts/railway-deploy.mjs"), "utf8");
+  assert.match(script, /waitForDeployment/);
+  assert.match(script, /RAILWAY_SERVICE_ID/);
+  // Hosted Cloud auto-deploy workflow must not exist in the public repo.
+  await assert.rejects(
+    () => readFile(path.join(repoRoot, ".github/workflows/railway-broker-deploy.yml"), "utf8"),
+    /ENOENT/
   );
-
-  assert.match(workflow, /@railway\/cli@5\.28\.0/);
-  assert.match(workflow, /node scripts\/railway-deploy\.mjs/);
-  assert.doesNotMatch(workflow, /for attempt in 1 2 3/);
 });
 
 test("deployment runner uploads once and polls the exact deployment to success", async () => {

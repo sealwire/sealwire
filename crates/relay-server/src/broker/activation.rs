@@ -15,8 +15,9 @@ use zeroize::Zeroize;
 pub(crate) const CLOUD_ACCESS_KEY_ENV: &str = "SEALWIRE_CLOUD_ACCESS_KEY";
 /// One-shot token file path env (mode 0600 best-effort; unlinked after read).
 pub(crate) const CLOUD_ACCESS_KEY_FILE_ENV: &str = "SEALWIRE_CLOUD_ACCESS_KEY_FILE";
-/// Deprecated compatibility alias — still accepted once, then removed.
-pub(crate) const LEGACY_LICENSE_CODE_ENV: &str = "RELAY_LICENSE_CODE";
+/// Removed legacy commercial env name. Scrubbed from the process and children for
+/// safety only — never treated as an activation input or compatibility surface.
+pub(crate) const REMOVED_LEGACY_LICENSE_CODE_ENV: &str = "RELAY_LICENSE_CODE";
 /// Set only by `sealwire cloud` / `cloud-activate`. Generic `--broker` must not set this.
 pub(crate) const CLOUD_ACTIVATION_ENV: &str = "RELAY_CLOUD_ACTIVATION";
 /// Witness envs set by the Node launcher after a successful cloud-activate only.
@@ -89,7 +90,6 @@ impl std::fmt::Debug for ActivationSecret {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ActivationCredentialSource {
     Env,
-    LegacyEnv,
     File,
     Tty,
 }
@@ -104,21 +104,23 @@ pub(crate) fn cloud_activation_required() -> bool {
 
 /// Resolve an activation credential for explicit cloud enrollment only.
 ///
-/// Precedence: file env → cloud access key env → legacy license env → TTY prompt
-/// (only when `allow_tty` and hidden input is available). Env vars are removed
-/// from the process immediately after a successful read.
+/// Precedence: file env → cloud access key env → TTY prompt (only when
+/// `allow_tty` and hidden input is available). Env vars are removed from the
+/// process immediately after a successful read. Removed legacy
+/// `RELAY_LICENSE_CODE` is never accepted as an input (scrub-only).
 pub(crate) fn resolve_activation_credential(
     allow_tty: bool,
 ) -> Result<Option<(ActivationSecret, ActivationCredentialSource)>, String> {
+    // Defense in depth: scrub the removed legacy name so it cannot linger for
+    // children, but never read it as a credential.
+    scrub_env_key(REMOVED_LEGACY_LICENSE_CODE_ENV);
+
     if let Some(path) = take_env_path_string(CLOUD_ACCESS_KEY_FILE_ENV) {
         let secret = read_token_file(Path::new(&path))?;
         return Ok(Some((secret, ActivationCredentialSource::File)));
     }
     if let Some(secret) = take_env_secret(CLOUD_ACCESS_KEY_ENV)? {
         return Ok(Some((secret, ActivationCredentialSource::Env)));
-    }
-    if let Some(secret) = take_env_secret(LEGACY_LICENSE_CODE_ENV)? {
-        return Ok(Some((secret, ActivationCredentialSource::LegacyEnv)));
     }
     if allow_tty {
         match hidden_input_availability() {
@@ -139,17 +141,16 @@ pub(crate) fn resolve_activation_credential(
 
 /// True when any activation override env is currently set (before consume).
 pub(crate) fn activation_override_env_present() -> bool {
-    env_nonempty(CLOUD_ACCESS_KEY_ENV)
-        || env_nonempty(CLOUD_ACCESS_KEY_FILE_ENV)
-        || env_nonempty(LEGACY_LICENSE_CODE_ENV)
+    env_nonempty(CLOUD_ACCESS_KEY_ENV) || env_nonempty(CLOUD_ACCESS_KEY_FILE_ENV)
 }
 
 /// Scrub raw activation secret env vars even when unused (defense in depth).
 /// Never clones secret plaintext into a second String solely to zeroize it.
+/// Also scrubs the removed legacy name so children never inherit it.
 pub(crate) fn scrub_activation_env() {
     scrub_env_key(CLOUD_ACCESS_KEY_ENV);
     scrub_env_key(CLOUD_ACCESS_KEY_FILE_ENV);
-    scrub_env_key(LEGACY_LICENSE_CODE_ENV);
+    scrub_env_key(REMOVED_LEGACY_LICENSE_CODE_ENV);
 }
 
 /// Scrub cloud-activation mode and launch-witness envs (not raw secrets).
@@ -382,16 +383,18 @@ mod tests {
     }
 
     #[test]
-    fn resolve_reads_legacy_env_and_removes_it() {
+    fn resolve_ignores_removed_legacy_license_env() {
         let _guard = env_lock().lock().unwrap();
         scrub_activation_env();
-        std::env::set_var(LEGACY_LICENSE_CODE_ENV, "legacy-code");
-        let (secret, source) = resolve_activation_credential(false)
-            .unwrap()
-            .expect("legacy");
-        assert_eq!(secret.as_str(), "legacy-code");
-        assert_eq!(source, ActivationCredentialSource::LegacyEnv);
-        assert!(std::env::var(LEGACY_LICENSE_CODE_ENV).is_err());
+        std::env::set_var(REMOVED_LEGACY_LICENSE_CODE_ENV, "legacy-code");
+        assert!(
+            resolve_activation_credential(false).unwrap().is_none(),
+            "removed RELAY_LICENSE_CODE must never activate"
+        );
+        assert!(
+            std::env::var(REMOVED_LEGACY_LICENSE_CODE_ENV).is_err(),
+            "legacy name must still be scrubbed"
+        );
         scrub_activation_env();
     }
 
@@ -464,13 +467,13 @@ mod tests {
     fn normal_start_scrub_unconditionally_clears_activation_env() {
         let _guard = env_lock().lock().unwrap();
         std::env::set_var(CLOUD_ACCESS_KEY_ENV, "must-not-reach-providers");
-        std::env::set_var(LEGACY_LICENSE_CODE_ENV, "legacy-must-go");
+        std::env::set_var(REMOVED_LEGACY_LICENSE_CODE_ENV, "legacy-must-go");
         std::env::set_var(CLOUD_ACTIVATION_ENV, "1");
         std::env::set_var(CLOUD_REQUIRE_CACHED_REGISTRATION_ENV, "1");
         std::env::set_var(CLOUD_EXPECTED_BEARER_FP_ENV, "abcdef0123456789");
         let _startup = super::super::capture_and_scrub_activation_for_normal_start();
         assert!(std::env::var_os(CLOUD_ACCESS_KEY_ENV).is_none());
-        assert!(std::env::var_os(LEGACY_LICENSE_CODE_ENV).is_none());
+        assert!(std::env::var_os(REMOVED_LEGACY_LICENSE_CODE_ENV).is_none());
         assert!(std::env::var_os(CLOUD_ACTIVATION_ENV).is_none());
         assert!(std::env::var_os(CLOUD_REQUIRE_CACHED_REGISTRATION_ENV).is_none());
         assert!(std::env::var_os(CLOUD_EXPECTED_BEARER_FP_ENV).is_none());
