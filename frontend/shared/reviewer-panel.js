@@ -561,36 +561,54 @@ function AskThreadCard({ thread, onOpen = null, fetchAskDetail = null }) {
   const live = thread.state === "working";
   const open = onOpen && thread.otherThreadId ? () => onOpen(thread.otherThreadId) : null;
   const askId = thread.latest?.id || null;
-  const [fullMessage, setFullMessage] = React.useState(null);
-  const [fullResult, setFullResult] = React.useState(null);
-  const detailRequestRef = React.useRef(null);
+  // Cache is keyed by ask id: the card itself is keyed by peer thread, so a follow-up
+  // that becomes `latest` keeps this component instance and must not keep the old body.
+  const [detail, setDetail] = React.useState(null);
+  const inflightAskIdRef = React.useRef(null);
+
+  React.useEffect(() => {
+    setDetail((prev) => (prev && prev.askId === askId ? prev : null));
+    if (inflightAskIdRef.current !== askId) {
+      inflightAskIdRef.current = null;
+    }
+  }, [askId]);
+
+  const cached = detail && detail.askId === askId ? detail : null;
+  const fullMessage = cached?.message || null;
+  const fullResult = cached?.result || null;
+  // A hover while the peer is still working may land message-only. Once the card
+  // shows a result preview, allow one more fetch so the answer tooltip can fill in.
+  const wantsResult = Boolean(thread.result) || (!live && thread.state !== "working");
+  const detailComplete = Boolean(fullMessage) && (!wantsResult || Boolean(fullResult));
 
   const loadDetail = () => {
     if (!askId || typeof fetchAskDetail !== "function") {
       return;
     }
-    if (fullMessage != null || detailRequestRef.current === askId) {
+    if (detailComplete || inflightAskIdRef.current === askId) {
       return;
     }
-    detailRequestRef.current = askId;
-    Promise.resolve(fetchAskDetail(askId))
-      .then((detail) => {
-        if (!detail || detail.id !== askId) {
+    const requestedAskId = askId;
+    inflightAskIdRef.current = requestedAskId;
+    Promise.resolve(fetchAskDetail(requestedAskId))
+      .then((payload) => {
+        if (!payload || payload.id !== requestedAskId) {
           return;
         }
-        const message = typeof detail.message === "string" ? detail.message.trim() : "";
-        const result = String(detail.answer || detail.error || "").trim();
-        if (message) {
-          setFullMessage(message);
-        }
-        if (result) {
-          setFullResult(result);
-        }
+        const message = typeof payload.message === "string" ? payload.message.trim() : "";
+        const result = String(payload.answer || payload.error || "").trim();
+        setDetail({
+          askId: requestedAskId,
+          message: message || null,
+          result: result || null,
+        });
       })
       .catch(() => {
         // Hover is best-effort: keep the preview card if the detail read fails.
-        if (detailRequestRef.current === askId) {
-          detailRequestRef.current = null;
+      })
+      .finally(() => {
+        if (inflightAskIdRef.current === requestedAskId) {
+          inflightAskIdRef.current = null;
         }
       });
   };
@@ -610,22 +628,17 @@ function AskThreadCard({ thread, onOpen = null, fetchAskDetail = null }) {
         : undefined,
       role: open ? "button" : undefined,
       tabIndex: open ? 0 : undefined,
+      // The article is the real tab stop when the card is openable. Mouseenter covers
+      // the whole card (title + result); do not put focus handlers on non-focusable h3/p.
+      onMouseEnter: loadDetail,
+      onFocus: loadDetail,
     },
     h(
       "div",
       { className: "reviewer-ask-head" },
       // Previews stay in the DOM; full prompt lands on `title=` only after hover/focus
       // fetches `/api/session/asks/:id`, so multi-KB strings are not retained on every card.
-      h(
-        "h3",
-        {
-          className: "reviewer-card-title",
-          title: fullMessage || undefined,
-          onMouseEnter: loadDetail,
-          onFocus: loadDetail,
-        },
-        thread.title
-      ),
+      h("h3", { className: "reviewer-card-title", title: fullMessage || undefined }, thread.title),
       h(
         "span",
         { className: `reviewer-ask-state is-${live ? "live" : thread.state.replace(/\s+/g, "-")}` },
@@ -636,16 +649,7 @@ function AskThreadCard({ thread, onOpen = null, fetchAskDetail = null }) {
     // Which way round the delegation runs is not in the title any more, so it rides here.
     thread.inbound ? h("p", { className: "reviewer-ask-inbound" }, "asked you") : null,
     thread.result
-      ? h(
-          "p",
-          {
-            className: "reviewer-card-result",
-            title: fullResult || undefined,
-            onMouseEnter: loadDetail,
-            onFocus: loadDetail,
-          },
-          thread.result
-        )
+      ? h("p", { className: "reviewer-card-result", title: fullResult || undefined }, thread.result)
       : null,
     h(RoundRows, { rounds: thread.rounds })
   );

@@ -39,20 +39,26 @@ async function mountPanel(props) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  await act(async () => {
-    root.render(
-      h(ReviewerPanel, {
-        canRequest: false,
-        onDeleteReview() {},
-        onResolveReview() {},
-        // No fetchReviewerTranscript on purpose: the card's polling effect early-returns
-        // without it, so nothing async runs during these synchronous clicks.
-        ...props,
-      })
-    );
-  });
+  const render = async (nextProps) => {
+    await act(async () => {
+      root.render(
+        h(ReviewerPanel, {
+          canRequest: false,
+          onDeleteReview() {},
+          onResolveReview() {},
+          // No fetchReviewerTranscript on purpose: the card's polling effect early-returns
+          // without it, so nothing async runs during these synchronous clicks.
+          ...nextProps,
+        })
+      );
+    });
+  };
+  await render(props);
   return {
     container,
+    async rerender(nextProps) {
+      await render(nextProps);
+    },
     async unmount() {
       await act(async () => root.unmount());
       container.remove();
@@ -168,9 +174,10 @@ test("an ask card opens the agent's session — the card IS the affordance", asy
   await unmount();
 });
 
-test("hovering an ask title lazily loads the full prompt onto title=", async () => {
+test("focusing an ask card lazily loads the full prompt onto title=", async () => {
   // The list channel only ships ledger previews so multi-KB prompts stay out of the
-  // resting DOM. Hover must fetch the detail endpoint before the tooltip can show them.
+  // resting DOM. Focus on the openable card (the real tab stop) must fetch detail
+  // before the tooltip can show them — not a manually focusable heading.
   let fetchCount = 0;
   const fullMessage = "have a look at the retry loop\n\n(hundreds of words of context follow)";
   const { container, unmount } = await mountPanel({
@@ -189,6 +196,7 @@ test("hovering an ask title lazily loads the full prompt onto title=", async () 
       },
     ],
     parentThreadId: "me",
+    onOpenThread: () => {},
     fetchAskDetail: async (askId) => {
       fetchCount += 1;
       assert.equal(askId, "ask-1");
@@ -196,14 +204,13 @@ test("hovering an ask title lazily loads the full prompt onto title=", async () 
     },
   });
 
+  const card = container.querySelector(".reviewer-ask");
   const title = container.querySelector(".reviewer-card-title");
+  assert.equal(card.getAttribute("tabindex"), "0");
   assert.equal(title.getAttribute("title"), null, "resting card keeps full text out of the DOM");
 
-  // React's onMouseEnter is synthetic (mouseover-based); focus is the reliable
-  // keyboard path and shares the same loader.
-  title.setAttribute("tabindex", "0");
   await act(async () => {
-    title.focus();
+    card.focus();
   });
   await act(async () => {});
 
@@ -211,10 +218,143 @@ test("hovering an ask title lazily loads the full prompt onto title=", async () 
   assert.equal(title.getAttribute("title"), fullMessage);
 
   await act(async () => {
-    title.blur();
-    title.focus();
+    card.blur();
+    card.focus();
   });
   assert.equal(fetchCount, 1, "a second focus must not refetch");
+
+  await unmount();
+});
+
+test("a follow-up that advances the card refetches detail for the new ask", async () => {
+  // The card is keyed by peer thread, so React keeps the same AskThreadCard instance
+  // when a later round becomes `latest`. Stale fullMessage must not stick on the tooltip.
+  const fetched = [];
+  const base = {
+    asker_thread_id: "me",
+    peer_thread_id: "them",
+    peer_provider: "codex",
+    status: "done",
+    delivered: true,
+  };
+  const first = {
+    ...base,
+    id: "ask-1",
+    title: "first prompt",
+    message: "first prompt",
+    answer: "first answer",
+    updated_at: 10,
+  };
+  const second = {
+    ...base,
+    id: "ask-2",
+    title: "second prompt",
+    message: "second prompt",
+    answer: "second answer",
+    updated_at: 20,
+  };
+  const props = {
+    parentThreadId: "me",
+    onOpenThread: () => {},
+    fetchAskDetail: async (askId) => {
+      fetched.push(askId);
+      if (askId === "ask-1") {
+        return { id: askId, message: "FULL first prompt", answer: "FULL first answer" };
+      }
+      return { id: askId, message: "FULL second prompt", answer: "FULL second answer" };
+    },
+  };
+
+  const { container, rerender, unmount } = await mountPanel({ ...props, asks: [first] });
+  const card = container.querySelector(".reviewer-ask");
+  await act(async () => {
+    card.focus();
+  });
+  await act(async () => {});
+  assert.deepEqual(fetched, ["ask-1"]);
+  assert.equal(container.querySelector(".reviewer-card-title").getAttribute("title"), "FULL first prompt");
+
+  await rerender({ ...props, asks: [first, second] });
+  assert.equal(
+    container.querySelector(".reviewer-card-title").getAttribute("title"),
+    null,
+    "advancing the latest ask must drop the previous round's tooltip"
+  );
+
+  // The card may still hold focus from the first load; blur so the next focus
+  // actually fires the loader for the new ask id.
+  await act(async () => {
+    card.blur();
+    card.focus();
+  });
+  await act(async () => {});
+  assert.deepEqual(fetched, ["ask-1", "ask-2"]);
+  assert.equal(container.querySelector(".reviewer-card-title").getAttribute("title"), "FULL second prompt");
+  assert.equal(
+    container.querySelector(".reviewer-card-result").getAttribute("title"),
+    "FULL second answer"
+  );
+
+  await unmount();
+});
+
+test("a working ask that later gains an answer refetches detail on the next focus", async () => {
+  // Hovering while the peer is still working caches a message-only detail. When the
+  // ask finishes, the next focus must load the full answer rather than keep a blank
+  // result tooltip forever.
+  const fetched = [];
+  const working = {
+    id: "ask-1",
+    asker_thread_id: "me",
+    peer_thread_id: "them",
+    peer_provider: "codex",
+    title: "look at the retry",
+    message: "look at the retry",
+    status: "working",
+    delivered: false,
+    updated_at: 10,
+  };
+  const done = {
+    ...working,
+    status: "done",
+    delivered: true,
+    answer: "Fixed.",
+    result: "Fixed.",
+    updated_at: 20,
+  };
+  const props = {
+    parentThreadId: "me",
+    onOpenThread: () => {},
+    fetchAskDetail: async (askId) => {
+      fetched.push(askId);
+      if (fetched.length === 1) {
+        return { id: askId, message: "FULL look at the retry", answer: null };
+      }
+      return { id: askId, message: "FULL look at the retry", answer: "FULL Fixed the backoff." };
+    },
+  };
+
+  const { container, rerender, unmount } = await mountPanel({ ...props, asks: [working] });
+  const card = container.querySelector(".reviewer-ask");
+  await act(async () => {
+    card.focus();
+  });
+  await act(async () => {});
+  assert.deepEqual(fetched, ["ask-1"]);
+  assert.equal(container.querySelector(".reviewer-card-title").getAttribute("title"), "FULL look at the retry");
+  assert.equal(container.querySelector(".reviewer-card-result"), null);
+
+  await rerender({ ...props, asks: [done] });
+  await act(async () => {
+    card.blur();
+    card.focus();
+  });
+  await act(async () => {});
+  assert.deepEqual(fetched, ["ask-1", "ask-1"]);
+  assert.equal(
+    container.querySelector(".reviewer-card-result").getAttribute("title"),
+    "FULL Fixed the backoff."
+  );
 
   await unmount();
 });
