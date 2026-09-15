@@ -167,3 +167,54 @@ test("an ask card opens the agent's session — the card IS the affordance", asy
 
   await unmount();
 });
+
+test("hovering an ask title lazily loads the full prompt onto title=", async () => {
+  // The list channel only ships ledger previews so multi-KB prompts stay out of the
+  // resting DOM. Hover must fetch the detail endpoint before the tooltip can show them.
+  let fetchCount = 0;
+  const fullMessage = "have a look at the retry loop\n\n(hundreds of words of context follow)";
+  const { container, unmount } = await mountPanel({
+    asks: [
+      {
+        id: "ask-1",
+        asker_thread_id: "me",
+        peer_thread_id: "them",
+        peer_provider: "codex",
+        title: "have a look at the retry loop",
+        message: "have a look at the retry loop",
+        answer: "Fixed.",
+        status: "done",
+        delivered: true,
+        updated_at: 10,
+      },
+    ],
+    parentThreadId: "me",
+    fetchAskDetail: async (askId) => {
+      fetchCount += 1;
+      assert.equal(askId, "ask-1");
+      return { id: askId, message: fullMessage, answer: "Fixed the backoff in full." };
+    },
+  });
+
+  const title = container.querySelector(".reviewer-card-title");
+  assert.equal(title.getAttribute("title"), null, "resting card keeps full text out of the DOM");
+
+  // React's onMouseEnter is synthetic (mouseover-based); focus is the reliable
+  // keyboard path and shares the same loader.
+  title.setAttribute("tabindex", "0");
+  await act(async () => {
+    title.focus();
+  });
+  await act(async () => {});
+
+  assert.equal(fetchCount, 1);
+  assert.equal(title.getAttribute("title"), fullMessage);
+
+  await act(async () => {
+    title.blur();
+    title.focus();
+  });
+  assert.equal(fetchCount, 1, "a second focus must not refetch");
+
+  await unmount();
+});

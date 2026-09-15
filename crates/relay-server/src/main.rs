@@ -44,18 +44,18 @@ use futures_util::stream::{self, StreamExt};
 use host_guard::HostPolicy;
 use protocol::{
     AllowedRootsInput, AllowedRootsReceipt, ApiEnvelope, ApiError, ApplyFileChangeInput,
-    ApplyFileChangeReceipt, ApprovalDecisionInput, ApprovalReceipt, AskUserAnswerReceipt,
-    AuthSessionInput, AuthSessionView, BulkRevokeDevicesReceipt, CommentHandBackInput,
-    CommentMutationReceipt, CommentResolveInput, CreateCommentInput, DeleteThreadInput,
-    DevicesResponse, ForkSessionInput, HealthResponse, HeartbeatInput, ListCommentsQuery,
-    ListCommentsResponse, ListReviewTicksQuery, ListReviewTicksResponse, ModelOptionView,
-    PairingDecisionInput, PairingDecisionReceipt, PairingStartInput, PairingTicketView,
-    ProjectActionInput, ProjectActionReceipt, ProjectsResponse, ReadThreadEntryDetailInput,
-    ReadThreadTranscriptInput, RenameThreadInput, RepairWorkspaceInput, RequestReviewInput,
-    RequestReviewReceipt, ResolvedWorkspace, ResumeSessionInput, ReviewActionInput,
-    ReviewDeleteReceipt, ReviewsResponse, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
-    SessionSnapshotCompactProfile, SetThreadFlagInput, StartSessionInput, StartTeamInput,
-    StartTeamReceipt, StartWorkflowInput, StartWorkflowReceipt, StopTurnInput,
+    ApplyFileChangeReceipt, ApprovalDecisionInput, ApprovalReceipt, AskDetailResponse,
+    AskUserAnswerReceipt, AuthSessionInput, AuthSessionView, BulkRevokeDevicesReceipt,
+    CommentHandBackInput, CommentMutationReceipt, CommentResolveInput, CreateCommentInput,
+    DeleteThreadInput, DevicesResponse, ForkSessionInput, HealthResponse, HeartbeatInput,
+    ListCommentsQuery, ListCommentsResponse, ListReviewTicksQuery, ListReviewTicksResponse,
+    ModelOptionView, PairingDecisionInput, PairingDecisionReceipt, PairingStartInput,
+    PairingTicketView, ProjectActionInput, ProjectActionReceipt, ProjectsResponse,
+    ReadThreadEntryDetailInput, ReadThreadTranscriptInput, RenameThreadInput, RepairWorkspaceInput,
+    RequestReviewInput, RequestReviewReceipt, ResolvedWorkspace, ResumeSessionInput,
+    ReviewActionInput, ReviewDeleteReceipt, ReviewsResponse, RevokeDeviceReceipt, SendMessageInput,
+    SessionSnapshot, SessionSnapshotCompactProfile, SetThreadFlagInput, StartSessionInput,
+    StartTeamInput, StartTeamReceipt, StartWorkflowInput, StartWorkflowReceipt, StopTurnInput,
     SubmitAskUserAnswerInput, TakeOverInput, TeamActionInput, TeamActionReceipt, TeamFileResponse,
     TeamMarkInput, TeamsResponse, ThreadArchiveReceipt, ThreadDeleteReceipt,
     ThreadEntryDetailResponse, ThreadFlagReceipt, ThreadRenameReceipt, ThreadSettingsView,
@@ -457,6 +457,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route("/api/session/review/resolve", post(resolve_review))
         .route("/api/session/workflow/resolve", post(resolve_workflow))
         .route("/api/session/reviews", get(list_reviews))
+        .route("/api/session/asks/:ask_id", get(get_ask_detail))
         .route("/api/session/workflows", get(list_workflows))
         .route("/api/session/team", post(start_team))
         .route("/api/session/team/pause", post(pause_team))
@@ -1801,6 +1802,23 @@ async fn list_reviews(
     // so the panel survives live-turn compaction (which drains `active_review_jobs`).
     // `None`: this is the local operator surface (full access), mirroring `workspace_diff`.
     Ok(Json(ApiEnvelope::ok(context.app.reviews(None).await)))
+}
+
+async fn get_ask_detail(
+    Path(ask_id): Path<String>,
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<ApiEnvelope<AskDetailResponse>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    // Local operator surface: no device scope, same as `list_reviews`. Full bodies —
+    // the reviews list only ships ledger previews so a fat ask cannot bloat every paint.
+    context
+        .app
+        .ask_detail(ask_id, None)
+        .await
+        .map(|detail| Json(ApiEnvelope::ok(detail)))
+        .map_err(bad_request)
 }
 
 async fn list_workflows(

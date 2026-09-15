@@ -171,6 +171,26 @@ impl Ask {
             updated_at: self.updated_at,
         }
     }
+
+    /// Unbounded bodies for `GET /api/session/asks/:ask_id`. The list channel stays
+    /// preview-only; this is the on-demand read for hover / expand.
+    pub(crate) fn detail(&self) -> crate::protocol::AskDetailResponse {
+        crate::protocol::AskDetailResponse {
+            id: self.id.clone(),
+            asker_thread_id: self.asker_thread_id.clone(),
+            peer_thread_id: self.peer_thread_id.clone(),
+            peer_provider: self.peer_provider.clone(),
+            asker_provider: self.asker_provider.clone(),
+            peer_model: self.peer_model.clone(),
+            peer_effort: self.peer_effort.clone(),
+            message: self.message.clone(),
+            answer: self.answer.clone(),
+            status: self.status.as_str().to_string(),
+            error: self.error.clone(),
+            delivered: self.delivered,
+            updated_at: self.updated_at,
+        }
+    }
 }
 
 /// Match the ledger's first-meaningful-line cleanup without putting a JS parser in the

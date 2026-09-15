@@ -27753,6 +27753,118 @@ watchdog settle this Blocked",
     }
 
     #[tokio::test]
+    async fn ask_detail_returns_the_full_bodies_the_list_channel_truncates() {
+        // The reviews list ships ledger previews so a multi-KB ask cannot bloat every
+        // Agents paint. Hover / expand needs the complete prompt and answer on a
+        // separate read — this is that channel's contract.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = goal_session(&app, &cwd).await;
+
+        let full_message = format!(
+            "{}\n\n{}",
+            "have a look at the retry loop and the archive path together",
+            "context ".repeat(400)
+        );
+        let full_answer = format!("Fixed the backoff.\n\n{}", "detail ".repeat(200));
+        let ask_id = {
+            let mut relay = app.relay.write().await;
+            let mut ask = crate::state::delegation::Ask::new(
+                "ask-full-1".to_string(),
+                asker.clone(),
+                String::new(),
+                "fake".to_string(),
+                None,
+                None,
+                full_message.clone(),
+                cwd.clone(),
+                None,
+                relay_api::delegation::StartedBy::Person,
+            );
+            ask.finish(full_answer.clone());
+            let id = ask.id.clone();
+            relay.insert_ask(ask);
+            id
+        };
+
+        let listed = {
+            let relay = app.relay.read().await;
+            relay
+                .reviews_response(None)
+                .asks
+                .into_iter()
+                .find(|ask| ask.id == ask_id)
+                .expect("list must still show the card")
+        };
+        assert!(
+            listed.message.chars().count() <= 80,
+            "list message must stay a title preview, got {} chars: {:?}",
+            listed.message.chars().count(),
+            listed.message
+        );
+        assert_ne!(
+            listed.message, full_message,
+            "list must not ship the full prompt"
+        );
+        assert_ne!(
+            listed.answer.as_deref(),
+            Some(full_answer.as_str()),
+            "list must not ship the full answer"
+        );
+
+        let detail = app
+            .ask_detail(ask_id.clone(), None)
+            .await
+            .expect("detail must resolve for an in-scope ask");
+        assert_eq!(detail.message, full_message);
+        assert_eq!(detail.answer.as_deref(), Some(full_answer.as_str()));
+        assert_eq!(detail.status, "done");
+    }
+
+    #[tokio::test]
+    async fn ask_detail_hides_out_of_scope_asks_as_missing() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let other = TempDir::new().expect("other");
+        let other_cwd = other.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        grant_workspace(&app, &other_cwd).await;
+        pair_device(&app, "phone", vec![cwd.clone()]).await;
+        let asker = goal_session(&app, &other_cwd).await;
+
+        let ask_id = {
+            let mut relay = app.relay.write().await;
+            let ask = crate::state::delegation::Ask::new(
+                "ask-other-ws".to_string(),
+                asker,
+                String::new(),
+                "fake".to_string(),
+                None,
+                None,
+                "secret from another tree".to_string(),
+                other_cwd,
+                None,
+                relay_api::delegation::StartedBy::Person,
+            );
+            let id = ask.id.clone();
+            relay.insert_ask(ask);
+            id
+        };
+
+        let err = app
+            .ask_detail(ask_id, Some("phone".to_string()))
+            .await
+            .expect_err("a phone outside this ask's workspace must not learn it exists");
+        assert!(
+            err.contains("no such ask"),
+            "out-of-scope must look like missing, got {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn ask_rounds_are_not_capped_per_session() {
         // Peer *count* is still limited; ask *rounds* to those peers are not —
         // the goal turn budget already bounds the loop. Past the old twenty-ask

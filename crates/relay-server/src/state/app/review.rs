@@ -676,6 +676,17 @@ to this thread."
         relay.reviews_response(device_id.as_deref())
     }
 
+    /// Full ask bodies for on-demand reads (Agents card hover). Same path fence as
+    /// `reviews`: a paired device only sees asks whose ends sit in its workspace.
+    pub async fn ask_detail(
+        &self,
+        ask_id: String,
+        device_id: Option<String>,
+    ) -> Result<crate::protocol::AskDetailResponse, String> {
+        let relay = self.relay.read().await;
+        relay.ask_detail(&ask_id, device_id.as_deref())
+    }
+
     /// Delete a finished review: drop its job record and archive the reviewer
     /// thread (so it leaves history). Only allowed on terminal reviews — an active
     /// or blocked review must be stopped/resolved first.

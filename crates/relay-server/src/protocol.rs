@@ -3138,7 +3138,7 @@ pub struct GoalView {
 /// One ask: A handed B a message and is waiting. This is a list/card projection.
 /// `title` / `result` are the ledger fields; `message` / `answer` / `error` repeat
 /// those previews under the legacy names so older clients still render a card.
-/// The peer sessions retain the full transcripts.
+/// Full bodies are on `GET /api/session/asks/:ask_id` (`AskDetailResponse`).
 #[derive(Debug, Clone, Serialize)]
 pub struct AskView {
     pub id: String,
@@ -3164,6 +3164,29 @@ pub struct AskView {
     pub answer: Option<String>,
     pub status: String,
     /// One-line failure preview, bounded like `result`.
+    pub error: Option<String>,
+    pub delivered: bool,
+    pub updated_at: u64,
+}
+
+/// Full ask bodies for on-demand reads (hover tooltip, expand). Not bounded —
+/// the reviews list stays preview-only so a fat ask cannot bloat every paint.
+#[derive(Debug, Clone, Serialize)]
+pub struct AskDetailResponse {
+    pub id: String,
+    pub asker_thread_id: String,
+    pub peer_thread_id: String,
+    pub peer_provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asker_provider: Option<String>,
+    pub peer_model: Option<String>,
+    pub peer_effort: Option<String>,
+    /// Complete asker prompt (not the ledger title preview).
+    pub message: String,
+    /// Complete peer answer when present.
+    pub answer: Option<String>,
+    pub status: String,
+    /// Complete failure text when present.
     pub error: Option<String>,
     pub delivered: bool,
     pub updated_at: u64,

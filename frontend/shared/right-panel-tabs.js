@@ -121,6 +121,7 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
           onResolveWorkflow: reviewer.onResolveWorkflow,
           onDeleteReview: reviewer.onDeleteReview,
           fetchReviewerTranscript: reviewer.fetchReviewerTranscript,
+          fetchAskDetail: reviewer.fetchAskDetail,
         })
       : changes
   );

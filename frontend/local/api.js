@@ -178,6 +178,18 @@ export async function getReviews(apiFetch, deviceId) {
   return payload.data;
 }
 
+// Full ask bodies (prompt + answer). The reviews list only ships ledger previews.
+export async function getAskDetail(apiFetch, askId) {
+  const response = await apiFetch(`/api/session/asks/${encodeURIComponent(askId)}`, {
+    method: "GET",
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.error?.message || "Failed to load ask");
+  }
+  return payload.data;
+}
+
 export async function getWorkflows(apiFetch, deviceId) {
   const suffix = deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : "";
   const response = await apiFetch(`/api/session/workflows${suffix}`, { method: "GET" });

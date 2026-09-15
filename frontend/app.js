@@ -107,6 +107,7 @@ import {
   fetchAuthSession,
   getDevices,
   getReviews,
+  getAskDetail,
   getWorkflows,
   getTeams,
   startTeam,
@@ -731,6 +732,9 @@ const reviewerActions = {
     Promise.resolve(state.controller?.fetchTranscriptPage(threadId, {})).then(
       (page) => reviewerPreviewEntriesFromPage(state.session, page)
     ),
+  // On-demand full ask bodies. The reviews list only ships ledger previews so a
+  // fat prompt cannot sit in every Agents paint; hover loads the complete text.
+  fetchAskDetail: (askId) => getAskDetail(apiFetch, askId),
 };
 
 const workspaceDiffSheet = createWorkspaceDiffSheet({

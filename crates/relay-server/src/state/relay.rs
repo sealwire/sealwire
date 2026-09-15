@@ -3463,7 +3463,7 @@ impl RelayState {
     /// revision). Served on demand via `/api/session/reviews` (local) and the `fetch_reviews`
     /// broker action (remote), decoupled from the byte-budgeted snapshot so the panel stays
     /// populated even while a live turn drains `active_review_jobs`. Ask entries are bounded
-    /// ledger previews; the complete exchanges remain in their session transcripts.
+    /// ledger previews; full bodies are on `ask_detail` (`GET /api/session/asks/:ask_id`).
     pub(crate) fn reviews_response(
         &self,
         device_id: Option<&str>,
@@ -3524,6 +3524,37 @@ impl RelayState {
                 .filter(|goal| in_scope(&goal.thread_id))
                 .collect(),
         }
+    }
+
+    /// Full ask body for on-demand reads. Same workspace fence as `reviews_response`:
+    /// both ends must be in scope, and an out-of-scope id looks like a missing ask
+    /// so the detail channel cannot confirm another workspace's exchange exists.
+    pub(crate) fn ask_detail(
+        &self,
+        ask_id: &str,
+        device_id: Option<&str>,
+    ) -> Result<crate::protocol::AskDetailResponse, String> {
+        let ask = self
+            .ask(ask_id)
+            .ok_or_else(|| "there is no such ask".to_string())?;
+        let scope = device_id
+            .map(|id| self.device_path_scope(id))
+            .unwrap_or_default();
+        let in_scope = |parent_thread_id: &str| -> bool {
+            match self.thread_cwd(parent_thread_id) {
+                Some(cwd) => {
+                    crate::state::ensure_path_within_device_scope(&cwd, &scope, &self.allowed_roots)
+                        .is_ok()
+                }
+                None => scope.is_empty() && self.allowed_roots.is_empty(),
+            }
+        };
+        if !in_scope(&ask.asker_thread_id)
+            || (!ask.peer_thread_id.is_empty() && !in_scope(&ask.peer_thread_id))
+        {
+            return Err("there is no such ask".to_string());
+        }
+        Ok(ask.detail())
     }
 
     /// Minimal, non-terminal review state that must arrive synchronously with a

@@ -557,9 +557,44 @@ function ReviewSlot({
 
 // One delegation subject. Repeat follow-ups to the same agent session are rounds INSIDE
 // it, so the panel stops printing the same subject once per turn.
-function AskThreadCard({ thread, onOpen = null }) {
+function AskThreadCard({ thread, onOpen = null, fetchAskDetail = null }) {
   const live = thread.state === "working";
   const open = onOpen && thread.otherThreadId ? () => onOpen(thread.otherThreadId) : null;
+  const askId = thread.latest?.id || null;
+  const [fullMessage, setFullMessage] = React.useState(null);
+  const [fullResult, setFullResult] = React.useState(null);
+  const detailRequestRef = React.useRef(null);
+
+  const loadDetail = () => {
+    if (!askId || typeof fetchAskDetail !== "function") {
+      return;
+    }
+    if (fullMessage != null || detailRequestRef.current === askId) {
+      return;
+    }
+    detailRequestRef.current = askId;
+    Promise.resolve(fetchAskDetail(askId))
+      .then((detail) => {
+        if (!detail || detail.id !== askId) {
+          return;
+        }
+        const message = typeof detail.message === "string" ? detail.message.trim() : "";
+        const result = String(detail.answer || detail.error || "").trim();
+        if (message) {
+          setFullMessage(message);
+        }
+        if (result) {
+          setFullResult(result);
+        }
+      })
+      .catch(() => {
+        // Hover is best-effort: keep the preview card if the detail read fails.
+        if (detailRequestRef.current === askId) {
+          detailRequestRef.current = null;
+        }
+      });
+  };
+
   return h(
     "article",
     {
@@ -579,9 +614,18 @@ function AskThreadCard({ thread, onOpen = null }) {
     h(
       "div",
       { className: "reviewer-ask-head" },
-      // The session behind the card carries the complete exchange. Do not attach raw
-      // legacy prompts to `title=`: browsers would retain multi-KB strings in the DOM.
-      h("h3", { className: "reviewer-card-title" }, thread.title),
+      // Previews stay in the DOM; full prompt lands on `title=` only after hover/focus
+      // fetches `/api/session/asks/:id`, so multi-KB strings are not retained on every card.
+      h(
+        "h3",
+        {
+          className: "reviewer-card-title",
+          title: fullMessage || undefined,
+          onMouseEnter: loadDetail,
+          onFocus: loadDetail,
+        },
+        thread.title
+      ),
       h(
         "span",
         { className: `reviewer-ask-state is-${live ? "live" : thread.state.replace(/\s+/g, "-")}` },
@@ -591,12 +635,23 @@ function AskThreadCard({ thread, onOpen = null }) {
     ),
     // Which way round the delegation runs is not in the title any more, so it rides here.
     thread.inbound ? h("p", { className: "reviewer-ask-inbound" }, "asked you") : null,
-    thread.result ? h("p", { className: "reviewer-card-result" }, thread.result) : null,
+    thread.result
+      ? h(
+          "p",
+          {
+            className: "reviewer-card-result",
+            title: fullResult || undefined,
+            onMouseEnter: loadDetail,
+            onFocus: loadDetail,
+          },
+          thread.result
+        )
+      : null,
     h(RoundRows, { rounds: thread.rounds })
   );
 }
 
-function AgentGroup({ group, onOpen = null }) {
+function AgentGroup({ group, onOpen = null, fetchAskDetail = null }) {
   const mark = providerMark(group.provider, "reviewer-agent-mark");
   // Only invent a letter when we have a real name and no shipped mark. Never for
   // the "another agent" placeholder — that used to paint "a", then "?", both of
@@ -625,7 +680,9 @@ function AgentGroup({ group, onOpen = null }) {
         group.working ? sinceLabel(group.updatedAt, true) : "idle"
       )
     ),
-    ...group.threads.map((thread) => h(AskThreadCard, { key: thread.key, onOpen, thread }))
+    ...group.threads.map((thread) =>
+      h(AskThreadCard, { key: thread.key, onOpen, fetchAskDetail, thread })
+    )
   );
 }
 
@@ -650,6 +707,7 @@ function reviewerThreadName(job, reviewerThreads) {
 //   onResolveWorkflow: (runId) => void           (stop a workflow)
 //   onDeleteReview:    (jobId) => void           (delete a terminal review)
 //   fetchReviewerTranscript: (threadId) => Promise<entries[]>
+//   fetchAskDetail: (askId) => Promise<{ message, answer?, error? }>
 export function ReviewerPanel({
   reviewJobs = [],
   asks = [],
@@ -683,6 +741,7 @@ export function ReviewerPanel({
   onResolveWorkflow,
   onDeleteReview,
   fetchReviewerTranscript,
+  fetchAskDetail = null,
   panelId = "review-panel",
 }) {
   const review = reviewLedger(reviewJobs);
@@ -726,7 +785,9 @@ export function ReviewerPanel({
       agents.length
         ? h(LedgerHeading, { label: "Asked", meta: askedSummary(agents) })
         : null,
-      ...agents.map((group) => h(AgentGroup, { group, key: group.key, onOpen: onOpenThread })),
+      ...agents.map((group) =>
+        h(AgentGroup, { group, key: group.key, onOpen: onOpenThread, fetchAskDetail })
+      ),
       // Runs trail the results: a review card answers "what did it conclude", a run
       // answers "what is happening right now".
       hasWorkflowRuns

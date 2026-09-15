@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   deleteReview,
+  getAskDetail,
   getReviews,
   getTeams,
   requestReview,
@@ -209,6 +210,21 @@ test("getReviews GETs the reviews endpoint with the device id and returns the li
   const result = await getReviews(apiFetch, "device-a");
   assert.deepEqual(result, jobs);
   assert.equal(calls[0].input, "/api/session/reviews?device_id=device-a");
+  assert.equal(calls[0].init.method, "GET");
+});
+
+test("getAskDetail GETs the ask detail endpoint and returns the full bodies", async () => {
+  const detail = {
+    id: "ask/with space",
+    message: "full prompt\n\nwith context",
+    answer: "full answer",
+    status: "done",
+  };
+  const { apiFetch, calls } = makeFetchStub(jsonResponse({ ok: true, data: detail }));
+
+  const result = await getAskDetail(apiFetch, "ask/with space");
+  assert.deepEqual(result, detail);
+  assert.equal(calls[0].input, "/api/session/asks/ask%2Fwith%20space");
   assert.equal(calls[0].init.method, "GET");
 });
 
