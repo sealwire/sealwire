@@ -61,7 +61,7 @@ const DEFAULT_CLIENT_CLAIM_TTL_SECS: u64 = 300;
 const MAX_PENDING_CLIENT_CLAIMS: usize = 512;
 const PUBLIC_CONTROL_STATE_VERSION: u32 = 2;
 
-/// Stable prefix on the per-license device-cap error, so the HTTP layer can map
+/// Stable prefix on the per-relay device-cap error, so the HTTP layer can map
 /// it to a machine-readable `device_limit_reached` code (and callers/UI can match
 /// it) without fragile full-string comparisons.
 pub const DEVICE_LIMIT_REACHED_ERROR_PREFIX: &str = "device limit reached";
@@ -125,6 +125,7 @@ pub struct RelayEnrollmentChallengeResponse {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RelayEnrollmentCompleteRequest {
     pub relay_verify_key: String,
     pub challenge_id: String,
@@ -133,8 +134,8 @@ pub struct RelayEnrollmentCompleteRequest {
     pub relay_label: Option<String>,
     /// Cloud access / enrollment credential the relay presents at enrollment.
     /// Required when the broker enforces access tokens; ignored otherwise.
-    /// `license_code` remains accepted as a temporary wire alias.
-    #[serde(default, alias = "license_code")]
+    /// Legacy wire name `license_code` is rejected as an unknown field.
+    #[serde(default)]
     pub enrollment_token: Option<String>,
 }
 
@@ -447,7 +448,7 @@ struct PendingClientClaim {
 }
 
 /// Opaque snapshot of a relay registration captured before re-enrollment, so the
-/// original credential can be restored if a later step (license redemption) fails.
+/// original credential can be restored if a later step (access bind) fails.
 pub struct RelayRegistrationSnapshot(PersistedRelayRegistration);
 
 impl RelayRegistrationSnapshot {
@@ -558,8 +559,7 @@ pub struct AdminTotals {
 }
 
 /// Per-relay device/client counts, sorted by `device_count` descending so the
-/// noisiest relays surface first. License attribution is joined on separately by
-/// the caller (the license table lives outside the control-plane store).
+/// noisiest relays surface first.
 #[derive(Debug, Clone, Serialize)]
 pub struct AdminRelayStat {
     pub relay_id: String,
@@ -790,7 +790,7 @@ impl PublicControlPlane {
 
     /// Capture the current registration for `verify_key`, if any, without modifying
     /// state. The returned opaque snapshot lets the caller [`restore_relay_registration`]
-    /// the relay's original refresh credential if a later step (license redemption)
+    /// the relay's original refresh credential if a later step (access bind)
     /// fails after `complete_relay_enrollment` replaced it with a new token.
     pub async fn snapshot_relay_registration(
         &self,
@@ -1096,8 +1096,8 @@ impl PublicControlPlane {
 
     /// Issue a device grant for a relay-authenticated request.
     ///
-    /// `device_limit` is the per-license device cap resolved by the caller from
-    /// the license tier (`None` = unlimited, e.g. licensing disabled). The cap is
+    /// `device_limit` is the numeric device cap resolved by the caller's access
+    /// strategy (`None` = unlimited). The cap is
     /// enforced only for NET-NEW devices, and BEFORE any state mutation, so:
     ///   - re-registering an existing `device_id` always succeeds (it adds no
     ///     seat, and stays allowed even when already over-limit after a downgrade —
@@ -1125,7 +1125,7 @@ impl PublicControlPlane {
                 let current = store.count_device_grants_for_relay(&registration.relay_id);
                 if current as u64 >= u64::from(limit) {
                     return Err(format!(
-                        "{DEVICE_LIMIT_REACHED_ERROR_PREFIX}: this license allows {limit} \
+                        "{DEVICE_LIMIT_REACHED_ERROR_PREFIX}: this relay allows {limit} \
                          device(s); remove a device to add a new one"
                     ));
                 }
@@ -2142,7 +2142,7 @@ impl PublicControlStateStore {
 
     /// Count device grants currently bound to `relay_id`. One grant row == one
     /// registered device (device_id is deduped on issue), so this is the seat
-    /// count the per-license limit is compared against.
+    /// count the numeric device limit is compared against.
     fn count_device_grants_for_relay(&self, relay_id: &str) -> usize {
         self.grants_by_hash
             .values()

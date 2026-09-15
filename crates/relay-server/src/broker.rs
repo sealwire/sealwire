@@ -39,7 +39,7 @@ use self::activation::{
     activation_override_env_present, cloud_activation_required,
     discard_oneshot_activation_file_input, resolve_activation_credential, scrub_activation_env,
     scrub_all_cloud_activation_env_for_normal_start, CLOUD_ACCESS_KEY_ENV,
-    CLOUD_ACCESS_KEY_FILE_ENV, CLOUD_ACTIVATION_ENV, LEGACY_LICENSE_CODE_ENV,
+    CLOUD_ACCESS_KEY_FILE_ENV, CLOUD_ACTIVATION_ENV,
 };
 use self::auth::{
     build_control_plane_client, complete_public_relay_enrollment, parse_control_plane_url,
@@ -536,8 +536,8 @@ impl BrokerConfig {
         startup_context: BrokerStartupContext,
     ) -> Result<BrokerConfigResolution, String> {
         // Never forward activation env into provider children: consume-or-scrub
-        // happens during resolution / enrollment. Legacy RELAY_LICENSE_CODE is
-        // only accepted as a one-shot compatibility input inside activation.rs.
+        // happens during resolution / enrollment. Removed RELAY_LICENSE_CODE is
+        // scrub-only and never accepted as an activation input.
         Self::from_parts_resolution_with_startup_context(
             std::env::var("RELAY_BROKER_URL").ok(),
             std::env::var("RELAY_BROKER_PUBLIC_URL").ok(),
@@ -1288,7 +1288,7 @@ pub(crate) async fn run_cloud_activate_core(allow_tty: bool) -> i32 {
                 return Err(format!(
                     "SealWire Cloud enrollment requires a Cloud access key. \
                      Set {CLOUD_ACCESS_KEY_ENV} or {CLOUD_ACCESS_KEY_FILE_ENV}, \
-                     or run interactively in a TTY. Deprecated: {LEGACY_LICENSE_CODE_ENV}."
+                     or run interactively in a TTY."
                 ));
             }
         };

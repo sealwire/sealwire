@@ -68,9 +68,10 @@ if (args.unbind) {
 // binary/PATH probes that spawn subprocesses (cargo/codex --version inherit env).
 let capturedAccessKey = process.env[CLOUD_ACCESS_KEY_ENV] ?? null;
 let capturedAccessKeyFile = process.env[CLOUD_ACCESS_KEY_FILE_ENV] ?? null;
-let capturedLegacyLicense = process.env.RELAY_LICENSE_CODE ?? null;
 delete process.env[CLOUD_ACCESS_KEY_ENV];
 delete process.env[CLOUD_ACCESS_KEY_FILE_ENV];
+// Scrub-only: removed legacy commercial name must never reach children or be
+// forwarded as an activation input.
 delete process.env.RELAY_LICENSE_CODE;
 // Strip ambient cloud mode/witness from the parent process immediately so they
 // cannot leak into PATH probes or non-cloud children.
@@ -85,7 +86,6 @@ if (!args.cloud) {
   // Non-cloud modes never consume captured secrets — drop reachable plaintext now.
   capturedAccessKey = null;
   capturedAccessKeyFile = null;
-  capturedLegacyLicense = null;
 }
 
 const relayServerBinary = resolveRelayServerBinary();
@@ -198,13 +198,11 @@ if (args.cloud) {
     relayServerBinary,
     accessKey: capturedAccessKey,
     accessKeyFile: capturedAccessKeyFile,
-    legacyLicense: capturedLegacyLicense,
     baseEnv: env,
   });
   // Drop reachable plaintext from the long-lived Node parent after preflight.
   capturedAccessKey = null;
   capturedAccessKeyFile = null;
-  capturedLegacyLicense = null;
   if (activate.code !== 0) {
     process.exit(activate.code);
   }
@@ -355,7 +353,6 @@ function runCloudActivate({
   relayServerBinary,
   accessKey,
   accessKeyFile,
-  legacyLicense,
   baseEnv,
 }) {
   if (!brokerConfig) {
@@ -375,15 +372,14 @@ function runCloudActivate({
   delete preflightEnv.PORT;
   delete preflightEnv.BIND_HOST;
   delete preflightEnv[LAUNCH_ID_ENV];
+  // Never forward removed legacy commercial env as an activation input.
+  delete preflightEnv.RELAY_LICENSE_CODE;
 
   if (accessKey) {
     preflightEnv[CLOUD_ACCESS_KEY_ENV] = accessKey;
   }
   if (accessKeyFile) {
     preflightEnv[CLOUD_ACCESS_KEY_FILE_ENV] = accessKeyFile;
-  }
-  if (legacyLicense) {
-    preflightEnv.RELAY_LICENSE_CODE = legacyLicense;
   }
 
   const command = relayServerBinary || "cargo";
@@ -459,6 +455,7 @@ function parseCloudLaunchWitness(stdout) {
 function stripActivationSecrets(env) {
   delete env[CLOUD_ACCESS_KEY_ENV];
   delete env[CLOUD_ACCESS_KEY_FILE_ENV];
+  // Scrub-only denylist entry: never an activation input after Round 4A.
   delete env.RELAY_LICENSE_CODE;
   delete env[CLOUD_ACTIVATION_ENV];
   delete env.RELAY_CLOUD_REQUIRE_CACHED_REGISTRATION;

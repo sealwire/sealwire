@@ -530,7 +530,7 @@ async fn spawn_device_limit_mock() -> String {
             axum::http::StatusCode::FORBIDDEN,
             Json(serde_json::json!({
                 "error": "device_limit_reached",
-                "message": "device limit reached: this license allows 2 device(s); \
+                "message": "device limit reached: this relay allows 2 device(s); \
                             remove a device to add a new one",
             })),
         )
@@ -4719,7 +4719,7 @@ async fn registration_watch_diverged_when_cache_removed() {
 }
 
 #[test]
-fn enrollment_complete_request_uses_enrollment_token_with_license_alias() {
+fn enrollment_complete_request_uses_enrollment_token_only() {
     let via_new = serde_json::from_value::<
         relay_broker::public_control::RelayEnrollmentCompleteRequest,
     >(serde_json::json!({
@@ -4738,9 +4738,11 @@ fn enrollment_complete_request_uses_enrollment_token_with_license_alias() {
         "challenge_id": "c",
         "challenge_signature": "s",
         "license_code": "tok-legacy"
-    }))
-    .expect("deserialize license_code alias");
-    assert_eq!(via_alias.enrollment_token.as_deref(), Some("tok-legacy"));
+    }));
+    assert!(
+        via_alias.is_err(),
+        "legacy license_code must be rejected, not aliased"
+    );
 
     let encoded = serde_json::to_value(&via_new).expect("serialize");
     assert!(encoded.get("enrollment_token").is_some());
