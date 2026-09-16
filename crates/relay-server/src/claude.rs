@@ -2406,6 +2406,10 @@ fn ensure_claude_turn_diff_entry(relay: &mut RelayState, turn_id: &str, status: 
             return false;
         }
     }
+    // Nothing landed: rebuild the row empty so no stale detail survives internally, then
+    // retract it — emptying alone still reads "Changed files in turn X", and the grouper
+    // counts a lone empty summary as one change.
+    let retract = fallback_file_changes.is_empty();
     // Addressed in the RELAY namespace, which is where `upsert_relay_named_item`
     // below writes it.
     let existing_diff = relay
@@ -2432,6 +2436,10 @@ fn ensure_claude_turn_diff_entry(relay: &mut RelayState, turn_id: &str, status: 
         entry.turn_id,
         entry.tool,
     );
+    if retract {
+        let thread_id = relay.active_thread_id.clone().unwrap_or_default();
+        relay.withdraw_relay_named_item_for_thread(&thread_id, &turn_diff_item_id);
+    }
     true
 }
 
@@ -2479,6 +2487,7 @@ fn ensure_claude_bg_turn_diff_entry(
             return false;
         }
     }
+    let retract = fallback_file_changes.is_empty();
     let existing_diff = relay
         .relay_named_entry_for_thread(thread_id, &turn_diff_item_id)
         .and_then(|entry| entry.tool)
@@ -2503,6 +2512,9 @@ fn ensure_claude_bg_turn_diff_entry(
         entry.tool,
         crate::state::unix_now(),
     );
+    if retract {
+        relay.withdraw_relay_named_item_for_thread(thread_id, &turn_diff_item_id);
+    }
     true
 }
 
@@ -4392,6 +4404,14 @@ mod tests {
         assert!(
             listed.is_empty(),
             "nothing landed in this turn, yet the settled summary still lists {listed:?}"
+        );
+        // Empty is not enough: the row still reads "Changed files in turn X", and the
+        // transcript grouper counts a lone empty turnDiff as "1 file change". A turn that
+        // changed nothing must retract the row, which is what `withdrawn` is for — the
+        // snapshot protocol cannot delete a row a client already holds.
+        assert!(
+            summary.is_none_or(|entry| entry.withdrawn),
+            "a turn that changed nothing must retract its summary, not just empty it"
         );
     }
 

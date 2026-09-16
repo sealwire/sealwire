@@ -202,6 +202,37 @@ impl RelayState {
         transcript.get_row(row_id).map(TranscriptRecord::to_view)
     }
 
+    /// Retract a row the relay synthesized, on a named thread.
+    ///
+    /// A tombstone rather than a deletion: the snapshot protocol only adds and updates, so
+    /// a row a client already holds can be retired only by travelling the update channel.
+    pub(crate) fn withdraw_relay_named_item_for_thread(
+        &mut self,
+        thread_id: &str,
+        item_id: &str,
+    ) -> bool {
+        let Some(runtime) = self.runtimes.get_mut(thread_id) else {
+            return false;
+        };
+        let Some(row_id) = runtime
+            .transcript
+            .resolve_relay(item_id)
+            .map(str::to_string)
+        else {
+            return false;
+        };
+        // `withdrawn` is absorbing, so the closure's set survives `update_row`'s restore.
+        runtime
+            .transcript
+            .update_row(&row_id, |entry| entry.withdrawn = true);
+        runtime.transcript_revision = runtime.transcript_revision.saturating_add(1);
+        if self.active_thread_id.as_deref() == Some(thread_id) {
+            self.sync_selected_runtime_to_fields();
+        }
+        self.notify();
+        true
+    }
+
     /// The same read for a thread that is not the one on screen.
     pub(crate) fn relay_named_entry_for_thread(
         &self,

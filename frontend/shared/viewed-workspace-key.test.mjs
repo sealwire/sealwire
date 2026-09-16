@@ -171,3 +171,26 @@ test("an old relay sending only item_id still resolves the change token", () => 
 
   assert.equal(decision.turnDiffId, "legacy-1");
 });
+
+// A turn that changed nothing retracts its summary rather than deleting it — the snapshot
+// protocol can only add and update. Rendering already skips withdrawn rows, but this scan
+// reads the raw transcript, so a retracted summary would still trigger a workspace re-read
+// and, worse, become the remembered id that suppresses the NEXT real one.
+test("a withdrawn turnDiff is not a change to refresh on", () => {
+  const key = sessionViewedWorkspaceKey({ current_cwd: "/repo" }, "thread-a");
+  const withdrawnDiff = { ...turnDiff("turn-diff:turn-1"), withdrawn: true };
+
+  const decision = decideWorkspaceRefresh({
+    session: { current_cwd: "/repo", transcript: [withdrawnDiff] },
+    workspaceKey: key,
+    lastWorkspaceKey: key,
+    lastTurnDiffId: null,
+  });
+
+  assert.equal(decision.refresh, false, "nothing changed on disk, so nothing to re-read");
+  assert.equal(
+    decision.turnDiffId,
+    null,
+    "and it must not be remembered, or the next real summary reads as already seen"
+  );
+});

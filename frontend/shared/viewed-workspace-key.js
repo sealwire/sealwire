@@ -47,6 +47,10 @@ export function decideWorkspaceRefresh({
   const entries = session?.transcript || [];
   let latest = null;
   for (let i = entries.length - 1; i >= 0; i -= 1) {
+    // Raw transcript, so withdrawn rows are still here — a turn that changed nothing
+    // retracts its summary, and re-reading the workspace for it would also spend the id
+    // that the next real summary needs to look new.
+    if (entries[i]?.withdrawn === true) continue;
     if (entries[i]?.tool?.item_type === "turnDiff") {
       latest = transcriptRowKey(entries[i]) || null;
       break;
