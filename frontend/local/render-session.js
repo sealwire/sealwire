@@ -2339,8 +2339,10 @@ export function createSessionRenderer({
               }),
               // Stop, so a turn started here can be interrupted here. The pane
               // is drawn beside the conversation, and the conversation's Stop
-              // button is hidden by CSS while Tasks is open.
-              onStop: () => void state.controller?.stopActiveTurn?.(orchId),
+              // button is hidden by CSS while Tasks is open. Failures land on
+              // this pane's red line via orchestratorChat.stop — not the
+              // conversation's #composer-error.
+              onStop: orchId ? () => void orchestratorChat.stop(orchId) : null,
               // An approval raised by the Orchestrator's own thread had NO
               // surface at all: this prop was never passed, and the fallback
               // `#pending-action-banner` is hidden by CSS while Tasks is open
@@ -2643,6 +2645,7 @@ export function createSessionRenderer({
   const orchestratorChat = createOrchestratorChatActions({
     state,
     sendMessage,
+    stopActiveTurn: (threadId) => state.controller?.stopActiveTurn?.(threadId),
     proposeOrchestratorTask,
     confirmOrchestratorProposal,
     reviseOrchestratorProposal,

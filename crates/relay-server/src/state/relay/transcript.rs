@@ -202,6 +202,48 @@ impl RelayState {
         transcript.get_row(row_id).map(TranscriptRecord::to_view)
     }
 
+    /// Retract a row the relay synthesized, on a named thread.
+    ///
+    /// A tombstone rather than a deletion: the snapshot protocol only adds and updates, so
+    /// a row a client already holds can be retired only by travelling the update channel.
+    pub(crate) fn withdraw_relay_named_item_for_thread(
+        &mut self,
+        thread_id: &str,
+        item_id: &str,
+    ) -> bool {
+        let Some(runtime) = self.runtimes.get_mut(thread_id) else {
+            return false;
+        };
+        let Some(row_id) = runtime
+            .transcript
+            .resolve_relay(item_id)
+            .map(str::to_string)
+        else {
+            return false;
+        };
+        // `withdrawn` is absorbing, so the closure's set survives `update_row`'s restore.
+        runtime
+            .transcript
+            .update_row(&row_id, |entry| entry.withdrawn = true);
+        runtime.transcript_revision = runtime.transcript_revision.saturating_add(1);
+        if self.active_thread_id.as_deref() == Some(thread_id) {
+            self.sync_selected_runtime_to_fields();
+        }
+        self.notify();
+        true
+    }
+
+    /// The same read for a thread that is not the one on screen.
+    pub(crate) fn relay_named_entry_for_thread(
+        &self,
+        thread_id: &str,
+        item_id: &str,
+    ) -> Option<TranscriptEntryView> {
+        let transcript = &self.runtime_for_thread(thread_id)?.transcript;
+        let row_id = transcript.resolve_relay(item_id)?;
+        transcript.get_row(row_id).map(TranscriptRecord::to_view)
+    }
+
     /// Active-thread convenience for a row the RELAY synthesized.
     pub(crate) fn upsert_relay_named_item(
         &mut self,
@@ -284,6 +326,30 @@ impl RelayState {
         turn_id: Option<String>,
         tool: Option<ToolCallView>,
     ) -> TranscriptMutationMeta {
+        // The provider contract, enforced where every provider UPSERT converges rather than
+        // per provider: a row names the turn `start_turn` answered. Scope is upserts, not
+        // literally every row write — `append_agent_delta_in` and the history paths do not
+        // pass through here — and it can only compare when both ids are present. Claude broke it for
+        // months by stamping the SDK's message uuid, and nothing caught it — codex and the
+        // fake provider happened to agree, so the whole suite stayed green while
+        // `/delegate`, agent-to-agent asks and turn file-change summaries all quietly
+        // stopped matching. Rows written with no live turn (history, a settled turn) are
+        // not claims about the current turn and are left alone.
+        #[cfg(test)]
+        {
+            let live = self
+                .runtime_for_thread(thread_id)
+                .and_then(|runtime| runtime.active_turn_id.clone());
+            if let (Some(live), Some(writing)) = (live.as_deref(), turn_id.as_deref()) {
+                assert_eq!(
+                    live, writing,
+                    "provider named this row's turn {writing:?}, but thread {thread_id} is \
+                     running turn {live:?}. A row must carry the id `start_turn` answered — \
+                     brief_from_reply, reply_answers_ask and collect_turn_file_changes all \
+                     match on it, and all three fail silently when it is something else."
+                );
+            }
+        }
         let (stamp_id, entry_seq, order_seq) = {
             let runtime = self.ensure_runtime_for_thread(thread_id);
             // One resolve, up front: from here on the row is addressed by the
@@ -1292,17 +1358,40 @@ impl RelayState {
         self.collect_turn_file_changes(turn_id, true)
     }
 
+    /// The same two summaries for a thread that is NOT the one on screen.
+    ///
+    /// A background turn's edits are on its own runtime, which the selected-runtime
+    /// collector below cannot see — it would sum the viewed thread's changes instead.
+    pub fn thread_turn_file_change_summary(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        settled: bool,
+    ) -> Vec<crate::protocol::FileChangeDiffView> {
+        let Some(runtime) = self.runtime_for_thread(thread_id) else {
+            return Vec::new();
+        };
+        Self::collect_turn_file_changes_in(runtime.transcript.rows(), turn_id, settled)
+    }
+
     fn collect_turn_file_changes(
         &self,
         turn_id: &str,
         settled: bool,
     ) -> Vec<crate::protocol::FileChangeDiffView> {
-        let mut file_changes = Vec::new();
-
         let entries = self
             .selected_runtime()
             .map(|runtime| runtime.transcript.rows())
             .unwrap_or(self.transcript.rows());
+        Self::collect_turn_file_changes_in(entries, turn_id, settled)
+    }
+
+    fn collect_turn_file_changes_in(
+        entries: &[TranscriptRecord],
+        turn_id: &str,
+        settled: bool,
+    ) -> Vec<crate::protocol::FileChangeDiffView> {
+        let mut file_changes = Vec::new();
 
         for entry in entries {
             if entry.turn_id.as_deref() != Some(turn_id) {
@@ -1404,12 +1493,11 @@ fn merge_tool_file_changes(
     incoming: Vec<crate::protocol::FileChangeDiffView>,
     merge_file_changes: bool,
 ) -> Vec<crate::protocol::FileChangeDiffView> {
+    // Only a turnDiff reaches this branch, and its list is recomputed WHOLE every time
+    // from the turn's rows — so an empty one means the turn changed nothing, not "no news".
+    // Keeping the old list is how an edit that never landed survived into a settled summary.
     if !merge_file_changes {
-        return if incoming.is_empty() {
-            existing
-        } else {
-            incoming
-        };
+        return incoming;
     }
 
     let mut file_changes = existing;

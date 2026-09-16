@@ -803,14 +803,28 @@ export function createLifecycleController(ctx) {
   async function stopActiveTurn(threadId = null) {
     // Name the active thread's own provider — never a hardcoded "Codex".
     const agentName = providerLabel(state.session?.provider) || "agent";
+    const targetThreadId =
+      threadId || state.viewOnlyThread?.threadId || state.session?.active_thread_id || null;
     // An explicitly named thread is the caller's assertion that it has a turn
     // running; the session-level `active_turn_id` describes a different thread
     // and cannot answer for it.
     if (!threadId && (!state.session?.active_thread_id || !state.session.active_turn_id)) {
-      logLine(`There is no running ${agentName} turn to stop.`);
-      return;
+      // Same channel as a refused send: the client log is collapsible / hidden on
+      // the phone, so "Stop did nothing" is what the user sees without this line.
+      const message = `There is no running ${agentName} turn to stop.`;
+      logLine(message);
+      if (targetThreadId) {
+        recordComposerError({ threadId: targetThreadId, message });
+        syncComposerError(composerError, viewedThreadId());
+      }
+      return false;
     }
 
+    // A fresh Stop supersedes the last failure on THIS thread only.
+    if (targetThreadId) {
+      clearComposerError(targetThreadId);
+      syncComposerError(composerError, viewedThreadId());
+    }
     logLine(`Requesting ${agentName} stop`);
 
     try {
@@ -821,8 +835,7 @@ export function createLifecycleController(ctx) {
         },
         body: JSON.stringify({
           device_id: state.deviceId,
-          thread_id:
-            threadId || state.viewOnlyThread?.threadId || state.session.active_thread_id,
+          thread_id: targetThreadId,
         }),
       });
       const payload = await response.json();
@@ -833,8 +846,18 @@ export function createLifecycleController(ctx) {
 
       applySessionSnapshot(payload.data);
       logLine(`Stop request sent to ${agentName}`);
+      return true;
     } catch (error) {
       logLine(`Stop failed: ${error.message}`);
+      // The relay's message is the diagnosis (team-locked, review-locked, …).
+      // Show it under the composer so Stop is never a silent no-op.
+      // Filed against the thread that was stopped — the Tasks Orchestrator pane
+      // reads it back via composerErrorFor (it has no #composer-error node).
+      if (targetThreadId) {
+        recordComposerError({ threadId: targetThreadId, message: error.message });
+        syncComposerError(composerError, viewedThreadId());
+      }
+      return false;
     }
   }
 

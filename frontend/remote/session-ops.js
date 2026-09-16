@@ -2090,21 +2090,28 @@ export function setComposerError(threadId, message) {
 export async function stopActiveTurn() {
   // Name the active thread's own provider — never a hardcoded "Codex".
   const agentName = providerLabel(state.session?.provider) || "agent";
-  if (!state.session?.active_thread_id || !state.session.active_turn_id) {
-    renderLog(`There is no running ${agentName} turn to stop.`);
+  const threadId = state.session?.active_thread_id || null;
+  if (!threadId || !state.session.active_turn_id) {
+    // Phone client log is `display: none` — without the composer line, Stop is a
+    // silent no-op when the surface thought a turn was running and it wasn't.
+    const message = `There is no running ${agentName} turn to stop.`;
+    renderLog(message);
+    if (threadId) setComposerError(threadId, message);
     return false;
   }
 
+  setComposerError(threadId, "");
   try {
     await dispatchOrRecover("stop_turn", {
       input: {
-        thread_id: state.session.active_thread_id,
+        thread_id: threadId,
       },
     });
     renderLog(`Remote stop request sent to ${agentName}.`);
     return true;
   } catch (error) {
     renderLog(`Remote stop failed: ${error.message}`);
+    setComposerError(threadId, error.message);
     return false;
   }
 }

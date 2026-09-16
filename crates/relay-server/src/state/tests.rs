@@ -1909,6 +1909,19 @@ fn thread_switch_back_keeps_single_user_message_when_ids_agree() {
         user_messages, 1,
         "user message duplicated on switch-back: live id and history id diverged"
     );
+    // Deduping the row is only half of it. The history copy names the turn with the SDK's
+    // per-message uuid, and three consumers match a row's turn against the one the relay
+    // started — so letting it win loses the attribution while keeping the row.
+    let row = relay
+        .transcript
+        .iter()
+        .find(|entry| entry.kind == TranscriptEntryKind::UserText)
+        .expect("the user message survives");
+    assert_eq!(
+        row.turn_id.as_deref(),
+        Some("claude-turn-1"),
+        "history's per-message uuid must not replace the turn the relay started"
+    );
 }
 
 #[test]
@@ -8175,6 +8188,84 @@ mod row_identity_tests {
         assert!(
             row.withdrawn,
             "withdrawn is absorbing: a live history copy must not resurrect the send"
+        );
+    }
+
+    /// The guard itself needs a pin, or deleting it is silent. This is the exact shape
+    /// claude shipped for months: the SDK's message uuid stamped where the relay turn goes.
+    #[test]
+    #[should_panic(expected = "must carry the id `start_turn` answered")]
+    fn the_turn_contract_guard_catches_a_row_naming_the_wrong_turn() {
+        let mut relay = test_state();
+        relay.activate_thread(
+            test_thread("thread-1", "/tmp/project"),
+            "/tmp/project",
+            DEFAULT_MODEL,
+            DEFAULT_APPROVAL_POLICY,
+            DEFAULT_SANDBOX,
+            DEFAULT_EFFORT,
+            "device-a",
+        );
+        relay.set_active_turn(Some("claude-turn-7".to_string()));
+
+        relay.upsert_transcript_item(
+            "assistant:0b9f7c12".to_string(),
+            TranscriptEntryKind::AgentText,
+            Some("look at the retry loop".to_string()),
+            "completed".to_string(),
+            Some("0b9f7c12".to_string()),
+            None,
+        );
+    }
+
+    /// The other half of the turn-id rule, and the reason it is not simply "existing
+    /// wins": between two history copies the newer one must still be able to correct the
+    /// turn. Freezing the first uuid seen would strand every history-only row on it.
+    #[test]
+    fn a_history_only_row_can_still_have_its_turn_corrected() {
+        let mut relay = test_state();
+        let thread = "thread-history-only";
+        relay.activate_thread(
+            test_thread(thread, "/tmp/project"),
+            "/tmp/project",
+            DEFAULT_MODEL,
+            DEFAULT_APPROVAL_POLICY,
+            DEFAULT_SANDBOX,
+            DEFAULT_EFFORT,
+            "device-a",
+        );
+
+        let history_row = |turn: &str| crate::state::relay::TranscriptRecord {
+            row_id: "assistant:sdk-1".to_string(),
+            provider_item_id: Some("assistant:sdk-1".to_string()),
+            relay_item_id: None,
+            kind: TranscriptEntryKind::AgentText,
+            text: Some("look at the retry loop".to_string()),
+            status: "completed".to_string(),
+            turn_id: Some(turn.to_string()),
+            tool: None,
+            order_seq: 0,
+            withdrawn: false,
+            // Never live-upserted: this row only ever came from a history read.
+            last_live_upsert_revision: None,
+        };
+
+        let changed = {
+            let runtime = relay.runtimes.get_mut(thread).expect("runtime");
+            let _ = runtime.merge_transcript_records(vec![history_row("sdk-per-message-uuid")]);
+            // A later read of the same row, now naming the turn properly.
+            runtime.merge_transcript_records(vec![history_row("claude-turn-9")])
+        };
+
+        let runtime = relay.runtime_for_thread(thread).expect("runtime");
+        assert_eq!(
+            runtime.transcript[0].turn_id.as_deref(),
+            Some("claude-turn-9"),
+            "a history-only row must accept a corrected turn, not freeze on the first one"
+        );
+        assert!(
+            changed,
+            "and the correction must mark the row dirty, or it never reaches a client"
         );
     }
 }
