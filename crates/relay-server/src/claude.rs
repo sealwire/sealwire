@@ -2303,7 +2303,14 @@ fn completion_matches_turn(active_turn_id: Option<&str>, event_turn_id: Option<&
 
 /// Walk a hydrated Claude transcript and insert a synthetic
 /// `turn-diff:<turn_id>` entry at the end of every turn that contains at
-/// least one `fileChange` tool item. Mirrors what codex `parse_transcript`
+/// least one `fileChange` tool item.
+///
+/// LIMITATION, until the turn-identity migration lands: history is grouped per MESSAGE,
+/// not per turn — `mapSessionMessages` stamps each row with its own SDK uuid — so a
+/// reloaded thread shows one summary per assistant message, and the row built here
+/// (`turn-diff:<uuid>`) is a different relay name from the live `turn-diff:claude-turn-N`,
+/// which the merge cannot resolve onto it. Both predate the turn-id work and need one
+/// identity migration to fix, not a patch here. Mirrors what codex `parse_transcript`
 /// does at hydration time so reopening an old thread shows the same
 /// per-turn diff summary that lived on the wire.
 /// Each returned entry says whether the SDK named it. The `turn-diff:*` rows are
@@ -2390,11 +2397,15 @@ fn ensure_claude_turn_diff_entry(relay: &mut RelayState, turn_id: &str, status: 
     } else {
         relay.turn_file_change_summary(turn_id)
     };
-    if fallback_file_changes.is_empty() {
-        return false;
-    }
-
     let turn_diff_item_id = format!("turn-diff:{turn_id}");
+    if fallback_file_changes.is_empty() {
+        // Nothing landed. A summary built while an edit was still in flight now claims
+        // that edit completed, so rebuild it empty — restatusing keeps the claim, and the
+        // snapshot protocol cannot delete the row a client already holds.
+        if status != "completed" || relay.relay_named_entry(&turn_diff_item_id).is_none() {
+            return false;
+        }
+    }
     // Addressed in the RELAY namespace, which is where `upsert_relay_named_item`
     // below writes it.
     let existing_diff = relay
@@ -2456,11 +2467,18 @@ fn ensure_claude_bg_turn_diff_entry(
 ) -> bool {
     let fallback_file_changes =
         relay.thread_turn_file_change_summary(thread_id, turn_id, status == "completed");
-    if fallback_file_changes.is_empty() {
-        return false;
-    }
-
     let turn_diff_item_id = format!("turn-diff:{turn_id}");
+    if fallback_file_changes.is_empty() {
+        // Same rule as the active twin: an empty settled summary must clear what a running
+        // one claimed, not merely restatus it.
+        if status != "completed"
+            || relay
+                .relay_named_entry_for_thread(thread_id, &turn_diff_item_id)
+                .is_none()
+        {
+            return false;
+        }
+    }
     let existing_diff = relay
         .relay_named_entry_for_thread(thread_id, &turn_diff_item_id)
         .and_then(|entry| entry.tool)
@@ -4292,6 +4310,81 @@ mod tests {
             !paths.iter().any(|path| path.contains("inflight")),
             "an edit still running when the turn ended never landed, got {paths:?}"
         );
+    }
+
+    // A turn where NOTHING landed must leave no completed summary. The terminal arms read
+    // the builder's `false` as "there is no summary row", but it also means "the settled
+    // collector came up empty" — so a summary built while an edit was still in flight got
+    // restatused to completed with that never-landed edit still listed, Undo and all.
+    async fn nothing_landed_leaves_no_completed_summary(session: &str, viewed: bool) {
+        let state = test_relay_with_active_b().await;
+        let now = crate::state::unix_now();
+        {
+            let mut relay = state.write().await;
+            if viewed {
+                relay.set_active_turn(Some("turn-x".to_string()));
+            } else {
+                relay.bg_set_active_turn(session, Some("turn-x".to_string()), now);
+            }
+        }
+        let tool = |id: &str| {
+            json!({
+                "item_type": "fileChange", "name": "Edit", "title": "Edit",
+                "detail": null, "query": null, "path": format!("/tmp/{id}.rs"),
+                "url": null, "command": null, "input_preview": null,
+                "result_preview": null, "diff": null, "file_changes": []
+            })
+        };
+        // Still in flight when the turn ends.
+        handle_worker_event(
+            json!({
+                "type": "tool_call_requested", "provider_session_id": session,
+                "id": "pending", "name": "Edit", "turn_id": "turn-x",
+                "status": "running", "tool": tool("pending")
+            }),
+            &state,
+        )
+        .await;
+        // A FAILED result still reaches the summary builder, which is what creates the row.
+        handle_worker_event(
+            json!({
+                "type": "tool_call_result", "provider_session_id": session,
+                "id": "failed", "turn_id": "turn-x", "is_error": true,
+                "tool": tool("failed")
+            }),
+            &state,
+        )
+        .await;
+        handle_worker_event(
+            json!({"type": "done", "provider_session_id": session, "turn_id": "turn-x"}),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        let runtime = relay.runtime_for_thread(session).expect("runtime");
+        let summary = runtime
+            .transcript
+            .iter()
+            .find(|entry| entry.relay_item_id.as_deref() == Some("turn-diff:turn-x"));
+        let listed: Vec<String> = summary
+            .and_then(|entry| entry.tool.as_ref())
+            .map(|tool| tool.file_changes.iter().map(|c| c.path.clone()).collect())
+            .unwrap_or_default();
+        assert!(
+            listed.is_empty(),
+            "nothing landed in this turn, yet the settled summary still lists {listed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_viewed_turn_where_nothing_landed_leaves_no_completed_summary() {
+        nothing_landed_leaves_no_completed_summary("thread-b", true).await;
+    }
+
+    #[tokio::test]
+    async fn a_background_turn_where_nothing_landed_leaves_no_completed_summary() {
+        nothing_landed_leaves_no_completed_summary("thread-a", false).await;
     }
 
     #[tokio::test]

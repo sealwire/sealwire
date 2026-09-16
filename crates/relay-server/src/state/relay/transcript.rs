@@ -295,8 +295,10 @@ impl RelayState {
         turn_id: Option<String>,
         tool: Option<ToolCallView>,
     ) -> TranscriptMutationMeta {
-        // The provider contract, enforced where every provider's rows converge rather than
-        // per provider: a row names the turn `start_turn` answered. Claude broke it for
+        // The provider contract, enforced where every provider UPSERT converges rather than
+        // per provider: a row names the turn `start_turn` answered. Scope is upserts, not
+        // literally every row write — `append_agent_delta_in` and the history paths do not
+        // pass through here — and it can only compare when both ids are present. Claude broke it for
         // months by stamping the SDK's message uuid, and nothing caught it — codex and the
         // fake provider happened to agree, so the whole suite stayed green while
         // `/delegate`, agent-to-agent asks and turn file-change summaries all quietly
@@ -1460,12 +1462,11 @@ fn merge_tool_file_changes(
     incoming: Vec<crate::protocol::FileChangeDiffView>,
     merge_file_changes: bool,
 ) -> Vec<crate::protocol::FileChangeDiffView> {
+    // Only a turnDiff reaches this branch, and its list is recomputed WHOLE every time
+    // from the turn's rows — so an empty one means the turn changed nothing, not "no news".
+    // Keeping the old list is how an edit that never landed survived into a settled summary.
     if !merge_file_changes {
-        return if incoming.is_empty() {
-            existing
-        } else {
-            incoming
-        };
+        return incoming;
     }
 
     let mut file_changes = existing;
