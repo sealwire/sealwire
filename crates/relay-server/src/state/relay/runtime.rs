@@ -981,10 +981,27 @@ fn merge_runtime_entry(existing: &mut TranscriptRecord, incoming: TranscriptReco
 
     let merged_tool = super::transcript::merge_tool_call_view(existing.tool.clone(), incoming.tool);
     incoming.tool = merged_tool;
+    // Source precedence, not recency: a row the live stream wrote owns its turn, since that
+    // is the id `start_turn` answered and what a brief/ask/file-change match compares to.
+    // Between two history copies the later one may still correct it — freezing the first
+    // uuid seen would strand every history-only row on a per-message id.
+    let merged_turn_id = if existing.last_live_upsert_revision.is_some() {
+        existing
+            .turn_id
+            .clone()
+            .or_else(|| incoming.turn_id.clone())
+    } else {
+        incoming
+            .turn_id
+            .clone()
+            .or_else(|| existing.turn_id.clone())
+    };
     let changed = existing.kind != incoming.kind
         || existing.text != incoming.text
         || existing.status != incoming.status
-        || existing.turn_id != incoming.turn_id
+        // Against the EFFECTIVE turn: comparing the raw incoming one reports a change on
+        // every re-read that this merge then declines to make, bumping the revision forever.
+        || existing.turn_id != merged_turn_id
         || !tool_calls_equal(existing.tool.as_ref(), incoming.tool.as_ref());
     if changed {
         // The row's issued key survives whole-record replacement: assigned once,
@@ -1022,6 +1039,7 @@ fn merge_runtime_entry(existing: &mut TranscriptRecord, incoming: TranscriptReco
         existing.provider_item_id = provider_item_id;
         existing.relay_item_id = relay_item_id;
         existing.last_live_upsert_revision = last_live_upsert_revision;
+        existing.turn_id = merged_turn_id;
         existing.order_seq = order_seq;
         existing.withdrawn = withdrawn;
     }
