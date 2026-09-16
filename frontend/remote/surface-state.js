@@ -27,6 +27,9 @@ export function createClearedRemoteSurfaceSessionStatePatch() {
     // afterwards and file the old relay's failure against the new one.
     composerErrors: {},
     goalErrors: {},
+    // Keyed by thread id for the same reason, though nothing here failed: a draft the
+    // composer held back on one relay would render under another's same-id thread.
+    composerHeld: {},
     ...createClearedTranscriptEntryDetailsPatch(),
   };
 }

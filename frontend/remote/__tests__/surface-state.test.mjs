@@ -60,6 +60,10 @@ function assertClearedSessionPatch(patch) {
   // file the old relay's failure into the new relay's state.
   assert.deepEqual(patch.composerErrors, {});
   assert.deepEqual(patch.goalErrors, {});
+  // Not a failure channel, but keyed the same way and carried across for the same reason:
+  // a draft the composer held back on one relay would surface under an unrelated thread
+  // that happens to share its id on the next.
+  assert.deepEqual(patch.composerHeld, {});
 }
 
 test("createClearedRemoteSurfaceSessionStatePatch clears session, threads, current approval, and transcript caches", () => {

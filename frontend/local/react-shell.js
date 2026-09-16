@@ -527,6 +527,7 @@ function ComposerShell() {
         // This shell renders once; the send path fills the region by id (see
         // local/composer-error.js), so it must exist from the start.
         errorId: "composer-error",
+        heldId: "composer-held",
         messageId: "message-input",
         messagePlaceholder: "Start or open a session first.",
         modelId: "message-model",

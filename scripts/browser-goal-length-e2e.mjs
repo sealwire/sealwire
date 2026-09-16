@@ -48,6 +48,19 @@ async function boxOf(page, selector) {
   }, selector);
 }
 
+async function composerLook(page) {
+  return page.evaluate(() => {
+    const node = document.querySelector("#message-input");
+    const field = node?.closest(".composer-inner");
+    const style = getComputedStyle(node);
+    return {
+      color: style.color,
+      cursor: style.cursor,
+      fieldBackground: field ? getComputedStyle(field).backgroundColor : null,
+    };
+  });
+}
+
 async function main() {
   await fs.mkdir(SHOTS, { recursive: true });
   const relayPort = await getFreePort();
@@ -104,17 +117,21 @@ async function main() {
     await page.click("#send-button");
     step("submitted, waiting for the refusal line");
 
+    // The gate stops this before the relay hears about it, so it lands in "not sent",
+    // not on the error line — which is for things that actually broke.
     await page.waitForFunction(
       () => {
-        const node = document.querySelector("#composer-error");
+        const node = document.querySelector("#composer-held");
         return node && !node.hasAttribute("hidden") && (node.textContent || "").trim().length > 0;
       },
       { timeout: 10000 }
     );
-    const refusal = await boxOf(page, "#composer-error");
+    const refusal = await boxOf(page, "#composer-held");
+    const errorLine = await boxOf(page, "#composer-error");
     await page.screenshot({ path: path.join(SHOTS, "1-refusal.png") });
 
-    assert.ok(refusal, "#composer-error must exist");
+    assert.ok(refusal, "#composer-held must exist");
+    assert.equal(errorLine?.height, 0, "nothing broke, so the error line stays down");
     assert.equal(refusal.hidden, false, "it must not still be hidden");
     assert.ok(refusal.height > 10, `it must occupy real space, got ${JSON.stringify(refusal)}`);
     assert.notEqual(refusal.display, "none");
@@ -164,6 +181,66 @@ async function main() {
     assert.match(notice.text, /re-sent in full every turn/);
     assert.match(notice.text, new RegExp(`${longGoal.trim().length} characters`));
 
+    // ---- (3) the composer LOOKS held while a command runs -------------------
+    // It is already `disabled` — the defect was that it looked exactly like a draft
+    // you were still typing, so the only cue was the cursor on hover.
+    const idleLook = await composerLook(page);
+    await page.route("**/api/session/goal", async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      await route.continue();
+    });
+    await page.fill("#message-input", "ship the phone menu");
+    await page.click("#send-button");
+    await page.waitForFunction(
+      () => document.querySelector("#message-input")?.disabled === true,
+      { timeout: 10000 }
+    );
+    const heldLook = await composerLook(page);
+    await page.keyboard.type("XXXX").catch(() => {});
+    const afterTyping = await page.inputValue("#message-input");
+    await page.screenshot({ path: path.join(SHOTS, "3-held.png") });
+    step("composer held");
+
+    assert.equal(afterTyping, "ship the phone menu", "a held composer takes no keystrokes");
+
+    // The phone's textarea is `#remote-message-input`; the desktop's is `#message-input`.
+    // Measuring only the one this page happens to render is how the freeze shipped
+    // never having applied on the phone at all, green the whole way.
+    const bothIds = await page.evaluate(() => {
+      const out = {};
+      for (const id of ["message-input", "remote-message-input"]) {
+        document.querySelectorAll(".probe-frozen").forEach((n) => n.remove());
+        const box = document.createElement("div");
+        box.className = "composer-inner is-frozen probe-frozen";
+        const field = document.createElement("textarea");
+        field.id = id;
+        box.append(field);
+        document.body.append(box);
+        const style = getComputedStyle(field);
+        out[id] = { color: style.color, cursor: style.cursor };
+      }
+      document.querySelectorAll(".probe-frozen").forEach((n) => n.remove());
+      return out;
+    });
+    assert.deepEqual(
+      bothIds["remote-message-input"],
+      bothIds["message-input"],
+      `the freeze must not be keyed to one surface's id — ${JSON.stringify(bothIds)}`
+    );
+    assert.equal(bothIds["remote-message-input"].cursor, "not-allowed");
+    assert.notEqual(
+      heldLook.color,
+      idleLook.color,
+      `held draft must not be the same ink as a live one — ${JSON.stringify(heldLook)}`
+    );
+    assert.notEqual(heldLook.fieldBackground, idleLook.fieldBackground, "nor the same fill");
+    assert.equal(heldLook.cursor, "not-allowed");
+    await page.unroute("**/api/session/goal");
+    await page.waitForFunction(
+      () => document.querySelector("#message-input")?.disabled === false,
+      { timeout: 15000 }
+    );
+
     // ---- (3) a REFUSED card button reports on the card ---------------------
     // The relay going away is the refusal that is reachable on demand; the 200 +
     // isError branch is pinned by unit tests. What matters here is WHERE it lands.
@@ -183,7 +260,7 @@ async function main() {
     );
     assert.ok(cardError.text.trim().length > 0, "and it must say why");
     // The point of moving it here: on a phone the composer is behind the modal.
-    const composerAfter = await boxOf(page, "#composer-error");
+    const composerAfter = await boxOf(page, "#composer-held");
     assert.notEqual(
       composerAfter?.text,
       cardError.text,
@@ -193,9 +270,11 @@ async function main() {
     assert.deepEqual(errors, [], "no page errors");
     console.log("goal-length-e2e OK");
     console.log("  card   :", JSON.stringify(cardError));
+    console.log("  held   :", JSON.stringify(heldLook));
     console.log("  refusal:", JSON.stringify(refusal));
     console.log("  notice :", JSON.stringify(notice));
     console.log("  card   :", JSON.stringify(cardError));
+    console.log("  held   :", JSON.stringify(heldLook));
     console.log("  shots  :", SHOTS);
   } catch (error) {
     try {

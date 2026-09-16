@@ -5,6 +5,7 @@ export function createComposerCommandsModel({
   getCatalog,
   getContext,
   requestReview,
+  hold,
   log,
   actions = {},
 } = {}) {
@@ -12,6 +13,9 @@ export function createComposerCommandsModel({
     getCatalog,
     getContext,
     requestReview,
+    // What a command stopped itself. On this surface the log is `display: none` with
+    // nothing to open it, so without this the refusal has nowhere at all to land.
+    hold,
     // The remote helpers already render their own progress and failure; an empty
     // string here would add a timestamp-only row and re-render the whole surface.
     log: (text) => {

@@ -1,4 +1,4 @@
-import { goalOutcomeOrContractError } from "./goal-outcome.js";
+import { commandOutcomeOrContractError } from "./command-outcome.js";
 
 // Stopping and resuming are separate capabilities rather than one write with an empty
 // objective meaning "stop": the intent then survives all the way down instead of being
@@ -32,7 +32,7 @@ export function createGoalActions({
         // A refusal is 200 + `isError`, not a throw, so nothing else catches it — and
         // anything that is not the contract counts as a failure rather than as success,
         // or a helper slipping back to a bare boolean goes silent right here.
-        const outcome = goalOutcomeOrContractError(result);
+        const outcome = commandOutcomeOrContractError(result, "the goal");
         if (outcome.isError) setGoalError(threadId, outcome.text, generation);
       })
       .catch((error) => {

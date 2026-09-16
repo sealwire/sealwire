@@ -2490,6 +2490,56 @@ test("sendMessage clears pending state when the relay does not reply", async () 
   assert.equal(await pending, false);
 });
 
+// `hold("")` only runs at the start of a "/" command submit, so an ordinary send left the
+// NOT SENT line standing — describing a draft the user had already replaced. Cleared as
+// the attempt STARTS, next to the error line, and on the thread the send targets.
+test("an ordinary send supersedes the NOT SENT line on that thread", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { sendMessage } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  state.session = { active_thread_id: "thread-1", available_models: [] };
+  state.composerHeld = { "thread-1": "/delegate needs something to say", "thread-2": "keep me" };
+  state.socket = {
+    readyState: 1,
+    send() {
+      throw new Error("socket write failed");
+    },
+  };
+
+  await sendMessage("an ordinary message", "medium");
+
+  assert.equal(
+    String(state.composerHeld?.["thread-1"] || ""),
+    "",
+    "the draft it described is gone, so the line describing it must go too"
+  );
+  assert.equal(
+    state.composerHeld?.["thread-2"],
+    "keep me",
+    "and only the thread the send targeted"
+  );
+});
+
 test("a failed remote stop records the reason for the composer, not just the log", async () => {
   // Same hole as a refused send/settings change: Stop used to vanish into the
   // client log (`display: none` on the phone), so pressing it looked like a no-op.
@@ -2715,13 +2765,12 @@ test("a /goal that works clears the line its own earlier attempt left", async ()
 // Built from the REAL session-ops writer rather than a spy. With a spy the optional
 // chain through react-app and remote-runtime can be deleted and this still passes —
 // which is exactly how the phone ended up with no channel in the first place.
-test("an over-limit /goal from the phone reaches the real composer-error writer", async () => {
+test("an over-limit /goal from the phone reaches the real held writer, not the error one", async () => {
   activeBrowser || installBrowserStubs();
 
   const { state, saveRemoteAuth } = await import("./state.js");
-  const { setComposerError, setRemoteGoal, stopRemoteGoal, delegateRemote } = await import(
-    "./session-ops.js"
-  );
+  const { setComposerError, setComposerHeld, setRemoteGoal, stopRemoteGoal, delegateRemote } =
+    await import("./session-ops.js");
   const { createRemoteComposerCommandActions } = await import("./composer-command-actions.js");
   const { MAX_GOAL_OBJECTIVE_CHARS } = await import("../shared/goal-objective.js");
 
@@ -2744,6 +2793,7 @@ test("an over-limit /goal from the phone reaches the real composer-error writer"
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
   state.pendingActions.clear();
   state.composerErrors = {};
+  state.composerHeld = {};
   state.session = { active_thread_id: "thread-1", available_models: [] };
 
   const actions = createRemoteComposerCommandActions({
@@ -2751,15 +2801,23 @@ test("an over-limit /goal from the phone reaches the real composer-error writer"
     stopGoal: stopRemoteGoal,
     delegate: delegateRemote,
     setComposerError,
+    setComposerHeld,
   });
 
   const answer = await actions.setGoal("thread-1", "x".repeat(MAX_GOAL_OBJECTIVE_CHARS + 1));
 
   assert.equal(answer.isError, true);
   assert.match(
-    String(state.composerErrors?.["thread-1"]),
+    String(state.composerHeld?.["thread-1"]),
     new RegExp(String(MAX_GOAL_OBJECTIVE_CHARS)),
     "the refusal has to land in the state the remote composer actually renders"
+  );
+  // The cap is the composer's own judgement and the relay never heard it, so red would
+  // claim something broke.
+  assert.equal(
+    String(state.composerErrors?.["thread-1"] || ""),
+    "",
+    "and nothing was sent, so nothing failed"
   );
 });
 
@@ -2832,6 +2890,93 @@ test("a refused Stop from the goal card lands on the card, not behind the modal"
     undefined,
     "and not on the composer, which the modal covers"
   );
+});
+
+// Reported from the phone: a "/delegate" with a real message just sat there. The relay
+// had refused it — the caller's thread was mid-turn — and the reason went only to a log
+// drawer that is `display: none` on this surface with nothing anywhere to open it.
+test("a refused delegate says why on the composer, not only in the log", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { delegateRemote } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  state.composerErrors = {};
+  state.session = { active_thread_id: "thread-1", available_models: [] };
+  state.socket = {
+    readyState: 1,
+    send() {
+      throw new Error("that thread is busy with a turn");
+    },
+  };
+
+  assert.equal(await delegateRemote("thread-1", { message: "review the frontend" }), false);
+  assert.match(
+    String(state.composerErrors?.["thread-1"]),
+    /busy with a turn/,
+    "the draft is kept, so the reason has to be readable next to it"
+  );
+});
+
+// The surface can legitimately show Stop from the status signal before the turn id has
+// arrived. Pressing it then sends nothing — the composer stopped it — so it is "not
+// sent", not a failure. Red here would blame the relay for a decision it never heard.
+test("Stop with no turn id is held, not reported as a failure", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { stopActiveTurn } = await import("./session-ops.js");
+  const { threadError } = await import("../shared/composer-errors.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  state.composerErrors = {};
+  state.composerHeld = {};
+  state.session = { active_thread_id: "thread-1", active_turn_id: null, available_models: [] };
+  state.socket = {
+    readyState: 1,
+    send() {
+      throw new Error("Stop must not be posted when the surface knows of no turn");
+    },
+  };
+
+  assert.equal(await stopActiveTurn(), false);
+  assert.match(threadError(state.composerHeld, "thread-1"), /no running .+ turn to stop/i);
+  assert.equal(threadError(state.composerErrors, "thread-1"), "", "nothing broke");
 });
 
 test("a successful remote settings update clears only that thread's composer error", async () => {

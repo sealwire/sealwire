@@ -4736,6 +4736,37 @@ body.sidebar-collapsed .app-shell[data-view="tasks"] #tasks-sidebar-toggle {
 }
 
 /* COMPOSER */
+/* Held, not abandoned: a "/" command keeps the draft on screen while the relay works.
+   Everything here is already disabled — this is only about looking it, because the
+   cursor change alone is discoverable by hovering and by nothing else. */
+/* By element, never by id: the two surfaces give this textarea different ids
+   (`message-input` vs `remote-message-input`), and keying on one shipped a freeze that
+   had never once applied on the phone. */
+.composer-shell.is-frozen .composer-inner,
+.composer-inner.is-frozen,
+.composer-shell.is-frozen textarea,
+.composer-inner.is-frozen textarea {
+  cursor: not-allowed;
+}
+.composer-shell.is-frozen textarea,
+.composer-inner.is-frozen textarea,
+.composer-shell.is-frozen .composer-command-pill,
+.composer-inner.is-frozen .composer-command-pill {
+  color: var(--text-tertiary);
+}
+.composer-shell.is-frozen .composer-command-pill-clear,
+.composer-inner.is-frozen .composer-command-pill-clear {
+  opacity: 0.45;
+}
+/* The field's own fill is what says "not yours right now" — greyed text alone still
+   reads as a field you could click into. Muted, not disabled-grey: the draft has to
+   stay readable, because a long goal is exactly what you want to re-read here. */
+.composer-shell.is-frozen .composer-inner,
+.composer-inner.is-frozen {
+  background: var(--surface-muted);
+  box-shadow: none;
+}
+
 .composer-shell {
   position: sticky;
   bottom: 0;
@@ -4791,6 +4822,38 @@ body.sidebar-collapsed .app-shell[data-view="tasks"] #tasks-sidebar-toggle {
 
 /* Why the last send was refused, shown where the user pressed Send. Hidden
    (via the `hidden` attribute) until there is something to say. */
+/* "Not sent" — the composer stopped this one itself, so nothing reached the relay and
+   nothing is broken. Deliberately NOT the error line below it: red says something went
+   wrong, and a draft you can fix in three keystrokes has not gone wrong. Neutral, with
+   the label carrying the meaning rather than a colour, so a genuinely queued message
+   can use this same shape once there is a queue to hold one. */
+.composer-held {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  overflow-wrap: anywhere;
+}
+.composer-held[hidden] {
+  display: none;
+}
+.composer-held-label {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.composer-held-text {
+  flex: 1 1 auto;
+  color: var(--text-secondary);
+}
+
 .composer-error {
   margin: 0;
   padding: 6px 10px;

@@ -5,6 +5,7 @@ import {
   auditTimeline,
   chatShell,
   composerError,
+  composerHeld,
   controlBanner,
   goConsoleHomeButton,
   sidebarHostStatus,
@@ -224,6 +225,7 @@ import {
 import { LocalTranscriptPanel } from "./local-transcript-panel.js";
 import { retainAskUserDraftsForPending } from "../shared/ask-user-draft-store.js";
 import { publishLocalTranscriptSlotContent } from "./transcript-slot.js";
+import { syncComposerHeld } from "./composer-held.js";
 import { goalErrorFor } from "./goal-error.js";
 
 const h = React.createElement;
@@ -773,13 +775,19 @@ export function createSessionRenderer({
     });
     // A failure belongs to the thread it happened to. Re-deciding it here means
     // navigation alone hides it — no clearing hook to forget on a new route.
-    syncComposerError(composerError, state.viewThreadId || session?.active_thread_id || null);
+    const viewedForComposer = state.viewThreadId || session?.active_thread_id || null;
+    syncComposerError(composerError, viewedForComposer);
+    syncComposerHeld(composerHeld, viewedForComposer);
     sendButton.disabled = buttons.sendDisabled;
     sendButton.hidden = buttons.sendHidden;
     if (stopButton) {
       stopButton.hidden = buttons.stopHidden;
       stopButton.disabled = buttons.stopDisabled;
     }
+    // The field is already dead here — a command holds the draft while it runs, and
+    // `disabled` refuses the keystrokes. At full-strength text it still reads as a
+    // draft you are in the middle of, so the freeze has to be visible too.
+    messageForm.classList.toggle("is-frozen", submitInFlight);
     messageInput.disabled =
       !hasActiveSession ||
       !canCompose ||

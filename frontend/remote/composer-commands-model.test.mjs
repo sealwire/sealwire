@@ -9,6 +9,7 @@ function model(overrides = {}) {
     getCatalog: () => ({}),
     getContext: () => ({}),
     requestReview: async () => {},
+    hold: () => {},
     log: () => {},
     actions: { setGoal: async () => ({}), askAgent: async () => ({}) },
     ...overrides,
@@ -34,6 +35,7 @@ test("the capability list is the host's, not a second copy that can drift", () =
   assert.ok(CONTROLLER_CAPABILITIES.includes("log"));
   assert.ok(CONTROLLER_CAPABILITIES.includes("askAgent"));
   assert.ok(CONTROLLER_CAPABILITIES.includes("setGoal"));
+  assert.ok(CONTROLLER_CAPABILITIES.includes("hold"));
 });
 
 test("nothing is logged for a helper that already spoke for itself", () => {

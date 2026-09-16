@@ -12,6 +12,9 @@ export const CONTROLLER_CAPABILITIES = [
   "askAgent",
   "setGoal",
   "requestReview",
+  // What a command stopped itself, which never reached the relay. `log` is where these
+  // used to go and die: a drawer behind Settings here, `display: none` on the phone.
+  "hold",
   "log",
 ];
 

@@ -30,7 +30,7 @@ test("every handler react-app reaches for is one remote-runtime provides", async
   // Named one by one, because "every name react-app uses" is satisfied by react-app
   // using fewer names. Deleting a wiring line removes the requirement along with it —
   // which is exactly how a silent channel gets re-introduced.
-  for (const required of ["onComposerError", "onGoalError", "onBeginGoalAction", "onDismissGoalError"]) {
+  for (const required of ["onComposerError", "onGoalError", "onBeginGoalAction", "onDismissGoalError", "onComposerHeld"]) {
     assert.ok(wanted.includes(required), `react-app must still route ${required}`);
   }
 

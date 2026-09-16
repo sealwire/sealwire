@@ -1996,6 +1996,9 @@ export async function sendMessage(messageDraft, effort, model = "") {
   // A new attempt supersedes the last failure ON THIS THREAD only. Patched
   // (not assigned) so the composer re-renders on both the clear and the set.
   setComposerError(threadId, "");
+  // And whatever a "/" command held back: the user has replaced what the box contained,
+  // so a NOT SENT line about the old draft now describes nothing.
+  setComposerHeld(threadId, "");
 
   // Clamp the effort to the target model's supported set so a stale/foreign
   // value (e.g. a Claude-only "max" left on a codex thread) is never forwarded
@@ -2081,6 +2084,13 @@ export function beginGoalActionOn(threadId) {
   return goalActionGeneration(next, threadId);
 }
 
+/** The composer's "not sent" slot: a command the composer stopped before the relay. */
+export function setComposerHeld(threadId, message) {
+  patchRemoteState({
+    composerHeld: withThreadError(state.composerHeld, threadId, message),
+  });
+}
+
 export function setComposerError(threadId, message) {
   patchRemoteState({
     composerErrors: withThreadError(state.composerErrors, threadId, message),
@@ -2092,15 +2102,17 @@ export async function stopActiveTurn() {
   const agentName = providerLabel(state.session?.provider) || "agent";
   const threadId = state.session?.active_thread_id || null;
   if (!threadId || !state.session.active_turn_id) {
-    // Phone client log is `display: none` — without the composer line, Stop is a
-    // silent no-op when the surface thought a turn was running and it wasn't.
+    // The surface stopped this press itself and sent nothing, so it is "not sent",
+    // not a failure. Still said out loud: this client's log is `display: none`, so
+    // without a line on screen Stop is a silent no-op.
     const message = `There is no running ${agentName} turn to stop.`;
     renderLog(message);
-    if (threadId) setComposerError(threadId, message);
+    if (threadId) setComposerHeld(threadId, message);
     return false;
   }
 
   setComposerError(threadId, "");
+  setComposerHeld(threadId, "");
   try {
     await dispatchOrRecover("stop_turn", {
       input: {
@@ -2441,12 +2453,18 @@ export async function delegateRemote(threadId, args = {}) {
     return false;
   }
   renderLog("Handing it to another agent…");
+  // Cleared as the attempt starts, not when it succeeds: a success clearing on its way
+  // out can erase a newer failure that landed while it was still in flight.
+  setComposerError(threadId, "");
   try {
     await dispatchOrRecover("delegate", { thread_id: threadId, ...args });
     await syncRemoteSnapshot("post-delegate", true);
     return true;
   } catch (error) {
     renderLog(`Remote delegate failed: ${error.message}`);
+    // The log drawer this surface has is `display: none`, so without this the refusal
+    // has nowhere to land and Send reads as dead.
+    setComposerError(threadId, error.message);
     return false;
   }
 }

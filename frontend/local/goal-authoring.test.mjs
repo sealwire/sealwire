@@ -9,6 +9,7 @@ import { MAX_GOAL_OBJECTIVE_CHARS } from "../shared/goal-objective.js";
 
 function harness({ setGoalResult = { text: "Goal set.", isError: false } } = {}) {
   const shown = [];
+  const held = [];
   const sent = [];
   const author = createGoalAuthor({
     setGoal: async (threadId, objective) => {
@@ -16,23 +17,47 @@ function harness({ setGoalResult = { text: "Goal set.", isError: false } } = {})
       return setGoalResult;
     },
     setComposerError: (threadId, message) => shown.push([threadId, message]),
+    setComposerHeld: (threadId, message) => held.push([threadId, message]),
   });
-  return { author, shown, sent };
+  return { author, shown, held, sent };
 }
 
-test("a goal refused for length is shown, not only handed back for the log", async () => {
-  const { author, shown, sent } = harness();
+// The gate stops this before the relay hears about it, so nothing failed and nothing
+// was sent: it belongs in "not sent", not on the red line that means something broke.
+test("a goal refused for length is held, not reported as a failure", async () => {
+  const { author, shown, held, sent } = harness();
   const answer = await author("thread-1", "x".repeat(MAX_GOAL_OBJECTIVE_CHARS + 1));
 
   assert.equal(answer.isError, true);
   assert.equal(sent.length, 0, "refused before the network");
   assert.deepEqual(
-    shown.map(([threadId]) => threadId),
+    held.map(([threadId]) => threadId),
     ["thread-1"],
-    "the failure belongs to the thread it happened to"
+    "held against the thread it was typed on"
   );
-  assert.equal(shown[0][1], answer.text, "the visible line says what the log says");
-  assert.ok(shown[0][1].trim(), "a blank line hides the refusal all over again");
+  assert.equal(held[0][1], answer.text, "the visible line says what the log says");
+  assert.ok(held[0][1].trim(), "a blank line hides the refusal all over again");
+  assert.deepEqual(
+    shown.filter(([, message]) => message.trim()),
+    [],
+    "and nothing claims something went wrong"
+  );
+});
+
+// The relay DID hear this one and said no, so it is a failure and reads like one.
+test("a relay refusal stays on the error line, not in the held slot", async () => {
+  const { author, shown, held } = harness({
+    setGoalResult: { text: "that thread is busy with a turn", isError: true },
+  });
+
+  await author("thread-1", "ship it");
+
+  assert.deepEqual(shown.at(-1), ["thread-1", "that thread is busy with a turn"]);
+  assert.deepEqual(
+    held.filter(([, message]) => message.trim()),
+    [],
+    "nothing is waiting on the user here — the relay refused it outright"
+  );
 });
 
 test("a fresh attempt clears the last refusal on that thread", async () => {
