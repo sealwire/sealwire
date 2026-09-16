@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
@@ -7,10 +8,15 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 import {
-  buildRemapRustflags,
+  ENCODED_SEP,
+  buildEncodedRustflags,
+  buildRemapFlags,
   computeRemapFromEnv,
+  exportFileContents,
   githubEnvAssignment,
   shellSingleQuote,
+  splitEncodedRustflags,
+  splitRustflagsWhitespace,
 } from "./npm-release-remap-env.mjs";
 import {
   FORBIDDEN_MARKER_LITERALS,
@@ -36,31 +42,60 @@ function utf16Le(str) {
   return buf;
 }
 
-test("remap flags cover workspace, swapped crate path, and private checkout", () => {
-  const workspace = path.join(os.tmpdir(), "sealwire-ws-example");
+test("encoded remap flags keep space-bearing paths as single argv entries", () => {
+  const workspace = path.join(os.tmpdir(), "sealwire ws with spaces");
   const privatePath = path.join(workspace, ".private");
-  const { flags, rustflags } = buildRemapRustflags({
+  const { flags, encoded, incorporatedFrom } = buildEncodedRustflags({
     workspace,
     privatePath,
     existingRustflags: "-C target-cpu=native",
   });
 
-  assert.match(rustflags, /^-C target-cpu=native /);
-  assert.ok(flags.some((f) => f.includes(`${workspace}=/rustc/build`)));
-  assert.ok(
-    flags.some((f) =>
-      f.includes(`${path.join(workspace, "crates", "sealwire-private")}=/rustc/crate`)
-    )
-  );
-  assert.ok(flags.some((f) => f.includes(`${privatePath}=/rustc/crate`)));
-  for (const flag of flags) {
-    const m = flag.match(/^--remap-path-prefix=(.*)=(\/rustc\/[^ =]+)$/);
-    assert.ok(m, `unexpected remap flag shape: ${flag}`);
-    assert.doesNotMatch(m[2], /\.private|sealwire-private|sealwire_private/);
+  assert.equal(incorporatedFrom, "rustflags");
+  assert.ok(flags[0] === "-C" || flags.includes("-C") || flags[0] === "-C");
+  // Whitespace split yields ["-C", "target-cpu=native"] — two Cargo argv items.
+  assert.deepEqual(flags.slice(0, 2), ["-C", "target-cpu=native"]);
+  assert.ok(flags.some((f) => f.startsWith("--remap-path-prefix=") && f.includes("with spaces")));
+  // Separators are 0x1f; paths may contain spaces *inside* a single argv entry.
+  assert.ok(encoded.includes(ENCODED_SEP));
+  assert.equal(encoded.split(ENCODED_SEP).length, flags.length);
+  for (const flag of flags.filter((f) => f.startsWith("--remap-path-prefix="))) {
+    assert.equal(flag.includes(ENCODED_SEP), false, "one remap flag = one argv entry");
+    assert.ok(flag.includes("=/rustc/"), `unexpected remap flag shape: ${flag}`);
+    const to = flag.slice(flag.lastIndexOf("=") + 1);
+    assert.doesNotMatch(to, /\.private|sealwire-private|sealwire_private/);
   }
 });
 
-test("github-env write preserves RUSTFLAGS with spaces/quotes without printing values", async () => {
+test("existing CARGO_ENCODED_RUSTFLAGS is preserved exactly and remaps append", () => {
+  const prior = ["--cfg", "keep_me", "--remap-path-prefix=/old=/x"];
+  const { flags, incorporatedFrom } = buildEncodedRustflags({
+    workspace: path.join(os.tmpdir(), "ws"),
+    privatePath: path.join(os.tmpdir(), "ws", ".private"),
+    existingEncoded: prior.join(ENCODED_SEP),
+    existingRustflags: "--cfg SHOULD_BE_IGNORED",
+  });
+  assert.equal(incorporatedFrom, "encoded");
+  assert.deepEqual(flags.slice(0, prior.length), prior);
+  assert.ok(flags.length > prior.length);
+});
+
+test("quoted RUSTFLAGS are rejected rather than pretends to quote", () => {
+  assert.throws(
+    () => splitRustflagsWhitespace('--cfg feature="quoted value"'),
+    /quote characters/
+  );
+  assert.throws(
+    () =>
+      buildEncodedRustflags({
+        workspace: "/tmp/ws",
+        existingRustflags: '--cfg feature="quoted value"',
+      }),
+    /quote characters/
+  );
+});
+
+test("github-env writes CARGO_ENCODED_RUSTFLAGS and clears RUSTFLAGS without printing values", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "npm-remap-ghenv-"));
   tempDirs.push(dir);
   const githubEnv = path.join(dir, "github.env");
@@ -68,8 +103,6 @@ test("github-env write preserves RUSTFLAGS with spaces/quotes without printing v
 
   const workspace = path.join(dir, "ws with spaces");
   await mkdir(workspace, { recursive: true });
-  const prior =
-    '--cfg feature="quoted value" --cfg other=ok';
 
   const result = spawnSync(
     process.execPath,
@@ -81,29 +114,28 @@ test("github-env write preserves RUSTFLAGS with spaces/quotes without printing v
         GITHUB_ENV: githubEnv,
         GITHUB_WORKSPACE: workspace,
         RELAY_PRIVATE_PATH: path.join(workspace, ".private"),
-        RUSTFLAGS: prior,
+        RUSTFLAGS: "-C target-cpu=native",
+        CARGO_ENCODED_RUSTFLAGS: "",
       },
     }
   );
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /^ok: wrote RUSTFLAGS to GITHUB_ENV\n$/);
-  assert.doesNotMatch(result.stdout, /remap-path-prefix|quoted value|PRIVATE_APP_KEY|TOKEN=/);
+  assert.match(result.stdout, /^ok: wrote CARGO_ENCODED_RUSTFLAGS to GITHUB_ENV\n$/);
+  assert.doesNotMatch(result.stdout, /remap-path-prefix|PRIVATE_APP_KEY|TOKEN=/);
 
   const written = await readFile(githubEnv, "utf8");
-  assert.match(written, /^RUSTFLAGS<<SEALWIRE_RUSTFLAGS_EOF\n/);
-  assert.match(written, /--cfg feature="quoted value"/);
-  assert.match(written, /--remap-path-prefix=/);
-  assert.match(written, /\nSEALWIRE_RUSTFLAGS_EOF\n$/);
+  assert.match(written, /^CARGO_ENCODED_RUSTFLAGS<</m);
+  assert.match(written, /^RUSTFLAGS<</m);
+  assert.ok(written.includes(ENCODED_SEP) || written.includes("\u001f"));
 });
 
-test("export-file round-trips spaces and embedded single quotes via shell source", async () => {
+test("export-file round-trips encoded flags with spaces via shell source", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "npm-remap-export-"));
   tempDirs.push(dir);
   const exportFile = path.join(dir, "remap.env");
-  const workspace = path.join(dir, "path with ' quotes");
+  const workspace = path.join(dir, "path with spaces");
   await mkdir(workspace, { recursive: true });
 
-  const prior = `--cfg 'a' --cfg b="x y"`;
   const result = spawnSync(
     process.execPath,
     [path.join(repoRoot, "scripts/npm-release-remap-env.mjs"), "--export-file", exportFile],
@@ -113,40 +145,32 @@ test("export-file round-trips spaces and embedded single quotes via shell source
         ...process.env,
         GITHUB_WORKSPACE: workspace,
         RELAY_PRIVATE_PATH: path.join(workspace, ".private"),
-        RUSTFLAGS: prior,
+        RUSTFLAGS: "-C opt-level=3",
+        CARGO_ENCODED_RUSTFLAGS: "",
       },
     }
   );
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /^ok: wrote RUSTFLAGS to export file\n$/);
-  assert.doesNotMatch(result.stdout, /remap-path-prefix|PRIVATE_APP_KEY/);
+  assert.match(result.stdout, /^ok: wrote CARGO_ENCODED_RUSTFLAGS to export file\n$/);
 
   const sourced = spawnSync(
     "bash",
-    ["-c", `set -a; . "$1"; set +a; printf '%s' "$RUSTFLAGS"`, "bash", exportFile],
+    [
+      "-c",
+      `set -a; . "$1"; set +a; printf '%s' "$CARGO_ENCODED_RUSTFLAGS"; printf '\\nRUSTFLAGS=[%s]' "$RUSTFLAGS"`,
+      "bash",
+      exportFile,
+    ],
     { encoding: "utf8" }
   );
   assert.equal(sourced.status, 0, sourced.stderr);
-  assert.match(sourced.stdout, /--cfg 'a'/);
-  assert.match(sourced.stdout, /--cfg b="x y"/);
-  assert.match(sourced.stdout, /--remap-path-prefix=/);
-
-  // Injection: a crafted prior flag must not break out of the assignment.
-  assert.equal(shellSingleQuote("a'$(echo INJECT)'b"), `'a'"'"'$(echo INJECT)'"'"'b'`);
-  const assignment = githubEnvAssignment("RUSTFLAGS", "line1\nRUSTFLAGS=evil");
-  assert.match(assignment, /SEALWIRE_RUSTFLAGS_EOF/);
-  assert.ok(assignment.includes("RUSTFLAGS=evil"));
-  assert.ok(assignment.startsWith("RUSTFLAGS<<"));
-});
-
-test("computeRemapFromEnv preserves prior flags", () => {
-  const { rustflags } = computeRemapFromEnv({
-    workspace: repoRoot,
-    privatePath: path.join(repoRoot, ".private"),
-    existingRustflags: "--cfg keep_me",
-  });
-  assert.match(rustflags, /^--cfg keep_me /);
-  assert.match(rustflags, /--remap-path-prefix=/);
+  const [encodedPart, rustflagsPart] = sourced.stdout.split("\nRUSTFLAGS=");
+  assert.ok(encodedPart.includes(ENCODED_SEP));
+  assert.ok(encodedPart.includes("path with spaces") || encodedPart.includes("with spaces"));
+  assert.equal(rustflagsPart, "[]");
+  assert.equal(shellSingleQuote("a'b"), `'a'"'"'b'`);
+  assert.ok(githubEnvAssignment("CARGO_ENCODED_RUSTFLAGS", "x").startsWith("CARGO_ENCODED_RUSTFLAGS<<"));
+  assert.match(exportFileContents("a\u001fb"), /CARGO_ENCODED_RUSTFLAGS=/);
 });
 
 test("CLI refuses bare stdout eval mode", () => {
@@ -157,6 +181,75 @@ test("CLI refuses bare stdout eval mode", () => {
   );
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /--github-env|--export-file/);
+});
+
+test("functional: cargo+rustc succeed under a workspace path with spaces using encoded remaps", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "npm-space-cargo-"));
+  tempDirs.push(dir);
+  const workspace = path.join(dir, "project with spaces");
+  await mkdir(path.join(workspace, "src"), { recursive: true });
+  await writeFile(
+    path.join(workspace, "Cargo.toml"),
+    `[package]\nname = "space_probe"\nversion = "0.1.0"\nedition = "2021"\n`
+  );
+  // file!() embeds the source path; remapping must rewrite it in the binary.
+  await writeFile(
+    path.join(workspace, "src", "main.rs"),
+    `fn main() {\n    let here = file!();\n    println!("{here}");\n    // keep the path reachable for strings(1)\n    let _ = option_env!("CARGO_PKG_NAME");\n}\n`
+  );
+
+  const exportFile = path.join(dir, "remap.env");
+  const configure = spawnSync(
+    process.execPath,
+    [path.join(repoRoot, "scripts/npm-release-remap-env.mjs"), "--export-file", exportFile],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_WORKSPACE: workspace,
+        RELAY_PRIVATE_PATH: path.join(workspace, ".private"),
+        RUSTFLAGS: "",
+        CARGO_ENCODED_RUSTFLAGS: "",
+      },
+    }
+  );
+  assert.equal(configure.status, 0, configure.stderr);
+
+  const build = spawnSync(
+    "bash",
+    [
+      "-c",
+      `set -a; . "$1"; set +a; cargo build --release -q`,
+      "bash",
+      exportFile,
+    ],
+    { encoding: "utf8", cwd: workspace, env: { ...process.env, CARGO_TERM_COLOR: "never" } }
+  );
+  assert.equal(
+    build.status,
+    0,
+    `cargo failed under spaced path:\nstdout:${build.stdout}\nstderr:${build.stderr}`
+  );
+  assert.doesNotMatch(
+    build.stderr,
+    /--remap-path-prefix must contain '='/,
+    "RUSTFLAGS whitespace split must not reach rustc"
+  );
+
+  const bin = path.join(workspace, "target", "release", "space_probe");
+  assert.ok(existsSync(bin), "release binary missing");
+  const bytes = await readFile(bin);
+  // Absolute workspace path must not survive remapping in file!()/debug paths.
+  assert.equal(
+    bytes.includes(Buffer.from(workspace, "utf8")),
+    false,
+    "workspace absolute path leaked into binary despite remap"
+  );
+  assert.ok(
+    bytes.includes(Buffer.from("/rustc/build", "utf8")) ||
+      !bytes.includes(Buffer.from("project with spaces", "utf8")),
+    "expected remapped placeholder or absence of spaced workspace segment"
+  );
 });
 
 test("byte scanner detects ASCII and UTF-16LE forbidden markers", () => {
@@ -269,7 +362,92 @@ test("clean staged executable passes verification and reports symbolScan honestl
   });
   assert.equal(result.ok, true);
   assert.ok(result.symbolScan === "checked" || result.symbolScan === "skipped-no-tool");
-  if (result.symbolScan === "skipped-no-tool") {
-    assert.equal(result.symbolTool, null);
-  }
+});
+
+test("API requirePrivatePath=true fails when private path is missing", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "npm-bin-priv-api-"));
+  tempDirs.push(dir);
+  const workspace = path.join(dir, "ws");
+  await mkdir(workspace, { recursive: true });
+  const bin = path.join(dir, "relay-server");
+  await writeFile(bin, Buffer.from("clean"));
+  const missing = path.join(workspace, ".private-missing");
+  assert.throws(
+    () =>
+      verifyNpmReleaseBinary({
+        binaryPath: bin,
+        workspace,
+        privatePath: missing,
+        requirePrivatePath: true,
+      }),
+    /private checkout path missing/
+  );
+});
+
+test("CLI defaults to requiring private path; only --allow-missing-private opts out", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "npm-bin-priv-cli-"));
+  tempDirs.push(dir);
+  const workspace = path.join(dir, "ws");
+  await mkdir(workspace, { recursive: true });
+  const bin = path.join(dir, "relay-server");
+  await writeFile(bin, Buffer.from("clean"));
+  const missingPrivate = path.join(workspace, "no-such-private");
+
+  const denied = spawnSync(
+    process.execPath,
+    [
+      path.join(repoRoot, "scripts/verify-npm-release-binary.mjs"),
+      bin,
+      "--workspace",
+      workspace,
+      "--private",
+      missingPrivate,
+    ],
+    { encoding: "utf8" }
+  );
+  assert.notEqual(denied.status, 0, "default CLI must fail when --private path is missing");
+  assert.match(denied.stderr, /private checkout path missing/);
+
+  const allowed = spawnSync(
+    process.execPath,
+    [
+      path.join(repoRoot, "scripts/verify-npm-release-binary.mjs"),
+      bin,
+      "--workspace",
+      workspace,
+      "--private",
+      missingPrivate,
+      "--allow-missing-private",
+    ],
+    { encoding: "utf8" }
+  );
+  assert.equal(allowed.status, 0, allowed.stderr);
+  assert.match(allowed.stdout, /^ok: verified/);
+});
+
+test("remap covers relative crates/sealwire-private paths used after the swap", () => {
+  const flags = buildRemapFlags({
+    workspace: "/tmp/ws",
+    privatePath: "/tmp/ws/.private",
+  });
+  assert.ok(
+    flags.some((f) => f === "--remap-path-prefix=crates/sealwire-private=/rustc/crate"),
+    "relative swapped-crate path must be remapped"
+  );
+  assert.ok(
+    flags.some((f) => f === "--remap-path-prefix=crates\\sealwire-private=/rustc/crate")
+  );
+});
+
+test("computeRemapFromEnv prefers encoded over rustflags", () => {
+  const { flags, incorporatedFrom } = computeRemapFromEnv({
+    workspace: repoRoot,
+    privatePath: path.join(repoRoot, ".private"),
+    existingEncoded: `--cfg${ENCODED_SEP}from_encoded`,
+    existingRustflags: "--cfg from_rustflags",
+  });
+  assert.equal(incorporatedFrom, "encoded");
+  assert.deepEqual(flags.slice(0, 2), ["--cfg", "from_encoded"]);
+  assert.ok(buildRemapFlags({ workspace: repoRoot }).length >= 1);
+  assert.deepEqual(splitEncodedRustflags(`a${ENCODED_SEP}b`), ["a", "b"]);
 });

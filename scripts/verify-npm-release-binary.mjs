@@ -208,8 +208,12 @@ export function verifyNpmReleaseBinary(opts) {
     }
   }
 
-  if (opts.requirePrivatePath && opts.privatePath && !existsSync(opts.privatePath)) {
-    failures.push(`private checkout path missing for verification: ${opts.privatePath}`);
+  if (opts.requirePrivatePath) {
+    if (!opts.privatePath || !existsSync(opts.privatePath)) {
+      failures.push(
+        `private checkout path missing for verification: ${opts.privatePath ?? "(unset)"}`
+      );
+    }
   }
 
   const symbols = tryReadSymbolTable(binaryPath);
@@ -306,7 +310,7 @@ function main() {
     binaryPath: args.binaryPath,
     workspace,
     privatePath,
-    requirePrivatePath: args.requirePrivatePath && existsSync(privatePath),
+    requirePrivatePath: args.requirePrivatePath,
   });
 
   process.stdout.write(

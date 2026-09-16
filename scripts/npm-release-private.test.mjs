@@ -551,7 +551,7 @@ test("npm release builds use the hardened release-npm profile on every matrix ta
   );
 
   const remap = stepMatching(await releaseWorkflow(), /npm-release-remap-env\.mjs --github-env/);
-  assert.ok(remap, "path remapping must write RUSTFLAGS via GITHUB_ENV (no shell eval)");
+  assert.ok(remap, "path remapping must write CARGO_ENCODED_RUSTFLAGS via GITHUB_ENV (no shell eval)");
   assert.match(remap, /shell: bash/);
   assert.doesNotMatch(remap, /\beval\b/);
 
@@ -562,8 +562,10 @@ test("npm release builds use the hardened release-npm profile on every matrix ta
   assert.match(build, /--features private/);
   assert.match(build, /SEALWIRE_NPM_RELEASE:\s*"1"/);
   assert.doesNotMatch(build, /\beval\b/, "build must not eval remap stdout");
+  // Remap configures encoded flags in a prior step; build must not set plain RUSTFLAGS.
+  assert.doesNotMatch(build, /^\s*RUSTFLAGS:/m);
 
-  // Remap must run before the cargo build so RUSTFLAGS is visible to the job.
+  // Remap must run before the cargo build so encoded flags are visible to the job.
   const buildJob = workflowJobs(await releaseWorkflow()).find((j) => j.id === "build-binary");
   assert.ok(buildJob);
   const jobSteps = steps(buildJob.body);
@@ -647,6 +649,11 @@ test("release-npm profile emits sealwire_npm_release cfg so env!(CARGO_MANIFEST_
   assert.match(buildRs, /cargo:rustc-check-cfg=cfg\(sealwire_npm_release\)/);
   assert.match(buildRs, /out_dir_is_release_npm_profile|release-npm/);
   assert.match(buildRs, /cargo:rustc-cfg=sealwire_npm_release/);
+  assert.match(
+    buildRs,
+    /cargo:rerun-if-env-changed=SEALWIRE_NPM_RELEASE/,
+    "env override must invalidate the build script when SEALWIRE_NPM_RELEASE changes"
+  );
   // PROFILE is NOT the custom profile name — must not be the sole detector.
   assert.doesNotMatch(
     buildRs,

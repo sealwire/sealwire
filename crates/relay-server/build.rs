@@ -10,6 +10,7 @@ fn main() {
     // custom profile name. Detect `--profile release-npm` via OUT_DIR's profile
     // directory segment, which Cargo places at target/<profile>/build/.../out.
     println!("cargo:rustc-check-cfg=cfg(sealwire_npm_release)");
+    println!("cargo:rerun-if-env-changed=SEALWIRE_NPM_RELEASE");
     let out_dir = env::var("OUT_DIR").unwrap_or_default();
     if out_dir_is_release_npm_profile(&out_dir)
         || env::var_os("SEALWIRE_NPM_RELEASE").is_some_and(|v| v == "1")
