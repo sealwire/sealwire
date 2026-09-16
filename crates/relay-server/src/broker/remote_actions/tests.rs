@@ -489,6 +489,7 @@ fn plain_remote_action_result_payload_splits_control_results_from_session_result
         devices: None,
         projects: None,
         ask_user_question_detail: None,
+        ask_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
         claim_challenge_id: None,
@@ -527,6 +528,7 @@ fn plain_remote_action_result_payload_splits_control_results_from_session_result
         devices: None,
         projects: None,
         ask_user_question_detail: None,
+        ask_detail: None,
         session_claim: Some("claim-1".to_string()),
         session_claim_expires_at: Some(123),
         claim_challenge_id: None,
@@ -627,6 +629,9 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
         None,
         // projects
         None,
+        // ask_user_question_detail
+        None,
+        // ask_detail
         None,
         None,
         None,
@@ -685,6 +690,7 @@ fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
         devices: None,
         projects: None,
         ask_user_question_detail: None,
+        ask_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
         claim_challenge_id: None,
@@ -738,6 +744,7 @@ fn make_large_ask_user_detail_plaintext() -> RemoteActionResultPlaintext {
                 }],
             ),
         }),
+        ask_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
         claim_challenge_id: None,
@@ -849,6 +856,33 @@ fn fetch_reviews_action_round_trips_and_is_not_claim_gated() {
     ));
     match request.bind_device("device-7".to_string(), "surface-test", test_origin()) {
         RemoteActionRequest::FetchReviews { device_id } => {
+            assert_eq!(device_id.as_deref(), Some("device-7"));
+        }
+        other => panic!("unexpected bound request: {other:?}"),
+    }
+}
+
+#[test]
+fn fetch_ask_action_round_trips_and_is_not_claim_gated() {
+    // Agents card hover: same read-only data channel shape as fetch_reviews.
+    let request: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "fetch_ask",
+        "ask_id": "ask-9"
+    }))
+    .expect("fetch_ask should parse");
+    assert_eq!(request.kind(), RemoteActionKind::FetchAsk);
+    assert_eq!(RemoteActionKind::FetchAsk.as_str(), "fetch_ask");
+    assert!(
+        !requires_session_claim(RemoteActionKind::FetchAsk),
+        "ask detail is read-only and must not require session control"
+    );
+    assert!(matches!(
+        remote_action_result_kind(RemoteActionKind::FetchAsk),
+        RemoteActionResultKind::RemoteTranscriptResult
+    ));
+    match request.bind_device("device-7".to_string(), "surface-test", test_origin()) {
+        RemoteActionRequest::FetchAsk { ask_id, device_id } => {
+            assert_eq!(ask_id, "ask-9");
             assert_eq!(device_id.as_deref(), Some("device-7"));
         }
         other => panic!("unexpected bound request: {other:?}"),
@@ -1093,6 +1127,7 @@ fn plain_fetch_reviews_result_carries_the_reviews_payload_to_the_device() {
         devices: None,
         projects: None,
         ask_user_question_detail: None,
+        ask_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
         claim_challenge_id: None,
@@ -1116,6 +1151,71 @@ fn plain_fetch_reviews_result_carries_the_reviews_payload_to_the_device() {
         carried["reviewer_threads"][0]["reviewer_thread_id"], "reviewer-1",
         "the device needs the reviewer threads to populate the reuse picker"
     );
+}
+
+#[test]
+fn plain_fetch_ask_result_carries_the_ask_detail_payload_to_the_device() {
+    // Same plaintext-drop trap as fetch_reviews: RemoteTranscriptResult must copy
+    // `ask_detail` or Agents hover on the phone gets undefined while local works.
+    let ask_detail = crate::protocol::AskDetailResponse {
+        id: "ask-1".to_string(),
+        asker_thread_id: "asker".to_string(),
+        peer_thread_id: "peer".to_string(),
+        peer_provider: "codex".to_string(),
+        asker_provider: None,
+        peer_model: None,
+        peer_effort: None,
+        message: "full prompt with context".to_string(),
+        answer: Some("full answer".to_string()),
+        status: "done".to_string(),
+        error: None,
+        delivered: true,
+        updated_at: 9,
+    };
+    let result = RemoteActionResultPlaintext {
+        kind: remote_action_result_kind(RemoteActionKind::FetchAsk),
+        action: RemoteActionKind::FetchAsk,
+        ok: true,
+        snapshot: None,
+        receipt: None,
+        ask_user_answer_receipt: None,
+        providers: None,
+        models: None,
+        threads: None,
+        thread_entry_detail: None,
+        thread_transcript: None,
+        workspace_diff: None,
+        workspace_git_context: None,
+        thread_workspace: None,
+        thread_settings: None,
+        reviews: None,
+        workflows: None,
+        devices: None,
+        projects: None,
+        ask_user_question_detail: None,
+        ask_detail: Some(ask_detail),
+        session_claim: None,
+        session_claim_expires_at: None,
+        claim_challenge_id: None,
+        claim_challenge: None,
+        claim_challenge_expires_at: None,
+        error: None,
+    };
+
+    let payload = build_plain_remote_action_result_payload("action-ask", "surface-1", &result)
+        .expect("ask detail payload");
+    let json = serde_json::to_value(&payload).expect("serialize ask detail payload");
+    let carried = json
+        .get("ask_detail")
+        .unwrap_or(&serde_json::Value::Null)
+        .clone();
+    assert!(
+        !carried.is_null(),
+        "the plaintext fetch_ask envelope must carry `ask_detail` to the device; got: {json}"
+    );
+    assert_eq!(carried["id"], "ask-1");
+    assert_eq!(carried["message"], "full prompt with context");
+    assert_eq!(carried["answer"], "full answer");
 }
 
 #[test]
@@ -1149,6 +1249,7 @@ fn plain_dedicated_workflows_and_devices_payloads_reach_the_device() {
         }),
         projects: None,
         ask_user_question_detail: None,
+        ask_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
         claim_challenge_id: None,
@@ -1202,6 +1303,7 @@ fn plain_fetch_projects_result_carries_the_projects_payload_to_the_device() {
         devices: None,
         projects: Some(projects),
         ask_user_question_detail: None,
+        ask_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
         claim_challenge_id: None,
@@ -1262,6 +1364,7 @@ fn plain_fetch_workspace_git_context_result_reaches_the_device() {
         devices: None,
         projects: None,
         ask_user_question_detail: None,
+        ask_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
         claim_challenge_id: None,

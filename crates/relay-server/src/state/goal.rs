@@ -99,9 +99,10 @@ impl From<String> for GoalStatus {
 /// Reaching it must never read as success — see `OutOfTurns`.
 pub(crate) const MAX_GOAL_TURNS: u32 = 20;
 
-/// Hard cap on the standing objective. The relay re-injects it every turn; a
-/// status dump here is not an aim, burns tokens, and blows up the Agents card.
-pub(crate) const MAX_GOAL_OBJECTIVE_CHARS: usize = 500;
+/// Hard cap on the standing objective, sized for a page of instructions rather
+/// than a pasted document — the relay re-injects it WHOLE every turn, so this is
+/// a recurring cost. Mirrored in `frontend/shared/goal-objective.js`.
+pub(crate) const MAX_GOAL_OBJECTIVE_CHARS: usize = 8_000;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]

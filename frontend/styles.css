@@ -6760,6 +6760,44 @@ body.is-resizing-panel {
   cursor: pointer;
   border-radius: var(--r-sm);
 }
+/* A refused Stop / Keep going, beside the button that was refused. */
+.reviewer-goal-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--err-bg);
+  color: var(--err-fg);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+/* The warning's own way out; see GoalErrorLine for why it needs one. */
+.reviewer-goal-error-text {
+  flex: 1 1 auto;
+}
+.reviewer-goal-error-dismiss {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--leading-none);
+  cursor: pointer;
+}
+.reviewer-goal-error-dismiss:focus-visible {
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+/* Advice, not a failure: the per-turn cost of a long aim, where the aim is read. */
+.reviewer-goal-length {
+  margin: 4px 0 0;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
 .reviewer-goal-title.is-expanded {
   display: block;
   -webkit-line-clamp: unset;

@@ -151,6 +151,9 @@ pub(super) enum OutboundBrokerPayload {
         /// plaintext path or the remote Projects view silently sees nothing.
         projects: Option<crate::protocol::ProjectsResponse>,
         ask_user_question_detail: Option<AskUserQuestionDetailResponse>,
+        /// Full ask bodies for Agents hover (`fetch_ask`). Same plaintext-drop trap as
+        /// `reviews` / `ask_user_question_detail` — must be copied on this path.
+        ask_detail: Option<crate::protocol::AskDetailResponse>,
         error: Option<String>,
     },
     RemoteActionResultChunk {

@@ -49,6 +49,12 @@ import {
   workspaceRepairResolved,
 } from "./workspace-repair.js";
 import { withThreadError } from "../shared/composer-errors.js";
+import {
+  beginGoalAction,
+  goalActionGeneration,
+  withGoalError,
+  withGoalErrorCleared,
+} from "../shared/goal-errors.js";
 import { createCachingTranscriptPageFetcher } from "../shared/caching-transcript-fetcher.js";
 import { providerLabel } from "../shared/provider-labels.js";
 import {
@@ -2053,7 +2059,29 @@ export async function sendMessage(messageDraft, effort, model = "") {
  * settling late can only ever affect the thread it was aimed at; see
  * shared/composer-errors.js.
  */
-function setComposerError(threadId, message) {
+/**
+ * The goal card's own failure line. Stamped with the goal it is about, so a `/goal`
+ * from the composer replacing that goal takes this sentence off screen with it.
+ */
+export function setGoalError(threadId, message, generation) {
+  patchRemoteState({
+    goalErrors: withGoalError(state.goalErrors, threadId, message, generation),
+  });
+}
+
+/** Retire the current word without opening a new action. The user has read it. */
+export function clearGoalErrorOn(threadId) {
+  patchRemoteState({ goalErrors: withGoalErrorCleared(state.goalErrors, threadId) });
+}
+
+/** Open a user action on this thread's goal; answers the generation to file it under. */
+export function beginGoalActionOn(threadId) {
+  const next = beginGoalAction(state.goalErrors, threadId);
+  patchRemoteState({ goalErrors: next });
+  return goalActionGeneration(next, threadId);
+}
+
+export function setComposerError(threadId, message) {
   patchRemoteState({
     composerErrors: withThreadError(state.composerErrors, threadId, message),
   });
@@ -2144,6 +2172,17 @@ export async function fetchAskUserQuestionDetail(requestId) {
     request_id: requestId,
   });
   return result.ask_user_question_detail?.request || null;
+}
+
+// Full ask bodies for Agents card hover. The reviews list only ships ledger previews.
+export async function fetchAskDetail(askId) {
+  if (!askId) {
+    return null;
+  }
+  const result = await dispatchOrRecover("fetch_ask", {
+    ask_id: askId,
+  });
+  return result.ask_detail || null;
 }
 
 export async function applyFileChange(itemId, direction) {
@@ -2351,19 +2390,25 @@ export async function resolveRemoteWorkflow(workflowRunId) {
 
 // Two actions rather than one with an empty objective: the relay gates and logs them
 // separately, and "stop" should not have to be spelled as an absent value.
+// Answers `{isError, text}` — the shape the loopback route already gives the desktop —
+// so one contract serves both surfaces' goal callers. It reports nowhere itself: the
+// composer and the goal card are different places, and only the caller knows which door
+// the user came through. On this surface that matters more than it sounds, because the
+// card lives inside a native <dialog> the composer is behind.
 async function dispatchGoal(threadId, action, payload, note) {
   if (!threadId) {
-    renderLog("No session to set a goal on.");
-    return false;
+    const text = "No session to set a goal on.";
+    renderLog(text);
+    return { isError: true, text };
   }
   renderLog(note);
   try {
     await dispatchOrRecover(action, { thread_id: threadId, ...payload });
     await syncRemoteSnapshot(`post-${action}`, true);
-    return true;
+    return { isError: false, text: "" };
   } catch (error) {
     renderLog(`Remote goal update failed: ${error.message}`);
-    return false;
+    return { isError: true, text: error.message };
   }
 }
 

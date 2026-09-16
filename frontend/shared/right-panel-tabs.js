@@ -89,6 +89,8 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
           reviewJobs: review.reviewJobs || [],
           asks: review.asks || [],
           goal: review.goal || null,
+          goalError: review.goalError || "",
+          onDismissGoalError: reviewer.onDismissGoalError || null,
           onStopGoal: reviewer.onStopGoal || null,
           onResumeGoal: reviewer.onResumeGoal || null,
           onOpenThread: reviewer.onOpenThread || null,

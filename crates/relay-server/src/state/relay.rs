@@ -216,6 +216,7 @@ pub(crate) struct CachedRemoteActionResult {
     pub(crate) devices: Option<crate::protocol::DevicesResponse>,
     pub(crate) projects: Option<crate::protocol::ProjectsResponse>,
     pub(crate) ask_user_question_detail: Option<crate::protocol::AskUserQuestionDetailResponse>,
+    pub(crate) ask_detail: Option<crate::protocol::AskDetailResponse>,
     pub(crate) session_claim: Option<String>,
     pub(crate) session_claim_expires_at: Option<u64>,
     pub(crate) claim_challenge_id: Option<String>,

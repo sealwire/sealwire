@@ -224,6 +224,7 @@ import {
 import { LocalTranscriptPanel } from "./local-transcript-panel.js";
 import { retainAskUserDraftsForPending } from "../shared/ask-user-draft-store.js";
 import { publishLocalTranscriptSlotContent } from "./transcript-slot.js";
+import { goalErrorFor } from "./goal-error.js";
 
 const h = React.createElement;
 const reactRoots = new WeakMap();
@@ -1238,8 +1239,9 @@ export function createSessionRenderer({
       typeof startWorkflow === "function" &&
       isViewingConversation(session) &&
       canCurrentDeviceWrite(session);
+    const panelSlice = agentsPanelSlice(reviewsData, viewedThreadId, state.threads);
     setReviewSlice({
-      ...agentsPanelSlice(reviewsData, viewedThreadId, state.threads),
+      ...panelSlice,
       workflowRuns: threadWorkflowRuns,
       reviewModel: reviewLaunchModel(session),
       workflowModel: workflowLaunchModel(session),
@@ -1255,6 +1257,7 @@ export function createSessionRenderer({
         canRequestReview(session, state.deviceId, viewedThreadId),
       canStartWorkflow: viewingWritableAuthor && canStartWorkflow(session, viewedThreadId),
       blocked: isReviewBlocked(session) || isWorkflowBlocked(session),
+      goalError: goalErrorFor(viewedThreadId),
     });
   }
 

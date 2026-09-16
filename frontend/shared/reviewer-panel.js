@@ -16,6 +16,7 @@ import { MenuPortal, useAnchoredMenu } from "./use-anchored-menu.js";
 import { useDismissableMenu } from "./use-dismissable-menu.js";
 import { isTerminalReviewStatus } from "./review-state.js";
 import { CODE_FLOW_ENABLED } from "./workflow-state.js";
+import { goalObjectiveLengthNotice } from "./goal-objective.js";
 
 const h = React.createElement;
 
@@ -217,9 +218,33 @@ const GOAL_STATUS_LABEL = {
   interrupted: "Stopped — pick it back up",
 };
 
+// The warning and its way out. A refusal is superseded by the next goal action, but the
+// one that CANCELS the goal takes its own buttons away — so without this the last word
+// on a thread can be a sentence that stopped being true and nothing can retire.
+function GoalErrorLine({ error, onDismiss = null }) {
+  return h(
+    "p",
+    { className: "reviewer-goal-error", role: "alert" },
+    h("span", { className: "reviewer-goal-error-text" }, error),
+    onDismiss
+      ? h(
+          "button",
+          {
+            type: "button",
+            className: "reviewer-goal-error-dismiss",
+            "aria-label": "Dismiss",
+            title: "Dismiss",
+            onClick: onDismiss,
+          },
+          "\u00d7"
+        )
+      : null
+  );
+}
+
 // Above the review slot, because it outranks it: a review judges one commit, the goal is
 // the standing objective every commit — and every review — is in service of.
-function GoalSlot({ goal, onStop = null, onResume = null }) {
+function GoalSlot({ goal, error = "", onDismissError = null, onStop = null, onResume = null }) {
   const working = goal.status === "active";
   const status = GOAL_STATUS_LABEL[goal.status] || goal.status;
   const [expanded, setExpanded] = React.useState(false);
@@ -262,6 +287,18 @@ function GoalSlot({ goal, onStop = null, onResume = null }) {
         },
         goal.objective
       ),
+      // The per-turn cost of a long aim is invisible where it is typed, and this is
+      // the only place the objective is read again afterwards.
+      goalObjectiveLengthNotice(goal.objective)
+        ? h(
+            "p",
+            { className: "reviewer-goal-length" },
+            goalObjectiveLengthNotice(goal.objective)
+          )
+        : null,
+      // Beside the button that was refused. On a phone this card is inside a native
+      // <dialog>, so anything reported to the composer is behind an inert layer.
+      error ? h(GoalErrorLine, { error, onDismiss: onDismissError }) : null,
       goal.outcome
         ? h(
             "p",
@@ -716,6 +753,11 @@ export function ReviewerPanel({
   reviewJobs = [],
   asks = [],
   goal = null,
+  // Why this card's own Stop / Keep going was refused. Lives here rather than on the
+  // composer because on a phone this panel is a native <dialog>: the composer is
+  // behind an inert layer, where nothing can be read or dismissed.
+  goalError = "",
+  onDismissGoalError = null,
   onStopGoal = null,
   onResumeGoal = null,
   onOpenThread = null,
@@ -764,7 +806,25 @@ export function ReviewerPanel({
     h(
       "div",
       { className: "reviewer-panel-body" },
-      goal ? h(GoalSlot, { goal, onResume: onResumeGoal, onStop: onStopGoal }) : null,
+      goal
+        ? h(GoalSlot, {
+            goal,
+            error: goalError,
+            onDismissError: onDismissGoalError,
+            onResume: onResumeGoal,
+            onStop: onStopGoal,
+          })
+        : // A Stop that partly succeeded takes the card away and still has something the
+          // user must read — "stopped, but the turn it started is still running". Without
+          // this the warning is written to a card that no longer exists.
+          goalError
+          ? h(
+              "article",
+              { className: "reviewer-card reviewer-goal" },
+              h(LedgerHeading, { label: "Goal" }),
+              h(GoalErrorLine, { error: goalError, onDismiss: onDismissGoalError })
+            )
+          : null,
       review
         ? h(ReviewSlot, {
             ledger: review,

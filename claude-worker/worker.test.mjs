@@ -799,3 +799,57 @@ test("trackBackgroundTasks mirrors the SDK's live set", () => {
   trackBackgroundTasks(entry, { type: "result", subtype: "success" });
   assert.deepEqual(entry.backgroundTasks, []);
 });
+
+// The cancel check sits BEFORE mapping, but enrichment awaits real filesystem I/O
+// (file-diff.mjs readTextSnapshot), so a stop/release can land inside that await and
+// the event is emitted anyway — making this function's own "suppress late provider
+// events during cancellation" comment false. It surfaced as a turn_id hole: an idle
+// spontaneous turn has no armed id, `armSpontaneousTurn` bails out once cancel is
+// set, and the row reaches the relay naming no turn at all.
+test("a cancel landing during enrichment suppresses the event, not just its turn id", async () => {
+  const cancel = { current: false };
+  const emitted = [];
+  const tracker = {
+    async capture(event) {
+      cancel.current = true; // the command loop runs stop/release while we await
+      return event;
+    },
+    async enrichResult(event) {
+      return event;
+    },
+  };
+
+  await captureStdout(async () => {
+    await flushEvents(
+      streamMessages([
+        {
+          type: "assistant",
+          uuid: "sdk-assistant-uuid",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "tool-1",
+                name: "Edit",
+                input: { file_path: "/tmp/x", old_string: "a", new_string: "b" },
+              },
+            ],
+          },
+        },
+      ]),
+      cancel,
+      (event) => emitted.push(event),
+      tracker,
+      null,
+      null,
+      null,
+      makeTracker(),
+    );
+  });
+
+  assert.deepEqual(
+    emitted.map((event) => event.type),
+    [],
+    "an event enriched across a cancel must not reach the relay",
+  );
+});

@@ -711,6 +711,13 @@ test("an SDK-spontaneous turn after done re-arms liveness with a fresh turn id",
       worker.events.indexOf(started) < worker.events.indexOf(text),
       "turn_started must precede the turn's output",
     );
+    // Announcing the turn is only half of it: the row has to name that same turn, or
+    // the relay files this text under an id it was never told about.
+    assert.equal(
+      text.turn_id,
+      started.turn_id,
+      "a spontaneous turn's row must carry the announced id, not the SDK message uuid",
+    );
 
     // ...and it must settle under that same id, or the relay's
     // completion_matches_turn drops the terminal and the thread hangs "running".
@@ -1176,6 +1183,104 @@ test("an absent cwd still means 'use the worker's own cwd' (not a failure)", asy
       { label: "model/list response (empty cwd)" },
     );
     assert.equal(res.ok, true, `empty cwd must stay valid, got ${JSON.stringify(res)}`);
+  } finally {
+    await worker.close();
+  }
+});
+
+// Reported as "/delegate said the agent did not write a brief" when it plainly had.
+// Three relay consumers ask "is this row from the turn I started?" by comparing the
+// row's turn_id against what `start_turn` answered (brief_from_reply,
+// reply_answers_ask, collect_turn_file_changes). The SDK's message uuid is message
+// identity — it already rides `item_id` — and answers none of them.
+test("every row a turn produces carries the relay turn id, not the SDK's uuid", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_TURN_OUTPUT: "1" });
+  const nth = (type, count) =>
+    worker.waitFor((event) => event.type === type, { count, label: `${type}#${count}` });
+  try {
+    // Turn 1 is the start-with-initial-prompt path: the relay names no turn, so the
+    // worker mints one. The rows must still agree with each other on it — that id is
+    // what `start_turn` hands back and what the relay seeds as the active turn.
+    worker.send(START_DEFAULT);
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    await nth("done", 1);
+
+    const minted = (await nth("user_message", 1)).turn_id;
+    assert.ok(minted, "a turn the relay did not name still needs one id of its own");
+    assert.equal((await nth("assistant_message", 1)).turn_id, minted);
+    assert.equal((await nth("tool_call_requested", 1)).turn_id, minted);
+    assert.equal((await nth("tool_call_result", 1)).turn_id, minted);
+
+    // Turn 2 is the ordinary relay-driven send — the shape `/delegate` goes through.
+    worker.send({
+      type: "send",
+      provider_session_id: "sess-1",
+      model: "claude-sonnet-4-6",
+      permissionMode: "default",
+      prompt: "hand this to codex",
+      turn_id: "relay-turn-1",
+      user_item_id: "user:relay-turn-1",
+    });
+    await nth("done", 2);
+
+    const assistant = await nth("assistant_message", 2);
+    assert.equal(assistant.turn_id, "relay-turn-1");
+    assert.equal((await nth("tool_call_requested", 2)).turn_id, "relay-turn-1");
+    assert.equal((await nth("tool_call_result", 2)).turn_id, "relay-turn-1");
+    // The uuid is not lost — it is message identity, and that is what item_id is for.
+    assert.equal(assistant.item_id, "assistant:sdk-assistant-uuid");
+  } finally {
+    await worker.close();
+  }
+});
+
+// Why this belongs in the worker and not the relay: `claude.rs` falls back to the
+// GLOBALLY selected active turn (`relay.active_turn_id`) even for an event it has
+// already routed to a background thread, so stamping there would file one thread's
+// rows under another's turn. Each worker session owns its own `currentTurnId`.
+// Both turns stay OPEN and A speaks again after B was armed. Waiting for A's `done`
+// first would prove nothing: `done` clears A's id, so a single global "current turn"
+// would pass that version of this test while still mixing up two live sessions.
+test("a live session keeps its own turn id while another session's turn is newer", async () => {
+  const worker = spawnWorker({
+    CLAUDE_FAKE_TURN_OUTPUT: "1",
+    CLAUDE_FAKE_TURN_OUTPUT_LATE_MS: "220",
+  });
+  const ROWS = ["assistant_message", "tool_call_requested", "tool_call_result"];
+  const rowsFor = (sid) =>
+    worker.events.filter(
+      (event) => event.provider_session_id === sid && ROWS.includes(event.type),
+    );
+  const lateRow = (sid) =>
+    rowsFor(sid).find((event) => (event.item_id ?? event.id ?? "").includes("-late"));
+  try {
+    worker.send({ ...START_DEFAULT, id: "start-1", prompt: "A", turn_id: "relay-turn-a" });
+    await worker.waitFor(isStarted("sess-1"), { label: "sess-1 started" });
+    await worker.waitFor((event) => event.provider_session_id === "sess-1" && ROWS.includes(event.type), {
+      label: "sess-1 first rows",
+    });
+
+    // B's turn is armed while A's is still open, so B is now the most recent.
+    worker.send({ ...START_DEFAULT, id: "start-2", prompt: "B", turn_id: "relay-turn-b" });
+    await worker.waitFor(isStarted("sess-2"), { label: "sess-2 started" });
+    await worker.waitFor((event) => event.provider_session_id === "sess-2" && ROWS.includes(event.type), {
+      label: "sess-2 first rows",
+    });
+
+    // Now A speaks again. A global current-turn would stamp these with B's id.
+    await worker.waitFor((event) => event.provider_session_id === "sess-1" && ROWS.includes(event.type), {
+      count: ROWS.length + 1,
+      label: "sess-1 late rows",
+      timeoutMs: 6000,
+    });
+
+    assert.ok(lateRow("sess-1"), "A must have spoken a second time for this to prove anything");
+    for (const row of rowsFor("sess-1")) {
+      assert.equal(row.turn_id, "relay-turn-a", `${row.type} ${row.item_id ?? row.id} on sess-1`);
+    }
+    for (const row of rowsFor("sess-2")) {
+      assert.equal(row.turn_id, "relay-turn-b", `${row.type} ${row.item_id ?? row.id} on sess-2`);
+    }
   } finally {
     await worker.close();
   }

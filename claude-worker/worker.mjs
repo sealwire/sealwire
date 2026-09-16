@@ -217,6 +217,11 @@ async function flushEvents(
       const events = Array.isArray(mapped) ? mapped : [mapped];
       for (const ev of events) {
         const enriched = await enrichEvent(ev, fileDiffTracker);
+        // Enrichment awaits disk, so a stop/release can land inside it. Without this
+        // the check above only covers events that needed no enrichment — and a
+        // cancelled idle turn has no armed id left to stamp, so the row would reach
+        // the relay naming no turn at all.
+        if (shouldCancel.current) return;
         decorateEvent?.(enriched);
         streamProviderSessionId = stampProviderSession(
           enriched,

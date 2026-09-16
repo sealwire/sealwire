@@ -154,10 +154,14 @@ to one of your own sessions"
         let resuming_same = relay
             .goal_for_thread(thread_id)
             .is_some_and(|goal| goal.objective == objective);
-        if !resuming_same && objective.chars().count() > crate::state::MAX_GOAL_OBJECTIVE_CHARS {
+        let chars = objective.chars().count();
+        if !resuming_same && chars > crate::state::MAX_GOAL_OBJECTIVE_CHARS {
+            // Names the overage: every caller keeps what was written, so the fix is
+            // an edit, and an edit needs the number the writer cannot see.
             return Err(format!(
-                "keep the goal short (at most {} characters) — what to aim for, not a status report",
-                crate::state::MAX_GOAL_OBJECTIVE_CHARS
+                "this goal is {chars} characters and {max} is the most it can be — trim {over} and send it again",
+                max = crate::state::MAX_GOAL_OBJECTIVE_CHARS,
+                over = chars - crate::state::MAX_GOAL_OBJECTIVE_CHARS,
             ));
         }
         // Claimed here rather than on the way in: a frame refused above changed nothing,

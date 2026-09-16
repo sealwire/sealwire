@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { createRemoteComposerCommandActions } from "./composer-command-actions.js";
+import { MAX_GOAL_OBJECTIVE_CHARS } from "../shared/goal-objective.js";
 
 function spy(result = true) {
   const calls = [];
@@ -43,24 +44,50 @@ test("a real objective reaches the relay trimmed", async () => {
   assert.equal(stopGoal.calls.length, 0);
 });
 
-test("a status-dump objective is refused before it reaches the relay", async () => {
+// Nothing else has logged this one — the helpers that log their own reason are not
+// reached — so unlike a helper refusal it must still carry its text back.
+test("a status-dump objective is refused before it reaches the relay, with its reason", async () => {
   const setGoal = spy();
   const actions = createRemoteComposerCommandActions({
     setGoal,
     stopGoal: spy(),
     delegate: spy(),
   });
-  const dump = "x".repeat(501);
+  const dump = "x".repeat(MAX_GOAL_OBJECTIVE_CHARS + 1);
   const answer = await actions.setGoal("thread-1", dump);
   assert.equal(answer.isError, true);
-  assert.match(answer.text, /at most 500/);
+  assert.ok(answer.text.trim(), "a silent refusal is the bug this whole path exists to avoid");
+  assert.match(answer.text, new RegExp(String(MAX_GOAL_OBJECTIVE_CHARS)));
   assert.equal(setGoal.calls.length, 0);
+});
+
+// The phone has it worse than the desktop: its log drawer is `display: none` with
+// nothing anywhere to open it, so the composer line is the ONLY channel there is.
+test("a goal refused for length is shown on the composer", async () => {
+  const shown = [];
+  const setGoal = spy();
+  const actions = createRemoteComposerCommandActions({
+    setGoal,
+    stopGoal: spy(),
+    delegate: spy(),
+    setComposerError: (threadId, message) => shown.push([threadId, message]),
+  });
+
+  const answer = await actions.setGoal("thread-1", "x".repeat(MAX_GOAL_OBJECTIVE_CHARS + 1));
+
+  assert.equal(answer.isError, true);
+  assert.equal(setGoal.calls.length, 0, "refused before the relay");
+  assert.deepEqual(
+    shown.map(([threadId]) => threadId),
+    ["thread-1"]
+  );
+  assert.ok(shown[0][1].trim(), "a blank line leaves the refusal nowhere at all");
 });
 
 test("a refused write comes back as an error so the draft is not cleared", async () => {
   const actions = createRemoteComposerCommandActions({
-    setGoal: spy(false),
-    stopGoal: spy(false),
+    setGoal: spy({ isError: true, text: "that thread is busy with a turn" }),
+    stopGoal: spy({ isError: true, text: "that thread is busy with a turn" }),
     delegate: spy(false),
   });
 
@@ -98,17 +125,48 @@ test("delegate forwards every field the command collected", async () => {
   ]);
 });
 
-test("the relay's own reason is not echoed a second time", async () => {
-  // The remote helpers already render their failure, so a non-empty text here
-  // would put the same sentence on screen twice.
+// delegate renders its own failure as it happens, so repeating it here would put the
+// same sentence on screen twice. The goal helpers are the opposite: they report nowhere.
+test("delegate's own reason is not echoed a second time", async () => {
   const actions = createRemoteComposerCommandActions({
-    setGoal: spy(false),
-    stopGoal: spy(),
+    setGoal: spy({ isError: false, text: "" }),
+    stopGoal: spy({ isError: false, text: "" }),
     delegate: spy(false),
   });
 
-  assert.equal((await actions.setGoal("t", "do it")).text, "");
   assert.equal((await actions.askAgent("t", { message: "look" })).text, "");
+});
+
+// The bare boolean was the OLD goal contract. If a helper slips back to it, the refusal
+// must become loud, not silent — silence is the whole defect this door exists to close.
+test("a goal helper that answers the old boolean is reported, not passed over", async () => {
+  const shown = [];
+  const actions = createRemoteComposerCommandActions({
+    setGoal: spy(false),
+    stopGoal: spy(false),
+    delegate: spy(),
+    setComposerError: (threadId, message) => shown.push([threadId, message]),
+  });
+
+  const answer = await actions.setGoal("t", "do it");
+
+  assert.equal(answer.isError, true);
+  assert.ok(answer.text.trim(), "a silent refusal is indistinguishable from a dead Send");
+  assert.equal(shown.at(-1)[1], answer.text, "and it is on screen, not only returned");
+});
+
+// `true` was the old success. Treating it as success would hide the regression instead.
+test("a goal helper that answers the old true is reported too", async () => {
+  const shown = [];
+  const actions = createRemoteComposerCommandActions({
+    setGoal: spy(true),
+    stopGoal: spy(true),
+    delegate: spy(),
+    setComposerError: (threadId, message) => shown.push([threadId, message]),
+  });
+
+  assert.equal((await actions.setGoal("t", "do it")).isError, true);
+  assert.ok(shown.at(-1)[1].trim());
 });
 
 test("a thrown transport failure is an error, not a crash mid-command", async () => {
@@ -129,4 +187,38 @@ test("a thrown transport failure is an error, not a crash mid-command", async ()
   const ask = await actions.askAgent("t", { message: "look" });
   assert.equal(ask.isError, true);
   assert.match(ask.text, /broker is down/);
+});
+
+// The card door and this one act on the same goal and cannot see each other, so writing
+// a goal here has to supersede whatever the card's buttons last reported. Wired but
+// never called is indistinguishable from not wired at all.
+test("writing a goal from the composer opens a user action on it", async () => {
+  const began = [];
+  const actions = createRemoteComposerCommandActions({
+    setGoal: spy({ isError: false, text: "" }),
+    stopGoal: spy({ isError: false, text: "" }),
+    delegate: spy(),
+    beginGoalAction: (threadId) => began.push(threadId),
+  });
+
+  await actions.setGoal("thread-1", "ship the phone menu");
+  assert.deepEqual(began, ["thread-1"]);
+
+  await actions.setGoal("thread-1", "   ");
+  assert.deepEqual(began, ["thread-1", "thread-1"], "calling it off is a user action too");
+});
+
+// Refused before the relay, so nothing about the goal moved and the card's word stands.
+test("a refusal that never reaches the relay does not supersede the card", async () => {
+  const began = [];
+  const actions = createRemoteComposerCommandActions({
+    setGoal: spy({ isError: false, text: "" }),
+    stopGoal: spy({ isError: false, text: "" }),
+    delegate: spy(),
+    beginGoalAction: (threadId) => began.push(threadId),
+  });
+
+  await actions.setGoal("thread-1", "x".repeat(MAX_GOAL_OBJECTIVE_CHARS + 1));
+
+  assert.deepEqual(began, []);
 });
