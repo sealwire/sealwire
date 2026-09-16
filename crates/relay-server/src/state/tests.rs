@@ -8191,6 +8191,33 @@ mod row_identity_tests {
         );
     }
 
+    /// The guard itself needs a pin, or deleting it is silent. This is the exact shape
+    /// claude shipped for months: the SDK's message uuid stamped where the relay turn goes.
+    #[test]
+    #[should_panic(expected = "must carry the id `start_turn` answered")]
+    fn the_turn_contract_guard_catches_a_row_naming_the_wrong_turn() {
+        let mut relay = test_state();
+        relay.activate_thread(
+            test_thread("thread-1", "/tmp/project"),
+            "/tmp/project",
+            DEFAULT_MODEL,
+            DEFAULT_APPROVAL_POLICY,
+            DEFAULT_SANDBOX,
+            DEFAULT_EFFORT,
+            "device-a",
+        );
+        relay.set_active_turn(Some("claude-turn-7".to_string()));
+
+        relay.upsert_transcript_item(
+            "assistant:0b9f7c12".to_string(),
+            TranscriptEntryKind::AgentText,
+            Some("look at the retry loop".to_string()),
+            "completed".to_string(),
+            Some("0b9f7c12".to_string()),
+            None,
+        );
+    }
+
     /// The other half of the turn-id rule, and the reason it is not simply "existing
     /// wins": between two history copies the newer one must still be able to correct the
     /// turn. Freezing the first uuid seen would strand every history-only row on it.

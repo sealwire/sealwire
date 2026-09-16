@@ -295,6 +295,28 @@ impl RelayState {
         turn_id: Option<String>,
         tool: Option<ToolCallView>,
     ) -> TranscriptMutationMeta {
+        // The provider contract, enforced where every provider's rows converge rather than
+        // per provider: a row names the turn `start_turn` answered. Claude broke it for
+        // months by stamping the SDK's message uuid, and nothing caught it — codex and the
+        // fake provider happened to agree, so the whole suite stayed green while
+        // `/delegate`, agent-to-agent asks and turn file-change summaries all quietly
+        // stopped matching. Rows written with no live turn (history, a settled turn) are
+        // not claims about the current turn and are left alone.
+        #[cfg(test)]
+        {
+            let live = self
+                .runtime_for_thread(thread_id)
+                .and_then(|runtime| runtime.active_turn_id.clone());
+            if let (Some(live), Some(writing)) = (live.as_deref(), turn_id.as_deref()) {
+                assert_eq!(
+                    live, writing,
+                    "provider named this row's turn {writing:?}, but thread {thread_id} is \
+                     running turn {live:?}. A row must carry the id `start_turn` answered — \
+                     brief_from_reply, reply_answers_ask and collect_turn_file_changes all \
+                     match on it, and all three fail silently when it is something else."
+                );
+            }
+        }
         let (stamp_id, entry_seq, order_seq) = {
             let runtime = self.ensure_runtime_for_thread(thread_id);
             // One resolve, up front: from here on the row is addressed by the
