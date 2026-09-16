@@ -2490,6 +2490,54 @@ test("sendMessage clears pending state when the relay does not reply", async () 
   assert.equal(await pending, false);
 });
 
+test("a failed remote stop records the reason for the composer, not just the log", async () => {
+  // Same hole as a refused send/settings change: Stop used to vanish into the
+  // client log (`display: none` on the phone), so pressing it looked like a no-op.
+  activeBrowser || installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { stopActiveTurn } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  state.composerErrors = {};
+  state.session = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-1",
+    available_models: [],
+    provider: "cursor",
+  };
+  state.socket = {
+    readyState: 1,
+    send() {
+      throw new Error("this thread belongs to a running task team; stop the run instead");
+    },
+  };
+
+  assert.equal(await stopActiveTurn(), false);
+  assert.match(
+    String(state.composerErrors?.["thread-1"]),
+    /stop the run instead/,
+    "a refused Stop must be visible on the composer, not only in the log"
+  );
+});
+
 test("a failed remote settings change records the reason for the composer, not just the log", async () => {
   // Choosing Spark (or any model) on the phone POSTs update_session_settings.
   // A refusal while a turn is in progress used to vanish into the client log,

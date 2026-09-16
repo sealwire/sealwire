@@ -54,6 +54,7 @@ globalThis.window = {
 };
 
 const { createLifecycleController } = await import("./lifecycle.js");
+const { resetComposerErrorsForTest } = await import("../composer-error.js");
 
 // This file is exercising composer-error routing, not the shared flush
 // scheduler, so renders (none of these tests inspect them) fire synchronously
@@ -369,4 +370,94 @@ test("stopping with no thread named still stops the viewed/active one", async ()
   await controller.stopActiveTurn();
 
   assert.equal(bodies[0].thread_id, "thread-1");
+});
+
+// Same class of bug as a rejected send: Stop used to report only through
+// `logLine`, so pressing the button looked like a no-op when the relay refused
+// (team-locked, review-locked, provider error) or when there was nothing to stop.
+test("a rejected stop shows the relay's reason in the composer, not just the log", async () => {
+  resetComposerErrorsForTest();
+  const { controller, state, error, logged } = buildController({
+    respond: async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        ok: false,
+        error: {
+          code: "bad_request",
+          message: "this thread belongs to a running task team; stop the run instead",
+        },
+      }),
+    }),
+  });
+  state.session.active_thread_id = "thread-1";
+  state.session.active_turn_id = "turn-1";
+
+  await controller.stopActiveTurn();
+
+  assert.match(
+    error.textContent,
+    /stop the run instead/,
+    "a refused Stop must be visible on the composer"
+  );
+  assert.equal(error.hidden, false);
+  assert.match(logged.join("\n"), /Stop failed/);
+});
+
+test("pressing Stop with nothing running still tells the composer, not only the log", async () => {
+  resetComposerErrorsForTest();
+  const { controller, state, error } = buildController({
+    respond: async () => {
+      throw new Error("stop must not be posted when nothing is running");
+    },
+  });
+  state.session.active_thread_id = "thread-1";
+  state.session.active_turn_id = null;
+
+  await controller.stopActiveTurn();
+
+  assert.match(
+    error.textContent,
+    /no running .+ turn to stop/i,
+    "Stop with no turn must still put a red line under the composer"
+  );
+  assert.equal(error.hidden, false);
+});
+
+// The Tasks pane's Orchestrator Stop names orch-1 while the conversation
+// composer still belongs to thread-1. Filing only into #composer-error would
+// leave the pane's own red line blank — the exact "Stop did nothing" hole.
+test("a rejected targeted stop files the reason on that thread, not the viewed one", async () => {
+  resetComposerErrorsForTest();
+  const { composerErrorFor } = await import("../composer-error.js");
+  const { controller, state, error } = buildController({
+    respond: async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        ok: false,
+        error: {
+          code: "bad_request",
+          message: "this thread belongs to a running task team; stop the run instead",
+        },
+      }),
+    }),
+  });
+  state.session.active_thread_id = "thread-1";
+  state.session.active_turn_id = "turn-1";
+
+  const ok = await controller.stopActiveTurn("orch-1");
+
+  assert.equal(ok, false);
+  assert.match(
+    composerErrorFor("orch-1"),
+    /stop the run instead/,
+    "the Orchestrator thread must own the refusal"
+  );
+  assert.equal(
+    error.textContent,
+    "",
+    "the conversation composer must not show the Orchestrator's refusal"
+  );
+  assert.equal(error.hidden, true);
 });

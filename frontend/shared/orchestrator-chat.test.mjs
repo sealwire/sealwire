@@ -105,6 +105,42 @@ test("a refused message falls back to a generic line when there is no reason", a
   assert.equal(state.orchestratorSendError, "Message was not accepted");
 });
 
+// Same hole as a refused send: Stop used to leave the Orchestrator pane's red
+// line blank because lifecycle only syncs the conversation's #composer-error.
+test("a refused Stop shows the relay's reason on the Orchestrator composer", async () => {
+  const reason = "this thread belongs to a running task team; stop the run instead";
+  const stopped = [];
+  const asked = [];
+  const { actions, state } = harness({
+    stopActiveTurn: async (threadId) => {
+      stopped.push(threadId);
+      return false;
+    },
+    readSendError: (threadId) => {
+      asked.push(threadId);
+      return reason;
+    },
+  });
+
+  await actions.stop("orch-1");
+
+  assert.deepEqual(stopped, ["orch-1"]);
+  assert.equal(state.orchestratorSendError, reason);
+  assert.deepEqual(asked, ["orch-1"]);
+});
+
+test("a successful Stop clears a stale Orchestrator composer error", async () => {
+  const { actions, state } = harness({
+    stopActiveTurn: async () => true,
+    readSendError: () => "",
+  });
+  state.orchestratorSendError = "stale refusal";
+
+  await actions.stop("orch-1");
+
+  assert.equal(state.orchestratorSendError, null);
+});
+
 test("Propose as task stages a card without starting it", async () => {
   const { actions, calls, state } = harness();
 

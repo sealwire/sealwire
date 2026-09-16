@@ -7,6 +7,7 @@ import { splitOrchestratorProposalDraft } from "./orchestrator-proposal-draft.js
 export function createOrchestratorChatActions({
   state,
   sendMessage,
+  stopActiveTurn = null,
   proposeOrchestratorTask,
   confirmOrchestratorProposal,
   reviseOrchestratorProposal,
@@ -15,6 +16,8 @@ export function createOrchestratorChatActions({
   // What the relay actually said, for the thread that refused. `sendMessage`
   // only reports pass/fail; it files the relay's sentence against the thread
   // (see shared/composer-errors.js) and this is how the pane gets it back.
+  // The same read is used after Stop: lifecycle files against the named thread
+  // and syncs only the conversation's #composer-error node.
   readSendError = () => "",
   renderTaskTeam = () => {},
   renderSession = () => {},
@@ -88,6 +91,40 @@ export function createOrchestratorChatActions({
       state.orchestratorSendError = error?.message || String(error);
     } finally {
       state.orchestratorSending = false;
+      if (state.session) {
+        renderTaskTeam(state.session);
+      }
+    }
+  }
+
+  /**
+   * Interrupt a turn started in this pane. Failures are filed against the
+   * Orchestrator thread by `stopActiveTurn`; this copies that sentence onto the
+   * pane's own red line, because the conversation's `#composer-error` is a
+   * different node and stays blank while Tasks is open.
+   */
+  async function stop(threadId) {
+    if (!threadId || typeof stopActiveTurn !== "function") {
+      return;
+    }
+    state.orchestratorSendError = null;
+    if (state.session) {
+      renderTaskTeam(state.session);
+    }
+    try {
+      const ok = await stopActiveTurn(threadId);
+      if (!ok) {
+        let reason = "";
+        try {
+          reason = readSendError(threadId) || "";
+        } catch {
+          reason = "";
+        }
+        state.orchestratorSendError = reason || "Stop failed";
+      }
+    } catch (error) {
+      state.orchestratorSendError = error?.message || String(error);
+    } finally {
       if (state.session) {
         renderTaskTeam(state.session);
       }
@@ -171,5 +208,5 @@ export function createOrchestratorChatActions({
     return receipt;
   }
 
-  return { send, propose, confirm, revise };
+  return { send, stop, propose, confirm, revise };
 }
