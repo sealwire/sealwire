@@ -1,3 +1,10 @@
+// Which id goes where, for anything mapped out of a LIVE stream message:
+// an SDK uuid is MESSAGE identity and belongs in `item_id`; `turn_id` names the
+// relay's turn and is owned by worker.mjs, which stamps `entry.currentTurnId`
+// per session in `decorateEvent`. Minting a turn_id from a uuid here looks
+// harmless and silently breaks every relay consumer that asks "is this row from
+// the turn I started?" — the uuid answers no to all of them.
+
 import {
   fileChangeFromToolInput,
   fileChangeTool,
@@ -326,7 +333,6 @@ export function mapModelInfos(modelInfos) {
 
 function mapToolCall(
   block,
-  msg,
   status = "running",
   { provisionalFileChange = false, cwd = null } = {}
 ) {
@@ -368,7 +374,6 @@ function mapToolCall(
     name: block.name,
     args: block.input ?? {},
     item_id: `tool:${block.id}`,
-    turn_id: msg.uuid || block.id,
     status,
     tool,
   };
@@ -546,7 +551,7 @@ export function mapSdkMessage(msg, turnState = {}) {
             text += block.text || "";
             break;
           case "tool_use":
-            events.push(mapToolCall(block, msg, "running", { provisionalFileChange: true }));
+            events.push(mapToolCall(block, "running", { provisionalFileChange: true }));
             break;
           case "tool_result":
             events.push({
@@ -564,7 +569,6 @@ export function mapSdkMessage(msg, turnState = {}) {
         events.unshift({
           type: "assistant_message",
           item_id: `assistant:${msg.uuid}`,
-          turn_id: msg.uuid,
           text,
           status: msg.error ? "failed" : "completed",
         });
@@ -591,7 +595,6 @@ export function mapSdkMessage(msg, turnState = {}) {
         events.push({
           type: "tool_call_result",
           id: block.tool_use_id,
-          turn_id: msg.uuid || block.tool_use_id,
           content: toolResultContentText(block.content),
           ...(block.is_error === true ? { is_error: true } : {}),
         });
@@ -806,7 +809,7 @@ export function mapSessionMessages(messages, cwd = null) {
         // upsertToolResult settles it when the matching tool_result shows up; an
         // interrupted turn leaves none, and claiming that write landed would both show a
         // phantom change and let the worktree suggestion follow it.
-        const event = mapToolCall(block, { uuid: itemId }, "running", { cwd });
+        const event = mapToolCall(block, "running", { cwd });
         entries.push({
           item_id: event.item_id,
           kind: "tool_call",

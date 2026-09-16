@@ -86,6 +86,13 @@ export function query({ prompt, options = {} }) {
   // "activity"-shaped exists to notice the turn by, so the terminal itself has to
   // be what tells the worker the turn happened.
   const spontaneousResultOnly = process.env.CLAUDE_FAKE_SPONTANEOUS_RESULT_ONLY === "1";
+  // One turn carrying the three shapes that reach the transcript — assistant
+  // text, a tool request, a tool result — each with its own SDK uuid, which is
+  // message identity and not the relay's turn.
+  const turnOutput = process.env.CLAUDE_FAKE_TURN_OUTPUT === "1";
+  // Hold the turn open and emit a SECOND batch this many ms later, so another
+  // session's turn can become the most recently armed one in between.
+  const lateRowsMs = Number.parseInt(process.env.CLAUDE_FAKE_TURN_OUTPUT_LATE_MS || "0", 10);
 
   writeLine({
     type: "__query",
@@ -218,6 +225,48 @@ export function query({ prompt, options = {} }) {
               setTimeout(() => {
                 pushOut({ type: "system", subtype: "session_state_changed", state: "idle" });
               }, firstTurnLateIdleMs);
+            } else if (turnOutput) {
+              const emitRows = (suffix) => {
+                pushOut({
+                  type: "assistant",
+                  uuid: `sdk-assistant-uuid${suffix}`,
+                  message: {
+                    content: [
+                      { type: "text", text: "looking at the retry loop" },
+                      {
+                        type: "tool_use",
+                        id: `toolu_retry${suffix}`,
+                        name: "Read",
+                        input: { file_path: "/tmp/auth.rs" },
+                      },
+                    ],
+                  },
+                });
+                // A tool result arrives as a USER-shaped message with its own uuid —
+                // a third mint again, and the one that used to overwrite the row.
+                pushOut({
+                  type: "user",
+                  uuid: `sdk-tool-result-uuid${suffix}`,
+                  message: {
+                    content: [
+                      {
+                        type: "tool_result",
+                        tool_use_id: `toolu_retry${suffix}`,
+                        content: "fn retry() {}",
+                      },
+                    ],
+                  },
+                });
+              };
+              emitRows("");
+              if (lateRowsMs > 0) {
+                // No terminal: the turn stays current while ANOTHER session opens one,
+                // so a second batch here proves per-session attribution rather than
+                // "whichever turn was armed last".
+                setTimeout(() => emitRows("-late"), lateRowsMs);
+              } else {
+                pushOut({ type: "result", usage: {} });
+              }
             } else if (!(holdAfterFirst && userTurnCount > 1)) {
               // The real SDK terminates a turn with `result` (it does NOT emit
               // `session_state_changed: idle` in this mode). Model that so the
