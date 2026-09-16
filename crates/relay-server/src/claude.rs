@@ -4317,6 +4317,18 @@ mod tests {
     // collector came up empty" — so a summary built while an edit was still in flight got
     // restatused to completed with that never-landed edit still listed, Undo and all.
     async fn nothing_landed_leaves_no_completed_summary(session: &str, viewed: bool) {
+        nothing_landed_inner(session, viewed, false).await;
+    }
+
+    // Same turn, except the never-landed edit carries a real diff — which is what a live
+    // edit actually looks like. The summary rebuild feeds the previous diff back in, and
+    // the builder re-derives file_changes FROM that diff, so clearing the list is not
+    // enough on its own.
+    async fn nothing_landed_with_a_diff(session: &str, viewed: bool) {
+        nothing_landed_inner(session, viewed, true).await;
+    }
+
+    async fn nothing_landed_inner(session: &str, viewed: bool, with_diff: bool) {
         let state = test_relay_with_active_b().await;
         let now = crate::state::unix_now();
         {
@@ -4332,7 +4344,13 @@ mod tests {
                 "item_type": "fileChange", "name": "Edit", "title": "Edit",
                 "detail": null, "query": null, "path": format!("/tmp/{id}.rs"),
                 "url": null, "command": null, "input_preview": null,
-                "result_preview": null, "diff": null, "file_changes": []
+                "result_preview": null,
+                "diff": if with_diff {
+                    json!(format!("--- a/{id}.rs\n+++ b/{id}.rs\n@@ -1 +1 @@\n-old\n+new\n"))
+                } else {
+                    json!(null)
+                },
+                "file_changes": []
             })
         };
         // Still in flight when the turn ends.
@@ -4375,6 +4393,16 @@ mod tests {
             listed.is_empty(),
             "nothing landed in this turn, yet the settled summary still lists {listed:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_viewed_turn_where_nothing_landed_and_had_a_diff_leaves_no_summary() {
+        nothing_landed_with_a_diff("thread-b", true).await;
+    }
+
+    #[tokio::test]
+    async fn a_background_turn_where_nothing_landed_and_had_a_diff_leaves_no_summary() {
+        nothing_landed_with_a_diff("thread-a", false).await;
     }
 
     #[tokio::test]
