@@ -42,3 +42,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 # Maintained successor to xsalsa20poly1305; move to stable 0.2 once published.
 crypto_secretbox = "0.2.0-pre.0"
+
+# Hardened profile for npm-release prebuilt relay-server binaries only.
+# Ordinary `cargo build --release` (dev / self-host) is unchanged. Do not set
+# panic=abort here — that changes unwind behaviour and is not required for
+# strip/LTO hardening.
+[profile.release-npm]
+inherits = "release"
+strip = "symbols"
+lto = "fat"
+codegen-units = 1
+debug = 0

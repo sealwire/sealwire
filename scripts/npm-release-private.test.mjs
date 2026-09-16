@@ -78,13 +78,16 @@ test("every platform we publish gets a binary built with the private crate linke
 
   // The build must go through the swap script AND ask for the feature. Either
   // one alone is a binary without the orchestration engines.
-  assert.match(workflow, /scripts\/with-private\.sh cargo build --release -p relay-server/);
+  assert.match(
+    workflow,
+    /scripts\/with-private\.sh cargo build --profile release-npm -p relay-server/
+  );
   assert.match(workflow, /--features private/);
 
   // ...and there must be no un-swapped build left behind next to it.
   assert.doesNotMatch(
     workflow,
-    /run: cargo build --release -p relay-server/,
+    /run: cargo build --(?:release|profile release-npm) -p relay-server/,
     "a plain cargo build in the release workflow produces a stub binary"
   );
 });
@@ -520,4 +523,171 @@ test("workflow shells do not dump env or enable xtrace around private credential
       }
     }
   }
+});
+
+// --- Native binary hardening (npm prebuilds only) ----------------------------
+
+async function cargoToml() {
+  return await readFile(path.join(repoRoot, "Cargo.toml"), "utf8");
+}
+
+test("npm release builds use the hardened release-npm profile on every matrix target", async () => {
+  const workflow = stripComments(await releaseWorkflow());
+  const cargo = await cargoToml();
+
+  assert.match(
+    cargo,
+    /\[profile\.release-npm\]/,
+    "dedicated profile keeps ordinary cargo build --release unchanged"
+  );
+  assert.match(cargo, /strip\s*=\s*"symbols"/);
+  assert.match(cargo, /lto\s*=\s*"fat"/);
+  assert.match(cargo, /codegen-units\s*=\s*1/);
+  assert.match(cargo, /debug\s*=\s*0/);
+  assert.doesNotMatch(
+    cargo,
+    /\[profile\.release-npm\][\s\S]*panic\s*=\s*"abort"/,
+    "panic=abort is not required and must not be slipped in without a behaviour review"
+  );
+
+  const remap = stepMatching(await releaseWorkflow(), /npm-release-remap-env\.mjs --github-env/);
+  assert.ok(remap, "path remapping must write RUSTFLAGS via GITHUB_ENV (no shell eval)");
+  assert.match(remap, /shell: bash/);
+  assert.doesNotMatch(remap, /\beval\b/);
+
+  const build = stepMatching(await releaseWorkflow(), /cargo build --profile release-npm/);
+  assert.ok(build, "build step must use --profile release-npm");
+  assert.match(build, /shell: bash/);
+  assert.match(build, /scripts\/with-private\.sh cargo build --profile release-npm/);
+  assert.match(build, /--features private/);
+  assert.match(build, /SEALWIRE_NPM_RELEASE:\s*"1"/);
+  assert.doesNotMatch(build, /\beval\b/, "build must not eval remap stdout");
+
+  // Remap must run before the cargo build so RUSTFLAGS is visible to the job.
+  const buildJob = workflowJobs(await releaseWorkflow()).find((j) => j.id === "build-binary");
+  assert.ok(buildJob);
+  const jobSteps = steps(buildJob.body);
+  const remapIdx = jobSteps.findIndex((s) => /npm-release-remap-env\.mjs --github-env/.test(s));
+  const buildIdx = jobSteps.findIndex((s) => /cargo build --profile release-npm/.test(s));
+  assert.ok(remapIdx >= 0 && buildIdx > remapIdx, "GITHUB_ENV remap must precede cargo build");
+
+  // Staging must read from the profile output dir for every target — a leftover
+  // `.../release/` path would upload an unhardened binary (or fail the job).
+  const stage = stepMatching(await releaseWorkflow(), /Stage binary/);
+  assert.ok(stage);
+  assert.match(stage, /release-npm\/\$\{\{\s*matrix\.executable\s*\}\}/);
+  assert.doesNotMatch(stage, /\/release\/\$\{\{\s*matrix\.executable\s*\}\}/);
+
+  for (const target of PUBLISHED_TARGETS) {
+    assert.match(
+      workflow,
+      new RegExp(`target: ${target.replace(".", "\\.")}\\b`),
+      `${target} must stay on the matrix so hardening applies to every published platform`
+    );
+  }
+
+  // No parallel un-hardened release build left in the workflow.
+  assert.doesNotMatch(
+    workflow,
+    /cargo build --release -p relay-server/,
+    "plain --release in the npm workflow bypasses release-npm hardening"
+  );
+});
+
+test("artifact verification runs before upload on the staged executable only", async () => {
+  const release = await releaseWorkflow();
+  const buildJob = workflowJobs(release).find((j) => j.id === "build-binary");
+  assert.ok(buildJob);
+
+  const jobSteps = steps(buildJob.body);
+  const verifyIdx = jobSteps.findIndex((s) =>
+    /verify-npm-release-binary\.mjs/.test(s)
+  );
+  const uploadIdx = jobSteps.findIndex((s) => /upload-artifact@/.test(s));
+  assert.ok(verifyIdx >= 0, "missing Verify staged binary step");
+  assert.ok(uploadIdx > verifyIdx, "verifier must run before upload-artifact");
+
+  const verify = jobSteps[verifyIdx];
+  assert.match(verify, /shell: bash/);
+  assert.match(
+    verify,
+    /dist-bin\/\$\{\{\s*matrix\.target\s*\}\}\/\$\{\{\s*matrix\.executable\s*\}\}/
+  );
+  assert.match(verify, /--workspace "\$\{\{\s*github\.workspace\s*\}\}"/);
+  assert.match(verify, /--private "\$\{\{\s*github\.workspace\s*\}\}\/\.private"/);
+
+  const upload = jobSteps[uploadIdx];
+  // Upload the file path, not the staging directory (sidecars must not ship).
+  assert.match(
+    upload,
+    /path:\s*dist-bin\/\$\{\{\s*matrix\.target\s*\}\}\/\$\{\{\s*matrix\.executable\s*\}\}/
+  );
+  assert.doesNotMatch(upload, /path:\s*dist-bin\/\$\{\{\s*matrix\.target\s*\}\}\s*$/m);
+});
+
+test("Vite production build does not enable source maps in config", async () => {
+  // Aggressive JS obfuscation is out of scope; production minify is enough.
+  // Pin that we are not packaging browser source maps via an explicit true.
+  const vite = await readFile(path.join(repoRoot, "vite.config.js"), "utf8");
+  assert.doesNotMatch(
+    vite,
+    /sourcemap\s*:\s*true/,
+    "vite must not explicitly emit source maps for production embeds"
+  );
+});
+
+test("release-npm profile emits sealwire_npm_release cfg so env!(CARGO_MANIFEST_DIR) is compiled out", async () => {
+  // --remap-path-prefix does not rewrite env! string literals. The build script
+  // must emit a profile-scoped cfg; production helpers must gate env! on it so
+  // ordinary --release / debug keep developer path discovery.
+  const buildRs = await readFile(
+    path.join(repoRoot, "crates/relay-server/build.rs"),
+    "utf8"
+  );
+  assert.match(buildRs, /cargo:rustc-check-cfg=cfg\(sealwire_npm_release\)/);
+  assert.match(buildRs, /out_dir_is_release_npm_profile|release-npm/);
+  assert.match(buildRs, /cargo:rustc-cfg=sealwire_npm_release/);
+  // PROFILE is NOT the custom profile name — must not be the sole detector.
+  assert.doesNotMatch(
+    buildRs,
+    /PROFILE\s*==\s*"release-npm"|var\("PROFILE"\)[\s\S]{0,80}release-npm/,
+    "do not assume PROFILE equals the custom profile name"
+  );
+
+  const mainSrc = await readFile(
+    path.join(repoRoot, "crates/relay-server/src/main.rs"),
+    "utf8"
+  );
+  const workspaceFn = mainSrc.match(
+    /fn workspace_root\(\) -> PathBuf \{[\s\S]*?\n\}/
+  )?.[0];
+  assert.ok(workspaceFn, "workspace_root helper missing");
+  assert.match(workspaceFn, /#\[cfg\(sealwire_npm_release\)\]/);
+  assert.match(workspaceFn, /#\[cfg\(not\(sealwire_npm_release\)\)\]/);
+  assert.match(workspaceFn, /env!\(\s*"CARGO_MANIFEST_DIR"\s*\)/);
+  // env! must sit only in the not(npm) arm.
+  const npmArm = workspaceFn.match(
+    /#\[cfg\(sealwire_npm_release\)\]\s*\{([\s\S]*?)\}\s*#\[cfg\(not\(sealwire_npm_release\)\)\]/
+  )?.[1];
+  assert.ok(npmArm, "npm-release arm of workspace_root missing");
+  assert.doesNotMatch(npmArm, /env!\(\s*"CARGO_MANIFEST_DIR"\s*\)/);
+
+  const claudeSrc = await readFile(
+    path.join(repoRoot, "crates/relay-server/src/claude.rs"),
+    "utf8"
+  );
+  const claudeProd = claudeSrc.replace(/#\[cfg\(test\)\][\s\S]*$/, "");
+  assert.match(claudeProd, /fn npm_release_claude_worker_path/);
+  const defaultWorker = claudeProd.match(
+    /fn default_claude_worker_path\(\) -> String \{[\s\S]*?\n\}/
+  )?.[0];
+  assert.ok(defaultWorker, "default_claude_worker_path helper missing");
+  assert.match(defaultWorker, /#\[cfg\(sealwire_npm_release\)\]/);
+  assert.match(defaultWorker, /#\[cfg\(not\(sealwire_npm_release\)\)\]/);
+  assert.match(defaultWorker, /env!\(\s*"CARGO_MANIFEST_DIR"\s*\)/);
+  const workerNpmArm = defaultWorker.match(
+    /#\[cfg\(sealwire_npm_release\)\]\s*\{([\s\S]*?)\}\s*#\[cfg\(not\(sealwire_npm_release\)\)\]/
+  )?.[1];
+  assert.ok(workerNpmArm, "npm-release arm of default_claude_worker_path missing");
+  assert.doesNotMatch(workerNpmArm, /env!\(\s*"CARGO_MANIFEST_DIR"\s*\)/);
 });

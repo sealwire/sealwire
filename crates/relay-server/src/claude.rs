@@ -334,19 +334,37 @@ fn orchestrator_mcp_config_with_transport(
     })
 }
 
+/// Cwd-relative fallback used only for `--profile release-npm` prebuilds.
+/// Packaged launches set `CLAUDE_WORKER_PATH` (see scripts/sealwire.mjs).
+pub(crate) fn npm_release_claude_worker_path() -> &'static str {
+    "claude-worker/worker.mjs"
+}
+
+fn default_claude_worker_path() -> String {
+    // env!("CARGO_MANIFEST_DIR") is a compile-time string literal — remap-path-prefix
+    // does not rewrite it. Keep it for debug and ordinary --release so local
+    // developer discovery still works; exclude it only from release-npm via the
+    // build-script cfg `sealwire_npm_release`.
+    #[cfg(sealwire_npm_release)]
+    {
+        npm_release_claude_worker_path().to_string()
+    }
+    #[cfg(not(sealwire_npm_release))]
+    {
+        let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = crate_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        format!("{workspace_root}/claude-worker/worker.mjs")
+    }
+}
+
 impl ClaudeCodeBridge {
     pub async fn spawn(state: Arc<RwLock<RelayState>>) -> Result<Self, String> {
-        let worker_path = std::env::var("CLAUDE_WORKER_PATH").unwrap_or_else(|_| {
-            // Default: resolve relative to this crate's manifest dir, up to workspace root.
-            // CARGO_MANIFEST_DIR = .../crates/relay-server, workspace root = ../..
-            let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let workspace_root = crate_dir
-                .parent()
-                .and_then(|p| p.parent())
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| ".".to_string());
-            format!("{workspace_root}/claude-worker/worker.mjs")
-        });
+        let worker_path =
+            std::env::var("CLAUDE_WORKER_PATH").unwrap_or_else(|_| default_claude_worker_path());
         Self::spawn_with_worker_path(state, &worker_path).await
     }
 
@@ -2426,6 +2444,20 @@ fn thread_belongs_to_claude(relay: &RelayState, thread_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn npm_release_worker_fallback_is_cwd_relative_not_absolute() {
+        let path = super::npm_release_claude_worker_path();
+        assert_eq!(path, "claude-worker/worker.mjs");
+        assert!(
+            !std::path::Path::new(path).is_absolute(),
+            "release-npm must not bake an absolute builder path into the worker fallback"
+        );
+        assert!(
+            !path.contains("CARGO_MANIFEST_DIR") && !path.starts_with('/'),
+            "release-npm worker fallback must stay package-relative"
+        );
+    }
 
     #[test]
     fn the_orchestrator_pin_outranks_everything_and_an_ordinary_thread_gets_peer_tools() {
