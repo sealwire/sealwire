@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -15,6 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
+import { WORKER_STATIC_FILES, selectWorkerFiles } from "./tauri-worker-files.mjs";
 
 // These tests exercise the ACTUAL npm artifact — the tarball `npm publish`
 // would upload — not the source tree. The source tree always has every worker
@@ -213,6 +214,215 @@ test("the packed claude worker loads from the tarball layout", async () => {
     result.code,
     0,
     `packed worker did not exit cleanly on shutdown; exit=${result.code}\n${combined}`,
+  );
+});
+
+// The checks below exist because the import-closure test above only sees files
+// reachable from worker.mjs, and `orchestrator-mcp.mjs` shipped for nobody
+// precisely because nothing imports it — the relay spawns it by name. So each one
+// asks "did we ship everything?" from a side that does not depend on reading
+// code: what the worker directory holds, what the relay names, what the worker's
+// own manifest declares.
+
+// Where a spawned script could live. web/ is a browser bundle served over HTTP
+// and crates/ is Rust, so neither can be one.
+const PACKED_NODE_DIRS = ["claude-worker", "scripts"];
+const NODE_SCRIPT_EXTENSIONS = [".mjs", ".cjs", ".js"];
+
+function walk(dir, ext) {
+  const found = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) found.push(...walk(full, ext));
+    else if (entry.name.endsWith(ext)) found.push(full);
+  }
+  return found;
+}
+
+function isFixture(name) {
+  return name.endsWith(".test.mjs") || name.startsWith("fake-") || name.startsWith("test-");
+}
+
+// The Tauri sidecar ships the lockfile because it runs `npm ci` inside
+// claude-worker/; the npm package resolves dependencies from the root manifest
+// instead, so this is the one file the two packagers legitimately differ on.
+const NOT_IN_NPM_PACKAGE = ["package-lock.json"];
+
+// Everything the npm package must carry for the worker. Runtime modules come
+// from the same policy the Tauri sidecar uses, so the two can't disagree; the
+// tracked non-.mjs files are added because a data asset the packagers don't
+// recognize is exactly the kind of file that goes missing unnoticed.
+function workerFilesThatMustShip() {
+  const onDisk = readdirSync(path.join(repoRoot, "claude-worker"), { withFileTypes: true })
+    .filter((entry) => !entry.isDirectory())
+    .map((entry) => entry.name);
+  const tracked = trackedWorkerPaths().filter((rel) => !rel.includes("/") && !isFixture(rel));
+  const wanted = new Set([...selectWorkerFiles(onDisk), ...tracked]);
+  for (const name of NOT_IN_NPM_PACKAGE) wanted.delete(name);
+  return [...wanted].sort();
+}
+
+// Committed paths only. A dev's .DS_Store or scratch file can't be in anyone
+// else's install, so it is not a packaging omission and must not fail the suite.
+// git also reports symlinks, which a Dirent type check silently skips.
+function trackedWorkerPaths() {
+  const listed = execFileSync("git", ["ls-files", "-z", "claude-worker"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  const paths = listed.split("\0").filter(Boolean);
+  assert.ok(paths.length > 0, "git ls-files returned nothing for claude-worker/ — the scan is broken");
+  return paths.map((p) => p.slice("claude-worker/".length));
+}
+
+// Both packagers only ever see top-level `.mjs` plus the two manifests —
+// `claude-worker/*.mjs` in the npm `files` list, a flat readdir filtered to .mjs
+// in the Tauri selector. So a nested module, or a runtime file with any other
+// extension, is dropped by both while every other guard here still passes.
+// These two assert that premise rather than trusting it.
+test("claude-worker/ stays flat, which is what both packagers assume", () => {
+  const nested = trackedWorkerPaths()
+    .filter((rel) => rel.includes("/"))
+    .map((rel) => `claude-worker/${rel}`);
+  assert.deepEqual(
+    nested,
+    [],
+    `These committed claude-worker paths are below the top level, where ` +
+      `neither packager looks:\n  ${nested.join("\n  ")}\n` +
+      `If they are needed at runtime, make both packagers recursive first: the ` +
+      `"claude-worker/*.mjs" globs in package.json and selectWorkerFiles in ` +
+      `scripts/tauri-worker-files.mjs. If they are not, move them out of ` +
+      `claude-worker/.`,
+  );
+});
+
+test("claude-worker/ holds only file types the packagers know how to ship", () => {
+  const unknown = trackedWorkerPaths().filter(
+    (rel) => !rel.includes("/") && !rel.endsWith(".mjs") && !WORKER_STATIC_FILES.includes(rel),
+  );
+  assert.deepEqual(
+    unknown,
+    [],
+    `These committed claude-worker files are neither .mjs nor a known manifest, ` +
+      `so neither packager ships them:\n  ${unknown.join("\n  ")}\n` +
+      `If one is needed at runtime (a .cjs, a data .json), add it to the npm ` +
+      `\`files\` list and to WORKER_STATIC_FILES in scripts/tauri-worker-files.mjs.`,
+  );
+});
+
+test("npm package ships every claude-worker file it needs, imported or not", async () => {
+  const { manifest } = await getPacked();
+  const shipped = new Set(manifest);
+  const expected = workerFilesThatMustShip().map((name) => `claude-worker/${name}`);
+
+  const missing = expected.filter((f) => !shipped.has(f));
+  assert.deepEqual(
+    missing,
+    [],
+    `These claude-worker files exist in the source tree but are NOT in the ` +
+      `npm \`files\` allow-list, so a user's install won't have them:\n  ` +
+      `${missing.join("\n  ")}\n` +
+      `A file does not have to be imported to be needed — the relay spawns some ` +
+      `as their own process, and a data asset is read by path.`,
+  );
+
+  // Other direction: fixtures must stay out, or "ship everything" turns into
+  // shipping the fake SDK.
+  const optional = NOT_IN_NPM_PACKAGE.map((name) => `claude-worker/${name}`);
+  const strays = manifest
+    .filter((p) => p.startsWith("claude-worker/"))
+    .filter((p) => !expected.includes(p) && !optional.includes(p));
+  assert.deepEqual(
+    strays,
+    [],
+    `These are test fixtures, not runtime files, and must not ship:\n  ${strays.join("\n  ")}`,
+  );
+});
+
+// Where a spawn literal could resolve to in the source tree. Keeps sub-paths
+// (`.../claude-worker/mcp/foo.mjs` → `claude-worker/mcp/foo.mjs`) instead of
+// collapsing to the basename, so a nested spawn target is still checked.
+function spawnTargetCandidates(literal) {
+  const parts = literal.split("/");
+  const candidates = [];
+  for (const dir of PACKED_NODE_DIRS) {
+    const at = parts.lastIndexOf(dir);
+    candidates.push(at === -1 ? `${dir}/${parts[parts.length - 1]}` : parts.slice(at).join("/"));
+  }
+  return candidates;
+}
+
+// Scripts the relay launches as a subprocess, named as string literals anywhere
+// in the crate. Deliberately over-inclusive: telling production code from test
+// code needs a Rust lexer, and an earlier attempt at one silently dropped real
+// coverage (a `contains("@{")` in worktree.rs unbalanced its brace counter). A
+// script named only in a fixture is demanded too, which fails loudly with a
+// readable message — the safe direction for a packaging guard.
+function relaySpawnedScripts() {
+  const extensions = NODE_SCRIPT_EXTENSIONS.map((ext) => ext.slice(1)).join("|");
+  const literalRe = new RegExp(`"([A-Za-z0-9._/-]+\\.(?:${extensions}))"`, "g");
+  const wanted = new Set();
+  for (const file of walk(path.join(repoRoot, "crates", "relay-server", "src"), ".rs")) {
+    const source = readFileSync(file, "utf8");
+    literalRe.lastIndex = 0;
+    let match;
+    while ((match = literalRe.exec(source)) !== null) {
+      if (isFixture(path.basename(match[1]))) continue;
+      for (const candidate of spawnTargetCandidates(match[1])) {
+        if (existsSync(path.join(repoRoot, candidate))) wanted.add(candidate);
+      }
+    }
+  }
+  return [...wanted].sort();
+}
+
+test("npm package ships every script the relay spawns by name", async () => {
+  const { manifest } = await getPacked();
+  const shipped = new Set(manifest);
+  const spawned = relaySpawnedScripts();
+
+  // A literal that resolves to nothing is dropped silently, so the scan going
+  // quiet would make this test vacuous. orchestrator-mcp.mjs is the sentinel and
+  // the reason this file exists. worker.mjs is deliberately not pinned here: no
+  // production literal names it — the launcher passes its path in, which the
+  // launcher test below covers end to end.
+  assert.ok(
+    spawned.includes("claude-worker/orchestrator-mcp.mjs"),
+    `the scan found ${spawned.length} spawned scripts and missed ` +
+      `claude-worker/orchestrator-mcp.mjs — either the literal pattern drifted ` +
+      `or the relay stopped spawning it`,
+  );
+
+  const missing = spawned.filter((f) => !shipped.has(f));
+  assert.deepEqual(
+    missing,
+    [],
+    `The relay spawns these by path, but they are NOT in the npm \`files\` ` +
+      `allow-list, so the spawn fails with ENOENT after install:\n  ${missing.join("\n  ")}`,
+  );
+});
+
+// The second half of the same bug: the MCP bridge's `@modelcontextprotocol/sdk`
+// was declared only in claude-worker/package.json. Nothing ever runs `npm
+// install` in that directory for the npm artifact — only the Tauri sidecar does —
+// so a dependency written down only there is absent from a user's install, and
+// resolved by luck if it happens to be a peer of something the root declares.
+test("every dependency the worker declares is also declared by the package", () => {
+  const read = (...segments) =>
+    JSON.parse(readFileSync(path.join(repoRoot, ...segments), "utf8"));
+  const workerDeps = Object.keys(read("claude-worker", "package.json").dependencies ?? {});
+  const rootDeps = new Set(Object.keys(read("package.json").dependencies ?? {}));
+
+  assert.ok(workerDeps.length > 0, "claude-worker declares no dependencies — the read must be wrong");
+
+  const undeclared = workerDeps.filter((name) => !rootDeps.has(name));
+  assert.deepEqual(
+    undeclared,
+    [],
+    `claude-worker/package.json declares these, but the root package.json does ` +
+      `not, so npm won't install them for a published install:\n  ` +
+      `${undeclared.join("\n  ")}\n` +
+      `Add them to "dependencies" in the root package.json.`,
   );
 });
 
