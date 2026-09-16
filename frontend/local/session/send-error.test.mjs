@@ -14,12 +14,16 @@ import assert from "node:assert/strict";
 const nodes = new Map();
 function fakeNode(selector) {
   if (!nodes.has(selector)) {
+    // The held region carries its label and its sentence in separate spans, so its
+    // writer fills a child rather than the node — mirror that or the stub reads blank.
+    const heldText = { textContent: "" };
     nodes.set(selector, {
       selector,
       value: "",
       disabled: false,
       hidden: true,
       textContent: "",
+      heldText,
       dataset: {},
       style: {},
       classList: { add() {}, contains: () => false, remove() {}, toggle() {} },
@@ -28,7 +32,7 @@ function fakeNode(selector) {
       setAttribute() {},
       removeAttribute() {},
       appendChild() {},
-      querySelector: () => null,
+      querySelector: (sel) => (sel === ".composer-held-text" ? heldText : null),
       querySelectorAll: () => [],
     });
   }
@@ -102,7 +106,13 @@ function buildController({ respond }) {
     isViewingConversation: () => true,
     queryClient: null,
   });
-  return { controller, logged, state, error: fakeNode("#composer-error") };
+  return {
+    controller,
+    logged,
+    state,
+    error: fakeNode("#composer-error"),
+    held: fakeNode("#composer-held"),
+  };
 }
 
 const rejection = () => ({
@@ -404,9 +414,9 @@ test("a rejected stop shows the relay's reason in the composer, not just the log
   assert.match(logged.join("\n"), /Stop failed/);
 });
 
-test("pressing Stop with nothing running still tells the composer, not only the log", async () => {
+test("pressing Stop with nothing running holds the reason, it did not break", async () => {
   resetComposerErrorsForTest();
-  const { controller, state, error } = buildController({
+  const { controller, state, held } = buildController({
     respond: async () => {
       throw new Error("stop must not be posted when nothing is running");
     },
@@ -416,12 +426,22 @@ test("pressing Stop with nothing running still tells the composer, not only the 
 
   await controller.stopActiveTurn();
 
+  // Nothing was sent — the surface saw no turn id and stopped the press itself. Red
+  // means the relay refused or the request broke; neither happened here.
   assert.match(
-    error.textContent,
+    held.heldText.textContent,
     /no running .+ turn to stop/i,
-    "Stop with no turn must still put a red line under the composer"
+    "Stop with no turn belongs in NOT SENT, beside the draft it did not send"
   );
-  assert.equal(error.hidden, false);
+  assert.equal(held.hidden, false);
+  // The store, not the node: these stubs are shared across tests, so a node left
+  // visible by an earlier one would pass this for the wrong reason.
+  const { composerErrorFor } = await import("../composer-error.js");
+  assert.equal(
+    composerErrorFor("thread-1"),
+    "",
+    "and nothing claims something went wrong"
+  );
 });
 
 // The Tasks pane's Orchestrator Stop names orch-1 while the conversation
@@ -496,4 +516,108 @@ test("a successful stop stays pending until the thread idles", async () => {
     true,
     "HTTP success is not turn-idle — keep Stopping… until working clears"
   );
+});
+
+// `hold("")` only runs at the start of a "/" command submit, so an ordinary send left the
+// NOT SENT region standing — describing a draft the user had already replaced. Same rule
+// and the same place as the error line above it: cleared as the attempt starts, and only
+// on the thread the send targets.
+test("an ordinary send supersedes the NOT SENT region on that thread", async () => {
+  const { recordComposerHeld, composerHeldFor, resetComposerHeldForTest } = await import(
+    "../composer-held.js"
+  );
+  resetComposerHeldForTest();
+  recordComposerHeld({ threadId: "thread-1", message: "/delegate needs something to say" });
+  recordComposerHeld({ threadId: "thread-2", message: "keep me" });
+
+  const { controller, error } = buildController({ respond: rejection });
+  const sent = await controller.sendMessage("an ordinary message", "thread-1");
+
+  assert.equal(sent, false, "this send is rejected — the clear must not depend on success");
+  assert.equal(
+    composerHeldFor("thread-1"),
+    "",
+    "the draft it described is gone, so the line describing it must go too"
+  );
+  // And the replacement is installed: one authoritative diagnosis, not two competing ones.
+  assert.match(String(error.textContent), /thread not found/);
+  assert.equal(
+    composerHeldFor("thread-2"),
+    "keep me",
+    "and only the thread the send targeted"
+  );
+});
+
+// Stop can be pressed in the legitimate window where the surface knows a turn is
+// running but its id has not arrived. That press is held. The NEXT press, once the id
+// is there, really is sent — and must retire the line that said nothing was running,
+// or the composer contradicts what just happened.
+test("a Stop that is actually sent retires the NOT SENT line the last one left", async () => {
+  resetComposerErrorsForTest();
+  const { resetComposerHeldForTest, composerHeldFor } = await import("../composer-held.js");
+  resetComposerHeldForTest();
+
+  const { controller, state } = buildController({
+    respond: async () => ({ ok: true, status: 200, json: async () => ({ ok: true }) }),
+  });
+  state.session.active_thread_id = "thread-1";
+
+  state.session.active_turn_id = null;
+  await controller.stopActiveTurn();
+  assert.match(composerHeldFor("thread-1"), /no running .+ turn to stop/i, "the first press is held");
+
+  state.session.active_turn_id = "turn-7";
+  await controller.stopActiveTurn();
+
+  assert.equal(
+    composerHeldFor("thread-1"),
+    "",
+    "and the press that WAS sent takes the old line down with it"
+  );
+});
+
+// Stop asks the relay to interrupt `targetThreadId`, so the preflight has to ask
+// whether THAT thread has a turn — not the session's active one. Watching a background
+// thread read-only is exactly when the two differ, and the answer used to depend on
+// whether an unrelated thread happened to be busy.
+test("Stop on a background thread reads that thread's turn, not the active one", async () => {
+  resetComposerErrorsForTest();
+  const { resetComposerHeldForTest } = await import("../composer-held.js");
+  resetComposerHeldForTest();
+
+  const posted = [];
+  const { controller, state } = buildController({
+    respond: async (url, options) => {
+      posted.push(JSON.parse(options.body).thread_id);
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    },
+  });
+  // The relay's active thread is idle; the one on screen is running in the background.
+  state.session.active_thread_id = "thread-A";
+  state.session.active_turn_id = null;
+  state.viewOnlyThread = { threadId: "thread-B", activeTurnId: "turn-B" };
+
+  await controller.stopActiveTurn();
+
+  assert.deepEqual(posted, ["thread-B"], "the thread being watched is the one stopped");
+});
+
+test("Stop on a background thread with no turn of its own is still held", async () => {
+  resetComposerErrorsForTest();
+  const { resetComposerHeldForTest, composerHeldFor } = await import("../composer-held.js");
+  resetComposerHeldForTest();
+
+  const { controller, state } = buildController({
+    respond: async () => {
+      throw new Error("nothing is running on that thread, so nothing may be posted");
+    },
+  });
+  // The unrelated active thread IS running — which used to be enough to fire.
+  state.session.active_thread_id = "thread-A";
+  state.session.active_turn_id = "turn-A";
+  state.viewOnlyThread = { threadId: "thread-B", activeTurnId: null };
+
+  await controller.stopActiveTurn();
+
+  assert.match(composerHeldFor("thread-B"), /no running .+ turn to stop/i);
 });

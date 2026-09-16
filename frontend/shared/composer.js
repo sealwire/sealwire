@@ -85,6 +85,9 @@ export function ConversationComposer({
   sendButtonId = "remote-send-button",
   sendLabel = "Send",
   sendPending = false,
+  // The "not sent" slot, same two ways in as the error line above it.
+  heldId = null,
+  heldMessage = "",
   textareaRef = null,
   stopButtonId = null,
   stopLabel = "Stop",
@@ -164,10 +167,32 @@ export function ConversationComposer({
         )
       : null;
 
+  // Nothing went wrong here and nothing was sent: a command the composer itself
+  // stopped before the relay ever heard about it. Separate from the error line on
+  // purpose — red is for what broke, and this is a draft still waiting on you. The
+  // shape is meant to carry a genuinely queued message later, when there is a queue.
+  const heldRegion =
+    heldId || heldMessage
+      ? h(
+          "div",
+          {
+            className: "composer-held",
+            id: heldId || undefined,
+            role: "status",
+            hidden: !heldMessage,
+          },
+          h("span", { className: "composer-held-label" }, "Not sent"),
+          h("span", { className: "composer-held-text" }, heldMessage || null)
+        )
+      : null;
+
   return h(
     "div",
-    { className: "composer-inner" },
+    // Frozen while a command runs. The local surface decides this imperatively on the
+    // form (render-session.js); this is the same state for the surface that does not.
+    { className: `composer-inner${sendPending ? " is-frozen" : ""}` },
     errorRegion,
+    heldRegion,
     attachmentArea,
     h("textarea", textareaProps),
     h(

@@ -1,5 +1,5 @@
 import { prepareAuthoredGoalObjective } from "../shared/goal-objective.js";
-import { goalOutcomeOrContractError } from "../shared/goal-outcome.js";
+import { commandOutcomeOrContractError } from "../shared/command-outcome.js";
 
 // The "/" controller expects capabilities that answer `{text, isError}`. Two remote
 // shapes reach it, and they are settled separately ON PURPOSE: collapsing them is how a
@@ -29,7 +29,7 @@ async function settledGoal(run, report) {
     report(text);
     return { text, isError: true };
   }
-  const outcome = goalOutcomeOrContractError(answer);
+  const outcome = commandOutcomeOrContractError(answer, "the goal");
   if (outcome.isError) report(outcome.text);
   return outcome.isError ? { text: outcome.text, isError: true } : OK;
 }
@@ -41,6 +41,9 @@ export function createRemoteComposerCommandActions({
   // The phone's log drawer is `display: none` and nothing opens it, so unlike the
   // desktop there is no second channel: without this a refusal lands nowhere.
   setComposerError = () => {},
+  // The gate's own refusal never reached the relay, so it is not a failure — it is a
+  // draft that is not ready. Red would say the opposite.
+  setComposerHeld = () => {},
   // The other door onto the same goal. Writing one here is a user action, so whatever
   // the card's own buttons last reported stops being the current word.
   beginGoalAction = () => {},
@@ -51,10 +54,14 @@ export function createRemoteComposerCommandActions({
       // logs them separately, and "/goal" on its own means call it off.
       const prepared = prepareAuthoredGoalObjective(objective);
       if (prepared.refuse) {
-        setComposerError(threadId, prepared.refuse);
+        setComposerHeld(threadId, prepared.refuse);
+        setComposerError(threadId, "");
         return Promise.resolve({ text: prepared.refuse, isError: true });
       }
+      // This attempt supersedes whatever the last one left on this thread, in either
+      // region — a stale line under a draft that has since been fixed is a dead end.
       setComposerError(threadId, "");
+      setComposerHeld(threadId, "");
       beginGoalAction(threadId);
       const report = (text) => setComposerError(threadId, text);
       if (!prepared.objective) {

@@ -2,6 +2,7 @@ import { transcriptRowKey } from "../../shared/transcript-row-key.js";
 import {
   approvalPolicyInput,
   composerError,
+  composerHeld,
   cwdInput,
   messageEffort,
   messageInput,
@@ -19,6 +20,11 @@ import {
   recordComposerError,
   syncComposerError,
 } from "../composer-error.js";
+import {
+  clearComposerHeld,
+  recordComposerHeld,
+  syncComposerHeld,
+} from "../composer-held.js";
 import {
   requestReview as requestReviewApi,
   startWorkflow as startWorkflowApi,
@@ -590,6 +596,14 @@ export function createLifecycleController(ctx) {
     // aimed elsewhere says nothing about the thread the user is looking at.
     clearComposerError(threadId);
     syncComposerError(composerError, viewedThreadId());
+    // And whatever a "/" command held back: the user has replaced what the box
+    // contained, so a NOT SENT line about the old draft now describes nothing.
+    // Here rather than at the form submit ON PURPOSE. The rule is "a valid message
+    // send supersedes it", not "any submit": the preflight exits above this (a
+    // review-pinned thread, a failed image conversion) only log today, so clearing
+    // up there would take away the one visible line and put nothing in its place.
+    clearComposerHeld(threadId);
+    syncComposerHeld(composerHeld, viewedThreadId());
     sendButton.disabled = true;
     logLine(`Sending prompt to ${providerLabel(state.session?.provider) || "agent"}`);
 
@@ -811,17 +825,24 @@ export function createLifecycleController(ctx) {
     const agentName = providerLabel(state.session?.provider) || "agent";
     const targetThreadId =
       threadId || state.viewOnlyThread?.threadId || state.session?.active_thread_id || null;
+    // The turn belonging to the thread being STOPPED. The session-level id describes the
+    // relay's active thread, which is not the one on screen while a background thread is
+    // watched read-only — reading it there made the click depend on an unrelated thread.
+    const targetTurnId =
+      state.viewOnlyThread?.threadId && state.viewOnlyThread.threadId === targetThreadId
+        ? state.viewOnlyThread.activeTurnId || null
+        : state.session?.active_turn_id || null;
     // An explicitly named thread is the caller's assertion that it has a turn
-    // running; the session-level `active_turn_id` describes a different thread
-    // and cannot answer for it.
-    if (!threadId && (!state.session?.active_thread_id || !state.session.active_turn_id)) {
-      // Same channel as a refused send: the client log is collapsible / hidden on
-      // the phone, so "Stop did nothing" is what the user sees without this line.
+    // running, so it is taken at its word.
+    if (!threadId && (!targetThreadId || !targetTurnId)) {
+      // The surface stopped this press itself and sent nothing, so it is "not sent",
+      // not a failure. Still said out loud: the log is collapsible here and hidden
+      // on the phone, which is what made "Stop did nothing" look like a dead button.
       const message = `There is no running ${agentName} turn to stop.`;
       logLine(message);
       if (targetThreadId) {
-        recordComposerError({ threadId: targetThreadId, message });
-        syncComposerError(composerError, viewedThreadId());
+        recordComposerHeld({ threadId: targetThreadId, message });
+        syncComposerHeld(composerHeld, viewedThreadId());
       }
       return false;
     }
@@ -832,10 +853,13 @@ export function createLifecycleController(ctx) {
       return false;
     }
 
-    // A fresh Stop supersedes the last failure on THIS thread only.
+    // A fresh Stop supersedes whatever the last one left on THIS thread only —
+    // error, held "not sent", and the Stopping… flag for this press.
     if (targetThreadId) {
       clearComposerError(targetThreadId);
       syncComposerError(composerError, viewedThreadId());
+      clearComposerHeld(targetThreadId);
+      syncComposerHeld(composerHeld, viewedThreadId());
       state.stopPendingByThread = withStopPending(
         state.stopPendingByThread,
         targetThreadId,

@@ -193,8 +193,12 @@ import { matchesApplePlatform } from "./shared/composer-keys.js";
 import { createComposerCommandController } from "./local/composer-commands.js";
 import { canRequestReview, selectReviewLaunchModel } from "./shared/review-state.js";
 import { createGoalActions } from "./shared/goal-actions.js";
+import { createDelegateAuthor } from "./local/delegate-authoring.js";
+import { createReviewAuthor } from "./local/review-authoring.js";
 import { createGoalAuthor } from "./local/goal-authoring.js";
 import { recordComposerError, syncComposerError } from "./local/composer-error.js";
+import { recordComposerHeld, syncComposerHeld } from "./local/composer-held.js";
+import { composerHeld } from "./local/dom.js";
 import {
   beginLocalGoalAction,
   clearGoalError,
@@ -2842,6 +2846,22 @@ function composerCommandLaunchModel() {
 
 // What each command IS lives behind the seam; this only hands over the
 // capabilities it may act through, so the public tree never names one.
+// The relay hears a delegate before it refuses it, so its reason is a failure and goes
+// to the error line. Behind a seam so that guarantee is testable — see goalAuthor.
+const delegateAuthor = createDelegateAuthor({
+  delegate: (threadId, args) =>
+    postRelayCommand("/api/session/delegate", { thread_id: threadId, ...args }),
+  setComposerError: showComposerError,
+});
+
+// The command door onto a review. The request modal keeps calling the controller
+// directly — it shows the relay's reason inline itself.
+const reviewAuthor = createReviewAuthor({
+  requestReview: (values) => state.controller?.requestReview(values),
+  getThreadId: viewedThreadId,
+  setComposerError: showComposerError,
+});
+
 const composerCommands = createComposerCommandController({
   input: messageInput,
   mount: composerCommandMount,
@@ -2865,7 +2885,7 @@ const composerCommands = createComposerCommandController({
       defaultReviewerProvider: composerCommandLaunchModel().defaultProvider,
     };
   },
-  requestReview: (values) => state.controller?.requestReview(values),
+  requestReview: reviewAuthor,
   // The SAME endpoint an agent's tool call lands on, so the human door and the
   // agent door cannot drift apart. A refusal comes back as 200 + isError, which
   // is text for the caller to read, not a transport failure.
@@ -2873,11 +2893,14 @@ const composerCommands = createComposerCommandController({
   // and the asking agent is driven to turn them into a brief the other agent can
   // act on. Forwarding "carry on with the next step" verbatim hands a stranger
   // an instruction with no referent.
-  askAgent: (callerThreadId, args) =>
-    postRelayCommand("/api/session/delegate", { thread_id: callerThreadId, ...args }),
+  askAgent: delegateAuthor,
   // Authoring via /goal — length-gated. "Keep going" on the Agents card uses
   // createGoalActions → postSessionGoal directly so a pre-cap dump can resume.
   setGoal: postSessionGoalFromComposer,
+  // Everything the commands stop themselves — a delegate with nothing to say, a review
+  // on a thread that cannot take one. It never reached the relay, so it is "not sent"
+  // rather than a failure, and the log alone is where this used to disappear.
+  hold: (message) => showComposerHeld(viewedThreadId(), message),
   log: logLine,
 });
 
@@ -2913,6 +2936,7 @@ function postSessionGoal(threadId, objective, { resetTurns = false } = {}) {
 const goalAuthor = createGoalAuthor({
   setGoal: (threadId, objective) => postSessionGoal(threadId, objective),
   setComposerError: showComposerError,
+  setComposerHeld: showComposerHeld,
   // The other door onto the same goal: what the card's buttons last said stops being
   // the current word the moment the user writes a goal here.
   beginGoalAction: openGoalAction,
@@ -2923,6 +2947,13 @@ const goalAuthor = createGoalAuthor({
 function showComposerError(threadId, message) {
   recordComposerError({ threadId, message });
   syncComposerError(composerError, viewedThreadId());
+}
+
+// The "/" commands' own refusals. Nothing was sent, so this is not the error line:
+// see local/composer-held.js for why they are separate slots.
+function showComposerHeld(threadId, message) {
+  recordComposerHeld({ threadId, message });
+  syncComposerHeld(composerHeld, viewedThreadId());
 }
 
 // The goal card's own failure line. A declaration for the same reason, and it pushes

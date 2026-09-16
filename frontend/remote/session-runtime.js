@@ -23,6 +23,8 @@ export function deriveSessionRuntime({
   // in both directions: a late rejection must not blame the session now on
   // screen, and a late success elsewhere must not silence this one.
   composerErrors = null,
+  // What a "/" command stopped itself. Same per-thread rule, a different slot.
+  composerHeld = null,
   composerModel = "",
   fallbackModels = [],
   sendPending = false,
@@ -60,6 +62,7 @@ export function deriveSessionRuntime({
     currentEffortValue,
     currentModelValue,
     errorMessage: threadError(composerErrors, session?.active_thread_id),
+    heldMessage: threadError(composerHeld, session?.active_thread_id),
     effortOptions: buildReasoningEffortOptions(
       models,
       currentModelValue,

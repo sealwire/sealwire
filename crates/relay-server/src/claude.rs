@@ -334,19 +334,37 @@ fn orchestrator_mcp_config_with_transport(
     })
 }
 
+/// Cwd-relative fallback used only for `--profile release-npm` prebuilds.
+/// Packaged launches set `CLAUDE_WORKER_PATH` (see scripts/sealwire.mjs).
+pub(crate) fn npm_release_claude_worker_path() -> &'static str {
+    "claude-worker/worker.mjs"
+}
+
+fn default_claude_worker_path() -> String {
+    // env!("CARGO_MANIFEST_DIR") is a compile-time string literal — remap-path-prefix
+    // does not rewrite it. Keep it for debug and ordinary --release so local
+    // developer discovery still works; exclude it only from release-npm via the
+    // build-script cfg `sealwire_npm_release`.
+    #[cfg(sealwire_npm_release)]
+    {
+        npm_release_claude_worker_path().to_string()
+    }
+    #[cfg(not(sealwire_npm_release))]
+    {
+        let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = crate_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        format!("{workspace_root}/claude-worker/worker.mjs")
+    }
+}
+
 impl ClaudeCodeBridge {
     pub async fn spawn(state: Arc<RwLock<RelayState>>) -> Result<Self, String> {
-        let worker_path = std::env::var("CLAUDE_WORKER_PATH").unwrap_or_else(|_| {
-            // Default: resolve relative to this crate's manifest dir, up to workspace root.
-            // CARGO_MANIFEST_DIR = .../crates/relay-server, workspace root = ../..
-            let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let workspace_root = crate_dir
-                .parent()
-                .and_then(|p| p.parent())
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| ".".to_string());
-            format!("{workspace_root}/claude-worker/worker.mjs")
-        });
+        let worker_path =
+            std::env::var("CLAUDE_WORKER_PATH").unwrap_or_else(|_| default_claude_worker_path());
         Self::spawn_with_worker_path(state, &worker_path).await
     }
 
@@ -1522,7 +1540,8 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
             }
             // Turn id first: the fallback name below is derived from it.
             if let (Some(turn_id), Some(text)) = (
-                string_at(&payload, &["turn_id"]).or_else(|| relay.active_turn_id.clone()),
+                string_at(&payload, &["turn_id"])
+                    .or_else(|| route_fallback_turn_id(&relay, &route)),
                 string_at(&payload, &["text"]),
             ) {
                 // `assistant_delta` carries no item id by contract, so the relay
@@ -1645,7 +1664,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 .or_else(|| string_at(&payload, &["id"]).map(|id| format!("tool:{id}")))
             {
                 let turn_id = string_at(&payload, &["turn_id"])
-                    .or_else(|| relay.active_turn_id.clone())
+                    .or_else(|| route_fallback_turn_id(&relay, &route))
                     .unwrap_or_else(|| item_id.clone());
                 let tool = payload
                     .get("tool")
@@ -1732,8 +1751,8 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 if tool.result_preview.is_none() {
                     tool.result_preview = string_at(&payload, &["content"]);
                 }
-                let turn_id =
-                    string_at(&payload, &["turn_id"]).or_else(|| relay.active_turn_id.clone());
+                let turn_id = string_at(&payload, &["turn_id"])
+                    .or_else(|| route_fallback_turn_id(&relay, &route));
                 let is_file_change = tool.item_type == "fileChange";
                 // The worker reports a failed tool with `is_error: true`. Settling every
                 // result as "completed" made a failed Edit indistinguishable from a
@@ -1756,10 +1775,19 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                         TranscriptEntryKind::ToolCall,
                         None,
                         status.to_string(),
-                        turn_id,
+                        turn_id.clone(),
                         Some(tool),
                         crate::state::unix_now(),
                     );
+                    // The summary has to be built where the edit landed; the active branch
+                    // below has done this since it existed.
+                    if is_file_change {
+                        if let Some(turn_id) = turn_id {
+                            ensure_claude_bg_turn_diff_entry(
+                                &mut relay, &thread_id, &turn_id, "running",
+                            );
+                        }
+                    }
                 } else {
                     relay.upsert_transcript_item(
                         item_id,
@@ -2031,6 +2059,24 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     relay.bg_set_active_turn(&thread_id, None, now);
                     relay.bg_set_thread_status(&thread_id, "idle".to_string(), Vec::new(), now);
                     relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
+                    // REBUILD rather than restatus, for the reason the active arm gives
+                    // below: the running summary may still list an edit that never landed.
+                    if let Some(turn_id) = completed_turn_id.as_deref() {
+                        if !ensure_claude_bg_turn_diff_entry(
+                            &mut relay,
+                            &thread_id,
+                            turn_id,
+                            "completed",
+                        ) {
+                            relay.bg_set_transcript_item_status(
+                                &thread_id,
+                                crate::state::IdSpace::Relay,
+                                &format!("turn-diff:{turn_id}"),
+                                "completed",
+                                now,
+                            );
+                        }
+                    }
                     // Same failure-visibility guarantee for BACKGROUND turns: the
                     // entry lands on that thread's runtime so it is present when
                     // the user later switches back to it (and in its broker-bound
@@ -2275,7 +2321,14 @@ fn completion_matches_turn(active_turn_id: Option<&str>, event_turn_id: Option<&
 
 /// Walk a hydrated Claude transcript and insert a synthetic
 /// `turn-diff:<turn_id>` entry at the end of every turn that contains at
-/// least one `fileChange` tool item. Mirrors what codex `parse_transcript`
+/// least one `fileChange` tool item.
+///
+/// LIMITATION, until the turn-identity migration lands: history is grouped per MESSAGE,
+/// not per turn — `mapSessionMessages` stamps each row with its own SDK uuid — so a
+/// reloaded thread shows one summary per assistant message, and the row built here
+/// (`turn-diff:<uuid>`) is a different relay name from the live `turn-diff:claude-turn-N`,
+/// which the merge cannot resolve onto it. Both predate the turn-id work and need one
+/// identity migration to fix, not a patch here. Mirrors what codex `parse_transcript`
 /// does at hydration time so reopening an old thread shows the same
 /// per-turn diff summary that lived on the wire.
 /// Each returned entry says whether the SDK named it. The `turn-diff:*` rows are
@@ -2362,11 +2415,19 @@ fn ensure_claude_turn_diff_entry(relay: &mut RelayState, turn_id: &str, status: 
     } else {
         relay.turn_file_change_summary(turn_id)
     };
-    if fallback_file_changes.is_empty() {
-        return false;
-    }
-
     let turn_diff_item_id = format!("turn-diff:{turn_id}");
+    if fallback_file_changes.is_empty() {
+        // Nothing landed. A summary built while an edit was still in flight now claims
+        // that edit completed, so rebuild it empty — restatusing keeps the claim, and the
+        // snapshot protocol cannot delete the row a client already holds.
+        if status != "completed" || relay.relay_named_entry(&turn_diff_item_id).is_none() {
+            return false;
+        }
+    }
+    // Nothing landed: rebuild the row empty so no stale detail survives internally, then
+    // retract it — emptying alone still reads "Changed files in turn X", and the grouper
+    // counts a lone empty summary as one change.
+    let retract = fallback_file_changes.is_empty();
     // Addressed in the RELAY namespace, which is where `upsert_relay_named_item`
     // below writes it.
     let existing_diff = relay
@@ -2393,6 +2454,10 @@ fn ensure_claude_turn_diff_entry(relay: &mut RelayState, turn_id: &str, status: 
         entry.turn_id,
         entry.tool,
     );
+    if retract {
+        let thread_id = relay.active_thread_id.clone().unwrap_or_default();
+        relay.withdraw_relay_named_item_for_thread(&thread_id, &turn_diff_item_id);
+    }
     true
 }
 
@@ -2401,6 +2466,74 @@ enum ClaudeThreadRoute {
     Active,
     Background(String),
     Drop,
+}
+
+/// The turn a row joins when the worker named none.
+///
+/// `relay.active_turn_id` mirrors the SELECTED thread, so reaching for it directly
+/// files a background thread's row under whatever the user is looking at.
+fn route_fallback_turn_id(relay: &RelayState, route: &ClaudeThreadRoute) -> Option<String> {
+    match route {
+        ClaudeThreadRoute::Background(thread_id) => relay
+            .runtime_for_thread(thread_id)
+            .and_then(|runtime| runtime.active_turn_id.clone()),
+        _ => relay.active_turn_id.clone(),
+    }
+}
+
+/// `ensure_claude_turn_diff_entry` for a thread that is not the one on screen.
+///
+/// Split rather than parameterised because every read and write differs: the summary is
+/// collected from that thread's own runtime and written through the `bg_` family.
+fn ensure_claude_bg_turn_diff_entry(
+    relay: &mut RelayState,
+    thread_id: &str,
+    turn_id: &str,
+    status: &str,
+) -> bool {
+    let fallback_file_changes =
+        relay.thread_turn_file_change_summary(thread_id, turn_id, status == "completed");
+    let turn_diff_item_id = format!("turn-diff:{turn_id}");
+    if fallback_file_changes.is_empty() {
+        // Same rule as the active twin: an empty settled summary must clear what a running
+        // one claimed, not merely restatus it.
+        if status != "completed"
+            || relay
+                .relay_named_entry_for_thread(thread_id, &turn_diff_item_id)
+                .is_none()
+        {
+            return false;
+        }
+    }
+    let retract = fallback_file_changes.is_empty();
+    let existing_diff = relay
+        .relay_named_entry_for_thread(thread_id, &turn_diff_item_id)
+        .and_then(|entry| entry.tool)
+        .and_then(|tool| tool.diff);
+
+    let entry = crate::codex::build_turn_diff_entry_with_fallback(
+        turn_id.to_string(),
+        existing_diff,
+        status,
+        fallback_file_changes,
+        "Claude",
+    );
+    let Some(item_id) = entry.item_id.clone() else {
+        return false;
+    };
+    relay.bg_upsert_turn_diff_item(
+        thread_id,
+        item_id,
+        entry.text,
+        entry.status,
+        entry.turn_id,
+        entry.tool,
+        crate::state::unix_now(),
+    );
+    if retract {
+        relay.withdraw_relay_named_item_for_thread(thread_id, &turn_diff_item_id);
+    }
+    true
 }
 
 fn claude_thread_route(relay: &RelayState, thread_id: Option<&str>) -> ClaudeThreadRoute {
@@ -2426,6 +2559,20 @@ fn thread_belongs_to_claude(relay: &RelayState, thread_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn npm_release_worker_fallback_is_cwd_relative_not_absolute() {
+        let path = super::npm_release_claude_worker_path();
+        assert_eq!(path, "claude-worker/worker.mjs");
+        assert!(
+            !std::path::Path::new(path).is_absolute(),
+            "release-npm must not bake an absolute builder path into the worker fallback"
+        );
+        assert!(
+            !path.contains("CARGO_MANIFEST_DIR") && !path.starts_with('/'),
+            "release-npm worker fallback must stay package-relative"
+        );
+    }
 
     #[test]
     fn the_orchestrator_pin_outranks_everything_and_an_ordinary_thread_gets_peer_tools() {
@@ -4057,6 +4204,269 @@ mod tests {
         );
     }
 
+    // A background thread's file edits never got a turn summary at all: only the Active
+    // branch called `ensure_claude_turn_diff_entry`, and the collector behind it reads the
+    // SELECTED runtime, so even reaching it would have summed the wrong thread's changes.
+    #[tokio::test]
+    async fn a_background_turn_gets_its_own_file_change_summary() {
+        let state = test_relay_with_active_b().await;
+        {
+            let mut relay = state.write().await;
+            relay.bg_set_active_turn(
+                "thread-a",
+                Some("turn-a".to_string()),
+                crate::state::unix_now(),
+            );
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "tool_call_result",
+                "provider_session_id": "thread-a",
+                "id": "toolu_bg",
+                "turn_id": "turn-a",
+                "tool": {
+                    "item_type": "fileChange",
+                    "name": "Edit",
+                    "title": "Edit",
+                    "detail": null,
+                    "query": null,
+                    "path": "/tmp/a/bg.rs",
+                    "url": null,
+                    "command": null,
+                    "input_preview": null,
+                    "result_preview": "ok",
+                    "diff": null,
+                    "file_changes": []
+                }
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        let background = relay
+            .runtime_for_thread("thread-a")
+            .expect("background runtime");
+        let summary = background
+            .transcript
+            .iter()
+            .find(|entry| entry.relay_item_id.as_deref() == Some("turn-diff:turn-a"));
+        assert!(
+            summary.is_some(),
+            "the background turn's edits must be summarised too, got rows: {:?}",
+            background
+                .transcript
+                .iter()
+                .map(|entry| entry.row_id.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            relay
+                .runtime_for_thread("thread-b")
+                .map(|runtime| runtime.transcript.iter().count())
+                .unwrap_or(0),
+            0,
+            "and it must not land on the thread the user is looking at"
+        );
+    }
+
+    // The Active `done` arm rebuilds its summary so an edit that was in flight when the
+    // turn ended is dropped. The background arm never did either half — so a background
+    // turn's summary stayed "running" forever, still listing an edit that never landed.
+    #[tokio::test]
+    async fn a_background_turn_settles_its_file_change_summary_on_done() {
+        let state = test_relay_with_active_b().await;
+        let now = crate::state::unix_now();
+        {
+            let mut relay = state.write().await;
+            relay.bg_set_active_turn("thread-a", Some("turn-a".to_string()), now);
+        }
+
+        // `tool_call_result` is terminal by construction (its status is completed or
+        // failed), so an edit that is still in flight is a REQUEST whose result never came.
+        let tool = |id: &str| {
+            json!({
+                "item_type": "fileChange", "name": "Edit", "title": "Edit",
+                "detail": null, "query": null, "path": format!("/tmp/a/{id}.rs"),
+                "url": null, "command": null, "input_preview": null,
+                "result_preview": "ok", "diff": null, "file_changes": []
+            })
+        };
+        handle_worker_event(
+            json!({
+                "type": "tool_call_requested",
+                "provider_session_id": "thread-a",
+                "id": "inflight",
+                "name": "Edit",
+                "turn_id": "turn-a",
+                "status": "running",
+                "tool": tool("inflight")
+            }),
+            &state,
+        )
+        .await;
+        handle_worker_event(
+            json!({
+                "type": "tool_call_result",
+                "provider_session_id": "thread-a",
+                "id": "landed",
+                "turn_id": "turn-a",
+                "tool": tool("landed")
+            }),
+            &state,
+        )
+        .await;
+
+        handle_worker_event(
+            json!({
+                "type": "done",
+                "provider_session_id": "thread-a",
+                "turn_id": "turn-a"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        let background = relay
+            .runtime_for_thread("thread-a")
+            .expect("background runtime");
+        let summary = background
+            .transcript
+            .iter()
+            .find(|entry| entry.relay_item_id.as_deref() == Some("turn-diff:turn-a"))
+            .expect("the background turn must have a summary");
+        assert_eq!(
+            summary.status, "completed",
+            "a settled turn's summary must not stay running"
+        );
+        let paths: Vec<String> = summary
+            .tool
+            .as_ref()
+            .map(|tool| tool.file_changes.iter().map(|c| c.path.clone()).collect())
+            .unwrap_or_default();
+        assert!(
+            paths.iter().any(|path| path.contains("landed")),
+            "the completed edit belongs in the summary, got {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|path| path.contains("inflight")),
+            "an edit still running when the turn ended never landed, got {paths:?}"
+        );
+    }
+
+    // A turn where NOTHING landed must leave no completed summary. The terminal arms read
+    // the builder's `false` as "there is no summary row", but it also means "the settled
+    // collector came up empty" — so a summary built while an edit was still in flight got
+    // restatused to completed with that never-landed edit still listed, Undo and all.
+    async fn nothing_landed_leaves_no_completed_summary(session: &str, viewed: bool) {
+        nothing_landed_inner(session, viewed, false).await;
+    }
+
+    // Same turn, except the never-landed edit carries a real diff — which is what a live
+    // edit actually looks like. The summary rebuild feeds the previous diff back in, and
+    // the builder re-derives file_changes FROM that diff, so clearing the list is not
+    // enough on its own.
+    async fn nothing_landed_with_a_diff(session: &str, viewed: bool) {
+        nothing_landed_inner(session, viewed, true).await;
+    }
+
+    async fn nothing_landed_inner(session: &str, viewed: bool, with_diff: bool) {
+        let state = test_relay_with_active_b().await;
+        let now = crate::state::unix_now();
+        {
+            let mut relay = state.write().await;
+            if viewed {
+                relay.set_active_turn(Some("turn-x".to_string()));
+            } else {
+                relay.bg_set_active_turn(session, Some("turn-x".to_string()), now);
+            }
+        }
+        let tool = |id: &str| {
+            json!({
+                "item_type": "fileChange", "name": "Edit", "title": "Edit",
+                "detail": null, "query": null, "path": format!("/tmp/{id}.rs"),
+                "url": null, "command": null, "input_preview": null,
+                "result_preview": null,
+                "diff": if with_diff {
+                    json!(format!("--- a/{id}.rs\n+++ b/{id}.rs\n@@ -1 +1 @@\n-old\n+new\n"))
+                } else {
+                    json!(null)
+                },
+                "file_changes": []
+            })
+        };
+        // Still in flight when the turn ends.
+        handle_worker_event(
+            json!({
+                "type": "tool_call_requested", "provider_session_id": session,
+                "id": "pending", "name": "Edit", "turn_id": "turn-x",
+                "status": "running", "tool": tool("pending")
+            }),
+            &state,
+        )
+        .await;
+        // A FAILED result still reaches the summary builder, which is what creates the row.
+        handle_worker_event(
+            json!({
+                "type": "tool_call_result", "provider_session_id": session,
+                "id": "failed", "turn_id": "turn-x", "is_error": true,
+                "tool": tool("failed")
+            }),
+            &state,
+        )
+        .await;
+        handle_worker_event(
+            json!({"type": "done", "provider_session_id": session, "turn_id": "turn-x"}),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        let runtime = relay.runtime_for_thread(session).expect("runtime");
+        let summary = runtime
+            .transcript
+            .iter()
+            .find(|entry| entry.relay_item_id.as_deref() == Some("turn-diff:turn-x"));
+        let listed: Vec<String> = summary
+            .and_then(|entry| entry.tool.as_ref())
+            .map(|tool| tool.file_changes.iter().map(|c| c.path.clone()).collect())
+            .unwrap_or_default();
+        assert!(
+            listed.is_empty(),
+            "nothing landed in this turn, yet the settled summary still lists {listed:?}"
+        );
+        // Empty is not enough: the row still reads "Changed files in turn X", and the
+        // transcript grouper counts a lone empty turnDiff as "1 file change". A turn that
+        // changed nothing must retract the row, which is what `withdrawn` is for — the
+        // snapshot protocol cannot delete a row a client already holds.
+        assert!(
+            summary.is_none_or(|entry| entry.withdrawn),
+            "a turn that changed nothing must retract its summary, not just empty it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_viewed_turn_where_nothing_landed_and_had_a_diff_leaves_no_summary() {
+        nothing_landed_with_a_diff("thread-b", true).await;
+    }
+
+    #[tokio::test]
+    async fn a_background_turn_where_nothing_landed_and_had_a_diff_leaves_no_summary() {
+        nothing_landed_with_a_diff("thread-a", false).await;
+    }
+
+    #[tokio::test]
+    async fn a_viewed_turn_where_nothing_landed_leaves_no_completed_summary() {
+        nothing_landed_leaves_no_completed_summary("thread-b", true).await;
+    }
+
+    #[tokio::test]
+    async fn a_background_turn_where_nothing_landed_leaves_no_completed_summary() {
+        nothing_landed_leaves_no_completed_summary("thread-a", false).await;
+    }
+
     #[tokio::test]
     async fn a_successful_tool_result_stays_completed() {
         let state = test_relay_with_active_b().await;
@@ -4454,6 +4864,62 @@ mod tests {
             "active thread should not receive background Claude text: {:?}",
             snapshot.transcript
         );
+    }
+
+    // `relay.active_turn_id` mirrors the SELECTED thread, so falling back to it files a
+    // background thread's row under whatever the user happens to be looking at. The
+    // `done` arm already reads the background runtime's own turn; these three did not.
+    #[tokio::test]
+    async fn a_background_row_falls_back_to_its_own_threads_turn() {
+        let state = test_relay_with_active_b().await;
+        let now = crate::state::unix_now();
+        {
+            let mut relay = state.write().await;
+            relay.bg_set_active_turn("thread-a", Some("turn-a".to_string()), now);
+            relay.set_active_turn(Some("turn-b".to_string()));
+        }
+
+        for event in [
+            json!({
+                "type": "assistant_message",
+                "provider_session_id": "thread-a",
+                "item_id": "assistant:a1",
+                "text": "background text",
+                "status": "completed"
+            }),
+            json!({
+                "type": "tool_call_requested",
+                "provider_session_id": "thread-a",
+                "id": "toolu_a",
+                "name": "Read",
+                "status": "running"
+            }),
+            json!({
+                "type": "tool_call_result",
+                "provider_session_id": "thread-a",
+                "id": "toolu_a",
+                "content": "ok"
+            }),
+        ] {
+            handle_worker_event(event, &state).await;
+        }
+
+        let relay = state.read().await;
+        let background = relay
+            .runtime_for_thread("thread-a")
+            .expect("background runtime");
+        assert!(
+            background.transcript.iter().next().is_some(),
+            "the rows must land on the background thread at all"
+        );
+        for entry in background.transcript.iter() {
+            assert_eq!(
+                entry.turn_id.as_deref(),
+                Some("turn-a"),
+                "{} joined the viewed thread's turn instead of its own",
+                entry.row_id
+            );
+        }
     }
 
     #[tokio::test]

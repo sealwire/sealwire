@@ -6,6 +6,18 @@ use std::{
 };
 
 fn main() {
+    // Cargo's PROFILE env is only "debug" | "release" (from inherits), NOT the
+    // custom profile name. Detect `--profile release-npm` via OUT_DIR's profile
+    // directory segment, which Cargo places at target/<profile>/build/.../out.
+    println!("cargo:rustc-check-cfg=cfg(sealwire_npm_release)");
+    println!("cargo:rerun-if-env-changed=SEALWIRE_NPM_RELEASE");
+    let out_dir = env::var("OUT_DIR").unwrap_or_default();
+    if out_dir_is_release_npm_profile(&out_dir)
+        || env::var_os("SEALWIRE_NPM_RELEASE").is_some_and(|v| v == "1")
+    {
+        println!("cargo:rustc-cfg=sealwire_npm_release");
+    }
+
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let web_root = manifest_dir.join("..").join("..").join("web");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("out dir"));
@@ -39,6 +51,17 @@ fn main() {
         .expect("failed to write embedded asset entry");
     }
     writeln!(output, "];").expect("failed to finish embedded asset source");
+}
+
+/// True when Cargo is building with `--profile release-npm`.
+///
+/// Custom profile names are NOT exposed via the PROFILE env (that stays
+/// "release" / "debug" based on inherits). The profile directory name in
+/// OUT_DIR is the supported detection signal.
+fn out_dir_is_release_npm_profile(out_dir: &str) -> bool {
+    Path::new(out_dir)
+        .components()
+        .any(|c| c.as_os_str() == "release-npm")
 }
 
 fn collect_assets(

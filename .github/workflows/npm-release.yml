@@ -128,17 +128,44 @@ jobs:
       # `shell: bash` on every runner, not just the Unix ones: with-private.sh is
       # a bash script and the Windows runner defaults to pwsh, which would fail
       # to run it at all.
+      #
+      # `--profile release-npm` (workspace Cargo.toml) applies strip/fat LTO/
+      # codegen-units=1/debug=0 for npm prebuilds only — ordinary
+      # `cargo build --release` is unchanged. Path remapping keeps absolute
+      # runner/workspace/private-checkout paths out of the binary metadata.
+      - name: Configure rustc path remapping
+        shell: bash
+        env:
+          RELAY_PRIVATE_PATH: ${{ github.workspace }}/.private
+        run: node scripts/npm-release-remap-env.mjs --github-env
+
       - name: Build relay-server
         shell: bash
         env:
           RELAY_PRIVATE_PATH: ${{ github.workspace }}/.private
-        run: scripts/with-private.sh cargo build --release -p relay-server --target ${{ matrix.cargo_target }} --features private
+          # Belt-and-braces with OUT_DIR profile detection in build.rs — Cargo's
+          # PROFILE env is only debug|release and cannot name release-npm.
+          SEALWIRE_NPM_RELEASE: "1"
+        run: scripts/with-private.sh cargo build --profile release-npm -p relay-server --target ${{ matrix.cargo_target }} --features private
 
       - name: Stage binary
         shell: bash
         run: |
           mkdir -p "dist-bin/${{ matrix.target }}"
-          cp "target/${{ matrix.cargo_target }}/release/${{ matrix.executable }}" "dist-bin/${{ matrix.target }}/${{ matrix.executable }}"
+          cp "target/${{ matrix.cargo_target }}/release-npm/${{ matrix.executable }}" "dist-bin/${{ matrix.target }}/${{ matrix.executable }}"
+
+      # Byte-scan (+ optional nm/dumpbin) the exact staged executable before
+      # upload. Upload path is the file alone — never a directory that could
+      # include PDB/dSYM sidecars.
+      - name: Verify staged binary
+        shell: bash
+        env:
+          RELAY_PRIVATE_PATH: ${{ github.workspace }}/.private
+        run: |
+          node scripts/verify-npm-release-binary.mjs \
+            "dist-bin/${{ matrix.target }}/${{ matrix.executable }}" \
+            --workspace "${{ github.workspace }}" \
+            --private "${{ github.workspace }}/.private"
 
       - name: Upload binary
         uses: actions/upload-artifact@v4

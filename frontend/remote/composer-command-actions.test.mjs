@@ -62,15 +62,19 @@ test("a status-dump objective is refused before it reaches the relay, with its r
 });
 
 // The phone has it worse than the desktop: its log drawer is `display: none` with
-// nothing anywhere to open it, so the composer line is the ONLY channel there is.
-test("a goal refused for length is shown on the composer", async () => {
+// nothing anywhere to open it, so the composer is the ONLY channel there is. And the
+// cap is the composer's own judgement — the relay never heard it — so it belongs in
+// "not sent", exactly as it does on the desktop. Red would claim something broke.
+test("a goal refused for length is held, not reported as a failure", async () => {
   const shown = [];
+  const held = [];
   const setGoal = spy();
   const actions = createRemoteComposerCommandActions({
     setGoal,
     stopGoal: spy(),
     delegate: spy(),
     setComposerError: (threadId, message) => shown.push([threadId, message]),
+    setComposerHeld: (threadId, message) => held.push([threadId, message]),
   });
 
   const answer = await actions.setGoal("thread-1", "x".repeat(MAX_GOAL_OBJECTIVE_CHARS + 1));
@@ -78,10 +82,32 @@ test("a goal refused for length is shown on the composer", async () => {
   assert.equal(answer.isError, true);
   assert.equal(setGoal.calls.length, 0, "refused before the relay");
   assert.deepEqual(
-    shown.map(([threadId]) => threadId),
+    held.map(([threadId]) => threadId),
     ["thread-1"]
   );
-  assert.ok(shown[0][1].trim(), "a blank line leaves the refusal nowhere at all");
+  assert.ok(held[0][1].trim(), "a blank line leaves the refusal nowhere at all");
+  assert.deepEqual(
+    shown.filter(([, message]) => message.trim()),
+    [],
+    "and nothing claims something went wrong"
+  );
+});
+
+// Each region is only cleared by its own writer, so a fixed draft would otherwise send
+// under a NOT SENT line still describing the draft it replaced.
+test("a fresh goal attempt clears the held slot the last one left", async () => {
+  const held = [];
+  const actions = createRemoteComposerCommandActions({
+    setGoal: spy({ isError: false, text: "" }),
+    stopGoal: spy({ isError: false, text: "" }),
+    delegate: spy(),
+    setComposerHeld: (threadId, message) => held.push([threadId, message]),
+  });
+
+  await actions.setGoal("thread-1", "x".repeat(MAX_GOAL_OBJECTIVE_CHARS + 1));
+  await actions.setGoal("thread-1", "ship the phone menu");
+
+  assert.deepEqual(held.at(-1), ["thread-1", ""]);
 });
 
 test("a refused write comes back as an error so the draft is not cleared", async () => {

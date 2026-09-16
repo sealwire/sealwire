@@ -2312,11 +2312,22 @@ fn authorize_api(
 }
 
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("workspace root should resolve")
+    // Only consulted when debug_assertions is true (disk-backed `web/` in
+    // local dev). env!("CARGO_MANIFEST_DIR") is unremappable — keep it for
+    // debug / ordinary --release, but compile it out of `--profile release-npm`
+    // (build-script cfg `sealwire_npm_release`).
+    #[cfg(sealwire_npm_release)]
+    {
+        PathBuf::from(".")
+    }
+    #[cfg(not(sealwire_npm_release))]
+    {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .canonicalize()
+            .expect("workspace root should resolve")
+    }
 }
 
 fn default_web_assets() -> WebAssets {

@@ -36,6 +36,10 @@ export const state = {
   // composerErrors because the card is inside a modal on this surface, and because
   // that slot also carries send/settings failures the card must not claim.
   goalErrors: {},
+  // thread id -> what a "/" command stopped itself, which never reached the relay.
+  // Not composerErrors: that slot means something broke, and this means nothing was
+  // sent yet. See shared/composer.js for the two regions.
+  composerHeld: {},
   currentApprovalId: null,
   deviceIdentityPromise: null,
   deviceKeypair: null,

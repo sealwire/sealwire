@@ -167,6 +167,7 @@ import { createWorkflowsCache } from "../shared/workflows-cache.js";
 import { createPanelControl } from "../local/panel-controls.js";
 import { setupHeaderBandSync } from "../local/header-band-sync.js";
 import { createRemoteComposerCommandActions } from "./composer-command-actions.js";
+import { createReviewAuthor } from "../local/review-authoring.js";
 import { goalErrorFrom } from "../shared/goal-errors.js";
 import { ComposerCommandHost } from "./composer-command-host.js";
 import { createComposerCommandsModel } from "./composer-commands-model.js";
@@ -667,6 +668,7 @@ function RemoteApp() {
         composerDraft: remoteUi.composerDraft,
         composerEffort: remoteUi.composerEffort,
         composerErrors: currentState.composerErrors,
+        composerHeld: currentState.composerHeld,
         composerModel: remoteUi.composerModel,
         fallbackModels: remoteUi.providerModels[session.provider] || [],
         sendPending: remoteUi.sendPending,
@@ -1231,6 +1233,8 @@ function RemoteApp() {
         delegate: (threadId, args) => handlersRef.current.onDelegate?.(threadId, args),
         setComposerError: (threadId, message) =>
           handlersRef.current.onComposerError?.(threadId, message),
+        setComposerHeld: (threadId, message) =>
+          handlersRef.current.onComposerHeld?.(threadId, message),
         // The other door onto the same goal, so the card's last word stops being current.
         beginGoalAction: (threadId) => handlersRef.current.onBeginGoalAction?.(threadId),
       }),
@@ -2511,6 +2515,8 @@ function RemoteApp() {
           // broker instead of loopback HTTP. Built here because this is where the
           // catalog and the viewed thread already live.
           composerCommandsModel: createComposerCommandsModel({
+            hold: (message) =>
+              handlersRef.current.onComposerHeld?.(viewedThreadIdRef.current, message),
             getCatalog: () => ({
               providers: remoteUi.providers || [],
               models: reviewLaunchModel?.models || [],
@@ -2525,7 +2531,15 @@ function RemoteApp() {
               canReview: canRequestRemoteReview,
               defaultReviewerProvider: reviewLaunchModel?.defaultProvider || "",
             }),
-            requestReview: (values) => reviewerActions.onRequestReview(values),
+            // The command door only: the request modal shows the relay's reason inline
+            // itself, and the controller turns this rejection into a bare `false`.
+            requestReview: (values) =>
+              createReviewAuthor({
+                requestReview: (v) => reviewerActions.onRequestReview(v),
+                getThreadId: () => viewedThreadIdRef.current,
+                setComposerError: (threadId, message) =>
+                  handlersRef.current.onComposerError?.(threadId, message),
+              })(values),
             log: renderLog,
             actions: remoteComposerCommandActions,
           }),

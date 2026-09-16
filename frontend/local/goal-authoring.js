@@ -5,7 +5,7 @@
 // green through any change that keeps the words and drops the effect.
 
 import { prepareAuthoredGoalObjective } from "../shared/goal-objective.js";
-import { goalOutcomeOrContractError } from "../shared/goal-outcome.js";
+import { commandOutcomeOrContractError } from "../shared/command-outcome.js";
 
 /**
  * @param {{
@@ -23,25 +23,31 @@ import { goalOutcomeOrContractError } from "../shared/goal-outcome.js";
 export function createGoalAuthor({
   setGoal,
   setComposerError = () => {},
+  // The gate's own refusal never reached the relay, so it is not a failure — it is a
+  // draft that is not ready. Red would say the opposite.
+  setComposerHeld = () => {},
   beginGoalAction = () => {},
 }) {
   return async function authorGoal(threadId, objective) {
     const prepared = prepareAuthoredGoalObjective(objective);
     if (prepared.refuse) {
-      setComposerError(threadId, prepared.refuse);
+      setComposerHeld(threadId, prepared.refuse);
+      setComposerError(threadId, "");
       return { text: prepared.refuse, isError: true };
     }
-    // This attempt supersedes the last refusal on this thread only — a stale red
-    // line under a draft that has since been fixed is its own dead end.
+    // This attempt supersedes whatever the last one left on this thread — a stale line
+    // under a draft that has since been fixed is its own dead end.
     setComposerError(threadId, "");
+    setComposerHeld(threadId, "");
     beginGoalAction(threadId);
     // Normalised, never trusted as-is: the controller decides whether to keep the
     // draft from `isError`, so a helper answering the old bare boolean would read as
     // success and throw away what the user typed.
-    const outcome = goalOutcomeOrContractError(await setGoal(threadId, prepared.objective));
+    const outcome = commandOutcomeOrContractError(await setGoal(threadId, prepared.objective), "the goal");
     // Length is the only thing the gate can judge. A busy thread, a session narrowed
     // since, a workspace that moved — the relay decides those, and its reason reaches
     // the same collapsed panel unless it is put on screen here.
+    // The relay's own refusal DID leave the composer, so it belongs on the error line.
     if (outcome.isError) setComposerError(threadId, outcome.text);
     return outcome;
   };

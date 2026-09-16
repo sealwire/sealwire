@@ -712,6 +712,10 @@ export function lastMessageActivitySeconds(messages) {
 // `cwd` is the session's working directory. It is what makes replayed patch headers
 // repo-relative — without it a reloaded thread re-renders absolute headers and its
 // Undo/Reapply stops working, even for edits the live path recorded correctly.
+// LIMITATION: the turn_id values below are per-MESSAGE (an SDK uuid), not per-turn, so a
+// hydrated thread groups file changes by message and cannot line up with the live
+// `claude-turn-N` rows. Deleting them is NOT the fix — the relay's inject_turn_diff_entries
+// groups on this field and would then build no summary at all. See its doc comment.
 export function mapSessionMessages(messages, cwd = null) {
   const entries = [];
   const toolEntryById = new Map();
