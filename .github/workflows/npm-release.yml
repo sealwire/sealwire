@@ -48,26 +48,22 @@ jobs:
             cargo_target: x86_64-pc-windows-msvc
             executable: relay-server.exe
 
-    # Job level, not step level: a step's own `if` is evaluated before its `env`
-    # block exists, so a step cannot read a secret through `env` in its own
-    # condition.
-    env:
-      PRIVATE_APP_CLIENT_ID: ${{ secrets.RELAY_PRIVATE_APP_CLIENT_ID }}
-      PRIVATE_APP_KEY: ${{ secrets.RELAY_PRIVATE_APP_KEY }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      # Rust CI skips the private crate when the credentials are absent, and that
-      # is right there: it costs coverage on forks and nothing else. Here the same
-      # skip would publish a binary with no orchestration engines to every user,
-      # from a workflow run that is green — the failure would surface as "task
-      # teams don't work" long after the release. So this one stops.
+      # Fail loudly when the private-crate app credentials are missing. A release
+      # built without the private crate ships a relay whose task lists and task
+      # teams refuse at runtime — from a green workflow run. Presence-only
+      # booleans keep the raw App private key out of this job's environment;
+      # `${{ secrets.X != '' }}` evaluates without materializing the value.
       - name: Require the private-crate app credentials
         shell: bash
+        env:
+          HAS_PRIVATE_APP_CLIENT_ID: ${{ secrets.RELAY_PRIVATE_APP_CLIENT_ID != '' }}
+          HAS_PRIVATE_APP_KEY: ${{ secrets.RELAY_PRIVATE_APP_KEY != '' }}
         run: |
-          if [ -z "${PRIVATE_APP_CLIENT_ID:-}" ] || [ -z "${PRIVATE_APP_KEY:-}" ]; then
+          if [ "${HAS_PRIVATE_APP_CLIENT_ID}" != "true" ] || [ "${HAS_PRIVATE_APP_KEY}" != "true" ]; then
             echo "::error::RELAY_PRIVATE_APP_CLIENT_ID / RELAY_PRIVATE_APP_KEY are not both set. A release built without the private crate ships a relay whose task lists and task teams refuse at runtime. See PRIVATE_CRATE.md."
             exit 1
           fi
@@ -76,7 +72,9 @@ jobs:
       # A GitHub App installation token rather than a deploy key: deploy keys are
       # disabled by organisation policy, and this expires in an hour, is revocable
       # on its own, and `repositories:` holds it to the one repository even though
-      # the app could be installed on more later.
+      # the app could be installed on more later. `permission-contents: read`
+      # narrows the minted token further (the App installation must itself grant
+      # at most Contents: read — verify on the GitHub App settings).
       - name: Mint a private-crate token
         id: private-token
         uses: actions/create-github-app-token@v3
@@ -85,6 +83,7 @@ jobs:
           private-key: ${{ secrets.RELAY_PRIVATE_APP_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: sealwire-private
+          permission-contents: read
 
       - name: Checkout private crate
         uses: actions/checkout@v5
@@ -92,6 +91,15 @@ jobs:
           repository: sealwire/sealwire-private
           token: ${{ steps.private-token.outputs.token }}
           path: .private
+          persist-credentials: false
+
+      # Drop the nested gitdir before npm/Cargo run. Even with persist-credentials
+      # false, leaving `.private/.git` around is unnecessary attack surface for
+      # later build scripts; remove it cross-platform via bash (Windows runners
+      # included). Do not print git config or token values.
+      - name: Drop private checkout credentials
+        shell: bash
+        run: rm -rf .private/.git
 
       - name: Setup Node
         uses: actions/setup-node@v5

@@ -154,6 +154,7 @@ jobs:
           private-key: ${{ secrets.RELAY_PRIVATE_APP_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: sealwire-private
+          permission-contents: read
 
       - name: Checkout private crate
         id: private
@@ -164,6 +165,14 @@ jobs:
           repository: sealwire/sealwire-private
           token: ${{ steps.private-token.outputs.token }}
           path: .private
+          persist-credentials: false
+
+      # Drop nested git metadata before any private-enabled cargo/npm step so the
+      # short-lived installation token cannot linger in .private/.git/config.
+      - name: Drop private checkout credentials
+        if: steps.private.outcome == 'success'
+        shell: bash
+        run: rm -rf .private/.git
 
       # The price of the skip above is that the team suite runs nowhere and the
       # tick is still green, which is indistinguishable from a healthy build
@@ -257,6 +266,7 @@ jobs:
           private-key: ${{ secrets.RELAY_PRIVATE_APP_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: sealwire-private
+          permission-contents: read
 
       - name: Checkout private crate
         id: private
@@ -267,6 +277,14 @@ jobs:
           repository: sealwire/sealwire-private
           token: ${{ steps.private-token.outputs.token }}
           path: .private
+          persist-credentials: false
+
+      # Drop nested git metadata before the task-team e2e so the installation
+      # token is not left in .private/.git/config for later scripts.
+      - name: Drop private checkout credentials
+        if: steps.private.outcome == 'success'
+        shell: bash
+        run: rm -rf .private/.git
 
       # Worth more here than in the `rust` job: the fallback below still runs the
       # suite, against the public stub, where it skips itself — a green tick

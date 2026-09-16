@@ -130,8 +130,22 @@ test("a release with no private-crate credentials fails loudly instead of publis
 
   const gate = stepMatching(await releaseWorkflow(), /exit 1/);
   assert.ok(gate, "no step fails the release when the app credentials are missing");
-  assert.match(gate, /PRIVATE_APP_CLIENT_ID/);
-  assert.match(gate, /PRIVATE_APP_KEY/);
+  // Presence-only booleans — never materialize the raw key into the step env.
+  assert.match(
+    gate,
+    /HAS_PRIVATE_APP_CLIENT_ID: \$\{\{ secrets\.RELAY_PRIVATE_APP_CLIENT_ID != '' \}\}/
+  );
+  assert.match(
+    gate,
+    /HAS_PRIVATE_APP_KEY: \$\{\{ secrets\.RELAY_PRIVATE_APP_KEY != '' \}\}/
+  );
+  assert.match(gate, /HAS_PRIVATE_APP_CLIENT_ID/);
+  assert.match(gate, /HAS_PRIVATE_APP_KEY/);
+  assert.doesNotMatch(
+    gate,
+    /^\s*PRIVATE_APP_KEY:\s*\$\{\{\s*secrets\.RELAY_PRIVATE_APP_KEY\s*\}\}/m,
+    "the credential gate must not put the raw private key into env"
+  );
 });
 
 test("Rust CI keeps skipping the private crate rather than failing on a fork", async () => {
@@ -298,4 +312,212 @@ test("that guard actually rejects a tree with the private sources in it", async 
   await writeFile(path.join(workdir, "crates/sealwire-private/STUB"), "");
   const stubbed = spawnSync("bash", [guard], { encoding: "utf8" });
   assert.equal(stubbed.status, 0, `guard rejected a clean stub tree: ${stubbed.stderr}`);
+});
+
+// --- Credential narrowing ----------------------------------------------------
+// The long-lived GitHub App private key must never sit in job-level env where
+// npm ci, Vite, Cargo build.rs, and every later step can read it. The minted
+// installation token must also not linger in `.private/.git` after checkout.
+
+function workflowJobs(yaml) {
+  const stripped = stripComments(yaml);
+  const jobsMatch = stripped.match(/^jobs:\n([\s\S]*)$/m);
+  assert.ok(jobsMatch, "workflow has no jobs: block");
+  const body = jobsMatch[1];
+  const parts = body.split(/^  ([A-Za-z0-9_-]+):\n/m).slice(1);
+  const out = [];
+  for (let i = 0; i < parts.length; i += 2) {
+    out.push({ id: parts[i], body: parts[i + 1] ?? "" });
+  }
+  return out;
+}
+
+function jobLevelEnvBlock(jobBody) {
+  // Job-level `env:` sits at 4 spaces; step env is deeper. Stop at the next
+  // 4-space key (steps:, strategy:, permissions:, etc.).
+  const match = jobBody.match(/^    env:\n((?:      .*\n)*)/m);
+  return match ? match[0] : "";
+}
+
+function privateKeyMaterializations(yaml) {
+  // Any assignment that puts the secret VALUE into an env var / output — not a
+  // presence check (`!= ''`) and not the mint action's `private-key:` input.
+  const hits = [];
+  for (const line of stripComments(yaml).split("\n")) {
+    if (!/secrets\.RELAY_PRIVATE_APP_KEY|PRIVATE_APP_KEY:/.test(line)) continue;
+    if (/private-key:\s*\$\{\{\s*secrets\.RELAY_PRIVATE_APP_KEY\s*\}\}/.test(line)) continue;
+    if (/secrets\.RELAY_PRIVATE_APP_KEY\s*!=\s*''/.test(line)) continue;
+    if (/::error::.*RELAY_PRIVATE_APP_KEY/.test(line)) continue;
+    if (/^\s*#/.test(line)) continue;
+    hits.push(line.trim());
+  }
+  return hits;
+}
+
+test("the raw GitHub App private key is never placed in job-level or global env", async () => {
+  for (const [label, yaml] of [
+    ["npm-release", await releaseWorkflow()],
+    ["rust-ci", await ciWorkflow()],
+  ]) {
+    assert.doesNotMatch(
+      yaml,
+      /^env:\n(?:.*\n)*?.*RELAY_PRIVATE_APP_KEY/m,
+      `${label}: workflow-level env must not carry RELAY_PRIVATE_APP_KEY`
+    );
+
+    for (const job of workflowJobs(yaml)) {
+      const envBlock = jobLevelEnvBlock(job.body);
+      assert.doesNotMatch(
+        envBlock,
+        /PRIVATE_APP_KEY|RELAY_PRIVATE_APP_KEY/,
+        `${label} job '${job.id}' exposes the App private key at job-level env`
+      );
+    }
+
+    const leaks = privateKeyMaterializations(yaml);
+    assert.deepEqual(
+      leaks,
+      [],
+      `${label}: raw private-key materializations (not mint input / presence check):\n${leaks.join("\n")}`
+    );
+  }
+});
+
+test("the App private key secret reference occurs only as the mint action input (or a presence check)", async () => {
+  const workflows = [await releaseWorkflow(), await ciWorkflow()];
+  for (const yaml of workflows) {
+    const refs = stripComments(yaml)
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /secrets\.RELAY_PRIVATE_APP_KEY/.test(line));
+
+    for (const line of refs) {
+      const mintInput = /private-key:\s*\$\{\{\s*secrets\.RELAY_PRIVATE_APP_KEY\s*\}\}/.test(line);
+      const presence = /secrets\.RELAY_PRIVATE_APP_KEY\s*!=\s*''/.test(line);
+      const errorText = /::error::/.test(line);
+      assert.ok(
+        mintInput || presence || errorText,
+        `disallowed RELAY_PRIVATE_APP_KEY reference: ${line}`
+      );
+    }
+
+    const mints = stepsMatching(yaml, /create-github-app-token/);
+    assert.ok(mints.length > 0);
+    for (const mint of mints) {
+      assert.match(mint, /private-key: \$\{\{ secrets\.RELAY_PRIVATE_APP_KEY \}\}/);
+      assert.match(
+        mint,
+        /permission-contents:\s*read/,
+        "minted tokens must request contents:read only (v3 supports this input)"
+      );
+      assert.match(mint, /repositories: sealwire-private/);
+    }
+  }
+});
+
+test("every sealwire-private checkout disables credential persistence and drops .git before private builds", async () => {
+  for (const [label, yaml] of [
+    ["npm-release", await releaseWorkflow()],
+    ["rust-ci", await ciWorkflow()],
+  ]) {
+    const checkouts = stepsMatching(yaml, /repository: sealwire\/sealwire-private/);
+    assert.ok(checkouts.length > 0, `${label}: expected private checkouts`);
+    for (const checkout of checkouts) {
+      assert.match(
+        checkout,
+        /persist-credentials:\s*false/,
+        `${label}: private checkout must set persist-credentials: false`
+      );
+    }
+
+    for (const job of workflowJobs(yaml)) {
+      if (!/repository: sealwire\/sealwire-private/.test(job.body)) continue;
+
+      const jobSteps = steps(job.body);
+      const checkoutIdx = jobSteps.findIndex((s) =>
+        /repository: sealwire\/sealwire-private/.test(s)
+      );
+      assert.ok(checkoutIdx >= 0, `${label}/${job.id}: missing private checkout`);
+
+      const cleanupIdx = jobSteps.findIndex((s) => /rm -rf \.private\/\.git/.test(s));
+      assert.ok(
+        cleanupIdx > checkoutIdx,
+        `${label}/${job.id}: must remove .private/.git after the private checkout`
+      );
+
+      const privateBuildIdx = jobSteps.findIndex((s) =>
+        /with-private\.sh|RELAY_PRIVATE_PATH:/.test(s)
+      );
+      assert.ok(
+        privateBuildIdx > cleanupIdx,
+        `${label}/${job.id}: credential cleanup must run before any private-enabled build/test`
+      );
+
+      const cleanup = jobSteps[cleanupIdx];
+      assert.match(cleanup, /shell: bash/, `${label}/${job.id}: cleanup must use bash (Windows)`);
+      assert.doesNotMatch(
+        cleanup,
+        /git config|printenv|echo \$\{?.*TOKEN|echo \$\{?.*KEY/,
+        `${label}/${job.id}: cleanup must not print git config / tokens`
+      );
+    }
+  }
+});
+
+test("private steps stay off pull_request; publish stays a separate clean job", async () => {
+  const ci = await ciWorkflow();
+  const release = await releaseWorkflow();
+
+  // Fork/Dependabot skip + PR exclusion — both mint steps.
+  const mints = stepsMatching(ci, /create-github-app-token/);
+  assert.equal(mints.length, 2);
+  for (const mint of mints) {
+    assert.match(mint, /github\.event_name != 'pull_request'/);
+    assert.match(mint, /env\.PRIVATE_APP_CLIENT_ID != ''/);
+  }
+  assert.doesNotMatch(ci, /pull_request_target/);
+  assert.doesNotMatch(release, /pull_request_target/);
+  assert.doesNotMatch(release, /pull_request:/);
+
+  const jobs = workflowJobs(release);
+  const build = jobs.find((j) => j.id === "build-binary");
+  const publish = jobs.find((j) => j.id === "publish");
+  assert.ok(build, "release must keep the build-binary job");
+  assert.ok(publish, "release must keep a separate publish job");
+  assert.match(publish.body, /needs:\s*build-binary/);
+  assert.doesNotMatch(
+    publish.body,
+    /sealwire-private|create-github-app-token|RELAY_PRIVATE_PATH|\.private/,
+    "publish must not see the private checkout — only clean public sources + downloaded binaries"
+  );
+
+  const manifest = JSON.parse(await readFile(path.join(repoRoot, "package.json"), "utf8"));
+  assert.match(manifest.scripts?.prepublishOnly ?? "", /check-no-private/);
+});
+
+test("workflow shells do not dump env or enable xtrace around private credentials", async () => {
+  for (const [label, yaml] of [
+    ["npm-release", await releaseWorkflow()],
+    ["rust-ci", await ciWorkflow()],
+  ]) {
+    for (const step of stepsMatching(yaml, /^\s*run:/m)) {
+      assert.doesNotMatch(step, /\bset\s+-[a-zA-Z]*x\b/, `${label}: set -x would leak secrets`);
+      assert.doesNotMatch(step, /\bprintenv\b/, `${label}: printenv dumps the environment`);
+      const run = step.match(/run:\s*(?:\|\s*)?\n?([\s\S]*)/);
+      const script = run?.[1] ?? "";
+      assert.doesNotMatch(script, /^\s*env\s*$/m, `${label}: bare env dump`);
+      assert.doesNotMatch(script, /\benv\s*\|/, `${label}: env pipe dump`);
+      assert.doesNotMatch(script, /echo\s+"?\$\{\{\s*secrets\./, `${label}: echoing a secret`);
+      // Naming a secret in an ::error:: message is fine; echoing its value is not.
+      const echoLines = script.split("\n").filter((line) => /^\s*echo\s+/.test(line));
+      for (const line of echoLines) {
+        if (/::error::|::warning::/.test(line)) continue;
+        assert.doesNotMatch(
+          line,
+          /\b(PRIVATE_APP_KEY|RELAY_PRIVATE_APP_KEY|TOKEN)\b/,
+          `${label}: echoing credentials: ${line.trim()}`
+        );
+      }
+    }
+  }
 });
