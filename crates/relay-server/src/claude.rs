@@ -1522,7 +1522,8 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
             }
             // Turn id first: the fallback name below is derived from it.
             if let (Some(turn_id), Some(text)) = (
-                string_at(&payload, &["turn_id"]).or_else(|| relay.active_turn_id.clone()),
+                string_at(&payload, &["turn_id"])
+                    .or_else(|| route_fallback_turn_id(&relay, &route)),
                 string_at(&payload, &["text"]),
             ) {
                 // `assistant_delta` carries no item id by contract, so the relay
@@ -1645,7 +1646,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 .or_else(|| string_at(&payload, &["id"]).map(|id| format!("tool:{id}")))
             {
                 let turn_id = string_at(&payload, &["turn_id"])
-                    .or_else(|| relay.active_turn_id.clone())
+                    .or_else(|| route_fallback_turn_id(&relay, &route))
                     .unwrap_or_else(|| item_id.clone());
                 let tool = payload
                     .get("tool")
@@ -1732,8 +1733,8 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 if tool.result_preview.is_none() {
                     tool.result_preview = string_at(&payload, &["content"]);
                 }
-                let turn_id =
-                    string_at(&payload, &["turn_id"]).or_else(|| relay.active_turn_id.clone());
+                let turn_id = string_at(&payload, &["turn_id"])
+                    .or_else(|| route_fallback_turn_id(&relay, &route));
                 let is_file_change = tool.item_type == "fileChange";
                 // The worker reports a failed tool with `is_error: true`. Settling every
                 // result as "completed" made a failed Edit indistinguishable from a
@@ -2401,6 +2402,19 @@ enum ClaudeThreadRoute {
     Active,
     Background(String),
     Drop,
+}
+
+/// The turn a row joins when the worker named none.
+///
+/// `relay.active_turn_id` mirrors the SELECTED thread, so reaching for it directly
+/// files a background thread's row under whatever the user is looking at.
+fn route_fallback_turn_id(relay: &RelayState, route: &ClaudeThreadRoute) -> Option<String> {
+    match route {
+        ClaudeThreadRoute::Background(thread_id) => relay
+            .runtime_for_thread(thread_id)
+            .and_then(|runtime| runtime.active_turn_id.clone()),
+        _ => relay.active_turn_id.clone(),
+    }
 }
 
 fn claude_thread_route(relay: &RelayState, thread_id: Option<&str>) -> ClaudeThreadRoute {
@@ -4454,6 +4468,62 @@ mod tests {
             "active thread should not receive background Claude text: {:?}",
             snapshot.transcript
         );
+    }
+
+    // `relay.active_turn_id` mirrors the SELECTED thread, so falling back to it files a
+    // background thread's row under whatever the user happens to be looking at. The
+    // `done` arm already reads the background runtime's own turn; these three did not.
+    #[tokio::test]
+    async fn a_background_row_falls_back_to_its_own_threads_turn() {
+        let state = test_relay_with_active_b().await;
+        let now = crate::state::unix_now();
+        {
+            let mut relay = state.write().await;
+            relay.bg_set_active_turn("thread-a", Some("turn-a".to_string()), now);
+            relay.set_active_turn(Some("turn-b".to_string()));
+        }
+
+        for event in [
+            json!({
+                "type": "assistant_message",
+                "provider_session_id": "thread-a",
+                "item_id": "assistant:a1",
+                "text": "background text",
+                "status": "completed"
+            }),
+            json!({
+                "type": "tool_call_requested",
+                "provider_session_id": "thread-a",
+                "id": "toolu_a",
+                "name": "Read",
+                "status": "running"
+            }),
+            json!({
+                "type": "tool_call_result",
+                "provider_session_id": "thread-a",
+                "id": "toolu_a",
+                "content": "ok"
+            }),
+        ] {
+            handle_worker_event(event, &state).await;
+        }
+
+        let relay = state.read().await;
+        let background = relay
+            .runtime_for_thread("thread-a")
+            .expect("background runtime");
+        assert!(
+            background.transcript.iter().next().is_some(),
+            "the rows must land on the background thread at all"
+        );
+        for entry in background.transcript.iter() {
+            assert_eq!(
+                entry.turn_id.as_deref(),
+                Some("turn-a"),
+                "{} joined the viewed thread's turn instead of its own",
+                entry.row_id
+            );
+        }
     }
 
     #[tokio::test]
