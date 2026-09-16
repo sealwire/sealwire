@@ -5,7 +5,7 @@ import { createOrchestratorChatActions } from "./orchestrator-chat.js";
 
 function harness(overrides = {}) {
   const calls = { send: [], propose: [], confirm: [], revise: [], openTask: [], invalidate: 0 };
-  const state = { session: { orchestrator_proposals: [] } };
+  const state = { session: { orchestrator_proposals: [] }, stopPendingByThread: {} };
   const actions = createOrchestratorChatActions({
     state,
     sendMessage: async (text, threadId) => {
@@ -130,15 +130,70 @@ test("a refused Stop shows the relay's reason on the Orchestrator composer", asy
 });
 
 test("a successful Stop clears a stale Orchestrator composer error", async () => {
+  const { withStopPending, isStopPending } = await import("./stop-pending.js");
   const { actions, state } = harness({
-    stopActiveTurn: async () => true,
+    stopActiveTurn: async (threadId) => {
+      // Real lifecycle stamps the shared map; this pane must not keep a
+      // separate boolean that only renderTaskTeam could clear.
+      state.stopPendingByThread = withStopPending(
+        state.stopPendingByThread,
+        threadId,
+        true
+      );
+      return true;
+    },
     readSendError: () => "",
   });
+  state.stopPendingByThread = {};
   state.orchestratorSendError = "stale refusal";
 
   await actions.stop("orch-1");
 
   assert.equal(state.orchestratorSendError, null);
+  assert.equal(
+    isStopPending(state.stopPendingByThread, "orch-1"),
+    true,
+    "pending until reconcile sees the thread idle"
+  );
+  assert.equal(
+    state.orchestratorStopPending,
+    undefined,
+    "no separate boolean that can survive off-screen idle"
+  );
+});
+
+test("a refused Stop surfaces the reason and leaves no pane-local pending bit", async () => {
+  const { isStopPending } = await import("./stop-pending.js");
+  const { actions, state } = harness({
+    // Lifecycle clears the map on ask failure; this mock returns false the same way.
+    stopActiveTurn: async () => false,
+    readSendError: () => "stop the run instead",
+  });
+
+  await actions.stop("orch-1");
+
+  assert.equal(
+    isStopPending(state.stopPendingByThread, "orch-1"),
+    false,
+    "chat must not invent a pending flag of its own on failure"
+  );
+  assert.equal(state.orchestratorStopPending, undefined);
+  assert.match(state.orchestratorSendError, /stop the run instead/);
+});
+
+test("a second Stop while already pending is a no-op", async () => {
+  const stopped = [];
+  const { actions, state } = harness({
+    stopActiveTurn: async (threadId) => {
+      stopped.push(threadId);
+      return true;
+    },
+  });
+  state.stopPendingByThread = { "orch-1": true };
+
+  await actions.stop("orch-1");
+
+  assert.deepEqual(stopped, [], "duplicate ask must not re-post");
 });
 
 test("Propose as task stages a card without starting it", async () => {

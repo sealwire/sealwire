@@ -72,6 +72,7 @@ test("deriveSessionRuntime returns runtime state from the session view", () => {
     sendDisabled: false,
     sendPending: false,
     session,
+    stopPending: false,
     stopVisible: false,
   });
 });
@@ -294,4 +295,71 @@ test("deriveSessionRuntime reports no composer error by default", () => {
   });
 
   assert.equal(runtime.errorMessage, "");
+});
+
+test("deriveSessionRuntime keeps Stop pending only while the session is working", () => {
+  const sessionView = {
+    composerDisabled: false,
+    currentApprovalId: null,
+    messagePlaceholder: "Message…",
+  };
+  const working = deriveSessionRuntime({
+    stopPendingByThread: { "thread-1": true },
+    session: {
+      active_thread_id: "thread-1",
+      active_turn_id: "turn-1",
+      available_models: [],
+    },
+    sessionView,
+  });
+  assert.equal(working.stopPending, true);
+  assert.equal(working.stopVisible, true);
+
+  const idle = deriveSessionRuntime({
+    stopPendingByThread: { "thread-1": true },
+    session: {
+      active_thread_id: "thread-1",
+      active_turn_id: null,
+      available_models: [],
+    },
+    sessionView,
+  });
+  assert.equal(idle.stopPending, false, "idle ends Stopping… even if the flag was still set");
+});
+
+// The bug this pins: a global stopPending bit was reconciled against whichever
+// session was on screen. Stopping A then opening idle B cleared the bit, so
+// returning to still-working A re-armed Stop; opening working B wore A's
+// Stopping… label. Pending must be keyed by thread.
+test("deriveSessionRuntime only paints Stopping… for the thread that is pending", () => {
+  const sessionView = {
+    composerDisabled: false,
+    currentApprovalId: null,
+    messagePlaceholder: "Message…",
+  };
+  const onB = deriveSessionRuntime({
+    stopPendingByThread: { "thread-a": true },
+    session: {
+      active_thread_id: "thread-b",
+      active_turn_id: "turn-b",
+      available_models: [],
+    },
+    sessionView,
+  });
+  assert.equal(
+    onB.stopPending,
+    false,
+    "thread B must not inherit thread A's Stopping… state"
+  );
+
+  const backOnA = deriveSessionRuntime({
+    stopPendingByThread: { "thread-a": true },
+    session: {
+      active_thread_id: "thread-a",
+      active_turn_id: "turn-a",
+      available_models: [],
+    },
+    sessionView,
+  });
+  assert.equal(backOnA.stopPending, true, "returning to A still shows Stopping…");
 });

@@ -79,9 +79,19 @@ test("remote UI store tracks async pending state", () => {
 
   store.getState().setSessionStartPending(true);
   store.getState().setSendPending(true);
+  store.getState().markStopPending("thread-a");
 
   assert.equal(store.getState().sessionStartPending, true);
   assert.equal(store.getState().sendPending, true);
+  assert.equal(store.getState().stopPendingByThread["thread-a"], true);
+  store.getState().reconcileStopPendingForThread("thread-b", false);
+  assert.equal(
+    store.getState().stopPendingByThread["thread-a"],
+    true,
+    "reconciling idle B must not clear A's Stopping…"
+  );
+  store.getState().clearStopPending("thread-a");
+  assert.equal(store.getState().stopPendingByThread["thread-a"], undefined);
   store.getState().resetPairingInput();
 
   assert.equal(store.getState().pairingInputValue, "");

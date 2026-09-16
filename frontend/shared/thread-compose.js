@@ -30,20 +30,25 @@ export function composerButtonState({
   canWrite,
   viewOnly,
   submitInFlight,
+  stopPending = false,
 }) {
   // `threadWorking` (not `turnRunning`) gates Stop: a thread can be working from
   // a status update before `active_turn_id` lands, and that still warrants Stop.
   // `!activeThreadFrozen` keeps us from offering to stop a review's own turn.
+  // `stopPending` keeps Stop up after the HTTP ask returns and before the turn
+  // actually idles — otherwise the button flickers enabled and invites mashing.
+  const pending = Boolean(stopPending);
   const stopVisible = Boolean(
-    threadWorking && !activeThreadFrozen && (canWrite || viewOnly)
+    (threadWorking || pending) && !activeThreadFrozen && (canWrite || viewOnly)
   );
   return {
     // Send hides exactly when Stop shows — the two buttons never coexist.
     sendHidden: stopVisible,
     sendDisabled: Boolean(
-      !composerReady || turnRunning || activeThreadFrozen || submitInFlight
+      !composerReady || turnRunning || activeThreadFrozen || submitInFlight || pending
     ),
     stopHidden: !stopVisible,
-    stopDisabled: !stopVisible,
+    stopDisabled: !stopVisible || pending,
+    stopPending: pending && stopVisible,
   };
 }

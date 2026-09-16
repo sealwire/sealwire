@@ -7,6 +7,12 @@ import {
 import { loadDeviceLabel } from "./state.js";
 import { notificationPermission } from "../shared/thread-notify.js";
 import { pushSupported } from "./push-subscribe.js";
+import {
+  reconcileAllStopPending,
+  reconcileStopPending,
+  withoutStopPending,
+  withStopPending,
+} from "../shared/stop-pending.js";
 
 export function createDefaultSessionDraft(provider = "codex") {
   return {
@@ -62,6 +68,11 @@ export function createRemoteUiStore(initialState = {}) {
     pushPermission: notificationPermission(),
     pushSubscribed: false,
     sendPending: false,
+    // Thread ids whose Stop was asked but whose turn has not idled yet. A single
+    // boolean used to live here and was reconciled against whichever session was
+    // on screen — stopping A then opening idle B cleared it, so returning to A
+    // re-armed Stop (and opening working B wore A's Stopping… label).
+    stopPendingByThread: {},
     // The bell used to live here as a byte-identical port of local's
     // `state.threadFilter`. It now lives once, in shared/thread-list-store.js — both
     // shells already own one of those stores, so neither shell has to declare the field.
@@ -196,6 +207,40 @@ export function createRemoteUiStore(initialState = {}) {
       set({
         sendPending: Boolean(value),
       });
+    },
+    markStopPending(threadId, turnMarker = true) {
+      if (!threadId) return;
+      set((state) => ({
+        stopPendingByThread: withStopPending(
+          state.stopPendingByThread,
+          threadId,
+          turnMarker
+        ),
+      }));
+    },
+    clearStopPending(threadId) {
+      if (!threadId) return;
+      set((state) => ({
+        stopPendingByThread: withoutStopPending(state.stopPendingByThread, threadId),
+      }));
+    },
+    reconcileStopPendingForThread(threadId, workingOrInfo) {
+      if (!threadId) return;
+      set((state) => ({
+        stopPendingByThread: reconcileStopPending(
+          state.stopPendingByThread,
+          threadId,
+          workingOrInfo
+        ),
+      }));
+    },
+    reconcileAllStopPending(resolve) {
+      set((state) => ({
+        stopPendingByThread: reconcileAllStopPending(
+          state.stopPendingByThread,
+          resolve
+        ),
+      }));
     },
     // One transition: provider, model and effort are a single decision, and each
     // intermediate state is both invalid and observable by subscribers.

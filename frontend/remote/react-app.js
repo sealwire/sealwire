@@ -102,6 +102,7 @@ import {
   sendHeartbeat,
   queueRemoteThreadSearch,
   searchRemoteThreads,
+  configureRemoteStopPending,
 } from "./session-ops.js";
 import {
   buildExpandedTranscriptDetailEntries,
@@ -185,6 +186,11 @@ import { ThreadGroupList } from "../shared/thread-list-react.js";
 import { buildThreadActivityMap } from "../shared/thread-activity.js";
 import { attachProjectSummaries } from "../shared/project-overview-model.js";
 import { threadAttention } from "../shared/thread-attention.js";
+import { reconcileAllStopPending } from "../shared/stop-pending.js";
+import {
+  stopPendingResolveFromSession,
+  stopPendingOverlayFromViewedSession,
+} from "../shared/stop-pending-session.js";
 import {
   configureThreadNotifications,
   ensureNotificationPermission,
@@ -375,6 +381,13 @@ function RemoteApp() {
   const [askUserQuestionDetailErrors, setAskUserQuestionDetailErrors] = useState(() => new Map());
   const [remoteUiStore] = useState(() => createRemoteUiStore());
   const remoteUi = useRemoteUiStoreState(remoteUiStore);
+  useEffect(() => {
+    configureRemoteStopPending((threadId, value, turnMarker = true) => {
+      if (value) remoteUiStore.getState().markStopPending(threadId, turnMarker);
+      else remoteUiStore.getState().clearStopPending(threadId);
+    });
+    return () => configureRemoteStopPending(null);
+  }, [remoteUiStore]);
   // A binding, not just a sidebar prop: the create-project callback below calls it
   // directly, and as a prop-only method that was a ReferenceError.
   const updateSessionDraft = useCallback(
@@ -611,6 +624,32 @@ function RemoteApp() {
   }, [currentState.session?.available_models, currentState.session?.provider]);
 
   const session = currentState.session;
+  // Every pending thread against the REAL session — not the view-only projection
+  // in `session`. The projection rewrites active_thread_id to the viewed thread
+  // and omits the live thread from thread_activity, which would falsely idle a
+  // stopped live thread and re-arm Stop mid-cancel.
+  // Derive the reconciled map synchronously for THIS paint (useEffect would leave
+  // one frame of Stopping… on a newer turn). Persist afterward.
+  const reconcileSession = currentState.realSession || session;
+  const reconciledStopPending = reconcileSession
+    ? reconcileAllStopPending(
+        remoteUi.stopPendingByThread,
+        (threadId) =>
+          stopPendingResolveFromSession(
+            reconcileSession,
+            threadId,
+            // Viewed projection may still know a background turn is live when
+            // realSession's thread_activity has temporarily dropped it.
+            stopPendingOverlayFromViewedSession(session, threadId)
+          )
+      )
+    : remoteUi.stopPendingByThread;
+  useEffect(() => {
+    if (reconciledStopPending === remoteUiStore.getState().stopPendingByThread) {
+      return;
+    }
+    remoteUiStore.setState({ stopPendingByThread: reconciledStopPending });
+  }, [reconciledStopPending, remoteUiStore]);
   const previousSession = previousSessionRef.current;
   const hasControllerLease = !session?.view_only && (
     !session?.active_controller_device_id
@@ -631,6 +670,7 @@ function RemoteApp() {
         composerModel: remoteUi.composerModel,
         fallbackModels: remoteUi.providerModels[session.provider] || [],
         sendPending: remoteUi.sendPending,
+        stopPendingByThread: reconciledStopPending,
         session,
         sessionView,
       })
@@ -2037,6 +2077,13 @@ function RemoteApp() {
   }
 
   async function handleStopTurn() {
+    const threadId = session?.active_thread_id || null;
+    if (
+      threadId
+      && remoteUiStore.getState().stopPendingByThread?.[threadId]
+    ) {
+      return false;
+    }
     return handlers.onStopTurn();
   }
 

@@ -4,6 +4,7 @@ import {
   resolveReasoningEffortValue,
 } from "../shared/reasoning-efforts.js";
 import { sessionIsWorking } from "../shared/thread-attention.js";
+import { isStopPending } from "../shared/stop-pending.js";
 
 export function selectRemoteControlSession({ session, realSession }) {
   if (session?.view_only) {
@@ -25,6 +26,9 @@ export function deriveSessionRuntime({
   composerModel = "",
   fallbackModels = [],
   sendPending = false,
+  // Same thread-scoping as composerErrors: Stopping… belongs to the thread that
+  // was stopped, not whichever session is currently painted.
+  stopPendingByThread = null,
   session,
   sessionView,
 }) {
@@ -44,6 +48,11 @@ export function deriveSessionRuntime({
     currentModelValue,
     composerEffort || session?.reasoning_effort || ""
   );
+  const working = sessionIsWorking(session);
+  const threadId = session?.active_thread_id || null;
+  // Pending only paints while THIS thread's turn is still up — once idle, Send
+  // returns. Another thread's pending flag must not leak onto this composer.
+  const stopping = Boolean(isStopPending(stopPendingByThread, threadId) && working);
   return {
     composerDisabled: sessionView.composerDisabled,
     currentDraft: composerDraft,
@@ -58,11 +67,12 @@ export function deriveSessionRuntime({
     ),
     messagePlaceholder: sessionView.messagePlaceholder,
     models,
-    sendDisabled: Boolean(session?.active_turn_id),
+    sendDisabled: Boolean(session?.active_turn_id || stopping),
     sendPending,
     session,
+    stopPending: stopping,
     stopVisible: Boolean(
-      sessionIsWorking(session)
+      (working || stopping)
       && (!sessionView.composerDisabled || session?.view_only)
     ),
   };

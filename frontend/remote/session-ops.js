@@ -2087,6 +2087,19 @@ export function setComposerError(threadId, message) {
   });
 }
 
+/** @type {null | ((threadId: string, value: boolean, turnMarker?: true | string) => void)} */
+let remoteStopPendingWriter = null;
+
+/** Shell installs this so Stop can flip the composer's Stopping… state. */
+export function configureRemoteStopPending(writer) {
+  remoteStopPendingWriter = typeof writer === "function" ? writer : null;
+}
+
+function markRemoteStopPending(threadId, value, turnMarker = true) {
+  if (!threadId) return;
+  remoteStopPendingWriter?.(threadId, Boolean(value), turnMarker);
+}
+
 export async function stopActiveTurn() {
   // Name the active thread's own provider — never a hardcoded "Codex".
   const agentName = providerLabel(state.session?.provider) || "agent";
@@ -2101,6 +2114,7 @@ export async function stopActiveTurn() {
   }
 
   setComposerError(threadId, "");
+  markRemoteStopPending(threadId, true, state.session.active_turn_id);
   try {
     await dispatchOrRecover("stop_turn", {
       input: {
@@ -2108,10 +2122,13 @@ export async function stopActiveTurn() {
       },
     });
     renderLog(`Remote stop request sent to ${agentName}.`);
+    // Keep pending until a later snapshot shows THIS thread idle (or a newer
+    // turn replaces the one we stopped).
     return true;
   } catch (error) {
     renderLog(`Remote stop failed: ${error.message}`);
     setComposerError(threadId, error.message);
+    markRemoteStopPending(threadId, false);
     return false;
   }
 }

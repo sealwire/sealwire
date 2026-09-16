@@ -182,6 +182,11 @@ import {
 import { selectControlBannerModel } from "./control-banner.js";
 import { readWorkspaceRepair } from "./workspace-repair.js";
 import { canComposeThread, composerButtonState } from "../shared/thread-compose.js";
+import {
+  isStopPending,
+  reconcileAllStopPending,
+} from "../shared/stop-pending.js";
+import { stopPendingResolveFromSession, stopPendingOverlayFromPin } from "../shared/stop-pending-session.js";
 import { saveLastEffort } from "../shared/last-used-settings.js";
 import {
   AuditList,
@@ -442,6 +447,19 @@ export function createSessionRenderer({
     // back in when that's the case.
     session = adoptSettledTranscript(state, session, cancelPendingTranscriptFlush());
     state.session = session;
+    // Before any pane paints (Tasks included): drop idle/stale Stopping… flags
+    // against the REAL session. renderTaskTeam used to run earlier in this
+    // function than reconcile, so an idle Orchestrator snapshot kept showing
+    // Stopping… from the stale map with no second paint in the same turn.
+    state.stopPendingByThread = reconcileAllStopPending(
+      state.stopPendingByThread,
+      (threadId) =>
+        stopPendingResolveFromSession(
+          state.session,
+          threadId,
+          stopPendingOverlayFromPin(state.viewOnlyThread, threadId)
+        )
+    );
     // Here, BEFORE the view-only projection below narrows the snapshot to the
     // thread on screen: a draft belongs to its question, and pruning against the
     // projection throws away a half-typed answer for merely looking elsewhere.
@@ -758,6 +776,8 @@ export function createSessionRenderer({
     // Frozen while a submit is in flight (app.js runComposerSubmit) so a
     // draft edit or second submit can't change or duplicate the in-flight send.
     const submitInFlight = Boolean(state.composerSubmitInFlight);
+    const viewedForComposer = state.viewThreadId || session?.active_thread_id || null;
+    const stopPending = isStopPending(state.stopPendingByThread, viewedForComposer);
     const composerReady = hasActiveSession && canCompose && viewingConversation;
     // Send and Stop are mutually exclusive: a running turn shows Stop, never Send
     // (no pending-message queue yet). The view-only observer of a background turn
@@ -770,15 +790,23 @@ export function createSessionRenderer({
       canWrite,
       viewOnly: session.view_only,
       submitInFlight,
+      stopPending,
     });
     // A failure belongs to the thread it happened to. Re-deciding it here means
     // navigation alone hides it — no clearing hook to forget on a new route.
-    syncComposerError(composerError, state.viewThreadId || session?.active_thread_id || null);
+    syncComposerError(composerError, viewedForComposer);
     sendButton.disabled = buttons.sendDisabled;
     sendButton.hidden = buttons.sendHidden;
     if (stopButton) {
       stopButton.hidden = buttons.stopHidden;
       stopButton.disabled = buttons.stopDisabled;
+      stopButton.textContent = buttons.stopPending ? "Stopping..." : "Stop";
+      stopButton.classList.toggle("is-stopping", buttons.stopPending);
+      if (buttons.stopPending) {
+        stopButton.setAttribute("aria-busy", "true");
+      } else {
+        stopButton.removeAttribute("aria-busy");
+      }
     }
     messageInput.disabled =
       !hasActiveSession ||
@@ -2135,6 +2163,11 @@ export function createSessionRenderer({
       ) || null;
     const orchIsActive = Boolean(orchId && session?.active_thread_id === orchId);
     const orchActivity = threadActivityFor(session, orchId);
+    // Shared map only — a separate orchestratorStopPending boolean used to
+    // survive off-screen idle→new-turn because only this pane cleared it.
+    const orchStopPending = Boolean(
+      orchId && isStopPending(state.stopPendingByThread, orchId)
+    );
     // Streamed deltas leave their entry `status: "running"`, and the settling
     // patch is only routed to the ACTIVE thread. The conversation's pin survives
     // that because something refreshes it periodically; the Orchestrator has no
@@ -2240,6 +2273,7 @@ export function createSessionRenderer({
               composerDisabled: !orchId || Boolean(state.orchestratorLoading),
               composerBusy: Boolean(state.orchestratorSending || state.orchestratorProposalBusy),
               composerError: state.orchestratorSendError || null,
+              stopPending: orchStopPending,
               proposals: session?.orchestrator_proposals || [],
               onSend: orchId ? (text) => sendOrchestratorMessage(text, orchId) : null,
               onPropose: (text) => proposeFromOrchestratorDraft(text),

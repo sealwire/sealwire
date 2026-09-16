@@ -231,11 +231,12 @@ export function ConversationComposer({
         ? h(
             "button",
             {
-              className: "stop-button",
+              className: stopPending ? "stop-button is-stopping" : "stop-button",
               disabled: stopDisabled,
               hidden: !stopVisible,
               id: stopButtonId || undefined,
-              onClick: onStop ? () => onStop() : undefined,
+              "aria-busy": stopPending ? "true" : undefined,
+              onClick: onStop && !stopPending ? () => onStop() : undefined,
               type: "button",
             },
             stopPending ? "Stopping..." : stopLabel

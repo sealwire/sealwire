@@ -264,6 +264,7 @@ export function OrchestratorPane({
   composerDisabled = false,
   composerBusy = false,
   composerError = null,
+  stopPending = false,
   proposals = [],
   onSend = null,
   onPropose = null,
@@ -427,6 +428,7 @@ export function OrchestratorPane({
       disabled: composerDisabled || !onSend || !canWrite,
       busy: composerBusy,
       threadWorking: Boolean(activity?.phase),
+      stopPending,
       onStop,
       enterSubmits,
       error: composerError,
@@ -703,6 +705,7 @@ function OrchestratorComposer({
   // send in flight from this composer")? Only the second was ever tracked, so
   // Send stayed live mid-turn and there was no way to interrupt.
   threadWorking = false,
+  stopPending = false,
   onStop = null,
   enterSubmits = undefined,
   onSend = null,
@@ -717,8 +720,8 @@ function OrchestratorComposer({
   // A screenshot with no words is a message: "look at this". Requiring text
   // alongside it would make the common case the awkward one.
   const canSubmit =
-    Boolean(onSend) && !disabled && !busy && (trimmed.length > 0 || pending.length > 0);
-  const canPropose = Boolean(onPropose) && !disabled && !busy && trimmed.length > 0;
+    Boolean(onSend) && !disabled && !busy && !stopPending && (trimmed.length > 0 || pending.length > 0);
+  const canPropose = Boolean(onPropose) && !disabled && !busy && !stopPending && trimmed.length > 0;
   // The shared rule: "Send hides exactly when Stop shows -- the two buttons
   // never coexist." Re-deriving that here is how the two composers would drift.
   const buttons = composerButtonState({
@@ -729,6 +732,7 @@ function OrchestratorComposer({
     canWrite: true,
     viewOnly: false,
     submitInFlight: busy,
+    stopPending,
   });
 
   function submit(event) {
@@ -814,7 +818,7 @@ function OrchestratorComposer({
         sendDisabled: buttons.sendDisabled || !canSubmit,
         sendPending: busy,
         stopVisible: !buttons.stopHidden,
-        stopPending: false,
+        stopPending: buttons.stopPending,
         stopButtonId: "task-orch-stop",
         onStop: onStop || null,
         // Pinned, exactly as local/react-shell.js pins it for the conversation.
@@ -1633,6 +1637,7 @@ export function TaskTeamScreen({
       composerDisabled: Boolean(orchestrator?.composerDisabled),
       composerBusy: Boolean(orchestrator?.composerBusy),
       composerError: orchestrator?.composerError || null,
+      stopPending: Boolean(orchestrator?.stopPending),
       proposals: orchestrator?.proposals || [],
       onSend: orchestrator?.onSend || null,
       onPropose: orchestrator?.onPropose || null,

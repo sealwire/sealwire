@@ -3,6 +3,7 @@
  * `send` is chat only; `propose` stages a card — neither starts work.
  */
 import { splitOrchestratorProposalDraft } from "./orchestrator-proposal-draft.js";
+import { isStopPending } from "./stop-pending.js";
 
 export function createOrchestratorChatActions({
   state,
@@ -107,6 +108,11 @@ export function createOrchestratorChatActions({
     if (!threadId || typeof stopActiveTurn !== "function") {
       return;
     }
+    // Same map the conversation Stop uses — a separate boolean used to survive
+    // an off-screen idle→new-turn cycle because only renderTaskTeam cleared it.
+    if (isStopPending(state.stopPendingByThread, threadId)) {
+      return;
+    }
     state.orchestratorSendError = null;
     if (state.session) {
       renderTaskTeam(state.session);
@@ -122,6 +128,8 @@ export function createOrchestratorChatActions({
         }
         state.orchestratorSendError = reason || "Stop failed";
       }
+      // On success the shared map stays pending until reconcile sees the orch
+      // thread idle (even if Tasks is not open when that happens).
     } catch (error) {
       state.orchestratorSendError = error?.message || String(error);
     } finally {

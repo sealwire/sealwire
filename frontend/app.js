@@ -422,6 +422,10 @@ const state = {
   // Freezes the composer and rejects re-entry so a draft edit / navigation /
   // double-submit during the async request can't change or duplicate the send.
   composerSubmitInFlight: false,
+  // Thread ids whose Stop has been asked but whose turn has not idled yet.
+  // Cleared on idle (or on a refused ask). Keeps the button saying Stopping…
+  // and refusing another click across the gap between HTTP return and settle.
+  stopPendingByThread: {},
   composerImageAttachments: [],
   nextComposerImageAttachmentId: 1,
   newSessionSubmitInFlight: false,

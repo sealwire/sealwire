@@ -135,3 +135,22 @@ test("a thread frozen under review hides Stop and keeps Send visible-but-disable
   assert.equal(state.sendHidden, false, "Send stays visible (disabled) when Stop is hidden");
   assert.equal(state.sendDisabled, true);
 });
+
+// Stop's HTTP call returns before the turn idles. Until then the button must
+// stay up, say Stopping…, and refuse another click — otherwise users mash it.
+test("a pending stop keeps Stop visible and disabled while the turn is still working", () => {
+  const state = composerButtonState({
+    composerReady: true,
+    turnRunning: true,
+    threadWorking: true,
+    activeThreadFrozen: false,
+    canWrite: true,
+    viewOnly: false,
+    submitInFlight: false,
+    stopPending: true,
+  });
+  assert.equal(state.stopHidden, false);
+  assert.equal(state.stopDisabled, true, "cannot press Stop again while stopping");
+  assert.equal(state.stopPending, true);
+  assert.equal(state.sendHidden, true);
+});

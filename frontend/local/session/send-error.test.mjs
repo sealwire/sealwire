@@ -445,6 +445,7 @@ test("a rejected targeted stop files the reason on that thread, not the viewed o
   });
   state.session.active_thread_id = "thread-1";
   state.session.active_turn_id = "turn-1";
+  state.stopPendingByThread = {};
 
   const ok = await controller.stopActiveTurn("orch-1");
 
@@ -460,4 +461,39 @@ test("a rejected targeted stop files the reason on that thread, not the viewed o
     "the conversation composer must not show the Orchestrator's refusal"
   );
   assert.equal(error.hidden, true);
+  assert.equal(
+    state.stopPendingByThread["orch-1"],
+    undefined,
+    "a refused ask must re-arm Stop"
+  );
+});
+
+test("a successful stop stays pending until the thread idles", async () => {
+  const { isStopPending } = await import("../../shared/stop-pending.js");
+  const { controller, state } = buildController({
+    respond: async () => ({
+      ok: true,
+      status: 200,
+      // Keep the thread looking mid-turn: that is what the real stop response
+      // often looks like before the agent acknowledges cancel.
+      json: async () => ({
+        ok: true,
+        data: {
+          active_thread_id: "thread-1",
+          active_turn_id: "turn-1",
+          transcript: [],
+        },
+      }),
+    }),
+  });
+  state.session.active_thread_id = "thread-1";
+  state.session.active_turn_id = "turn-1";
+  state.stopPendingByThread = {};
+
+  assert.equal(await controller.stopActiveTurn(), true);
+  assert.equal(
+    isStopPending(state.stopPendingByThread, "thread-1"),
+    true,
+    "HTTP success is not turn-idle — keep Stopping… until working clears"
+  );
 });

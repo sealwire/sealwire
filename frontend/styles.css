@@ -964,6 +964,14 @@ button:disabled {
   border-color: color-mix(in srgb, var(--err-fg) 48%, transparent);
 }
 
+/* Stop asked; waiting for the turn to idle. Disabled + busy so a second click
+   cannot land, and the label/opacity mark that something is happening. */
+.stop-button.is-stopping,
+.stop-button.is-stopping:disabled {
+  opacity: 0.72;
+  cursor: wait;
+}
+
 /* ICON wrappers used inside buttons */
 .send-button-icon,
 .inline-icon {

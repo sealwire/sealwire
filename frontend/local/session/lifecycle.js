@@ -30,6 +30,12 @@ import { loadLastEffort, saveLastApprovalPolicy } from "../../shared/last-used-s
 import { detectDeferredThreadPromotion } from "../../shared/thread-promotion.js";
 import { resolveOutgoingEffort } from "../../shared/reasoning-efforts.js";
 import { providerLabel } from "../../shared/provider-labels.js";
+import {
+  isStopPending,
+  withoutStopPending,
+  withStopPending,
+} from "../../shared/stop-pending.js";
+import { stopPendingTurnMarker } from "../../shared/stop-pending-session.js";
 import { forkFieldsToPayload, relayResolvesForkPoints } from "../../shared/fork-fields.js";
 import { buildNavigationThreadGroups } from "../../shared/thread-groups.js";
 import {
@@ -820,10 +826,31 @@ export function createLifecycleController(ctx) {
       return false;
     }
 
+    // A second click while we are already waiting for this thread to idle must
+    // not re-post; the button is disabled in the UI, and this is the same guard.
+    if (targetThreadId && isStopPending(state.stopPendingByThread, targetThreadId)) {
+      return false;
+    }
+
     // A fresh Stop supersedes the last failure on THIS thread only.
     if (targetThreadId) {
       clearComposerError(targetThreadId);
       syncComposerError(composerError, viewedThreadId());
+      state.stopPendingByThread = withStopPending(
+        state.stopPendingByThread,
+        targetThreadId,
+        stopPendingTurnMarker(state.session, targetThreadId, {
+          overlayTurnId:
+            state.viewOnlyThread?.threadId === targetThreadId
+              ? state.viewOnlyThread.activeTurnId || null
+              : null,
+        })
+      );
+      // Paint Stopping… before the await — the HTTP round-trip is not the wait;
+      // the turn idling afterwards is, and the user needs feedback at the press.
+      if (state.session) {
+        renderSession(state.session);
+      }
     }
     logLine(`Requesting ${agentName} stop`);
 
@@ -846,6 +873,8 @@ export function createLifecycleController(ctx) {
 
       applySessionSnapshot(payload.data);
       logLine(`Stop request sent to ${agentName}`);
+      // Keep pending until a later snapshot shows the thread idle — clearing
+      // here would re-enable Stop while the agent is still winding down.
       return true;
     } catch (error) {
       logLine(`Stop failed: ${error.message}`);
@@ -854,8 +883,15 @@ export function createLifecycleController(ctx) {
       // Filed against the thread that was stopped — the Tasks Orchestrator pane
       // reads it back via composerErrorFor (it has no #composer-error node).
       if (targetThreadId) {
+        state.stopPendingByThread = withoutStopPending(
+          state.stopPendingByThread,
+          targetThreadId
+        );
         recordComposerError({ threadId: targetThreadId, message: error.message });
         syncComposerError(composerError, viewedThreadId());
+        if (state.session) {
+          renderSession(state.session);
+        }
       }
       return false;
     }
