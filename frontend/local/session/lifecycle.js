@@ -843,6 +843,9 @@ export function createLifecycleController(ctx) {
       if (targetThreadId) {
         recordComposerHeld({ threadId: targetThreadId, message });
         syncComposerHeld(composerHeld, viewedThreadId());
+        // This press is now the current word; the last attempt's failure is not.
+        clearComposerError(targetThreadId);
+        syncComposerError(composerError, viewedThreadId());
       }
       return false;
     }

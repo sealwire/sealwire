@@ -2517,6 +2517,8 @@ function RemoteApp() {
           composerCommandsModel: createComposerCommandsModel({
             hold: (message) =>
               handlersRef.current.onComposerHeld?.(viewedThreadIdRef.current, message),
+            clearError: () =>
+              handlersRef.current.onComposerError?.(viewedThreadIdRef.current, ""),
             getCatalog: () => ({
               providers: remoteUi.providers || [],
               models: reviewLaunchModel?.models || [],

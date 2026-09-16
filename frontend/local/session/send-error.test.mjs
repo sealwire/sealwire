@@ -414,8 +414,39 @@ test("a rejected stop shows the relay's reason in the composer, not just the log
   assert.match(logged.join("\n"), /Stop failed/);
 });
 
+// ...and it retires the last attempt's red line. The test below resets the error store
+// first, so it cannot see this: seed a stale one and watch it go.
+test("Stop the surface stopped itself retires the previous red line", async () => {
+  resetComposerErrorsForTest();
+  const { recordComposerError, composerErrorFor } = await import("../composer-error.js");
+  recordComposerError({ threadId: "thread-1", message: "that thread is busy with a turn" });
+  recordComposerError({ threadId: "thread-2", message: "keep me" });
+
+  const { controller, state } = buildController({
+    respond: async () => {
+      throw new Error("stop must not be posted when nothing is running");
+    },
+  });
+  state.session.active_thread_id = "thread-1";
+  state.session.active_turn_id = null;
+
+  await controller.stopActiveTurn();
+
+  assert.equal(
+    composerErrorFor("thread-1"),
+    "",
+    "two diagnoses at once, and the older one is no longer the current word"
+  );
+  assert.equal(composerErrorFor("thread-2"), "keep me", "only this thread");
+});
+
 test("pressing Stop with nothing running holds the reason, it did not break", async () => {
   resetComposerErrorsForTest();
+  const { resetComposerHeldForTest, composerHeldFor } = await import("../composer-held.js");
+  // These DOM stubs are shared across tests, so an earlier one's message left on the node
+  // would answer for this one. Start from nothing and check the STORE, the same reason
+  // this test already reads the error through its store rather than off the node.
+  resetComposerHeldForTest();
   const { controller, state, held } = buildController({
     respond: async () => {
       throw new Error("stop must not be posted when nothing is running");
@@ -429,10 +460,12 @@ test("pressing Stop with nothing running holds the reason, it did not break", as
   // Nothing was sent — the surface saw no turn id and stopped the press itself. Red
   // means the relay refused or the request broke; neither happened here.
   assert.match(
-    held.heldText.textContent,
+    composerHeldFor("thread-1"),
     /no running .+ turn to stop/i,
     "Stop with no turn belongs in NOT SENT, beside the draft it did not send"
   );
+  // The node too — the store being right is no use if nothing renders it.
+  assert.match(held.heldText.textContent, /no running .+ turn to stop/i);
   assert.equal(held.hidden, false);
   // The store, not the node: these stubs are shared across tests, so a node left
   // visible by an earlier one would pass this for the wrong reason.

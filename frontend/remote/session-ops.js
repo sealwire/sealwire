@@ -2120,7 +2120,11 @@ export async function stopActiveTurn() {
     // without a line on screen Stop is a silent no-op.
     const message = `There is no running ${agentName} turn to stop.`;
     renderLog(message);
-    if (threadId) setComposerHeld(threadId, message);
+    if (threadId) {
+      setComposerHeld(threadId, message);
+      // This press is now the current word; the last attempt's failure is not.
+      setComposerError(threadId, "");
+    }
     return false;
   }
 

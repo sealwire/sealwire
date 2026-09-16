@@ -61,7 +61,7 @@ test("a relay refusal stays on the error line, not in the held slot", async () =
 });
 
 test("a fresh attempt clears the last refusal on that thread", async () => {
-  const { author, shown } = harness();
+  const { author, shown, held } = harness();
   await author("thread-1", "x".repeat(MAX_GOAL_OBJECTIVE_CHARS + 1));
   await author("thread-1", "ship the phone menu");
 
@@ -69,6 +69,13 @@ test("a fresh attempt clears the last refusal on that thread", async () => {
     shown[1],
     ["thread-1", ""],
     "the red line must not outlive the draft that caused it"
+  );
+  // The refusal went to the HELD region, so checking only the red line above proves
+  // nothing about the line actually on screen — it would stay through a fixed draft.
+  assert.deepEqual(
+    held.at(-1),
+    ["thread-1", ""],
+    "and neither must the NOT SENT line it really wrote"
   );
 });
 

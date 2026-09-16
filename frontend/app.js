@@ -198,6 +198,7 @@ import { createReviewAuthor } from "./local/review-authoring.js";
 import { createGoalAuthor } from "./local/goal-authoring.js";
 import { recordComposerError, syncComposerError } from "./local/composer-error.js";
 import { recordComposerHeld, syncComposerHeld } from "./local/composer-held.js";
+import { createHeldWriter } from "./shared/composer-held-writer.js";
 import { composerHeld } from "./local/dom.js";
 import {
   beginLocalGoalAction,
@@ -2900,7 +2901,10 @@ const composerCommands = createComposerCommandController({
   // Everything the commands stop themselves — a delegate with nothing to say, a review
   // on a thread that cannot take one. It never reached the relay, so it is "not sent"
   // rather than a failure, and the log alone is where this used to disappear.
-  hold: (message) => showComposerHeld(viewedThreadId(), message),
+  hold: createHeldWriter(
+    (message) => showComposerHeld(viewedThreadId(), message),
+    () => showComposerError(viewedThreadId(), "")
+  ),
   log: logLine,
 });
 

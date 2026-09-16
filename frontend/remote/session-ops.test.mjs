@@ -2939,6 +2939,48 @@ test("a refused delegate says why on the composer, not only in the log", async (
 // The surface can legitimately show Stop from the status signal before the turn id has
 // arrived. Pressing it then sends nothing — the composer stopped it — so it is "not
 // sent", not a failure. Red here would blame the relay for a decision it never heard.
+// ...and it must RETIRE whatever the last attempt left on the red line. The test above
+// starts from an empty error map, so it proves nothing about this: seed a stale one.
+test("Stop the surface stopped itself retires the previous red line", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { stopActiveTurn } = await import("./session-ops.js");
+  const { threadError } = await import("../shared/composer-errors.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  state.composerHeld = {};
+  state.composerErrors = { "thread-1": "that thread is busy with a turn", "thread-2": "keep me" };
+  state.session = { active_thread_id: "thread-1", active_turn_id: null, available_models: [] };
+  state.socket = { readyState: 1, send() {} };
+
+  assert.equal(await stopActiveTurn(), false);
+  assert.match(threadError(state.composerHeld, "thread-1"), /no running .+ turn to stop/i);
+  assert.equal(
+    threadError(state.composerErrors, "thread-1"),
+    "",
+    "two diagnoses at once, and the older one is no longer the current word"
+  );
+  assert.equal(threadError(state.composerErrors, "thread-2"), "keep me", "only this thread");
+});
+
 test("Stop with no turn id is held, not reported as a failure", async () => {
   activeBrowser || installBrowserStubs();
 

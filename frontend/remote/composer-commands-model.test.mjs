@@ -49,3 +49,34 @@ test("nothing is logged for a helper that already spoke for itself", () => {
 
   assert.deepEqual(lines, ["Open a session first."]);
 });
+
+// `/goal` is protected because its action clears the error line explicitly; `/delegate`
+// and `/review` refuse LOCALLY and never reach an action, so a red line from an earlier
+// attempt used to stay on screen underneath the new NOT SENT one — two diagnoses at once,
+// the older one no longer true.
+test("a refusal the composer wrote itself retires the last attempt's error line", () => {
+  const held = [];
+  const cleared = [];
+  const command = model({
+    hold: (message) => held.push(message),
+    clearError: () => cleared.push(true),
+  });
+
+  command.hold("Say what you want done — an agent starting from nothing cannot guess.");
+
+  assert.equal(held.length, 1, "the refusal still reaches NOT SENT");
+  assert.equal(cleared.length, 1, "and the stale red line goes with it");
+});
+
+// `hold("")` is not a generic dismiss. The controller only reaches it AFTER a command pill
+// and runner are found, so it means exactly "a new staged attempt has begun" — and a new
+// attempt supersedes the previous result, the same rule an ordinary send already follows.
+// If this one fails it writes its own red line.
+test("a fresh command attempt retires the previous result too", () => {
+  const cleared = [];
+  const command = model({ hold: () => {}, clearError: () => cleared.push(true) });
+
+  command.hold("");
+
+  assert.equal(cleared.length, 1, "the last attempt's red line is not this attempt's word");
+});
