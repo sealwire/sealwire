@@ -202,6 +202,17 @@ impl RelayState {
         transcript.get_row(row_id).map(TranscriptRecord::to_view)
     }
 
+    /// The same read for a thread that is not the one on screen.
+    pub(crate) fn relay_named_entry_for_thread(
+        &self,
+        thread_id: &str,
+        item_id: &str,
+    ) -> Option<TranscriptEntryView> {
+        let transcript = &self.runtime_for_thread(thread_id)?.transcript;
+        let row_id = transcript.resolve_relay(item_id)?;
+        transcript.get_row(row_id).map(TranscriptRecord::to_view)
+    }
+
     /// Active-thread convenience for a row the RELAY synthesized.
     pub(crate) fn upsert_relay_named_item(
         &mut self,
@@ -1292,17 +1303,40 @@ impl RelayState {
         self.collect_turn_file_changes(turn_id, true)
     }
 
+    /// The same two summaries for a thread that is NOT the one on screen.
+    ///
+    /// A background turn's edits are on its own runtime, which the selected-runtime
+    /// collector below cannot see — it would sum the viewed thread's changes instead.
+    pub fn thread_turn_file_change_summary(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        settled: bool,
+    ) -> Vec<crate::protocol::FileChangeDiffView> {
+        let Some(runtime) = self.runtime_for_thread(thread_id) else {
+            return Vec::new();
+        };
+        Self::collect_turn_file_changes_in(runtime.transcript.rows(), turn_id, settled)
+    }
+
     fn collect_turn_file_changes(
         &self,
         turn_id: &str,
         settled: bool,
     ) -> Vec<crate::protocol::FileChangeDiffView> {
-        let mut file_changes = Vec::new();
-
         let entries = self
             .selected_runtime()
             .map(|runtime| runtime.transcript.rows())
             .unwrap_or(self.transcript.rows());
+        Self::collect_turn_file_changes_in(entries, turn_id, settled)
+    }
+
+    fn collect_turn_file_changes_in(
+        entries: &[TranscriptRecord],
+        turn_id: &str,
+        settled: bool,
+    ) -> Vec<crate::protocol::FileChangeDiffView> {
+        let mut file_changes = Vec::new();
 
         for entry in entries {
             if entry.turn_id.as_deref() != Some(turn_id) {
