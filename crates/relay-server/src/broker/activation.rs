@@ -200,27 +200,12 @@ fn scrub_env_key(key: &str) {
     zeroize_os_string(value);
 }
 
-/// Best-effort wipe of an `OsString` without building a second UTF-8 `String`.
+/// Rust currently returns the owned backing buffer here on Unix and Windows,
+/// avoiding a re-encoded copy that would leave the original secret unwiped.
 fn zeroize_os_string(value: std::ffi::OsString) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStringExt;
-        let mut bytes = value.into_vec();
-        bytes.zeroize();
-        drop(bytes);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStringExt;
-        let mut wide: Vec<u16> = value.encode_wide().collect();
-        drop(value);
-        wide.zeroize();
-        drop(wide);
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        drop(value);
-    }
+    let mut bytes = value.into_encoded_bytes();
+    bytes.zeroize();
+    drop(bytes);
 }
 
 fn take_env_path_string(key: &str) -> Option<String> {

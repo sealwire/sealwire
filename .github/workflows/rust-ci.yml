@@ -189,6 +189,31 @@ jobs:
           RELAY_PRIVATE_PATH: ${{ github.workspace }}/.private
         run: scripts/with-private.sh cargo test --workspace --features relay-server/private
 
+  # Until this job existed, `cfg(windows)` code was compiled in exactly one
+  # place: the release workflow. A Windows-only type error therefore stayed
+  # invisible through every green push and surfaced as a failed release build.
+  # Check only — the tests need a real provider environment, and compiling is
+  # what was missing.
+  windows:
+    name: windows-check
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo check
+        run: cargo check --workspace
+
   review-recap-modes-e2e:
     name: relay-http-e2e
     runs-on: ubuntu-latest
