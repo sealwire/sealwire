@@ -27,6 +27,49 @@ pub(crate) struct TurnFailure {
     pub(crate) reason: String,
 }
 
+/// That a turn is OVER, and how it ended.
+///
+/// Same discipline as [`TurnFailure`] and [`TurnSpend`] — turn-keyed, so a reader
+/// matches the id it dispatched — with one addition that is the whole point: a
+/// bounded history rather than a single slot, so a turn that ended before anyone
+/// looked is still observable, and a following turn cannot overwrite the answer
+/// out from under a waiter.
+///
+/// Published as the LAST write once a turn's rows are in. That ordering is the
+/// contract behind `Completed`: seeing it means the transcript is already complete,
+/// which is what lets a waiter read once and refuse rather than sample and hope.
+/// Nothing about the live active-turn marker says that — every bridge clears it
+/// before its final rows. The stop paths publish `Stopped` instead, which claims
+/// less (see [`TurnOutcome`]) precisely because they cannot claim this.
+#[derive(Debug, Clone)]
+pub(crate) struct FinishedTurn {
+    pub(crate) turn_id: String,
+    pub(crate) outcome: TurnOutcome,
+}
+
+/// How a turn ended, and how much that ending promises.
+///
+/// `Completed` is the strong one: the turn is done writing, so a caller may read its
+/// rows once and act on them. `Stopped` and `Failed` promise only that waiting is
+/// pointless — a provider that never answered a stop, or one whose process died, may
+/// still have a row in flight — and a caller that wants text must refuse them,
+/// because half an instruction is not a shorter instruction.
+///
+/// One known exception to `Completed`, scoped and harmless to the above: Codex may
+/// echo the turn's USER row back late, after settlement, which
+/// `reconcile_codex_user_reservation` accepts on purpose. It rewrites no agent text,
+/// so a reader of what the turn SAID is unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnOutcome {
+    Completed,
+    Failed,
+    Stopped,
+}
+
+/// How many finished turns a thread remembers. Generous because the record is tiny
+/// and forgetting one reads as "that turn never ended".
+const FINISHED_TURNS_KEPT: usize = 32;
+
 /// What a provider said one finished turn cost.
 ///
 /// Same shape and same discipline as [`TurnFailure`]: written by the single
@@ -177,6 +220,8 @@ pub(crate) struct ThreadRuntime {
     /// Written by `RelayState::record_token_usage` for the turn it is billing;
     /// never cleared — see [`TurnSpend`] on matching `turn_id`.
     pub(crate) last_turn_spend: Option<TurnSpend>,
+    /// Turns this thread has finished, oldest first — see [`FinishedTurn`].
+    pub(crate) finished_turns: std::collections::VecDeque<FinishedTurn>,
     /// Transient Codex send-boundary state. Never persisted.
     pub(crate) codex_user_reservation_seq: u64,
     pub(crate) codex_start_reservation: Option<CodexStartReservation>,
@@ -243,6 +288,7 @@ impl ThreadRuntime {
             workspace_missing: None,
             last_turn_failure: None,
             last_turn_spend: None,
+            finished_turns: std::collections::VecDeque::new(),
             codex_user_reservation_seq: 0,
             codex_start_reservation: None,
         }
@@ -287,6 +333,7 @@ impl ThreadRuntime {
             workspace_missing: None,
             last_turn_failure: None,
             last_turn_spend: None,
+            finished_turns: std::collections::VecDeque::new(),
             codex_user_reservation_seq: 0,
             codex_start_reservation: None,
         }
@@ -386,6 +433,7 @@ impl ThreadRuntime {
             workspace_missing: None,
             last_turn_failure: None,
             last_turn_spend: None,
+            finished_turns: std::collections::VecDeque::new(),
             codex_user_reservation_seq: 0,
             codex_start_reservation: None,
         }
@@ -440,6 +488,29 @@ impl ThreadRuntime {
 
     pub(crate) fn note_turn_event(&mut self) {
         self.turn_revision = self.turn_revision.wrapping_add(1);
+    }
+
+    /// Note that `turn_id` is over. The FIRST terminal wins: a turn ends once, and
+    /// a duplicate or replayed terminal moving it afterwards would change an answer
+    /// a waiter has already been given.
+    pub(crate) fn record_finished_turn(&mut self, turn_id: &str, outcome: TurnOutcome) {
+        if turn_id.is_empty() || self.finished_turn(turn_id).is_some() {
+            return;
+        }
+        if self.finished_turns.len() >= FINISHED_TURNS_KEPT {
+            self.finished_turns.pop_front();
+        }
+        self.finished_turns.push_back(FinishedTurn {
+            turn_id: turn_id.to_string(),
+            outcome,
+        });
+    }
+
+    pub(crate) fn finished_turn(&self, turn_id: &str) -> Option<TurnOutcome> {
+        self.finished_turns
+            .iter()
+            .find(|finished| finished.turn_id == turn_id)
+            .map(|finished| finished.outcome)
     }
 
     pub(crate) fn transcript_views(&self) -> Vec<TranscriptEntryView> {

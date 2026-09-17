@@ -2951,6 +2951,23 @@ tree would review commits this thread never made"
         latest_agent_entry_with_turn(&data.to_views())
     }
 
+    /// The assistant row a NAMED turn wrote, from the live runtime only.
+    ///
+    /// No provider fallback, unlike its "latest" sibling: Claude's history mapper
+    /// stamps each message with its own uuid (`claude-worker/sdk-mapping.mjs`), so a
+    /// re-read can never match a `claude-turn-N` id and could only answer `None` at
+    /// the price of a round trip. Callers come here once a terminal says the
+    /// transcript is final, so absence is an answer.
+    pub(super) async fn assistant_entry_for_turn(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Option<(String, String, Option<String>, String)> {
+        let relay = self.relay.read().await;
+        let runtime = relay.runtime_for_thread(thread_id)?;
+        agent_entry_for_turn(&runtime.transcript_views(), turn_id)
+    }
+
     pub(super) async fn latest_assistant_entry(&self, thread_id: &str) -> Option<(String, String)> {
         {
             let relay = self.relay.read().await;
@@ -3544,6 +3561,23 @@ fn latest_agent_entry_with_turn(
         .map(|entry| (entry.turn_id.clone(), entry.status.clone()))
         .unwrap_or_default();
     Some((item_id, text, turn.0, turn.1))
+}
+
+/// The last assistant row `turn_id` wrote, as `(item_id, text, turn_id, status)`.
+///
+/// Addressed by turn, not by recency: "the latest" is a sampling race in its own
+/// right, since an unrelated turn's reply landing afterwards hides this one for
+/// good.
+fn agent_entry_for_turn(
+    views: &[TranscriptEntryView],
+    turn_id: &str,
+) -> Option<(String, String, Option<String>, String)> {
+    let matching: Vec<TranscriptEntryView> = views
+        .iter()
+        .filter(|entry| entry.turn_id.as_deref() == Some(turn_id))
+        .cloned()
+        .collect();
+    latest_agent_entry_with_turn(&matching)
 }
 
 fn latest_agent_entry(views: &[TranscriptEntryView]) -> Option<(String, String)> {

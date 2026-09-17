@@ -8218,6 +8218,113 @@ mod row_identity_tests {
         );
     }
 
+    /// The half of the contract the live-marker check cannot see: every bridge clears
+    /// the marker before its last rows, so writes on the way out went unchecked.
+    #[test]
+    #[should_panic(expected = "after that turn was published as Completed")]
+    fn the_turn_contract_guard_catches_a_row_written_after_its_terminal() {
+        let mut relay = test_state();
+        let thread = "thread-1";
+        relay.activate_thread(
+            test_thread(thread, "/tmp/project"),
+            "/tmp/project",
+            DEFAULT_MODEL,
+            DEFAULT_APPROVAL_POLICY,
+            DEFAULT_SANDBOX,
+            DEFAULT_EFFORT,
+            "device-a",
+        );
+        relay.record_turn_terminal(
+            thread,
+            "claude-turn-7",
+            crate::state::TurnOutcome::Completed,
+        );
+
+        relay.upsert_transcript_item(
+            "assistant:0b9f7c12".to_string(),
+            TranscriptEntryKind::AgentText,
+            Some("look at the retry loop".to_string()),
+            "completed".to_string(),
+            Some("claude-turn-7".to_string()),
+            None,
+        );
+    }
+
+    /// A turn that ended before anyone looked is the case a single slot cannot serve,
+    /// and the one `/delegate` kept losing to.
+    #[test]
+    fn a_finished_turn_stays_readable_behind_later_turns() {
+        let mut relay = test_state();
+        let thread = "thread-1";
+        relay.activate_thread(
+            test_thread(thread, "/tmp/project"),
+            "/tmp/project",
+            DEFAULT_MODEL,
+            DEFAULT_APPROVAL_POLICY,
+            DEFAULT_SANDBOX,
+            DEFAULT_EFFORT,
+            "device-a",
+        );
+
+        relay.record_turn_terminal(thread, "turn-brief", crate::state::TurnOutcome::Completed);
+        for index in 0..8 {
+            relay.record_turn_terminal(
+                thread,
+                &format!("turn-{index}"),
+                crate::state::TurnOutcome::Failed,
+            );
+        }
+
+        assert_eq!(
+            relay.turn_terminal(thread, "turn-brief"),
+            Some(crate::state::TurnOutcome::Completed),
+            "a later turn must not answer for an earlier one"
+        );
+        assert_eq!(
+            relay.turn_terminal(thread, "turn-nobody-ran"),
+            None,
+            "and a turn that never ended must not read as finished"
+        );
+    }
+
+    /// Promotion swaps a Claude thread's synthetic id for its real one and keeps
+    /// whichever runtime has more transcript. A finished turn recorded on the losing
+    /// side would vanish with it, and a caller waiting on that turn would wait out its
+    /// whole budget for an answer that was already given.
+    #[test]
+    fn promotion_keeps_the_turns_that_already_finished() {
+        let mut relay = test_state();
+        let pending = "claude-pending-1";
+        let real = "claude-real-1";
+
+        relay.upsert_thread(test_thread(pending, "/tmp/project"));
+        relay.ensure_runtime_for_thread(pending);
+        relay.record_turn_terminal(
+            pending,
+            "claude-turn-1",
+            crate::state::TurnOutcome::Completed,
+        );
+
+        // The event stream got there first and has more transcript, so promotion keeps
+        // the real-id runtime — the arm that used to drop the pending side wholesale.
+        relay.ensure_runtime_for_thread(real);
+        relay.bg_upsert_user_message(
+            real,
+            "user:1".to_string(),
+            "hello".to_string(),
+            "claude-turn-1".to_string(),
+            100,
+        );
+
+        relay.promote_background_thread(pending, real);
+
+        assert_eq!(
+            relay.turn_terminal(real, "claude-turn-1"),
+            Some(crate::state::TurnOutcome::Completed),
+            "a turn that finished before promotion still finished after it"
+        );
+    }
+
     /// The other half of the turn-id rule, and the reason it is not simply "existing
     /// wins": between two history copies the newer one must still be able to correct the
     /// turn. Freezing the first uuid seen would strand every history-only row on it.

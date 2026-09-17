@@ -8874,6 +8874,49 @@ tree; got {}",
     }
 
     #[tokio::test]
+    async fn a_stop_the_provider_says_is_already_gone_ends_the_turn_for_waiters_too() {
+        // Clearing the local ghost is not the whole job. A `/delegate` brief runs as an
+        // ordinary turn on the asker's thread, and it waits for that turn to END — so a
+        // stop the provider has already forgotten, which will never send another event,
+        // has to say so here or the person watches a frozen composer for five minutes.
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-a", Vec::new()).await;
+
+        let thread = codex.thread_summary("codex-gone", cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        *codex.interrupt_error.lock().await = Some("no active turn to interrupt".to_string());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(thread.id.clone());
+            relay.threads = vec![thread.clone()];
+            relay.ensure_runtime_for_thread(&thread.id).summary = Some(thread.clone());
+            relay.bg_set_active_turn(&thread.id, Some("stale-turn".to_string()), unix_now());
+            relay.set_active_controller("device-a");
+        }
+
+        app.stop_active_turn(StopTurnInput {
+            device_id: Some("device-a".to_string()),
+            thread_id: "codex-gone".to_string(),
+        })
+        .await
+        .expect("already-gone must succeed without wedging");
+
+        let relay = app.relay.read().await;
+        assert_eq!(
+            relay.turn_terminal("codex-gone", "stale-turn"),
+            Some(crate::state::TurnOutcome::Stopped),
+            "a turn the provider has forgotten is over, and nothing else will ever say so"
+        );
+    }
+
+    #[tokio::test]
     async fn stale_turn_watchdog_clears_ghost_when_provider_says_already_gone() {
         let project = TempDir::new().expect("project tempdir");
         let cwd = project.path().to_str().unwrap();
@@ -8912,6 +8955,45 @@ tree; got {}",
         assert_eq!(
             *claude.interrupt_thread_ids.lock().await,
             vec![thread.id.clone()]
+        );
+    }
+
+    // The other half of the already-gone case: here the provider says nothing at all.
+    // Marking idle locally is what keeps the session usable, and the turn's waiters
+    // need the same word — a provider that never confirmed a stop is not going to send
+    // a terminal event later.
+    #[tokio::test]
+    async fn a_stop_the_provider_never_confirms_ends_the_turn_for_waiters_too() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _codex, _claude) = build_recording_provider_app(cwd).await;
+        app.set_stop_fallback_ms(40);
+
+        {
+            let mut relay = app.relay.write().await;
+            relay.active_thread_id = Some("thread-silent".to_string());
+            relay.bg_set_active_turn("thread-silent", Some("turn-silent".to_string()), unix_now());
+            relay.bg_set_thread_status(
+                "thread-silent",
+                "active".to_string(),
+                Vec::new(),
+                unix_now(),
+            );
+        }
+
+        app.await_stop_or_mark_idle("thread-silent".to_string(), "turn-silent".to_string())
+            .await;
+
+        let relay = app.relay.read().await;
+        assert_eq!(
+            relay.turn_terminal("thread-silent", "turn-silent"),
+            Some(crate::state::TurnOutcome::Stopped),
+            "the fallback settled the turn locally, so it must settle it for waiters too"
+        );
+        assert_ne!(
+            relay.turn_terminal("thread-silent", "turn-silent"),
+            Some(crate::state::TurnOutcome::Completed),
+            "and never as Completed: the provider may still write a row for it"
         );
     }
 
@@ -28060,21 +28142,17 @@ watchdog settle this Blocked",
     }
 
     #[tokio::test]
-    async fn a_peer_inherits_what_its_asker_may_do_when_it_starts_not_when_it_was_asked() {
-        // Writing the brief can take minutes, and the settings read before it are stale by
-        // the time the peer is created. Narrowing the asker in that window has to bind the
-        // peer, or delegating is a way to keep powers that were just taken away.
+    async fn a_brief_recorded_after_the_thread_reads_idle_is_still_the_brief() {
+        // Every provider passes through "no turn is running, and this turn's reply is not
+        // written yet". A wait that ends on idleness lands in it, reads whatever the
+        // previous turn left, and blames the person for writing nothing.
         let project = TempDir::new().expect("tempdir");
         let cwd = project.path().to_string_lossy().to_string();
-        let (app, _p, _o) = build_app(&cwd).await;
+        let (app, provider, _p, _o) = build_app_with_bridge(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let asker = goal_session(&app, &cwd).await;
 
-        // Hold the asker mid-turn so the brief parks, then narrow it while it is parked.
-        {
-            let mut relay = app.relay.write().await;
-            relay.ensure_runtime_for_thread(&asker).active_turn_id = Some("brief".to_string());
-        }
+        provider.hold_terminals();
         let driving = {
             let app = app.clone();
             let asker = asker.clone();
@@ -28094,15 +28172,297 @@ watchdog settle this Blocked",
                 .await
             })
         };
-        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+
+        // Wait for the turn to PARK at its terminal, not merely to start: parked is what
+        // makes "the reply is not written yet" a fact rather than a hope.
+        provider.wait_for_held_turn().await;
+
+        // The provider goes quiet before it records anything — a stop, a status the
+        // relay settles on its own, a reconnect that clears in-flight turns.
+        {
+            let mut relay = app.relay.write().await;
+            relay.ensure_runtime_for_thread(&asker).active_turn_id = None;
+            relay.set_thread_status(&asker, "idle".to_string(), Vec::new());
+            relay.notify();
+        }
+
+        // Nothing has recorded a brief yet, so nothing can be answered with. Sampled
+        // repeatedly rather than once at the end: the old wait returned on its own
+        // 500ms tick, and a single look can miss that it already answered. A machine
+        // starved for the whole window would still let the old bug through here — the
+        // reply being provably unwritten is what keeps that from being silent.
+        for _ in 0..90 {
+            if driving.is_finished() {
+                let answer = driving.await.expect("the delegate task should not panic");
+                panic!(
+                    "the delegate answered before the brief was recorded, with {answer:?} — \
+                     an idle thread is not a finished turn"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        provider.release_terminals();
+        let peer = driving
+            .await
+            .expect("the delegate task should not panic")
+            .expect("a brief recorded after the thread read idle is still the brief");
+
+        let relay = app.relay.read().await;
+        let mine = relay.asks_of_asker(&asker);
+        assert!(
+            mine.iter()
+                .all(|ask| ask.message != "look at the retry loop"),
+            "the peer must be started on the brief, not on the person's one-liner: {:?}",
+            mine.iter().map(|ask| &ask.message).collect::<Vec<_>>(),
+        );
+        assert!(
+            mine.iter()
+                .any(|ask| ask.peer_thread_id == peer && !ask.message.trim().is_empty()),
+            "and the brief must be what the peer actually got"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delegate_whose_asker_disappears_is_refused_rather_than_left_waiting() {
+        // Archiving or deleting the asker from another device takes its runtime with it,
+        // and the finished-turn record lives there. Nothing will ever answer, so waiting
+        // out the budget only freezes the composer of whoever asked.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = goal_session(&app, &cwd).await;
+
+        provider.hold_terminals();
+        let driving = {
+            let app = app.clone();
+            let asker = asker.clone();
+            tokio::spawn(async move {
+                app.ask_agent(
+                    &asker,
+                    AskRequest {
+                        device_id: None,
+                        started_by: relay_api::delegation::StartedBy::Person,
+                        peer_thread_id: None,
+                        provider: Some("fake".to_string()),
+                        model: None,
+                        effort: None,
+                        message: "look at the retry loop".to_string(),
+                    },
+                )
+                .await
+            })
+        };
+        provider.wait_for_held_turn().await;
+
+        {
+            let mut relay = app.relay.write().await;
+            relay.runtimes.remove(&asker);
+            relay.notify();
+        }
+
+        let answer = tokio::time::timeout(std::time::Duration::from_secs(5), driving)
+            .await
+            .expect("a brief with nothing left to wait for must not hold the caller")
+            .expect("the delegate task should not panic");
+        assert!(
+            answer.is_err(),
+            "the asker is gone, so there is no brief — that is a refusal, not a wait"
+        );
+        provider.release_terminals();
+    }
+
+    #[tokio::test]
+    async fn a_reply_from_another_turn_landing_first_does_not_cost_the_delegate_its_brief() {
+        // The same rule as the unit test below, but through `brief_from_asker`. Ordering
+        // comes from the provider hold rather than a seam in the production path: the
+        // brief's own row is already in the transcript while the turn is parked (the
+        // fake streams it), so a row written now is NEWER than the brief's and older
+        // than its terminal — which is the one arrangement where reading "the latest
+        // reply" is observable end to end.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = goal_session(&app, &cwd).await;
+
+        provider.hold_terminals();
+        let driving = {
+            let app = app.clone();
+            let asker = asker.clone();
+            tokio::spawn(async move {
+                app.ask_agent(
+                    &asker,
+                    AskRequest {
+                        device_id: None,
+                        started_by: relay_api::delegation::StartedBy::Person,
+                        peer_thread_id: None,
+                        provider: Some("fake".to_string()),
+                        model: None,
+                        effort: None,
+                        message: "look at the retry loop".to_string(),
+                    },
+                )
+                .await
+            })
+        };
+        provider.wait_for_held_turn().await;
+
+        // Somebody else's reply, after the brief's row and before its terminal. In life
+        // that row belongs to the turn the person started next, which runs after this
+        // one — so the marker is stepped aside to write it: the turn contract, rightly,
+        // refuses a row for a turn that is not the live one. The shape left behind is
+        // what matters, and it is the shape a second turn really does leave.
+        {
+            let mut relay = app.relay.write().await;
+            let parked = relay
+                .runtime_for_thread(&asker)
+                .and_then(|runtime| runtime.active_turn_id.clone());
+            relay.ensure_runtime_for_thread(&asker).active_turn_id = None;
+            relay.upsert_transcript_item_for_thread(
+                &asker,
+                "assistant:interrupting".to_string(),
+                crate::protocol::TranscriptEntryKind::AgentText,
+                Some("sure, renamed it".to_string()),
+                "completed".to_string(),
+                Some("turn-later".to_string()),
+                None,
+            );
+            relay.ensure_runtime_for_thread(&asker).active_turn_id = parked;
+        }
+        provider.release_terminals();
+
+        let peer = driving
+            .await
+            .expect("the delegate task should not panic")
+            .expect("a newer reply from another turn must not cost the asker its brief");
+
+        let relay = app.relay.read().await;
+        let mine = relay.asks_of_asker(&asker);
+        assert!(
+            mine.iter()
+                .any(|ask| ask.peer_thread_id == peer && ask.message != "sure, renamed it"),
+            "the peer must get the brief, not whatever replied last: {:?}",
+            mine.iter().map(|ask| &ask.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[tokio::test]
+    async fn the_brief_is_read_from_its_own_turn_not_from_whatever_replied_last() {
+        // Through the production accessor, over a real runtime transcript. A closure
+        // standing in for the fetcher proves nothing about the path that runs: the last
+        // attempt at this bug swapped the production call back to the broken one and
+        // every test stayed green, because none of them went through it.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = goal_session(&app, &cwd).await;
+
+        {
+            let mut relay = app.relay.write().await;
+            // No live marker, so the turn-contract guard has nothing to compare against;
+            // these rows stand in for two turns that have both already settled.
+            relay.ensure_runtime_for_thread(&asker).active_turn_id = None;
+            relay.upsert_transcript_item_for_thread(
+                &asker,
+                "assistant:brief".to_string(),
+                crate::protocol::TranscriptEntryKind::AgentText,
+                Some("read the retry loop in worker.mjs and say what it retries".to_string()),
+                "completed".to_string(),
+                Some("turn-brief".to_string()),
+                None,
+            );
+            // Somebody typed into the same session while the brief was being written.
+            relay.upsert_transcript_item_for_thread(
+                &asker,
+                "assistant:interrupting".to_string(),
+                crate::protocol::TranscriptEntryKind::AgentText,
+                Some("sure, renamed it".to_string()),
+                "completed".to_string(),
+                Some("turn-later".to_string()),
+                None,
+            );
+        }
+
+        let entry = app
+            .assistant_entry_for_turn(&asker, "turn-brief")
+            .await
+            .expect("the brief's own turn wrote a row");
+        assert_eq!(
+            entry.1, "read the retry loop in worker.mjs and say what it retries",
+            "the brief must be read from the turn that wrote it, not from the newest reply"
+        );
+        assert_eq!(
+            entry.2.as_deref(),
+            Some("turn-brief"),
+            "and it must carry that turn, so brief_from_reply can still refuse a mismatch"
+        );
+
+        assert!(
+            app.assistant_entry_for_turn(&asker, "turn-nobody-ran")
+                .await
+                .is_none(),
+            "a turn that wrote nothing is an absence, not somebody else's reply"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_inherits_what_its_asker_may_do_when_it_starts_not_when_it_was_asked() {
+        // Writing the brief can take minutes, and the settings read before it are stale by
+        // the time the peer is created. Narrowing the asker in that window has to bind the
+        // peer, or delegating is a way to keep powers that were just taken away.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = goal_session(&app, &cwd).await;
+
+        // Park the brief on the PROVIDER, mid-turn. Pinning a foreign turn id here used
+        // to look like it did that, but the provider overwrites the marker at turn start;
+        // what actually held the window open was the wait loop's poll interval.
+        provider.hold_terminals();
+        let driving = {
+            let app = app.clone();
+            let asker = asker.clone();
+            tokio::spawn(async move {
+                app.ask_agent(
+                    &asker,
+                    AskRequest {
+                        device_id: None,
+                        started_by: relay_api::delegation::StartedBy::Person,
+                        peer_thread_id: None,
+                        provider: Some("fake".to_string()),
+                        model: None,
+                        effort: None,
+                        message: "look at the retry loop".to_string(),
+                    },
+                )
+                .await
+            })
+        };
+        // Parked mid-turn, so the narrowing below is provably inside the window. A loop
+        // that gave up quietly would narrow the settings before the brief even started
+        // and still pass, testing nothing.
+        provider.wait_for_held_turn().await;
+        assert!(
+            {
+                let relay = app.relay.read().await;
+                relay
+                    .runtime_for_thread(&asker)
+                    .is_some_and(|runtime| runtime.active_turn_id.is_some())
+            },
+            "the brief turn must be running when its asker is narrowed"
+        );
         {
             let mut relay = app.relay.write().await;
             let mut narrowed = relay.thread_settings(&asker).expect("asker has settings");
             narrowed.approval_policy = "on-request".to_string();
             narrowed.sandbox = "read-only".to_string();
             relay.thread_settings.insert(asker.clone(), narrowed);
-            relay.ensure_runtime_for_thread(&asker).active_turn_id = None;
         }
+        provider.release_terminals();
 
         let peer = driving
             .await

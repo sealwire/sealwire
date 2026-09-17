@@ -9,7 +9,9 @@ use tokio::{
 };
 use tracing::{debug, trace};
 
-use crate::state::{BrokerPendingMessage, PendingTranscriptDelta, RelayState, TranscriptDeltaKind};
+use crate::state::{
+    BrokerPendingMessage, PendingTranscriptDelta, RelayState, TranscriptDeltaKind, TurnOutcome,
+};
 
 use super::*;
 
@@ -458,6 +460,28 @@ async fn handle_notification_for_provider(
                 return;
             }
             let completed_turn = string_at(&params, &["turn", "id"]);
+            // How this turn ended, for the terminal each branch publishes as its last
+            // write. Codex reports a failure only here, so this is the first and only
+            // place the outcome is known.
+            //
+            // `completed` is claimed for the literal case only. Codex's own
+            // `interrupted`, a status a later version adds, and an ABSENT status all
+            // read as `Stopped`: the field is required, so its absence means a peer we
+            // cannot hold to the protocol, and completeness is exactly what must not be
+            // assumed about one. The two mistakes are not symmetric — a wrong
+            // `Completed` hands another agent half a sentence as its whole instruction,
+            // while a wrong `Stopped` refuses a delegate and says so on screen.
+            let outcome = if value_at(&params, &["turn"])
+                .and_then(codex_turn_failure_reason)
+                .is_some()
+            {
+                TurnOutcome::Failed
+            } else {
+                match value_at(&params, &["turn", "status"]).and_then(Value::as_str) {
+                    Some("completed") => TurnOutcome::Completed,
+                    _ => TurnOutcome::Stopped,
+                }
+            };
             if let ThreadRoute::Background(bg_thread_id) = route {
                 let now = crate::state::unix_now();
                 // Only settle if this completion is for the background thread's
@@ -546,6 +570,10 @@ async fn handle_notification_for_provider(
                         now,
                     );
                     relay.finish_codex_start_reservation(&bg_thread_id, turn_id);
+                    // LAST, after every row this completion writes: a reader that sees
+                    // the terminal reads the transcript once and trusts what is there.
+                    // Published even when superseded — that turn still ended.
+                    relay.record_turn_terminal(&bg_thread_id, turn_id, outcome);
                 }
                 changed = true;
             } else {
@@ -643,6 +671,9 @@ async fn handle_notification_for_provider(
                     );
                     if let Some(completed_thread) = completed_thread {
                         relay.finish_codex_start_reservation(&completed_thread, turn_id);
+                        // See the background branch: published last, and regardless of
+                        // whether this completion was the current turn's.
+                        relay.record_turn_terminal(&completed_thread, turn_id, outcome);
                         changed = true;
                     }
                 }

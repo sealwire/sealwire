@@ -601,6 +601,46 @@ async fn handle_notification_turn_completed_settles_active_thread_to_idle() {
     );
 }
 
+// Codex reports three terminal statuses — completed, interrupted, failed — and the
+// relay only ever looked for `failed`. An interrupted turn has real partial text
+// already stamped "completed" by `item/completed`, so calling its terminal Completed
+// is how half a sentence becomes another agent's whole instruction.
+#[tokio::test]
+async fn an_interrupted_codex_turn_is_stopped_not_completed() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-1".to_string());
+        relay.set_thread_status("thread-1", "active".to_string(), Vec::new());
+        relay.set_active_turn(Some("turn-1".to_string()));
+    }
+
+    handle_notification(
+        json!({
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turn": { "id": "turn-1", "status": "interrupted" }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    assert_eq!(
+        relay.turn_terminal("thread-1", "turn-1"),
+        Some(crate::state::TurnOutcome::Stopped),
+        "an interrupted turn must not read as one that finished what it was saying"
+    );
+}
+
 // A codex turn that completes WITH an error must notify remote devices (push),
 // not just log it.
 #[tokio::test]
