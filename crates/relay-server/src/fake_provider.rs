@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::AsyncWriteExt,
-    sync::{oneshot, Mutex, RwLock},
+    sync::{oneshot, watch, Mutex, RwLock},
     time::{sleep, Duration},
 };
 
@@ -27,7 +27,7 @@ use crate::{
     },
     state::{
         ApprovalKind, BrokerPendingMessage, PendingApproval, PendingAskUserQuestion,
-        PendingTranscriptDelta, RelayState, TranscriptDeltaKind,
+        PendingTranscriptDelta, RelayState, TranscriptDeltaKind, TurnOutcome,
     },
 };
 
@@ -484,6 +484,14 @@ pub struct FakeProviderBridge {
     /// Every stop ASKED for, whatever the configured behaviour did with it.
     stop_requests: Arc<Mutex<HashSet<String>>>,
     scenario_harness: Option<FakeScenarioHarness>,
+    /// Holds every turn at its terminal — reply row and settle both — until released.
+    /// A double that settles in one go never leaves the thread reading idle with the
+    /// reply unrecorded, which is the window a waiter can wrongly read in.
+    terminal_hold: watch::Sender<bool>,
+    /// How many turns have parked at that hold. A test that only knows the turn
+    /// STARTED does not know the reply is still unwritten, which is the whole premise
+    /// of standing in the window.
+    terminal_hold_arrivals: watch::Sender<u64>,
     /// `(cwd, system_prompt)` for every thread opened with a persona. The fake
     /// has no model to feed it to, so recording is the whole point: it lets a
     /// test assert the relay ASKED for a persona without standing up a real
@@ -514,6 +522,31 @@ impl FakeProviderBridge {
     /// ever yielding lets them take turns instead.
     pub(crate) fn set_start_thread_delay_ms(&self, ms: u64) {
         self.start_thread_delay_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Park every turn just before its terminal — the reply row and the settle
+    /// are both still ahead — until `release_terminals`.
+    ///
+    /// The seam exists because "the thread reads idle, but this turn's reply is
+    /// not recorded yet" is a real state every provider passes through, and a
+    /// double that does both in one go never lets a test stand in it.
+    pub(crate) fn hold_terminals(&self) {
+        self.terminal_hold.send_replace(true);
+    }
+
+    pub(crate) fn release_terminals(&self) {
+        self.terminal_hold.send_replace(false);
+    }
+
+    /// Resolve once a turn has actually parked at the terminal hold, so a caller
+    /// standing in the window knows the reply is not written yet.
+    pub(crate) async fn wait_for_held_turn(&self) {
+        let mut arrivals = self.terminal_hold_arrivals.subscribe();
+        while *arrivals.borrow_and_update() == 0 {
+            if arrivals.changed().await.is_err() {
+                return;
+            }
+        }
     }
 
     /// `(cwd, system_prompt)` for every thread opened with a persona.
@@ -573,6 +606,8 @@ impl FakeProviderBridge {
             stopped_turns: Arc::new(Mutex::new(HashSet::new())),
             stop_requests: Arc::new(Mutex::new(HashSet::new())),
             scenario_harness,
+            terminal_hold: watch::channel(false).0,
+            terminal_hold_arrivals: watch::channel(0).0,
             system_prompts: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -942,6 +977,8 @@ impl ProviderBridge for FakeProviderBridge {
         let approval_gates = self.approval_gates.clone();
         let turn_stop_behaviors = self.turn_stop_behaviors.clone();
         let stopped_turns = self.stopped_turns.clone();
+        let mut terminal_hold = self.terminal_hold.subscribe();
+        let terminal_hold_arrivals = self.terminal_hold_arrivals.clone();
         turn_stop_behaviors
             .lock()
             .await
@@ -1050,7 +1087,14 @@ impl ProviderBridge for FakeProviderBridge {
                     }
                 };
                 if !registered {
-                    settle_fake_turn(&state, &thread_id, &turn_id_for_task, "idle").await;
+                    settle_fake_turn(
+                        &state,
+                        &thread_id,
+                        &turn_id_for_task,
+                        "idle",
+                        TurnOutcome::Stopped,
+                    )
+                    .await;
                     record_scenario_event(
                         scenario_harness.as_ref(),
                         "turn_stopped",
@@ -1186,7 +1230,14 @@ impl ProviderBridge for FakeProviderBridge {
                     }
                 };
                 if !registered {
-                    settle_fake_turn(&state, &thread_id, &turn_id_for_task, "idle").await;
+                    settle_fake_turn(
+                        &state,
+                        &thread_id,
+                        &turn_id_for_task,
+                        "idle",
+                        TurnOutcome::Stopped,
+                    )
+                    .await;
                     record_scenario_event(
                         scenario_harness.as_ref(),
                         "turn_stopped",
@@ -1303,7 +1354,14 @@ impl ProviderBridge for FakeProviderBridge {
                             );
                             relay.notify();
                         }
-                        settle_fake_turn(&state, &thread_id, &turn_id_for_task, "idle").await;
+                        settle_fake_turn(
+                            &state,
+                            &thread_id,
+                            &turn_id_for_task,
+                            "idle",
+                            TurnOutcome::Stopped,
+                        )
+                        .await;
                         turn_stop_behaviors.lock().await.remove(&turn_id_for_task);
                         stopped_turns.lock().await.remove(&turn_id_for_task);
                         return;
@@ -1372,7 +1430,14 @@ impl ProviderBridge for FakeProviderBridge {
             tool_entries.append(&mut ask_user_entries);
             for (index, tool_item_id) in tool_item_ids.into_iter().enumerate() {
                 if stopped_turns.lock().await.contains(&turn_id_for_task) {
-                    settle_fake_turn(&state, &thread_id, &turn_id_for_task, "idle").await;
+                    settle_fake_turn(
+                        &state,
+                        &thread_id,
+                        &turn_id_for_task,
+                        "idle",
+                        TurnOutcome::Stopped,
+                    )
+                    .await;
                     record_scenario_event(
                         scenario_harness.as_ref(),
                         "turn_stopped",
@@ -1566,7 +1631,14 @@ impl ProviderBridge for FakeProviderBridge {
             for (index, chunk) in chunks.into_iter().enumerate() {
                 sleep(chunk_delay).await;
                 if stopped_turns.lock().await.contains(&turn_id_for_task) {
-                    settle_fake_turn(&state, &thread_id, &turn_id_for_task, "idle").await;
+                    settle_fake_turn(
+                        &state,
+                        &thread_id,
+                        &turn_id_for_task,
+                        "idle",
+                        TurnOutcome::Stopped,
+                    )
+                    .await;
                     if let Some(harness) = scenario_harness.as_ref() {
                         harness
                             .record_event("turn_stopped", &thread_id, &turn_id_for_task, None)
@@ -1648,9 +1720,19 @@ impl ProviderBridge for FakeProviderBridge {
                 }
             }
 
+            if *terminal_hold.borrow() {
+                terminal_hold_arrivals.send_modify(|parked| *parked += 1);
+            }
+            while *terminal_hold.borrow_and_update() {
+                if terminal_hold.changed().await.is_err() {
+                    break;
+                }
+            }
+
             match terminal {
                 FakeTerminalBehavior::Complete => {
-                    settle_fake_turn(&state, &thread_id, &turn_id_for_task, "idle").await;
+                    // The reply BEFORE the settle: settling publishes this turn's
+                    // terminal, and a terminal is a promise the transcript is complete.
                     {
                         let mut relay = state.write().await;
                         relay.complete_agent_message_for_thread(
@@ -1665,6 +1747,14 @@ impl ProviderBridge for FakeProviderBridge {
                         );
                         relay.notify();
                     }
+                    settle_fake_turn(
+                        &state,
+                        &thread_id,
+                        &turn_id_for_task,
+                        "idle",
+                        TurnOutcome::Completed,
+                    )
+                    .await;
                     tool_entries.push(assistant_entry);
                     store_fake_turn(&threads, &thread_id, user_entry, tool_entries, "idle").await;
                     record_scenario_event(
@@ -1677,7 +1767,6 @@ impl ProviderBridge for FakeProviderBridge {
                     .await;
                 }
                 FakeTerminalBehavior::Error => {
-                    settle_fake_turn(&state, &thread_id, &turn_id_for_task, "idle").await;
                     let error_entry = TranscriptEntryView {
                         // A raw provider read: not a relay row until the relay numbers it.
                         row_id: None,
@@ -1712,6 +1801,16 @@ impl ProviderBridge for FakeProviderBridge {
                         relay.push_log("error", error_message.clone());
                         relay.notify();
                     }
+                    // Same order as `Complete`, for the same reason: the failure row is
+                    // part of this turn's transcript, so it precedes the terminal.
+                    settle_fake_turn(
+                        &state,
+                        &thread_id,
+                        &turn_id_for_task,
+                        "idle",
+                        TurnOutcome::Failed,
+                    )
+                    .await;
                     let partial_entry = (!streamed_reply.is_empty()).then(|| TranscriptEntryView {
                         // A raw provider read: not a relay row until the relay numbers it.
                         row_id: None,
@@ -1958,24 +2057,39 @@ impl ProviderBridge for FakeProviderBridge {
     }
 }
 
+/// End `turn_id`: clear what it was running and publish its terminal.
+///
+/// A caller passing `Completed` must already have written the turn's rows — that
+/// outcome is the promise they are all there (see `TurnOutcome`).
+///
+/// Nothing about the live turn is touched unless this IS the live turn: a fake turn
+/// settling late must not idle, restatus, or un-busy a newer one. The terminal is
+/// published either way, because that turn ended regardless of what runs now.
 async fn settle_fake_turn(
     state: &Arc<RwLock<RelayState>>,
     thread_id: &str,
     turn_id: &str,
     status: &str,
+    outcome: TurnOutcome,
 ) {
     let mut relay = state.write().await;
-    if relay.active_thread_id.as_deref() == Some(thread_id) {
-        if relay.active_turn_id.as_deref() == Some(turn_id) {
+    let settling_this_turn = relay
+        .runtime_for_thread(thread_id)
+        .and_then(|runtime| runtime.active_turn_id.clone())
+        .as_deref()
+        == Some(turn_id);
+    if settling_this_turn {
+        if relay.active_thread_id.as_deref() == Some(thread_id) {
             relay.set_active_turn(None);
+            relay.set_thread_status(thread_id, status.to_string(), Vec::new());
+            relay.clear_progress();
+        } else {
+            let now = unix_now();
+            relay.bg_set_active_turn(thread_id, None, now);
+            relay.bg_set_thread_status(thread_id, status.to_string(), Vec::new(), now);
         }
-        relay.set_thread_status(thread_id, status.to_string(), Vec::new());
-        relay.clear_progress();
-    } else {
-        let now = unix_now();
-        relay.bg_set_active_turn(thread_id, None, now);
-        relay.bg_set_thread_status(thread_id, status.to_string(), Vec::new(), now);
     }
+    relay.record_turn_terminal(thread_id, turn_id, outcome);
     relay.notify();
 }
 

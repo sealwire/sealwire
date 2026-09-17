@@ -1076,6 +1076,14 @@ from {}; no provider turn was active.",
                     relay.bg_set_active_turn(&thread_id, None, unix_now());
                     relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
                 }
+                // Outside the marker check on purpose: the turn is gone whether or not a
+                // newer one has taken the marker, and a caller waiting on THIS turn gets
+                // no other event — the provider has already forgotten it.
+                relay.record_turn_terminal(
+                    &thread_id,
+                    &turn_id,
+                    crate::state::TurnOutcome::Stopped,
+                );
                 relay.push_log(
                     "warn",
                     format!(
@@ -1165,6 +1173,10 @@ provider completion.",
         {
             relay.bg_set_active_turn(&thread_id, None, unix_now());
             relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
+            // `Stopped`, which promises only "stop waiting" — unlike `Completed`, it
+            // makes no claim that the transcript is final, which is the honest thing to
+            // say about a provider that never answered and may yet write more.
+            relay.record_turn_terminal(&thread_id, &turn_id, crate::state::TurnOutcome::Stopped);
             relay.push_log(
                 "warn",
                 format!(

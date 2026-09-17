@@ -40,10 +40,18 @@ fn answer_nudge() -> &'static str {
 that asked you needs to know — it is still waiting."
 }
 
-/// How long to wait for a brief before giving up, as ticks of `BRIEF_WAIT_TICK_MS`.
-/// Generous: writing a brief is a real turn on a real model.
-const BRIEF_WAIT_TICKS: u32 = 600;
-const BRIEF_WAIT_TICK_MS: u64 = 500;
+/// How long to wait for a brief before giving up. Generous: writing a brief is a
+/// real turn on a real model. It is the only bound — there is no shorter guess about
+/// when a turn is "probably done" that would be anything but a narrower race.
+const BRIEF_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// One sentence for every way a brief can fail to arrive. Which way it was is the
+/// relay's business, not the person's — the answer is the same either way.
+fn no_brief_written() -> String {
+    "this session did not write a brief for the other agent; try again, or say the \
+whole task in the command"
+        .to_string()
+}
 
 /// What the asking agent is asked to write when a person's words need turning
 /// into something a stranger can act on.
@@ -469,24 +477,40 @@ Carry on with one of those instead of bringing in another."
         }
     }
 
-    /// Block until `thread_id` stops working, or the wait runs out.
+    /// Block until `turn_id` on `thread_id` publishes a terminal, or the budget runs
+    /// out — `None` for the latter, where the turn may well still be running.
     ///
-    /// Its own small poll rather than the review orchestrator's: that one is
-    /// scoped to a review job and settles one, which is not what a brief turn
-    /// wants.
-    async fn wait_for_thread_idle(&self, thread_id: &str) {
-        for _ in 0..BRIEF_WAIT_TICKS {
-            let working = {
+    /// Addressed by TURN, because the question was never whether the thread is busy.
+    /// This waited on idleness, which arrives early in the gap every bridge leaves
+    /// between clearing its live marker and writing the turn's last rows — and read a
+    /// previous turn's reply there. A terminal is published after those rows.
+    async fn wait_for_turn_terminal(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Option<crate::state::TurnOutcome> {
+        let mut changes = self.subscribe();
+        let deadline = tokio::time::Instant::now() + BRIEF_WAIT_BUDGET;
+        loop {
+            {
                 let relay = self.relay.read().await;
-                relay
-                    .runtime_for_thread(thread_id)
-                    .map(|runtime| runtime.is_working())
-                    .unwrap_or(false)
-            };
-            if !working {
-                return;
+                // The thread's own record of the turn is the only thing that can answer,
+                // and it lives on the runtime. Archived or deleted from another device,
+                // the runtime and the record go together — so this is not "not yet".
+                let Some(runtime) = relay.runtime_for_thread(thread_id) else {
+                    return None;
+                };
+                if let Some(outcome) = runtime.finished_turn(turn_id) {
+                    return Some(outcome);
+                }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(BRIEF_WAIT_TICK_MS)).await;
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::select! {
+                changed = changes.changed() => changed.ok()?,
+                _ = tokio::time::sleep_until(deadline) => {}
+            }
         }
     }
 
@@ -512,23 +536,32 @@ Carry on with one of those instead of bringing in another."
 
         // The id may have been promoted by this very turn.
         let asker_thread_id = dispatched.thread_id.as_str();
-        self.wait_for_thread_idle(asker_thread_id).await;
+        // An UNCERTAIN start (see `DispatchedTurn`): the provider may be working, but
+        // nothing it writes could be matched to what we asked, so there is no brief to
+        // wait for.
+        let Some(turn_id) = dispatched.turn_id.as_deref() else {
+            return Err(AskError::Failed(no_brief_written()));
+        };
 
-        let entry = self.latest_assistant_entry_with_turn(asker_thread_id).await;
-        match crate::state::delegation::brief_from_reply(
-            entry,
-            baseline.as_deref(),
-            dispatched.turn_id.as_deref(),
-        ) {
+        // Completed, not merely over: a turn that failed or was stopped leaves real
+        // text carrying the right turn id, and half an instruction is not a shorter
+        // instruction. The row's own status cannot answer this — ACP stamps an agent
+        // row "completed" on every streamed chunk — so the turn's outcome does.
+        match self.wait_for_turn_terminal(asker_thread_id, turn_id).await {
+            Some(crate::state::TurnOutcome::Completed) => {}
+            _ => return Err(AskError::Failed(no_brief_written())),
+        }
+
+        let entry = self
+            .assistant_entry_for_turn(asker_thread_id, turn_id)
+            .await;
+        match crate::state::delegation::brief_from_reply(entry, baseline.as_deref(), Some(turn_id))
+        {
             Some(text) => Ok(text),
             // Nothing new, nothing said, or said in some other turn. Sending the raw
             // words is worse than failing: the peer would act on an instruction with
             // no referent.
-            None => Err(AskError::Failed(
-                "this session did not write a brief for the other agent; try again, \
-or say the whole task in the command"
-                    .to_string(),
-            )),
+            None => Err(AskError::Failed(no_brief_written())),
         }
     }
 

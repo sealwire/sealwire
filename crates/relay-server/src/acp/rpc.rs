@@ -20,7 +20,7 @@ use crate::{
     },
     state::{
         ApprovalKind, BrokerPendingMessage, PendingApproval, PendingTranscriptDelta, RelayState,
-        TranscriptDeltaKind,
+        TranscriptDeltaKind, TurnOutcome,
     },
 };
 
@@ -892,6 +892,22 @@ pub(crate) fn apply_turn_finished(
         }
         Err(error) => Some(error.clone()),
     };
+    // How the turn ended, for the terminal published at the bottom — and at the
+    // abandoned-turn return below, which is the only word a waiter on THAT turn gets.
+    // `end_turn` is the only thing that claims completeness. A `cancelled` turn stopped,
+    // and an ABSENT `stopReason` — required by the protocol — means a peer we cannot hold
+    // to it, which is the last peer to assume a finished transcript about. The failure
+    // classification above deliberately still treats absence as clean: this is about what
+    // may be READ from the turn, not about pushing an error at the user.
+    let terminal = match (&failure, &outcome) {
+        (Some(_), _) => TurnOutcome::Failed,
+        (None, Ok(result))
+            if result.get("stopReason").and_then(Value::as_str) == Some("end_turn") =>
+        {
+            TurnOutcome::Completed
+        }
+        _ => TurnOutcome::Stopped,
+    };
 
     // A completion that arrives after its turn was abandoned must touch nothing.
     //
@@ -907,6 +923,10 @@ pub(crate) fn apply_turn_finished(
         .runtime_for_thread(thread_id)
         .and_then(|runtime| runtime.active_turn_id.clone());
     if matches!(current_turn.as_deref(), Some(active) if active != turn_id) {
+        // Touch nothing, and publish no terminal — see the same decision in
+        // `claude.rs`. A waiter on the abandoned turn falls back to its own budget,
+        // which is the price of not being able to trust a terminal that disagrees with
+        // the live marker.
         return;
     }
     // Distinct from the above: `None` means somebody has already settled this
@@ -999,6 +1019,12 @@ pub(crate) fn apply_turn_finished(
             relay.clear_thread_progress(thread_id);
         }
     }
+
+    // LAST, after this turn's failure row: a reader that sees `Completed` reads the
+    // transcript once and trusts what is there. It matters most here, where an agent
+    // message row is stamped "completed" on every streamed chunk — that status says
+    // nothing about the turn, and this is what does.
+    relay.record_turn_terminal(thread_id, turn_id, terminal);
 }
 
 async fn handle_server_request(

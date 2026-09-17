@@ -30,7 +30,7 @@ pub(crate) use self::relay::{
     PendingAskUserQuestion, PendingPairingResult, PendingTranscriptDelta, PushDispatcher,
     PushSubscription, PushSubscriptionInput, RelayState, RemoteActionReplayDecision,
     RemoteActionWait, ReviewerThread, ThreadSessionSettings, TranscriptDeltaKind, TurnFailureKind,
-    MAX_REVIEWERS_PER_PARENT,
+    TurnOutcome, MAX_REVIEWERS_PER_PARENT,
 };
 // `PushKind` is referenced only by cross-module tests (codex/claude handler tests
 // assert an Error push); gate the re-export so non-test builds don't warn.

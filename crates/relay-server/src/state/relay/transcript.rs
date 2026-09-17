@@ -349,6 +349,24 @@ impl RelayState {
                      match on it, and all three fail silently when it is something else."
                 );
             }
+            // The other half of the same contract, and the half the check above cannot
+            // see: it compares against the LIVE marker, which every bridge clears before
+            // its final rows, so writes made on the way out go unchecked.
+            //
+            // Scoped to `Completed`, because that is the only outcome that promises a
+            // finished transcript (see [`TurnOutcome`]). `Stopped` and `Failed` promise
+            // one thing — stop waiting — and the paths that publish them are exactly the
+            // ones that cannot promise more: a provider that never answered a stop, or
+            // one whose process died, may still have a row in flight.
+            if let Some(writing) = turn_id.as_deref() {
+                assert_ne!(
+                    self.turn_terminal(thread_id, writing),
+                    Some(super::TurnOutcome::Completed),
+                    "thread {thread_id} wrote a row for turn {writing:?} after that turn was \
+                     published as Completed. Publish the terminal LAST, once the rows are \
+                     in — a reader that sees Completed reads the transcript once."
+                );
+            }
         }
         let (stamp_id, entry_seq, order_seq) = {
             let runtime = self.ensure_runtime_for_thread(thread_id);

@@ -2188,6 +2188,47 @@ async fn a_clean_turn_pushes_nothing() {
 }
 
 #[tokio::test]
+async fn an_abandoned_acp_turn_ends_neither_turn() {
+    // An ACP prompt can resolve an hour late, after the stop fallback settled it and a
+    // new turn started. It settles nothing: not the live turn, and not the abandoned one
+    // either. See `a_superseded_claude_completion_ends_neither_turn` in claude.rs for
+    // why ending the named turn cannot be done safely, and what it costs not to.
+    let state = relay_state();
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("t1".to_string());
+        relay.set_active_turn(Some("acp-turn-1".to_string()));
+        relay.set_active_turn(Some("acp-turn-2".to_string()));
+    }
+
+    {
+        let mut relay = state.write().await;
+        crate::acp::rpc::apply_turn_finished(
+            &mut relay,
+            "t1",
+            "acp-turn-1",
+            Err("stream closed".to_string()),
+            "cursor",
+        );
+    }
+
+    let relay = state.read().await;
+    assert_eq!(
+        relay.turn_terminal("t1", "acp-turn-1"),
+        None,
+        "a terminal for a turn the relay is not settling cannot be trusted to end it"
+    );
+    assert_eq!(
+        relay
+            .runtime_for_thread("t1")
+            .and_then(|runtime| runtime.active_turn_id.clone())
+            .as_deref(),
+        Some("acp-turn-2"),
+        "and the turn actually running must be left alone"
+    );
+}
+
+#[tokio::test]
 async fn a_failed_background_turn_does_not_resurrect_a_deleted_thread() {
     // The background route is not just "the same write plus a progress touch":
     // `bg_upsert_transcript_item` first drops events for a thread the user has

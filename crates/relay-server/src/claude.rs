@@ -31,7 +31,7 @@ use crate::{
     },
     state::{
         BrokerPendingMessage, PendingApproval, PendingTranscriptDelta, RelayState,
-        TranscriptDeltaKind, TurnFailureKind,
+        TranscriptDeltaKind, TurnFailureKind, TurnOutcome,
     },
 };
 
@@ -1962,6 +1962,17 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
             // still describes real work the provider performed.
             record_claude_turn_usage(&mut relay, &payload, event_thread_id.as_deref());
 
+            // How this turn ended, for the terminal each route arm publishes as its
+            // last write. A failure reason outranks the stop flag: a turn stopped
+            // because it broke is more usefully read as broken.
+            let outcome = if claude_failed_turn_reason(&payload).is_some() {
+                TurnOutcome::Failed
+            } else if stopped_explicitly {
+                TurnOutcome::Stopped
+            } else {
+                TurnOutcome::Completed
+            };
+
             match claude_thread_route(&relay, event_thread_id.as_deref()) {
                 ClaudeThreadRoute::Active => {
                     let tid = relay.active_thread_id.clone().unwrap_or_default();
@@ -1976,10 +1987,21 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                                 event_turn_id.as_deref().unwrap_or("<missing>")
                             ),
                         );
+                        // Deliberately publishes NO terminal, though a waiter on the
+                        // named turn then has nothing to go on but its own budget. The
+                        // worker can stamp a terminal with a turn that has not run yet
+                        // (`armSpontaneousTurn` in worker.mjs), and the relay cannot tell
+                        // that apart from a genuinely superseded turn: the only record of
+                        // "this turn ran" is the relay's own optimistic seed, which is
+                        // set on exactly the same race. A slow refusal beats settling a
+                        // turn before it starts — which is the original bug, from the
+                        // other side.
                         relay.notify();
                         return;
                     }
                     let completed_turn_id = relay.active_turn_id.clone();
+                    let terminal_turn_id =
+                        completed_turn_id.clone().or_else(|| event_turn_id.clone());
                     relay.set_active_turn(None);
                     relay.set_thread_status(&tid, "idle".to_string(), Vec::new());
                     relay.clear_progress();
@@ -2036,6 +2058,11 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                             None,
                         );
                     }
+                    // LAST, after every row this terminal writes: a reader that sees
+                    // the terminal reads the transcript once and trusts what is there.
+                    if let Some(turn_id) = terminal_turn_id.as_deref() {
+                        relay.record_turn_terminal(&tid, turn_id, outcome);
+                    }
                 }
                 ClaudeThreadRoute::Background(thread_id) => {
                     let completed_turn_id = relay
@@ -2052,9 +2079,12 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                                 event_turn_id.as_deref().unwrap_or("<missing>")
                             ),
                         );
+                        // See the active arm on why nothing is published here.
                         relay.notify();
                         return;
                     }
+                    let terminal_turn_id =
+                        completed_turn_id.clone().or_else(|| event_turn_id.clone());
                     let now = crate::state::unix_now();
                     relay.bg_set_active_turn(&thread_id, None, now);
                     relay.bg_set_thread_status(&thread_id, "idle".to_string(), Vec::new(), now);
@@ -2106,6 +2136,10 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                             None,
                             now,
                         );
+                    }
+                    // See the active arm: published last, once the rows are all in.
+                    if let Some(turn_id) = terminal_turn_id.as_deref() {
+                        relay.record_turn_terminal(&thread_id, turn_id, outcome);
                     }
                 }
                 ClaudeThreadRoute::Drop => {
@@ -4156,6 +4190,53 @@ mod tests {
         assert_eq!(fork_point_message_uuid("assistant:"), None);
     }
 
+    // A completion for a turn a newer one has replaced settles NOTHING — not the live
+    // turn, and not the turn it names either.
+    //
+    // The tempting other choice is to end the named turn, so a caller waiting on it
+    // hears something before its budget runs out. It cannot be done safely: the worker
+    // can stamp a terminal with a turn that has not run yet (`armSpontaneousTurn` in
+    // worker.mjs, and `a_mis_stamped_completion_cannot_settle_a_spontaneous_turn`
+    // below), and the relay has no record that tells a mis-stamp from a genuine
+    // supersession — the only evidence "this turn ran" would be its own optimistic
+    // seed, set on exactly the same race. Ending a turn before it starts is the
+    // original `/delegate` bug from the other side, so the slow refusal wins.
+    #[tokio::test]
+    async fn a_superseded_claude_completion_ends_neither_turn() {
+        let state = test_relay_with_active_b().await;
+        {
+            let mut relay = state.write().await;
+            relay.set_active_turn(Some("turn-1".to_string()));
+            relay.set_active_turn(Some("turn-2".to_string()));
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "done",
+                "provider_session_id": "thread-b",
+                "turn_id": "turn-1"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert_eq!(
+            relay.turn_terminal("thread-b", "turn-1"),
+            None,
+            "a terminal that disagrees with the live turn is not trustworthy enough to \
+             end anything — see this test's comment for the cost we accept instead"
+        );
+        assert_eq!(
+            relay
+                .runtime_for_thread("thread-b")
+                .and_then(|runtime| runtime.active_turn_id.clone())
+                .as_deref(),
+            Some("turn-2"),
+            "and the turn actually running must be left alone"
+        );
+    }
+
     // A tool that FAILED must not settle as "completed". The worker already reports
     // `is_error: true` on the result event (see sdk-mapping.mjs), but the relay recorded
     // every tool result with a hardcoded "completed" and never read the flag — so a
@@ -5438,6 +5519,15 @@ mod tests {
             relay.active_turn_id.as_deref(),
             Some("auto-turn-x"),
             "a completion for a turn we never armed must not settle the live one"
+        );
+        // Nor end it on paper. `relay-turn-2` is the user's turn, still QUEUED — the
+        // worker stamped this terminal with it by accident. Recording a terminal for a
+        // turn that has not run is worse than recording nothing: a `/delegate` brief
+        // dispatched as that turn wakes at once, finds no reply, and blames the person.
+        assert_eq!(
+            relay.turn_terminal("claude-thread", "relay-turn-2"),
+            None,
+            "a turn that never ran cannot have ended"
         );
     }
 

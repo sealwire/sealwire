@@ -40,7 +40,7 @@ pub(crate) use self::push::{
     PushDispatcher, PushJob, PushKind, PushSubscription, PushSubscriptionInput,
 };
 pub(crate) use self::runtime::{
-    CodexStartReservation, ThreadRuntime, TurnFailure, TurnFailureKind, TurnSpend,
+    CodexStartReservation, ThreadRuntime, TurnFailure, TurnFailureKind, TurnOutcome, TurnSpend,
 };
 pub(crate) use self::transcript::TranscriptRecord;
 pub(crate) use self::transcript_store::{IdSpace, ThreadTranscript};
@@ -96,6 +96,15 @@ pub const MAX_REVIEW_JOBS_PUB: usize = MAX_REVIEW_JOBS;
 /// progress") while Claude threads, which report `idle`, worked fine.
 /// Comparison is case-insensitive because the word is provider formatting, not
 /// semantics (Codex sends camelCase, the others lowercase).
+/// Carry `from`'s finished turns into `keep`, oldest first, without disturbing the
+/// ones it already has. Used across a promotion handoff, where only one of the two
+/// runtimes survives.
+fn adopt_finished_turns(keep: &mut ThreadRuntime, from: &ThreadRuntime) {
+    for finished in &from.finished_turns {
+        keep.record_finished_turn(&finished.turn_id, finished.outcome);
+    }
+}
+
 pub(crate) fn thread_status_is_working(status: &str) -> bool {
     !matches!(
         status.trim().to_ascii_lowercase().as_str(),
@@ -1075,6 +1084,30 @@ impl RelayState {
     pub(crate) fn last_turn_failure(&self, thread_id: &str) -> Option<&TurnFailure> {
         self.runtime_for_thread(thread_id)
             .and_then(|runtime| runtime.last_turn_failure.as_ref())
+    }
+
+    /// Publish that `turn_id` is over. Call it as the LAST write of the lock hold
+    /// that recorded the turn's rows — see [`FinishedTurn`] for why the order is the
+    /// whole contract.
+    ///
+    /// Unconditional on the live marker: the turn this terminal names may already have
+    /// been superseded by another, and it still ended.
+    pub(crate) fn record_turn_terminal(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        outcome: TurnOutcome,
+    ) {
+        // No `ensure_`: a thread deleted mid-turn must not be resurrected to hold a
+        // record nobody can read.
+        if let Some(runtime) = self.runtimes.get_mut(thread_id) {
+            runtime.record_finished_turn(turn_id, outcome);
+        }
+    }
+
+    pub(crate) fn turn_terminal(&self, thread_id: &str, turn_id: &str) -> Option<TurnOutcome> {
+        self.runtime_for_thread(thread_id)
+            .and_then(|runtime| runtime.finished_turn(turn_id))
     }
 
     /// Note what a provider said one turn cost. See [`TurnSpend`] — the record
@@ -2174,10 +2207,15 @@ impl RelayState {
                         existing.active_turn_id = runtime.active_turn_id.take();
                     }
                     existing.turn_revision = existing.turn_revision.max(runtime.turn_revision);
+                    // Folded, not chosen between: a turn that ended is a fact about the
+                    // SESSION, and dropping the losing runtime's copy leaves whoever
+                    // dispatched that turn waiting for an answer already given.
+                    adopt_finished_turns(&mut existing, &runtime);
                     self.runtimes.insert(real_id.to_string(), existing);
                 }
                 Some(existing) => {
                     runtime.turn_revision = runtime.turn_revision.max(existing.turn_revision);
+                    adopt_finished_turns(&mut runtime, &existing);
                     // Same reason turn_revision is folded: a client may already track
                     // real_id, and the pending runtime can be behind it on the shared
                     // clock. Adopting pending's revision verbatim would rewind it.
@@ -5312,7 +5350,7 @@ impl RelayState {
     /// keeps is_working() true forever, blocking reviews in that cwd until restart.
     pub fn fail_in_flight_turns_for_provider(&mut self, provider: &str) {
         let now = unix_now();
-        let stuck_threads: Vec<String> = self
+        let stuck_threads: Vec<(String, Option<String>)> = self
             .runtimes
             .iter()
             .filter(|(_, runtime)| {
@@ -5322,9 +5360,9 @@ impl RelayState {
                         .as_ref()
                         .is_some_and(|summary| summary.provider == provider)
             })
-            .map(|(thread_id, _)| thread_id.clone())
+            .map(|(thread_id, runtime)| (thread_id.clone(), runtime.active_turn_id.clone()))
             .collect();
-        for thread_id in stuck_threads {
+        for (thread_id, dead_turn_id) in stuck_threads {
             if self.active_thread_id.as_deref() == Some(thread_id.as_str()) {
                 self.set_active_turn(None);
                 self.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
@@ -5336,6 +5374,13 @@ impl RelayState {
             // A running turn died — notify remote devices (and suppress the
             // work→idle "completed" the snapshot diff would otherwise emit).
             self.enqueue_error_push(&thread_id, "stopped unexpectedly — the agent exited.");
+            // The provider is gone, so no further row for this turn is coming: the
+            // transcript is as complete as it will ever be, which is exactly what a
+            // terminal claims. Without it a waiter on that turn sits out its whole
+            // budget waiting for a process that has exited.
+            if let Some(turn_id) = dead_turn_id.as_deref() {
+                self.record_turn_terminal(&thread_id, turn_id, TurnOutcome::Failed);
+            }
         }
         // Once this process is gone, an unresolved Codex start can no longer emit
         // the notification that owns its placeholder. Release that fail-closed
