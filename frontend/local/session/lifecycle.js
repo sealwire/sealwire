@@ -645,7 +645,10 @@ export function createLifecycleController(ctx) {
         throw new Error(payload?.error?.message || "Failed to send prompt");
       }
 
-      messageInput.value = "";
+      // The draft is NOT cleared here. This is the send path for every composer on the
+      // surface (the Orchestrator's too), and the one textarea belongs to whichever
+      // thread is on screen by the time this lands — see app.js's runComposerSubmit,
+      // which clears the scope it captured at submit time.
       // Depending on the provider, this response's transcript may have been
       // built before the message we just sent was appended — see
       // `transcriptMayPredateWrite`. It is still applied in full; it just
@@ -1062,6 +1065,9 @@ export function createLifecycleController(ctx) {
       // the scroll hook to apply once, instead of writing into fields this
       // module no longer owns.
       state.localTranscriptScrollPromotion = threadPromotion;
+      // Synchronous and first: the composer's draft is keyed by thread id, and the very
+      // next render computes its scope from the promoted id.
+      state.retargetComposerWorkspace?.(threadPromotion.from, threadPromotion.to);
       // Rekey every canonical workspace and the route in one queued command. The
       // controller preserves tab identity/pin/order and uses history.replace when the
       // promoted thread is currently visible.

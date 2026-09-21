@@ -18,6 +18,12 @@
 //   - Agents-panel ask identity memory is keyed by THREAD id for off-page askers/peers,
 //     so a colliding id on relay B would inherit relay A's remembered name/provider.
 //
+// The composer's unsent state (shared/composer-workspace.js) is deliberately NOT reset
+// here either, for the same reason as the tab set below: its keys NAME the relay, so
+// pointing at another one already reads a different slot. Forgetting on a switch would
+// only throw away a half-typed message for looking at another relay for a moment.
+// Dropping the device's credentials is different — see pairing.js's forgetCurrentDevice.
+//
 // The session tab set is relay-scoped too — thread ids inside project-keyed workspaces —
 // but it is deliberately NOT reset here, because it is scoped BY CONSTRUCTION rather than
 // by forgetting: `session-tabs-host.js` caches one host per relay id and gives each its

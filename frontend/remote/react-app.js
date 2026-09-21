@@ -12,6 +12,11 @@ import React, {
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
 import { fetchBuildInfo } from "../shared/build-badge.js";
+import {
+  composerWorkspaceKey,
+  getComposerWorkspaceStore,
+} from "../shared/composer-workspace.js";
+import { createRemoteComposerSend } from "./composer-send.js";
 import { StartSessionSplitButton } from "../shared/start-session-split-button.js";
 import { ConversationHeader } from "../shared/conversation-header.js";
 import { ClientLog } from "../shared/client-log.js";
@@ -317,6 +322,17 @@ function useRemoteUiStoreState(store) {
     () => store.getState(),
     () => store.getState()
   );
+}
+
+// One per page: the "/" controller reaches the same singleton from behind the private
+// seam, so both sides of the composer agree on which thread a draft belongs to.
+const composerWorkspaces = getComposerWorkspaceStore();
+
+// The composer's unsent state for ONE scope. The store hands back the same object while
+// nothing in that scope changes, so another thread's keystrokes do not re-render this one.
+function useComposerWorkspace(store, scope) {
+  const read = useCallback(() => store.read(scope), [store, scope]);
+  return useSyncExternalStore(store.subscribe, read, read);
 }
 
 export function mountRemoteApp() {
@@ -625,6 +641,16 @@ function RemoteApp() {
   }, [currentState.session?.available_models, currentState.session?.provider]);
 
   const session = currentState.session;
+  // The composer's unsent state is filed under the thread the box is pointing at, and
+  // under the RELAY too: thread ids are only unique within one, so a bare id could
+  // attach one relay's half-typed message to another relay's session.
+  const composerScope = composerWorkspaceKey({
+    relayId: currentState.remoteAuth?.relayId || null,
+    threadId: session?.active_thread_id || null,
+  });
+  const composerWorkspace = useComposerWorkspace(composerWorkspaces, composerScope);
+  const composerDraft = composerWorkspace.text;
+  const composerSendPending = Boolean(composerWorkspace.pendingOperationId);
   // Every pending thread against the REAL session — not the view-only projection
   // in `session`. The projection rewrites active_thread_id to the viewed thread
   // and omits the live thread from thread_activity, which would falsely idle a
@@ -665,13 +691,13 @@ function RemoteApp() {
     : null;
   const sessionRuntime = sessionView
     ? deriveSessionRuntime({
-        composerDraft: remoteUi.composerDraft,
+        composerDraft,
         composerEffort: remoteUi.composerEffort,
         composerErrors: currentState.composerErrors,
         composerHeld: currentState.composerHeld,
         composerModel: remoteUi.composerModel,
         fallbackModels: remoteUi.providerModels[session.provider] || [],
-        sendPending: remoteUi.sendPending,
+        sendPending: composerSendPending,
         stopPendingByThread: reconciledStopPending,
         session,
         sessionView,
@@ -971,7 +997,7 @@ function RemoteApp() {
   };
   const composerModel = sessionRuntime || {
     composerDisabled: true,
-    currentDraft: remoteUi.composerDraft,
+    currentDraft: composerDraft,
     currentEffortValue: remoteUi.composerEffort,
     currentModelValue: remoteUi.composerModel,
     messagePlaceholder: !hasRelay
@@ -981,7 +1007,7 @@ function RemoteApp() {
       : hasUsableRelay
         ? "Start or open a remote session first."
         : "Local credentials are unavailable. Pair this relay again in this browser.",
-    sendPending: remoteUi.sendPending,
+    sendPending: composerSendPending,
   };
   const transcriptDetailEntries = buildExpandedTranscriptDetailEntries(currentState, {
     expandedItemIds: transcriptUiState.transcriptExpandedItemIds,
@@ -2063,22 +2089,18 @@ function RemoteApp() {
     };
   }, [vapidPublicKey, remoteUiStore]);
 
-  async function handleSendMessage() {
-    remoteUiStore.getState().setSendPending(true);
-    try {
-      const sent = await handlers.onSendMessage(
-        remoteUi.composerDraft,
+  // The freeze and the clear both ride the scope captured before the first await, so a
+  // send that outlives the session it was started from cannot reach the one on screen.
+  const handleSendMessage = createRemoteComposerSend({
+    workspaces: composerWorkspaces,
+    getScope: () => composerScope,
+    send: (draft) =>
+      handlers.onSendMessage(
+        draft,
         remoteUi.composerEffort || session?.reasoning_effort || "",
         remoteUi.composerModel || session?.model || ""
-      );
-      if (sent) {
-        remoteUiStore.getState().clearComposerDraft();
-      }
-      return sent;
-    } finally {
-      remoteUiStore.getState().setSendPending(false);
-    }
-  }
+      ),
+  });
 
   async function handleStopTurn() {
     const threadId = session?.active_thread_id || null;
@@ -2451,10 +2473,11 @@ function RemoteApp() {
           agentWorkingIndicatorModel,
           onForkFromMessage: handleOpenForkDialog,
           composerModel,
-          composerDraft: remoteUi.composerDraft,
+          composerDraft,
+          composerScope,
           composerEffort: remoteUi.composerEffort,
           onComposerDraftChange(value) {
-            remoteUiStore.getState().setComposerDraft(value);
+            composerWorkspaces.write(composerScope, { text: value });
           },
           onComposerEffortChange(value) {
             remoteUiStore.getState().setComposerEffort(value);
@@ -2533,6 +2556,7 @@ function RemoteApp() {
               canReview: canRequestRemoteReview,
               defaultReviewerProvider: reviewLaunchModel?.defaultProvider || "",
             }),
+            getScope: () => composerScope,
             // The command door only: the request modal shows the relay's reason inline
             // itself, and the controller turns this rejection into a bare `false`.
             requestReview: (values) =>
@@ -3287,6 +3311,7 @@ function RemoteThreadPanel({
   onUpdateSessionSettings,
   pendingAskUserQuestions,
   composerCommandsModel,
+  composerScope,
   reviewNudgeModel,
   session,
   sessionView,
@@ -3298,20 +3323,38 @@ function RemoteThreadPanel({
   // The node, not its id: two surfaces render a textarea, and an id lookup binds
   // whichever mounted last rather than this composer's own.
   const [commandInput, setCommandInput] = useState(null);
-  const [commandPending, setCommandPending] = useState(false);
   const commandControllerRef = useRef(null);
-  const commandPendingRef = useRef(false);
-  commandPendingRef.current = commandPending;
+  // The freeze cannot be a `useState` boolean: this panel survives every session switch
+  // under it, so /delegate on A used to lock B's textarea until A came back. It lives on
+  // the scope the command was started from — the same slot the composer reads back as
+  // `sendPending`, so the two cannot disagree.
+  const composerScopeRef = useRef(composerScope);
+  composerScopeRef.current = composerScope;
+  const onSendMessageRef = useRef(onSendMessage);
+  onSendMessageRef.current = onSendMessage;
+  // The token each scope's freeze was claimed with. A token, not a key: it survives the
+  // thread being renamed mid-command, and a superseded one releases nothing.
+  const commandOperationsRef = useRef(null);
+  if (!commandOperationsRef.current) commandOperationsRef.current = new Map();
   const submitComposer = useMemo(
     () =>
       createCommandSubmit({
+        getScope: () => composerScopeRef.current,
         getController: () => commandControllerRef.current,
-        isPending: () => commandPendingRef.current,
-        setPending: setCommandPending,
-        sendMessage: () => onSendMessage(),
+        isPending: (scope) => composerWorkspaces.isPending(scope),
+        setPending: (scope, value) => {
+          const operations = commandOperationsRef.current;
+          if (value) {
+            operations.set(scope, composerWorkspaces.beginOperation(scope));
+            return;
+          }
+          composerWorkspaces.endOperation(operations.get(scope));
+          operations.delete(scope);
+        },
+        sendMessage: () => onSendMessageRef.current(),
         log: renderLog,
       }),
-    [onSendMessage]
+    []
   );
 
   // Computed once and handed to BOTH the transcript and the dock: a review or
@@ -3446,12 +3489,13 @@ function RemoteThreadPanel({
               controllerRef: commandControllerRef,
               input: commandInput,
               options: composerCommandsModel,
+              scope: composerScope,
             })
           : null,
         textareaRef: setCommandInput,
         // Frozen the way the desktop freezes a submit: the field the command is
         // about to rewrite must not be edited while the relay is still working.
-        sendPending: composerModel.sendPending || commandPending,
+        sendPending: composerModel.sendPending,
         actionsBeforeSend: session?.active_thread_id
           && (!session?.view_only || session?.settings_writable)
           ? h(SessionSettingsButton, {

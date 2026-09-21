@@ -78,6 +78,10 @@ import {
   detectDeferredThreadPromotion,
   shouldRebindPinnedViewOnPromotion,
 } from "../shared/thread-promotion.js";
+import {
+  composerWorkspaceKey,
+  getComposerWorkspaceStore,
+} from "../shared/composer-workspace.js";
 import { resolveOutgoingEffort } from "../shared/reasoning-efforts.js";
 import { buildNavigationThreadGroups } from "../shared/thread-groups.js";
 import {
@@ -264,6 +268,16 @@ function invalidateViewOnlyNavigation() {
 
 function remoteQueryScope() {
   return state.remoteAuth?.relayId || "unpaired";
+}
+
+// Same logical conversation, new public id. The composer's draft is filed under the
+// thread id, so without this it is stranded under one that no longer exists.
+function retargetComposerWorkspace(promotion) {
+  const relayId = state.remoteAuth?.relayId || null;
+  getComposerWorkspaceStore().rekey(
+    composerWorkspaceKey({ relayId, threadId: promotion.from }),
+    composerWorkspaceKey({ relayId, threadId: promotion.to })
+  );
 }
 
 // See the local surface's copy: `gcTime: Infinity` keeps every past run's pages, and
@@ -978,6 +992,7 @@ export function applySessionSnapshot(snapshot) {
     nextThreadPromotedFrom: snapshot?.active_thread_promoted_from || null,
   });
   if (inboundPromotion) {
+    retargetComposerWorkspace(inboundPromotion);
     // One-shot scroll-bookkeeping alias for the transcript pane (it clears it
     // after rekeying).
     state.promotedThreadAlias = inboundPromotion;
@@ -2041,6 +2056,7 @@ export async function sendMessage(messageDraft, effort, model = "") {
       // it's a promotion; a pending→other-id transition seen by the pane alone
       // could also be the user switching threads.
       state.promotedThreadAlias = { from: threadId, to: promotedThreadId };
+      retargetComposerWorkspace({ from: threadId, to: promotedThreadId });
       clearTranscriptHydration(state);
       applyRenderedSession(state.realSession);
     }
