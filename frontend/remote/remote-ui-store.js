@@ -31,7 +31,11 @@ export function createDefaultSessionDraft(provider = "codex") {
 
 export function createRemoteUiStore(initialState = {}) {
   return createStore((set, get) => ({
-    composerDraft: "",
+    // The draft and the send freeze are NOT here. Both are per thread (and per relay)
+    // and live in shared/composer-workspace.js: a scalar slot here meant switching
+    // sessions took the draft with it and one send froze every composer at once.
+    // Effort and model stay, because they are the SESSION's settings, not unsent state.
+    //
     // Empty = "this surface hasn't overridden the session's effort". Readers
     // fall back to session.reasoning_effort, so opening a session on a new
     // device shows/sends its real effort instead of a hardcoded medium.
@@ -67,7 +71,6 @@ export function createRemoteUiStore(initialState = {}) {
     pushSupported: pushSupported(),
     pushPermission: notificationPermission(),
     pushSubscribed: false,
-    sendPending: false,
     // Thread ids whose Stop was asked but whose turn has not idled yet. A single
     // boolean used to live here and was reconciled against whichever session was
     // on screen — stopping A then opening idle B cleared it, so returning to A
@@ -80,19 +83,9 @@ export function createRemoteUiStore(initialState = {}) {
     sessionPanelOpen: false,
     sessionStartPending: false,
     ...initialState,
-    clearComposerDraft() {
-      set({
-        composerDraft: "",
-      });
-    },
     resetPairingInput() {
       set({
         pairingInputValue: "",
-      });
-    },
-    setComposerDraft(value) {
-      set({
-        composerDraft: value || "",
       });
     },
     setComposerEffort(value) {
@@ -201,11 +194,6 @@ export function createRemoteUiStore(initialState = {}) {
     setPushSubscribed(value) {
       set({
         pushSubscribed: Boolean(value),
-      });
-    },
-    setSendPending(value) {
-      set({
-        sendPending: Boolean(value),
       });
     },
     markStopPending(threadId, turnMarker = true) {

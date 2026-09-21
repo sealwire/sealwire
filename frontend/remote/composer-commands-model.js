@@ -6,6 +6,7 @@ import { createHeldWriter } from "../shared/composer-held-writer.js";
 export function createComposerCommandsModel({
   getCatalog,
   getContext,
+  getScope,
   requestReview,
   hold,
   clearError,
@@ -15,6 +16,9 @@ export function createComposerCommandsModel({
   return {
     getCatalog,
     getContext,
+    // Never absent: without a scope the controller files every thread's pills in one
+    // slot, and a command finishing late rewrites whatever composer is on screen.
+    getScope: getScope || (() => ""),
     requestReview,
     // What a command stopped itself. On this surface the log is `display: none` with
     // nothing to open it, so without this the refusal has nowhere at all to land — and it

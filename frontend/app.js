@@ -199,6 +199,11 @@ import { createGoalAuthor } from "./local/goal-authoring.js";
 import { recordComposerError, syncComposerError } from "./local/composer-error.js";
 import { recordComposerHeld, syncComposerHeld } from "./local/composer-held.js";
 import { createHeldWriter } from "./shared/composer-held-writer.js";
+import {
+  composerWorkspaceKey,
+  getComposerWorkspaceStore,
+} from "./shared/composer-workspace.js";
+import { createComposerWorkspaceBinding } from "./local/composer-workspace-binding.js";
 import { composerHeld } from "./local/dom.js";
 import {
   beginLocalGoalAction,
@@ -423,10 +428,8 @@ const state = {
   // which no session snapshot carries — and read by the control banner, which turns
   // into the repair action instead of a take-over the user cannot use.
   workspaceRepairByThread: new Map(),
-  // True while a composer submit is in flight.
-  // Freezes the composer and rejects re-entry so a draft edit / navigation /
-  // double-submit during the async request can't change or duplicate the send.
-  composerSubmitInFlight: false,
+  // `composerSubmitInFlight` is NOT a field: it is defined below as a getter over the
+  // submitting thread's own scope, so one session's send cannot freeze another's.
   // Thread ids whose Stop has been asked but whose turn has not idled yet.
   // Cleared on idle (or on a refused ask). Keeps the button saying Stopping…
   // and refusing another click across the gap between HTTP return and settle.
@@ -572,6 +575,60 @@ Object.defineProperty(state, "viewThreadId", {
   },
 });
 
+// One textarea and one attachment strip serve every thread, so which thread's unsent
+// state they hold has to be swapped, not shared. See shared/composer-workspace.js.
+const composerWorkspaces = getComposerWorkspaceStore();
+// Assigned where the "/" controller is built, far below. Only read when the composer
+// changes hands, which cannot happen before boot finishes this module.
+let composerCommandController = null;
+
+function composerScopeKey() {
+  return composerWorkspaceKey({
+    threadId: state.viewThreadId || state.session?.active_thread_id || null,
+  });
+}
+
+const composerWorkspace = createComposerWorkspaceBinding({
+  workspaces: composerWorkspaces,
+  getScopeKey: composerScopeKey,
+  getText: () => messageInput?.value || "",
+  setText: (value) => {
+    if (messageInput) messageInput.value = value;
+  },
+  getImageAttachments: () => state.composerImageAttachments,
+  setImageAttachments: (value) => {
+    state.composerImageAttachments = value;
+  },
+  // The two things that live outside the box but belong to the same thread.
+  onRestore: (key) => {
+    renderComposerImageAttachments();
+    composerCommandController?.syncScope?.(key);
+  },
+});
+
+function syncComposerWorkspace() {
+  return composerWorkspace.sync();
+}
+
+// Per thread on purpose: a send still out on the session you left must not freeze the
+// one you just opened, and going back to it must still find it frozen. Through the
+// binding, not the raw key, so it agrees with the box during a promotion's route gap.
+Object.defineProperty(state, "composerSubmitInFlight", {
+  configurable: false,
+  enumerable: true,
+  get() {
+    return composerWorkspaces.isPending(composerWorkspace.resolveScope());
+  },
+});
+
+// Same logical conversation, new public id (deferred Claude threads). Called from
+// lifecycle.js's promotion detection, which is where the lineage arrives.
+state.retargetComposerWorkspace = (fromThreadId, toThreadId) =>
+  composerWorkspace.retarget(
+    composerWorkspaceKey({ threadId: fromThreadId }),
+    composerWorkspaceKey({ threadId: toThreadId })
+  );
+
 const sessionViewController = createSessionViewController({
   store: sessionViewStore,
   historyAdapter: createBrowserSessionViewHistoryAdapter(window),
@@ -592,7 +649,9 @@ const sessionViewController = createSessionViewController({
   onCommit(change) {
     syncThreadListViewFromContext(change.next.location.context);
     if (change.locationChanged) {
-      clearComposerImageAttachments();
+      // Hand the box to whichever thread is now on screen. Clearing it here is what
+      // used to make a pasted screenshot disappear for the sin of looking elsewhere.
+      syncComposerWorkspace();
     }
   },
   onError(error, details) {
@@ -1375,6 +1434,10 @@ renderer.renderSession = function wrappedRenderSession(session) {
   // sets it again (idempotent).
   state.session = session;
   maybeRefreshViewOnly(session);
+  // The active thread can also change WITHOUT a navigation — another device switches the
+  // relay, a promotion lands — and the composer has to follow it or the next keystroke
+  // lands in the previous thread's draft. A no-op when the scope is unchanged.
+  syncComposerWorkspace();
   _baseRenderSession(session);
   syncVerbTimer(session);
   if (viewedThreadWasLive) {
@@ -2623,12 +2686,6 @@ function renderComposerImageAttachments() {
   }
 }
 
-function clearComposerImageAttachments() {
-  if (state.composerImageAttachments.length === 0) return;
-  state.composerImageAttachments = [];
-  renderComposerImageAttachments();
-}
-
 function renderNewSessionImageAttachments() {
   // Resolved live: the mount ships with the dialog, so a module-level query is null.
   const mount = document.getElementById("start-prompt-attachments");
@@ -2866,6 +2923,11 @@ const reviewAuthor = createReviewAuthor({
 const composerCommands = createComposerCommandController({
   input: messageInput,
   mount: composerCommandMount,
+  // Pills are per thread, and a command still out when the user moves on must rewrite
+  // the thread it was staged on rather than the box now on screen. Same resolution the
+  // box uses, so the pills can never be a different thread's from the text beside them.
+  workspaces: composerWorkspaces,
+  getScope: () => composerWorkspace.resolveScope(),
   getCatalog: () => ({
     providers: state.providers || [],
     models: composerCommandLaunchModel().models,
@@ -2907,6 +2969,7 @@ const composerCommands = createComposerCommandController({
   ),
   log: logLine,
 });
+composerCommandController = composerCommands;
 
 // A refusal comes back 200 + `isError`, so only a transport failure is an error here. A
 // function declaration: the reviewer actions above are built before this line runs.
@@ -2984,12 +3047,16 @@ function postSessionGoalFromComposer(threadId, objective) {
   return goalAuthor(threadId, objective);
 }
 
-// Drive a composer submit. The draft text and the target thread are captured
-// synchronously at submit time and the composer is frozen, so a draft edit /
-// navigation / second submit during the async send can't change or duplicate it.
+// Drive a composer submit. The draft text, the attachments, the target thread AND the
+// composer scope are captured synchronously at submit time, so a draft edit / navigation
+// / second submit during the async send can't change or duplicate it — and, since the
+// freeze and the clear are both filed against that captured scope, cannot reach into the
+// session the user moved on to either.
 // The send carries the target thread id; the relay starts the turn directly on
 // that thread and moves control after success.
 async function runComposerSubmit() {
+  syncComposerWorkspace();
+  const scope = composerWorkspace.scope();
   const text = messageInput.value;
   const imageAttachments = state.composerImageAttachments.slice();
   const pin = state.viewOnlyThread;
@@ -3005,12 +3072,12 @@ async function runComposerSubmit() {
   // provider verbatim. That is what keeps a user's own .claude/commands/* working.
   const running = composerCommands.submit();
   if (running) {
-    state.composerSubmitInFlight = true;
+    const operationId = composerWorkspaces.beginOperation(scope);
     if (state.session) renderer.renderSession(state.session);
     try {
       await running;
     } finally {
-      state.composerSubmitInFlight = false;
+      composerWorkspaces.endOperation(operationId);
       if (state.session) renderer.renderSession(state.session);
     }
     return;
@@ -3028,7 +3095,7 @@ async function runComposerSubmit() {
   if (targetThreadId) {
     void sessionViewController.promoteThread(targetThreadId);
   }
-  state.composerSubmitInFlight = true;
+  const operationId = composerWorkspaces.beginOperation(scope);
   renderComposerImageAttachments();
   if (state.session) renderer.renderSession(state.session); // freeze the composer
   try {
@@ -3039,15 +3106,18 @@ async function runComposerSubmit() {
     );
     const sent = await sendMessage(text, targetThreadId, images);
     if (sent) {
-      const sentIds = new Set(imageAttachments.map((attachment) => attachment.id));
-      state.composerImageAttachments = state.composerImageAttachments.filter(
-        (attachment) => !sentIds.has(attachment.id)
-      );
+      // Only what this send actually consumed, and only on the thread it was sent
+      // from — the user may be mid-sentence in another session by now, and a deferred
+      // Claude thread has been RENAMED by this very send. The token knows both.
+      composerWorkspace.clearSubmitted(operationId, {
+        text,
+        attachmentIds: imageAttachments.map((attachment) => attachment.id),
+      });
     }
   } catch (error) {
     logLine(`Image attachment failed: ${error.message}`);
   } finally {
-    state.composerSubmitInFlight = false;
+    composerWorkspaces.endOperation(operationId);
     renderComposerImageAttachments();
     if (state.session) renderer.renderSession(state.session); // unfreeze
   }
@@ -4535,6 +4605,7 @@ async function archiveThreadFromContextMenu() {
     // A tab pointing at a deleted session is dead — drop it before re-rendering.
     state.removedThreadIds.add(threadId);
     rememberRemovedThreadId(threadId);
+    composerWorkspace.discard(composerWorkspaceKey({ threadId }));
     const removal = await sessionViewController.removeThread(threadId);
     if (
       wasViewed
@@ -4629,6 +4700,7 @@ async function deleteThreadBatch(threadIds) {
       dropThreadFromSearchResults(threadId);
       state.removedThreadIds.add(threadId);
       rememberRemovedThreadId(threadId);
+      composerWorkspace.discard(composerWorkspaceKey({ threadId }));
       const removal = await sessionViewController.removeThread(threadId);
       if (threadId === viewedThreadId) {
         viewedRemoval = removal;
@@ -4752,6 +4824,7 @@ async function deleteThreadFromContextMenu() {
     // A tab pointing at a deleted session is dead — drop it before re-rendering.
     state.removedThreadIds.add(threadId);
     rememberRemovedThreadId(threadId);
+    composerWorkspace.discard(composerWorkspaceKey({ threadId }));
     const removal = await sessionViewController.removeThread(threadId);
     if (
       wasViewed

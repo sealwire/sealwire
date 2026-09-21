@@ -1,4 +1,5 @@
 import { replaceRemoteIdentity } from "./identity-change.js";
+import { getComposerWorkspaceStore } from "../shared/composer-workspace.js";
 import {
   clearPairingQueryFromUrl,
   decryptJson,
@@ -382,6 +383,9 @@ export function forgetCurrentDevice() {
   const room = state.remoteAuth?.brokerChannelId || null;
   const allowLegacyFallback = !hasSiblingOnBroker(brokerUrl, relayId);
   cancelDeviceRefreshesForRelay(relayId);
+  // Unlike a relay SWITCH, the credentials are gone: nothing can reach these threads
+  // again, so their half-typed messages are unreachable rather than merely elsewhere.
+  getComposerWorkspaceStore().forgetRelay(relayId);
   applyRemoteSurfacePatch(createPairingStatePatch({
     pairingError: null,
     pairingPhase: null,

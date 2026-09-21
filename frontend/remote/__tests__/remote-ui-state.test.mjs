@@ -52,7 +52,6 @@ test("remote UI store updates session, composer, pairing, and modal state locall
 
   store.getState().setSessionDraftField("cwd", "/tmp/project");
   store.getState().setSessionPanelOpen(true);
-  store.getState().setComposerDraft("hello");
   store.getState().setComposerEffort("high");
   store.getState().setComposerModel("gpt-5.5");
   store.getState().setDeviceLabelDraft("iPad");
@@ -63,7 +62,6 @@ test("remote UI store updates session, composer, pairing, and modal state locall
   const state = store.getState();
   assert.equal(state.sessionDraft.cwd, "/tmp/project");
   assert.equal(state.sessionPanelOpen, true);
-  assert.equal(state.composerDraft, "hello");
   assert.equal(state.composerEffort, "high");
   assert.equal(state.composerModel, "gpt-5.5");
   assert.equal(state.deviceLabelDraft, "iPad");
@@ -78,11 +76,9 @@ test("remote UI store tracks async pending state", () => {
   });
 
   store.getState().setSessionStartPending(true);
-  store.getState().setSendPending(true);
   store.getState().markStopPending("thread-a");
 
   assert.equal(store.getState().sessionStartPending, true);
-  assert.equal(store.getState().sendPending, true);
   assert.equal(store.getState().stopPendingByThread["thread-a"], true);
   store.getState().reconcileStopPendingForThread("thread-b", false);
   assert.equal(

@@ -9,6 +9,9 @@ const h = React.createElement;
 export const CONTROLLER_CAPABILITIES = [
   "getCatalog",
   "getContext",
+  // Which thread the box belongs to right now. Forwarded live like the rest, because a
+  // controller built once per textarea outlives every session switch under it.
+  "getScope",
   "askAgent",
   "setGoal",
   "requestReview",
@@ -36,7 +39,7 @@ export function attachComposerCommands({
   };
 }
 
-export function ComposerCommandHost({ controllerRef, input, options }) {
+export function ComposerCommandHost({ controllerRef, input, options, scope = "" }) {
   const mountRef = useRef(null);
   // The controller is built once per textarea but reads the catalog, the context
   // and the capabilities on every keystroke, and those change on every render.
@@ -63,6 +66,13 @@ export function ComposerCommandHost({ controllerRef, input, options }) {
       release();
     };
   }, [controllerRef, input]);
+
+  // The controller is built once per textarea and outlives every session switch under
+  // it, so the switch has to be told: otherwise it keeps showing the pills of a thread
+  // that is no longer on screen.
+  useEffect(() => {
+    controllerRef?.current?.syncScope?.(scope);
+  }, [controllerRef, scope]);
 
   return h("div", { className: "composer-command-host", ref: mountRef });
 }
