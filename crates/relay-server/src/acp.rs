@@ -1403,6 +1403,7 @@ impl ProviderBridge for AcpBridge {
         self.apply_model(&session_id, model).await?;
 
         Ok(StartThreadResult {
+            provider_thread_id: Some(session_id.clone()),
             thread: ThreadSummaryView {
                 workspace_trusted: false,
                 id: session_id,

@@ -211,6 +211,72 @@ impl SessionBindingRegistry {
         self.bindings.get(session_id)
     }
 
+    pub(crate) fn bind_deferred(
+        &mut self,
+        session_id: &str,
+        provider: &str,
+        provider_handle: &str,
+    ) -> Result<(), SessionBindingError> {
+        self.bind(
+            session_id,
+            SessionBinding {
+                provider: provider.to_string(),
+                provider_handle: provider_handle.to_string(),
+                provider_thread_id: None,
+            },
+        )
+    }
+
+    /// Move a deferred session from its temporary bridge handle to the durable
+    /// provider id. The session id and every relay-owned key stay unchanged.
+    /// `Ok(None)` means no unmaterialized binding owns the pending handle. The
+    /// caller must still distinguish an already-materialized replay from a legacy
+    /// public-id promotion.
+    pub(crate) fn materialize_deferred(
+        &mut self,
+        provider: &str,
+        pending_handle: &str,
+        provider_thread_id: &str,
+    ) -> Result<Option<String>, SessionBindingError> {
+        let Some(session_id) = self
+            .session_for_provider_handle(provider, pending_handle)
+            .map(str::to_string)
+        else {
+            return Ok(None);
+        };
+        if self
+            .binding(&session_id)
+            .is_some_and(SessionBinding::is_materialized)
+        {
+            // A pre-Phase-3 identity binding may own a public pending id after a
+            // list/discovery pass. It still needs the legacy domain re-key path;
+            // only an explicitly deferred binding is materialized in place.
+            return Ok(None);
+        }
+        self.bind(
+            &session_id,
+            SessionBinding {
+                provider: provider.to_string(),
+                provider_handle: provider_thread_id.to_string(),
+                provider_thread_id: Some(provider_thread_id.to_string()),
+            },
+        )?;
+        Ok(Some(session_id))
+    }
+
+    /// Resolve a provider handle only when it belongs to a durable non-identity
+    /// binding. This is the replay shape for a stable deferred session after its
+    /// pending reverse key has already been replaced by the native provider id.
+    pub(crate) fn materialized_non_identity_session_for_provider_handle(
+        &self,
+        provider: &str,
+        provider_handle: &str,
+    ) -> Option<&str> {
+        let session_id = self.session_for_provider_handle(provider, provider_handle)?;
+        let binding = self.binding(session_id)?;
+        (binding.is_materialized() && !binding.is_identity_for(session_id)).then_some(session_id)
+    }
+
     pub(crate) fn resolve(&self, session_id: &str) -> Option<ResolvedProviderTarget> {
         let binding = self.bindings.get(session_id)?;
         Some(ResolvedProviderTarget {
@@ -451,6 +517,49 @@ mod tests {
             registry.reverse_len(),
             1,
             "a rebind that leaves its old reverse key behind leaks one entry per promotion",
+        );
+    }
+
+    #[test]
+    fn materializing_a_deferred_binding_is_atomic_on_handle_collision() {
+        let mut registry = SessionBindingRegistry::default();
+        registry
+            .bind_deferred("session-a", "claude_code", "claude-pending-1")
+            .expect("deferred bind");
+        registry
+            .bind_identity("claude_code", "real-sdk-id")
+            .expect("real id already owned");
+
+        assert!(registry
+            .materialize_deferred("claude_code", "claude-pending-1", "real-sdk-id")
+            .is_err());
+        assert_eq!(
+            registry.session_for_provider_handle("claude_code", "claude-pending-1"),
+            Some("session-a"),
+            "a refused rebind must leave the old route intact",
+        );
+        assert!(!registry
+            .binding("session-a")
+            .expect("binding survives")
+            .is_materialized());
+    }
+
+    #[test]
+    fn materialization_does_not_mistake_a_legacy_identity_binding_for_deferred_state() {
+        let mut registry = SessionBindingRegistry::default();
+        registry
+            .bind_identity("claude_code", "claude-pending-legacy")
+            .expect("legacy identity bind");
+
+        assert_eq!(
+            registry
+                .materialize_deferred("claude_code", "claude-pending-legacy", "real-sdk-id",)
+                .expect("legacy fallback is not an error"),
+            None,
+        );
+        assert_eq!(
+            registry.session_for_provider_handle("claude_code", "claude-pending-legacy"),
+            Some("claude-pending-legacy"),
         );
     }
 

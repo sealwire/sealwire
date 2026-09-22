@@ -1515,6 +1515,11 @@ impl RelayState {
             .unwrap_or_else(|| thread_id.to_string())
     }
 
+    #[cfg(test)]
+    pub(crate) fn legacy_thread_promotion_count(&self) -> usize {
+        self.thread_promoted_from.len()
+    }
+
     /// How many sessions currently carry a user-chosen title (the persisted map's size,
     /// for the caller's entry-count bound).
     pub(crate) fn custom_thread_name_count(&self) -> usize {
@@ -4853,7 +4858,7 @@ impl RelayState {
         self.orchestrator_thread_id = persisted
             .orchestrator_thread_id
             .clone()
-            .filter(|id| !id.starts_with("claude-pending-"));
+            .filter(|id| self.session_is_materialized(id));
         self.orchestrator_device_id = persisted.orchestrator_device_id.clone();
         self.orchestrator_system_prompt = persisted.orchestrator_system_prompt.clone();
         self.orchestrator_system_prompt_version = persisted.orchestrator_system_prompt_version;
@@ -5394,6 +5399,67 @@ impl RelayState {
             .adopt_provider_handle(provider, &summary.id)?;
         identity.canonicalize_summary(summary);
         Ok(identity)
+    }
+
+    /// Adopt a provider start whose bridge handle exists before its native
+    /// provider thread. The generated id is relay-owned and is the only value
+    /// allowed into summaries, runtimes, and domain records.
+    pub(crate) fn adopt_deferred_provider_summary(
+        &mut self,
+        provider: &str,
+        summary: &mut ThreadSummaryView,
+    ) -> Result<crate::provider::AdoptedProviderSession, SessionBindingError> {
+        let provider_handle = summary.id.clone();
+        let session_id = loop {
+            let candidate = format!("session-{}", super::new_uuid_v4());
+            if self.session_bindings.binding(&candidate).is_none() {
+                break candidate;
+            }
+        };
+        self.session_bindings
+            .bind_deferred(&session_id, provider, &provider_handle)?;
+        let identity = crate::provider::AdoptedProviderSession {
+            provider: provider.to_string(),
+            provider_handle,
+            session_id,
+        };
+        identity.canonicalize_summary(summary);
+        Ok(identity)
+    }
+
+    /// Bind a `session_started` SDK id to the session that owns its pending
+    /// bridge handle. The registry updates both indexes in one mutation.
+    pub(crate) fn materialize_deferred_session_binding(
+        &mut self,
+        provider: &str,
+        pending_handle: &str,
+        provider_thread_id: &str,
+    ) -> Result<Option<String>, SessionBindingError> {
+        self.session_bindings
+            .materialize_deferred(provider, pending_handle, provider_thread_id)
+    }
+
+    /// Recognize a replayed materialization event through the provider's real
+    /// handle, after the pending reverse route has already been removed.
+    pub(crate) fn materialized_non_identity_session_for_provider_handle(
+        &self,
+        provider: &str,
+        provider_handle: &str,
+    ) -> Option<String> {
+        self.session_bindings
+            .materialized_non_identity_session_for_provider_handle(provider, provider_handle)
+            .map(str::to_string)
+    }
+
+    /// Whether a relay session has a durable provider thread behind it.
+    ///
+    /// An unbound id is historical identity state and therefore materialized,
+    /// except for the old public Claude placeholder shape retained until Phase 4.
+    pub(crate) fn session_is_materialized(&self, session_id: &str) -> bool {
+        self.session_bindings
+            .binding(session_id)
+            .map(SessionBinding::is_materialized)
+            .unwrap_or_else(|| !session_id.starts_with("claude-pending-"))
     }
 
     pub(super) fn persistable_session_bindings(&self) -> HashMap<String, SessionBinding> {
@@ -6290,7 +6356,7 @@ impl RelayState {
         self.orchestrator_thread_id = persisted
             .orchestrator_thread_id
             .clone()
-            .filter(|id| !id.starts_with("claude-pending-"));
+            .filter(|id| self.session_is_materialized(id));
         self.orchestrator_device_id = persisted.orchestrator_device_id.clone();
         self.orchestrator_system_prompt = persisted.orchestrator_system_prompt.clone();
         self.orchestrator_system_prompt_version = persisted.orchestrator_system_prompt_version;
@@ -7489,6 +7555,191 @@ mod tests {
         run.tl_thread_id = "tl-1".to_string();
         run.status = status;
         run
+    }
+
+    #[test]
+    fn materializing_a_deferred_binding_rekeys_no_relay_domain_reference() {
+        use crate::state::{ApprovalKind, Ask, Goal, PendingApproval, PendingAskUserQuestion};
+
+        let mut relay = test_relay();
+        let pending_handle = "claude-pending-domain-1";
+        let real_handle = "claude-sdk-domain-1";
+        let mut summary = test_thread(pending_handle, "/tmp/project");
+        summary.provider = "claude_code".to_string();
+        summary.source = "claude_code".to_string();
+        let stable_id = relay
+            .adopt_deferred_provider_summary("claude_code", &mut summary)
+            .expect("deferred adoption")
+            .session_id;
+        relay.activate_thread(
+            summary,
+            "/tmp/project",
+            "sonnet",
+            "never",
+            "workspace-write",
+            "medium",
+            "device-1",
+        );
+
+        relay.create_project("project-1".to_string(), "Project".to_string());
+        relay
+            .assign_thread_to_project(&stable_id, "project-1")
+            .expect("project assignment");
+        relay.set_thread_custom_name(&stable_id, Some("Stable title".to_string()));
+        relay.set_thread_flag(&stable_id, true);
+        relay.set_thread_workspace(&stable_id, Some("/tmp/project"));
+        relay.set_goal(Goal::new(
+            "goal-1".to_string(),
+            stable_id.clone(),
+            "keep the id".to_string(),
+        ));
+        relay.insert_ask(Ask::new(
+            "ask-1".to_string(),
+            stable_id.clone(),
+            stable_id.clone(),
+            "claude_code".to_string(),
+            None,
+            None,
+            "check identity".to_string(),
+            "/tmp/project".to_string(),
+            None,
+            relay_api::delegation::StartedBy::Agent,
+        ));
+        let ask_token = relay.ask_token_for_thread(&stable_id);
+
+        let mut review = ReviewJob::new(
+            "review-1".to_string(),
+            stable_id.clone(),
+            "claude_code".to_string(),
+            "claude_code".to_string(),
+            None,
+            ReviewMode::CleanThread,
+            "/tmp/project".to_string(),
+            "device-1".to_string(),
+            relay_api::delegation::StartedBy::Person,
+            None,
+            1,
+        );
+        review.reviewer_thread_id = Some(stable_id.clone());
+        relay.insert_review_job(review);
+        relay.register_reviewer_thread(stable_id.clone(), stable_id.clone());
+
+        let mut workflow = WorkflowRun::new(
+            "workflow-1".to_string(),
+            "code-flow".to_string(),
+            stable_id.clone(),
+            "anchor-1".to_string(),
+            "/tmp/project".to_string(),
+            "device-1".to_string(),
+        );
+        workflow
+            .step_threads
+            .insert("review".to_string(), stable_id.clone());
+        relay.insert_workflow_run(workflow);
+        let mut team = team_run_with_status("team-1", TeamRunStatus::Running);
+        team.tl_thread_id = stable_id.clone();
+        relay.insert_team_run(team);
+        relay.orchestrator_thread_id = Some(stable_id.clone());
+
+        relay.add_pending_approval(PendingApproval {
+            request_id: "approval-1".to_string(),
+            raw_request_id: serde_json::json!("approval-1"),
+            kind: ApprovalKind::Command,
+            thread_id: stable_id.clone(),
+            summary: "true".to_string(),
+            detail: None,
+            command: Some("true".to_string()),
+            cwd: Some("/tmp/project".to_string()),
+            context_preview: None,
+            requested_permissions: None,
+            available_decisions: vec!["approve".to_string(), "deny".to_string()],
+            supports_session_scope: false,
+        });
+        relay.add_pending_ask_user_question(PendingAskUserQuestion {
+            request_id: "question-1".to_string(),
+            tool_use_id: "tool-1".to_string(),
+            thread_id: stable_id.clone(),
+            requested_at: 1,
+            arrival_seq: 0,
+            questions: Vec::new(),
+        });
+        relay.set_watched_threads("surface-1", "device-1", vec![stable_id.clone()]);
+        relay.focus_thread_runtime(&stable_id, "device-1");
+
+        assert_eq!(
+            relay
+                .materialize_deferred_session_binding("claude_code", pending_handle, real_handle,)
+                .expect("binding update"),
+            Some(stable_id.clone()),
+        );
+
+        assert_eq!(relay.active_thread_id.as_deref(), Some(stable_id.as_str()));
+        assert!(relay.runtime_for_thread(&stable_id).is_some());
+        assert!(relay.runtime_for_thread(pending_handle).is_none());
+        assert!(relay.runtime_for_thread(real_handle).is_none());
+        assert!(relay.threads.iter().any(|thread| thread.id == stable_id));
+        assert_eq!(
+            relay
+                .project_for_thread(&stable_id)
+                .map(|project| project.id.as_str()),
+            Some("project-1"),
+        );
+        assert_eq!(
+            relay.thread_custom_name(&stable_id).as_deref(),
+            Some("Stable title")
+        );
+        assert!(relay.thread_flagged(&stable_id));
+        assert_eq!(
+            relay.thread_workspace(&stable_id).pinned.as_deref(),
+            Some("/tmp/project"),
+        );
+        assert_eq!(
+            relay
+                .goal_for_thread(&stable_id)
+                .map(|goal| goal.thread_id.as_str()),
+            Some(stable_id.as_str()),
+        );
+        assert_eq!(relay.asks_of_asker(&stable_id).len(), 1);
+        assert_eq!(
+            relay.thread_for_ask_token(&ask_token).as_deref(),
+            Some(stable_id.as_str())
+        );
+        let review = relay.review_job("review-1").expect("review");
+        assert_eq!(review.parent_thread_id, stable_id);
+        assert_eq!(
+            review.reviewer_thread_id.as_deref(),
+            Some(stable_id.as_str())
+        );
+        assert_eq!(
+            relay
+                .reviewer_threads
+                .get(&stable_id)
+                .map(|record| record.parent_thread_id.as_str()),
+            Some(stable_id.as_str()),
+        );
+        let workflow = relay.workflow_run("workflow-1").expect("workflow");
+        assert_eq!(workflow.parent_thread_id, stable_id);
+        assert_eq!(workflow.step_threads.get("review"), Some(&stable_id));
+        assert_eq!(relay.team_run("team-1").unwrap().tl_thread_id, stable_id);
+        assert_eq!(
+            relay.orchestrator_thread_id.as_deref(),
+            Some(stable_id.as_str())
+        );
+        assert_eq!(relay.pending_approvals["approval-1"].thread_id, stable_id,);
+        assert_eq!(
+            relay.pending_ask_user_questions["question-1"].thread_id,
+            stable_id,
+        );
+        assert!(relay.device_watches_thread("device-1", &stable_id));
+        assert_eq!(
+            relay
+                .resolve_session_target(&stable_id)
+                .expect("materialized target")
+                .provider_handle,
+            real_handle,
+        );
+        assert!(relay.snapshot().active_thread_promoted_from.is_none());
+        assert!(relay.thread_promoted_from.is_empty());
     }
 
     fn cloud_backend() -> relay_api::orchestration::OrchestrationBackendRef {
@@ -9180,6 +9431,53 @@ mod tests {
                 .is_none(),
             "the session id is not a provider handle and must not route as one",
         );
+    }
+
+    #[test]
+    fn an_unmaterialized_stable_session_is_cleanly_dropped_on_restart() {
+        let mut relay = test_relay();
+        let mut summary = provider_row("claude-pending-unsent", "claude_code");
+        let stable_id = relay
+            .adopt_deferred_provider_summary("claude_code", &mut summary)
+            .expect("deferred adoption")
+            .session_id;
+        relay.activate_thread(
+            summary,
+            "/tmp/project",
+            "sonnet",
+            "never",
+            "workspace-write",
+            "medium",
+            "device-1",
+        );
+        relay.create_project("project-1".to_string(), "Project".to_string());
+        relay
+            .assign_thread_to_project(&stable_id, "project-1")
+            .expect("project assignment");
+        relay.set_thread_custom_name(&stable_id, Some("Unsent".to_string()));
+        relay.set_thread_flag(&stable_id, true);
+        relay.set_thread_workspace(&stable_id, Some("/tmp/project"));
+        relay.orchestrator_thread_id = Some(stable_id.clone());
+
+        let persisted = reload(&PersistedRelayState::from_relay(&relay));
+        assert!(persisted.active_thread_id.is_none());
+        assert!(persisted.session_bindings.is_empty());
+        assert!(!persisted.thread_settings.contains_key(&stable_id));
+        assert!(!persisted.thread_project_id.contains_key(&stable_id));
+        assert!(!persisted.thread_custom_name.contains_key(&stable_id));
+        assert!(!persisted.thread_flagged.contains(&stable_id));
+        assert!(!persisted.thread_workspace.contains_key(&stable_id));
+        assert!(persisted.orchestrator_thread_id.is_none());
+
+        let mut restored = test_relay();
+        restored.apply_persisted(&persisted);
+        assert!(restored.active_thread_id.is_none());
+        assert!(restored.resolve_session_target(&stable_id).is_none());
+        assert!(restored
+            .session_for_provider_handle("claude_code", "claude-pending-unsent")
+            .is_none());
+        assert!(restored.thread_custom_name(&stable_id).is_none());
+        assert!(!restored.thread_flagged(&stable_id));
     }
 
     // A deep search scans a thousand rows per provider. Writing a binding for each

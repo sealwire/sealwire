@@ -6182,6 +6182,7 @@ tree; got {}",
             let consumed_initial_prompt =
                 initial_prompt.is_some() && self.consumes_initial_prompt.load(Ordering::Relaxed);
             Ok(crate::provider::StartThreadResult {
+                provider_thread_id: Some(thread.id.clone()),
                 thread,
                 consumed_initial_prompt,
                 initial_user_message: None,
@@ -6205,6 +6206,7 @@ tree; got {}",
             let thread = self.thread_summary(&id, &request.cwd);
             threads.insert(id, thread.clone());
             Ok(Some(crate::provider::StartThreadResult {
+                provider_thread_id: Some(thread.id.clone()),
                 thread,
                 consumed_initial_prompt: false,
                 initial_user_message: None,
@@ -9438,6 +9440,7 @@ tree; got {}",
                 self.running.lock().unwrap().insert(id.clone());
             }
             Ok(StartThreadResult {
+                provider_thread_id: Some(thread.id.clone()),
                 thread,
                 consumed_initial_prompt: initial_prompt.is_some(),
                 initial_user_message: None,
@@ -9709,6 +9712,7 @@ tree; got {}",
             }
 
             Ok(crate::provider::StartThreadResult {
+                provider_thread_id: Some(thread.id.clone()),
                 thread,
                 consumed_initial_prompt: initial_prompt.is_some(),
                 started_turn_id: initial_user_message
@@ -12998,6 +13002,7 @@ tree; got {}",
             };
             self.threads.lock().await.insert(id, thread.clone());
             Ok(crate::provider::StartThreadResult {
+                provider_thread_id: Some(thread.id.clone()),
                 thread,
                 consumed_initial_prompt: false,
                 initial_user_message: None,
@@ -14205,9 +14210,9 @@ mod review_tests {
     use super::super::*;
     use super::require_live_test_cwd;
     use crate::protocol::{
-        ModelOptionView, RequestReviewInput, SendMessageInput, StartSessionInput,
-        StartWorkflowInput, StopTurnInput, TakeOverInput, ThreadSummaryView, TranscriptEntryKind,
-        TranscriptEntryView, UpdateSessionSettingsInput, WorkflowActionInput,
+        ModelOptionView, RequestReviewInput, SendMessageInput, StartWorkflowInput, StopTurnInput,
+        TakeOverInput, ThreadSummaryView, TranscriptEntryKind, TranscriptEntryView,
+        UpdateSessionSettingsInput, WorkflowActionInput,
     };
     use crate::state::security::SecurityProfile;
     use crate::state::TurnFailureKind;
@@ -14765,6 +14770,7 @@ mod review_tests {
                 sandbox.to_string(),
             ));
             Ok(crate::provider::StartThreadResult {
+                provider_thread_id: Some(thread.id.clone()),
                 thread,
                 consumed_initial_prompt: false,
                 initial_user_message: None,
@@ -25876,6 +25882,7 @@ mod late_catalog_tests {
                 .await
                 .insert(thread.id.clone(), thread.clone());
             Ok(crate::provider::StartThreadResult {
+                provider_thread_id: Some(thread.id.clone()),
                 thread,
                 consumed_initial_prompt: false,
                 initial_user_message: None,
@@ -28472,15 +28479,15 @@ watchdog settle this Blocked",
         );
     }
 
-    /// A never-used deferred-start session, and the ids its delegate must survive.
-    /// Returns `(placeholder, the id its first turn promotes it to)`.
+    /// A never-used deferred-start session and the provider id its first turn creates.
+    /// The returned relay id is stable across that materialization.
     async fn deferred_start_asker(
         app: &crate::state::AppState,
         bridge: &crate::fake_provider::FakeProviderBridge,
         cwd: &str,
     ) -> (String, String) {
         bridge.defer_next_start();
-        let pending = app
+        let stable = app
             .start_session(StartSessionInput {
                 cwd: Some(cwd.to_string()),
                 provider: Some("fake".to_string()),
@@ -28497,13 +28504,18 @@ watchdog settle this Blocked",
             .active_thread_id
             .clone()
             .expect("thread");
-        assert!(
-            pending.starts_with("claude-pending-"),
-            "the fixture is only the bug's shape while the asker has no session yet: {pending}"
-        );
-        let real = format!("{pending}-session");
-        bridge.promote_on_first_turn(&pending, &real).await;
-        (pending, real)
+        assert!(stable.starts_with("session-"), "stable relay id: {stable}");
+        let pending_handle = app
+            .relay
+            .read()
+            .await
+            .resolve_session_target(&stable)
+            .expect("deferred binding")
+            .provider_handle;
+        assert!(pending_handle.starts_with("claude-pending-"));
+        let real = format!("{pending_handle}-session");
+        bridge.promote_on_first_turn(&pending_handle, &real).await;
+        (stable, real)
     }
 
     /// Run the ask watchdog until `until` reads true, then stop. Giving up quietly is
@@ -28545,10 +28557,10 @@ watchdog settle this Blocked",
         let cwd = project.path().to_string_lossy().to_string();
         let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
         grant_workspace(&app, &cwd).await;
-        let (pending, real) = deferred_start_asker(&app, &bridge, &cwd).await;
+        let (stable, real) = deferred_start_asker(&app, &bridge, &cwd).await;
 
         app.ask_agent(
-            &pending,
+            &stable,
             AskRequest {
                 device_id: None,
                 started_by: relay_api::delegation::StartedBy::Person,
@@ -28564,18 +28576,15 @@ watchdog settle this Blocked",
 
         {
             let relay = app.relay.read().await;
-            assert!(
-                relay.asks_of_asker(&pending).is_empty(),
-                "the placeholder stopped routing when the brief promoted it",
-            );
             assert_eq!(
-                relay.asks_of_asker(&real).len(),
+                relay.asks_of_asker(&stable).len(),
                 1,
-                "the ask belongs to the session the brief created",
+                "the ask stays on the relay id it was accepted under",
             );
+            assert!(relay.asks_of_asker(&real).is_empty());
         }
 
-        sweep_asks(&app, |relay| was_handed_the_answers(relay, &real)).await;
+        sweep_asks(&app, |relay| was_handed_the_answers(relay, &stable)).await;
 
         let relay = app.relay.read().await;
         let ask = relay
@@ -28584,8 +28593,8 @@ watchdog settle this Blocked",
             .next()
             .expect("the delegate is on record");
         assert_eq!(
-            ask.asker_thread_id, real,
-            "every later write must name the session that is actually there",
+            ask.asker_thread_id, stable,
+            "every write must retain the asker's original relay id",
         );
         assert!(
             ask.delivered,
@@ -28593,8 +28602,8 @@ watchdog settle this Blocked",
             ask.error
         );
         assert!(
-            was_handed_the_answers(&relay, &real),
-            "the answer must reach the session that asked for it, not a retired id",
+            was_handed_the_answers(&relay, &stable),
+            "the answer must reach the same stable session that asked for it",
         );
     }
 
@@ -28607,11 +28616,11 @@ watchdog settle this Blocked",
         let cwd = project.path().to_string_lossy().to_string();
         let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
         grant_workspace(&app, &cwd).await;
-        let (pending, real) = deferred_start_asker(&app, &bridge, &cwd).await;
+        let (stable, real) = deferred_start_asker(&app, &bridge, &cwd).await;
 
         let ask_id = app
             .ask_agent_detached(
-                &pending,
+                &stable,
                 AskRequest {
                     device_id: None,
                     started_by: relay_api::delegation::StartedBy::Person,
@@ -28625,13 +28634,13 @@ watchdog settle this Blocked",
             .await
             .expect("the delegate is accepted");
 
-        sweep_asks(&app, |relay| was_handed_the_answers(relay, &real)).await;
+        sweep_asks(&app, |relay| was_handed_the_answers(relay, &stable)).await;
 
         let relay = app.relay.read().await;
         let ask = relay.ask(&ask_id).expect("still on record");
         assert_eq!(
-            ask.asker_thread_id, real,
-            "the brief's promotion must be carried onto the record it was accepted under",
+            ask.asker_thread_id, stable,
+            "the accepted record must retain the stable asker id",
         );
         assert!(
             ask.delivered,
@@ -28639,9 +28648,10 @@ watchdog settle this Blocked",
             ask.error
         );
         assert!(
-            was_handed_the_answers(&relay, &real),
+            was_handed_the_answers(&relay, &stable),
             "and the session that asked is the one that must be told",
         );
+        assert_ne!(stable, real);
     }
 
     // A delegate that has been accepted can still fail after its brief has created the
@@ -28656,11 +28666,11 @@ watchdog settle this Blocked",
         let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
         grant_workspace(&app, &cwd).await;
         pair_device(&app, "phone", vec![cwd.clone()]).await;
-        let (pending, real) = deferred_start_asker(&app, &bridge, &cwd).await;
+        let (stable, real) = deferred_start_asker(&app, &bridge, &cwd).await;
 
         let ask_id = app
             .ask_agent_detached(
-                &pending,
+                &stable,
                 AskRequest {
                     device_id: None,
                     started_by: relay_api::delegation::StartedBy::Person,
@@ -28690,8 +28700,8 @@ watchdog settle this Blocked",
             "an accepted delegate that cannot start its peer must settle as a failure",
         );
         assert_eq!(
-            ask.asker_thread_id, real,
-            "the failure belongs to the session the brief created",
+            ask.asker_thread_id, stable,
+            "the failure belongs to the unchanged relay session",
         );
         assert!(
             relay
@@ -28701,6 +28711,7 @@ watchdog settle this Blocked",
                 .any(|ask| ask.id == ask_id),
             "the phone that asked must be shown the failure, not filtered out of it",
         );
+        assert_ne!(stable, real);
     }
 
     // A delegate can fail inside the brief itself, and that brief is what created the
@@ -31666,12 +31677,12 @@ mod provider_call_boundary_tests {
             bridge.thread_ids_seen_by("start_turn").await,
             vec![handle.clone()],
         );
-        // The turn's own follow-up question to the provider — "which id did that turn
-        // actually land on?" — is asked about the handle, because that is the only
-        // string the provider can answer for.
-        assert_eq!(
-            bridge.thread_ids_seen_by("resolve_started_thread_id").await,
-            vec![handle.clone()],
+        assert!(
+            bridge
+                .thread_ids_seen_by("resolve_started_thread_id")
+                .await
+                .is_empty(),
+            "a stable relay id does not need the legacy public-id promotion query",
         );
         assert_eq!(
             snapshot.active_thread_id.as_deref(),
@@ -31689,11 +31700,10 @@ mod provider_call_boundary_tests {
         );
     }
 
-    // Phase 2a keeps deferred Claude's promotion exactly as it was: while the session
-    // id IS the handle, a provider that promotes mid-turn still moves the relay key.
-    // Only a session that already has its own id is held still.
+    // The central Phase-3 lifecycle. This deliberately uses three different ids:
+    // relay session, temporary bridge handle, and durable provider thread.
     #[tokio::test]
-    async fn an_identity_session_still_follows_a_provider_promotion() {
+    async fn a_deferred_session_keeps_one_public_id_through_streaming_and_refresh() {
         let project = TempDir::new().expect("tempdir");
         let cwd = project.path().to_string_lossy().to_string();
         let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
@@ -31715,9 +31725,21 @@ mod provider_call_boundary_tests {
             .expect("start")
             .active_thread_id
             .expect("a started session has a thread");
-        assert!(started.starts_with("claude-pending-"), "{started}");
+        assert!(started.starts_with("session-"), "{started}");
+        let pending_handle = {
+            let relay = app.relay.read().await;
+            let target = relay
+                .resolve_session_target(&started)
+                .expect("the deferred session has a binding");
+            assert_eq!(target.provider, "fake");
+            assert!(target.provider_handle.starts_with("claude-pending-"));
+            assert!(!relay.session_is_materialized(&started));
+            assert!(relay.runtime_for_thread(&target.provider_handle).is_none());
+            target.provider_handle
+        };
+        assert_ne!(started, pending_handle);
         bridge
-            .promote_on_first_turn(&started, "real-provider-id")
+            .promote_on_first_turn(&pending_handle, "real-provider-id")
             .await;
 
         let snapshot = app
@@ -31733,8 +31755,142 @@ mod provider_call_boundary_tests {
 
         assert_eq!(
             snapshot.active_thread_id.as_deref(),
+            Some(started.as_str()),
+            "the send response must retain the relay session id",
+        );
+        assert!(snapshot.active_thread_promoted_from.is_none());
+        assert_eq!(
+            bridge.thread_ids_seen_by("start_turn").await,
+            vec![pending_handle.clone()],
+            "the first provider call must use the pending bridge handle",
+        );
+        assert!(
+            bridge
+                .thread_ids_seen_by("resolve_started_thread_id")
+                .await
+                .is_empty(),
+            "the stable path must not ask the bridge for a replacement public id",
+        );
+
+        for _ in 0..400 {
+            let complete = app
+                .relay
+                .read()
+                .await
+                .runtime_for_thread(&started)
+                .is_some_and(|runtime| {
+                    runtime.active_turn_id.is_none()
+                        && runtime.transcript.iter().any(|entry| {
+                            entry.kind == crate::protocol::TranscriptEntryKind::AgentText
+                                && entry.status == "completed"
+                        })
+                });
+            if complete {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        {
+            let relay = app.relay.read().await;
+            let target = relay
+                .resolve_session_target(&started)
+                .expect("the materialized binding survives");
+            assert_eq!(target.provider_handle, "real-provider-id");
+            assert!(relay.session_is_materialized(&started));
+            let runtime = relay
+                .runtime_for_thread(&started)
+                .expect("streaming created the stable session runtime");
+            assert!(
+                runtime.active_turn_id.is_none(),
+                "the turn reached terminal"
+            );
+            assert!(runtime.transcript.iter().any(|entry| {
+                entry.kind == crate::protocol::TranscriptEntryKind::AgentText
+                    && entry.status == "completed"
+            }));
+            assert!(relay.runtime_for_thread(&pending_handle).is_none());
+            assert!(relay.runtime_for_thread("real-provider-id").is_none());
+        }
+
+        let listed = app.list_threads(50, None).await.expect("refresh list");
+        assert!(listed.threads.iter().any(|row| row.id == started));
+        assert!(!listed
+            .threads
+            .iter()
+            .any(|row| row.id == pending_handle || row.id == "real-provider-id"));
+        let final_snapshot = app.snapshot().await;
+        assert_eq!(
+            final_snapshot.active_thread_id.as_deref(),
+            Some(started.as_str())
+        );
+        assert!(final_snapshot.active_thread_promoted_from.is_none());
+
+        let persisted = {
+            let relay = app.relay.read().await;
+            crate::state::persistence::PersistedRelayState::from_relay(&relay)
+        };
+        let persisted: crate::state::persistence::PersistedRelayState =
+            serde_json::from_str(&serde_json::to_string(&persisted).expect("encode state"))
+                .expect("decode state");
+        assert_eq!(
+            persisted
+                .session_bindings
+                .get(&started)
+                .map(|binding| binding.provider_handle.as_str()),
             Some("real-provider-id"),
-            "the identity promotion path is untouched until Phase 3",
+        );
+
+        let (cold_tx, _cold_rx) = tokio::sync::watch::channel(0_u64);
+        let cold_relay = std::sync::Arc::new(tokio::sync::RwLock::new(RelayState::new(
+            cwd.clone(),
+            cold_tx.clone(),
+            crate::state::security::SecurityProfile::private(),
+        )));
+        cold_relay.write().await.apply_persisted(&persisted);
+        let cold_bridge = std::sync::Arc::new(
+            FakeProviderBridge::spawn(cold_relay.clone())
+                .await
+                .expect("restart fake provider"),
+        );
+        let mut providers: std::collections::HashMap<String, std::sync::Arc<dyn ProviderBridge>> =
+            std::collections::HashMap::new();
+        providers.insert(
+            "fake".to_string(),
+            cold_bridge.clone() as std::sync::Arc<dyn ProviderBridge>,
+        );
+        let cold = AppState::from_parts(cold_relay.clone(), providers, cold_tx);
+        cold.restore_persisted_session(persisted).await;
+
+        assert_eq!(
+            cold.snapshot().await.active_thread_id.as_deref(),
+            Some(started.as_str()),
+        );
+        assert_eq!(
+            cold_bridge.thread_ids_seen_by("resume_thread").await,
+            vec!["real-provider-id".to_string()],
+        );
+        assert_eq!(
+            cold_bridge.thread_ids_seen_by("read_thread").await,
+            vec!["real-provider-id".to_string()],
+        );
+        cold.send_message(SendMessageInput {
+            text: "after restart".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            thread_id: started.clone(),
+        })
+        .await
+        .expect("send after restart");
+        assert_eq!(
+            cold_bridge.thread_ids_seen_by("start_turn").await,
+            vec!["real-provider-id".to_string()],
+            "restart must call the provider with its real handle while retaining the public id",
+        );
+        assert_eq!(
+            cold.snapshot().await.active_thread_id.as_deref(),
+            Some(started.as_str()),
         );
     }
 

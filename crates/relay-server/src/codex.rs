@@ -110,6 +110,7 @@ impl ProviderBridge for CodexBridge {
             )
             .await?;
         Ok(StartThreadResult {
+            provider_thread_id: Some(thread.id.clone()),
             thread,
             consumed_initial_prompt: false,
             initial_user_message: None,
@@ -129,6 +130,7 @@ impl ProviderBridge for CodexBridge {
         }
         let thread = CodexBridge::fork_thread(self, request).await?;
         Ok(Some(StartThreadResult {
+            provider_thread_id: Some(thread.id.clone()),
             thread,
             consumed_initial_prompt: false,
             initial_user_message: None,

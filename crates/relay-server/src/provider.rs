@@ -106,6 +106,10 @@ pub struct ThreadTranscriptPageData {
 
 #[derive(Clone)]
 pub struct StartThreadResult {
+    /// The provider's durable native id. `thread.id` is the bridge handle on
+    /// return; a deferred provider may expose a callable temporary handle while
+    /// reporting that no native thread exists yet.
+    pub provider_thread_id: Option<String>,
     pub thread: ThreadSummaryView,
     pub consumed_initial_prompt: bool,
     pub initial_user_message: Option<TranscriptEntryView>,

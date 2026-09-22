@@ -483,9 +483,8 @@ pub struct FakeProviderBridge {
     promote_on_start: Arc<Mutex<HashMap<String, String>>>,
     /// One-shot: the next `start_thread` hands back a `claude-pending-…` placeholder.
     defer_next_start: Arc<AtomicBool>,
-    /// Promotions that have HAPPENED, drained by `resolve_started_thread_id` — the
-    /// same two-map shape the Claude bridge has, so the id `start_turn` promoted to
-    /// is reported exactly once.
+    /// Legacy promotions drained by `resolve_started_thread_id`. Stable deferred
+    /// sessions update their binding and never add an entry here.
     promoted_thread_ids: Arc<Mutex<HashMap<String, String>>>,
     stopped_turns: Arc<Mutex<HashSet<String>>>,
     /// Every stop ASKED for, whatever the configured behaviour did with it.
@@ -814,6 +813,7 @@ impl ProviderBridge for FakeProviderBridge {
         );
 
         Ok(StartThreadResult {
+            provider_thread_id: (!deferred).then(|| thread.id.clone()),
             thread,
             consumed_initial_prompt: false,
             initial_user_message: None,
@@ -927,6 +927,7 @@ impl ProviderBridge for FakeProviderBridge {
             },
         );
         Ok(Some(StartThreadResult {
+            provider_thread_id: Some(summary.id.clone()),
             thread: summary,
             consumed_initial_prompt: false,
             initial_user_message: None,
@@ -1006,13 +1007,12 @@ impl ProviderBridge for FakeProviderBridge {
             return Err(format!("fake thread '{thread_id}' was not found"));
         }
 
-        // The session is created BY this turn, so the promotion happens inside it —
-        // exactly where the real deferred-start bridge does it. Everything below then
-        // runs under the real id, because that is the only id the session has left:
-        // the placeholder stops resolving here, not once the caller notices.
+        // The session is created BY this turn. Provider storage moves from the
+        // temporary handle to the real one, while relay state keeps its stable id.
         let promoted = self.promote_on_start.lock().await.remove(thread_id);
-        if let Some(real_id) = promoted.clone() {
-            let summary = {
+        let provider_thread_id = promoted.clone().unwrap_or_else(|| thread_id.to_string());
+        let session_id = if let Some(real_id) = promoted.clone() {
+            let mut summary = {
                 let mut threads = self.threads.lock().await;
                 let mut thread = threads.remove(thread_id).expect("checked above");
                 thread.summary.id = real_id.clone();
@@ -1021,21 +1021,45 @@ impl ProviderBridge for FakeProviderBridge {
                 threads.insert(real_id.clone(), thread);
                 summary
             };
-            self.promoted_thread_ids
-                .lock()
-                .await
-                .insert(thread_id.to_string(), real_id.clone());
             let mut relay = self.state.write().await;
-            // claude.rs moves the ACTIVE pointer first when the promoted thread is the
-            // user's own; the row for the real id is the caller's to upsert.
-            if relay.active_thread_id.as_deref() == Some(thread_id) {
-                relay.active_thread_id = Some(real_id.clone());
-            }
-            relay.promote_background_thread(thread_id, &real_id);
+            let session_id = match relay
+                .materialize_deferred_session_binding("fake", thread_id, &real_id)
+                .expect("fake deferred binding materialization")
+            {
+                Some(session_id) => session_id,
+                None => {
+                    // Legacy compatibility for tests or restored in-flight state
+                    // that predates stable deferred bindings.
+                    if relay.active_thread_id.as_deref() == Some(thread_id) {
+                        relay.active_thread_id = Some(real_id.clone());
+                    }
+                    relay.promote_background_thread(thread_id, &real_id);
+                    self.promoted_thread_ids
+                        .lock()
+                        .await
+                        .insert(thread_id.to_string(), real_id.clone());
+                    real_id.clone()
+                }
+            };
+            summary.id = session_id.clone();
             relay.upsert_thread(summary);
             relay.notify();
-        }
-        let thread_id = promoted.as_deref().unwrap_or(thread_id);
+            session_id
+        } else {
+            let mut relay = self.state.write().await;
+            match relay.session_for_provider_event("fake", Some(thread_id)) {
+                crate::state::ProviderEventSession::Session(session_id) => session_id,
+                crate::state::ProviderEventSession::Unnamed
+                | crate::state::ProviderEventSession::Refused => {
+                    return Err(format!(
+                        "fake provider could not route thread '{thread_id}'"
+                    ));
+                }
+            }
+        };
+        // Provider-originated lifecycle below mutates relay state only under the
+        // reverse-resolved session id. The provider map remains handle-keyed.
+        let thread_id = session_id.as_str();
 
         // A provider that opens a turn of its own while this send is being queued. The
         // sent turn never goes live, so the thread's live turn and the id we answer with
@@ -1130,7 +1154,7 @@ impl ProviderBridge for FakeProviderBridge {
                 .threads
                 .lock()
                 .await
-                .get(&thread_id)
+                .get(&provider_thread_id)
                 .map(|thread| thread.summary.cwd.clone())
                 .unwrap_or_default();
             for file in &write_files {
@@ -1158,6 +1182,7 @@ impl ProviderBridge for FakeProviderBridge {
             .collect::<Vec<_>>();
         let state = self.state.clone();
         let threads = self.threads.clone();
+        let provider_thread_id_for_task = provider_thread_id.clone();
         let turn_id_for_task = turn_id.clone();
 
         // Decide up front whether this turn must park on an approval request.
@@ -1401,7 +1426,9 @@ impl ProviderBridge for FakeProviderBridge {
                         relay.push_log("info", "Fake provider turn was denied.");
                         relay.notify();
                         drop(relay);
-                        if let Some(thread) = threads.lock().await.get_mut(&thread_id) {
+                        if let Some(thread) =
+                            threads.lock().await.get_mut(&provider_thread_id_for_task)
+                        {
                             thread.summary.status = "idle".to_string();
                             thread.summary.updated_at = unix_now();
                             thread.transcript.push(user_entry);
@@ -1983,7 +2010,14 @@ impl ProviderBridge for FakeProviderBridge {
                     )
                     .await;
                     tool_entries.push(assistant_entry);
-                    store_fake_turn(&threads, &thread_id, user_entry, tool_entries, "idle").await;
+                    store_fake_turn(
+                        &threads,
+                        &provider_thread_id_for_task,
+                        user_entry,
+                        tool_entries,
+                        "idle",
+                    )
+                    .await;
                     record_scenario_event(
                         scenario_harness.as_ref(),
                         "terminal_completed",
@@ -2048,8 +2082,16 @@ impl ProviderBridge for FakeProviderBridge {
                     if let Some(partial_entry) = partial_entry {
                         tool_entries.push(partial_entry);
                     }
-                    store_fake_turn(&threads, &thread_id, user_entry, tool_entries, "idle").await;
-                    if let Some(thread) = threads.lock().await.get_mut(&thread_id) {
+                    store_fake_turn(
+                        &threads,
+                        &provider_thread_id_for_task,
+                        user_entry,
+                        tool_entries,
+                        "idle",
+                    )
+                    .await;
+                    if let Some(thread) = threads.lock().await.get_mut(&provider_thread_id_for_task)
+                    {
                         thread.transcript.push(error_entry);
                     }
                     record_scenario_event(
@@ -2078,7 +2120,14 @@ impl ProviderBridge for FakeProviderBridge {
                     if let Some(partial_entry) = partial_entry {
                         tool_entries.push(partial_entry);
                     }
-                    store_fake_turn(&threads, &thread_id, user_entry, tool_entries, "idle").await;
+                    store_fake_turn(
+                        &threads,
+                        &provider_thread_id_for_task,
+                        user_entry,
+                        tool_entries,
+                        "idle",
+                    )
+                    .await;
                     record_scenario_event(
                         scenario_harness.as_ref(),
                         "provider_disconnected",
@@ -2099,7 +2148,14 @@ impl ProviderBridge for FakeProviderBridge {
                     if let Some(partial_entry) = partial_entry {
                         tool_entries.push(partial_entry);
                     }
-                    store_fake_turn(&threads, &thread_id, user_entry, tool_entries, "active").await;
+                    store_fake_turn(
+                        &threads,
+                        &provider_thread_id_for_task,
+                        user_entry,
+                        tool_entries,
+                        "active",
+                    )
+                    .await;
                     record_scenario_event(
                         scenario_harness.as_ref(),
                         "terminal_omitted",
@@ -2151,13 +2207,25 @@ impl ProviderBridge for FakeProviderBridge {
     ) -> Result<(), String> {
         self.record_thread_id_argument("request_turn_stop", thread_id)
             .await;
+        let session_id = {
+            let mut relay = self.state.write().await;
+            match relay.session_for_provider_event("fake", Some(thread_id)) {
+                crate::state::ProviderEventSession::Session(session_id) => session_id,
+                crate::state::ProviderEventSession::Unnamed
+                | crate::state::ProviderEventSession::Refused => {
+                    return Err(format!(
+                        "fake provider could not route thread '{thread_id}'"
+                    ));
+                }
+            }
+        };
         let resolved_turn_id = match turn_id {
             Some(turn_id) => Some(turn_id.to_string()),
             None => self
                 .state
                 .read()
                 .await
-                .runtime_for_thread(thread_id)
+                .runtime_for_thread(&session_id)
                 .and_then(|runtime| runtime.active_turn_id.clone()),
         };
         if let Some(turn_id) = resolved_turn_id.as_deref() {
@@ -2238,12 +2306,12 @@ impl ProviderBridge for FakeProviderBridge {
             self.turn_stop_behaviors.lock().await.remove(turn_id);
         }
         let mut relay = self.state.write().await;
-        if relay.active_thread_id.as_deref() == Some(thread_id) {
+        if relay.active_thread_id.as_deref() == Some(session_id.as_str()) {
             relay.set_active_turn(None);
-            relay.set_thread_status(thread_id, "idle".to_string(), Vec::new());
+            relay.set_thread_status(&session_id, "idle".to_string(), Vec::new());
         } else {
-            relay.bg_set_active_turn(thread_id, None, unix_now());
-            relay.bg_set_thread_status(thread_id, "idle".to_string(), Vec::new(), unix_now());
+            relay.bg_set_active_turn(&session_id, None, unix_now());
+            relay.bg_set_thread_status(&session_id, "idle".to_string(), Vec::new(), unix_now());
         }
         relay.push_log("info", "Fake provider turn interrupted.");
         relay.notify();
@@ -2381,10 +2449,17 @@ async fn wait_for_scenario_barrier(
 async fn restore_threads_from_relay(
     state: &Arc<RwLock<RelayState>>,
 ) -> HashMap<String, FakeThread> {
-    let snapshot = state.read().await.snapshot();
+    let relay = state.read().await;
+    let snapshot = relay.snapshot();
     let Some(thread_id) = snapshot.active_thread_id.clone() else {
         return HashMap::new();
     };
+    let provider_handle = relay
+        .resolve_session_target(&thread_id)
+        .filter(|target| target.provider == "fake")
+        .map(|target| target.provider_handle)
+        .unwrap_or_else(|| thread_id.clone());
+    drop(relay);
 
     // The relay no longer persists transcript history to disk (it is treated as
     // ephemeral provider data, restored on resume from the provider's own
@@ -2401,7 +2476,7 @@ async fn restore_threads_from_relay(
         .unwrap_or_default();
     let thread = ThreadSummaryView {
         workspace_trusted: false,
-        id: thread_id.clone(),
+        id: provider_handle.clone(),
         name: Some("Fake E2E Session".to_string()),
         preview,
         cwd: snapshot.current_cwd,
@@ -2416,7 +2491,7 @@ async fn restore_threads_from_relay(
     };
 
     HashMap::from([(
-        thread_id,
+        provider_handle,
         FakeThread {
             summary: thread,
             transcript,

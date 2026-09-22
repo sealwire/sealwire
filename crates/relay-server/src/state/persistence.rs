@@ -243,14 +243,13 @@ pub(super) struct PersistedRelayState {
 
 impl PersistedRelayState {
     pub(super) fn from_relay(relay: &RelayState) -> Self {
-        // Pending Claude threads (deferred-start placeholders) exist only in
-        // server memory — they have no real SDK session yet. Dropping them
-        // from the persisted snapshot avoids "ghost" active threads after a
-        // restart that point at a session id Anthropic has never seen.
+        // An unmaterialized provider session exists only in server memory: its
+        // binding has a callable bridge handle but no durable provider thread.
+        // Drop relay-domain references to it without guessing from the id text.
         let active_thread_id = relay
             .active_thread_id
             .clone()
-            .filter(|id| !id.starts_with("claude-pending-"));
+            .filter(|id| relay.session_is_materialized(id));
         Self {
             schema_version: PERSISTED_STATE_VERSION,
             active_thread_id,
@@ -264,30 +263,47 @@ impl PersistedRelayState {
             sandbox: relay.sandbox.clone(),
             reasoning_effort: relay.reasoning_effort.clone(),
             provider_name: relay.provider_name.clone(),
-            thread_settings: relay.thread_settings.clone(),
-            thread_forked_from: relay.thread_forked_from.clone(),
+            thread_settings: relay
+                .thread_settings
+                .iter()
+                .filter(|(thread_id, _)| relay.session_is_materialized(thread_id))
+                .map(|(thread_id, settings)| (thread_id.clone(), settings.clone()))
+                .collect(),
+            thread_forked_from: relay
+                .thread_forked_from
+                .iter()
+                .filter(|(thread_id, source_id)| {
+                    relay.session_is_materialized(thread_id)
+                        && relay.session_is_materialized(source_id)
+                })
+                .map(|(thread_id, source_id)| (thread_id.clone(), source_id.clone()))
+                .collect(),
             thread_promoted_from: relay.thread_promoted_from.clone(),
             session_bindings: relay.persistable_session_bindings(),
-            // Drop pending ids: a pin on a synthetic id would persist a dead key.
             thread_workspace: relay
                 .thread_workspace
                 .iter()
-                .filter(|(thread_id, _)| !thread_id.starts_with("claude-pending-"))
+                .filter(|(thread_id, _)| relay.session_is_materialized(thread_id))
                 .map(|(thread_id, workspace)| (thread_id.clone(), workspace.clone()))
                 .collect(),
             thread_last_turn_base_sha: relay
                 .thread_last_turn_base_sha
                 .iter()
-                .filter(|(thread_id, _)| !thread_id.starts_with("claude-pending-"))
+                .filter(|(thread_id, _)| relay.session_is_materialized(thread_id))
                 .map(|(thread_id, sha)| (thread_id.clone(), sha.clone()))
                 .collect(),
             thread_last_turn_base_cwd: relay
                 .thread_last_turn_base_cwd
                 .iter()
-                .filter(|(thread_id, _)| !thread_id.starts_with("claude-pending-"))
+                .filter(|(thread_id, _)| relay.session_is_materialized(thread_id))
                 .map(|(thread_id, cwd)| (thread_id.clone(), cwd.clone()))
                 .collect(),
-            thread_last_activity_at: relay.thread_last_activity_at.clone(),
+            thread_last_activity_at: relay
+                .thread_last_activity_at
+                .iter()
+                .filter(|(thread_id, _)| relay.session_is_materialized(thread_id))
+                .map(|(thread_id, at)| (thread_id.clone(), *at))
+                .collect(),
             allowed_roots: relay.allowed_roots.clone(),
             usage_daily_cap: relay.usage_budget.daily_cap,
             usage_budget_policy: relay.usage_budget.policy.as_str().to_string(),
@@ -295,14 +311,13 @@ impl PersistedRelayState {
             allowed_roots_trust_migrated: relay.allowed_roots_trust_migrated,
             device_records: relay.device_records.clone(),
             paired_devices: relay.paired_devices.clone(),
-            // Drop synthetic Claude pending reviewer ids (same as active_thread_id
-            // above): a reviewer that hasn't promoted to a real session id is
-            // ephemeral — its review is gone on restart anyway — so persisting the
-            // placeholder would only leave a ghost hiding entry.
             reviewer_threads: relay
                 .reviewer_threads
                 .iter()
-                .filter(|(reviewer_id, _)| !reviewer_id.starts_with("claude-pending-"))
+                .filter(|(reviewer_id, record)| {
+                    relay.session_is_materialized(reviewer_id)
+                        && relay.session_is_materialized(&record.parent_thread_id)
+                })
                 .map(|(reviewer_id, record)| (reviewer_id.clone(), record.clone()))
                 .collect(),
             // Only terminal review cards survive a restart (see the field doc): an
@@ -341,17 +356,18 @@ impl PersistedRelayState {
                 .iter()
                 .map(|(id, run)| {
                     let mut run = run.clone();
-                    if run.tl_thread_id.starts_with("claude-pending-") {
+                    if !run.tl_thread_id.is_empty()
+                        && !relay.session_is_materialized(&run.tl_thread_id)
+                    {
                         run.detach_unresumable_tl();
                     }
                     (id.clone(), run)
                 })
                 .collect(),
-            // Drop pending Claude ids: the SDK session does not exist yet.
             orchestrator_thread_id: relay
                 .orchestrator_thread_id
                 .clone()
-                .filter(|id| !id.starts_with("claude-pending-")),
+                .filter(|id| relay.session_is_materialized(id)),
             orchestrator_device_id: relay.orchestrator_device_id.clone(),
             orchestrator_system_prompt: relay.orchestrator_system_prompt.clone(),
             orchestrator_system_prompt_version: relay.orchestrator_system_prompt_version,
@@ -380,27 +396,22 @@ impl PersistedRelayState {
                 .collect(),
             push_subscriptions: relay.push_subscriptions.clone(),
             projects: relay.projects.clone(),
-            thread_project_id: relay.thread_project_id.clone(),
-            // Drop overrides keyed by a synthetic Claude pending id, for the same reason
-            // `active_thread_id` and `reviewer_threads` above drop theirs: that session
-            // exists only in this process's memory and has no real SDK session yet, so
-            // after a restart the key names nothing. Promotion normally re-keys the entry
-            // (see `promote_background_thread`), but a session renamed and never sent to
-            // would otherwise leave a row that no cleanup path can ever reach — it holds
-            // a slot under the persisted cap forever, and a reused id would inherit a
-            // stranger's title.
+            thread_project_id: relay
+                .thread_project_id
+                .iter()
+                .filter(|(thread_id, _)| relay.session_is_materialized(thread_id))
+                .map(|(thread_id, project_id)| (thread_id.clone(), project_id.clone()))
+                .collect(),
             thread_custom_name: relay
                 .thread_custom_name
                 .iter()
-                .filter(|(thread_id, _)| !thread_id.starts_with("claude-pending-"))
+                .filter(|(thread_id, _)| relay.session_is_materialized(thread_id))
                 .map(|(thread_id, name)| (thread_id.clone(), name.clone()))
                 .collect(),
-            // Same pending-id drop as `thread_custom_name` above, and for the same
-            // reason: a synthetic id names nothing after a restart.
             thread_flagged: relay
                 .thread_flagged
                 .iter()
-                .filter(|thread_id| !thread_id.starts_with("claude-pending-"))
+                .filter(|thread_id| relay.session_is_materialized(thread_id))
                 .cloned()
                 .collect(),
             projects_revision: relay.projects_revision,

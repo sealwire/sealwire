@@ -79,13 +79,18 @@ impl AppState {
         mut result: StartThreadResult,
     ) -> Result<AdoptedStartThreadResult, String> {
         let provider_handle = result.thread.id.clone();
+        let provider_thread_id = result.provider_thread_id.clone();
         // Creation paths historically stamp both routing fields. Keep that behavior
         // here so no caller can forget one while adopting the id.
         result.thread.provider = provider_name.to_string();
         result.thread.source = provider_name.to_string();
         let adoption = {
             let mut relay = self.relay.write().await;
-            relay.adopt_provider_summary(provider_name, &mut result.thread)
+            if provider_thread_id.is_some() {
+                relay.adopt_provider_summary(provider_name, &mut result.thread)
+            } else {
+                relay.adopt_deferred_provider_summary(provider_name, &mut result.thread)
+            }
         };
         let identity = match adoption {
             Ok(identity) => identity,
@@ -661,14 +666,13 @@ impl SessionTarget {
 
     /// Which relay id this session's just-started turn belongs to.
     ///
-    /// The provider is asked about its OWN handle — that is the only string it can
-    /// answer for — and an unchanged answer comes back as the session id, so a
-    /// session whose id is not its handle keeps its key. A provider that promoted the
-    /// handle mid-turn (deferred Claude) is honoured unchanged while the two are the
-    /// same string, which is the existing `promote_background_thread` path. Once they
-    /// differ the relay key is already stable and only the BINDING has to follow the
-    /// promotion, which is Phase 3 of `markdown/STABLE_SESSION_ID_DESIGN.md`.
+    /// A stable relay session already knows its answer: provider events changed the
+    /// binding while `start_turn` was in flight, and its public id never moved. Only
+    /// an identity session can still need the legacy provider-promotion handoff.
     pub(crate) async fn resolve_started_thread_id(&self) -> String {
+        if self.session_id != self.provider_handle {
+            return self.session_id.clone();
+        }
         let promoted = self
             .bridge
             .resolve_started_thread_id(&self.provider_handle)

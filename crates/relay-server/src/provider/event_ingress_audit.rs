@@ -101,7 +101,7 @@ fn only_the_reviewed_functions_read_a_raw_provider_thread_field() {
     );
     assert_eq!(
         functions_containing(CLAUDE, r#"["pending_thread_id"]"#),
-        vec!["pending_session_id"],
+        vec!["handle_worker_event", "pending_session_id"],
         "claude.rs: a new reader of a deferred-start placeholder id",
     );
 }
