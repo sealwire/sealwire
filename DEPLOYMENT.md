@@ -63,9 +63,9 @@ cd sealwire
 npm install                            # vite + frontend tooling
 (cd claude-worker && npm install)      # only needed for Claude Code sessions
 
-# Config for attaching to the hosted public broker. This file is gitignored.
+# Config for attaching to the hosted SealWire Cloud broker. This file is gitignored.
 cat > .env.cloud.local <<'EOF'
-RELAY_BROKER_URL=wss://agent-relay.up.railway.app
+RELAY_BROKER_URL=wss://app.sealwire.dev
 RELAY_BROKER_AUTH_MODE=public
 EOF
 
@@ -127,10 +127,10 @@ to a broker unless you tell it to. Commands and flags:
 ```bash
 # pair remote devices through the hosted licensed Cloud broker
 sealwire cloud                          # attach to hosted Cloud (default
-                                        # wss://agent-relay.up.railway.app)
+                                        # wss://app.sealwire.dev)
                                         # — commercial policy runs server-side;
                                         # this public package never ships it
-sealwire --broker wss://agent-relay.up.railway.app  # or point at your own self-host broker
+sealwire --broker wss://app.sealwire.dev  # or point at your own self-host broker
 
 sealwire local                          # no broker (alias for --no-broker)
 sealwire --no-broker                    # same: run without a broker
@@ -152,11 +152,11 @@ the bind host; pass `--host` if you need to control network exposure.
 
 ## Relay env vars
 
-To attach to the hosted public broker, only two variables are required:
+To attach to the hosted SealWire Cloud broker, only two variables are required:
 
 ```ini
 # .env.cloud.local — gitignored; read by `npm run dev:restart:cloud`
-RELAY_BROKER_URL=wss://agent-relay.up.railway.app
+RELAY_BROKER_URL=wss://app.sealwire.dev
 RELAY_BROKER_AUTH_MODE=public
 ```
 

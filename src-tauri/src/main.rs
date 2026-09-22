@@ -20,7 +20,7 @@ use tauri_plugin_shell::{
 };
 use url::Url;
 
-const HOSTED_BROKER_URL: &str = "wss://agent-relay.up.railway.app";
+const HOSTED_BROKER_URL: &str = "wss://app.sealwire.dev";
 const LOG_LIMIT: usize = 400;
 const TRAY_ID: &str = "sealwire-tray";
 const TRAY_OPEN_LOCAL_ID: &str = "open-local";
@@ -834,7 +834,7 @@ fn broker_runtime_config(config: &DesktopConfig) -> Result<Option<BrokerRuntimeC
     let websocket_url = strip_trailing_slash(websocket.as_str());
     let control_url = strip_trailing_slash(control.as_str());
     let label = if config.broker_mode == BrokerMode::Hosted {
-        "Hosted public broker".to_string()
+        "Hosted SealWire Cloud broker".to_string()
     } else {
         control_url.clone()
     };
@@ -1570,7 +1570,7 @@ mod tests {
             .unwrap();
         assert!(broker.websocket_url.starts_with("wss://"));
         assert!(broker.control_url.starts_with("https://"));
-        assert_eq!(broker.label, "Hosted public broker");
+        assert_eq!(broker.label, "Hosted SealWire Cloud broker");
     }
 
     #[test]

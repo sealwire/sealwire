@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const launcher = path.join(here, "sealwire.mjs");
-const HOSTED_BROKER_HTTP = "https://agent-relay.up.railway.app";
+const HOSTED_BROKER_HTTP = "https://app.sealwire.dev";
 
 function runLauncher({ extraEnv = {}, args = [], stubScript } = {}) {
   const workdir = mkdtempSync(path.join(os.tmpdir(), "sealwire-unbind-"));

@@ -79,7 +79,7 @@ already own beats a container.
 sealwire cloud
 ```
 
-Attaches to the hosted public broker (`wss://agent-relay.up.railway.app`) so
+Attaches to the hosted SealWire Cloud broker (`wss://app.sealwire.dev`) so
 remote devices can pair — no infrastructure to deploy. You can point `--broker`
 at a self-hosted `relay-broker` instead, or use `sealwire local` to guarantee the
 relay never dials out.
@@ -137,7 +137,7 @@ just moves encrypted traffic.
 ```bash
 sealwire                    # localhost-only relay, opens the web UI
 sealwire local              # never attach to a broker; remote pairing disabled
-sealwire cloud              # attach to the hosted public broker so a phone can pair
+sealwire cloud              # attach to the hosted SealWire Cloud broker so a phone can pair
 sealwire --broker https://broker.example.com   # use your own broker
 sealwire --port 8788 --host 127.0.0.1          # bind address / port
 sealwire --no-open          # don't open a browser
@@ -189,7 +189,7 @@ Also in focus:
 - single owner, many devices; approval-first remote control that follows you
 - web first: the remote surface is an installable PWA with push; the macOS
   desktop app is a preview and there is no native mobile app
-- local-first runtime, with the hosted public broker as the default remote
+- local-first runtime, with the hosted SealWire Cloud broker as the default remote
   transport and a self-hosted broker as an option
 
 ## Roadmap

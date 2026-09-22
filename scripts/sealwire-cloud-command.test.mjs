@@ -18,8 +18,8 @@ const launcher = path.join(here, "sealwire.mjs");
 
 // The hosted broker `sealwire cloud` dials by default when nothing else is
 // configured. Kept in sync with HOSTED_PUBLIC_BROKER_ORIGIN in sealwire.mjs.
-const HOSTED_BROKER_WS = "wss://agent-relay.up.railway.app";
-const HOSTED_BROKER_HTTP = "https://agent-relay.up.railway.app";
+const HOSTED_BROKER_WS = "wss://app.sealwire.dev";
+const HOSTED_BROKER_HTTP = "https://app.sealwire.dev";
 
 // Black-box drive the launcher with a stub standing in for the compiled
 // relay-server binary. The stub records preflight + long-lived env separately.
@@ -341,7 +341,7 @@ test("`sealwire cloud` strips activation secrets before PATH probes spawn", asyn
     [
       "#!/bin/sh",
       'if [ "$1" = "cloud-activate" ]; then',
-      '  printf \'sealwire-cloud-witness:{"v":1,"control_url":"https://agent-relay.up.railway.app","relay_id":"r","broker_room_id":"room","bearer_fingerprint":"abcdef0123456789"}\\n\'',
+      '  printf \'sealwire-cloud-witness:{"v":1,"control_url":"https://app.sealwire.dev","relay_id":"r","broker_room_id":"room","bearer_fingerprint":"abcdef0123456789"}\\n\'',
       "  exit 0",
       "fi",
       "exit 0",

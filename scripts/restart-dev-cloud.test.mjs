@@ -84,7 +84,7 @@ function runScript({
 }
 
 const README_MINIMAL_ENV =
-  "RELAY_BROKER_URL=wss://agent-relay.up.railway.app\n" +
+  "RELAY_BROKER_URL=wss://app.sealwire.dev\n" +
   "RELAY_BROKER_AUTH_MODE=public\n";
 
 test("restart-dev-cloud.sh starts the relay from the documented two-variable env", async () => {

@@ -19,11 +19,11 @@ const userCwd = process.cwd();
 const require = createRequire(import.meta.url);
 
 const DEFAULT_PUBLIC_BROKER_ORIGIN = "";
-// The hosted public broker `sealwire cloud` dials when the user has not
+// The hosted SealWire Cloud broker `sealwire cloud` dials when the user has not
 // configured a broker origin of their own. `cloud` is an explicit "go online"
 // request (the mirror image of `local`), so it defaults to the hosted broker
 // rather than falling back to a localhost-only relay.
-const HOSTED_PUBLIC_BROKER_ORIGIN = "wss://agent-relay.up.railway.app";
+const HOSTED_PUBLIC_BROKER_ORIGIN = "wss://app.sealwire.dev";
 const defaultPort = "8787";
 const defaultHost = "127.0.0.1";
 const LAUNCH_ID_ENV = "SEALWIRE_LAUNCH_ID";
@@ -150,7 +150,7 @@ if (brokerConfig) {
   env.RELAY_BROKER_URL = brokerConfig.websocketUrl;
 
   if (args.cloud) {
-    // `cloud` == the hosted public broker: a single, fully-managed coherent set
+    // `cloud` == the hosted SealWire Cloud broker: a single, fully-managed coherent set
     // (mirrors the desktop launcher) — public/control follow the same origin and
     // it always uses public auth (an inherited self_hosted would dial the hosted
     // broker with the wrong auth). Custom self-hosted brokers go through plain
@@ -307,7 +307,7 @@ function parseArgs(argv) {
       //   `local` — friendly alias for `--no-broker`: run a localhost-only
       //     relay and never reach for a broker, even if one is configured.
       //   `cloud` — the mirror image: an explicit "go online" request that
-      //     attaches to the hosted public broker (defaulting to it when the
+      //     attaches to the hosted SealWire Cloud broker (defaulting to it when the
       //     user has configured no broker origin of their own).
       //   `cloud unbind` — release cloud access without starting the relay.
       parsed.command = arg;
@@ -851,7 +851,7 @@ Commands:
                 every RELAY_BROKER_* variable (case-insensitively) so the relay
                 never dials out. Does not change the bind host — pass --host to
                 control network exposure.
-  cloud         Attach to the hosted public broker so remote devices can pair
+  cloud         Attach to the hosted SealWire Cloud broker so remote devices can pair
                 (the opposite of local). Uses a configured broker origin if one
                 is set (--broker / AGENT_RELAY_PUBLIC_BROKER_URL / packaged
                 default); otherwise falls back to ${HOSTED_PUBLIC_BROKER_ORIGIN}.
