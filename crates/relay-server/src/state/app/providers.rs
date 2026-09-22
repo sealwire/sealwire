@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::protocol::TranscriptEntryView;
+use crate::protocol::{ThreadSummaryView, TranscriptEntryView};
 use crate::state::PendingApproval;
 
 /// How often the background task re-pulls every provider's model catalog. The
@@ -10,6 +10,138 @@ use crate::state::PendingApproval;
 const MODEL_CATALOG_REFRESH_SECS: u64 = 30 * 60;
 
 impl AppState {
+    /// API ingress compatibility: a known provider handle is a legacy alias for
+    /// its stable relay session id. Canonicalize before any domain lookup or write.
+    pub(crate) async fn canonical_session_id(&self, value: &str) -> Result<String, String> {
+        self.relay.read().await.canonical_session_id(value)
+    }
+
+    /// Fetch and adopt provider-native list rows before any relay-id keyed merge,
+    /// lookup, deletion, reviewer, cwd, or device-scope decision sees them.
+    ///
+    /// A collision is omitted rather than allowed to enter relay state under an id
+    /// that already routes somewhere else. Phase 2c cannot mint the distinct public
+    /// id needed to represent it; Phase 3 removes that identity-only limitation.
+    pub(crate) async fn list_provider_threads(
+        &self,
+        provider_name: &str,
+        bridge: &Arc<dyn ProviderBridge>,
+        limit: usize,
+    ) -> Result<Vec<ThreadSummaryView>, String> {
+        let rows = bridge.list_threads(limit).await?;
+        let mut adopted = Vec::with_capacity(rows.len());
+        let mut relay = self.relay.write().await;
+        for mut row in rows {
+            // Permanent deletion deliberately removes the binding but keeps the
+            // tombstone. Providers are eventually consistent, so an identity row can
+            // linger after delete; adopting it would recreate the binding before the
+            // later visibility filter drops the row. Existing non-identity bindings
+            // are checked by their stable id and left intact.
+            let bound_session = relay.session_for_provider_handle(provider_name, &row.id);
+            let tombstone_id = bound_session.as_deref().unwrap_or(row.id.as_str());
+            if relay.thread_is_locally_deleted(tombstone_id) {
+                continue;
+            }
+            match relay.adopt_provider_summary(provider_name, &mut row) {
+                Ok(_) => adopted.push(row),
+                Err(error) => tracing::warn!(
+                    provider = provider_name,
+                    provider_handle = row.id,
+                    %error,
+                    "refused provider thread-list row at the result adoption boundary",
+                ),
+            }
+        }
+        Ok(adopted)
+    }
+
+    /// The one AppState seam for a provider-created session.
+    ///
+    /// The bridge contract stays `StartThreadResult`; immediately after it returns,
+    /// this records/adopts its raw handle and rewrites the summary to the relay id.
+    /// Every ordinary, reviewer, team, workflow, delegation, orchestrator, replay,
+    /// and native-fork start goes through the same adoption operation.
+    pub(crate) async fn start_provider_thread(
+        &self,
+        provider_name: &str,
+        bridge: &Arc<dyn ProviderBridge>,
+        request: StartThreadRequest,
+    ) -> Result<AdoptedStartThreadResult, String> {
+        let result = bridge.start_thread(request).await?;
+        self.adopt_provider_start_result(provider_name, bridge, result)
+            .await
+    }
+
+    pub(crate) async fn adopt_provider_start_result(
+        &self,
+        provider_name: &str,
+        bridge: &Arc<dyn ProviderBridge>,
+        mut result: StartThreadResult,
+    ) -> Result<AdoptedStartThreadResult, String> {
+        let provider_handle = result.thread.id.clone();
+        // Creation paths historically stamp both routing fields. Keep that behavior
+        // here so no caller can forget one while adopting the id.
+        result.thread.provider = provider_name.to_string();
+        result.thread.source = provider_name.to_string();
+        let adoption = {
+            let mut relay = self.relay.write().await;
+            relay.adopt_provider_summary(provider_name, &mut result.thread)
+        };
+        let identity = match adoption {
+            Ok(identity) => identity,
+            Err(error) => {
+                let adoption_error = format!(
+                    "could not adopt newly-created {provider_name} session '{}': {error}",
+                    provider_handle
+                );
+                // No binding can safely be registered, so this is the one creation
+                // cleanup that must address the exact bridge by its raw handle.
+                if let Err(release_error) = bridge.release_thread(&provider_handle).await {
+                    self.push_runtime_log(
+                        "warn",
+                        format!(
+                            "Could not release unadopted {provider_name} session \
+{provider_handle}: {release_error}"
+                        ),
+                    )
+                    .await;
+                }
+                return Err(adoption_error);
+            }
+        };
+        Ok(AdoptedStartThreadResult { identity, result })
+    }
+
+    pub(crate) async fn read_adopted_provider_thread(
+        &self,
+        identity: &AdoptedProviderSession,
+        bridge: &Arc<dyn ProviderBridge>,
+    ) -> Result<ThreadSyncData, String> {
+        let mut data = bridge.read_thread(&identity.provider_handle).await?;
+        identity.canonicalize_sync(&mut data);
+        Ok(data)
+    }
+
+    pub(crate) async fn fork_provider_thread(
+        &self,
+        source: &SessionTarget,
+        up_to_item_id: Option<String>,
+        cwd: &str,
+        model: &str,
+        approval_policy: &str,
+        sandbox: &str,
+    ) -> Result<Option<AdoptedStartThreadResult>, String> {
+        let Some(result) = source
+            .fork_thread_raw(up_to_item_id, cwd, model, approval_policy, sandbox)
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.adopt_provider_start_result(&source.provider, &source.bridge, result)
+            .await
+            .map(Some)
+    }
+
     pub async fn provider_models(
         &self,
         provider_name: &str,
@@ -141,7 +273,7 @@ impl AppState {
         }
         // Fall back to probing each provider's thread list
         for (name, bridge) in &self.providers {
-            match bridge.list_threads(200).await {
+            match self.list_provider_threads(name, bridge, 200).await {
                 Ok(threads) => {
                     if threads.iter().any(|t| t.id == thread_id) {
                         return Ok((name.as_str(), bridge));
@@ -198,7 +330,8 @@ impl AppState {
         &self,
         session_id: &str,
     ) -> Result<SessionTarget, String> {
-        let route = self.bound_session_route(session_id).await;
+        let session_id = self.canonical_session_id(session_id).await?;
+        let route = self.bound_session_route(&session_id).await;
         if let Some(target) = route.target {
             return Ok(target);
         }
@@ -215,7 +348,7 @@ impl AppState {
         }
 
         let (provider, bridge) = {
-            let (name, bridge) = self.find_thread_provider(session_id).await?;
+            let (name, bridge) = self.find_thread_provider(&session_id).await?;
             (name.to_string(), bridge.clone())
         };
         {
@@ -224,12 +357,12 @@ impl AppState {
             // site did before rather than inventing a refusal this phase promised
             // not to add; the identity target below is that same behaviour.
             let mut relay = self.relay.write().await;
-            let _ = relay.register_identity_session_binding(&provider, session_id);
+            let _ = relay.register_identity_session_binding(&provider, &session_id);
         }
         Ok(SessionTarget {
-            session_id: session_id.to_string(),
+            session_id: session_id.clone(),
             provider,
-            provider_handle: session_id.to_string(),
+            provider_handle: session_id,
             bridge,
         })
     }
@@ -433,8 +566,16 @@ impl SessionTarget {
 
     pub(crate) async fn read_thread(&self) -> Result<ThreadSyncData, String> {
         let mut data = self.bridge.read_thread(&self.provider_handle).await?;
-        data.thread.id = self.session_id.clone();
+        self.result_identity().canonicalize_sync(&mut data);
         Ok(data)
+    }
+
+    pub(crate) fn result_identity(&self) -> AdoptedProviderSession {
+        AdoptedProviderSession {
+            provider: self.provider.clone(),
+            provider_handle: self.provider_handle.clone(),
+            session_id: self.session_id.clone(),
+        }
     }
 
     pub(crate) async fn resume_thread(
@@ -474,7 +615,7 @@ impl SessionTarget {
             .read_thread_transcript_page(&self.provider_handle, before)
             .await?;
         Ok(page.map(|mut page| {
-            page.sync.thread.id = self.session_id.clone();
+            self.result_identity().canonicalize_sync(&mut page.sync);
             page
         }))
     }
@@ -538,10 +679,9 @@ impl SessionTarget {
         self.session_id.clone()
     }
 
-    /// The source half of a native fork. The thread it hands back is the provider's
-    /// own new row and is deliberately NOT rewritten: adopting a freshly created
-    /// provider thread is Phase 2c.
-    pub(crate) async fn fork_thread(
+    /// The raw source half of a native fork. Only `AppState::fork_provider_thread`
+    /// calls this helper, and it adopts the returned provider row immediately.
+    async fn fork_thread_raw(
         &self,
         up_to_item_id: Option<String>,
         cwd: &str,

@@ -370,6 +370,7 @@ the trees the relay listed for it"
         let device_id = require_device_id(input.device_id)?;
         let requested_thread =
             non_empty(Some(input.thread_id)).ok_or_else(|| "thread_id is required".to_string())?;
+        let requested_thread = self.canonical_session_id(&requested_thread).await?;
         // Rollback/reapply mutates the working tree; block it while a review reads
         // that same tree.
         let _slot = self.acquire_session_slot()?;

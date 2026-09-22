@@ -102,6 +102,8 @@ impl AppState {
         reset_turns: bool,
         ingress: Option<u64>,
     ) -> Result<(), String> {
+        let thread_id = self.canonical_session_id(thread_id).await?;
+        let thread_id = thread_id.as_str();
         let objective = objective.trim().to_string();
         if objective.is_empty() {
             return Err("say what you want done".to_string());
@@ -249,6 +251,8 @@ still running — the agent may still be working to it. Stop the session itself 
         device_id: Option<&str>,
         ingress: Option<u64>,
     ) -> Result<(), String> {
+        let thread_id = self.canonical_session_id(thread_id).await?;
+        let thread_id = thread_id.as_str();
         // As above. A stop landing while the driver was between charging a turn and
         // sending it used to report success and let that turn start anyway.
         let slot = self.acquire_session_slot().map_err(|_| {

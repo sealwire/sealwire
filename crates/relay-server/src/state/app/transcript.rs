@@ -8,8 +8,9 @@ impl AppState {
     /// forgot to set it would silently look like "same run as whatever you have".
     pub async fn read_thread_transcript(
         &self,
-        input: ReadThreadTranscriptInput,
+        mut input: ReadThreadTranscriptInput,
     ) -> Result<ThreadTranscriptResponse, String> {
+        input.thread_id = self.canonical_session_id(&input.thread_id).await?;
         let generation = self.relay.read().await.transcript_generation.clone();
         self.read_thread_transcript_page_unstamped(input)
             .await
@@ -276,8 +277,9 @@ impl AppState {
     /// like "same run as whatever you have".
     pub async fn read_thread_entry_detail(
         &self,
-        input: ReadThreadEntryDetailInput,
+        mut input: ReadThreadEntryDetailInput,
     ) -> Result<ThreadEntryDetailResponse, String> {
+        input.thread_id = self.canonical_session_id(&input.thread_id).await?;
         let generation = self.relay.read().await.transcript_generation.clone();
         self.read_thread_entry_detail_unstamped(input)
             .await

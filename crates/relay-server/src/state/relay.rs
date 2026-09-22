@@ -5352,6 +5352,18 @@ impl RelayState {
         self.session_bindings.resolve(session_id)
     }
 
+    /// Canonicalize one public/API id before it is used as a relay-domain key.
+    pub(crate) fn canonical_session_id(&self, value: &str) -> Result<String, String> {
+        self.session_bindings
+            .canonical_session_id(value)
+            .map_err(|owners| {
+                format!(
+                    "provider handle '{value}' is ambiguous between relay sessions: {}",
+                    owners.join(", ")
+                )
+            })
+    }
+
     /// Record the compatibility binding `session_id == provider handle == native id`.
     ///
     /// Re-binding to a different provider is allowed on purpose: restore seeds the
@@ -5368,26 +5380,20 @@ impl RelayState {
     /// Bring one provider row under a relay session id before anything routes,
     /// filters, or renders it.
     ///
-    /// Phase 1 is identity-only, so `id` never actually moves — the rewrite below is
-    /// the seam Phase 2c fills in. A native id already owned by ANOTHER provider's
-    /// session is left unbound rather than rebound: Phase 1 may not mint a
-    /// replacement id, and an unbound row still routes exactly the way it does today.
-    pub(crate) fn adopt_provider_summary(&mut self, summary: &mut ThreadSummaryView) {
-        if summary.id.is_empty() || summary.provider.is_empty() {
-            return;
-        }
-        if let Some(session_id) = self.session_for_provider_handle(&summary.provider, &summary.id) {
-            summary.id = session_id;
-            return;
-        }
-        if let Some(existing) = self.session_bindings.binding(&summary.id) {
-            if existing.provider != summary.provider {
-                return;
-            }
-        }
-        let _ = self
+    /// Production remains identity-only in Phase 2c, so `id` does not move unless a
+    /// test or stale registry already contains a non-identity binding. A native id
+    /// already owned by another provider is refused: this phase cannot mint the
+    /// second public id needed to represent both sessions safely.
+    pub(crate) fn adopt_provider_summary(
+        &mut self,
+        provider: &str,
+        summary: &mut ThreadSummaryView,
+    ) -> Result<crate::provider::AdoptedProviderSession, SessionBindingError> {
+        let identity = self
             .session_bindings
-            .bind_identity(&summary.provider, &summary.id);
+            .adopt_provider_handle(provider, &summary.id)?;
+        identity.canonicalize_summary(summary);
+        Ok(identity)
     }
 
     pub(super) fn persistable_session_bindings(&self) -> HashMap<String, SessionBinding> {
@@ -9200,7 +9206,9 @@ mod tests {
         restored.apply_persisted(&persisted);
         assert!(restored.resolve_session_target("thread-2").is_none());
         let mut row = provider_row("thread-2", "codex");
-        restored.adopt_provider_summary(&mut row);
+        restored
+            .adopt_provider_summary("codex", &mut row)
+            .expect("adopt");
         assert_eq!(row.id, "thread-2", "adoption must not move a public id");
         assert_eq!(
             restored
@@ -9230,9 +9238,9 @@ mod tests {
             .is_none());
     }
 
-    // Two providers can hand back the same native id string. Phase 1 may not mint a
-    // replacement id, so the second row stays unbound and keeps routing the way it
-    // does today — what it must NOT do is silently steal the first session's provider.
+    // Two providers can hand back the same native id string. Phase 2c may not mint a
+    // replacement id, so the second row is refused rather than allowed to steal the
+    // first session's provider.
     #[test]
     fn adopting_a_native_id_another_provider_owns_leaves_the_row_alone() {
         let mut relay = test_relay();
@@ -9241,9 +9249,15 @@ mod tests {
             .expect("bind");
 
         let mut row = provider_row("abc", "fake");
-        relay.adopt_provider_summary(&mut row);
+        let error = relay
+            .adopt_provider_summary("fake", &mut row)
+            .expect_err("identity-only collision must refuse");
 
         assert_eq!(row.id, "abc", "the row keeps the id the provider gave it");
+        assert!(matches!(
+            error,
+            super::SessionBindingError::SessionIdClaimed { .. }
+        ));
         assert_eq!(
             relay.resolve_session_target("abc").map(|t| t.provider),
             Some("codex".to_string()),
@@ -9255,6 +9269,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_unqualified_provider_alias_with_two_owners_is_refused_at_ingress() {
+        let mut relay = test_relay();
+        relay.bind_session_to_foreign_handle("session-a", "codex", "shared-handle");
+        relay.bind_session_to_foreign_handle("session-b", "claude_code", "shared-handle");
+
+        let error = relay
+            .canonical_session_id("shared-handle")
+            .expect_err("an unqualified alias cannot choose a provider owner");
+        assert!(error.contains("session-a"));
+        assert!(error.contains("session-b"));
+    }
+
     // `list_threads` re-adopts every row on every poll (every 12s per client), so
     // adoption has to be a no-op the second time — and never move an id.
     #[test]
@@ -9262,7 +9289,9 @@ mod tests {
         let mut relay = test_relay();
         for _ in 0..3 {
             let mut row = provider_row("thread-1", "codex");
-            relay.adopt_provider_summary(&mut row);
+            relay
+                .adopt_provider_summary("codex", &mut row)
+                .expect("adopt");
             assert_eq!(row.id, "thread-1");
         }
         assert_eq!(relay.session_bindings.len(), 1);

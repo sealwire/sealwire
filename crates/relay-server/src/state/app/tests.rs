@@ -5974,9 +5974,9 @@ tree; got {}",
     }
 
     #[derive(Clone)]
-    struct RecordingProvider {
+    pub(super) struct RecordingProvider {
         name: &'static str,
-        threads: Arc<Mutex<HashMap<String, ThreadSummaryView>>>,
+        pub(super) threads: Arc<Mutex<HashMap<String, ThreadSummaryView>>>,
         approval_thread_ids: Arc<Mutex<Vec<String>>>,
         ask_request_ids: Arc<Mutex<Vec<String>>>,
         turn_thread_ids: Arc<Mutex<Vec<String>>>,
@@ -5984,7 +5984,9 @@ tree; got {}",
         turn_efforts: Arc<Mutex<Vec<String>>>,
         turn_images: Arc<Mutex<Vec<Vec<ProviderImage>>>>,
         interrupt_thread_ids: Arc<Mutex<Vec<String>>>,
-        resume_thread_ids: Arc<Mutex<Vec<String>>>,
+        pub(super) resume_thread_ids: Arc<Mutex<Vec<String>>>,
+        pub(super) release_thread_ids: Arc<Mutex<Vec<String>>>,
+        pub(super) release_error: Arc<Mutex<Option<String>>>,
         // Thread ids that are resumable/readable but deliberately omitted from
         // `list_threads` — models a provider whose store can resume a session
         // that its thread listing hasn't surfaced yet (e.g. Codex at restart).
@@ -6004,7 +6006,7 @@ tree; got {}",
         // Off by default so every existing test keeps exercising the replay
         // path. Flipped on to cover the native branch, whose "no fork prompt →
         // stay idle" early return must not swallow pasted images.
-        native_fork: Arc<AtomicBool>,
+        pub(super) native_fork: Arc<AtomicBool>,
         /// Item ids that `read_thread` reports as ADAPTER-synthesized rather than
         /// provider-named — the `turn-diff:*` / `turn-error:*` rows a real adapter
         /// invents while parsing a read.
@@ -6034,7 +6036,7 @@ tree; got {}",
         start_turn_should_fail: Arc<AtomicBool>,
         // Models a provider that is down: `list_threads` errors, and the merge is
         // expected to carry on with the remaining providers rather than failing.
-        list_threads_should_fail: Arc<AtomicBool>,
+        pub(super) list_threads_should_fail: Arc<AtomicBool>,
         // Reproduces the cold-page race: a stream event lands and builds the
         // runtime WHILE the relay is awaiting this provider's page read, so the
         // page the relay gets back is already stale by the time it is served.
@@ -6064,6 +6066,8 @@ tree; got {}",
                 turn_images: Arc::new(Mutex::new(Vec::new())),
                 interrupt_thread_ids: Arc::new(Mutex::new(Vec::new())),
                 resume_thread_ids: Arc::new(Mutex::new(Vec::new())),
+                release_thread_ids: Arc::new(Mutex::new(Vec::new())),
+                release_error: Arc::new(Mutex::new(None)),
                 hidden_from_list: Arc::new(Mutex::new(std::collections::HashSet::new())),
                 state,
                 mark_active_status_before_return: Arc::new(AtomicBool::new(false)),
@@ -6091,7 +6095,7 @@ tree; got {}",
             }
         }
 
-        fn thread_summary(&self, id: &str, cwd: &str) -> ThreadSummaryView {
+        pub(super) fn thread_summary(&self, id: &str, cwd: &str) -> ThreadSummaryView {
             ThreadSummaryView {
                 workspace_trusted: false,
                 id: id.to_string(),
@@ -6112,6 +6116,17 @@ tree; got {}",
 
     #[async_trait::async_trait]
     impl ProviderBridge for RecordingProvider {
+        async fn release_thread(&self, thread_id: &str) -> Result<(), String> {
+            self.release_thread_ids
+                .lock()
+                .await
+                .push(thread_id.to_string());
+            match self.release_error.lock().await.clone() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        }
+
         async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String> {
             if self.list_threads_should_fail.load(Ordering::Relaxed) {
                 return Err(format!("{} thread/list failed", self.name));
@@ -6461,7 +6476,7 @@ tree; got {}",
         }
     }
 
-    async fn build_recording_provider_app(
+    pub(super) async fn build_recording_provider_app(
         cwd: &str,
     ) -> (AppState, RecordingProvider, RecordingProvider) {
         let (change_tx, _) = watch::channel(0_u64);
@@ -30976,6 +30991,408 @@ watchdog settle this Blocked",
     }
 }
 
+#[cfg(test)]
+mod provider_result_adoption_tests {
+    use super::path_scope_tests::{build_recording_provider_app, pair_device};
+    use crate::protocol::{
+        ForkSessionInput, ResumeSessionInput, SendMessageInput, StartSessionInput,
+    };
+    use crate::provider::{ProviderBridge, StartThreadRequest};
+    use std::sync::atomic::Ordering;
+    use tempfile::TempDir;
+
+    /// Phase 2c: creation is adopted before `activate_started_thread`, and a raw
+    /// provider-handle alias is canonicalized before resume's relay-domain guards.
+    #[tokio::test]
+    async fn start_and_resume_results_cross_the_single_adoption_boundary() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, codex, _claude) = build_recording_provider_app(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let provider_handle = "codex-thread-1";
+        let session_id = "session-stable-start";
+        app.relay.write().await.bind_session_to_foreign_handle(
+            session_id,
+            "codex",
+            provider_handle,
+        );
+
+        let started = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.clone()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("codex".to_string()),
+                initial_prompt: None,
+                project_id: None,
+            })
+            .await
+            .expect("start");
+        assert_eq!(started.active_thread_id.as_deref(), Some(session_id));
+        assert!(app
+            .relay
+            .read()
+            .await
+            .runtime_for_thread(provider_handle)
+            .is_none());
+
+        let resumed = app
+            .resume_session(ResumeSessionInput {
+                device_id: Some("device-1".to_string()),
+                thread_id: provider_handle.to_string(),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                provider: None,
+            })
+            .await
+            .expect("legacy provider alias resumes");
+        assert_eq!(resumed.active_thread_id.as_deref(), Some(session_id));
+        assert_eq!(
+            codex.resume_thread_ids.lock().await.as_slice(),
+            [provider_handle.to_string()]
+        );
+    }
+
+    /// Fresh rows are canonical before deleted/reviewer/device-scope filters. Each
+    /// assertion would expose a raw handle under the old post-filter adoption order.
+    #[tokio::test]
+    async fn fresh_list_rows_are_canonical_before_every_session_filter() {
+        let project = TempDir::new().expect("project");
+        let outside = TempDir::new().expect("outside");
+        let cwd = project.path().to_string_lossy().to_string();
+        let outside_cwd = outside.path().to_string_lossy().to_string();
+        let (app, codex, _claude) = build_recording_provider_app(&cwd).await;
+        pair_device(&app, "scoped", vec![cwd.clone()]).await;
+
+        let visible_handle = ProviderBridge::start_thread(
+            &codex,
+            StartThreadRequest::new(&cwd, "codex-model", "never", "workspace-write"),
+        )
+        .await
+        .expect("visible")
+        .thread
+        .id;
+        let deleted_handle = ProviderBridge::start_thread(
+            &codex,
+            StartThreadRequest::new(&cwd, "codex-model", "never", "workspace-write"),
+        )
+        .await
+        .expect("deleted")
+        .thread
+        .id;
+        let reviewer_handle = ProviderBridge::start_thread(
+            &codex,
+            StartThreadRequest::new(&cwd, "codex-model", "never", "workspace-write"),
+        )
+        .await
+        .expect("reviewer")
+        .thread
+        .id;
+        let scoped_handle = ProviderBridge::start_thread(
+            &codex,
+            StartThreadRequest::new(&outside_cwd, "codex-model", "never", "workspace-write"),
+        )
+        .await
+        .expect("scoped")
+        .thread
+        .id;
+
+        let mut relay = app.relay.write().await;
+        for (session, handle) in [
+            ("session-visible", visible_handle.as_str()),
+            ("session-deleted", deleted_handle.as_str()),
+            ("session-reviewer", reviewer_handle.as_str()),
+            ("session-scoped", scoped_handle.as_str()),
+        ] {
+            relay.bind_session_to_foreign_handle(session, "codex", handle);
+        }
+        relay.mark_thread_deleted("session-deleted");
+        // `mark_thread_deleted` correctly drops the binding after a real delete;
+        // restore it here to model a stale provider row racing that tombstone.
+        relay.bind_session_to_foreign_handle("session-deleted", "codex", &deleted_handle);
+        relay
+            .register_reviewer_thread("session-reviewer".to_string(), "session-parent".to_string());
+        drop(relay);
+
+        let listed = app
+            .list_threads(50, Some("scoped".to_string()))
+            .await
+            .expect("list");
+        let ids = listed
+            .threads
+            .iter()
+            .map(|thread| thread.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["session-visible"]);
+        assert_eq!(
+            app.relay
+                .read()
+                .await
+                .session_for_provider_handle("codex", &deleted_handle)
+                .as_deref(),
+            Some("session-deleted"),
+            "omitting a tombstoned stable id must not corrupt its existing binding",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_identity_list_row_cannot_rebind_or_resurrect_a_deleted_session() {
+        let project = TempDir::new().expect("project");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, codex, _claude) = build_recording_provider_app(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let handle = ProviderBridge::start_thread(
+            &codex,
+            StartThreadRequest::new(&cwd, "codex-model", "never", "workspace-write"),
+        )
+        .await
+        .expect("provider start")
+        .thread
+        .id;
+        let first = app.list_threads(50, None).await.expect("initial list");
+        assert!(first.threads.iter().any(|row| row.id == handle));
+        assert!(app
+            .relay
+            .read()
+            .await
+            .resolve_session_target(&handle)
+            .is_some());
+
+        app.relay.write().await.mark_thread_deleted(&handle);
+        assert!(app
+            .relay
+            .read()
+            .await
+            .resolve_session_target(&handle)
+            .is_none());
+
+        let refreshed = app.list_threads(50, None).await.expect("stale list");
+        assert!(!refreshed.threads.iter().any(|row| row.id == handle));
+        assert!(app
+            .relay
+            .read()
+            .await
+            .resolve_session_target(&handle)
+            .is_none());
+        assert!(app.resolve_session_target(&handle).await.is_err());
+        let send_error = app
+            .send_message(SendMessageInput {
+                text: "must stay deleted".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                thread_id: handle.clone(),
+            })
+            .await
+            .expect_err("a tombstoned provider row must not become routable again");
+        assert!(
+            send_error.contains("not found"),
+            "unexpected error: {send_error}"
+        );
+        assert!(app
+            .relay
+            .read()
+            .await
+            .resolve_session_target(&handle)
+            .is_none());
+    }
+
+    /// A failed provider contributes cached RelayState summaries, which already
+    /// carry relay ids. Passing this row through provider adoption again used to
+    /// replace `stable -> handle` with `stable -> stable`.
+    #[tokio::test]
+    async fn cached_stable_summaries_are_not_readopted_as_provider_handles() {
+        let project = TempDir::new().expect("project");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _codex, claude) = build_recording_provider_app(&cwd).await;
+        let raw = ProviderBridge::start_thread(
+            &claude,
+            StartThreadRequest::new(&cwd, "claude-model", "never", "workspace-write"),
+        )
+        .await
+        .expect("provider start")
+        .thread;
+        let handle = raw.id.clone();
+        let session_id = "session-cached-stable";
+        let mut cached = raw;
+        cached.id = session_id.to_string();
+        {
+            let mut relay = app.relay.write().await;
+            relay.bind_session_to_foreign_handle(session_id, "claude_code", &handle);
+            relay.threads = vec![cached];
+        }
+        claude
+            .list_threads_should_fail
+            .store(true, Ordering::Relaxed);
+
+        let listed = app.list_threads(50, None).await.expect("partial list");
+        assert!(listed.threads.iter().any(|row| row.id == session_id));
+        let relay = app.relay.read().await;
+        assert_eq!(
+            relay
+                .resolve_session_target(session_id)
+                .map(|target| target.provider_handle),
+            Some(handle.clone()),
+        );
+        assert_eq!(
+            relay
+                .session_for_provider_handle("claude_code", &handle)
+                .as_deref(),
+            Some(session_id),
+        );
+        assert!(relay
+            .session_for_provider_handle("claude_code", session_id)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn native_fork_result_is_adopted_before_read_activation_and_lineage() {
+        let project = TempDir::new().expect("project");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, codex, _claude) = build_recording_provider_app(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let source = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.clone()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("codex".to_string()),
+                initial_prompt: None,
+                project_id: None,
+            })
+            .await
+            .expect("source")
+            .active_thread_id
+            .expect("source id");
+        codex.native_fork.store(true, Ordering::Relaxed);
+        let handle = "codex-fork-2";
+        let session_id = "session-stable-fork";
+        app.relay
+            .write()
+            .await
+            .bind_session_to_foreign_handle(session_id, "codex", handle);
+
+        let forked = app
+            .fork_session(ForkSessionInput {
+                source_thread_id: source.clone(),
+                up_to_item_id: None,
+                cwd: Some(cwd),
+                initial_prompt: None,
+                model: None,
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("codex".to_string()),
+                project_id: None,
+            })
+            .await
+            .expect("native fork");
+        assert_eq!(forked.active_thread_id.as_deref(), Some(session_id));
+        let relay = app.relay.read().await;
+        assert_eq!(relay.thread_forked_from(session_id), Some(source));
+        assert!(relay.runtime_for_thread(handle).is_none());
+    }
+
+    #[tokio::test]
+    async fn duplicate_raw_handles_across_providers_fail_closed_without_minting() {
+        let project = TempDir::new().expect("project");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, codex, claude) = build_recording_provider_app(&cwd).await;
+        codex.threads.lock().await.insert(
+            "shared-native-id".to_string(),
+            codex.thread_summary("shared-native-id", &cwd),
+        );
+        claude.threads.lock().await.insert(
+            "shared-native-id".to_string(),
+            claude.thread_summary("shared-native-id", &cwd),
+        );
+
+        let listed = app.list_threads(50, None).await.expect("list");
+        assert_eq!(
+            listed
+                .threads
+                .iter()
+                .filter(|row| row.id == "shared-native-id")
+                .count(),
+            1,
+            "Phase 2c cannot safely expose two public identities for one raw string",
+        );
+        let relay = app.relay.read().await;
+        let owner = relay
+            .resolve_session_target("shared-native-id")
+            .expect("one provider wins deterministically for this refresh");
+        assert_eq!(owner.provider_handle, "shared-native-id");
+        assert!(owner.session_id == "shared-native-id");
+        let loser = if owner.provider == "codex" {
+            "claude_code"
+        } else {
+            "codex"
+        };
+        assert!(relay
+            .session_for_provider_handle(loser, "shared-native-id")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_start_collision_releases_the_unadopted_provider_session() {
+        let project = TempDir::new().expect("project");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _codex, claude) = build_recording_provider_app(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let raw_handle = "claude_code-thread-1";
+        app.relay
+            .write()
+            .await
+            .register_identity_session_binding("codex", raw_handle)
+            .expect("first provider owns the identity");
+        *claude.release_error.lock().await = Some("cleanup failed".to_string());
+
+        let error = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("claude_code".to_string()),
+                initial_prompt: None,
+                project_id: None,
+            })
+            .await
+            .expect_err("the second provider cannot claim an identity-only public id");
+
+        assert!(
+            error.contains("already a session owned by provider 'codex'"),
+            "cleanup failure must not mask the adoption error: {error}",
+        );
+        assert!(!error.contains("cleanup failed"));
+        assert_eq!(
+            claude.release_thread_ids.lock().await.as_slice(),
+            [raw_handle.to_string()],
+        );
+        assert_eq!(
+            app.relay
+                .read()
+                .await
+                .resolve_session_target(raw_handle)
+                .map(|target| target.provider),
+            Some("codex".to_string()),
+            "cleanup must not disturb the winning binding",
+        );
+    }
+}
+
 /// Phase 1 of `markdown/STABLE_SESSION_ID_DESIGN.md` at the app level: the binding
 /// registry now sits in the thread-list path, and the whole point of the phase is
 /// that nothing outside it can tell.
@@ -31962,12 +32379,6 @@ mod provider_boundary_lint {
     /// `(file, method, why this one is allowed to hold a bare bridge)`.
     const EXEMPT: &[(&str, &str, &str)] = &[
         (
-            "fork.rs",
-            "read_thread",
-            "reads the thread the provider JUST created, so the id is already a \
-handle; adopting a fresh provider row is Phase 2c",
-        ),
-        (
             "mod.rs",
             "resume_thread",
             "`try_resume_thread`, restore's IDENTITY discovery fallback: it offers a \
@@ -31978,12 +32389,6 @@ a session id doubles as a handle. Restore's bound route goes through SessionTarg
             "mod.rs",
             "read_thread",
             "the same identity probe, which reads back the thread it just resumed",
-        ),
-        (
-            "team.rs",
-            "release_thread",
-            "hands back a seat the provider just created and the relay has not \
-registered yet, so it has no binding to resolve",
         ),
         (
             "approvals.rs",
@@ -32090,5 +32495,65 @@ AppState::resolve_session_target, or add them to EXEMPT with the reason:\n  {}",
                 "{file} no longer calls bridge.{method} — drop the exemption ({why})",
             );
         }
+    }
+
+    /// Phase 2c's provider-result counterpart to the call-boundary scan above.
+    ///
+    /// This is deliberately a TEXTUAL HEURISTIC, not a proof. It recognizes the
+    /// receiver spellings used in this layer and forces direct start/list result
+    /// sites into `providers.rs`, where adoption is centralized. Restore's legacy
+    /// provider probe remains raw because it is only an identity-discovery question:
+    /// no returned row enters RelayState or leaves AppState, and adopting it would
+    /// prevent repair of a stale persisted provider key.
+    #[test]
+    fn provider_results_enter_the_action_layer_only_through_the_adoption_seam() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let layer = Path::new(manifest).join("src/state/app");
+        let mut files = Vec::new();
+        layer_files(&layer, &mut files);
+        let exempt = [("mod.rs", "list_threads")];
+        let mut unexpected = Vec::new();
+        let mut seen_exempt = Vec::new();
+        for path in files {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
+            let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
+            for method in ["start_thread", "list_threads"] {
+                for receiver in [
+                    "bridge .",
+                    "bridge.",
+                    ".1 .",
+                    ".1.",
+                    "bridge() .",
+                    "bridge().",
+                ] {
+                    if !flat.contains(&format!("{receiver}{method}(")) {
+                        continue;
+                    }
+                    if exempt.contains(&(name.as_str(), method)) {
+                        seen_exempt.push((name.clone(), method));
+                    } else {
+                        unexpected.push(format!("{name}: bridge.{method}(…)"));
+                    }
+                }
+            }
+        }
+        unexpected.sort();
+        unexpected.dedup();
+        assert!(
+            unexpected.is_empty(),
+            "provider result bypasses the adoption seam:\n  {}",
+            unexpected.join("\n  "),
+        );
+        assert!(
+            seen_exempt
+                .iter()
+                .any(|(file, method)| file == "mod.rs" && *method == "list_threads"),
+            "restore's raw legacy list probe moved; re-audit whether it should now adopt",
+        );
     }
 }

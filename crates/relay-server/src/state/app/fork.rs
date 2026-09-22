@@ -38,6 +38,7 @@ impl AppState {
         let device_id = require_device_id(input.device_id)?;
         let source_thread_id = non_empty(Some(input.source_thread_id))
             .ok_or_else(|| "source_thread_id is required".to_string())?;
+        let source_thread_id = self.canonical_session_id(&source_thread_id).await?;
         let _slot = self.acquire_session_slot()?;
         self.expire_stale_controller_if_needed().await;
 
@@ -231,8 +232,9 @@ impl AppState {
             // Through the SOURCE target: a native fork is described to the provider
             // by the thread it branches from, so that argument is a handle. Same
             // provider, therefore the same bridge as `target_bridge`.
-            if let Some(start_result) = source
-                .fork_thread(
+            if let Some(start_result) = self
+                .fork_provider_thread(
+                    &source,
                     up_to_item_id.clone(),
                     &cwd,
                     &model,
@@ -300,7 +302,7 @@ impl AppState {
         target_provider_name: &str,
         target_bridge: Arc<dyn ProviderBridge>,
         provider_models: Option<Vec<ModelOptionView>>,
-        start_result: StartThreadResult,
+        start: AdoptedStartThreadResult,
         model: &str,
         approval_policy: &str,
         sandbox: &str,
@@ -311,15 +313,14 @@ impl AppState {
         user_prompt: Option<String>,
         images: Vec<ProviderImage>,
     ) -> Result<SessionSnapshot, String> {
-        // The provider's own id for a thread it just created, so it is already a
-        // handle — adopting a fresh provider row under a relay session id is Phase 2c
-        // of `markdown/STABLE_SESSION_ID_DESIGN.md`.
-        let forked_thread_id = start_result.thread.id.clone();
+        let forked_thread_id = start.identity.session_id.clone();
         let read_started_at_revision = {
             let relay = self.relay.read().await;
             relay.transcript_clock()
         };
-        let thread_data = target_bridge.read_thread(&forked_thread_id).await?;
+        let thread_data = self
+            .read_adopted_provider_thread(&start.identity, &target_bridge)
+            .await?;
         {
             let mut relay = self.relay.write().await;
             relay.set_provider_name(target_provider_name.to_string());
@@ -400,14 +401,17 @@ impl AppState {
         // instead, the same split `start_session_with_images` uses. Letting the
         // provider consume the prompt at creation would strand the images.
         let initial_prompt = images.is_empty().then_some(replay_prompt.as_str());
-        let start_result = target_bridge
-            .start_thread(
+        let start = self
+            .start_provider_thread(
+                target_provider_name,
+                &target_bridge,
                 StartThreadRequest::new(cwd, model, approval_policy, sandbox)
                     .with_initial_prompt(initial_prompt),
             )
             .await?;
+        let start_result = start.result;
         let consumed_initial_prompt = start_result.consumed_initial_prompt;
-        let started_thread_id = start_result.thread.id.clone();
+        let started_thread_id = start.identity.session_id;
         let initial_user_message = start_result.initial_user_message.clone();
         let started_turn_id = start_result.started_turn_id.clone();
 

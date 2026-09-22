@@ -32,8 +32,8 @@ use crate::{
         WorkspaceDiffResponse, WorkspaceGitContextView, WorkspaceOrigin, WorkspaceRootView,
     },
     provider::{
-        spawn_providers, ProviderBridge, ProviderForkRequest, ProviderImage, StartThreadRequest,
-        StartThreadResult, ThreadSyncData,
+        spawn_providers, AdoptedProviderSession, AdoptedStartThreadResult, ProviderBridge,
+        ProviderForkRequest, ProviderImage, StartThreadRequest, StartThreadResult, ThreadSyncData,
     },
 };
 
@@ -1100,8 +1100,11 @@ in thread {thread_id}: {error}"
     /// Whether a local surface should be sent deltas for `thread_id`. Mirrors the
     /// broker's per-device filter so both surfaces obey the same declaration.
     pub async fn device_watches_thread(&self, device_id: &str, thread_id: &str) -> bool {
+        let Ok(thread_id) = self.canonical_session_id(thread_id).await else {
+            return false;
+        };
         let relay = self.relay.read().await;
-        relay.device_watches_thread(device_id, thread_id)
+        relay.device_watches_thread(device_id, &thread_id)
     }
 
     async fn defaults(&self) -> SessionDefaults {
@@ -1415,9 +1418,15 @@ in thread {thread_id}: {error}"
             relay.notify();
             return;
         };
-        // The discovery steps read under the provider's own id; the relay keys
-        // everything it is about to restore by the session id.
-        thread_data.thread.id = thread_id.clone();
+        // Bound reads already return canonical data; identity discovery reads under
+        // the provider's own id. Put both through the same explicit result identity
+        // before anything enters RelayState.
+        AdoptedProviderSession {
+            provider: provider_name.clone(),
+            provider_handle: provider_handle.clone(),
+            session_id: thread_id.clone(),
+        }
+        .canonicalize_sync(&mut thread_data);
 
         let provider_models = self
             .load_provider_model_catalog(&provider_name, &bridge)

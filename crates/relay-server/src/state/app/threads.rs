@@ -143,6 +143,16 @@ impl AppState {
     ) -> Result<ThreadsResponse, String> {
         let query = normalize_thread_query(query);
         let wanted_ids = normalize_thread_id_probe(ids)?;
+        let wanted_ids = match wanted_ids {
+            Some(wanted) => {
+                let mut canonical = HashSet::with_capacity(wanted.len());
+                for thread_id in wanted {
+                    canonical.insert(self.canonical_session_id(&thread_id).await?);
+                }
+                Some(canonical)
+            }
+            None => None,
+        };
         // Read nav-hidden reviewer ids before the provider fetch so we can request a
         // larger page from each provider. If the newest N slots are all Session-bound
         // reviewers we would return fewer than `limit` visible threads otherwise.
@@ -171,13 +181,11 @@ impl AppState {
         // not exist" when it means "we could not look".
         let mut unavailable_providers = Vec::new();
         for (provider_name, bridge) in &self.providers {
-            match bridge.list_threads(fetch_limit).await {
-                Ok(mut threads) => {
-                    for thread in &mut threads {
-                        thread.provider = provider_name.clone();
-                    }
-                    all_threads.extend(threads);
-                }
+            match self
+                .list_provider_threads(provider_name, bridge, fetch_limit)
+                .await
+            {
+                Ok(threads) => all_threads.extend(threads),
                 Err(error) => {
                     unavailable_providers.push(provider_name.clone());
                     self.push_runtime_log(
@@ -195,6 +203,11 @@ impl AppState {
             .map(String::as_str)
             .collect::<std::collections::HashSet<_>>();
         let mut relay = self.relay.write().await;
+        // `all_threads` is canonical here. Provider-native rows crossed the adoption
+        // seam under their authoritative configured provider key before this lock and
+        // before any id-keyed operation below. Cached rows appended in the failure path
+        // already contain relay session ids and must never be re-adopted as handles.
+        //
         // A transient provider-list failure must not turn the next resting poll into
         // an authoritative empty list for that provider. Keep its last known rows in
         // both the response and the routing cache, while `unavailable_providers` tells
@@ -231,16 +244,8 @@ impl AppState {
         // reviewers are first-class seats in the task worktree, so they stay visible
         // alongside the TL and Dev sessions.
         let (reviewer_ids, hidden_reviewer_ids) = relay.reviewer_thread_ids_and_navigation_hidden();
-        let mut merged = relay.filter_deleted_threads(all_threads);
-        // The one seam every provider row crosses on its way into relay state or a
-        // client (`markdown/STABLE_SESSION_ID_DESIGN.md`, Phase 1). Ahead of the scope
-        // and reviewer filters on purpose: a row hidden from THIS device is still a
-        // session the relay has to be able to route. Identity-only for now, so no id
-        // here changes — see `RelayState::adopt_provider_summary`.
-        for thread in &mut merged {
-            relay.adopt_provider_summary(thread);
-        }
-        let mut threads = merged
+        let mut threads = relay
+            .filter_deleted_threads(all_threads)
             .into_iter()
             .filter(|thread| path_within_device_scope(&thread.cwd, &device_scope, &allowed_roots))
             .filter(|thread| !hidden_reviewer_ids.contains(&thread.id))
@@ -647,6 +652,8 @@ impl AppState {
         thread_id: &str,
         input: RepairWorkspaceInput,
     ) -> Result<SessionSnapshot, String> {
+        let thread_id = self.canonical_session_id(thread_id).await?;
+        let thread_id = thread_id.as_str();
         let device_id = require_device_id(input.device_id)?;
         let (recorded, device_scope, allowed_roots, grants) = {
             let relay = self.relay.read().await;
@@ -699,6 +706,8 @@ impl AppState {
         thread_id: &str,
         input: RenameThreadInput,
     ) -> Result<ThreadRenameReceipt, String> {
+        let thread_id = self.canonical_session_id(thread_id).await?;
+        let thread_id = thread_id.as_str();
         if thread_id.len() > MAX_THREAD_ID_BYTES {
             return Err(format!(
                 "thread id must be at most {MAX_THREAD_ID_BYTES} bytes"
@@ -827,6 +836,8 @@ impl AppState {
         thread_id: &str,
         input: SetThreadFlagInput,
     ) -> Result<ThreadFlagReceipt, String> {
+        let thread_id = self.canonical_session_id(thread_id).await?;
+        let thread_id = thread_id.as_str();
         if thread_id.len() > MAX_THREAD_ID_BYTES {
             return Err(format!(
                 "thread id must be at most {MAX_THREAD_ID_BYTES} bytes"
@@ -916,6 +927,8 @@ impl AppState {
         thread_id: &str,
         delete_reviewers: Option<bool>,
     ) -> Result<ThreadArchiveReceipt, String> {
+        let thread_id = self.canonical_session_id(thread_id).await?;
+        let thread_id = thread_id.as_str();
         let _slot = self.acquire_session_slot()?;
         {
             // Don't let a user archive a thread that a running review owns (its
@@ -1002,6 +1015,8 @@ impl AppState {
         thread_id: &str,
         delete_reviewers: Option<bool>,
     ) -> Result<ThreadDeleteReceipt, String> {
+        let thread_id = self.canonical_session_id(thread_id).await?;
+        let thread_id = thread_id.as_str();
         let _slot = self.acquire_session_slot()?;
         {
             // Don't let a user delete a thread a running review owns. Terminal-
@@ -1147,6 +1162,8 @@ impl AppState {
         device_id: Option<String>,
         thread_id: &str,
     ) -> Result<ThreadSettingsView, String> {
+        let thread_id = self.canonical_session_id(thread_id).await?;
+        let thread_id = thread_id.as_str();
         let defaults = self.defaults().await;
         let relay = self.relay.read().await;
         // Optional `device_id`, like `workspace_git_context`: local is already

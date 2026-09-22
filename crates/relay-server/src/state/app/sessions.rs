@@ -67,14 +67,17 @@ impl AppState {
         } else {
             None
         };
-        let start_result = bridge
-            .start_thread(
+        let adopted_start = self
+            .start_provider_thread(
+                provider_name,
+                bridge,
                 StartThreadRequest::new(&cwd, &model, &approval_policy, &sandbox)
                     .with_initial_prompt(provider_initial_prompt),
             )
             .await?;
+        let start_result = adopted_start.result;
         let consumed_initial_prompt = start_result.consumed_initial_prompt;
-        let started_thread_id = start_result.thread.id.clone();
+        let started_thread_id = adopted_start.identity.session_id;
         let initial_user_message = start_result.initial_user_message.clone();
         let started_turn_id = start_result.started_turn_id.clone();
 
@@ -195,8 +198,9 @@ impl AppState {
 
     pub async fn resume_session(
         &self,
-        input: ResumeSessionInput,
+        mut input: ResumeSessionInput,
     ) -> Result<SessionSnapshot, String> {
+        input.thread_id = self.canonical_session_id(&input.thread_id).await?;
         let _slot = self.acquire_session_slot()?;
         {
             // resume_session is NOT view-only: it calls bridge.resume_thread,
@@ -438,6 +442,7 @@ impl AppState {
         let device_id = require_device_id(input.device_id)?;
         let thread_id =
             non_empty(Some(input.thread_id)).ok_or_else(|| "thread_id is required".to_string())?;
+        let thread_id = self.canonical_session_id(&thread_id).await?;
         let _slot = self.acquire_session_slot()?;
         self.expire_stale_controller_if_needed().await;
         self.ensure_thread_runtime_loaded(&thread_id, &device_id)
@@ -611,6 +616,7 @@ impl AppState {
         let requested_effort = non_empty(input.effort);
         let target_thread =
             non_empty(Some(input.thread_id)).ok_or_else(|| "thread_id is required".to_string())?;
+        let target_thread = self.canonical_session_id(&target_thread).await?;
 
         {
             let relay = self.relay.read().await;
@@ -986,6 +992,7 @@ impl AppState {
         let device_id = require_device_id(input.device_id)?;
         let requested_thread =
             non_empty(Some(input.thread_id)).ok_or_else(|| "thread_id is required".to_string())?;
+        let requested_thread = self.canonical_session_id(&requested_thread).await?;
         let _slot = self.acquire_session_slot()?;
         self.expire_stale_controller_if_needed().await;
         self.ensure_thread_runtime_loaded(&requested_thread, &device_id)
@@ -1194,8 +1201,15 @@ marking idle locally."
     /// Deliberately does NOT `notify()`: a watch declaration changes nothing any client
     /// renders, and clients re-declare on every navigation — waking the snapshot
     /// publisher here would turn routine scrolling into a broadcast storm.
-    pub async fn set_watched_threads(&self, input: WatchThreadsInput) -> Result<(), String> {
+    pub async fn set_watched_threads(&self, mut input: WatchThreadsInput) -> Result<(), String> {
         let device_id = require_device_id(input.device_id)?;
+        let mut canonical = Vec::with_capacity(input.thread_ids.len());
+        for thread_id in input.thread_ids {
+            canonical.push(self.canonical_session_id(&thread_id).await?);
+        }
+        canonical.sort();
+        canonical.dedup();
+        input.thread_ids = canonical;
         let mut relay = self.relay.write().await;
         // A broker surface is identified by the peer id the relay already bound at
         // join, never by a value the client sent — otherwise one phone could take over
@@ -1251,8 +1265,11 @@ marking idle locally."
 
     /// Whether one surface should receive deltas for a thread (local SSE filter).
     pub async fn surface_watches_thread(&self, surface_id: &str, thread_id: &str) -> bool {
+        let Ok(thread_id) = self.canonical_session_id(thread_id).await else {
+            return false;
+        };
         let relay = self.relay.read().await;
-        relay.surface_watches_thread(surface_id, thread_id)
+        relay.surface_watches_thread(surface_id, &thread_id)
     }
 
     pub async fn heartbeat_session(
@@ -1270,6 +1287,7 @@ marking idle locally."
         let device_id = require_device_id(input.device_id)?;
         let thread_id =
             non_empty(Some(input.thread_id)).ok_or_else(|| "thread_id is required".to_string())?;
+        let thread_id = self.canonical_session_id(&thread_id).await?;
         let _slot = self.acquire_session_slot()?;
         self.expire_stale_controller_if_needed().await;
         self.ensure_thread_runtime_loaded(&thread_id, &device_id)

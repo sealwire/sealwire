@@ -290,9 +290,13 @@ and the author will revise until approved or the round budget runs out."
         device_id: &str,
         parent_thread_id: Option<String>,
     ) -> Result<(String, String, String), String> {
+        let parent_thread_id = match non_empty(parent_thread_id) {
+            Some(thread_id) => Some(self.canonical_session_id(&thread_id).await?),
+            None => None,
+        };
         let (parent_thread_id, cwd) = {
             let relay = self.relay.read().await;
-            let parent_thread_id = non_empty(parent_thread_id)
+            let parent_thread_id = parent_thread_id
                 .or_else(|| relay.active_thread_id.clone())
                 .ok_or_else(|| "there is no thread to run a workflow on".to_string())?;
             // One workflow at a time; a review and a workflow both drive turns on this
@@ -1045,17 +1049,16 @@ the drain window; it may still be running."
 
         let start = classify_workspace_result(
             workspace,
-            bridge
-                .start_thread(
-                    StartThreadRequest::new(workspace.as_str(), &model, &approval_policy, &sandbox)
-                        .driven_by(crate::provider::SessionPurpose::Workflow),
-                )
-                .await,
+            self.start_provider_thread(
+                &provider_name,
+                &bridge,
+                StartThreadRequest::new(workspace.as_str(), &model, &approval_policy, &sandbox)
+                    .driven_by(crate::provider::SessionPurpose::Workflow),
+            )
+            .await,
         )?;
-        let mut thread = start.thread;
-        thread.provider = provider_name.clone();
-        thread.source = provider_name.clone();
-        let thread_id = thread.id.clone();
+        let thread = start.result.thread;
+        let thread_id = start.identity.session_id;
         {
             let mut relay = self.relay.write().await;
             relay.register_background_thread(

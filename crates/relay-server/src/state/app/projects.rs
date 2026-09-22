@@ -52,8 +52,21 @@ impl AppState {
             .as_deref()
             .unwrap_or("local operator")
             .to_string();
+        let action = match input.action {
+            ProjectAction::Assign {
+                thread_id,
+                project_id,
+            } => ProjectAction::Assign {
+                thread_id: self.canonical_session_id(&thread_id).await?,
+                project_id,
+            },
+            ProjectAction::Unassign { thread_id } => ProjectAction::Unassign {
+                thread_id: self.canonical_session_id(&thread_id).await?,
+            },
+            other => other,
+        };
         let mut relay = self.relay.write().await;
-        let message = match input.action {
+        let message = match action {
             ProjectAction::Create { name } => {
                 let name = validate_project_name(name)?;
                 if relay.projects.len() >= MAX_PROJECTS {

@@ -121,8 +121,10 @@ New task button on the Tasks screen."
         let persona = self.orchestrator_persona_from_driver();
         let persona_text = persona.as_ref().map(|(prompt, _)| prompt.clone());
 
-        let start = bridge
-            .start_thread(
+        let start = self
+            .start_provider_thread(
+                provider_name,
+                bridge,
                 StartThreadRequest::new(&cwd, &model, &approval_policy, &sandbox)
                     // Persona from the private driver when present; public builds stay bare.
                     .with_system_prompt(persona_text.clone())
@@ -130,10 +132,8 @@ New task button on the Tasks screen."
                     .with_orchestrator_tools(Some(device_id.clone())),
             )
             .await?;
-        let mut thread = start.thread;
-        thread.provider = provider_name.to_string();
-        thread.source = provider_name.to_string();
-        let thread_id = thread.id.clone();
+        let thread = start.result.thread;
+        let thread_id = start.identity.session_id;
 
         {
             let mut relay = self.relay.write().await;
@@ -710,6 +710,21 @@ loser of a race keeps an id that is not the pin and silently loses its toolset"
         let app = build_multi_provider_app(&cwd, &["cursor", "claude_code"]).await;
         pair_device(&app, "device-1", Vec::new()).await;
         app.set_beta_features_enabled(true).await;
+
+        // Phase 2c intentionally refuses the fixture's otherwise-identical raw id
+        // across provider keys: identity-only public ids cannot represent both.
+        // Advance Claude's per-bridge counter so this test keeps isolating stale-pin
+        // recovery; the explicit provider-collision test covers the refusal.
+        let claude_fixture = app
+            .resolve_provider(Some("claude_code"))
+            .expect("Claude fixture")
+            .1;
+        ProviderBridge::start_thread(
+            claude_fixture.as_ref(),
+            StartThreadRequest::new(&cwd, "fake-model", "never", "workspace-write"),
+        )
+        .await
+        .expect("advance the Claude fixture's id counter");
 
         // A legacy Orchestrator: a real thread on cursor, pinned.
         let legacy = app

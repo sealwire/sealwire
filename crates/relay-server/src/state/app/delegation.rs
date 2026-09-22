@@ -107,6 +107,10 @@ impl AppState {
         peer_thread_id: &str,
         answer: String,
     ) -> Result<(), AskError> {
+        let peer_thread_id = self
+            .canonical_session_id(peer_thread_id)
+            .await
+            .map_err(AskError::Failed)?;
         let answer = answer.trim().to_string();
         if answer.is_empty() {
             return Err(AskError::Failed(
@@ -142,11 +146,22 @@ impl AppState {
     pub(crate) async fn ask_agent_detached(
         &self,
         asker_thread_id: &str,
-        request: AskRequest,
+        mut request: AskRequest,
     ) -> Result<String, AskError> {
+        let asker_thread_id = self
+            .canonical_session_id(asker_thread_id)
+            .await
+            .map_err(AskError::Failed)?;
+        if let Some(peer) = request.peer_thread_id.as_deref() {
+            request.peer_thread_id = Some(
+                self.canonical_session_id(peer)
+                    .await
+                    .map_err(AskError::Failed)?,
+            );
+        }
         // Refusals a person can act on are answered here; only the brief and the peer's
         // start happen out of sight.
-        let prechecked = self.precheck_ask(asker_thread_id, &request, None).await?;
+        let prechecked = self.precheck_ask(&asker_thread_id, &request, None).await?;
 
         // Written before the caller is answered: a restart during the minutes the brief
         // takes would otherwise lose an accepted delegate with nothing to show for it.
@@ -321,9 +336,21 @@ Carry on with one of those instead of bringing in another."
     pub(crate) async fn ask_agent(
         &self,
         asker_thread_id: &str,
-        request: AskRequest,
+        mut request: AskRequest,
     ) -> Result<String, AskError> {
-        self.ask_agent_filling(asker_thread_id, request, None).await
+        let asker_thread_id = self
+            .canonical_session_id(asker_thread_id)
+            .await
+            .map_err(AskError::Failed)?;
+        if let Some(peer) = request.peer_thread_id.as_deref() {
+            request.peer_thread_id = Some(
+                self.canonical_session_id(peer)
+                    .await
+                    .map_err(AskError::Failed)?,
+            );
+        }
+        self.ask_agent_filling(&asker_thread_id, request, None)
+            .await
     }
 
     /// `existing_ask_id` fills in a record written before the caller was answered, so an
@@ -822,17 +849,16 @@ get around your own permissions"
         );
         let effort = request.effort.clone().unwrap_or_default();
 
-        let start = bridge
-            .start_thread(
+        let start = self
+            .start_provider_thread(
+                &provider_name,
+                &bridge,
                 StartThreadRequest::new(cwd, &model, approval_policy, sandbox).with_effort(&effort),
             )
             .await
             .map_err(AskError::Failed)?;
-        let mut thread = start.thread;
-        let peer_thread_id = thread.id.clone();
-        // Force the routing fields, or `find_thread_provider` cannot reach it later.
-        thread.provider = provider_name.clone();
-        thread.source = provider_name.clone();
+        let thread = start.result.thread;
+        let peer_thread_id = start.identity.session_id;
 
         {
             let mut relay = self.relay.write().await;

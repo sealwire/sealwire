@@ -267,6 +267,7 @@ no workspace related to it is available instead"
     ) -> Result<ResolvedWorkspace, String> {
         let thread_id =
             non_empty(Some(input.thread_id)).ok_or_else(|| "thread_id is required".to_string())?;
+        let thread_id = self.canonical_session_id(&thread_id).await?;
         if thread_id.len() > MAX_THREAD_ID_BYTES {
             return Err(format!(
                 "thread id must be at most {MAX_THREAD_ID_BYTES} bytes"

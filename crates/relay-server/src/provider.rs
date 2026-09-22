@@ -112,6 +112,41 @@ pub struct StartThreadResult {
     pub started_turn_id: Option<String>,
 }
 
+/// The three names at a provider-result boundary.
+///
+/// Bridges return `provider_handle`; relay-owned state and every public response use
+/// `session_id`. Keeping the configured provider key beside both prevents an adapter's
+/// self-reported metadata from becoming routing authority. Phase 2c keeps these ids
+/// equal in production, while tests deliberately make them differ so a missed rewrite
+/// is observable before Phase 3 enables that shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AdoptedProviderSession {
+    pub(crate) provider: String,
+    pub(crate) provider_handle: String,
+    pub(crate) session_id: String,
+}
+
+impl AdoptedProviderSession {
+    pub(crate) fn canonicalize_summary(&self, summary: &mut ThreadSummaryView) {
+        summary.id = self.session_id.clone();
+        summary.provider = self.provider.clone();
+    }
+
+    pub(crate) fn canonicalize_sync(&self, data: &mut ThreadSyncData) {
+        self.canonicalize_summary(&mut data.thread);
+    }
+}
+
+/// A newly-created provider session after its raw result crossed the adoption seam.
+///
+/// `StartThreadResult` itself remains the provider contract. This wrapper is an
+/// AppState-side boundary value that retains the raw handle even after the public
+/// summary has been rewritten to the relay session id.
+pub(crate) struct AdoptedStartThreadResult {
+    pub(crate) identity: AdoptedProviderSession,
+    pub(crate) result: StartThreadResult,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderImage {
     pub media_type: String,

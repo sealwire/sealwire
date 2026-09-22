@@ -294,7 +294,14 @@ impl AppState {
         // one. The provider for a reused thread is derived/locked from the thread
         // itself (below, under the relay read lock); the request's
         // `reviewer_provider` is only a hint that must match if present.
-        let reuse_thread_id = non_empty(input.reviewer_thread_id.clone());
+        let reuse_thread_id = match non_empty(input.reviewer_thread_id.clone()) {
+            Some(thread_id) => Some(self.canonical_session_id(&thread_id).await?),
+            None => None,
+        };
+        let requested_parent_thread_id = match non_empty(input.parent_thread_id.clone()) {
+            Some(thread_id) => Some(self.canonical_session_id(&thread_id).await?),
+            None => None,
+        };
         let requested_provider = non_empty(Some(input.reviewer_provider.clone()));
 
         if reuse_thread_id.is_none() {
@@ -334,7 +341,8 @@ starting a review"
             //
             // Review the thread the request NAMES, falling back to the active thread when
             // none is given; error only if there is no thread to review at all.
-            let parent_thread_id = non_empty(input.parent_thread_id.clone())
+            let parent_thread_id = requested_parent_thread_id
+                .clone()
                 .or_else(|| relay.active_thread_id.clone())
                 .ok_or_else(|| "there is no thread to review".to_string())?;
             if relay.is_thread_review_locked(&parent_thread_id) {
@@ -2520,20 +2528,16 @@ tree would review commits this thread never made"
 
         let start = classify_workspace_result(
             workspace,
-            bridge
-                .start_thread(
-                    StartThreadRequest::new(workspace.as_str(), &model, &approval_policy, &sandbox)
-                        .driven_by(crate::provider::SessionPurpose::Reviewer),
-                )
-                .await,
+            self.start_provider_thread(
+                &provider_name,
+                &bridge,
+                StartThreadRequest::new(workspace.as_str(), &model, &approval_policy, &sandbox)
+                    .driven_by(crate::provider::SessionPurpose::Reviewer),
+            )
+            .await,
         )?;
-        let mut thread = start.thread;
-        // The thread must be routable by `find_thread_provider`, which matches the
-        // summary's provider/source against the provider registry — set both to the
-        // reviewer provider key (it's hidden from nav by `reviewer_thread_ids()`).
-        thread.provider = provider_name.clone();
-        thread.source = provider_name.clone();
-        let reviewer_thread_id = thread.id.clone();
+        let thread = start.result.thread;
+        let reviewer_thread_id = start.identity.session_id;
 
         {
             let reviewer_thread_id = reviewer_thread_id.clone();

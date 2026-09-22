@@ -114,6 +114,13 @@ pub(crate) enum SessionBindingError {
         handle: String,
         owner: String,
     },
+    /// Identity-only adoption cannot expose the same raw string as a second
+    /// provider's public session id. Phase 3 can mint a distinct session id; Phase
+    /// 2c must refuse instead of silently moving the existing binding.
+    SessionIdClaimed {
+        session_id: String,
+        owner_provider: String,
+    },
 }
 
 impl std::fmt::Display for SessionBindingError {
@@ -127,6 +134,13 @@ impl std::fmt::Display for SessionBindingError {
             } => write!(
                 f,
                 "provider handle {provider}/{handle} is already bound to session '{owner}'"
+            ),
+            Self::SessionIdClaimed {
+                session_id,
+                owner_provider,
+            } => write!(
+                f,
+                "provider result id '{session_id}' is already a session owned by provider '{owner_provider}'"
             ),
         }
     }
@@ -213,6 +227,69 @@ impl SessionBindingRegistry {
                 handle: handle.to_string(),
             })
             .map(String::as_str)
+    }
+
+    /// Resolve an unqualified legacy provider handle at API ingress.
+    ///
+    /// Public inputs do not carry a provider key. A real session id always wins;
+    /// otherwise exactly one reverse-index match may act as its alias. The same raw
+    /// handle under two providers is ambiguous and must be refused rather than routed
+    /// by HashMap iteration order.
+    pub(crate) fn canonical_session_id(&self, value: &str) -> Result<String, Vec<String>> {
+        if self.bindings.contains_key(value) {
+            return Ok(value.to_string());
+        }
+        let mut matches = self
+            .by_provider_handle
+            .iter()
+            .filter(|(key, _)| key.handle == value)
+            .map(|(_, session_id)| session_id.clone())
+            .collect::<Vec<_>>();
+        matches.sort();
+        matches.dedup();
+        match matches.as_slice() {
+            [] => Ok(value.to_string()),
+            [session_id] => Ok(session_id.clone()),
+            _ => Err(matches),
+        }
+    }
+
+    /// Adopt one provider result and return all three boundary names.
+    ///
+    /// Existing reverse bindings win, which is what rewrites an injected/stale
+    /// provider alias to its stable session id. Unknown rows get the compatibility
+    /// identity binding. A raw handle that already spells some session id is refused:
+    /// Phase 2c cannot represent that second identity without minting an id.
+    pub(crate) fn adopt_provider_handle(
+        &mut self,
+        provider: &str,
+        handle: &str,
+    ) -> Result<crate::provider::AdoptedProviderSession, SessionBindingError> {
+        if provider.is_empty() {
+            return Err(SessionBindingError::Blank("provider"));
+        }
+        if handle.is_empty() {
+            return Err(SessionBindingError::Blank("provider handle"));
+        }
+        if let Some(session_id) = self.session_for_provider_handle(provider, handle) {
+            return Ok(crate::provider::AdoptedProviderSession {
+                provider: provider.to_string(),
+                provider_handle: handle.to_string(),
+                session_id: session_id.to_string(),
+            });
+        }
+        if let Some(existing) = self.bindings.get(handle) {
+            return Err(SessionBindingError::SessionIdClaimed {
+                session_id: handle.to_string(),
+                owner_provider: existing.provider.clone(),
+            });
+        }
+        self.bind_identity(provider, handle)?;
+        Ok(crate::provider::AdoptedProviderSession {
+            provider: provider.to_string(),
+            provider_handle: handle.to_string(),
+            session_id: handle.to_string(),
+        })
     }
 
     /// Route one provider event to the session that owns its handle, adopting the

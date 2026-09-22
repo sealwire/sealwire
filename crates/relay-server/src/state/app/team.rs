@@ -23,7 +23,7 @@
 //!    one of them can be a Claude `claude-pending-*` id that gets re-keyed by
 //!    `promote_background_thread` the moment its first turn starts.
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use tokio::time::Instant;
 
@@ -36,7 +36,6 @@ use crate::protocol::{
     StartTeamInput, StartTeamReceipt, TeamActionInput, TeamActionReceipt, TeamAwaitingView,
     TeamMarkInput, TeamRunView, TeamSubTaskView, TeamsResponse,
 };
-use crate::provider::ProviderBridge;
 use crate::state::{
     TaskSpec, TeamPauseKind, TeamRun, TeamRunStatus, TeamThreadSlot, TurnFailureKind,
 };
@@ -2024,24 +2023,6 @@ over on resume"
         }
     }
 
-    /// Release a thread by the bridge that just created it, before it is registered.
-    /// `thread_id` is the provider's own id here and has no binding yet, which is why
-    /// this one does not go through `resolve_session_target`.
-    async fn release_team_thread_on_bridge(
-        &self,
-        bridge: &Arc<dyn ProviderBridge>,
-        thread_id: &str,
-    ) {
-        if let Err(error) = bridge.release_thread(thread_id).await {
-            let mut relay = self.relay.write().await;
-            relay.push_log(
-                "warn",
-                format!("Could not release task thread {thread_id}: {error}"),
-            );
-            relay.notify();
-        }
-    }
-
     /// Hold the drive gate across a git mutation of the task worktree.
     ///
     /// Stop and Cancel promise the workspace is quiescent when they return, and
@@ -2372,18 +2353,17 @@ over on resume"
 
         let start = classify_workspace_result(
             workspace,
-            bridge
-                .start_thread(
-                    StartThreadRequest::new(workspace.as_str(), &model, &approval_policy, &sandbox)
-                        .with_effort(&effort)
-                        .driven_by(crate::provider::SessionPurpose::Seat(run_id.to_string())),
-                )
-                .await,
+            self.start_provider_thread(
+                &provider_name,
+                &bridge,
+                StartThreadRequest::new(workspace.as_str(), &model, &approval_policy, &sandbox)
+                    .with_effort(&effort)
+                    .driven_by(crate::provider::SessionPurpose::Seat(run_id.to_string())),
+            )
+            .await,
         )?;
-        let mut thread = start.thread;
-        thread.provider = provider_name.clone();
-        thread.source = provider_name.clone();
-        let thread_id = thread.id.clone();
+        let thread = start.result.thread;
+        let thread_id = start.identity.session_id;
 
         // D5, path 1: the provider thread now exists but owns nothing yet.
         // Test-only latch, held before the write lock below — never while
@@ -2400,8 +2380,7 @@ over on resume"
             let mut relay = self.relay.write().await;
             let Some(status) = relay.team_run(run_id).map(|run| run.status) else {
                 drop(relay);
-                self.release_team_thread_on_bridge(&bridge, &thread_id)
-                    .await;
+                self.release_team_thread_by_id(&thread_id).await;
                 return Err(ThreadDriveError::Provider(format!(
                     "task run {run_id} is gone before its {} seat could be registered",
                     role.as_str()
