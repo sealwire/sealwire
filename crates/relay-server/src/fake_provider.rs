@@ -23,7 +23,8 @@ use crate::{
         ModelOptionView, ThreadSummaryView, ToolCallView, TranscriptEntryKind, TranscriptEntryView,
     },
     provider::{
-        ProviderBridge, ProviderImage, StartThreadRequest, StartThreadResult, ThreadSyncData,
+        ProviderBridge, ProviderForkRequest, ProviderImage, StartThreadRequest, StartThreadResult,
+        ThreadSyncData, ThreadTranscriptPageData,
     },
     state::{
         ApprovalKind, BrokerPendingMessage, PendingApproval, PendingAskUserQuestion,
@@ -511,6 +512,22 @@ pub struct FakeProviderBridge {
     /// test assert the relay ASKED for a persona without standing up a real
     /// provider to observe that it arrived.
     system_prompts: Arc<Mutex<Vec<(String, String)>>>,
+    /// `(method, thread id)` for every id-bearing call, in order.
+    ///
+    /// A double that only rejects an id it does not know can say "that was not my
+    /// handle" but never "this exact string arrived", which is the half the
+    /// session-binding boundary is actually about.
+    thread_id_arguments: Arc<Mutex<Vec<(&'static str, String)>>>,
+    /// Whether `read_thread_transcript_page` answers instead of declining.
+    /// Off by default: answering marks the runtime `provider_history_paged`, which
+    /// changes how every existing fake-backed transcript test merges history.
+    transcript_paging: Arc<AtomicBool>,
+    /// Whether `fork_thread` forks instead of declining. Off by default: declining
+    /// is what sends every existing fork test down the replay path.
+    native_fork: Arc<AtomicBool>,
+    /// One-shot: the next `archive_thread` fails, so a test can stand in the state
+    /// where the provider refused and the relay must keep the session.
+    refuse_next_archive: Arc<AtomicBool>,
 }
 
 impl FakeProviderBridge {
@@ -584,6 +601,40 @@ impl FakeProviderBridge {
         self.system_prompts.lock().await.clone()
     }
 
+    /// Every thread id `method` was called with, in call order.
+    pub(crate) async fn thread_ids_seen_by(&self, method: &str) -> Vec<String> {
+        self.thread_id_arguments
+            .lock()
+            .await
+            .iter()
+            .filter(|(called, _)| *called == method)
+            .map(|(_, id)| id.clone())
+            .collect()
+    }
+
+    /// Answer `read_thread_transcript_page` like a provider that pages its own
+    /// history, so the relay's paging branch is reachable against the double.
+    pub(crate) fn enable_transcript_paging(&self) {
+        self.transcript_paging.store(true, Ordering::Relaxed);
+    }
+
+    /// Fork natively instead of declining, so the relay's native-fork branch — the
+    /// one that names the source thread to the provider — is reachable.
+    pub(crate) fn enable_native_fork(&self) {
+        self.native_fork.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn refuse_next_archive(&self) {
+        self.refuse_next_archive.store(true, Ordering::Relaxed);
+    }
+
+    async fn record_thread_id_argument(&self, method: &'static str, thread_id: &str) {
+        self.thread_id_arguments
+            .lock()
+            .await
+            .push((method, thread_id.to_string()));
+    }
+
     /// Start the next thread the way Claude starts one with no initial prompt: a
     /// synthetic `claude-pending-…` id, reading active, with no session behind it.
     /// Name what its first turn promotes it to with `promote_on_first_turn`.
@@ -645,6 +696,10 @@ impl FakeProviderBridge {
             finish_turn_before_start_returns: Arc::new(AtomicBool::new(false)),
             announce_foreign_turn_during_start: Arc::new(Mutex::new(None)),
             system_prompts: Arc::new(Mutex::new(Vec::new())),
+            thread_id_arguments: Arc::new(Mutex::new(Vec::new())),
+            transcript_paging: Arc::new(AtomicBool::new(false)),
+            native_fork: Arc::new(AtomicBool::new(false)),
+            refuse_next_archive: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -772,6 +827,8 @@ impl ProviderBridge for FakeProviderBridge {
         _approval_policy: &str,
         _sandbox: &str,
     ) -> Result<(), String> {
+        self.record_thread_id_argument("resume_thread", thread_id)
+            .await;
         if self.threads.lock().await.contains_key(thread_id) {
             Ok(())
         } else {
@@ -780,6 +837,8 @@ impl ProviderBridge for FakeProviderBridge {
     }
 
     async fn read_thread(&self, thread_id: &str) -> Result<ThreadSyncData, String> {
+        self.record_thread_id_argument("read_thread", thread_id)
+            .await;
         let threads = self.threads.lock().await;
         let thread = threads
             .get(thread_id)
@@ -802,6 +861,8 @@ impl ProviderBridge for FakeProviderBridge {
         thread_id: &str,
         item_id: &str,
     ) -> Result<Option<TranscriptEntryView>, String> {
+        self.record_thread_id_argument("read_thread_entry_detail", thread_id)
+            .await;
         Ok(self.threads.lock().await.get(thread_id).and_then(|thread| {
             thread
                 .transcript
@@ -818,6 +879,8 @@ impl ProviderBridge for FakeProviderBridge {
     }
 
     async fn release_thread(&self, thread_id: &str) -> Result<(), String> {
+        self.record_thread_id_argument("release_thread", thread_id)
+            .await;
         self.released_threads
             .lock()
             .await
@@ -826,14 +889,78 @@ impl ProviderBridge for FakeProviderBridge {
     }
 
     async fn archive_thread(&self, thread_id: &str) -> Result<(), String> {
+        self.record_thread_id_argument("archive_thread", thread_id)
+            .await;
+        if self.refuse_next_archive.swap(false, Ordering::Relaxed) {
+            return Err("fake provider refused the archive".to_string());
+        }
         self.threads.lock().await.remove(thread_id);
         Ok(())
+    }
+
+    /// A native fork, once a test asks for one: a new thread carrying the source's
+    /// history. Declines otherwise, which is the relay's cue to replay instead.
+    async fn fork_thread(
+        &self,
+        request: ProviderForkRequest,
+    ) -> Result<Option<StartThreadResult>, String> {
+        if !self.native_fork.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        self.record_thread_id_argument("fork_thread", &request.source_thread_id)
+            .await;
+        let mut threads = self.threads.lock().await;
+        let source = threads
+            .get(&request.source_thread_id)
+            .cloned()
+            .ok_or_else(|| format!("fake thread '{}' was not found", request.source_thread_id))?;
+        let mut summary = source.summary.clone();
+        summary.id = self.next_token("fake-fork");
+        summary.cwd = request.cwd.clone();
+        summary.forked_from = Some(request.source_thread_id.clone());
+        summary.updated_at = unix_now();
+        threads.insert(
+            summary.id.clone(),
+            FakeThread {
+                summary: summary.clone(),
+                transcript: source.transcript.clone(),
+            },
+        );
+        Ok(Some(StartThreadResult {
+            thread: summary,
+            consumed_initial_prompt: false,
+            initial_user_message: None,
+            started_turn_id: None,
+        }))
+    }
+
+    /// Page a thread's history the way a provider with its own paging does, but
+    /// only once a test asks — see `transcript_paging`.
+    async fn read_thread_transcript_page(
+        &self,
+        thread_id: &str,
+        before: Option<usize>,
+    ) -> Result<Option<ThreadTranscriptPageData>, String> {
+        if !self.transcript_paging.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        self.record_thread_id_argument("read_thread_transcript_page", thread_id)
+            .await;
+        let sync = ProviderBridge::read_thread(self, thread_id).await?;
+        let _ = before;
+        Ok(Some(ThreadTranscriptPageData {
+            sync,
+            prev_cursor: None,
+            paged: true,
+        }))
     }
 
     async fn delete_thread_permanently(
         &self,
         thread_id: &str,
     ) -> Result<LocalThreadDeleteSummary, String> {
+        self.record_thread_id_argument("delete_thread_permanently", thread_id)
+            .await;
         self.threads.lock().await.remove(thread_id);
         Ok(LocalThreadDeleteSummary {
             deleted_paths: Vec::new(),
@@ -842,11 +969,27 @@ impl ProviderBridge for FakeProviderBridge {
     }
 
     async fn resolve_started_thread_id(&self, requested_thread_id: &str) -> String {
+        self.record_thread_id_argument("resolve_started_thread_id", requested_thread_id)
+            .await;
         self.promoted_thread_ids
             .lock()
             .await
             .remove(requested_thread_id)
             .unwrap_or_else(|| requested_thread_id.to_string())
+    }
+
+    /// The trait's own default, plus the recording. A task seat records its owning
+    /// provider up front, which is what makes this call distinguishable from an
+    /// ordinary delete in the boundary assertions.
+    async fn delete_owned_thread_permanently(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<LocalThreadDeleteSummary>, String> {
+        self.record_thread_id_argument("delete_owned_thread_permanently", thread_id)
+            .await;
+        ProviderBridge::delete_thread_permanently(self, thread_id)
+            .await
+            .map(Some)
     }
 
     async fn start_turn(
@@ -857,6 +1000,8 @@ impl ProviderBridge for FakeProviderBridge {
         _effort: &str,
         _images: &[ProviderImage],
     ) -> Result<Option<String>, String> {
+        self.record_thread_id_argument("start_turn", thread_id)
+            .await;
         if !self.threads.lock().await.contains_key(thread_id) {
             return Err(format!("fake thread '{thread_id}' was not found"));
         }
@@ -2004,6 +2149,8 @@ impl ProviderBridge for FakeProviderBridge {
         thread_id: &str,
         turn_id: Option<&str>,
     ) -> Result<(), String> {
+        self.record_thread_id_argument("request_turn_stop", thread_id)
+            .await;
         let resolved_turn_id = match turn_id {
             Some(turn_id) => Some(turn_id.to_string()),
             None => self
@@ -2108,6 +2255,8 @@ impl ProviderBridge for FakeProviderBridge {
         pending: &PendingApproval,
         input: &ApprovalDecisionInput,
     ) -> Result<(), String> {
+        self.record_thread_id_argument("respond_to_approval", &pending.thread_id)
+            .await;
         // Unblock the parked turn (if any) with the user's decision. The app
         // layer clears the pending approval from relay state after this returns.
         if let Some(gate) = self.approval_gates.lock().await.remove(&pending.request_id) {

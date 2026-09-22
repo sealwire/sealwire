@@ -5345,6 +5345,31 @@ impl RelayState {
         self.session_bindings.persistable()
     }
 
+    /// Point a session at a provider handle that is NOT its own id — the shape
+    /// Phase 3 will mint and no production path may create yet.
+    ///
+    /// Test-only because that is the point: an identity binding cannot tell a call
+    /// site that resolves from one that passes the session id straight through.
+    #[cfg(test)]
+    pub(crate) fn bind_session_to_foreign_handle(
+        &mut self,
+        session_id: &str,
+        provider: &str,
+        provider_handle: &str,
+    ) {
+        self.session_bindings.remove(provider_handle);
+        self.session_bindings
+            .bind(
+                session_id,
+                SessionBinding {
+                    provider: provider.to_string(),
+                    provider_handle: provider_handle.to_string(),
+                    provider_thread_id: Some(provider_handle.to_string()),
+                },
+            )
+            .expect("test binding");
+    }
+
     pub fn filter_deleted_threads(
         &self,
         threads: Vec<ThreadSummaryView>,

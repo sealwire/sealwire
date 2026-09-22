@@ -253,9 +253,10 @@ impl AppState {
             })
             .unwrap_or(defaults.sandbox);
 
-        let (provider_name, bridge) = self.find_thread_provider(&input.thread_id).await?;
+        let target = self.resolve_session_target(&input.thread_id).await?;
+        let provider_name = target.provider.clone();
         let provider_models = self
-            .load_provider_model_catalog(provider_name, bridge)
+            .load_provider_model_catalog(&provider_name, target.bridge())
             .await;
         let effort = non_empty(input.effort)
             .or_else(|| {
@@ -297,7 +298,7 @@ impl AppState {
         // so a dead workspace can fail the read itself, with a raw provider error and no
         // banner. When that happens and the workspace is the known reason, open the thread
         // anyway: history is unavailable, the repair is not.
-        let preview = match bridge.read_thread(&input.thread_id).await {
+        let preview = match target.read_thread().await {
             Ok(preview) => preview,
             Err(error) if known_missing => {
                 self.open_thread_without_its_provider(
@@ -348,12 +349,10 @@ impl AppState {
             .await
             .is_none()
         {
-            bridge
-                .resume_thread(&input.thread_id, &approval_policy, &sandbox)
-                .await?;
+            target.resume_thread(&approval_policy, &sandbox).await?;
         }
 
-        let thread_data = bridge.read_thread(&input.thread_id).await?;
+        let thread_data = target.read_thread().await?;
 
         // Ask for the catalog again if the first attempt came back empty.
         //
@@ -369,14 +368,14 @@ impl AppState {
         let provider_models = match provider_models {
             Some(models) => Some(models),
             None => {
-                self.load_provider_model_catalog(provider_name, bridge)
+                self.load_provider_model_catalog(&provider_name, target.bridge())
                     .await
             }
         };
 
         {
             let mut relay = self.relay.write().await;
-            relay.set_provider_name(provider_name.to_string());
+            relay.set_provider_name(provider_name.clone());
             // `set_available_models` heals the relay's model when it is still
             // the untouched seed. Recording the seed on the thread here would
             // undo that immediately — and persist another provider's model id,
@@ -403,7 +402,7 @@ impl AppState {
             // open. Other providers may report a bumpable mtime, so we
             // freeze-first to keep repeated selection from creeping the thread
             // up the list.
-            if bridge.read_thread_reports_activity_time() {
+            if target.bridge().read_thread_reports_activity_time() {
                 relay.observe_thread_last_activity(&input.thread_id, preview.thread.updated_at);
             } else {
                 relay.seed_thread_last_activity(&input.thread_id, preview.thread.updated_at);
@@ -507,12 +506,13 @@ impl AppState {
             )
         };
 
-        let (provider_name, bridge) = self.find_thread_provider(&thread_id).await?;
+        let target = self.resolve_session_target(&thread_id).await?;
+        let provider_name = target.provider.clone();
         let provider_models = self
-            .load_provider_model_catalog(provider_name, bridge)
+            .load_provider_model_catalog(&provider_name, target.bridge())
             .await;
         let next_model = resolve_provider_model(
-            provider_name,
+            &provider_name,
             &provider_models,
             requested_model,
             current_model.clone(),
@@ -537,8 +537,8 @@ impl AppState {
         }
 
         if needs_bridge_resume {
-            bridge
-                .resume_thread(&thread_id, &next_approval_policy, &next_sandbox)
+            target
+                .resume_thread(&next_approval_policy, &next_sandbox)
                 .await?;
         }
 
@@ -546,7 +546,7 @@ impl AppState {
             let mut relay = self.relay.write().await;
             let is_focused = relay.active_thread_id.as_deref() == Some(thread_id.as_str());
             if is_focused {
-                relay.set_provider_name(provider_name.to_string());
+                relay.set_provider_name(provider_name.clone());
                 if let Some(models) = provider_models {
                     relay.set_available_models(models);
                 }
@@ -699,9 +699,10 @@ impl AppState {
             )
         };
 
-        let (provider_name, bridge) = self.find_thread_provider(&target_thread).await?;
+        let target = self.resolve_session_target(&target_thread).await?;
+        let provider_name = target.provider.clone();
         let provider_models = self
-            .load_provider_model_catalog(provider_name, bridge)
+            .load_provider_model_catalog(&provider_name, target.bridge())
             .await;
         // The thread's own model, else the provider-neutral sentinel — NOT
         // `defaults.model`. A person can send into a thread that is not the active
@@ -713,7 +714,7 @@ impl AppState {
             .filter(|model| !model.is_empty())
             .unwrap_or_else(|| super::PROVIDER_DEFAULT_MODEL.to_string());
         let model = resolve_provider_model(
-            provider_name,
+            &provider_name,
             &provider_models,
             requested_model,
             fallback_model.clone(),
@@ -754,7 +755,7 @@ impl AppState {
         let target_cwd = if let Some(cwd) = runtime_cwd {
             cwd
         } else {
-            let data = bridge.read_thread(&target_thread).await?;
+            let data = target.read_thread().await?;
             let cwd = data.thread.cwd.clone();
             let mut relay = self.relay.write().await;
             if remembered_settings.is_some() {
@@ -862,14 +863,12 @@ impl AppState {
         }
 
         let turn_base_sha = self.session_turn_base_sha(&target_cwd).await;
-        let turn_id = bridge
-            .start_turn(&target_thread, &text, &model, &effort, images)
-            .await?;
-        let effective_thread_id = bridge.resolve_started_thread_id(&target_thread).await;
+        let turn_id = target.start_turn(&text, &model, &effort, images).await?;
+        let effective_thread_id = target.resolve_started_thread_id().await;
         {
             let mut relay = self.relay.write().await;
             relay.focus_thread_runtime(&effective_thread_id, &device_id);
-            relay.set_provider_name(provider_name.to_string());
+            relay.set_provider_name(provider_name.clone());
             if let Some(models) = provider_models {
                 relay.set_available_models(models);
             }
@@ -1056,10 +1055,9 @@ from {}; no provider turn was active.",
         self.interrupt_goal_stopped_by_user(&thread_id).await;
 
         let turn_already_gone = match self
-            .find_thread_provider(&thread_id)
+            .resolve_session_target(&thread_id)
             .await?
-            .1
-            .request_turn_stop(&thread_id, Some(&turn_id))
+            .request_turn_stop(Some(&turn_id))
             .await
         {
             Ok(()) => false,

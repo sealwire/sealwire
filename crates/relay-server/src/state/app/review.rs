@@ -2286,8 +2286,13 @@ tree would review commits this thread never made"
         if let Some(cwd) = self.relay.read().await.thread_cwd(thread_id) {
             return Ok(cwd);
         }
-        let (_, bridge) = self.find_thread_provider(thread_id).await?;
-        let cwd = bridge.read_thread(thread_id).await?.thread.cwd;
+        let cwd = self
+            .resolve_session_target(thread_id)
+            .await?
+            .read_thread()
+            .await?
+            .thread
+            .cwd;
         non_empty(Some(cwd)).ok_or_else(|| format!("cannot resolve thread {thread_id}'s workspace"))
     }
 
@@ -2360,12 +2365,10 @@ tree would review commits this thread never made"
                 .map(|settings| settings.reasoning_effort.clone())
                 .filter(|value| !value.is_empty())
         });
-        let (provider_name, bridge) = {
-            let (name, bridge) = self.find_thread_provider(thread_id).await?;
-            (name.to_string(), bridge.clone())
-        };
+        let target = self.resolve_session_target(thread_id).await?;
+        let provider_name = target.provider.clone();
         let provider_models = self
-            .load_provider_model_catalog(&provider_name, &bridge)
+            .load_provider_model_catalog(&provider_name, target.bridge())
             .await;
         // The read paths drop a leaked id via `resolve_model_for_provider`; this is the
         // path that SENDS one, and `resolve_provider_model` honours a named model
@@ -2422,9 +2425,7 @@ tree would review commits this thread never made"
         let turn_revision = { self.relay.read().await.thread_turn_revision(thread_id) };
         let turn_id = classify_workspace_result(
             &workspace,
-            bridge
-                .start_turn(thread_id, text, &model, &effort, &[])
-                .await,
+            target.start_turn(text, &model, &effort, &[]).await,
         )?;
 
         // Which thread the turn ACTUALLY runs under. A deferred-start provider
@@ -2436,7 +2437,7 @@ tree would review commits this thread never made"
         // would spawn a phantom working thread. Every other provider returns the
         // requested id unchanged, so this is a no-op for them. Same call the ordinary
         // send path makes (`sessions.rs`).
-        let effective_thread_id = bridge.resolve_started_thread_id(thread_id).await;
+        let effective_thread_id = target.resolve_started_thread_id().await;
         let thread_id = effective_thread_id.as_str();
 
         {
@@ -2625,12 +2626,13 @@ tree would review commits this thread never made"
         &self,
         reviewer_thread_id: &str,
     ) -> Result<(Option<String>, Option<String>), ThreadDriveError> {
-        let (provider_name, bridge) = self.find_thread_provider(reviewer_thread_id).await?;
+        let target = self.resolve_session_target(reviewer_thread_id).await?;
+        let provider_name = target.provider.clone();
         let defaults = self.defaults().await;
         // Authoritative read-only policy for a reviewer on this provider. Recomputed,
         // never read from (user-mutable) persisted settings.
         let (approval_policy, sandbox, _read_only) =
-            reviewer_thread_settings(provider_name, &defaults.approval_policy, &defaults.sandbox);
+            reviewer_thread_settings(&provider_name, &defaults.approval_policy, &defaults.sandbox);
 
         // Model/effort are not a safety concern: keep the reviewer's own where
         // recorded, falling back to the session default — never None (which
@@ -2656,9 +2658,7 @@ tree would review commits this thread never made"
         let workspace = self.drivable_thread(reviewer_thread_id).await?;
         classify_workspace_result(
             &workspace,
-            bridge
-                .resume_thread(reviewer_thread_id, &approval_policy, &sandbox)
-                .await,
+            target.resume_thread(&approval_policy, &sandbox).await,
         )?;
 
         let has_runtime = {
@@ -2682,11 +2682,11 @@ tree would review commits this thread never made"
             // read-only policy, so `wait_for_thread_idle_outcome` observes this turn
             // (a missing runtime reads as "idle") and the read-back binds to a fresh
             // message instead of replaying the prior review.
-            let mut data = bridge.read_thread(reviewer_thread_id).await?;
+            let mut data = target.read_thread().await?;
             // Keep this foreground-review row routable and nav-hidden; its durable
             // reviewer record remains explicitly non-task-owned.
-            data.thread.provider = provider_name.to_string();
-            data.thread.source = provider_name.to_string();
+            data.thread.provider = provider_name.clone();
+            data.thread.source = provider_name.clone();
             let mut relay = self.relay.write().await;
             relay.hydrate_background_runtime(
                 data,
@@ -2944,11 +2944,13 @@ tree would review commits this thread never made"
                 }
             }
         }
-        let bridge = {
-            let (_, bridge) = self.find_thread_provider(thread_id).await.ok()?;
-            bridge.clone()
-        };
-        let data = bridge.read_thread(thread_id).await.ok()?;
+        let data = self
+            .resolve_session_target(thread_id)
+            .await
+            .ok()?
+            .read_thread()
+            .await
+            .ok()?;
         latest_agent_entry_with_turn(&data.to_views())
     }
 
@@ -2978,11 +2980,13 @@ tree would review commits this thread never made"
                 }
             }
         }
-        let bridge = {
-            let (_, bridge) = self.find_thread_provider(thread_id).await.ok()?;
-            bridge.clone()
-        };
-        let data = bridge.read_thread(thread_id).await.ok()?;
+        let data = self
+            .resolve_session_target(thread_id)
+            .await
+            .ok()?
+            .read_thread()
+            .await
+            .ok()?;
         latest_agent_entry(&data.to_views())
     }
 
@@ -3004,12 +3008,8 @@ tree would review commits this thread never made"
         thread_id: &str,
         turn_id: Option<&str>,
     ) -> bool {
-        match self.find_thread_provider(thread_id).await {
-            Ok((_, bridge)) => bridge
-                .clone()
-                .request_turn_stop(thread_id, turn_id)
-                .await
-                .is_ok(),
+        match self.resolve_session_target(thread_id).await {
+            Ok(target) => target.request_turn_stop(turn_id).await.is_ok(),
             Err(_) => false,
         }
     }
@@ -3220,14 +3220,13 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
                 .collect()
         };
         for approval in pending {
-            if let Ok((_, bridge)) = self.find_thread_provider(&approval.thread_id).await {
-                let bridge = bridge.clone();
+            if let Ok(target) = self.resolve_session_target(&approval.thread_id).await {
                 let input = ApprovalDecisionInput {
                     decision: ApprovalDecision::Deny,
                     scope: None,
                     device_id: None,
                 };
-                let _ = bridge.respond_to_approval(&approval, &input).await;
+                let _ = target.respond_to_approval(&approval, &input).await;
             }
         }
     }

@@ -31133,3 +31133,962 @@ mod session_binding_tests {
         );
     }
 }
+
+/// Phase 2a of `markdown/STABLE_SESSION_ID_DESIGN.md`: every AppState call into a
+/// provider sends the binding's handle, while relay state and every public id stay
+/// on the stable session id.
+///
+/// Production bindings are still identity mappings, so an identity test cannot tell
+/// a converted call site from an unconverted one — every test here injects a binding
+/// whose session id and provider handle are deliberately DIFFERENT strings.
+#[cfg(test)]
+mod provider_call_boundary_tests {
+    use super::path_scope_tests::{build_app_with_bridge, pair_device};
+    use crate::fake_provider::FakeProviderBridge;
+    use crate::protocol::{
+        ApprovalDecision, ApprovalDecisionInput, ForkSessionInput, ReadThreadEntryDetailInput,
+        ReadThreadTranscriptInput, ResumeSessionInput, SendMessageInput, StopTurnInput,
+    };
+    use crate::provider::{ProviderBridge, StartThreadRequest};
+    use crate::state::app::AppState;
+    use crate::state::{ApprovalKind, PendingApproval, RelayState};
+    use tempfile::TempDir;
+
+    /// Open a thread on the provider and give it a relay session id that is NOT the
+    /// handle — the Phase-3 shape, injected so Phase 2a can be proved before Phase 3
+    /// is allowed to mint one.
+    async fn session_bound_to_a_foreign_handle(
+        app: &AppState,
+        bridge: &FakeProviderBridge,
+        cwd: &str,
+    ) -> (String, String) {
+        let handle = ProviderBridge::start_thread(
+            bridge,
+            StartThreadRequest::new(cwd, "fake-echo", "on-request", "workspace-write"),
+        )
+        .await
+        .expect("the provider opens its own thread")
+        .thread
+        .id;
+        let session_id = format!("session-stable-{handle}");
+        app.relay
+            .write()
+            .await
+            .bind_session_to_foreign_handle(&session_id, "fake", &handle);
+        (session_id, handle)
+    }
+
+    async fn resume(app: &AppState, session_id: &str) -> crate::protocol::SessionSnapshot {
+        app.resume_session(ResumeSessionInput {
+            thread_id: session_id.to_string(),
+            approval_policy: None,
+            sandbox: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            provider: None,
+        })
+        .await
+        .expect("resume")
+    }
+
+    #[tokio::test]
+    async fn read_and_resume_cross_on_the_handle_and_come_back_on_the_session_id() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let (session_id, handle) = session_bound_to_a_foreign_handle(&app, &bridge, &cwd).await;
+
+        let snapshot = resume(&app, &session_id).await;
+
+        assert_eq!(
+            bridge.thread_ids_seen_by("resume_thread").await,
+            vec![handle.clone()],
+        );
+        assert_eq!(
+            bridge.thread_ids_seen_by("read_thread").await,
+            vec![handle.clone(), handle.clone()],
+        );
+        assert_eq!(
+            snapshot.active_thread_id.as_deref(),
+            Some(session_id.as_str()),
+            "the id that reaches the client is the relay's, never the provider's",
+        );
+        let relay = app.relay.read().await;
+        assert!(
+            relay.runtime_for_thread(&session_id).is_some(),
+            "the read has to land on the stable id's runtime",
+        );
+        assert!(
+            relay.runtime_for_thread(&handle).is_none(),
+            "a read whose summary was not rewritten builds a second runtime under the handle",
+        );
+    }
+
+    #[tokio::test]
+    async fn sending_starts_the_turn_on_the_handle() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let (session_id, handle) = session_bound_to_a_foreign_handle(&app, &bridge, &cwd).await;
+        resume(&app, &session_id).await;
+
+        let snapshot = app
+            .send_message(SendMessageInput {
+                text: "hello".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                thread_id: session_id.clone(),
+            })
+            .await
+            .expect("send");
+
+        assert_eq!(
+            bridge.thread_ids_seen_by("start_turn").await,
+            vec![handle.clone()],
+        );
+        // The turn's own follow-up question to the provider — "which id did that turn
+        // actually land on?" — is asked about the handle, because that is the only
+        // string the provider can answer for.
+        assert_eq!(
+            bridge.thread_ids_seen_by("resolve_started_thread_id").await,
+            vec![handle.clone()],
+        );
+        assert_eq!(
+            snapshot.active_thread_id.as_deref(),
+            Some(session_id.as_str()),
+            "and the answer still keys the relay by the session id",
+        );
+        let relay = app.relay.read().await;
+        assert_eq!(relay.active_thread_id.as_deref(), Some(session_id.as_str()));
+        assert_eq!(
+            relay
+                .resolve_session_target(&session_id)
+                .map(|target| target.provider_handle),
+            Some(handle),
+            "a send must not move the binding",
+        );
+    }
+
+    // Phase 2a keeps deferred Claude's promotion exactly as it was: while the session
+    // id IS the handle, a provider that promotes mid-turn still moves the relay key.
+    // Only a session that already has its own id is held still.
+    #[tokio::test]
+    async fn an_identity_session_still_follows_a_provider_promotion() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        bridge.defer_next_start();
+        let started = app
+            .start_session(crate::protocol::StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.clone()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("fake".to_string()),
+                initial_prompt: None,
+                project_id: None,
+            })
+            .await
+            .expect("start")
+            .active_thread_id
+            .expect("a started session has a thread");
+        assert!(started.starts_with("claude-pending-"), "{started}");
+        bridge
+            .promote_on_first_turn(&started, "real-provider-id")
+            .await;
+
+        let snapshot = app
+            .send_message(SendMessageInput {
+                text: "hello".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                thread_id: started.clone(),
+            })
+            .await
+            .expect("send");
+
+        assert_eq!(
+            snapshot.active_thread_id.as_deref(),
+            Some("real-provider-id"),
+            "the identity promotion path is untouched until Phase 3",
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_a_turn_asks_the_provider_on_the_handle() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let (session_id, handle) = session_bound_to_a_foreign_handle(&app, &bridge, &cwd).await;
+        resume(&app, &session_id).await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.bg_set_active_turn(
+                &session_id,
+                Some("turn-77".to_string()),
+                crate::state::unix_now(),
+            );
+            relay.bg_set_thread_status(
+                &session_id,
+                "active".to_string(),
+                Vec::new(),
+                crate::state::unix_now(),
+            );
+        }
+
+        app.stop_active_turn(StopTurnInput {
+            device_id: Some("device-1".to_string()),
+            thread_id: session_id.clone(),
+        })
+        .await
+        .expect("stop");
+
+        assert_eq!(
+            bridge.thread_ids_seen_by("request_turn_stop").await,
+            vec![handle.clone()],
+        );
+    }
+
+    #[tokio::test]
+    async fn an_approval_reaches_the_provider_under_the_handle_and_is_stored_under_the_session() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let (session_id, handle) = session_bound_to_a_foreign_handle(&app, &bridge, &cwd).await;
+        resume(&app, &session_id).await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.pending_approvals.insert(
+                "req-1".to_string(),
+                PendingApproval {
+                    request_id: "req-1".to_string(),
+                    raw_request_id: serde_json::json!(1),
+                    kind: ApprovalKind::Command,
+                    thread_id: session_id.clone(),
+                    summary: "ls".to_string(),
+                    detail: None,
+                    command: Some("ls".to_string()),
+                    cwd: Some(cwd.clone()),
+                    context_preview: None,
+                    requested_permissions: None,
+                    available_decisions: vec!["approve".to_string(), "deny".to_string()],
+                    supports_session_scope: false,
+                },
+            );
+        }
+
+        app.decide_approval(
+            "req-1",
+            ApprovalDecisionInput {
+                decision: ApprovalDecision::Approve,
+                scope: None,
+                device_id: Some("device-1".to_string()),
+            },
+        )
+        .await
+        .expect("approve");
+
+        assert_eq!(
+            bridge.thread_ids_seen_by("respond_to_approval").await,
+            vec![handle.clone()],
+            "the bridge must be handed a provider-facing copy of the pending record",
+        );
+    }
+
+    #[tokio::test]
+    async fn transcript_pages_are_fetched_on_the_handle_and_answered_on_the_session_id() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        bridge.enable_transcript_paging();
+        let (session_id, handle) = session_bound_to_a_foreign_handle(&app, &bridge, &cwd).await;
+
+        let cold = app
+            .read_thread_transcript(ReadThreadTranscriptInput {
+                thread_id: session_id.clone(),
+                cursor: None,
+                before: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("cold page");
+        assert_eq!(cold.thread_id, session_id);
+
+        app.read_thread_transcript(ReadThreadTranscriptInput {
+            thread_id: session_id.clone(),
+            cursor: None,
+            before: Some(0),
+            device_id: Some("device-1".to_string()),
+        })
+        .await
+        .expect("older page");
+
+        assert_eq!(
+            bridge
+                .thread_ids_seen_by("read_thread_transcript_page")
+                .await,
+            vec![handle.clone(), handle.clone()],
+        );
+        let relay = app.relay.read().await;
+        assert!(
+            relay.runtime_for_thread(&handle).is_none(),
+            "a page whose summary was not rewritten hydrates a runtime under the handle",
+        );
+    }
+
+    #[tokio::test]
+    async fn an_entry_detail_is_fetched_on_the_handle() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let (session_id, handle) = session_bound_to_a_foreign_handle(&app, &bridge, &cwd).await;
+
+        // Absent from the (empty) provider transcript, so the error is about the ROW,
+        // not about the thread — which is what proves the lookup crossed on the handle.
+        let error = app
+            .read_thread_entry_detail(ReadThreadEntryDetailInput {
+                thread_id: session_id.clone(),
+                item_id: "item-1".to_string(),
+                field: None,
+                cursor: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect_err("no such row");
+        assert!(
+            error.contains("item-1"),
+            "expected a missing-row error, got: {error}"
+        );
+        assert_eq!(
+            bridge.thread_ids_seen_by("read_thread").await,
+            vec![handle.clone()],
+        );
+        assert_eq!(
+            bridge.thread_ids_seen_by("read_thread_entry_detail").await,
+            vec![handle.clone()],
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fork_names_its_source_by_the_handle_and_records_it_by_the_session_id() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        bridge.enable_native_fork();
+        let (session_id, handle) = session_bound_to_a_foreign_handle(&app, &bridge, &cwd).await;
+
+        let snapshot = app
+            .fork_session(ForkSessionInput {
+                source_thread_id: session_id.clone(),
+                up_to_item_id: None,
+                cwd: None,
+                initial_prompt: None,
+                model: None,
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: None,
+                project_id: None,
+            })
+            .await
+            .expect("fork");
+
+        assert_eq!(
+            bridge.thread_ids_seen_by("fork_thread").await,
+            vec![handle.clone()],
+            "a native fork is described to the provider, so its source must be the handle",
+        );
+        assert!(
+            bridge
+                .thread_ids_seen_by("read_thread")
+                .await
+                .first()
+                .is_some_and(|id| id == &handle),
+            "the source transcript is read on the handle too",
+        );
+        let forked = snapshot
+            .active_thread_id
+            .expect("a fork activates the new thread");
+        assert_ne!(forked, session_id);
+        assert_eq!(
+            app.relay
+                .read()
+                .await
+                .thread_forked_from(&forked)
+                .as_deref(),
+            Some(session_id.as_str()),
+            "the lineage the relay stores is the stable id, not the provider's handle",
+        );
+    }
+
+    #[tokio::test]
+    async fn archiving_archives_the_handle_and_forgets_the_session() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let (session_id, handle) = session_bound_to_a_foreign_handle(&app, &bridge, &cwd).await;
+
+        let receipt = app
+            .archive_thread(&session_id, None)
+            .await
+            .expect("archive");
+
+        assert_eq!(
+            bridge.thread_ids_seen_by("archive_thread").await,
+            vec![handle.clone()],
+        );
+        assert_eq!(receipt.thread_id, session_id);
+        let relay = app.relay.read().await;
+        assert!(
+            relay.resolve_session_target(&session_id).is_none(),
+            "a successful archive takes the binding with it",
+        );
+        assert!(
+            relay.session_for_provider_handle("fake", &handle).is_none(),
+            "and the reverse key, or the handle keeps routing to a dead session",
+        );
+    }
+
+    #[tokio::test]
+    async fn permanent_delete_deletes_the_handle_and_tombstones_the_session() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let (session_id, handle) = session_bound_to_a_foreign_handle(&app, &bridge, &cwd).await;
+
+        let receipt = app
+            .delete_thread_permanently(&session_id, None)
+            .await
+            .expect("delete");
+
+        assert_eq!(
+            bridge.thread_ids_seen_by("delete_thread_permanently").await,
+            vec![handle.clone()],
+        );
+        assert_eq!(receipt.thread_id, session_id);
+        let relay = app.relay.read().await;
+        assert!(
+            relay.thread_is_locally_deleted(&session_id),
+            "the tombstone is the relay's own id",
+        );
+        assert!(relay.resolve_session_target(&session_id).is_none());
+    }
+
+    // Release and reusability are driven from inside the task-team engine, whose
+    // entry points are private to that module — so the wrapper is exercised here
+    // directly. The call sites are converted; what this pins is that the wrapper they
+    // now have no way around sends the handle.
+    #[tokio::test]
+    async fn releasing_and_probing_reusability_cross_on_the_handle() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let (session_id, handle) = session_bound_to_a_foreign_handle(&app, &bridge, &cwd).await;
+        let target = app
+            .resolve_session_target(&session_id)
+            .await
+            .expect("resolve");
+
+        assert!(target.session_can_take_a_turn().await);
+        assert_eq!(
+            bridge.thread_ids_seen_by("read_thread").await,
+            vec![handle.clone()],
+            "reusability is decided by reading the PROVIDER's thread",
+        );
+
+        target.release_thread().await.expect("release");
+        assert_eq!(bridge.released_threads().await, vec![handle.clone()]);
+    }
+
+    // Discovery heals a stale binding whose provider this build does not run — but
+    // only while the handle is still the session's own id. Once it is not, that
+    // binding is the only record of where the session lives, so guessing is refused.
+    #[tokio::test]
+    async fn a_foreign_handle_on_an_unavailable_provider_is_refused_not_guessed() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let (session_id, handle) = session_bound_to_a_foreign_handle(&app, &bridge, &cwd).await;
+        app.relay.write().await.bind_session_to_foreign_handle(
+            &session_id,
+            "not_built_in",
+            &handle,
+        );
+
+        let error = match app.resolve_session_target(&session_id).await {
+            Ok(target) => panic!(
+                "nothing can answer for that binding, yet it resolved to {}/{}",
+                target.provider, target.provider_handle
+            ),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("not_built_in"),
+            "the refusal has to name the provider, got: {error}"
+        );
+        assert_eq!(
+            app.relay
+                .read()
+                .await
+                .resolve_session_target(&session_id)
+                .map(|target| target.provider_handle),
+            Some(handle),
+            "and must not overwrite the binding it could not use",
+        );
+    }
+
+    // A task seat records its owning provider when it is created, so its delete must
+    // stay on that provider — while still crossing on the handle.
+    #[tokio::test]
+    async fn a_task_seat_delete_names_the_handle_on_its_recorded_provider() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let (session_id, handle) = session_bound_to_a_foreign_handle(&app, &bridge, &cwd).await;
+
+        let target = app
+            .resolve_session_target_on_provider(&session_id, "fake")
+            .await
+            .expect("the recorded provider is available");
+        assert_eq!(target.provider_handle, handle);
+        target
+            .delete_owned_thread_permanently()
+            .await
+            .expect("delete");
+
+        assert_eq!(
+            bridge
+                .thread_ids_seen_by("delete_owned_thread_permanently")
+                .await,
+            vec![handle.clone()],
+        );
+    }
+
+    // The recorded owner wins over the registry: a binding that names another
+    // provider must not redirect a delete onto a bridge that never owned the seat.
+    #[tokio::test]
+    async fn a_binding_on_another_provider_cannot_redirect_a_recorded_seat_delete() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let (session_id, handle) = session_bound_to_a_foreign_handle(&app, &bridge, &cwd).await;
+        app.relay.write().await.bind_session_to_foreign_handle(
+            &session_id,
+            "somewhere_else",
+            &handle,
+        );
+
+        let target = app
+            .resolve_session_target_on_provider(&session_id, "fake")
+            .await
+            .expect("the recorded provider is still available");
+        assert_eq!(target.provider, "fake");
+        assert_eq!(
+            target.provider_handle, session_id,
+            "a handle recorded for a DIFFERENT provider means nothing on this one",
+        );
+    }
+
+    /// Shut down with a stable->handle session active, then boot cold from what the
+    /// state file actually holds.
+    ///
+    /// Returns `(cold app, cold relay, session id, handle)`. The provider store is
+    /// carried across on purpose — that is what survives a restart in reality — while
+    /// the relay is rebuilt from the persisted bytes.
+    async fn reboot_with_a_persisted_foreign_binding(
+        app: &AppState,
+        bridge: &std::sync::Arc<FakeProviderBridge>,
+        cwd: &str,
+        session_id: &str,
+        binding_provider: &str,
+        handle: &str,
+    ) -> (AppState, std::sync::Arc<tokio::sync::RwLock<RelayState>>) {
+        {
+            let mut relay = app.relay.write().await;
+            relay.active_thread_id = Some(session_id.to_string());
+            relay.set_provider_name("fake".to_string());
+            relay.bind_session_to_foreign_handle(session_id, binding_provider, handle);
+        }
+        let persisted = {
+            let relay = app.relay.read().await;
+            crate::state::persistence::PersistedRelayState::from_relay(&relay)
+        };
+        // Through the file, not around it: the binding only helps if it is written.
+        let persisted: crate::state::persistence::PersistedRelayState =
+            serde_json::from_str(&serde_json::to_string(&persisted).expect("encode"))
+                .expect("decode");
+        assert!(
+            persisted.session_bindings.contains_key(session_id),
+            "precondition: a stable->handle binding is written to the state file",
+        );
+
+        let (cold_tx, _cold_rx) = tokio::sync::watch::channel(0_u64);
+        let cold_relay = std::sync::Arc::new(tokio::sync::RwLock::new(RelayState::new(
+            cwd.to_string(),
+            cold_tx.clone(),
+            crate::state::security::SecurityProfile::private(),
+        )));
+        cold_relay.write().await.apply_persisted(&persisted);
+        let mut providers: std::collections::HashMap<String, std::sync::Arc<dyn ProviderBridge>> =
+            std::collections::HashMap::new();
+        providers.insert(
+            "fake".to_string(),
+            std::sync::Arc::clone(bridge) as std::sync::Arc<dyn ProviderBridge>,
+        );
+        let cold = AppState::from_parts(cold_relay.clone(), providers, cold_tx);
+        cold.restore_persisted_session(persisted).await;
+        (cold, cold_relay)
+    }
+
+    // The whole point of persisting a binding: a session the provider only knows by
+    // another name has to come back, on the handle, under its own id.
+    #[tokio::test]
+    async fn a_persisted_foreign_binding_restores_on_the_handle_and_keeps_its_id() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        let (session_id, handle) = session_bound_to_a_foreign_handle(&app, &bridge, &cwd).await;
+
+        let (cold, cold_relay) = reboot_with_a_persisted_foreign_binding(
+            &app,
+            &bridge,
+            &cwd,
+            &session_id,
+            "fake",
+            &handle,
+        )
+        .await;
+
+        assert_eq!(
+            bridge.thread_ids_seen_by("resume_thread").await,
+            vec![handle.clone()],
+        );
+        assert_eq!(
+            bridge.thread_ids_seen_by("read_thread").await,
+            vec![handle.clone()],
+        );
+        assert_eq!(
+            cold.snapshot().await.active_thread_id.as_deref(),
+            Some(session_id.as_str()),
+            "the restored session comes back under the id the client already has",
+        );
+        let relay = cold_relay.read().await;
+        assert!(relay.runtime_for_thread(&session_id).is_some());
+        assert!(
+            relay.runtime_for_thread(&handle).is_none(),
+            "a restore that did not rewrite the read builds the runtime under the handle",
+        );
+        assert_eq!(
+            relay
+                .resolve_session_target(&session_id)
+                .map(|target| target.provider_handle),
+            Some(handle),
+            "and the binding survives: overwriting it with stable->stable would strand \
+the session on the NEXT boot, with nothing left to route on",
+        );
+    }
+
+    /// An app whose provider store holds a thread spelled exactly like `session_id`
+    /// — the decoy a discovery fallback would happily grab. The double seeds itself
+    /// from the relay's active thread at spawn, so the naming has to happen first.
+    async fn app_whose_provider_holds_a_thread_named(
+        cwd: &str,
+        session_id: &str,
+    ) -> (AppState, std::sync::Arc<FakeProviderBridge>) {
+        let (change_tx, _rx) = tokio::sync::watch::channel(0_u64);
+        let relay = std::sync::Arc::new(tokio::sync::RwLock::new(RelayState::new(
+            cwd.to_string(),
+            change_tx.clone(),
+            crate::state::security::SecurityProfile::private(),
+        )));
+        relay.write().await.active_thread_id = Some(session_id.to_string());
+        let bridge = std::sync::Arc::new(
+            FakeProviderBridge::spawn(relay.clone())
+                .await
+                .expect("fake provider should spawn"),
+        );
+        let mut providers: std::collections::HashMap<String, std::sync::Arc<dyn ProviderBridge>> =
+            std::collections::HashMap::new();
+        providers.insert(
+            "fake".to_string(),
+            std::sync::Arc::clone(&bridge) as std::sync::Arc<dyn ProviderBridge>,
+        );
+        (AppState::from_parts(relay, providers, change_tx), bridge)
+    }
+
+    // Fail closed. Nothing has ever heard the session id, so re-routing it can only
+    // find the wrong thread or nothing at all — and the wrong thread is worse. The
+    // available `fake` provider here holds exactly that wrong thread.
+    #[tokio::test]
+    async fn a_persisted_binding_on_a_missing_provider_is_not_re_routed() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let session_id = "session-stable-restore";
+        let (app, bridge) = app_whose_provider_holds_a_thread_named(&cwd, session_id).await;
+        assert!(
+            ProviderBridge::read_thread(bridge.as_ref(), session_id)
+                .await
+                .is_ok(),
+            "precondition: the decoy is readable on the live provider",
+        );
+
+        let (cold, cold_relay) = reboot_with_a_persisted_foreign_binding(
+            &app,
+            &bridge,
+            &cwd,
+            session_id,
+            "gone_provider",
+            "provider-handle-restore",
+        )
+        .await;
+
+        assert_eq!(
+            cold.snapshot().await.active_thread_id,
+            None,
+            "a session whose only record names a provider we do not run is dropped, \
+not handed to whoever answers",
+        );
+        assert!(
+            bridge.thread_ids_seen_by("resume_thread").await.is_empty(),
+            "the decoy must not even be asked",
+        );
+        assert!(cold_relay
+            .read()
+            .await
+            .runtime_for_thread(session_id)
+            .is_none());
+    }
+
+    // A failed provider operation must leave the session reachable: the binding is
+    // what the retry routes on.
+    #[tokio::test]
+    async fn a_refused_archive_leaves_the_binding_intact() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let (session_id, handle) = session_bound_to_a_foreign_handle(&app, &bridge, &cwd).await;
+        bridge.refuse_next_archive();
+
+        let error = app
+            .archive_thread(&session_id, None)
+            .await
+            .expect_err("the provider refused");
+        assert!(
+            error.contains("refused the archive"),
+            "the archive has to have REACHED the provider, got: {error}"
+        );
+
+        assert_eq!(
+            bridge.thread_ids_seen_by("archive_thread").await,
+            vec![handle.clone()],
+        );
+        assert_eq!(
+            app.relay
+                .read()
+                .await
+                .resolve_session_target(&session_id)
+                .map(|target| target.provider_handle),
+            Some(handle),
+        );
+    }
+}
+
+/// The Phase-2a boundary checklist, as a test.
+///
+/// Phase 3 may only mint a session id that differs from its provider handle once no
+/// call site can reach a bridge with a relay id. This carries the exemptions — each
+/// with the reason it is one — so a new raw call has to be argued for rather than
+/// merely added (`markdown/STABLE_SESSION_ID_DESIGN.md`).
+///
+/// NOT a proof, and should not be read as one. It is a text scan over the receiver
+/// shapes this layer actually writes (`…bridge`, a `.1` tuple index off
+/// `find_thread_provider`, and a `.bridge()` escape hatch off a `SessionTarget`); a
+/// bridge stored under some other name — `agent`, a struct field, an element of a
+/// collection — would pass it silently. It catches the regression that is likely,
+/// not every one that is possible, so the boundary still has to be re-read by hand
+/// when a call site is added.
+#[cfg(test)]
+mod provider_boundary_lint {
+    use std::path::{Path, PathBuf};
+
+    /// Every `ProviderBridge` method whose input names a thread. The wrappers on
+    /// `SessionTarget` share these names on purpose, so the scan below keys off the
+    /// RECEIVER — a bare bridge — not the method.
+    ///
+    /// `respond_to_approval` is here because it carries the thread id INDIRECTLY, in
+    /// `PendingApproval.thread_id`, which is the relay's own id on the relay's own
+    /// record. `resolve_started_thread_id` is here because its argument is the handle
+    /// whose promotion is being asked about, and its answer becomes a relay key.
+    /// `respond_to_ask_user_question` is deliberately absent: it names only a request
+    /// id, so nothing can leak through its arguments — only its ROUTING matters, and
+    /// routing is not what a text scan can see.
+    const ID_BEARING_METHODS: &[&str] = &[
+        "read_thread",
+        "resume_thread",
+        "start_turn",
+        "request_turn_stop",
+        "resolve_started_thread_id",
+        "archive_thread",
+        "release_thread",
+        "delete_thread_permanently",
+        "delete_owned_thread_permanently",
+        "read_thread_transcript_page",
+        "read_thread_entry_detail",
+        "session_can_take_a_turn",
+        "fork_thread",
+        "respond_to_approval",
+    ];
+
+    /// `(file, method, why this one is allowed to hold a bare bridge)`.
+    const EXEMPT: &[(&str, &str, &str)] = &[
+        (
+            "fork.rs",
+            "read_thread",
+            "reads the thread the provider JUST created, so the id is already a \
+handle; adopting a fresh provider row is Phase 2c",
+        ),
+        (
+            "mod.rs",
+            "resume_thread",
+            "`try_resume_thread`, restore's IDENTITY discovery fallback: it offers a \
+provider a string and asks whether it is one of its own, which is the one case where \
+a session id doubles as a handle. Restore's bound route goes through SessionTarget",
+        ),
+        (
+            "mod.rs",
+            "read_thread",
+            "the same identity probe, which reads back the thread it just resumed",
+        ),
+        (
+            "team.rs",
+            "release_thread",
+            "hands back a seat the provider just created and the relay has not \
+registered yet, so it has no binding to resolve",
+        ),
+        (
+            "approvals.rs",
+            "respond_to_approval",
+            "an approval the provider raised before any thread existed carries an \
+empty thread id, so there is no session to resolve and the active provider is the \
+only thing that can answer for it",
+        ),
+    ];
+
+    fn layer_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap_or_else(|e| {
+            panic!(
+                "read_dir {} ({e}) — did the action layer move?",
+                dir.display()
+            )
+        }) {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                layer_files(&path, out);
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+            // `providers.rs` HOLDS the wrapper, so it is the one file that must call a
+            // bridge with an id. Test sources describe provider doubles.
+            if path.extension().and_then(|e| e.to_str()) == Some("rs")
+                && name != "providers.rs"
+                && name != "tests.rs"
+                && !name.contains("test")
+            {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn no_action_layer_call_site_reaches_a_bridge_with_a_relay_id() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let layer = Path::new(manifest).join("src/state/app");
+        let mut files = Vec::new();
+        layer_files(&layer, &mut files);
+        assert!(
+            !files.is_empty(),
+            "no scannable .rs files under {} — update this guard to the layer's new home",
+            layer.display()
+        );
+
+        let mut unexpected = Vec::new();
+        let mut seen_exemptions = Vec::new();
+        for path in files {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
+            // Whitespace-collapsed so a rustfmt line break between the receiver and
+            // the method cannot hide a call from this scan.
+            let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
+            for method in ID_BEARING_METHODS {
+                // Any identifier ending in `bridge`; the tuple-index shape a
+                // `find_thread_provider(...)?.1.read_thread(...)` chain leaves behind;
+                // and `SessionTarget::bridge()`, which is the deliberate escape hatch
+                // for calls that name no thread and must never be used for one.
+                for receiver in [
+                    "bridge .",
+                    "bridge.",
+                    ".1 .",
+                    ".1.",
+                    "bridge() .",
+                    "bridge().",
+                ] {
+                    let needle = format!("{receiver}{method}(");
+                    if !flat.contains(&needle) {
+                        continue;
+                    }
+                    match EXEMPT
+                        .iter()
+                        .find(|(file, exempt, _)| *file == name && exempt == method)
+                    {
+                        Some((file, exempt, _)) => seen_exemptions.push((*file, *exempt)),
+                        None => unexpected.push(format!("{name}: bridge.{method}(…)")),
+                    }
+                }
+            }
+        }
+
+        unexpected.sort();
+        unexpected.dedup();
+        assert!(
+            unexpected.is_empty(),
+            "these call sites hand a bridge a thread id directly. Route them through \
+AppState::resolve_session_target, or add them to EXEMPT with the reason:\n  {}",
+            unexpected.join("\n  "),
+        );
+
+        for (file, method, why) in EXEMPT {
+            assert!(
+                seen_exemptions.contains(&(*file, *method)),
+                "{file} no longer calls bridge.{method} — drop the exemption ({why})",
+            );
+        }
+    }
+}

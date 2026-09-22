@@ -41,10 +41,8 @@ impl AppState {
         let _slot = self.acquire_session_slot()?;
         self.expire_stale_controller_if_needed().await;
 
-        let (source_provider_name, source_bridge) = {
-            let (name, bridge) = self.find_thread_provider(&source_thread_id).await?;
-            (name.to_string(), bridge.clone())
-        };
+        let source = self.resolve_session_target(&source_thread_id).await?;
+        let source_provider_name = source.provider.clone();
         // Reject from relay-local state BEFORE the expensive provider read: a
         // locked or busy source thread should not cost a full transcript
         // round-trip, and reading first left the busy check evaluating a
@@ -62,7 +60,7 @@ impl AppState {
             }
         }
 
-        let source_data = source_bridge.read_thread(&source_thread_id).await?;
+        let source_data = source.read_thread().await?;
         let defaults = self.defaults().await;
         let source_cwd = non_empty(Some(source_data.thread.cwd.clone()))
             .unwrap_or_else(|| defaults.current_cwd.clone());
@@ -230,15 +228,19 @@ impl AppState {
         let user_prompt = non_empty(input.initial_prompt);
 
         if source_provider_name == target_provider_name && native_fork_possible {
-            let request = ProviderForkRequest {
-                source_thread_id: source_thread_id.clone(),
-                up_to_item_id: up_to_item_id.clone(),
-                cwd: cwd.clone(),
-                model: model.clone(),
-                approval_policy: approval_policy.clone(),
-                sandbox: sandbox.clone(),
-            };
-            if let Some(start_result) = target_bridge.fork_thread(request).await? {
+            // Through the SOURCE target: a native fork is described to the provider
+            // by the thread it branches from, so that argument is a handle. Same
+            // provider, therefore the same bridge as `target_bridge`.
+            if let Some(start_result) = source
+                .fork_thread(
+                    up_to_item_id.clone(),
+                    &cwd,
+                    &model,
+                    &approval_policy,
+                    &sandbox,
+                )
+                .await?
+            {
                 return self
                     .activate_native_fork_and_start(
                         &target_provider_name,
@@ -309,6 +311,9 @@ impl AppState {
         user_prompt: Option<String>,
         images: Vec<ProviderImage>,
     ) -> Result<SessionSnapshot, String> {
+        // The provider's own id for a thread it just created, so it is already a
+        // handle — adopting a fresh provider row under a relay session id is Phase 2c
+        // of `markdown/STABLE_SESSION_ID_DESIGN.md`.
         let forked_thread_id = start_result.thread.id.clone();
         let read_started_at_revision = {
             let relay = self.relay.read().await;

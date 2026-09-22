@@ -29,11 +29,8 @@ impl AppState {
                 .is_some_and(|runtime| runtime.provider_history_paged)
         };
         if input.before.is_some() && provider_history_paged {
-            let (_, bridge) = self.find_thread_provider(&input.thread_id).await?;
-            if let Some(page) = bridge
-                .read_thread_transcript_page(&input.thread_id, input.before)
-                .await?
-            {
+            let target = self.resolve_session_target(&input.thread_id).await?;
+            if let Some(page) = target.read_thread_transcript_page(input.before).await? {
                 {
                     let relay = self.relay.read().await;
                     let device_scope = relay.device_path_scope(device_id);
@@ -71,12 +68,9 @@ impl AppState {
             )
         };
         if runtime_missing && input.before.is_none() {
-            let (provider_name, bridge) = self.find_thread_provider(&input.thread_id).await?;
-            let (provider_name, bridge) = (provider_name.to_string(), bridge.clone());
-            if let Some(page) = bridge
-                .read_thread_transcript_page(&input.thread_id, None)
-                .await?
-            {
+            let target = self.resolve_session_target(&input.thread_id).await?;
+            let (provider_name, bridge) = (target.provider.clone(), target.bridge().clone());
+            if let Some(page) = target.read_thread_transcript_page(None).await? {
                 {
                     let relay = self.relay.read().await;
                     let device_scope = relay.device_path_scope(device_id);
@@ -332,12 +326,8 @@ impl AppState {
         let entry = if let Some(entry) = relay_entry {
             entry
         } else {
-            let thread_data = self
-                .find_thread_provider(&input.thread_id)
-                .await?
-                .1
-                .read_thread(&input.thread_id)
-                .await?;
+            let target = self.resolve_session_target(&input.thread_id).await?;
+            let thread_data = target.read_thread().await?;
             {
                 let relay = self.relay.read().await;
                 let device_scope = input
@@ -374,11 +364,8 @@ impl AppState {
                 )
             })?;
 
-            let mut entry = self
-                .find_thread_provider(&input.thread_id)
-                .await?
-                .1
-                .read_thread_entry_detail(&input.thread_id, &provider_item_id)
+            let mut entry = target
+                .read_thread_entry_detail(&provider_item_id)
                 .await?
                 .ok_or_else(|| {
                     format!(

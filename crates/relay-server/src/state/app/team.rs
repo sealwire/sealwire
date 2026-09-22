@@ -1233,13 +1233,13 @@ over on resume"
         }
 
         let provider_name = provider_name.expect("provider preflight");
-        let bridge = self
-            .providers
-            .get(provider_name)
+        let target = self
+            .resolve_session_target_on_provider(thread_id, provider_name)
+            .await
             .expect("provider availability preflight");
         let delete_summary = tokio::time::timeout(
             TASK_SEAT_DELETE_TIMEOUT,
-            bridge.delete_owned_thread_permanently(thread_id),
+            target.delete_owned_thread_permanently(),
         )
         .await
         .map_err(|_| {
@@ -2009,10 +2009,10 @@ over on resume"
     /// bookkeeping, so this works even for a thread whose D5 registration was
     /// just refused and therefore never made it into that bookkeeping at all.
     async fn release_team_thread_by_id(&self, thread_id: &str) {
-        let Ok((_, bridge)) = self.find_thread_provider(thread_id).await else {
+        let Ok(target) = self.resolve_session_target(thread_id).await else {
             return;
         };
-        if let Err(error) = bridge.release_thread(thread_id).await {
+        if let Err(error) = target.release_thread().await {
             let mut relay = self.relay.write().await;
             relay.push_log(
                 "warn",
@@ -2024,6 +2024,9 @@ over on resume"
         }
     }
 
+    /// Release a thread by the bridge that just created it, before it is registered.
+    /// `thread_id` is the provider's own id here and has no binding yet, which is why
+    /// this one does not go through `resolve_session_target`.
     async fn release_team_thread_on_bridge(
         &self,
         bridge: &Arc<dyn ProviderBridge>,
@@ -3712,8 +3715,8 @@ over on resume"
         let mut denied = Vec::new();
         let mut refused = Vec::new();
         for approval in pending {
-            let bridge = match self.find_thread_provider(&approval.thread_id).await {
-                Ok((_, bridge)) => bridge.clone(),
+            let target = match self.resolve_session_target(&approval.thread_id).await {
+                Ok(target) => target,
                 Err(error) => {
                     refused.push(error);
                     continue;
@@ -3724,7 +3727,7 @@ over on resume"
                 scope: None,
                 device_id: None,
             };
-            match bridge.respond_to_approval(&approval, &input).await {
+            match target.respond_to_approval(&approval, &input).await {
                 Ok(_) => denied.push(approval.request_id.clone()),
                 Err(error) => refused.push(error),
             }
@@ -4370,8 +4373,8 @@ impl relay_api::TeamPort for AppState {
         for candidate in candidates.iter().filter(|id| !id.is_empty()) {
             // Routing is not enough: the relay's thread cache outlives the
             // session, so an archived one still resolves. Only the provider knows.
-            let usable = match self.find_thread_provider(candidate).await {
-                Ok((_, bridge)) => bridge.session_can_take_a_turn(candidate).await,
+            let usable = match self.resolve_session_target(candidate).await {
+                Ok(target) => target.session_can_take_a_turn().await,
                 Err(_) => false,
             };
             if usable {

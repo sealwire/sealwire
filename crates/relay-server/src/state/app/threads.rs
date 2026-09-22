@@ -938,10 +938,9 @@ impl AppState {
             relay.can_archive_thread(thread_id)?
         };
 
-        self.find_thread_provider(thread_id)
+        self.resolve_session_target(thread_id)
             .await?
-            .1
-            .archive_thread(thread_id)
+            .archive_thread()
             .await?;
 
         {
@@ -1097,10 +1096,9 @@ normal thread instead."
         };
 
         let delete_summary = self
-            .find_thread_provider(thread_id)
+            .resolve_session_target(thread_id)
             .await?
-            .1
-            .delete_thread_permanently(thread_id)
+            .delete_thread_permanently()
             .await?;
 
         {

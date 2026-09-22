@@ -72,21 +72,39 @@ impl AppState {
             pending
         };
 
-        let bridge = if pending.thread_id.is_empty() {
-            self.require_active_provider()
-                .map_err(ApprovalError::Bridge)?
-                .1
+        // A thread-less approval predates any session (the provider asked before a
+        // thread existed), so there is nothing to resolve and the active provider is
+        // the only answer.
+        let target = if pending.thread_id.is_empty() {
+            None
         } else {
-            self.find_thread_provider(&pending.thread_id)
-                .await
-                .map_err(ApprovalError::Bridge)?
-                .1
+            Some(
+                self.resolve_session_target(&pending.thread_id)
+                    .await
+                    .map_err(ApprovalError::Bridge)?,
+            )
         };
-
-        bridge
-            .respond_to_approval(&pending, &input)
-            .await
-            .map_err(ApprovalError::Bridge)?;
+        let provider_key = match target.as_ref() {
+            Some(target) => {
+                target
+                    .respond_to_approval(&pending, &input)
+                    .await
+                    .map_err(ApprovalError::Bridge)?;
+                target.bridge().provider_name().to_string()
+            }
+            None => {
+                let bridge = self
+                    .require_active_provider()
+                    .map_err(ApprovalError::Bridge)?
+                    .1
+                    .clone();
+                bridge
+                    .respond_to_approval(&pending, &input)
+                    .await
+                    .map_err(ApprovalError::Bridge)?;
+                bridge.provider_name().to_string()
+            }
+        };
 
         let mut relay = self.relay.write().await;
         relay.remove_pending_approval(request_id);
@@ -103,7 +121,7 @@ impl AppState {
         // Name the provider that actually received it. This used to say "Codex"
         // for everyone, which made the receipt wrong for every non-Codex user on
         // the one surface whose job is to confirm where a permission decision went.
-        let provider = crate::provider::provider_display_name(bridge.provider_name());
+        let provider = crate::provider::provider_display_name(&provider_key);
         Ok(ApprovalReceipt {
             request_id: request_id.to_string(),
             decision: input.decision,
@@ -177,21 +195,23 @@ impl AppState {
             }
         }
 
-        let bridge = if pending.thread_id.is_empty() {
+        // Same reasoning as `decide_approval`: a thread-less question has no session
+        // to resolve, so only then does the active provider answer for it.
+        if pending.thread_id.is_empty() {
             self.require_active_provider()
                 .map_err(AskUserAnswerError::Bridge)?
                 .1
+                .respond_to_ask_user_question(request_id, &input.answers)
+                .await
+                .map_err(AskUserAnswerError::Bridge)?;
         } else {
-            self.find_thread_provider(&pending.thread_id)
+            self.resolve_session_target(&pending.thread_id)
                 .await
                 .map_err(AskUserAnswerError::Bridge)?
-                .1
-        };
-
-        bridge
-            .respond_to_ask_user_question(request_id, &input.answers)
-            .await
-            .map_err(AskUserAnswerError::Bridge)?;
+                .respond_to_ask_user_question(request_id, &input.answers)
+                .await
+                .map_err(AskUserAnswerError::Bridge)?;
+        }
 
         let mut relay = self.relay.write().await;
         relay.remove_pending_ask_user_question(request_id);

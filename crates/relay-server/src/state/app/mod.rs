@@ -45,8 +45,8 @@ use super::{
     sort_threads_by_recency, thread_status_is_working, unix_now, vapid_key_path,
     BrokerPendingMessage, CachedRemoteActionResult, ClaimChallenge, CompletedRemoteClaim,
     IssuedClaimChallenge, PendingPairingResult, PushDispatcher, PushSubscriptionInput, RelayState,
-    RemoteActionReplayDecision, ResolvedProviderTarget, SecurityProfile, DEFAULT_EFFORT,
-    DEFAULT_MODEL, STALE_TURN_PROGRESS_TIMEOUT_SECS,
+    RemoteActionReplayDecision, SecurityProfile, DEFAULT_EFFORT, DEFAULT_MODEL,
+    STALE_TURN_PROGRESS_TIMEOUT_SECS,
 };
 
 /// Drive the server-side push attention tracker once per (debounced) state
@@ -861,8 +861,8 @@ impl AppState {
             if !still_stale {
                 continue;
             }
-            let stop_result = match self.find_thread_provider(&thread_id).await {
-                Ok((_, bridge)) => bridge.request_turn_stop(&thread_id, Some(&turn_id)).await,
+            let stop_result = match self.resolve_session_target(&thread_id).await {
+                Ok(target) => target.request_turn_stop(Some(&turn_id)).await,
                 Err(error) => Err(error),
             };
             let mut relay = self.relay.write().await;
@@ -1259,9 +1259,9 @@ in thread {thread_id}: {error}"
             .as_ref()
             .map(|value| value.model.clone())
             .filter(|value| !value.is_empty());
-        let (provider_name, bridge) = self.find_thread_provider(thread_id).await?;
-        let (provider_name, bridge) = (provider_name.to_string(), bridge.clone());
-        let data = bridge.read_thread(thread_id).await?;
+        let target = self.resolve_session_target(thread_id).await?;
+        let (provider_name, bridge) = (target.provider.clone(), target.bridge().clone());
+        let data = target.read_thread().await?;
         let model = self
             .resolve_model_for_provider(
                 &provider_name,
@@ -1297,42 +1297,98 @@ in thread {thread_id}: {error}"
 
         let settings = persisted.settings_for_thread(&thread_id);
 
-        // Resolve + resume the restored active thread. Try the PERSISTED provider
-        // FIRST — it's robust against a cold `list_threads` at restart, which would
-        // otherwise mis-route the thread to the boot-default (preferred)
-        // provider. Fall back to probing every provider by thread id when the
-        // persisted provider is gone (removed/renamed → not in the map) OR resuming
-        // on it fails (a stale/wrong persisted value) — so a bad persisted provider
-        // self-heals instead of dropping the session.
+        // Resolve + resume the restored active thread, in three steps.
+        //
+        // 1. THE BINDING, which `apply_persisted` has already restored. For a session
+        //    whose handle is not its own id this is the only route that can work: no
+        //    provider has ever heard the session id, so neither step below could ask
+        //    about it. For a legacy file the binding is the identity seed made from
+        //    `provider_name`, which is why this also subsumes step 2 in the common
+        //    case.
+        // 2. The persisted provider, for a file with no binding at all — robust
+        //    against a cold `list_threads` at restart, which would otherwise mis-route
+        //    the thread to the boot-default (preferred) provider.
+        // 3. A provider-list probe, when the persisted provider is gone
+        //    (removed/renamed → not in the map) OR resuming on it fails (a stale/wrong
+        //    persisted value) — so a bad persisted provider self-heals instead of
+        //    dropping the session. NOT `find_thread_provider`, which would
+        //    short-circuit to the relay's ACTIVE provider: at boot the persisted
+        //    thread is already marked active (apply_persisted) with the untrusted
+        //    boot-default provider, so that shortcut returns the wrong provider and
+        //    never actually probes the thread lists.
+        //
+        // Every step records the handle it succeeded on, because only an identity
+        // route may (re)write the binding afterwards.
         let mut restored: Option<(
+            String,
             String,
             Arc<dyn ProviderBridge>,
             crate::provider::ThreadSyncData,
         )> = None;
 
-        if let Some((name, bridge)) = self
-            .providers
-            .get_key_value(persisted.provider_name.as_str())
-            .map(|(name, bridge)| (name.clone(), bridge.clone()))
-        {
-            if let Some(data) = self
-                .try_resume_thread(
-                    &bridge,
-                    &thread_id,
-                    &settings.approval_policy,
-                    &settings.sandbox,
-                )
+        let route = self.bound_session_route(&thread_id).await;
+        // Whether step 1 already made step 2's exact attempt. For a legacy file it
+        // did: `apply_persisted` seeds the binding from `provider_name` itself.
+        let bound_route_is_the_persisted_one = route.target.as_ref().is_some_and(|target| {
+            target.provider == persisted.provider_name && target.provider_handle == thread_id
+        });
+        if let Some(target) = route.target.as_ref() {
+            // Through the target, so the read comes back under the session id.
+            if target
+                .resume_thread(&settings.approval_policy, &settings.sandbox)
                 .await
+                .is_ok()
             {
-                restored = Some((name, bridge, data));
+                if let Ok(data) = target.read_thread().await {
+                    restored = Some((
+                        target.provider.clone(),
+                        target.provider_handle.clone(),
+                        target.bridge().clone(),
+                        data,
+                    ));
+                }
             }
         }
 
-        // Genuine provider-list probe — NOT `find_thread_provider`, which would
-        // short-circuit to the relay's ACTIVE provider. At boot the persisted
-        // thread is already marked active (apply_persisted) with the untrusted
-        // boot-default provider, so that shortcut returns the wrong provider and
-        // never actually probes the thread lists.
+        // Fail closed rather than guess. A non-identity binding that could not answer
+        // — unavailable provider, or a resume the provider refused — leaves nothing
+        // else to try: handing the session id to another provider would either find
+        // nothing or, worse, drive an unrelated thread that happens to spell the same.
+        if restored.is_none() && route.is_non_identity {
+            let mut relay = self.relay.write().await;
+            relay.clear_active_session();
+            relay.push_log(
+                "warn",
+                format!(
+                    "Failed to restore persisted session {thread_id} from its provider binding \
+({}); it was not re-routed, because that binding is the only record of where the session lives.",
+                    route.provider.unwrap_or_default()
+                ),
+            );
+            relay.notify();
+            return;
+        }
+
+        if restored.is_none() && !bound_route_is_the_persisted_one {
+            if let Some((name, bridge)) = self
+                .providers
+                .get_key_value(persisted.provider_name.as_str())
+                .map(|(name, bridge)| (name.clone(), bridge.clone()))
+            {
+                if let Some(data) = self
+                    .try_resume_thread(
+                        &bridge,
+                        &thread_id,
+                        &settings.approval_policy,
+                        &settings.sandbox,
+                    )
+                    .await
+                {
+                    restored = Some((name, thread_id.clone(), bridge, data));
+                }
+            }
+        }
+
         if restored.is_none() {
             if let Some((name, bridge)) = self.probe_thread_provider(&thread_id).await {
                 if let Some(data) = self
@@ -1344,12 +1400,12 @@ in thread {thread_id}: {error}"
                     )
                     .await
                 {
-                    restored = Some((name, bridge, data));
+                    restored = Some((name, thread_id.clone(), bridge, data));
                 }
             }
         }
 
-        let Some((provider_name, bridge, thread_data)) = restored else {
+        let Some((provider_name, provider_handle, bridge, mut thread_data)) = restored else {
             let mut relay = self.relay.write().await;
             relay.clear_active_session();
             relay.push_log(
@@ -1359,6 +1415,9 @@ in thread {thread_id}: {error}"
             relay.notify();
             return;
         };
+        // The discovery steps read under the provider's own id; the relay keys
+        // everything it is about to restore by the session id.
+        thread_data.thread.id = thread_id.clone();
 
         let provider_models = self
             .load_provider_model_catalog(&provider_name, &bridge)
@@ -1369,14 +1428,22 @@ in thread {thread_id}: {error}"
             relay.set_available_models(models);
         }
         relay.restore_thread_data(thread_data, &persisted);
-        // The resume above is the authority on which provider owns this session, so it
-        // overrides whatever `apply_persisted` seeded from a possibly stale
-        // `provider_name`.
-        if let Err(error) = relay.register_identity_session_binding(&provider_name, &thread_id) {
-            relay.push_log(
-                "warn",
-                format!("Could not bind restored session {thread_id} to {provider_name}: {error}"),
-            );
+        // Only for a session the provider knows by its own id. The resume is the
+        // authority on which provider owns such a session, so this overrides whatever
+        // `apply_persisted` seeded from a possibly stale `provider_name`. A session
+        // restored through a handle of its own must NOT be re-bound here: that would
+        // overwrite the one record of where it lives with `stable -> stable`, and the
+        // next boot would have nothing left to route on.
+        if provider_handle == thread_id {
+            if let Err(error) = relay.register_identity_session_binding(&provider_name, &thread_id)
+            {
+                relay.push_log(
+                    "warn",
+                    format!(
+                        "Could not bind restored session {thread_id} to {provider_name}: {error}"
+                    ),
+                );
+            }
         }
         expire_controller_if_needed(&mut relay);
         relay.push_log(
@@ -1389,6 +1456,11 @@ in thread {thread_id}: {error}"
     /// Resume a thread on `bridge` and read its current state. Returns `None` when
     /// the provider can't resume/read the thread (e.g. it isn't the thread's real
     /// owner), so the caller can fall back to another provider.
+    ///
+    /// The IDENTITY discovery fallback only — `thread_id` here is a string a provider
+    /// is being asked to recognise as its own, which is the one case where the
+    /// session id doubles as a handle. The bound route is taken first, through
+    /// `SessionTarget`, in `restore_persisted_session`.
     async fn try_resume_thread(
         &self,
         bridge: &Arc<dyn ProviderBridge>,
