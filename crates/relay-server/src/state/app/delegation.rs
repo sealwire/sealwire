@@ -180,13 +180,32 @@ impl AppState {
                 .ask_agent_filling(&asker, request, Some(background_ask_id.clone()))
                 .await
             {
-                // On the record the panel is showing, not in a log the phone never renders.
-                let mut relay = app.relay.write().await;
-                relay.update_ask(&background_ask_id, |ask| ask.fail(error.message()));
-                relay.notify();
+                app.fail_detached_ask(&background_ask_id, &asker, error.message())
+                    .await;
             }
         });
         Ok(ask_id)
+    }
+
+    /// Report an accepted delegate's failure on the record the panel is showing, rather
+    /// than in a log the phone never renders — that card is all the caller ever gets.
+    ///
+    /// The asker is re-resolved because the failure can BE the promotion: a brief that
+    /// created the session and then wrote nothing leaves the record on an id that
+    /// resolves to no workspace, which every scoped device filters the card out of.
+    pub(super) async fn fail_detached_ask(
+        &self,
+        ask_id: &str,
+        asker_thread_id: &str,
+        reason: String,
+    ) {
+        let mut relay = self.relay.write().await;
+        let asker_thread_id = relay.resolve_promoted_thread_id(asker_thread_id);
+        relay.update_ask(ask_id, |ask| {
+            ask.asker_thread_id = asker_thread_id;
+            ask.fail(reason);
+        });
+        relay.notify();
     }
 
     /// The checks a caller is owed an answer to, and the settings the rest needs —
@@ -325,16 +344,35 @@ Carry on with one of those instead of bringing in another."
         } = self
             .precheck_ask(asker_thread_id, &request, existing_ask_id.as_deref())
             .await?;
-        let asker_thread_id = asker_thread_id.as_str();
 
         // A person's one-liner becomes a brief before anyone else sees it. This
         // costs a turn on the asking agent, which is why it is opt-in: an agent
         // calling the tool already wrote its message with the context in view.
-        let message = if request.started_by == relay_api::delegation::StartedBy::Person {
-            self.brief_from_asker(asker_thread_id, &message).await?
-        } else {
-            message
-        };
+        // It hands back the id it ran under too: the brief is the asker's FIRST turn, so
+        // a deferred start is promoted by it and everything below would name a dead id.
+        let (asker_thread_id, message) =
+            if request.started_by == relay_api::delegation::StartedBy::Person {
+                self.brief_from_asker(&asker_thread_id, &message).await?
+            } else {
+                (asker_thread_id, message)
+            };
+        let asker_thread_id = asker_thread_id.as_str();
+
+        // Onto the accepted record NOW, ahead of starting the peer and everything else
+        // that can fail: a failure filed under the retired id reaches no device, and that
+        // card is all a caller answered ahead of the work ever gets.
+        if let Some(ask_id) = existing_ask_id.as_deref() {
+            let mut relay = self.relay.write().await;
+            if relay
+                .ask(ask_id)
+                .is_some_and(|ask| ask.asker_thread_id != asker_thread_id)
+            {
+                relay.update_ask(ask_id, |ask| {
+                    ask.asker_thread_id = asker_thread_id.to_string()
+                });
+                relay.notify();
+            }
+        }
 
         // Re-read rather than reuse what the precheck saw: writing the brief can take
         // minutes, and a narrowing in that window must bind the peer. Otherwise the peer
@@ -577,11 +615,13 @@ write the brief — try again once it is done"
     ///
     /// No tools involved — this is an ordinary turn — so it works for every
     /// provider, including ones that can never be given a tool.
+    ///
+    /// Returns the id it ran under as well, which a deferred start's own brief promotes.
     async fn brief_from_asker(
         &self,
         asker_thread_id: &str,
         task: &str,
-    ) -> Result<String, AskError> {
+    ) -> Result<(String, String), AskError> {
         // ONE budget for the whole delegate — queueing behind another turn and waiting for
         // our own are the same person waiting, and the desktop route blocks on the total.
         let deadline = tokio::time::Instant::now() + BRIEF_WAIT_BUDGET;
@@ -626,7 +666,7 @@ write the brief — try again once it is done"
             .await;
         match crate::state::delegation::brief_from_reply(entry, baseline.as_deref(), Some(turn_id))
         {
-            Some(text) => Ok(text),
+            Some(text) => Ok((asker_thread_id.to_string(), text)),
             // Nothing new, nothing said, or said in some other turn. Sending the raw
             // words is worse than failing: the peer would act on an instruction with
             // no referent.

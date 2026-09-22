@@ -480,6 +480,12 @@ pub struct FakeProviderBridge {
     /// Placeholder id -> the id the session really gets, applied during `start_turn`.
     /// Models Claude, whose session does not exist until its first user message.
     promote_on_start: Arc<Mutex<HashMap<String, String>>>,
+    /// One-shot: the next `start_thread` hands back a `claude-pending-…` placeholder.
+    defer_next_start: Arc<AtomicBool>,
+    /// Promotions that have HAPPENED, drained by `resolve_started_thread_id` — the
+    /// same two-map shape the Claude bridge has, so the id `start_turn` promoted to
+    /// is reported exactly once.
+    promoted_thread_ids: Arc<Mutex<HashMap<String, String>>>,
     stopped_turns: Arc<Mutex<HashSet<String>>>,
     /// Every stop ASKED for, whatever the configured behaviour did with it.
     stop_requests: Arc<Mutex<HashSet<String>>>,
@@ -578,6 +584,13 @@ impl FakeProviderBridge {
         self.system_prompts.lock().await.clone()
     }
 
+    /// Start the next thread the way Claude starts one with no initial prompt: a
+    /// synthetic `claude-pending-…` id, reading active, with no session behind it.
+    /// Name what its first turn promotes it to with `promote_on_first_turn`.
+    pub(crate) fn defer_next_start(&self) {
+        self.defer_next_start.store(true, Ordering::Relaxed);
+    }
+
     /// Make `placeholder` become `real_id` when its first turn starts.
     pub(crate) async fn promote_on_first_turn(&self, placeholder: &str, real_id: &str) {
         self.promote_on_start
@@ -622,6 +635,8 @@ impl FakeProviderBridge {
             ask_user_gates: Arc::new(Mutex::new(HashMap::new())),
             turn_stop_behaviors: Arc::new(Mutex::new(HashMap::new())),
             promote_on_start: Arc::new(Mutex::new(HashMap::new())),
+            defer_next_start: Arc::new(AtomicBool::new(false)),
+            promoted_thread_ids: Arc::new(Mutex::new(HashMap::new())),
             stopped_turns: Arc::new(Mutex::new(HashSet::new())),
             stop_requests: Arc::new(Mutex::new(HashSet::new())),
             scenario_harness,
@@ -710,15 +725,25 @@ impl ProviderBridge for FakeProviderBridge {
                 .await
                 .push((cwd.to_string(), prompt.to_string()));
         }
+        // A deferred start has no session yet, so its row reads active with no turn
+        // behind it — the shape `wait_for_asker_idle` and the send path branch on.
+        let deferred = self.defer_next_start.swap(false, Ordering::Relaxed);
         let thread = ThreadSummaryView {
             workspace_trusted: false,
-            id: self.next_token("fake-thread"),
+            id: if deferred {
+                format!(
+                    "claude-pending-{}",
+                    self.next_id.fetch_add(1, Ordering::Relaxed)
+                )
+            } else {
+                self.next_token("fake-thread")
+            },
             name: Some("Fake E2E Session".to_string()),
             preview: String::new(),
             cwd: cwd.to_string(),
             updated_at: unix_now(),
             source: "fake".to_string(),
-            status: "idle".to_string(),
+            status: if deferred { "active" } else { "idle" }.to_string(),
             model_provider: "fake".to_string(),
             provider: "fake".to_string(),
             forked_from: None,
@@ -817,11 +842,10 @@ impl ProviderBridge for FakeProviderBridge {
     }
 
     async fn resolve_started_thread_id(&self, requested_thread_id: &str) -> String {
-        self.promote_on_start
+        self.promoted_thread_ids
             .lock()
             .await
-            .get(requested_thread_id)
-            .cloned()
+            .remove(requested_thread_id)
             .unwrap_or_else(|| requested_thread_id.to_string())
     }
 
@@ -838,12 +862,35 @@ impl ProviderBridge for FakeProviderBridge {
         }
 
         // The session is created BY this turn, so the promotion happens inside it —
-        // exactly where the real deferred-start bridge does it.
-        if let Some(real_id) = self.promote_on_start.lock().await.get(thread_id).cloned() {
+        // exactly where the real deferred-start bridge does it. Everything below then
+        // runs under the real id, because that is the only id the session has left:
+        // the placeholder stops resolving here, not once the caller notices.
+        let promoted = self.promote_on_start.lock().await.remove(thread_id);
+        if let Some(real_id) = promoted.clone() {
+            let summary = {
+                let mut threads = self.threads.lock().await;
+                let mut thread = threads.remove(thread_id).expect("checked above");
+                thread.summary.id = real_id.clone();
+                thread.summary.status = "active".to_string();
+                let summary = thread.summary.clone();
+                threads.insert(real_id.clone(), thread);
+                summary
+            };
+            self.promoted_thread_ids
+                .lock()
+                .await
+                .insert(thread_id.to_string(), real_id.clone());
             let mut relay = self.state.write().await;
+            // claude.rs moves the ACTIVE pointer first when the promoted thread is the
+            // user's own; the row for the real id is the caller's to upsert.
+            if relay.active_thread_id.as_deref() == Some(thread_id) {
+                relay.active_thread_id = Some(real_id.clone());
+            }
             relay.promote_background_thread(thread_id, &real_id);
+            relay.upsert_thread(summary);
             relay.notify();
         }
+        let thread_id = promoted.as_deref().unwrap_or(thread_id);
 
         // A provider that opens a turn of its own while this send is being queued. The
         // sent turn never goes live, so the thread's live turn and the id we answer with

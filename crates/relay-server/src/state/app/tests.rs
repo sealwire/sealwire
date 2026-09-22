@@ -28457,6 +28457,292 @@ watchdog settle this Blocked",
         );
     }
 
+    /// A never-used deferred-start session, and the ids its delegate must survive.
+    /// Returns `(placeholder, the id its first turn promotes it to)`.
+    async fn deferred_start_asker(
+        app: &crate::state::AppState,
+        bridge: &crate::fake_provider::FakeProviderBridge,
+        cwd: &str,
+    ) -> (String, String) {
+        bridge.defer_next_start();
+        let pending = app
+            .start_session(StartSessionInput {
+                cwd: Some(cwd.to_string()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("never".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+                sandbox: None,
+            })
+            .await
+            .expect("the asker's tab opens")
+            .active_thread_id
+            .clone()
+            .expect("thread");
+        assert!(
+            pending.starts_with("claude-pending-"),
+            "the fixture is only the bug's shape while the asker has no session yet: {pending}"
+        );
+        let real = format!("{pending}-session");
+        bridge.promote_on_first_turn(&pending, &real).await;
+        (pending, real)
+    }
+
+    /// Run the ask watchdog until `until` reads true, then stop. Giving up quietly is
+    /// deliberate: the test's own assertion is what should report the failure.
+    async fn sweep_asks(
+        app: &crate::state::AppState,
+        until: impl Fn(&crate::state::RelayState) -> bool,
+    ) {
+        for _ in 0..200 {
+            app.settle_and_deliver_asks_at(crate::state::unix_now())
+                .await;
+            if until(&*app.relay.read().await) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Has this session actually been handed the answers — is the wake's message in its
+    /// own transcript? Marking an ask delivered proves only that the send was attempted.
+    fn was_handed_the_answers(relay: &crate::state::RelayState, thread_id: &str) -> bool {
+        relay.runtime_for_thread(thread_id).is_some_and(|runtime| {
+            runtime.transcript.iter().any(|entry| {
+                entry.kind == crate::protocol::TranscriptEntryKind::UserText
+                    && entry
+                        .text
+                        .as_deref()
+                        .is_some_and(|text| text.contains("The agents you asked have finished"))
+            })
+        })
+    }
+
+    // The brief is the asker's FIRST turn, so a `/delegate` on a session that has never
+    // run one is accepted under an id that same brief retires. An ask left on that id is
+    // one nobody can be woken for — the answer lands on a session that no longer exists.
+    #[tokio::test]
+    async fn an_answer_follows_an_asker_its_own_brief_promoted() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let (pending, real) = deferred_start_asker(&app, &bridge, &cwd).await;
+
+        app.ask_agent(
+            &pending,
+            AskRequest {
+                device_id: None,
+                started_by: relay_api::delegation::StartedBy::Person,
+                peer_thread_id: None,
+                provider: Some("fake".to_string()),
+                model: None,
+                effort: None,
+                message: "look at the retry loop".to_string(),
+            },
+        )
+        .await
+        .expect("the delegate goes through");
+
+        {
+            let relay = app.relay.read().await;
+            assert!(
+                relay.asks_of_asker(&pending).is_empty(),
+                "the placeholder stopped routing when the brief promoted it",
+            );
+            assert_eq!(
+                relay.asks_of_asker(&real).len(),
+                1,
+                "the ask belongs to the session the brief created",
+            );
+        }
+
+        sweep_asks(&app, |relay| was_handed_the_answers(relay, &real)).await;
+
+        let relay = app.relay.read().await;
+        let ask = relay
+            .asks
+            .values()
+            .next()
+            .expect("the delegate is on record");
+        assert_eq!(
+            ask.asker_thread_id, real,
+            "every later write must name the session that is actually there",
+        );
+        assert!(
+            ask.delivered,
+            "the answer must be handed back, not left on the card: {:?}",
+            ask.error
+        );
+        assert!(
+            was_handed_the_answers(&relay, &real),
+            "the answer must reach the session that asked for it, not a retired id",
+        );
+    }
+
+    // The phone's delegate writes its record BEFORE the brief runs, so that record is
+    // the one holding the placeholder when the promotion lands. Filling it in must
+    // correct the asker too — otherwise the accepted delegate is the one that strands.
+    #[tokio::test]
+    async fn a_detached_delegate_corrects_the_asker_it_was_accepted_under() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let (pending, real) = deferred_start_asker(&app, &bridge, &cwd).await;
+
+        let ask_id = app
+            .ask_agent_detached(
+                &pending,
+                AskRequest {
+                    device_id: None,
+                    started_by: relay_api::delegation::StartedBy::Person,
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "look at the retry loop".to_string(),
+                },
+            )
+            .await
+            .expect("the delegate is accepted");
+
+        sweep_asks(&app, |relay| was_handed_the_answers(relay, &real)).await;
+
+        let relay = app.relay.read().await;
+        let ask = relay.ask(&ask_id).expect("still on record");
+        assert_eq!(
+            ask.asker_thread_id, real,
+            "the brief's promotion must be carried onto the record it was accepted under",
+        );
+        assert!(
+            ask.delivered,
+            "the answer must be handed back, not left on the card: {:?}",
+            ask.error
+        );
+        assert!(
+            was_handed_the_answers(&relay, &real),
+            "and the session that asked is the one that must be told",
+        );
+    }
+
+    // A delegate that has been accepted can still fail after its brief has created the
+    // session — starting the peer is the next thing that can go wrong, and by then the
+    // id the record was written under is retired. The card is the only place the caller
+    // ever hears about it, and one filed under a dead id resolves to no workspace, so
+    // the scoped device it was for filters it out and the delegate fails silently.
+    #[tokio::test]
+    async fn a_detached_delegate_that_fails_after_the_promotion_is_still_on_the_phone() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "phone", vec![cwd.clone()]).await;
+        let (pending, real) = deferred_start_asker(&app, &bridge, &cwd).await;
+
+        let ask_id = app
+            .ask_agent_detached(
+                &pending,
+                AskRequest {
+                    device_id: None,
+                    started_by: relay_api::delegation::StartedBy::Person,
+                    peer_thread_id: None,
+                    // Nothing checks this until the peer is started, which is after the
+                    // brief has run — so the delegate is accepted and then fails there.
+                    provider: Some("no-such-provider".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "look at the retry loop".to_string(),
+                },
+            )
+            .await
+            .expect("the delegate is accepted");
+
+        sweep_asks(&app, |relay| {
+            relay
+                .ask(&ask_id)
+                .is_some_and(|ask| ask.status.is_terminal())
+        })
+        .await;
+
+        let relay = app.relay.read().await;
+        let ask = relay.ask(&ask_id).expect("still on record");
+        assert!(
+            ask.error.is_some(),
+            "an accepted delegate that cannot start its peer must settle as a failure",
+        );
+        assert_eq!(
+            ask.asker_thread_id, real,
+            "the failure belongs to the session the brief created",
+        );
+        assert!(
+            relay
+                .reviews_response(Some("phone"))
+                .asks
+                .into_iter()
+                .any(|ask| ask.id == ask_id),
+            "the phone that asked must be shown the failure, not filtered out of it",
+        );
+    }
+
+    // A delegate can fail inside the brief itself, and that brief is what created the
+    // session: the promotion and the failure are the same turn, so nothing has corrected
+    // the record yet. What the caller is told must still be filed where it can be read.
+    #[tokio::test]
+    async fn a_failure_reported_after_the_promotion_is_filed_on_the_live_session() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "phone", vec![cwd.clone()]).await;
+        let real = goal_session(&app, &cwd).await;
+        let pending = "claude-pending-accepted-1";
+        let ask_id = "ask-detached-1";
+
+        {
+            let mut relay = app.relay.write().await;
+            relay.insert_ask(crate::state::delegation::Ask::new(
+                ask_id.to_string(),
+                pending.to_string(),
+                String::new(),
+                "fake".to_string(),
+                None,
+                None,
+                "look at the retry loop".to_string(),
+                cwd.clone(),
+                None,
+                relay_api::delegation::StartedBy::Person,
+            ));
+            relay.promote_background_thread(pending, &real);
+            relay.notify();
+        }
+
+        app.fail_detached_ask(
+            ask_id,
+            pending,
+            "this session did not write a brief".to_string(),
+        )
+        .await;
+
+        let relay = app.relay.read().await;
+        let ask = relay.ask(ask_id).expect("on record");
+        assert_eq!(
+            ask.asker_thread_id, real,
+            "the id the delegate was accepted under is retired; the failure is not",
+        );
+        assert!(
+            relay
+                .reviews_response(Some("phone"))
+                .asks
+                .into_iter()
+                .any(|ask| ask.id == ask_id),
+            "the phone that asked must be shown the failure, not filtered out of it",
+        );
+    }
+
     #[tokio::test]
     async fn a_brief_recorded_after_the_thread_reads_idle_is_still_the_brief() {
         // Every provider passes through "no turn is running, and this turn's reply is not
