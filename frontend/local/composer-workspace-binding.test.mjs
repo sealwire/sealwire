@@ -37,12 +37,6 @@ function harness({ scope = "local::a" } = {}) {
       current = next;
       return binding.sync();
     },
-    // What a deferred-Claude promotion does: the relay renames the thread, so the
-    // scope the composer derives moves at the same moment the store is rekeyed.
-    promote(from, to) {
-      binding.retarget(from, to);
-      current = to;
-    },
   };
 }
 
@@ -124,26 +118,6 @@ test("a draft the user changed mid-flight survives its own send's success", () =
   );
 });
 
-test("a promoted Claude thread keeps the draft typed under its pending id", () => {
-  const ui = harness({ scope: "local::claude-pending-7" });
-  ui.binding.sync();
-  ui.box.text = "half a thought";
-
-  ui.binding.retarget("local::claude-pending-7", "local::real-session-id");
-
-  assert.equal(ui.binding.scope(), "local::real-session-id");
-  assert.equal(ui.box.text, "half a thought", "same conversation, new public id");
-
-  ui.go("local::b");
-  ui.go("local::real-session-id");
-  assert.equal(ui.box.text, "half a thought", "and it is filed under the id that still exists");
-  assert.equal(
-    ui.workspaces.read("local::claude-pending-7").text,
-    "",
-    "nothing is stranded under the id that ceased to exist"
-  );
-});
-
 test("a snapshot that briefly reports no thread does not eat the sentence being typed", () => {
   // The scope is derived from the session, so a moment with no active thread makes it
   // empty. Re-binding must not treat that as "switched to a thread with no draft".
@@ -178,37 +152,6 @@ test("sync is a no-op when the composer has not changed hands", () => {
   assert.deepEqual(ui.restored, []);
 });
 
-test("a send still out when its thread is promoted is finished on the thread it became", () => {
-  // The submit captured the PENDING id. By the time the relay answers, that thread has
-  // been renamed — so clearing and unfreezing "the scope I captured" writes a ghost
-  // under an id nobody can reach, leaves the real one frozen forever, and leaves the
-  // words that were already sent sitting in the box.
-  const ui = harness();
-  ui.binding.sync();
-  ui.box.text = "ship it";
-  ui.box.images = [{ id: "image-1", file: {} }];
-
-  const operationId = ui.workspaces.beginOperation(ui.binding.scope());
-  ui.promote("local::a", "local::real");
-
-  ui.binding.clearSubmitted(operationId, { text: "ship it", attachmentIds: ["image-1"] });
-  ui.workspaces.endOperation(operationId);
-
-  assert.equal(ui.binding.scope(), "local::real");
-  assert.equal(ui.box.text, "", "the draft that went must be consumed");
-  assert.deepEqual(ui.box.images, [], "and so must the image that went with it");
-  assert.equal(
-    ui.workspaces.isPending("local::real"),
-    false,
-    "the promoted thread must not be left frozen by a send that already landed"
-  );
-  assert.equal(
-    ui.workspaces.keys().includes("local::a"),
-    false,
-    "and nothing may be resurrected under the id that ceased to exist"
-  );
-});
-
 test("a completion whose thread was deleted mid-send touches nothing at all", () => {
   const ui = harness();
   ui.binding.sync();
@@ -223,32 +166,6 @@ test("a completion whose thread was deleted mid-send touches nothing at all", ()
 
   assert.equal(ui.box.text, "words for B", "a token that names nothing must land nowhere");
   assert.deepEqual(ui.workspaces.keys(), [], "and must not resurrect the thread that was deleted");
-});
-
-test("a promotion whose route has not caught up yet does not blank the box", () => {
-  // The rename lands on a SNAPSHOT; the route/tab retarget is queued behind it. For that
-  // beat the scope derived from the view is still the id that just ceased to exist, and
-  // a render in the gap would swap the box out for an empty one — and read the freeze off
-  // a thread with no send on it.
-  const ui = harness({ scope: "local::pending" });
-  ui.binding.sync();
-  ui.box.text = "half a thought";
-  ui.workspaces.beginOperation("local::pending");
-
-  ui.binding.retarget("local::pending", "local::real");
-  ui.binding.sync();
-
-  assert.equal(ui.box.text, "half a thought", "the gap must not eat the draft");
-  assert.equal(ui.binding.resolveScope(), "local::real", "the composer is already the promoted thread");
-  assert.equal(
-    ui.workspaces.isPending(ui.binding.resolveScope()),
-    true,
-    "and its send is still out, so it stays frozen"
-  );
-
-  ui.go("local::real");
-  assert.equal(ui.box.text, "half a thought", "and nothing changes when the route catches up");
-  assert.equal(ui.workspaces.keys().includes("local::pending"), false);
 });
 
 test("deleting the session you are in does not hand its draft to the one that replaces it", () => {
@@ -300,19 +217,6 @@ test("deleting a session you are NOT in drops only its draft", () => {
 
   assert.equal(ui.box.text, "words for B", "the box belongs to B and must not be touched");
   assert.equal(ui.workspaces.keys().includes("local::a"), false);
-});
-
-test("a discarded scope that was mid-promotion does not resurrect through the gap", () => {
-  const ui = harness({ scope: "local::pending" });
-  ui.binding.sync();
-  ui.box.text = "half a thought";
-  ui.binding.retarget("local::pending", "local::real");
-
-  ui.binding.discard("local::real");
-  ui.go("local::b");
-
-  assert.deepEqual(ui.workspaces.keys(), [], "neither id may be left holding the dead draft");
-  assert.equal(ui.box.text, "");
 });
 
 test("a sent draft leaves no slot behind, dismissal included", () => {

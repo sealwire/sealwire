@@ -321,31 +321,28 @@ test("rescued entries keep their rendered order behind the response's own tail",
   );
 });
 
-test("a send that promotes the thread still applies its response in full", async () => {
-  // Deferred-start Claude threads are promoted server-side by the first send:
-  // the public id changes from `claude-pending-…` to the real session id, and
-  // `applySessionSnapshot` is what moves the scroll bookkeeping and retargets
-  // the route. The response is authoritative for a thread the surface holds
-  // nothing for, so pinning the transcript there would render an empty thread.
-  const promoted = {
+test("a send answered for a different thread still applies its response in full", async () => {
+  // The clobber guard only protects the thread the surface is ALREADY showing. A
+  // response naming another one is authoritative for it — the surface holds nothing
+  // to preserve there — so pinning the transcript would render an empty thread.
+  const elsewhere = {
     ...snapshot({
       revision: 0,
       transcript: [entry("user-1", "user_text", USER_TEXT)],
     }),
-    active_thread_id: "claude-real-1",
-    active_thread_promoted_from: "claude-pending-1",
+    active_thread_id: "session-other",
   };
   const { controller, state, lastRenderedTexts } = buildController({
-    response: promoted,
+    response: elsewhere,
     streamFrame: snapshot({ revision: 1, transcript: [] }),
   });
 
-  assert.equal(await controller.sendMessage(USER_TEXT, "claude-pending-1"), true);
+  assert.equal(await controller.sendMessage(USER_TEXT, "session-1"), true);
 
   assert.equal(
     state.session?.active_thread_id,
-    "claude-real-1",
-    "the promoted thread id must reach the surface"
+    "session-other",
+    "the responding thread id must reach the surface"
   );
   assert.deepEqual(
     lastRenderedTexts(),

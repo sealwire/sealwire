@@ -1610,7 +1610,6 @@ export function createSessionRenderer({
         getStandbyEmptyContent: buildStandbyEmptyContent,
         hydrationLoading: shouldShowTranscriptLoading(session, state),
         onLoadOlderTranscript: loadOlderTranscript,
-        promotion: state.localTranscriptScrollPromotion,
         readyCopy: `${providerLabel(session?.provider) || "The agent"} is connected. Send the first prompt below when you're ready.`,
         requestedSessionLabel,
         resetEpoch: state.localTranscriptScrollResetEpoch,

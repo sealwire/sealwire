@@ -11,10 +11,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const APP_SOURCE = readFileSync(new URL("./app.js", import.meta.url), "utf8");
-const LIFECYCLE_SOURCE = readFileSync(
-  new URL("./local/session/lifecycle.js", import.meta.url),
-  "utf8"
-);
 
 function slice(startMarker, endMarker) {
   const start = APP_SOURCE.indexOf(startMarker);
@@ -59,15 +55,15 @@ test("the submit freeze is per thread, not one global flag", () => {
 test("the in-flight freeze is derived from the viewed thread's own scope", () => {
   const derived = slice('Object.defineProperty(state, "composerSubmitInFlight"', "});");
 
-  // Through the binding, not the raw key: during a promotion's route gap those two
-  // disagree, and the freeze has to follow the box.
+  // Through the binding, not the raw key: while a route commit is still landing
+  // those two disagree, and the freeze has to follow the box.
   assert.match(derived, /isPending\(composerWorkspace\.resolveScope\(\)\)/);
 });
 
 test("every completion follows its OPERATION, not the key it started under", () => {
-  // A deferred Claude thread is renamed by the very send that is still in flight. A
-  // completion that writes back to the id it captured resurrects a ghost, leaves the
-  // real thread frozen forever, and never clears what was actually sent.
+  // A send can outlive the box it was typed in — the user switches threads, or the
+  // route commits underneath it. A completion that writes back to the key it captured
+  // rewrites whatever now answers to it, and never clears what was actually sent.
   const submit = slice("async function runComposerSubmit() {", "messageForm.addEventListener");
 
   assert.match(submit, /clearSubmitted\(operationId,/);
@@ -88,18 +84,6 @@ test("the \"/\" controller is told which thread its pills belong to", () => {
     "without a scope a command completing late rewrites whatever box is on screen"
   );
   assert.match(controller, /workspaces:\s*composerWorkspaces/);
-});
-
-test("a promoted deferred-Claude thread takes its draft with it", () => {
-  // The scope key IS the thread id, so a promotion the composer never hears about
-  // strands the draft under an id that no longer exists.
-  const promotion = LIFECYCLE_SOURCE.slice(
-    LIFECYCLE_SOURCE.indexOf("if (threadPromotion) {"),
-    LIFECYCLE_SOURCE.indexOf("retargetThread(")
-  );
-
-  assert.ok(promotion, "lifecycle.js no longer has a promotion branch");
-  assert.match(promotion, /retargetComposerWorkspace\?\.\(\s*threadPromotion\.from,\s*threadPromotion\.to/);
 });
 
 test("a deleted session's draft is discarded through the binding, on every path", () => {

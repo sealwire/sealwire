@@ -31587,7 +31587,6 @@ mod provider_call_boundary_tests {
             Some(started.as_str()),
             "the send response must retain the relay session id",
         );
-        assert!(snapshot.active_thread_promoted_from.is_none());
         assert_eq!(
             bridge.thread_ids_seen_by("start_turn").await,
             vec![pending_handle.clone()],
@@ -31650,7 +31649,6 @@ mod provider_call_boundary_tests {
             final_snapshot.active_thread_id.as_deref(),
             Some(started.as_str())
         );
-        assert!(final_snapshot.active_thread_promoted_from.is_none());
 
         let persisted = {
             let relay = app.relay.read().await;

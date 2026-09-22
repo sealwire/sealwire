@@ -366,7 +366,6 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             audit_enabled: false,
             beta_features_enabled: false,
             active_thread_id: Some("thread-1".to_string()),
-            active_thread_promoted_from: None,
             active_thread_task_reviewer: false,
             active_controller_device_id: Some("device-a".to_string()),
             active_controller_last_seen_at: Some(100),

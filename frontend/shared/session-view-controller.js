@@ -304,7 +304,7 @@ function defaultHistoryMode(action, change) {
   if (action?.type === "RESTORE_HISTORY") {
     return "replace";
   }
-  if (action?.type === "REMOVE_THREAD" || action?.type === "RETARGET_THREAD") {
+  if (action?.type === "REMOVE_THREAD") {
     return change.locationChanged ? "replace" : "none";
   }
   return change.locationChanged ? "push" : "none";
@@ -465,13 +465,6 @@ export function createSessionViewController({
     },
     removeThread(threadId) {
       return commit({ type: "REMOVE_THREAD", threadId });
-    },
-    retargetThread(fromThreadId, toThreadId) {
-      return commit({
-        type: "RETARGET_THREAD",
-        fromThreadId,
-        toThreadId,
-      });
     },
     /**
      * `preview: true` marks this as Back/Forward — the browser replaying peeks the

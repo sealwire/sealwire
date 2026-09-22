@@ -143,39 +143,6 @@ test("removing a thread sweeps every context and settles the visible location", 
   });
 });
 
-test("promotion rekeys the same visible tab without losing pin or identity invariants", () => {
-  let state = createSessionViewState();
-  state = transition(state, {
-    type: "OPEN_THREAD",
-    threadId: "claude-pending-1",
-  });
-  state = {
-    ...state,
-    workspaces: {
-      ...state.workspaces,
-      [SESSIONS_KEY]: setTabPinned(
-        state.workspaces[SESSIONS_KEY],
-        tabIdForThread("claude-pending-1"),
-        true
-      ),
-    },
-  };
-
-  state = transition(state, {
-    type: "RETARGET_THREAD",
-    fromThreadId: "claude-pending-1",
-    toThreadId: "claude-real-1",
-  });
-
-  assert.deepEqual(state.location, {
-    context: sessions(),
-    threadId: "claude-real-1",
-  });
-  assert.deepEqual(workspaceThreadIds(state, SESSIONS_KEY), ["claude-real-1"]);
-  assert.equal(state.workspaces[SESSIONS_KEY].tabs[0].id, tabIdForThread("claude-real-1"));
-  assert.equal(state.workspaces[SESSIONS_KEY].tabs[0].pinned, true);
-});
-
 test("valid move and background-context pin/move do not disturb the visible location", () => {
   let state = createSessionViewState();
   for (const threadId of ["a", "b", "c"]) {

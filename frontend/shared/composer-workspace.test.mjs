@@ -73,25 +73,6 @@ test("one scope's pending operation does not freeze another", () => {
   assert.equal(store.isPending("local::b"), false);
 });
 
-test("rekey moves a draft onto a promoted thread id", () => {
-  const store = createComposerWorkspaceStore();
-  store.write("local::claude-pending-1", { text: "half a thought" });
-
-  assert.equal(store.rekey("local::claude-pending-1", "local::real"), true);
-  assert.equal(store.read("local::real").text, "half a thought");
-  assert.equal(store.read("local::claude-pending-1").text, "");
-});
-
-test("rekey does not let an empty pending scope wipe what the promoted id already holds", () => {
-  const store = createComposerWorkspaceStore();
-  store.write("local::real", { text: "typed against the real id" });
-  store.write("local::claude-pending-1", { text: "" });
-
-  store.rekey("local::claude-pending-1", "local::real");
-
-  assert.equal(store.read("local::real").text, "typed against the real id");
-});
-
 test("a deleted thread is forgotten on every relay that had one", () => {
   const store = createComposerWorkspaceStore();
   store.write("relay-1::gone", { text: "x" });
@@ -208,28 +189,11 @@ test("pills and images are kept for as long as the thread exists", () => {
   assert.equal(store.read("local::staged").commandPills.length, 1);
 });
 
-test("an operation token follows its workspace through a promotion", () => {
-  // This is the whole race: the token is the identity, the key is not.
+test("a released tracked scope names nothing at all", () => {
   const store = createComposerWorkspaceStore();
-  store.write("local::pending", { text: "the first message" });
-  const operationId = store.beginOperation("local::pending");
-
-  store.rekey("local::pending", "local::real");
-
-  assert.equal(store.operationScope(operationId), "local::real");
-  assert.equal(store.isPending("local::real"), true);
-  assert.equal(store.endOperation(operationId), true);
-  assert.equal(store.isPending("local::real"), false);
-  assert.equal(store.keys().includes("local::pending"), false);
-});
-
-test("a tracked scope follows a promotion and is forgotten when released", () => {
-  const store = createComposerWorkspaceStore();
-  store.write("local::pending", { text: "x" });
-  const token = store.trackScope("local::pending");
-
-  store.rekey("local::pending", "local::real");
-  assert.equal(store.operationScope(token), "local::real");
+  store.write("local::thread-1", { text: "x" });
+  const token = store.trackScope("local::thread-1");
+  assert.equal(store.operationScope(token), "local::thread-1");
 
   store.releaseScope(token);
   assert.equal(store.operationScope(token), null, "a released token names nothing at all");
@@ -245,21 +209,6 @@ test("a token whose thread was deleted resolves to nothing rather than to somebo
   assert.equal(store.operationScope(operationId), null);
   assert.equal(store.endOperation(operationId), false, "a dead operation releases nothing");
   assert.deepEqual(store.keys(), []);
-});
-
-test("a promotion leaves no forwarding pointer a later unrelated thread could inherit", () => {
-  // No persistent old->new map exists, so an id that comes back around later starts
-  // clean rather than redirecting into the workspace it once pointed at.
-  const store = createComposerWorkspaceStore();
-  store.write("local::recycled", { text: "the first life" });
-  const operationId = store.beginOperation("local::recycled");
-  store.rekey("local::recycled", "local::real");
-  store.endOperation(operationId);
-
-  store.write("local::recycled", { text: "an unrelated later thread" });
-
-  assert.equal(store.read("local::recycled").text, "an unrelated later thread");
-  assert.equal(store.read("local::real").text, "the first life");
 });
 
 test("one scope's keystrokes do not change what another scope reads back", () => {

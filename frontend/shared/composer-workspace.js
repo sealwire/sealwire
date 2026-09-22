@@ -13,11 +13,10 @@
 //
 // TWO INVARIANTS hold this together, and everything else follows from them:
 //
-//   1. A key is NOT an identity. Deferred Claude threads are renamed by their first send
-//      (shared/thread-promotion.js), and that send is still in flight when it happens.
-//      So anything that has to survive an await holds a TOKEN, and `rekey` moves the
-//      tokens with the workspace. Nothing persists an old->new mapping, so an id that
-//      ceased to exist can never redirect a later, unrelated write into somebody's draft.
+//   1. A key is NOT an identity. A key can be forgotten and later reissued while a send
+//      that named it is still in flight, so anything that has to survive an await holds
+//      a TOKEN and is resolved through it. Nothing persists an old->new mapping, so an id
+//      that ceased to exist can never redirect a later write into somebody's draft.
 //
 //   2. An inert slot is never stored. That is what makes "no cap" safe: the map only ever
 //      holds drafts a person actually made, so there is nothing to bound and nothing that
@@ -107,9 +106,9 @@ function sameWorkspace(a, b) {
 export function createComposerWorkspaceStore() {
   const entries = new Map();
   const listeners = new Set();
-  // Every token handed out that still names a scope. `rekey` rewrites these, which is how
-  // a completion follows its workspace through a promotion instead of resurrecting the id
-  // it started under. Entries die with their token, so this cannot outlive what it is for.
+  // Every token handed out that still names a scope: this is how a completion follows
+  // the workspace it was started on rather than whatever is on screen when it lands.
+  // Entries die with their token, so this cannot outlive what it is for.
   const liveScopes = new Map();
   let nextToken = 0;
 
@@ -185,26 +184,6 @@ export function createComposerWorkspaceStore() {
     return Boolean(read(key).pendingOperationId);
   }
 
-  // Same logical conversation, new public id. The workspace moves, and so does every
-  // token still naming it — that second half is the whole point.
-  function rekey(fromKey, toKey) {
-    if (!fromKey || !toKey || fromKey === toKey) return false;
-    const moving = entries.get(fromKey);
-    let moved = false;
-    for (const [token, key] of liveScopes) {
-      if (key !== fromKey) continue;
-      liveScopes.set(token, toKey);
-      moved = true;
-    }
-    if (moving) {
-      entries.delete(fromKey);
-      entries.set(toKey, moving);
-      moved = true;
-      notify();
-    }
-    return moved;
-  }
-
   // A token pointing at a workspace that is gone must resolve to NOTHING. Dropping the
   // entry but keeping the token would send the next completion somewhere arbitrary.
   function dropTokensFor(keys) {
@@ -268,7 +247,6 @@ export function createComposerWorkspaceStore() {
     keys: () => [...entries.keys()],
     operationScope,
     read,
-    rekey,
     releaseScope,
     reset,
     size: () => entries.size,

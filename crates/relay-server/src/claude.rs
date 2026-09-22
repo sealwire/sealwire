@@ -3982,7 +3982,6 @@ for await (const line of rl) {
             .expect("targeted send should focus the original relay session");
         assert_ne!(focused_id, second_session_id);
         assert_eq!(focused_id, session_id);
-        assert!(result.active_thread_promoted_from.is_none());
         assert!(
             result
                 .transcript
@@ -4084,7 +4083,6 @@ for await (const line of rl) {
             immediate.active_thread_id.as_deref(),
             Some(session_id.as_str())
         );
-        assert!(immediate.active_thread_promoted_from.is_none());
         let immediate_match = immediate.transcript.iter().find(|entry| {
             entry.kind == TranscriptEntryKind::UserText
                 && entry.text.as_deref().map(str::trim) == Some(first_message.trim())
@@ -6987,7 +6985,6 @@ mod session_binding_boundary_tests {
 
         let relay = state.read().await;
         assert_eq!(relay.active_thread_id.as_deref(), Some(stable_id.as_str()));
-        assert!(relay.snapshot().active_thread_promoted_from.is_none());
         assert!(relay.thread_settings(&stable_id).is_some());
         assert!(relay.thread_settings("claude-pending-1").is_none());
         assert!(relay.thread_settings("real-sdk-id").is_none());
@@ -7070,7 +7067,6 @@ mod session_binding_boundary_tests {
                 .iter()
                 .all(|thread| thread.id != "claude-pending-replayed"
                     && thread.id != "real-sdk-replayed"));
-            assert!(relay.snapshot().active_thread_promoted_from.is_none());
         }
     }
 }

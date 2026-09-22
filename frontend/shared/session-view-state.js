@@ -25,7 +25,6 @@ import {
   moveTab,
   openThreadTab,
   promoteTab,
-  retargetThread,
   setTabPinned,
 } from "./tab-layout.js";
 import { SESSIONS_KEY } from "./tab-workspace-store.js";
@@ -333,7 +332,7 @@ function focusedThreadId(workspace) {
  *
  * A routed thread is always opened and focused in its exact context. This is the core
  * invariant consumers previously had to re-establish independently after boot,
- * popstate, mode switches, deletion, and promotion.
+ * popstate, mode switches, and deletion.
  */
 export function createSessionViewState(initial = {}) {
   const context = normalizeSessionViewContext(initial.location?.context);
@@ -634,34 +633,6 @@ function reduceSessionViewCases(snapshot, action = {}, facts = {}) {
 
     case "REMOVE_THREAD":
       return removeThread(state, action.threadId);
-
-    case "RETARGET_THREAD": {
-      const fromThreadId = stringId(action.fromThreadId);
-      const toThreadId = stringId(action.toThreadId);
-      if (!fromThreadId || !toThreadId || fromThreadId === toThreadId) {
-        return state;
-      }
-      if (stringSet(facts.unavailableThreadIds).has(toThreadId)) {
-        return removeThread(removeThread(state, fromThreadId), toThreadId);
-      }
-
-      const workspaces = Object.fromEntries(
-        Object.entries(state.workspaces).map(([key, workspace]) => [
-          key,
-          retargetThread(workspace, fromThreadId, toThreadId),
-        ])
-      );
-      return createSessionViewState({
-        location: {
-          context: state.location.context,
-          threadId:
-            state.location.threadId === fromThreadId
-              ? toThreadId
-              : state.location.threadId,
-        },
-        workspaces,
-      });
-    }
 
     case "RESTORE_HISTORY": {
       const context = contextFromHistory(

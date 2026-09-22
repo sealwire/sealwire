@@ -141,12 +141,6 @@ pub struct SessionSnapshot {
     #[serde(default)]
     pub beta_features_enabled: bool,
     pub active_thread_id: Option<String>,
-    /// Always `None`. A session's public id no longer changes, so there is no
-    /// promotion left to report; the field stays on the wire for one release so a
-    /// saved client that still reads it parses this snapshot. Removed with the
-    /// frontend code that consumes it.
-    #[serde(default)]
-    pub active_thread_promoted_from: Option<String>,
     /// The ACTIVE thread is a task reviewer: readable, never conversable. Clients
     /// disable the composer on this instead of letting the send fail — and it must
     /// come from here rather than be derived from the team runs in this snapshot,

@@ -113,37 +113,6 @@ test("a second press while the first is out is ignored", async () => {
   await first;
 });
 
-test("a send still out when its thread is promoted is finished on the thread it became", async () => {
-  // Deferred Claude threads change public id on their first send, and the send that
-  // caused it is still in flight. Everything it does on the way back — clearing the
-  // draft it consumed, lifting the freeze — belongs to the id the thread now has.
-  const PROMOTED = "relay-1::real-session";
-  let release;
-  const ui = harness({ send: () => new Promise((resolve) => {
-    release = resolve;
-  }) });
-  ui.workspaces.write(A, { text: "the first message" });
-
-  const running = ui.submit();
-  ui.workspaces.rekey(A, PROMOTED);
-  ui.go(PROMOTED);
-
-  release(true);
-  await running;
-
-  assert.equal(ui.workspaces.read(PROMOTED).text, "", "the draft that went must be consumed");
-  assert.equal(
-    ui.workspaces.isPending(PROMOTED),
-    false,
-    "the promoted thread must not be left frozen by a send that already landed"
-  );
-  assert.equal(
-    ui.workspaces.keys().includes(A),
-    false,
-    "and nothing may be resurrected under the id that ceased to exist"
-  );
-});
-
 test("a sent draft leaves no slot behind, dismissal included", () => {
   // Same on the phone: the dismissal is dropped with the text it named, so the workspace
   // goes inert and stops being stored rather than lingering for the life of the tab.

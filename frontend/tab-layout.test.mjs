@@ -14,7 +14,6 @@ import {
   openThreadIds,
   openThreadTab,
   promoteTab,
-  retargetThread,
   sameWorkspace,
   setTabPinned,
   tabIdForThread,
@@ -163,68 +162,6 @@ test("layout trees expose every session in visual order", () => {
   assert.deepEqual(layoutThreadIds(split), ["t1", "t2", "t3"]);
 });
 
-// A promoted Claude session (claude-pending-… → real SDK id) is the SAME session, so
-// its tab must be rekeyed rather than closed and reopened — otherwise the promotion
-// leaves a permanent dead tab beside the live one, and pin/order/focus are lost.
-test("retargeting a promoted session rekeys its tab in place", () => {
-  const pending = "claude-pending-1";
-  let workspace = workspaceWith(["t1", pending, "t3"]);
-  workspace = setTabPinned(workspace, tabIdForThread(pending), true);
-  workspace = focusTab(workspace, tabIdForThread(pending));
-
-  const promoted = retargetThread(workspace, pending, "real-1");
-
-  assert.deepEqual(
-    openThreadIds(promoted),
-    ["real-1", "t1", "t3"],
-    "the pending id is gone and the real one holds its slot"
-  );
-  assert.equal(promoted.tabs.length, 3, "no extra tab is created");
-  assert.equal(promoted.tabs[0].pinned, true, "pin survives");
-  assert.equal(promoted.tabs[0].id, tabIdForThread("real-1"), "the tab id is renamed too");
-  assert.equal(promoted.focusedTabId, tabIdForThread("real-1"), "focus follows the rename");
-});
-
-test("retargeting preserves strip order for an unpinned tab", () => {
-  const workspace = workspaceWith(["t1", "pending", "t3"]);
-  const promoted = retargetThread(workspace, "pending", "real");
-  assert.deepEqual(openThreadIds(promoted), ["t1", "real", "t3"]);
-});
-
-test("retargeting is a no-op for an unknown or unchanged session", () => {
-  const workspace = workspaceWith(["t1"]);
-  assert.deepEqual(retargetThread(workspace, "nope", "real"), workspace);
-  assert.deepEqual(retargetThread(workspace, "t1", "t1"), workspace);
-  assert.deepEqual(retargetThread(workspace, "", "real"), workspace);
-  assert.deepEqual(retargetThread(workspace, "t1", ""), workspace);
-});
-
-// If the promoted id somehow already has a tab, folding into it beats leaving two tabs
-// for one session.
-test("retargeting onto an already-open session drops the stale tab", () => {
-  const workspace = workspaceWith(["pending", "real"]);
-  const promoted = retargetThread(workspace, "pending", "real");
-  assert.deepEqual(openThreadIds(promoted), ["real"]);
-  assert.equal(promoted.tabs.length, 1);
-});
-
-// Panes aren't in the UI yet, but the rekey has to reach into a stored split tree —
-// that is the whole point of modelling the layout as a tree up front.
-test("retargeting rewrites a session nested inside a split", () => {
-  const workspace = createTabWorkspace({
-    tabs: [
-      {
-        id: "tab-split",
-        layout: createSplit({ children: [createLeaf("t1"), createLeaf("pending")] }),
-      },
-    ],
-  });
-
-  const promoted = retargetThread(workspace, "pending", "real");
-  assert.deepEqual(openThreadIds(promoted), ["t1", "real"]);
-  assert.equal(promoted.tabs[0].id, "tab-split", "a split tab keeps its own id");
-});
-
 test("a session inside a split counts as open", () => {
   const workspace = createTabWorkspace({
     tabs: [
@@ -328,8 +265,8 @@ test("dragging a preview tab into place keeps it", () => {
   assert.equal(moved.tabs[0].preview, false);
 });
 
-// Change detection drives both persistence and re-render; a promotion that
-// compared equal would never reach IndexedDB or repaint the italic title.
+// Change detection drives both persistence and re-render; a peek promoted to a kept
+// tab that compared equal would never reach IndexedDB or repaint the italic title.
 test("preview state participates in workspace equality", () => {
   const preview = openThreadTab(createTabWorkspace(), "t1", { preview: true });
   const kept = promoteTab(preview, tabIdForThread("t1"));
@@ -337,13 +274,10 @@ test("preview state participates in workspace equality", () => {
   assert.equal(sameWorkspace(kept, promoteTab(kept, tabIdForThread("t1"))), true);
 });
 
-test("preview state survives normalization and a rekeyed session", () => {
+test("preview state survives normalization", () => {
   const stored = createTabWorkspace(
-    openThreadTab(createTabWorkspace(), "claude-pending-1", { preview: true })
+    openThreadTab(createTabWorkspace(), "session-1", { preview: true })
   );
   assert.equal(stored.tabs[0].preview, true, "a reloaded window keeps its preview tab");
-
-  const retargeted = retargetThread(stored, "claude-pending-1", "real-1");
-  assert.equal(retargeted.tabs[0].preview, true);
-  assert.deepEqual(openThreadIds(retargeted), ["real-1"]);
+  assert.deepEqual(openThreadIds(stored), ["session-1"]);
 });

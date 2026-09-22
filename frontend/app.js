@@ -612,7 +612,7 @@ function syncComposerWorkspace() {
 
 // Per thread on purpose: a send still out on the session you left must not freeze the
 // one you just opened, and going back to it must still find it frozen. Through the
-// binding, not the raw key, so it agrees with the box during a promotion's route gap.
+// binding, not the raw key, so it agrees with whatever the box is actually holding.
 Object.defineProperty(state, "composerSubmitInFlight", {
   configurable: false,
   enumerable: true,
@@ -620,14 +620,6 @@ Object.defineProperty(state, "composerSubmitInFlight", {
     return composerWorkspaces.isPending(composerWorkspace.resolveScope());
   },
 });
-
-// Same logical conversation, new public id (deferred Claude threads). Called from
-// lifecycle.js's promotion detection, which is where the lineage arrives.
-state.retargetComposerWorkspace = (fromThreadId, toThreadId) =>
-  composerWorkspace.retarget(
-    composerWorkspaceKey({ threadId: fromThreadId }),
-    composerWorkspaceKey({ threadId: toThreadId })
-  );
 
 const sessionViewController = createSessionViewController({
   store: sessionViewStore,
@@ -1435,8 +1427,8 @@ renderer.renderSession = function wrappedRenderSession(session) {
   state.session = session;
   maybeRefreshViewOnly(session);
   // The active thread can also change WITHOUT a navigation — another device switches the
-  // relay, a promotion lands — and the composer has to follow it or the next keystroke
-  // lands in the previous thread's draft. A no-op when the scope is unchanged.
+  // relay — and the composer has to follow it or the next keystroke lands in the previous
+  // thread's draft. A no-op when the scope is unchanged.
   syncComposerWorkspace();
   _baseRenderSession(session);
   syncVerbTimer(session);
@@ -5253,7 +5245,7 @@ function renderLaunchSessionDialog() {
       providerModels: state.providerModels,
       providers: state.providers || [],
       // Matches remote: Claude supports deferred start, so an empty prompt is
-      // allowed and the relay promotes the session on the first message.
+      // allowed and the provider session is created by the first message.
       requireInitialPrompt: false,
       startPending: Boolean(state.newSessionSubmitInFlight),
       threadProjectId: state.threadProjectId || {},

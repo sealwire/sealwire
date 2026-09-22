@@ -481,13 +481,6 @@ test("LATEST_USER_MESSAGE_ATTR is the documented data attribute name", () => {
   assert.equal(LATEST_USER_MESSAGE_ATTR, "data-latest-user-message");
 });
 
-// --- deferred-thread promotion (claude-pending-* -> real id) -----------------
-//
-// Both surfaces' flavors of this promotion rekey now live on the shared
-// engine's `retarget` operation — see shared/transcript-scroll-bookkeeping.test.mjs
-// for that coverage (Local's own key equals its thread id; Remote's is
-// relay-scoped, `relayId:threadId`).
-
 // --- input required (Bug B) -------------------------------------------------
 //
 // When the agent blocks on the reader (an approval, or an AskUser question) the

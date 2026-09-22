@@ -107,7 +107,7 @@ function mount() {
   const host = dom.window.document.createElement("div");
   dom.window.document.body.append(host);
   const root = createRoot(host);
-  const currentState = { activeRelayId: "relay-1", promotedThreadAlias: null };
+  const currentState = { activeRelayId: "relay-1" };
   return {
     scroller: () => host.querySelector(".chat-thread"),
     show(threadId, entries, session = null) {

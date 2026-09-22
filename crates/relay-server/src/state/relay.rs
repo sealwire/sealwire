@@ -3975,9 +3975,6 @@ impl RelayState {
             audit_enabled: self.security.audit_enabled(),
             beta_features_enabled: self.beta_features_enabled,
             active_thread_id: self.active_thread_id.clone(),
-            // Phase 4 removed public thread promotion; the field stays on the wire
-            // for one release so a saved client still parses this snapshot.
-            active_thread_promoted_from: None,
             active_thread_task_reviewer: self
                 .active_thread_id
                 .as_deref()
@@ -7497,7 +7494,6 @@ mod tests {
                 .provider_handle,
             real_handle,
         );
-        assert!(relay.snapshot().active_thread_promoted_from.is_none());
     }
 
     fn cloud_backend() -> relay_api::orchestration::OrchestrationBackendRef {

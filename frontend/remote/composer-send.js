@@ -1,12 +1,11 @@
-// The remote composer's send, kept out of the render tree so the two races it exists to
-// survive can be tested: the user switching sessions while the broker round-trip is still
-// out, and the thread being RENAMED by this very send (a deferred Claude thread is
-// promoted by its first message).
+// The remote composer's send, kept out of the render tree so the race it exists to
+// survive can be tested: the user switching sessions, or deleting one, while the broker
+// round-trip is still out.
 //
 // So the completion follows the operation TOKEN, not the key it started under. The token
-// moves with the workspace through a promotion, and resolves to nothing once the thread
-// is deleted — which is the difference between finishing the right conversation, leaving
-// the real one frozen forever, and writing a ghost under an id nobody can reach.
+// resolves to nothing once the thread is deleted — which is the difference between
+// finishing the right conversation, leaving the real one frozen forever, and writing a
+// ghost under an id nobody can reach.
 export function createRemoteComposerSend({ workspaces, getScope, send }) {
   return async () => {
     const scope = getScope();

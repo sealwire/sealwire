@@ -225,8 +225,8 @@ test("choosing a project reports it as a field, like every other setting", () =>
 });
 
 test("requireInitialPrompt gates Claude, and both hosts opt out of it", () => {
-  // The relay promotes a promptless Claude session on its first message, so both
-  // surfaces pass requireInitialPrompt: false.
+  // Claude creates its session on the first message rather than at start, so a
+  // promptless start is legal and both surfaces pass requireInitialPrompt: false.
   const optedOut = mount({ requireInitialPrompt: false });
   assert.equal(
     optedOut.host.querySelector("#test-dialog-start").disabled,

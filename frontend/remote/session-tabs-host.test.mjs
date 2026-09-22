@@ -355,8 +355,8 @@ test("a remembered context with no remembered tab falls through to the live thre
 });
 
 // The restore is a ONE-SHOT claim on the first snapshot, not a lock. Everything after it
-// — the user clicking a tab, another client moving focus, a Claude promotion — must move
-// the surface exactly as it did before.
+// — the user clicking a tab, another client moving focus — must move the surface exactly
+// as it did before.
 test("the restore yields to the next thread the surface actually shows", async () => {
   const persistence = memoryPersistence();
   const storage = memoryStorage();
@@ -546,32 +546,14 @@ test("switching back to a project restores the tab you were on", async () => {
   assert.equal(host.controller.getState().location.threadId, "A");
 });
 
-// F2: a Claude pending->real promotion must REKEY the tab, not add a second one.
-test("a Claude promotion rekeys the tab in place", async () => {
+test("each thread the surface is shown gets its own tab", async () => {
   const host = hostWith();
-  await host.adoptViewedThread({ threadId: "claude-pending-1", threadProjectId: {} });
-  assert.deepEqual(tabThreadIds(host, { kind: "sessions" }), ["claude-pending-1"]);
-
-  await host.adoptViewedThread({
-    threadId: "real-1",
-    promotedFrom: "claude-pending-1",
-    threadProjectId: {},
-  });
-
-  assert.deepEqual(
-    tabThreadIds(host, { kind: "sessions" }),
-    ["real-1"],
-    "the pending tab must be rekeyed, leaving no ghost"
-  );
-});
-
-test("an ordinary thread switch away from a pending id is not treated as a promotion", async () => {
-  const host = hostWith();
-  await host.adoptViewedThread({ threadId: "claude-pending-1", threadProjectId: {} });
-  // No lineage field: another device simply moved the relay elsewhere.
+  await host.adoptViewedThread({ threadId: "session-1", threadProjectId: {} });
+  // Another device moved the relay elsewhere; that is a second session, not the
+  // same one under a new name.
   await host.adoptViewedThread({ threadId: "other", threadProjectId: {} });
 
-  assert.deepEqual(tabThreadIds(host, { kind: "sessions" }), ["claude-pending-1", "other"]);
+  assert.deepEqual(tabThreadIds(host, { kind: "sessions" }), ["session-1", "other"]);
 });
 
 // F3: nothing else dispatches when the relay has no active thread, so the

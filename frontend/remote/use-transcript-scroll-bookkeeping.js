@@ -63,28 +63,6 @@ export function useRemoteTranscriptScrollBookkeeping({
 
     const previous = engine.getSnapshot();
 
-    // Deferred-Claude promotion (send path sets the one-shot alias): same
-    // logical thread under a new public id — rekey the retained bookkeeping
-    // instead of treating it as a thread switch, so the first reply keeps the
-    // send-anchor instead of jump-bottom briefly re-enabling live follow.
-    const promotion = currentState.promotedThreadAlias || null;
-    if (
-      promotion
-      && previous?.activeThreadId === promotion.from
-      && remoteThreadId === promotion.to
-    ) {
-      engine.retarget({
-        fromKey: `${currentState.activeRelayId || "-"}:${promotion.from}`,
-        toKey: remoteScrollKey,
-        fromThreadId: promotion.from,
-        toThreadId: remoteThreadId,
-      });
-      // Consumed: the alias is one-shot. (An alias whose transition this pane
-      // never renders stays until the next promotion overwrites it — pending
-      // ids are unique, so it can never match anything else.)
-      currentState.promotedThreadAlias = null;
-    }
-
     let restoredScrollPosition = null;
     if (previous?.scrollKey && previous.scrollKey !== remoteScrollKey) {
       // The prior layout-effect cleanup and scroll listener retained the old

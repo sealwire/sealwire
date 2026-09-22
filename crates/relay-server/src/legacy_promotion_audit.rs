@@ -32,71 +32,59 @@
 
 use std::path::{Path, PathBuf};
 
-/// `(needle first half, needle second half, still-allowed superstring, why it went)`.
-///
-/// The superstring column exists for one case: `active_thread_promoted_from` is
-/// still in the wire model for one compatibility release, and it CONTAINS the
-/// removed state field's name. Occurrences of the allowed superstring are erased
-/// before the bare needle is looked for.
-const REMOVED: &[(&str, &str, Option<(&str, &str)>, &str)] = &[
+/// `(needle first half, needle second half, why it went)`.
+const REMOVED: &[(&str, &str, &str)] = &[
     (
         "promote_background",
         "_thread",
-        None,
         "re-keyed ~20 relay-owned maps when a public id changed; a stable session id \
 never changes, so nothing is left to re-key",
     ),
     (
         "thread_promoted",
         "_from",
-        Some(("active_thread_promoted", "_from")),
-        "persisted lineage real_id -> pending_id, written only by the re-key above",
+        "persisted lineage real_id -> pending_id, written only by the re-key above. \
+The same needle covers the `active_`-prefixed `SessionSnapshot` field that carried \
+that lineage to clients, which is gone from the wire too",
     ),
     (
         "resolve_promoted",
         "_thread_id",
-        None,
         "client-supplied-id alias resolver; it scanned the lineage map and answered \
 only for ids beginning `claude-pending-`, which are no longer public",
     ),
     (
         "legacy_thread_promotion",
         "_count",
-        None,
         "test observability for the lineage map",
     ),
     (
         "resolve_started",
         "_thread_id",
-        None,
         "asked a bridge which public id a just-started turn really belonged to; the \
 send path now keeps the session id it already had",
     ),
     (
         "promoted_thread",
         "_ids",
-        None,
         "the bridge side of that question — a pending-handle -> real-id handoff drained \
 once per start. Materializing the binding is what carries that fact now",
     ),
     (
         "dispatched_thread",
         "_id",
-        None,
         "answered `which thread did that turn really land on?` from the relay's lineage \
 record. Every dispatch now lands on the id the caller supplied",
     ),
     (
         "dispatched.thread",
         "_id",
-        None,
         "the same question asked of the dispatch RESULT. A driver that reads a thread id \
 back out of a dispatch is carrying the retired protocol, whatever it is spelled",
     ),
     (
         "rekey",
         "_thread",
-        None,
         "`TeamRun`'s sweep that rewrote one thread id to another across every seat, role, \
 provider and in-flight marker. Nothing rotates a seat by renaming it",
     ),
@@ -119,8 +107,9 @@ fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
 fn no_source_reintroduces_public_thread_promotion() {
     // `relay-api` too: `TeamRun` owns the run record, and the seat-rewriting sweep
     // that was removed with the rest of this lived there rather than here.
+    let crate_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let roots = [
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        crate_src.clone(),
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../relay-api/src")
             .canonicalize()
@@ -147,13 +136,9 @@ fn no_source_reintroduces_public_thread_promotion() {
             .unwrap_or(path)
             .display()
             .to_string();
-        for (head, tail, allowed, why) in REMOVED {
+        for (head, tail, why) in REMOVED {
             let needle = format!("{head}{tail}");
-            let haystack = match allowed {
-                Some((head, tail)) => text.replace(&format!("{head}{tail}"), ""),
-                None => text.clone(),
-            };
-            let hits = haystack.matches(&needle).count();
+            let hits = text.matches(&needle).count();
             if hits > 0 {
                 found.push(format!("{rel}: {hits}x `{needle}` — removed because {why}"));
             }

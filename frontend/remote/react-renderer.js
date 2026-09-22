@@ -175,7 +175,7 @@ export function SessionPanel({
     // Remote passes no attachment mount: a paired device cannot send image
     // bytes, so the placeholder must not invite a paste.
     // Mirror local: Claude supports deferred start — the relay accepts no
-    // initial prompt and promotes the session on the first composer message.
+    // initial prompt and the provider session is created by the first message.
     requireInitialPrompt: false,
   });
 }

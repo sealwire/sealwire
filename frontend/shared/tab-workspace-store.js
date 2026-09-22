@@ -7,7 +7,6 @@ import {
   focusTab,
   moveTab,
   openThreadTab,
-  retargetThread,
   sameWorkspace,
   setTabPinned,
 } from "./tab-layout.js";
@@ -109,20 +108,6 @@ export function createTabWorkspaceStore({ persistence = null } = {}) {
     },
     moveTabId(projectId, tabId, toIndex) {
       return get().update(projectId, (workspace) => moveTab(workspace, tabId, toIndex));
-    },
-
-    /**
-     * Rekey a promoted session everywhere it is open (see retargetThread). Covers every
-     * workspace, loaded or not, for the same reason the removal sweep does: the tab may
-     * live in a project this page has not opened yet.
-     */
-    retargetThreadEverywhere(fromThreadId, toThreadId) {
-      if (!fromThreadId || !toThreadId || fromThreadId === toThreadId) {
-        return;
-      }
-      for (const key of get().allWorkspaceKeys()) {
-        get().update(key, (current) => retargetThread(current, fromThreadId, toThreadId));
-      }
     },
 
     /**

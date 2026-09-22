@@ -131,45 +131,6 @@ export function createTranscriptScrollBookkeeping() {
     return true;
   }
 
-  // Rekey the promoted key/thread-id pair (the deferred-Claude case: a
-  // synthetic `claude-pending-*` id promoted to its real session id on first
-  // send) across all three retained things in one step. Returns true if
-  // anything was rekeyed.
-  function retarget(options) {
-    // `options || {}`, not a destructured default param: a default only
-    // applies for `undefined`, and callers (safely) pass `null` too.
-    const { fromKey, toKey, fromThreadId, toThreadId } = options || {};
-    if (!fromKey || !toKey || !fromThreadId || !toThreadId || fromKey === toKey) {
-      return false;
-    }
-    let changed = false;
-    // Thread ids alone are not a reliable match: two distinct keys can share
-    // one (a reconnect reusing a thread id under a different relay). Only
-    // rekey the retained snapshot when its own scrollKey agrees with fromKey
-    // -- or is absent, the null-element snapshot's shape, which carries no
-    // key to disagree with.
-    const snapshotScrollKey = previousSnapshot?.scrollKey;
-    const snapshotBelongsToFromKey = snapshotScrollKey == null || snapshotScrollKey === fromKey;
-    if (previousSnapshot?.activeThreadId === fromThreadId && snapshotBelongsToFromKey) {
-      previousSnapshot.activeThreadId = toThreadId;
-      if (snapshotScrollKey === fromKey) {
-        previousSnapshot.scrollKey = toKey;
-      }
-      changed = true;
-    }
-    if (positions.has(fromKey)) {
-      positions.set(toKey, positions.get(fromKey));
-      positions.delete(fromKey);
-      changed = true;
-    }
-    if (anchors.has(fromKey)) {
-      anchors.set(toKey, anchors.get(fromKey));
-      anchors.delete(fromKey);
-      changed = true;
-    }
-    return changed;
-  }
-
   return {
     anchorsFor,
     applyRestore,
@@ -179,7 +140,6 @@ export function createTranscriptScrollBookkeeping() {
     readRestoreIntent,
     rememberView,
     reset,
-    retarget,
     syncGeneration,
   };
 }

@@ -1402,29 +1402,17 @@ function RemoteApp() {
   }, [sessionTabsHost]);
 
   // 2. Screen -> controller. Remote's viewed thread is NOT owned by the controller —
-  // boot shows the relay's active thread, another client can move it, and a Claude
-  // pending id gets promoted mid-turn. Mirroring it back guarantees the strip always
-  // describes what is actually rendered, which is the invariant five review rounds on
-  // the local surface were spent establishing.
+  // boot shows the relay's active thread and another client can move it. Mirroring it
+  // back guarantees the strip always describes what is actually rendered, which is the
+  // invariant five review rounds on the local surface were spent establishing.
   //
   // `preview` is deliberately omitted rather than passed: omitting it routes without
   // re-flagging an already-open tab, so a session the user chose to KEEP is not demoted
   // back to a peek by the snapshot that follows.
-  // The relay's own lineage field. It is the ONLY signal that separates a Claude
-  // pending->real promotion from another device switching threads; without it the pending
-  // tab would survive beside its promoted self, persisted, one per session.
-  //
-  // Held in a ref for the same reason as the others: it is an INPUT to how the change is
-  // classified, never a reason to re-classify. Reading it inline would be correct — it
-  // comes from the same render's `session` as `remoteViewedThreadId` — but it would read
-  // as a missing dependency to everyone after this.
-  const promotedFromRef = useRef(null);
-  promotedFromRef.current = session?.active_thread_promoted_from || null;
   useEffect(() => {
     if (!remoteViewedThreadId) return;
     void sessionTabsHost.adoptViewedThread({
       threadId: remoteViewedThreadId,
-      promotedFrom: promotedFromRef.current,
       threadProjectId: threadProjectIdRef.current,
     });
   }, [remoteViewedThreadId, sessionTabsHost]);

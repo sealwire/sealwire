@@ -23,24 +23,11 @@ export function createComposerWorkspaceBinding({
   onRestore = () => {},
 }) {
   let bound = "";
-  // A promotion renames the thread on a SNAPSHOT, but the route/tab retarget behind it is
-  // queued — so for a beat the scope derived from the view is still the id that just
-  // ceased to exist. One pair, cleared the moment the route settles anywhere: long enough
-  // to stop a render in that gap blanking the box and reading the freeze off the wrong
-  // thread, too short to ever redirect an unrelated later scope.
-  let promotedFrom = "";
-  let promotedTo = "";
 
-  // The scope the composer is on RIGHT NOW, promotion gap included. The one definition —
-  // the in-flight freeze and the "/" controller both have to agree with the box.
+  // The scope the composer is on RIGHT NOW. The one definition — the in-flight freeze
+  // and the "/" controller both have to agree with the box.
   function resolveScopeKey() {
-    const raw = getScopeKey();
-    if (promotedFrom && raw !== promotedFrom) {
-      promotedFrom = "";
-      promotedTo = "";
-      return raw;
-    }
-    return promotedFrom ? promotedTo : raw;
+    return getScopeKey();
   }
 
   function capture(key = bound) {
@@ -115,34 +102,12 @@ export function createComposerWorkspaceBinding({
     /// belonging to a session that no longer exists.
     discard(key) {
       if (!key) return false;
-      if (promotedFrom === key || promotedTo === key) {
-        promotedFrom = "";
-        promotedTo = "";
-      }
       const dropped = workspaces.forget(key);
       if (bound !== key) return dropped;
       setText("");
       setImageAttachments([]);
       onRestore(key);
       return dropped;
-    },
-
-    /// Deferred Claude threads change public id on their first send. Same conversation,
-    /// so the draft moves with it instead of being stranded under an id that is gone.
-    retarget(fromKey, toKey) {
-      if (!fromKey || !toKey || fromKey === toKey) return false;
-      const wasBound = bound === fromKey;
-      if (wasBound) capture(fromKey);
-      const moved = workspaces.rekey(fromKey, toKey);
-      if (!wasBound) return moved;
-      bound = toKey;
-      promotedFrom = fromKey;
-      promotedTo = toKey;
-      // The box keeps its text — same conversation — but anything reading the scope off
-      // to the side (the "/" controller's pills) has to be told the id changed, and the
-      // next sync() cannot tell it: by then `bound` already equals the new scope.
-      onRestore(toKey);
-      return moved;
     },
   };
 }

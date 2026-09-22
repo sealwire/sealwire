@@ -33,7 +33,6 @@ import {
   deleteReview as deleteReviewApi,
 } from "../api.js";
 import { loadLastEffort, saveLastApprovalPolicy } from "../../shared/last-used-settings.js";
-import { detectDeferredThreadPromotion } from "../../shared/thread-promotion.js";
 import { resolveOutgoingEffort } from "../../shared/reasoning-efforts.js";
 import { providerLabel } from "../../shared/provider-labels.js";
 import {
@@ -1006,8 +1005,7 @@ export function createLifecycleController(ctx) {
   /// persisted, monotonic clock, so the comparison would be sound. The guard
   /// still does not need it, and nothing here depends on that ordering.)
   ///
-  /// Scoped to the thread the surface is already showing: for any OTHER thread —
-  /// notably a deferred-start Claude thread the send itself just promoted — the
+  /// Scoped to the thread the surface is already showing: for any OTHER thread the
   /// surface holds nothing to preserve and the response is authoritative.
   ///
   /// NOTE: this covers the transcript only. The rest of the snapshot is still
@@ -1047,34 +1045,6 @@ export function createLifecycleController(ctx) {
     }
     if (snapshot?.active_thread_id !== previousThreadId) {
       state.localUiStore.getState().clearTranscriptDetailLoading();
-    }
-
-    // Deferred-start Claude threads get promoted server-side when the first
-    // message is sent: the public id changes from `claude-pending-…` to the
-    // real Anthropic session id. Keep the URL aligned (replace, not push, so
-    // we don't trap the back button) so isViewingConversation stays true.
-    // Scoped to the pending-prefix transition so initial loads with a seeded
-    // active_thread_id don't auto-enter conversation view.
-    const threadPromotion = detectDeferredThreadPromotion({
-      previousThreadId,
-      nextThreadId: snapshot?.active_thread_id || null,
-      nextThreadPromotedFrom: snapshot?.active_thread_promoted_from || null,
-    });
-    if (threadPromotion) {
-      // Same logical thread, new public id: stage the rekey as a signal for
-      // the scroll hook to apply once, instead of writing into fields this
-      // module no longer owns.
-      state.localTranscriptScrollPromotion = threadPromotion;
-      // Synchronous and first: the composer's draft is keyed by thread id, and the very
-      // next render computes its scope from the promoted id.
-      state.retargetComposerWorkspace?.(threadPromotion.from, threadPromotion.to);
-      // Rekey every canonical workspace and the route in one queued command. The
-      // controller preserves tab identity/pin/order and uses history.replace when the
-      // promoted thread is currently visible.
-      void state.sessionViewController?.retargetThread(
-        threadPromotion.from,
-        threadPromotion.to
-      );
     }
 
     // Update per-thread attention + fire notifications here — the single

@@ -41,7 +41,6 @@ import {
   sessionViewContextKey,
 } from "../shared/session-view-state.js";
 import { createTabWorkspace, focusedTab, layoutThreadIds } from "../shared/tab-layout.js";
-import { detectDeferredThreadPromotion } from "../shared/thread-promotion.js";
 import { renderLog } from "./client-log.js";
 import { getRemoteProjectsStore } from "./projects-host.js";
 import { createSessionLocationMemo } from "./session-location-memo.js";
@@ -210,12 +209,6 @@ export function createRemoteSessionTabsHost({
     },
   });
 
-  // The last thread this surface was known to be viewing, kept so a promotion can be
-  // told apart from a plain thread switch. Held here rather than in the React layer
-  // because it is the host's own bookkeeping, and because it makes every command below
-  // testable without rendering anything.
-  let lastAdoptedThreadId = null;
-
   // The boot restore, as a memoized PROMISE rather than a boolean.
   //
   // A boolean set before an `await` is not a latch. The boot seam is concurrent — React
@@ -326,7 +319,6 @@ export function createRemoteSessionTabsHost({
      */
     openThread({ threadId, threadProjectId = null, preview = undefined } = {}) {
       if (!threadId) return Promise.resolve(null);
-      lastAdoptedThreadId = threadId;
       return controller.openThread(threadId, {
         context: selectOwningContext({ threadId, threadProjectId }),
         preview,
@@ -391,13 +383,9 @@ export function createRemoteSessionTabsHost({
      * Mirror the thread the surface is actually showing into the tab set.
      *
      * Remote's viewed thread moves for reasons the controller does not cause — boot,
-     * another client, a Claude promotion — and the strip has to keep describing what is
-     * rendered. `promotedFrom` is the snapshot's own `active_thread_promoted_from`
-     * lineage field; when it names the thread we were on, this is a REKEY of one logical
-     * session, not the arrival of a second one. Without that the pending tab would
-     * survive forever beside its own promoted self, persisted, one per Claude session.
+     * another client — and the strip has to keep describing what is rendered.
      */
-    async adoptViewedThread({ threadId, promotedFrom = null, threadProjectId = null } = {}) {
+    async adoptViewedThread({ threadId, threadProjectId = null } = {}) {
       if (!threadId) return null;
 
       // The boot restore, and the only place the relay's live thread does not win.
@@ -435,20 +423,9 @@ export function createRemoteSessionTabsHost({
         && restoredThreadId !== threadId
         && commands.isShowingBootRestore()
       ) {
-        lastAdoptedThreadId = restoredThreadId;
         return null;
       }
 
-      const promotion = detectDeferredThreadPromotion({
-        previousThreadId: lastAdoptedThreadId,
-        nextThreadId: threadId,
-        nextThreadPromotedFrom: promotedFrom,
-      });
-      if (promotion) {
-        lastAdoptedThreadId = threadId;
-        return controller.retargetThread(promotion.from, promotion.to);
-      }
-      lastAdoptedThreadId = threadId;
       // `preview` is deliberately omitted: routing without re-flagging leaves a session
       // the user chose to KEEP alone, rather than demoting it back to a peek.
       return controller.openThread(threadId, {

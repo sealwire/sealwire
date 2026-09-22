@@ -188,50 +188,6 @@ test("deleting a session also sweeps workspaces that were never loaded", () => {
   );
 });
 
-// Claude's deferred sessions are promoted from `claude-pending-…` to the real SDK id on
-// first send. Same session, so the tab is rekeyed — closing and reopening would leave a
-// dead tab and lose pin/order/focus. Covered here rather than in the e2e because the
-// fake provider used by the browser suite has no promotion path at all.
-test("promoting a session rekeys its tab in every workspace, loaded or not", () => {
-  const persistence = fakePersistence({
-    p_cold: {
-      tabs: [{ id: "tab-claude-pending-1", pinned: true, layout: createLeaf("claude-pending-1") }],
-      focusedTabId: "tab-claude-pending-1",
-    },
-  });
-  const store = createTabWorkspaceStore({ persistence }).getState;
-
-  store().openThread("p_hot", "claude-pending-1");
-  store().openThread("p_hot", "other");
-
-  store().retargetThreadEverywhere("claude-pending-1", "real-1");
-
-  const hot = store().ensureWorkspace("p_hot");
-  assert.deepEqual(ids(hot), ["tab-real-1", "tab-other"], "rekeyed in place, order intact");
-  assert.equal(hot.tabs.length, 2, "no extra tab");
-
-  const cold = store().ensureWorkspace("p_cold");
-  assert.deepEqual(ids(cold), ["tab-real-1"], "a cold workspace is rekeyed too");
-  assert.equal(cold.tabs[0].pinned, true, "pin survives the promotion");
-  assert.equal(cold.focusedTabId, "tab-real-1", "focus follows the rename");
-  assert.deepEqual(ids(persistence.saved.p_cold), ["tab-real-1"], "the rekey is persisted");
-});
-
-test("promotion with a missing or identical id is a no-op", () => {
-  const persistence = fakePersistence();
-  const store = createTabWorkspaceStore({ persistence }).getState;
-  store().openThread("p1", "t1");
-  const writes = persistence.calls.save.length;
-
-  store().retargetThreadEverywhere("t1", "t1");
-  store().retargetThreadEverywhere("", "real");
-  store().retargetThreadEverywhere("t1", "");
-  store().retargetThreadEverywhere("absent", "real");
-
-  assert.deepEqual(ids(store().ensureWorkspace("p1")), ["tab-t1"]);
-  assert.equal(persistence.calls.save.length, writes, "nothing was written");
-});
-
 test("closing an unknown or missing session is a no-op", () => {
   const persistence = fakePersistence();
   const store = createTabWorkspaceStore({ persistence }).getState;

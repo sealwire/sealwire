@@ -12,7 +12,6 @@ export function useLocalTranscriptScrollBookkeeping({
   activeThreadId,
   entries,
   mode,
-  promotion,
   resetEpoch,
   scrollElement,
   session,
@@ -23,28 +22,14 @@ export function useLocalTranscriptScrollBookkeeping({
   }
   const engine = engineRef.current;
   const pendingCommitRef = useRef(null);
-  const appliedPromotionRef = useRef(null);
   // Seeded from the first render's value, not a hardcoded 0 — otherwise mount
   // itself would read as a reset if the caller's epoch already started > 0.
   const seenResetEpochRef = useRef(resetEpoch);
 
-  // Before anything retained is read or rekeyed: a new run renames the same
-  // messages, so a snapshot/position/anchor set from the old one anchors to ids
-  // that no longer exist. Same-generation promotion below is untouched.
+  // Before anything retained is read: a new run renames the same messages, so a
+  // snapshot/position/anchor set from the old one anchors to ids that no longer
+  // exist.
   engine.syncGeneration(session?.transcript_generation);
-
-  // One-shot by IDENTITY: the caller never clears this field, so every render
-  // until the next promotion hands back the same object, and re-running the
-  // rekey against a since-reused `from` id would move someone else's data.
-  if (promotion && appliedPromotionRef.current !== promotion) {
-    appliedPromotionRef.current = promotion;
-    engine.retarget({
-      fromKey: promotion.from,
-      toKey: promotion.to,
-      fromThreadId: promotion.from,
-      toThreadId: promotion.to,
-    });
-  }
 
   if (resetEpoch !== seenResetEpochRef.current) {
     seenResetEpochRef.current = resetEpoch;

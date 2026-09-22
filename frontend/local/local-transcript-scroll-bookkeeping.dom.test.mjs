@@ -80,12 +80,11 @@ function entriesFor(threadId, count, salt = "") {
   }));
 }
 
-function Harness({ activeThreadId, entries, mode, promotion, resetEpoch, scrollElement, session }) {
+function Harness({ activeThreadId, entries, mode, resetEpoch, scrollElement, session }) {
   useLocalTranscriptScrollBookkeeping({
     activeThreadId,
     entries,
     mode,
-    promotion,
     resetEpoch,
     scrollElement,
     session,
@@ -103,14 +102,13 @@ function mount() {
   const root = createRoot(host);
   return {
     host,
-    show(threadId, entries, { mode = "entries", promotion = null, resetEpoch = 0, session = null } = {}) {
+    show(threadId, entries, { mode = "entries", resetEpoch = 0, session = null } = {}) {
       act(() =>
         root.render(
           h(Harness, {
             activeThreadId: threadId,
             entries,
             mode,
-            promotion,
             resetEpoch,
             scrollElement: host,
             session,
@@ -263,7 +261,6 @@ test("a scroll-element identity swap applies the staged commit to the CURRENT el
           activeThreadId: "a",
           entries: entriesFor("a", 8),
           mode: "entries",
-          promotion: null,
           resetEpoch: 0,
           scrollElement: elementA,
           session: null,
@@ -279,7 +276,6 @@ test("a scroll-element identity swap applies the staged commit to the CURRENT el
           activeThreadId: "b",
           entries: entriesFor("b", 20),
           mode: "entries",
-          promotion: null,
           resetEpoch: 0,
           scrollElement: elementB,
           session: null,
@@ -295,43 +291,6 @@ test("a scroll-element identity swap applies the staged commit to the CURRENT el
   } finally {
     act(() => root.unmount());
     host.remove();
-  }
-});
-
-test("a promotion rekeys the retained store once, by identity — reusing the FROM id later must not re-rekey and corrupt the TO thread's own data", () => {
-  const view = mount();
-  try {
-    // pend-A accumulates a mid-history offset, then gets evicted.
-    view.show("pend-A", entriesFor("pend-A", 8));
-    const pendBottom = view.host.scrollTop;
-    view.host.scrollTop = pendBottom - 40;
-    view.show("decoy-1", []);
-
-    // The send promotes pend-A to real-A; the first reply arrives there.
-    const promotion = { from: "pend-A", to: "real-A" };
-    view.show("real-A", entriesFor("real-A", 20), { promotion });
-    assert.equal(
-      view.host.scrollTop,
-      pendBottom - 40,
-      "the promotion moved pend-A's retained offset onto real-A"
-    );
-
-    // pend-A's id is reused by an unrelated later thread, which accumulates
-    // its OWN (different) retained data.
-    view.show("pend-A", [], { mode: "empty-ready", promotion });
-    view.show("decoy-2", []);
-
-    // real-A is revisited. The SAME (unconsumed) promotion object is still
-    // being passed, as it would be in production (the caller never clears
-    // it) — the one-shot latch must skip re-applying it.
-    view.show("real-A", entriesFor("real-A", 20), { promotion });
-    assert.equal(
-      view.host.scrollTop,
-      pendBottom - 40,
-      "re-passing the same promotion object must not re-rekey the reused pend-A id onto real-A"
-    );
-  } finally {
-    view.cleanup();
   }
 });
 

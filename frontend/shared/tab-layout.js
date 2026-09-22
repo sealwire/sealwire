@@ -267,71 +267,6 @@ export function openThreadIds(workspace) {
   return (workspace?.tabs || []).flatMap((tab) => layoutThreadIds(tab.layout));
 }
 
-function rewriteLayoutThread(layout, fromThreadId, toThreadId) {
-  if (!layout) {
-    return layout;
-  }
-  if (layout.type === LEAF) {
-    return layout.threadId === fromThreadId ? createLeaf(toThreadId) : layout;
-  }
-  return {
-    ...layout,
-    children: (layout.children || []).map((child) =>
-      rewriteLayoutThread(child, fromThreadId, toThreadId)
-    ),
-  };
-}
-
-/**
- * Rekey a session IN PLACE: every reference to `fromThreadId` becomes `toThreadId`.
- *
- * Deferred Claude sessions live under a synthetic `claude-pending-…` id until the first
- * send promotes them to the real SDK session id (see shared/thread-promotion.js). It is
- * the SAME session, so closing the old tab and opening a new one is wrong — pin state,
- * strip order, focus and (once panes land) position in the layout all have to survive.
- * This mirrors how the transcript's own bookkeeping is retargeted rather than reset.
- *
- * The tab's id is renamed too when it was derived from the old thread, so a promoted tab
- * doesn't keep a `tab-claude-pending-…` identity forever; focus follows the rename.
- *
- * If the target session is already open in a DIFFERENT tab, the stale tab is dropped
- * rather than leaving two tabs for one session. (A single tab holding both ids cannot
- * arise today — that needs panes, and this is where pruning will belong when they land.)
- */
-export function retargetThread(workspace, fromThreadId, toThreadId) {
-  const base = createTabWorkspace(workspace);
-  if (!fromThreadId || !toThreadId || fromThreadId === toThreadId) {
-    return base;
-  }
-
-  const owning = findTabByThread(base, fromThreadId);
-  if (!owning) {
-    return base;
-  }
-
-  const existingTarget = findTabByThread(base, toThreadId);
-  if (existingTarget && existingTarget.id !== owning.id) {
-    return closeTab(base, owning.id);
-  }
-
-  const renamedId =
-    owning.id === tabIdForThread(fromThreadId) ? tabIdForThread(toThreadId) : owning.id;
-  const tabs = base.tabs.map((tab) =>
-    tab.id === owning.id
-      ? {
-          ...tab,
-          id: renamedId,
-          layout: rewriteLayoutThread(tab.layout, fromThreadId, toThreadId),
-        }
-      : tab
-  );
-
-  return {
-    tabs,
-    focusedTabId: base.focusedTabId === owning.id ? renamedId : base.focusedTabId,
-  };
-}
-
 /**
  * Structural equality, for change detection.
  *
@@ -360,8 +295,8 @@ export function sameWorkspace(left, right) {
     return (
       tab.id === other.id
       && Boolean(tab.pinned) === Boolean(other.pinned)
-      // Promotion changes nothing but this flag, and it still has to reach
-      // persistence and repaint the tab — so it belongs in the comparison.
+      // A peek promoted to a kept tab changes nothing but this flag, and it still
+      // has to reach persistence and repaint the tab — so it belongs here.
       && Boolean(tab.preview) === Boolean(other.preview)
       // Layout trees are a handful of nodes; a serialized compare keeps this honest
       // about nested splits without hand-rolling a tree walk.

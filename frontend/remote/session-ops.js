@@ -74,14 +74,6 @@ import {
   createRemoteThreadsPatch,
 } from "./surface-state.js";
 import { isReviewInProgressForThread } from "../shared/review-state.js";
-import {
-  detectDeferredThreadPromotion,
-  shouldRebindPinnedViewOnPromotion,
-} from "../shared/thread-promotion.js";
-import {
-  composerWorkspaceKey,
-  getComposerWorkspaceStore,
-} from "../shared/composer-workspace.js";
 import { resolveOutgoingEffort } from "../shared/reasoning-efforts.js";
 import { buildNavigationThreadGroups } from "../shared/thread-groups.js";
 import {
@@ -268,16 +260,6 @@ function invalidateViewOnlyNavigation() {
 
 function remoteQueryScope() {
   return state.remoteAuth?.relayId || "unpaired";
-}
-
-// Same logical conversation, new public id. The composer's draft is filed under the
-// thread id, so without this it is stranded under one that no longer exists.
-function retargetComposerWorkspace(promotion) {
-  const relayId = state.remoteAuth?.relayId || null;
-  getComposerWorkspaceStore().rekey(
-    composerWorkspaceKey({ relayId, threadId: promotion.from }),
-    composerWorkspaceKey({ relayId, threadId: promotion.to })
-  );
 }
 
 // See the local surface's copy: `gcTime: Infinity` keeps every past run's pages, and
@@ -955,10 +937,6 @@ export function applySessionSnapshot(snapshot) {
   // incoming snapshot against a transcript missing whatever streamed in
   // since the last flush.
   settleTranscriptProjection();
-  // Captured before the realSession sync below so an INBOUND pending->real
-  // promotion (another device sent the first message) is still visible.
-  const previousActiveThreadId =
-    state.realSession?.active_thread_id || state.session?.active_thread_id || null;
   // Keep the authoritative live snapshot aligned with the rendered session
   // whenever no client-local projection is active. This also preserves live
   // transcript deltas that arrived after the previous full snapshot.
@@ -981,35 +959,6 @@ export function applySessionSnapshot(snapshot) {
     renderLog(message);
     console.log(message);
     return;
-  }
-  // Deferred-Claude promotion seen from the SNAPSHOT side — this is how every
-  // client that didn't send the first message (a second remote observer, or a
-  // remote watching while the local UI sends) learns about it. The sender path
-  // in sendMessage() handles its own client explicitly.
-  const inboundPromotion = detectDeferredThreadPromotion({
-    previousThreadId: previousActiveThreadId,
-    nextThreadId: snapshot?.active_thread_id || null,
-    nextThreadPromotedFrom: snapshot?.active_thread_promoted_from || null,
-  });
-  if (inboundPromotion) {
-    retargetComposerWorkspace(inboundPromotion);
-    // One-shot scroll-bookkeeping alias for the transcript pane (it clears it
-    // after rekeying).
-    state.promotedThreadAlias = inboundPromotion;
-    if (
-      shouldRebindPinnedViewOnPromotion({
-        pinnedThreadId: viewOnlyThreadId,
-        promotion: inboundPromotion,
-      })
-    ) {
-      // The pending thread ceased to exist; without re-pinning, the
-      // projection would keep rendering the stale pending transcript forever.
-      viewOnlyNavigationGeneration += 1;
-      viewOnlyThreadId = inboundPromotion.to;
-      viewOnlyLastRefreshAt = Date.now();
-      seedViewOnlyWasWorking(inboundPromotion.to, snapshot);
-      clearTranscriptHydration(state);
-    }
   }
   const displaySnapshot = stampThreadActivitySnapshotTime(
     preserveVisibleTranscriptText(state.realSession, snapshot)
@@ -2033,33 +1982,6 @@ export async function sendMessage(messageDraft, effort, model = "") {
         thread_id: threadId,
       },
     });
-    // Claude's first send promotes a synthetic pending id to the real SDK
-    // session id. The action snapshot arrives while the old id is still pinned,
-    // so it is initially projected back onto that stale id. Rebind the client-
-    // local view after the successful targeted send and hydrate the real thread.
-    const promotedThreadId = state.realSession?.active_thread_id || null;
-    if (
-      threadId.startsWith("claude-pending-")
-      && viewOnlyThreadId === threadId
-      && promotedThreadId
-      && promotedThreadId !== threadId
-    ) {
-      viewOnlyNavigationGeneration += 1;
-      viewOnlyThreadId = promotedThreadId;
-      viewOnlyLastRefreshAt = Date.now();
-      seedViewOnlyWasWorking(promotedThreadId);
-      // One-shot alias for the transcript pane: it keeps per-thread scroll
-      // bookkeeping keyed by thread id, and must rekey it (same logical
-      // thread, new public id) instead of treating the promotion as a thread
-      // switch — which would jump-bottom and briefly re-enable live follow on
-      // top of the freshly send-anchored message. Only this send path KNOWS
-      // it's a promotion; a pending→other-id transition seen by the pane alone
-      // could also be the user switching threads.
-      state.promotedThreadAlias = { from: threadId, to: promotedThreadId };
-      retargetComposerWorkspace({ from: threadId, to: promotedThreadId });
-      clearTranscriptHydration(state);
-      applyRenderedSession(state.realSession);
-    }
     return true;
   } catch (error) {
     renderLog(`Remote send failed: ${error.message}`);
@@ -2617,8 +2539,8 @@ function applyRenderedSession(
   // Every call here is a direct, synchronous render — the same "render now,
   // nothing pending after" invariant the scheduler exists to keep. Without
   // this, a delta timer left over from before a thread switch, a hydration
-  // progress step, a promotion, or a settings update fires later and renders
-  // a second time on top of what this call already painted.
+  // progress step, or a settings update fires later and renders a second time
+  // on top of what this call already painted.
   //
   // settleTranscriptProjection materialises into state.realSession/state.session,
   // not necessarily into THIS `session` — many callers build a fresh

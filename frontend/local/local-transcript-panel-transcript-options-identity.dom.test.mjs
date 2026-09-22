@@ -82,7 +82,6 @@ function baseProps(overrides = {}) {
     getStandbyEmptyContent: () => null,
     hydrationLoading: false,
     onLoadOlderTranscript: () => {},
-    promotion: null,
     readyCopy: "",
     requestedSessionLabel: "",
     resetEpoch: 0,

@@ -83,7 +83,6 @@ function baseProps(overrides = {}) {
     getStandbyEmptyContent: () => h("div", { className: "standby-empty-marker" }, "Standby"),
     hydrationLoading: false,
     onLoadOlderTranscript: () => {},
-    promotion: null,
     readyCopy: "The agent is connected.",
     requestedSessionLabel: "",
     resetEpoch: 0,
@@ -105,7 +104,7 @@ function baseProps(overrides = {}) {
 // the rendered entries and scrollTop clamps like a real browser's. The
 // hook's own exhaustive behavior coverage lives in
 // local-transcript-scroll-bookkeeping.dom.test.mjs; these tests only prove
-// the panel wires activeThreadId/mode/promotion/resetEpoch through to it.
+// the panel wires activeThreadId/mode/resetEpoch through to it.
 const SCROLL_CLIENT_HEIGHT = 266;
 const SCROLL_ROW_HEIGHT = 46;
 const scrollLaidOut = new WeakSet();
@@ -368,27 +367,6 @@ test("branches 1-4 never run a scroll action; branches 5/6 do, and a branch-5 fi
       view.host.scrollTop,
       15 * SCROLL_ROW_HEIGHT - SCROLL_CLIENT_HEIGHT,
       "branch 5's own scroll action landed the first message at a fresh bottom"
-    );
-  } finally {
-    view.unmount();
-  }
-});
-
-test("a promotion prop reaches the hook and rekeys the retained offset onto the new thread id", () => {
-  const view = mount();
-  installScrollLayout(view.host);
-  try {
-    view.render({ activeThreadId: "pend-A", entries: entriesFor(8) });
-    const bottom = view.host.scrollTop;
-    view.host.scrollTop = bottom - 40;
-    view.render({ activeThreadId: "decoy", entries: [] }); // evicts pend-A's offset
-
-    const promotion = { from: "pend-A", to: "real-A" };
-    view.render({ activeThreadId: "real-A", entries: entriesFor(15), promotion });
-    assert.equal(
-      view.host.scrollTop,
-      bottom - 40,
-      "the promotion prop must reach the hook and rekey pend-A's retained offset onto real-A"
     );
   } finally {
     view.unmount();

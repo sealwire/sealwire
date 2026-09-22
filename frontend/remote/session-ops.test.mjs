@@ -826,102 +826,6 @@ test("remote view of an idle saved Codex thread stays composable despite stale a
   state.pendingActions.clear();
 });
 
-test("successful first send follows a promoted Claude pending thread id", async () => {
-  activeBrowser = installBrowserStubs();
-
-  const { state, saveRemoteAuth } = await import("./state.js");
-  const { handleRemoteBrokerPayload } = await import("./actions.js");
-  const { ensureRemoteRuntimeConfigured } = await import("./remote-runtime.js");
-  const {
-    applySessionSnapshot,
-    clearSessionRuntime,
-    sendMessage,
-    viewRemoteThread,
-  } = await import("./session-ops.js");
-
-  ensureRemoteRuntimeConfigured();
-  clearSessionRuntime();
-  seedRemoteAuth(state, saveRemoteAuth, {
-    relayId: "relay-pending-promotion",
-    brokerUrl: "wss://broker.example.test",
-    brokerChannelId: "room-a",
-    relayPeerId: "relay-1",
-    securityMode: "managed",
-    deviceId: "device-1",
-    deviceLabel: "Primary Phone",
-    payloadSecret: "payload-secret-1",
-    deviceRefreshMode: "cookie",
-    deviceRefreshToken: null,
-    deviceJoinTicket: "device-ws-token",
-    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: "claim-token-1",
-    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
-  });
-  seedSocketState(state, {
-    socketConnected: true,
-    socketPeerId: "surface-peer-1",
-  });
-  state.pendingActions.clear();
-  seedTranscriptHydrationState(state);
-
-  const pendingId = "claude-pending-abc";
-  const realId = "claude-real-123";
-  applySessionSnapshot({
-    active_thread_id: pendingId,
-    active_turn_id: null,
-    current_cwd: "/tmp/project",
-    current_status: "idle",
-    pending_approvals: [],
-    pending_ask_user_questions: [],
-    transcript: [],
-    transcript_truncated: false,
-  });
-  assert.equal(await viewRemoteThread(pendingId), true);
-
-  state.socket = {
-    readyState: 1,
-    send(frameText) {
-      const frame = JSON.parse(frameText);
-      setImmediate(async () => {
-        await handleRemoteBrokerPayload({
-          kind: "remote_session_result",
-          action_id: frame.payload.action_id,
-          action: "send_message",
-          ok: true,
-          snapshot: {
-            active_thread_id: realId,
-            active_turn_id: "claude-turn-1",
-            current_cwd: "/tmp/project",
-            current_status: "active",
-            pending_approvals: [],
-            pending_ask_user_questions: [],
-            transcript: [
-              {
-                item_id: "user-1",
-                kind: "user_text",
-                status: "completed",
-                text: "hello",
-                turn_id: "claude-turn-1",
-                tool: null,
-              },
-            ],
-            transcript_truncated: false,
-          },
-        });
-      });
-    },
-  };
-
-  assert.equal(await sendMessage("hello", "medium"), true);
-  assert.equal(state.realSession.active_thread_id, realId);
-  assert.equal(state.session.active_thread_id, realId);
-  assert.equal(state.session.view_only, undefined);
-  assert.equal(state.session.transcript[0].text, "hello");
-  clearSessionRuntime();
-  state.socket = null;
-  state.pendingActions.clear();
-});
-
 test("remote send clamps a foreign effort the codex model rejects", async () => {
   // REGRESSION: the remote composer forwards the live session effort verbatim.
   // A codex thread carrying a Claude-only "max" (codex rejects `unknown variant
@@ -3504,7 +3408,7 @@ test("a queued delta render is cancelled by an immediate thread switch", async (
 
   // viewRemoteThread's same-thread branch renders synchronously via
   // applyRenderedSession — the same path a real thread switch, hydration
-  // progress step, promotion, or settings update takes.
+  // progress step, or settings update takes.
   const switched = await viewRemoteThread("thread-live");
   assert.equal(switched, true);
 
