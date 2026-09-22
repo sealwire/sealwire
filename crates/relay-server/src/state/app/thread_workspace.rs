@@ -274,13 +274,6 @@ no workspace related to it is available instead"
             ));
         }
         let device_id = input.device_id.clone();
-        // Promote pending ids first: pinning a `claude-pending-…` row would persist a dead key.
-        let thread_id = self
-            .relay
-            .read()
-            .await
-            .resolve_promoted_thread_id(&thread_id);
-
         let current = self
             .resolve_thread_workspace(&thread_id, device_id.as_deref())
             .await

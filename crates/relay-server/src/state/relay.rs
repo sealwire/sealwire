@@ -101,15 +101,6 @@ pub const MAX_REVIEW_JOBS_PUB: usize = MAX_REVIEW_JOBS;
 /// progress") while Claude threads, which report `idle`, worked fine.
 /// Comparison is case-insensitive because the word is provider formatting, not
 /// semantics (Codex sends camelCase, the others lowercase).
-/// Carry `from`'s finished turns into `keep`, oldest first, without disturbing the
-/// ones it already has. Used across a promotion handoff, where only one of the two
-/// runtimes survives.
-fn adopt_finished_turns(keep: &mut ThreadRuntime, from: &ThreadRuntime) {
-    for finished in &from.finished_turns {
-        keep.record_finished_turn(&finished.turn_id, finished.outcome);
-    }
-}
-
 pub(crate) fn thread_status_is_working(status: &str) -> bool {
     !matches!(
         status.trim().to_ascii_lowercase().as_str(),
@@ -366,12 +357,6 @@ pub struct RelayState {
     /// at fork time because neither provider tracks the relationship, and
     /// retrofitting it once forked threads exist would need a migration.
     pub(super) thread_forked_from: HashMap<String, String>,
-    /// Deferred-thread lineage: promoted (real) thread id -> the synthetic
-    /// `claude-pending-…` id it grew out of at first send. Rides the snapshot
-    /// as `active_thread_promoted_from` so EVERY client — including observers
-    /// that never sent — can recognize the promotion authoritatively; the id
-    /// sequence alone is indistinguishable from a normal thread switch.
-    pub(super) thread_promoted_from: HashMap<String, String>,
     /// Where each relay session currently reaches its provider — the one place a
     /// provider handle is allowed to live (see `markdown/STABLE_SESSION_ID_DESIGN.md`).
     /// Every entry is an identity mapping until Phase 3; only the non-identity ones
@@ -708,7 +693,6 @@ impl RelayState {
             reasoning_effort: DEFAULT_EFFORT.to_string(),
             thread_settings: HashMap::new(),
             thread_forked_from: HashMap::new(),
-            thread_promoted_from: HashMap::new(),
             session_bindings: SessionBindingRegistry::default(),
             thread_workspace: HashMap::new(),
             thread_last_turn_base_sha: HashMap::new(),
@@ -1492,34 +1476,6 @@ impl RelayState {
         self.thread_custom_name.get(thread_id).cloned()
     }
 
-    /// Resolve a thread id a CLIENT supplied to the id the relay actually keys state by.
-    ///
-    /// A Claude session lives under a synthetic `claude-pending-…` id until its first
-    /// send promotes it to a real SDK id. Clients learn about that promotion from the
-    /// snapshot, so between the promotion and the client processing it, a client can
-    /// legitimately act on the pending id. A write that keyed off it verbatim would land
-    /// on a dead key: invisible to every reader, and — for a PERSISTED map — orphaned
-    /// forever, because the pending id is never seen by any cleanup path.
-    ///
-    /// `thread_promoted_from` is real_id -> pending_id, so this scans it. The map is
-    /// small (one entry per promoted Claude session this process has seen) and this runs
-    /// only on an explicit user action, never in a hot path.
-    pub(crate) fn resolve_promoted_thread_id(&self, thread_id: &str) -> String {
-        if !thread_id.starts_with("claude-pending-") {
-            return thread_id.to_string();
-        }
-        self.thread_promoted_from
-            .iter()
-            .find(|(_, pending_id)| pending_id.as_str() == thread_id)
-            .map(|(real_id, _)| real_id.clone())
-            .unwrap_or_else(|| thread_id.to_string())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn legacy_thread_promotion_count(&self) -> usize {
-        self.thread_promoted_from.len()
-    }
-
     /// How many sessions currently carry a user-chosen title (the persisted map's size,
     /// for the caller's entry-count bound).
     pub(crate) fn custom_thread_name_count(&self) -> usize {
@@ -1719,15 +1675,15 @@ impl RelayState {
     }
 
     /// Drop any review jobs whose reviewer thread is `reviewer_id` — called when
-    /// that reviewer thread is deleted or promoted to a normal thread, so the
-    /// Reviewer panel can't show a stale card pointing at it.
+    /// that reviewer thread is deleted or un-hidden into an ordinary thread, so
+    /// the Reviewer panel can't show a stale card pointing at it.
     pub(crate) fn drop_review_jobs_for_reviewer(&mut self, reviewer_id: &str) {
         self.review_jobs
             .retain(|_, job| job.reviewer_thread_id.as_deref() != Some(reviewer_id));
     }
 
     /// Drop terminal workflow cards whose owned reviewer thread was deleted or
-    /// promoted to a normal thread. Non-terminal workflow runs are protected by
+    /// un-hidden into an ordinary thread. Non-terminal workflow runs are protected by
     /// `reviewers_to_evict` and by the workflow lock guards.
     pub(crate) fn drop_workflow_runs_for_reviewer(&mut self, reviewer_id: &str) {
         self.workflow_jobs.retain(|_, run| {
@@ -2027,13 +1983,10 @@ impl RelayState {
         views
     }
 
-    /// Promote a Claude thread from its synthetic `claude-pending-…` id to the
-    /// real SDK session id. This moves the runtime, pending prompts, and any review
-    /// job reference without assuming the thread is the current live projection.
     /// The device the Orchestrator acts as, when `thread_id` IS the Orchestrator.
     ///
     /// Asked per turn rather than remembered by the bridge, so it survives a relay
-    /// restart and a promotion without a second copy to keep in sync.
+    /// restart without a second copy to keep in sync.
     pub(crate) fn orchestrator_tools_device(&self, thread_id: &str) -> Option<String> {
         if self.orchestrator_thread_id.as_deref() == Some(thread_id) {
             self.orchestrator_device_id.clone()
@@ -2190,213 +2143,6 @@ impl RelayState {
         self.orchestrator_thread_id = Some(thread_id.to_string());
         self.orchestrator_device_id = Some(device_id.to_string());
         self.orchestrator_system_prompt = Some(persona.to_string());
-    }
-
-    pub(crate) fn promote_background_thread(&mut self, pending_id: &str, real_id: &str) {
-        if pending_id == real_id || pending_id.is_empty() || real_id.is_empty() {
-            return;
-        }
-        // Record the lineage FIRST: it rides the snapshot
-        // (`active_thread_promoted_from`) so every client — observers included —
-        // can authoritatively tell this promotion apart from a normal thread
-        // switch (the active-id sequence alone cannot).
-        self.thread_promoted_from
-            .insert(real_id.to_string(), pending_id.to_string());
-        // The Orchestrator pin is the one pointer that OUTLIVES a promotion and
-        // is load-bearing: `live_orchestrator_thread_id` clears a pin whose thread
-        // cannot be found, which is correct for a deleted thread and catastrophic
-        // for a promoted one — the next ensure would build a fresh Orchestrator
-        // and the conversation would reset on every first message.
-        if self.orchestrator_thread_id.as_deref() == Some(pending_id) {
-            self.orchestrator_thread_id = Some(real_id.to_string());
-        }
-        if let Some(mut runtime) = self.runtimes.remove(pending_id) {
-            if let Some(summary) = runtime.summary.as_mut() {
-                summary.id = real_id.to_string();
-            }
-            match self.runtimes.remove(real_id) {
-                // The event stream already created a real-id runtime with more
-                // transcript — keep it, but carry over the pending turn id if it
-                // has none.
-                Some(mut existing) if existing.transcript.len() >= runtime.transcript.len() => {
-                    if existing.active_turn_id.is_none() {
-                        existing.active_turn_id = runtime.active_turn_id.take();
-                    }
-                    existing.turn_revision = existing.turn_revision.max(runtime.turn_revision);
-                    // Folded, not chosen between: a turn that ended is a fact about the
-                    // SESSION, and dropping the losing runtime's copy leaves whoever
-                    // dispatched that turn waiting for an answer already given.
-                    adopt_finished_turns(&mut existing, &runtime);
-                    self.runtimes.insert(real_id.to_string(), existing);
-                }
-                Some(existing) => {
-                    runtime.turn_revision = runtime.turn_revision.max(existing.turn_revision);
-                    adopt_finished_turns(&mut runtime, &existing);
-                    // Same reason turn_revision is folded: a client may already track
-                    // real_id, and the pending runtime can be behind it on the shared
-                    // clock. Adopting pending's revision verbatim would rewind it.
-                    runtime.transcript_revision = runtime
-                        .transcript_revision
-                        .max(existing.transcript_revision);
-                    self.runtimes.insert(real_id.to_string(), runtime);
-                }
-                None => {
-                    self.runtimes.insert(real_id.to_string(), runtime);
-                }
-            }
-        }
-        if let Some(settings) = self.thread_settings.remove(pending_id) {
-            self.thread_settings
-                .entry(real_id.to_string())
-                .or_insert(settings);
-        }
-        // Carry the honest last-activity timestamp from the synthetic pending id
-        // to the real session id, keeping the most recent of the two (either
-        // could have logged a transcript write during the promotion handoff).
-        // Without this the pending-id entry orphans (and leaks, since the map is
-        // persisted) and a later un-hidden reviewer would fall back to mtime.
-        if let Some(pending_activity) = self.thread_last_activity_at.remove(pending_id) {
-            let entry = self
-                .thread_last_activity_at
-                .entry(real_id.to_string())
-                .or_insert(pending_activity);
-            *entry = (*entry).max(pending_activity);
-        }
-        // Move Project membership from the synthetic pending id to the real session id.
-        // Without this an assigned pending session silently becomes "Unassigned" after
-        // its first turn, leaving an orphan mapping under `claude-pending-*`. Preserve
-        // any assignment the real id already has (conflict → keep the real one), and
-        // bump the revision so clients refetch the changed membership.
-        if let Some(pending_project) = self.thread_project_id.remove(pending_id) {
-            self.thread_project_id
-                .entry(real_id.to_string())
-                .or_insert(pending_project);
-            self.bump_projects_revision();
-        }
-        // Same orphan class for a user-chosen title. A Claude session can be renamed
-        // BEFORE its first message — it is visible in the tab strip from the moment it
-        // is created — and that rename is recorded against the synthetic
-        // `claude-pending-…` id. Without this move the title silently reverts to the
-        // provider's auto-derived name on the first send, and the entry orphans in a
-        // persisted map. Conflict keeps the real id's own name.
-        if let Some(pending_name) = self.thread_custom_name.remove(pending_id) {
-            self.thread_custom_name
-                .entry(real_id.to_string())
-                .or_insert(pending_name);
-        }
-        // Same orphan class for the follow-up flag: a session can be flagged before
-        // its first send, while still under its synthetic `claude-pending-…` id.
-        if self.thread_flagged.remove(pending_id) {
-            self.thread_flagged.insert(real_id.to_string());
-        }
-        // Same orphan class for fork lineage. A replay fork carrying pasted
-        // images must withhold the prompt from `start_thread` (it cannot take
-        // image bytes), which puts Claude on its deferred-start path — so the
-        // fork is recorded against the pending id and would otherwise lose its
-        // source here, leaving a stale key in this PERSISTED map. Conflict
-        // keeps the real id's own lineage.
-        if let Some(pending_source) = self.thread_forked_from.remove(pending_id) {
-            self.thread_forked_from
-                .entry(real_id.to_string())
-                .or_insert(pending_source);
-        }
-        // Promote pending workspace too: it is keyed by thread id in a persisted map.
-        if let Some(pending_workspace) = self.thread_workspace.remove(pending_id) {
-            self.thread_workspace
-                .entry(real_id.to_string())
-                .or_insert(pending_workspace);
-        }
-        if let Some(base_sha) = self.thread_last_turn_base_sha.remove(pending_id) {
-            self.thread_last_turn_base_sha
-                .entry(real_id.to_string())
-                .or_insert(base_sha);
-        }
-        if let Some(base_cwd) = self.thread_last_turn_base_cwd.remove(pending_id) {
-            self.thread_last_turn_base_cwd
-                .entry(real_id.to_string())
-                .or_insert(base_cwd);
-        }
-        // Drop the stale pending row; the real row is upserted by the caller.
-        self.threads.retain(|thread| thread.id != pending_id);
-        for approval in self.pending_approvals.values_mut() {
-            if approval.thread_id == pending_id {
-                approval.thread_id = real_id.to_string();
-            }
-        }
-        for question in self.pending_ask_user_questions.values_mut() {
-            if question.thread_id == pending_id {
-                question.thread_id = real_id.to_string();
-            }
-        }
-        // The peer token is minted against the pending id on this very turn, so
-        // the tools that turn is being told to call would resolve to a thread
-        // that no longer exists.
-        for owner in self.ask_tokens.values_mut() {
-            if owner == pending_id {
-                *owner = real_id.to_string();
-            }
-        }
-        // `/goal` on a session that has never been messaged is the ordinary case,
-        // and its first driven turn is the very thing that promotes it.
-        if let Some(mut goal) = self.goals.remove(pending_id) {
-            goal.thread_id = real_id.to_string();
-            self.goals.insert(real_id.to_string(), goal);
-        }
-        for job in self.review_jobs.values_mut() {
-            if job.reviewer_thread_id.as_deref() == Some(pending_id) {
-                job.reviewer_thread_id = Some(real_id.to_string());
-            }
-            // The REVIEWED thread is promoted too when the review is what first
-            // messages it (its recap turn creates the SDK session). This id is what
-            // `is_thread_review_locked` matches on, so leaving it behind silently
-            // unfreezes a thread the orchestrator is still driving.
-            if job.parent_thread_id == pending_id {
-                job.parent_thread_id = real_id.to_string();
-            }
-        }
-        // A workflow step thread (a clean Claude reviewer) is promoted from its
-        // synthetic pending id to the real session id once its first turn starts;
-        // rewrite any workflow `step_threads` entry so the runner keeps tracking the
-        // live thread instead of waiting on the removed pending runtime.
-        for run in self.workflow_jobs.values_mut() {
-            for thread_id in run.step_threads.values_mut() {
-                if thread_id == pending_id {
-                    *thread_id = real_id.to_string();
-                }
-            }
-            // Same for the author thread a workflow runs its execute/revise steps on
-            // — the workflow lock keys off it exactly as the review lock does.
-            if run.parent_thread_id == pending_id {
-                run.parent_thread_id = real_id.to_string();
-            }
-        }
-        // Same for every team seat. This is not optional plumbing: EVERY team
-        // thread is background-started, so a TL, a dev, or any reviewer can be
-        // promoted mid-turn, and a driver left holding the pending id would find
-        // no runtime, read that as "not working", and treat a running turn as
-        // finished — silently losing that agent's output.
-        for run in self.team_runs.values_mut() {
-            run.rekey_thread(pending_id, real_id);
-        }
-        // Move the durable nav-hiding entry from the pending id to the real id
-        // (carrying its parent + created_at, so FIFO order is preserved).
-        if let Some(record) = self.reviewer_threads.remove(pending_id) {
-            self.reviewer_threads.insert(real_id.to_string(), record);
-        }
-        // A placeholder that reached the registry (an event router adopted it, a
-        // test injected it) must not be left owning a route key after the session
-        // it named is gone — a recycled handle would route straight back into it.
-        if let Some(stale) = self.session_bindings.remove(pending_id) {
-            if self.session_bindings.binding(real_id).is_none() {
-                let _ = self
-                    .session_bindings
-                    .bind_identity(&stale.provider, real_id);
-            }
-        }
-        // The reviewer's turn is in flight; mark the real runtime working until the
-        // provider's `done`/`session_stopped` event flips it idle. This keeps the
-        // orchestrator's per-thread idle wait correct regardless of turn-id timing.
-        self.set_thread_status(real_id, "active".to_string(), Vec::new());
     }
 
     /// Whether any non-terminal review job exists. Used to enforce one active
@@ -4229,10 +3975,9 @@ impl RelayState {
             audit_enabled: self.security.audit_enabled(),
             beta_features_enabled: self.beta_features_enabled,
             active_thread_id: self.active_thread_id.clone(),
-            active_thread_promoted_from: self
-                .active_thread_id
-                .as_ref()
-                .and_then(|id| self.thread_promoted_from.get(id).cloned()),
+            // Phase 4 removed public thread promotion; the field stays on the wire
+            // for one release so a saved client still parses this snapshot.
+            active_thread_promoted_from: None,
             active_thread_task_reviewer: self
                 .active_thread_id
                 .as_deref()
@@ -4775,7 +4520,6 @@ impl RelayState {
             .entry(data.thread.id.clone())
             .or_insert(materialized);
         self.thread_forked_from = persisted.thread_forked_from.clone();
-        self.thread_promoted_from = persisted.thread_promoted_from.clone();
         self.thread_workspace = persisted.thread_workspace.clone();
         self.thread_last_turn_base_sha = persisted.thread_last_turn_base_sha.clone();
         self.thread_last_turn_base_cwd = persisted.thread_last_turn_base_cwd.clone();
@@ -5453,21 +5197,23 @@ impl RelayState {
 
     /// Whether a relay session has a durable provider thread behind it.
     ///
-    /// An unbound id is historical identity state and therefore materialized,
-    /// except for the old public Claude placeholder shape retained until Phase 4.
+    /// The binding is the only authority. An id with no binding is historical
+    /// identity state — its own provider row IS the durable thread — so it counts
+    /// as materialized. Reading the id's SPELLING instead is exactly what this
+    /// replaced: it dropped a live session's settings whenever an id happened to
+    /// look like a bridge handle, and it answered for ids the relay never minted.
     pub(crate) fn session_is_materialized(&self, session_id: &str) -> bool {
         self.session_bindings
             .binding(session_id)
             .map(SessionBinding::is_materialized)
-            .unwrap_or_else(|| !session_id.starts_with("claude-pending-"))
+            .unwrap_or(true)
     }
 
     pub(super) fn persistable_session_bindings(&self) -> HashMap<String, SessionBinding> {
         self.session_bindings.persistable()
     }
 
-    /// Point a session at a provider handle that is NOT its own id — the shape
-    /// Phase 3 will mint and no production path may create yet.
+    /// Point a session at a provider handle that is NOT its own id.
     ///
     /// Test-only because that is the point: an identity binding cannot tell a call
     /// site that resolves from one that passes the session id straight through.
@@ -5489,6 +5235,20 @@ impl RelayState {
                 },
             )
             .expect("test binding");
+    }
+
+    /// A session whose provider has not created its thread yet — the deferred
+    /// shape, and the only one `session_is_materialized` may answer `false` for.
+    #[cfg(test)]
+    pub(crate) fn bind_session_to_pending_handle(
+        &mut self,
+        session_id: &str,
+        provider: &str,
+        provider_handle: &str,
+    ) {
+        self.session_bindings
+            .bind_deferred(session_id, provider, provider_handle)
+            .expect("test deferred binding");
     }
 
     pub fn filter_deleted_threads(
@@ -6249,7 +6009,6 @@ impl RelayState {
             self.thread_settings.entry(thread_id).or_insert(settings);
         }
         self.thread_forked_from = persisted.thread_forked_from.clone();
-        self.thread_promoted_from = persisted.thread_promoted_from.clone();
         // The reverse index is derived, so it is rebuilt here rather than read.
         let (bindings, dropped) = SessionBindingRegistry::restore(&persisted.session_bindings);
         self.session_bindings = bindings;
@@ -7739,7 +7498,6 @@ mod tests {
             real_handle,
         );
         assert!(relay.snapshot().active_thread_promoted_from.is_none());
-        assert!(relay.thread_promoted_from.is_empty());
     }
 
     fn cloud_backend() -> relay_api::orchestration::OrchestrationBackendRef {
@@ -8294,13 +8052,14 @@ mod tests {
 
     #[test]
     fn a_team_run_whose_tl_thread_never_materialized_restores_interrupted_not_missing() {
-        // Claude mints a synthetic `claude-pending-*` id until the first turn
-        // promotes it. Such a run cannot be resumed — that thread will not exist
-        // after a restart — but dropping it would also erase the record of a
-        // worktree and branch still sitting on disk with nothing pointing at them.
+        // A Claude TL seat has no SDK session until its first turn creates one. Such a
+        // run cannot be resumed — that session will not exist after a restart — but
+        // dropping it would also erase the record of a worktree and branch still
+        // sitting on disk with nothing pointing at them.
         let mut relay = test_relay();
+        relay.bind_session_to_pending_handle("session-tl", "claude_code", "claude-pending-7");
         let mut pending = team_run_with_status("t1", TeamRunStatus::Paused);
-        pending.tl_thread_id = "claude-pending-7".to_string();
+        pending.tl_thread_id = "session-tl".to_string();
         pending.branch = "task/orphan".to_string();
         pending.cwd = "/repo/.sealwire/worktrees/orphan".to_string();
         relay.insert_team_run(pending);
@@ -8321,11 +8080,9 @@ mod tests {
         assert_eq!(run.branch, "task/orphan");
         assert_eq!(run.cwd, "/repo/.sealwire/worktrees/orphan");
 
-        // The live run is untouched: it is still mid-promotion in memory.
-        assert_eq!(
-            relay.team_run("t1").unwrap().tl_thread_id,
-            "claude-pending-7"
-        );
+        // The live run is untouched: in memory its seat is still waiting for the
+        // session its first turn will create.
+        assert_eq!(relay.team_run("t1").unwrap().tl_thread_id, "session-tl");
     }
 
     #[test]
@@ -8798,42 +8555,40 @@ mod tests {
         );
     }
 
+    /// Phase 4 deleted the deferred-thread lineage map from the persisted state.
+    /// Every state file written before that still HAS the key, and a decode that
+    /// choked on it would lose the user's whole session — projects, names, goals,
+    /// bindings — on first launch after the upgrade.
+    ///
+    /// The key is spelled in two halves for one reason: `legacy_promotion_audit`
+    /// scans these sources for the removed names, and a literal here would be
+    /// indistinguishable from the code coming back.
     #[test]
-    fn promotion_moves_project_membership_to_the_real_id() {
-        let mut relay = test_relay();
-        relay.create_project("proj_x".to_string(), "P".to_string());
-        relay
-            .assign_thread_to_project("claude-pending-1", "proj_x")
-            .unwrap();
-        let rev_before = relay.projects_revision;
+    fn a_state_file_written_before_phase_4_still_loads() {
+        let removed_key = format!("thread_promoted{}", "_from");
+        let mut source = test_relay();
+        source.set_thread_custom_name("real-1", Some("Auth work".to_string()));
 
-        relay.promote_background_thread("claude-pending-1", "real-1");
-
+        let persisted = PersistedRelayState::from_relay(&source);
+        let mut value = serde_json::to_value(&persisted).expect("serialize");
         assert!(
-            relay.thread_project_id.get("claude-pending-1").is_none(),
-            "the synthetic pending membership must not orphan"
+            value.get(&removed_key).is_none(),
+            "the removed field must not be written back out"
         );
-        assert_eq!(relay.project_for_thread("real-1").unwrap().id, "proj_x");
-        assert!(
-            relay.projects_revision > rev_before,
-            "promotion that moves membership bumps the revision"
+        value.as_object_mut().unwrap().insert(
+            removed_key,
+            serde_json::json!({ "real-1": "claude-pending-1" }),
         );
 
-        // Conflict: an assignment the real id ALREADY has is preserved.
-        let mut relay = test_relay();
-        relay.create_project("proj_x".to_string(), "X".to_string());
-        relay.create_project("proj_y".to_string(), "Y".to_string());
-        relay
-            .assign_thread_to_project("claude-pending-2", "proj_x")
-            .unwrap();
-        relay.assign_thread_to_project("real-2", "proj_y").unwrap();
-        relay.promote_background_thread("claude-pending-2", "real-2");
+        let legacy: PersistedRelayState =
+            serde_json::from_value(value).expect("a pre-Phase-4 state file must still load");
+        let mut restored = test_relay();
+        restored.apply_persisted(&legacy);
         assert_eq!(
-            relay.project_for_thread("real-2").unwrap().id,
-            "proj_y",
-            "an existing real-id assignment wins over the pending one"
+            restored.thread_custom_name("real-1"),
+            Some("Auth work".to_string()),
+            "and everything alongside the dropped key must survive the load"
         );
-        assert!(relay.thread_project_id.get("claude-pending-2").is_none());
     }
 
     /// A rename that did not survive a relay restart would be worse than no rename:
@@ -8865,36 +8620,6 @@ mod tests {
         let legacy: PersistedRelayState =
             serde_json::from_value(value).expect("pre-rename state file must still load");
         assert!(legacy.thread_custom_name.is_empty());
-    }
-
-    /// A Claude session is renamable the moment it appears — it has a tab before it has
-    /// a real SDK id. That rename is recorded against the synthetic `claude-pending-…`
-    /// id, so the promotion on first send must carry it over, or the title reverts
-    /// exactly when the user starts working and orphans a key in a PERSISTED map.
-    #[test]
-    fn promotion_carries_the_custom_name_to_the_real_thread_id() {
-        let mut relay = test_relay();
-        relay.set_thread_custom_name("claude-pending-1", Some("Auth work".to_string()));
-        relay.promote_background_thread("claude-pending-1", "real-1");
-        assert_eq!(
-            relay.thread_custom_name("real-1"),
-            Some("Auth work".to_string()),
-            "a rename made before the first message must survive promotion"
-        );
-        assert!(
-            relay.thread_custom_name("claude-pending-1").is_none(),
-            "the pending key would otherwise orphan in a persisted map"
-        );
-
-        // Conflict: a name the real id ALREADY has wins, mirroring project membership.
-        let mut relay = test_relay();
-        relay.set_thread_custom_name("claude-pending-2", Some("Pending name".to_string()));
-        relay.set_thread_custom_name("real-2", Some("Real name".to_string()));
-        relay.promote_background_thread("claude-pending-2", "real-2");
-        assert_eq!(
-            relay.thread_custom_name("real-2"),
-            Some("Real name".to_string())
-        );
     }
 
     /// The cached rows are what `relay.threads` readers see between provider refreshes,
@@ -9431,6 +9156,41 @@ mod tests {
                 .is_none(),
             "the session id is not a provider handle and must not route as one",
         );
+    }
+
+    /// Materialization is a fact about the BINDING, never about how an id is spelled.
+    ///
+    /// The prefix test this replaced had both failure modes at once: it called a live
+    /// session unmaterialized because its id happened to start like a bridge handle —
+    /// dropping that session's settings, name, project and flags on the next restart —
+    /// and it could only ever recognize one provider's handle shape.
+    #[test]
+    fn materialization_is_read_off_the_binding_and_never_off_the_id() {
+        let mut relay = test_relay();
+
+        // No binding: historical identity state, where the id IS the provider thread.
+        // Spelling is irrelevant, including the shape Phase 3 retired from public ids.
+        assert!(relay.session_is_materialized("codex-thread-1"));
+        assert!(
+            relay.session_is_materialized("claude-pending-not-a-relay-session"),
+            "an unbound id must not be judged by its spelling",
+        );
+
+        relay.bind_session_to_pending_handle("session-a", "claude_code", "claude-pending-1");
+        assert!(
+            !relay.session_is_materialized("session-a"),
+            "a deferred binding is the one thing that makes a session unmaterialized",
+        );
+        assert!(
+            relay.session_is_materialized("claude-pending-1"),
+            "the bridge handle is not a session and has no binding of its own",
+        );
+
+        relay
+            .materialize_deferred_session_binding("claude_code", "claude-pending-1", "real-sdk-id")
+            .expect("materialize")
+            .expect("the deferred binding was there to materialize");
+        assert!(relay.session_is_materialized("session-a"));
     }
 
     #[test]

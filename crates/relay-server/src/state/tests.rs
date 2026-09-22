@@ -104,7 +104,6 @@ fn test_persisted_state() -> PersistedRelayState {
         orchestrator_system_prompt_version: None,
         orchestrator_proposals: Vec::new(),
         thread_forked_from: Default::default(),
-        thread_promoted_from: Default::default(),
         thread_workspace: Default::default(),
         push_subscriptions: std::collections::HashMap::new(),
         projects: Default::default(),
@@ -909,79 +908,6 @@ fn recording_a_proven_workspace_notifies_so_it_reaches_disk() {
 }
 
 #[test]
-fn promote_background_thread_carries_the_orchestrator_pin() {
-    // Observed against a real Claude session, not reasoned about. The Orchestrator
-    // opens with no prompt, so Claude defers the session and hands back a synthetic
-    // `claude-pending-…` id, which is what gets pinned. The FIRST message promotes
-    // it to a real id — and if the pin does not follow, this happens:
-    //
-    //   live_orchestrator_thread_id -> find_thread_provider(pending) -> not found
-    //     -> clears the pin (its self-heal for a deleted thread)
-    //     -> the next ensure builds a BRAND NEW Orchestrator
-    //
-    // i.e. the conversation resets after the first message, on the provider the
-    // ranking deliberately prefers. The self-heal is right; it just cannot tell a
-    // promoted thread from a deleted one unless promotion says so.
-    let (change_tx, _rx) = watch::channel(0_u64);
-    let mut relay = RelayState::new(
-        "/tmp/project".to_string(),
-        change_tx,
-        SecurityProfile::private(),
-    );
-    relay.orchestrator_thread_id = Some("claude-pending-7".to_string());
-
-    relay.promote_background_thread("claude-pending-7", "real-session-id");
-
-    assert_eq!(
-        relay.orchestrator_thread_id.as_deref(),
-        Some("real-session-id"),
-        "the pin must follow its thread, or the Orchestrator resets every first turn"
-    );
-}
-
-#[test]
-fn promotion_carries_the_goal_across() {
-    // `/goal` on a fresh Claude session is the ordinary case: the session has no
-    // real id until its first turn, and that first turn is the one the goal
-    // drives. Left keyed to the pending id the goal vanishes from the panel and
-    // burns the rest of its budget on a thread that no longer exists.
-    let mut relay = test_state();
-    relay.set_goal(crate::state::Goal::new(
-        "goal-1".to_string(),
-        "claude-pending-7".to_string(),
-        "ship the mobile door".to_string(),
-    ));
-
-    relay.promote_background_thread("claude-pending-7", "real-session-id");
-
-    assert!(
-        relay.goal_for_thread("claude-pending-7").is_none(),
-        "nothing is left under the id that no longer exists",
-    );
-    let goal = relay
-        .goal_for_thread("real-session-id")
-        .expect("the goal follows its thread");
-    assert_eq!(goal.thread_id, "real-session-id", "and is re-pointed too");
-    assert_eq!(goal.objective, "ship the mobile door");
-}
-
-#[test]
-fn promotion_carries_the_ask_token_across() {
-    // The token is minted against the pending id on the very turn that promotes
-    // it. Left behind, the tools the goal tells the agent to call resolve to a
-    // thread that no longer exists — so its first "I'm done" is refused.
-    let mut relay = test_state();
-    let token = relay.ask_token_for_thread("claude-pending-7");
-
-    relay.promote_background_thread("claude-pending-7", "real-session-id");
-
-    assert_eq!(
-        relay.thread_for_ask_token(&token).as_deref(),
-        Some("real-session-id"),
-    );
-}
-
-#[test]
 fn removing_a_thread_takes_its_goal_with_it() {
     // A goal outliving its thread is both a wedged driver and the user's own
     // words surviving a permanent delete.
@@ -1025,59 +951,23 @@ fn rewording_an_objective_moves_the_reviews_revision() {
 }
 
 #[test]
-fn promotion_keeps_a_reviewed_parent_review_locked() {
-    // Promotion re-keys the reviewer id, workflow step threads and team seats — but
-    // the PARENT id of a review/workflow is the same class of pointer and was left
-    // behind. A review of a Claude session that has never been messaged promotes that
-    // session on its first (recap) turn, and the lock is what stops the user typing
-    // into a thread the orchestrator is driving. Keyed to a dead id, it evaporates.
-    let mut relay = test_state();
-    let job = crate::state::ReviewJob::new(
-        "review-1".to_string(),
-        "claude-pending-1".to_string(),
-        "claude_code".to_string(),
-        "codex".to_string(),
-        None,
-        crate::state::ReviewMode::CleanThread,
-        "/tmp/project".to_string(),
-        "device-1".to_string(),
-        relay_api::delegation::StartedBy::Person,
-        None,
-        1,
-    );
-    relay.insert_review_job(job);
-    assert!(relay.is_thread_review_locked("claude-pending-1"));
-
-    relay.promote_background_thread("claude-pending-1", "real-1");
-
-    assert!(
-        relay.is_thread_review_locked("real-1"),
-        "the reviewed thread must stay locked across its own promotion"
-    );
-    assert!(
-        !relay.is_thread_review_locked("claude-pending-1"),
-        "and the dead placeholder must not stay locked"
-    );
-}
-
-#[test]
 fn registering_a_thread_from_a_working_summary_does_not_make_it_working() {
     // `ThreadRuntime::new` copies the summary's status VERBATIM, so the settling is
     // done by the `upsert_thread` that `register_background_thread` ends with. A
-    // Claude deferred-start placeholder is reported `"active"` before it has ever
-    // had a turn, so if that upsert stops settling, registration alone leaves a
+    // deferred-start Claude session is reported `"active"` before it has ever had a
+    // turn, so if that upsert stops settling, registration alone leaves a
     // permanently-working ghost: `update_session_settings` refuses a working thread,
     // and the review's uncertain-start cleanup tries to interrupt an SDK session
     // that was never created and can leave the job stuck in `Blocked`.
     //
     // Upserting the same summary again (a list refresh) must not revive it either.
     let mut relay = test_state();
-    let mut pending = test_thread("claude-pending-1", "/tmp/project");
-    pending.provider = "claude_code".to_string();
-    pending.source = "claude_code".to_string();
-    pending.status = "active".to_string();
+    let mut unsent = test_thread("session-unsent", "/tmp/project");
+    unsent.provider = "claude_code".to_string();
+    unsent.source = "claude_code".to_string();
+    unsent.status = "active".to_string();
     relay.register_background_thread(
-        pending.clone(),
+        unsent.clone(),
         "/tmp/project",
         "claude-sonnet-4-6",
         "on-request",
@@ -1087,16 +977,16 @@ fn registering_a_thread_from_a_working_summary_does_not_make_it_working() {
 
     assert!(
         !relay
-            .runtime_for_thread("claude-pending-1")
+            .runtime_for_thread("session-unsent")
             .expect("the runtime is registered")
             .is_working(),
-        "a placeholder that has never had a turn must not register as working"
+        "a session that has never had a turn must not register as working"
     );
 
-    relay.upsert_thread(pending);
+    relay.upsert_thread(unsent);
     assert!(
         !relay
-            .runtime_for_thread("claude-pending-1")
+            .runtime_for_thread("session-unsent")
             .expect("the runtime is still there")
             .is_working(),
         "re-reading the same working summary must not revive it either"
@@ -1131,60 +1021,6 @@ fn a_summary_still_cannot_mark_an_idle_turnless_thread_working() {
             .is_working(),
         "a summary must never resurrect a settled, turn-less thread"
     );
-}
-
-#[test]
-fn promote_background_thread_leaves_an_unrelated_orchestrator_pin_alone() {
-    let (change_tx, _rx) = watch::channel(0_u64);
-    let mut relay = RelayState::new(
-        "/tmp/project".to_string(),
-        change_tx,
-        SecurityProfile::private(),
-    );
-    relay.orchestrator_thread_id = Some("orch-thread".to_string());
-
-    relay.promote_background_thread("claude-pending-7", "real-session-id");
-
-    assert_eq!(relay.orchestrator_thread_id.as_deref(), Some("orch-thread"));
-}
-
-#[test]
-fn promote_background_thread_migrates_last_activity_keeping_most_recent() {
-    // A background reviewer logs activity under its synthetic `claude-pending-…`
-    // id; promotion to the real session id must carry that honest timestamp over
-    // and drop the pending entry (which is otherwise orphaned in a persisted
-    // map). When both ids have a value, the most-recent wins — either could have
-    // logged a transcript write during the handoff.
-    let mut relay = test_state();
-    relay
-        .thread_last_activity_at
-        .insert("claude-pending-1".to_string(), 8_000);
-    relay
-        .thread_last_activity_at
-        .insert("real-1".to_string(), 5_000);
-    relay.promote_background_thread("claude-pending-1", "real-1");
-    assert_eq!(
-        relay.thread_last_activity_at.get("real-1"),
-        Some(&8_000),
-        "the more recent pending timestamp must win"
-    );
-    assert!(
-        !relay
-            .thread_last_activity_at
-            .contains_key("claude-pending-1"),
-        "the pending entry must not orphan after promotion"
-    );
-
-    // When only the pending id has a value, it carries over wholesale.
-    let mut relay = test_state();
-    relay
-        .thread_last_activity_at
-        .insert("claude-pending-2".to_string(), 9_000);
-    relay.promote_background_thread("claude-pending-2", "real-2");
-    assert_eq!(relay.thread_last_activity_at.get("real-2"), Some(&9_000));
-    assert!(!relay
-        .thread_last_activity_at
-        .contains_key("claude-pending-2"));
 }
 
 // Removing the lineage row is only half the job: the persistence task saves
@@ -1235,84 +1071,6 @@ fn clearing_absent_fork_lineage_does_not_notify() {
     assert!(
         !change_rx.has_changed().expect("channel stays open"),
         "a no-op removal must not notify"
-    );
-}
-
-// A Claude replay fork that carries pasted images has to withhold the prompt
-// from `start_thread` (that call cannot take image bytes), which puts Claude on
-// its deferred-start path: the fork is recorded against a synthetic
-// `claude-pending-…` id and only becomes a real session on the first turn.
-// `thread_forked_from` must therefore ride promotion like every other
-// thread-keyed map, or the branch loses its lineage and the pending key is
-// orphaned in a PERSISTED map — leaking across restarts forever.
-#[test]
-fn promote_background_thread_migrates_fork_lineage() {
-    let mut relay = test_state();
-    relay.set_thread_forked_from("claude-pending-3", "source-thread");
-    relay.promote_background_thread("claude-pending-3", "real-3");
-
-    assert_eq!(
-        relay.thread_forked_from("real-3"),
-        Some("source-thread".to_string()),
-        "the promoted thread must keep the source it was forked from"
-    );
-    assert!(
-        !relay.thread_forked_from.contains_key("claude-pending-3"),
-        "the pending lineage entry must not orphan in a persisted map"
-    );
-}
-
-// Promotion must not clobber lineage the real id already has: the event stream
-// can create the real-id thread first, and its own lineage is the honest one.
-#[test]
-fn promotion_keeps_existing_fork_lineage_on_the_real_thread() {
-    let mut relay = test_state();
-    relay.set_thread_forked_from("claude-pending-4", "pending-source");
-    relay.set_thread_forked_from("real-4", "real-source");
-    relay.promote_background_thread("claude-pending-4", "real-4");
-
-    assert_eq!(
-        relay.thread_forked_from("real-4"),
-        Some("real-source".to_string()),
-        "an existing real-id lineage wins over the pending one"
-    );
-    assert!(!relay.thread_forked_from.contains_key("claude-pending-4"));
-}
-
-#[test]
-fn promotion_records_lineage_and_rides_the_snapshot() {
-    // The pending->real id transition is, from a client's point of view,
-    // indistinguishable from another device switching the relay to an
-    // unrelated thread. The snapshot must therefore carry the lineage
-    // authoritatively so every client (observers included) can rekey its
-    // scroll bookkeeping / pinned view only on REAL promotions.
-    let mut relay = test_state();
-    relay.promote_background_thread("claude-pending-9", "real-9");
-    assert_eq!(
-        relay.thread_promoted_from.get("real-9"),
-        Some(&"claude-pending-9".to_string()),
-        "promotion must record its lineage"
-    );
-
-    relay.active_thread_id = Some("real-9".to_string());
-    assert_eq!(
-        relay.snapshot().active_thread_promoted_from,
-        Some("claude-pending-9".to_string()),
-        "the active thread's pending lineage must ride the snapshot"
-    );
-
-    // An unrelated active thread exposes no lineage.
-    relay.active_thread_id = Some("other-thread".to_string());
-    assert_eq!(relay.snapshot().active_thread_promoted_from, None);
-
-    // Lineage survives persistence (mirrors thread_forked_from).
-    let persisted = PersistedRelayState::from_relay(&relay);
-    let mut restored = test_state();
-    restored.apply_persisted(&persisted);
-    assert_eq!(
-        restored.thread_promoted_from.get("real-9"),
-        Some(&"claude-pending-9".to_string()),
-        "promotion lineage must survive a relay restart"
     );
 }
 
@@ -2636,27 +2394,26 @@ fn drop_terminal_review_jobs_for_reviewer_keeps_an_in_progress_run() {
 }
 
 #[test]
-fn persist_skips_pending_claude_reviewer_ids() {
+fn persist_skips_reviewer_ids_whose_session_never_materialized() {
     let mut relay = test_state();
-    // A real (promoted) reviewer id alongside a synthetic Claude pending id. The
-    // pending id only exists in memory — it has no real SDK session — so persisting
-    // it would leave a ghost hiding entry that never resolves after a restart.
+    // A reviewer whose provider session exists, alongside one whose first turn never
+    // ran. The second has nothing behind it, so persisting it would leave a ghost
+    // hiding entry that never resolves after a restart.
+    relay.bind_session_to_pending_handle("session-unsent", "claude_code", "claude-pending-abc");
     relay.register_reviewer_thread("reviewer-real".to_string(), "parent-1".to_string());
-    relay.register_reviewer_thread("claude-pending-abc".to_string(), "parent-2".to_string());
+    relay.register_reviewer_thread("session-unsent".to_string(), "parent-2".to_string());
 
     let persisted = PersistedRelayState::from_relay(&relay);
     assert!(
         persisted.reviewer_threads.contains_key("reviewer-real"),
-        "the real reviewer id is persisted"
+        "the reviewer with a session behind it is persisted"
     );
     assert!(
-        !persisted
-            .reviewer_threads
-            .contains_key("claude-pending-abc"),
-        "synthetic claude-pending reviewer ids must be dropped from the snapshot"
+        !persisted.reviewer_threads.contains_key("session-unsent"),
+        "a reviewer whose session was never created must be dropped from the snapshot"
     );
 
-    // Restoring keeps the real one hidden and never resurrects the pending ghost.
+    // Restoring keeps the real one hidden and never resurrects the ghost.
     let (change_tx, _) = watch::channel(0_u64);
     let mut restored = RelayState::new(
         "/tmp/other".to_string(),
@@ -2665,9 +2422,7 @@ fn persist_skips_pending_claude_reviewer_ids() {
     );
     restored.apply_persisted(&persisted);
     assert!(restored.reviewer_thread_ids().contains("reviewer-real"));
-    assert!(!restored
-        .reviewer_thread_ids()
-        .contains("claude-pending-abc"));
+    assert!(!restored.reviewer_thread_ids().contains("session-unsent"));
 }
 
 #[test]
@@ -6864,69 +6619,6 @@ fn a_crash_after_the_last_save_does_not_replay_issued_revisions() {
     );
 }
 
-/// Promoting a deferred thread onto its real id must not rewind the real id's
-/// revision. `turn_revision` is already max-folded here; the transcript revision
-/// has to be too.
-#[test]
-fn promoting_a_background_thread_does_not_rewind_the_real_threads_revision() {
-    let mut relay = test_state();
-    // The pending runtime was created first, so it sits BEHIND on the shared clock.
-    relay.bump_thread_transcript_revision("claude-pending-1");
-    // The event stream then built a real-id runtime and advanced it past pending.
-    for _ in 0..4 {
-        relay.bump_thread_transcript_revision("real-id");
-    }
-    let real_before = relay
-        .runtime_for_thread("real-id")
-        .expect("real runtime")
-        .transcript_revision;
-    // Pending carries the longer transcript, so promotion keeps pending's runtime.
-    relay
-        .runtimes
-        .get_mut("claude-pending-1")
-        .expect("pending runtime")
-        .transcript = crate::state::relay::ThreadTranscript::from_rows(vec![
-        TranscriptRecord {
-            row_id: "a".to_string(),
-            provider_item_id: None,
-            relay_item_id: None,
-            kind: TranscriptEntryKind::AgentText,
-            text: Some("a".to_string()),
-            status: "completed".to_string(),
-            turn_id: None,
-            tool: None,
-            order_seq: 0,
-            withdrawn: false,
-            last_live_upsert_revision: None,
-        },
-        TranscriptRecord {
-            row_id: "b".to_string(),
-            provider_item_id: None,
-            relay_item_id: None,
-            kind: TranscriptEntryKind::AgentText,
-            text: Some("b".to_string()),
-            status: "completed".to_string(),
-            turn_id: None,
-            tool: None,
-            order_seq: 0,
-            withdrawn: false,
-            last_live_upsert_revision: None,
-        },
-    ]);
-
-    relay.promote_background_thread("claude-pending-1", "real-id");
-
-    let real_after = relay
-        .runtime_for_thread("real-id")
-        .expect("promoted runtime")
-        .transcript_revision;
-    assert!(
-        real_after >= real_before,
-        "promotion rewound real-id from revision {real_before} to {real_after}; a \
-         client tracking real-id would discard everything until the clock caught up"
-    );
-}
-
 /// `restore_thread_data` restores the clock itself, so it must do that BEFORE it
 /// draws a revision — otherwise the restored thread is seeded from a clock that
 /// has not yet resumed.
@@ -8285,44 +7977,6 @@ mod row_identity_tests {
             relay.turn_terminal(thread, "turn-nobody-ran"),
             None,
             "and a turn that never ended must not read as finished"
-        );
-    }
-
-    /// Promotion swaps a Claude thread's synthetic id for its real one and keeps
-    /// whichever runtime has more transcript. A finished turn recorded on the losing
-    /// side would vanish with it, and a caller waiting on that turn would wait out its
-    /// whole budget for an answer that was already given.
-    #[test]
-    fn promotion_keeps_the_turns_that_already_finished() {
-        let mut relay = test_state();
-        let pending = "claude-pending-1";
-        let real = "claude-real-1";
-
-        relay.upsert_thread(test_thread(pending, "/tmp/project"));
-        relay.ensure_runtime_for_thread(pending);
-        relay.record_turn_terminal(
-            pending,
-            "claude-turn-1",
-            crate::state::TurnOutcome::Completed,
-        );
-
-        // The event stream got there first and has more transcript, so promotion keeps
-        // the real-id runtime — the arm that used to drop the pending side wholesale.
-        relay.ensure_runtime_for_thread(real);
-        relay.bg_upsert_user_message(
-            real,
-            "user:1".to_string(),
-            "hello".to_string(),
-            "claude-turn-1".to_string(),
-            100,
-        );
-
-        relay.promote_background_thread(pending, real);
-
-        assert_eq!(
-            relay.turn_terminal(real, "claude-turn-1"),
-            Some(crate::state::TurnOutcome::Completed),
-            "a turn that finished before promotion still finished after it"
         );
     }
 

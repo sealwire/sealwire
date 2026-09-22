@@ -23,8 +23,8 @@
 //!    `PendingApproval`, `PendingAskUserQuestion` or `PendingTranscriptDelta` built
 //!    from a provider payload carries the handle until you overwrite it.
 //! 5. **Bridge-owned maps keep the handle.** The ACP `Sessions`/`Captures` maps,
-//!    Claude's `pending_threads`/`promoted_thread_ids` and the outgoing JSON are
-//!    the provider's address space; only `RelayState` is translated.
+//!    Claude's `pending_threads` and the outgoing JSON are the provider's address
+//!    space; only `RelayState` is translated.
 //! 6. **Turn ids, request ids and transcript item ids are not session ids.** They
 //!    are never translated.
 //!

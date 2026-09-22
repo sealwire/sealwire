@@ -101,12 +101,8 @@ fn workspace_gone_recap() -> String {
 
 /// What driving a recap turn on the reviewed thread produced.
 enum RecapOutcome {
-    /// `(the parent's id AFTER the recap turn, the recap text)`. The id is returned
-    /// because a recap can be the reviewed thread's very first turn, which promotes a
-    /// Claude session off its `claude-pending-…` placeholder — every later step of the
-    /// review (resolving the workspace, driving fix turns, posting back) has to follow
-    /// it or it addresses a thread that no longer exists.
-    Text(String, String),
+    /// The recap the reviewed thread wrote.
+    Text(String),
     /// The thread's workspace no longer exists, so it cannot be asked for anything. The
     /// review continues read-only with whatever briefing is already available.
     WorkspaceGone,
@@ -115,7 +111,7 @@ enum RecapOutcome {
 }
 
 enum AuthorTurnOutcome {
-    Completed(String),
+    Completed,
     WorkspaceGone,
     Aborted,
 }
@@ -242,25 +238,16 @@ pub(super) struct ReviewWorkspace {
 
 /// What a dispatched turn is running as.
 ///
-/// `thread_id` exists so a caller physically cannot carry on with the id it sent
-/// to. For a deferred-start provider (Claude) that id is a `claude-pending-…`
-/// placeholder whose runtime is REMOVED mid-`start_turn`, when the turn creates the
-/// SDK session and promotion re-keys everything onto the real id. Waiting on the
-/// placeholder then reads "no runtime" as "idle", so a turn that has only just
-/// started looks finished — the run gives up, releases its locks, and the agent
-/// keeps working. That was the reported bug for a clean Claude reviewer, and the
-/// same shape reaches every parent/author turn on a Claude session that has not
-/// been messaged yet.
+/// A named type rather than a bare `Option<String>` so the one thing every caller
+/// gets wrong stays attached to the value: `None` is not "nothing happened". It is an
+/// UNCERTAIN start — the provider may have begun work and simply not told us — which
+/// is why each caller stops and drains rather than moving on.
 ///
-/// Returning it is the point: promotion re-keys the relay's own ownership maps
-/// (review `reviewer_thread_id`, workflow `step_threads`, team seats) but NOT the
-/// parent ids, and never the local variables a driver is holding. So the id has to
-/// come back out of the dispatch rather than be looked up afterwards by each caller.
+/// The thread is not in here. It is the session id the caller already passed in: a
+/// deferred provider creates its session during `start_turn`, but that moves only the
+/// binding behind the id, never the id.
 pub(super) struct DispatchedTurn {
-    /// The thread the turn actually runs under, after any promotion.
-    pub(super) thread_id: String,
-    /// The provider's turn id, when it gave one. `None` is an UNCERTAIN start: the
-    /// provider may still have begun work.
+    /// The provider's turn id, when it gave one.
     pub(super) turn_id: Option<String>,
 }
 
@@ -877,10 +864,7 @@ last message (no recap turn)."
                             }
                         };
                         match self.drive_parent_recap(&job_id, &parent_thread_id).await {
-                            RecapOutcome::Text(promoted, text) => {
-                                parent_thread_id = promoted;
-                                text
-                            }
+                            RecapOutcome::Text(text) => text,
                             RecapOutcome::WorkspaceGone => workspace_gone_recap(),
                             RecapOutcome::Aborted => return,
                         }
@@ -889,13 +873,7 @@ last message (no recap turn)."
             }
             ReviewRecapSource::Recap => {
                 match self.drive_parent_recap(&job_id, &parent_thread_id).await {
-                    // The recap may have been this thread's FIRST turn, which promotes
-                    // a Claude session off its placeholder. Everything after — the
-                    // workspace resolve, the fix turns, the post-back — must follow it.
-                    RecapOutcome::Text(promoted, text) => {
-                        parent_thread_id = promoted;
-                        text
-                    }
+                    RecapOutcome::Text(text) => text,
                     // Lost the race: the workspace vanished as the recap turn reached the
                     // provider. Continue read-only rather than failing the review.
                     RecapOutcome::WorkspaceGone => workspace_gone_recap(),
@@ -1287,10 +1265,7 @@ reviewer ({error}); re-resolving the workspace and retrying the round."
             if self.review_aborted(&job_id).await {
                 return;
             }
-            // The id the turn RUNS under: a clean Claude reviewer is promoted from its
-            // placeholder during this call, and everything after it — the idle wait and
-            // the read-back — must follow the turn, not the id we addressed.
-            let current_id = match self
+            match self
                 .send_message_to_thread(
                     &this_reviewer_id,
                     &prompt,
@@ -1299,11 +1274,11 @@ reviewer ({error}); re-resolving the workspace and retrying the round."
                 )
                 .await
             {
-                Ok(dispatched) if dispatched.turn_id.is_some() => dispatched.thread_id,
-                Ok(dispatched) => {
+                Ok(dispatched) if dispatched.turn_id.is_some() => {}
+                Ok(_) => {
                     self.fail_after_uncertain_turn_start(
                         &job_id,
-                        &dispatched.thread_id,
+                        &this_reviewer_id,
                         "reviewer did not return a turn id",
                     )
                     .await;
@@ -1328,17 +1303,15 @@ started ({error}); re-resolving the workspace and retrying the round."
                 Err(error) => {
                     self.fail_after_uncertain_turn_start(
                         &job_id,
-                        &self.dispatched_thread_id(&this_reviewer_id).await,
+                        &this_reviewer_id,
                         format!("failed to send the reviewer prompt: {error}"),
                     )
                     .await;
                     return;
                 }
             };
-            // (The loop-reuse `reviewer_thread_id` is re-set from the post-wait,
-            // post-promotion id at the read-back below; no need to stash the pre-wait id.)
             match self
-                .wait_for_thread_idle_outcome(&job_id, &current_id)
+                .wait_for_thread_idle_outcome(&job_id, &this_reviewer_id)
                 .await
             {
                 WaitOutcome::Completed => {}
@@ -1348,7 +1321,7 @@ started ({error}); re-resolving the workspace and retrying the round."
                 | WaitOutcome::TimedOut) => {
                     // Stop the reviewer turn; if it can't be stopped, the job enters
                     // the persistent Blocked state (threads stay review-locked).
-                    if self.stop_thread_or_block(&job_id, &current_id).await {
+                    if self.stop_thread_or_block(&job_id, &this_reviewer_id).await {
                         self.fail_job(&job_id, reviewer_failure_message(&outcome))
                             .await;
                     }
@@ -1357,12 +1330,8 @@ started ({error}); re-resolving the workspace and retrying the round."
             }
             self.set_job_status(&job_id, ReviewJobStatus::WaitingToPostBack)
                 .await;
-            let current_id = self
-                .current_reviewer_thread_id(&job_id)
-                .await
-                .unwrap_or(current_id);
-            reviewer_thread_id = Some(current_id.clone());
-            let mut review = match self.latest_assistant_entry(&current_id).await {
+            reviewer_thread_id = Some(this_reviewer_id.clone());
+            let mut review = match self.latest_assistant_entry(&this_reviewer_id).await {
                 Some((item_id, text)) if reviewer_baseline.as_deref() != Some(item_id.as_str()) => {
                     text
                 }
@@ -1452,7 +1421,7 @@ the new `HEAD` must be reviewed as a fresh committed candidate.\n\n{review}"
             if max_rounds == 1 {
                 // Single-shot: today's behavior — post the review and complete,
                 // regardless of verdict.
-                let message = post_back_message(&reviewer_provider, &current_id, &review);
+                let message = post_back_message(&reviewer_provider, &this_reviewer_id, &review);
                 self.finish_review_to_parent(
                     &job_id,
                     &parent_thread_id,
@@ -1515,23 +1484,15 @@ reviewer prompt; starting another review round for the current committed candida
             if self.review_aborted(&job_id).await {
                 return;
             }
-            // The author may itself be a Claude session that has never been messaged,
-            // in which case THIS turn creates its SDK session and promotes it. Follow
-            // the turn from here on, for the wait and for every cleanup below.
             let fix_thread_id = match self
                 .send_message_to_thread(&parent_thread_id, &fix_prompt, None, None)
                 .await
             {
-                Ok(dispatched) if dispatched.turn_id.is_some() => {
-                    // A fix turn can be the author's first too (a review whose recap
-                    // came from `LastMessage` never drove one).
-                    parent_thread_id = dispatched.thread_id.clone();
-                    dispatched.thread_id
-                }
-                Ok(dispatched) => {
+                Ok(dispatched) if dispatched.turn_id.is_some() => parent_thread_id.clone(),
+                Ok(_) => {
                     self.fail_after_uncertain_turn_start(
                         &job_id,
-                        &dispatched.thread_id,
+                        &parent_thread_id,
                         "the author did not return a turn id for the fix",
                     )
                     .await;
@@ -1546,7 +1507,7 @@ started ({error}); finishing with round {round}'s findings."
                         ),
                     )
                     .await;
-                    let message = post_back_message(&reviewer_provider, &current_id, &review);
+                    let message = post_back_message(&reviewer_provider, &this_reviewer_id, &review);
                     self.finish_review_to_parent(
                         &job_id,
                         &parent_thread_id,
@@ -1559,7 +1520,7 @@ started ({error}); finishing with round {round}'s findings."
                 Err(error) => {
                     self.fail_after_uncertain_turn_start(
                         &job_id,
-                        &self.dispatched_thread_id(&parent_thread_id).await,
+                        &parent_thread_id,
                         format!("failed to ask the author to address findings: {error}"),
                     )
                     .await;
@@ -1608,7 +1569,7 @@ started ({error}); finishing with round {round}'s findings."
                 match self
                     .ensure_review_candidate_advanced(
                         &job_id,
-                        &mut parent_thread_id,
+                        &parent_thread_id,
                         &device_id,
                         &round_base_sha,
                     )
@@ -1667,7 +1628,7 @@ started ({error}); finishing with round {round}'s findings."
             Err(error) => {
                 self.fail_after_uncertain_turn_start(
                     job_id,
-                    &self.dispatched_thread_id(parent_thread_id).await,
+                    parent_thread_id,
                     format!("failed to post the review back to the parent: {error}"),
                 )
                 .await;
@@ -1732,25 +1693,18 @@ started ({error}); finishing with round {round}'s findings."
             .await
             .map(|(item_id, _)| item_id);
         // Reviewing a Claude session that has never been messaged makes THIS the turn
-        // that creates its SDK session, so the parent is promoted off its placeholder
-        // mid-send. Everything below follows the turn's own id: waiting on (or
-        // stopping, or reading back from) the placeholder would find no runtime, call
-        // a turn that just started finished, and fail the review — the parent-side
-        // twin of the clean-reviewer bug.
         // Deliberately NOT charged to a goal on this thread: the recap moves the objective
         // nowhere, it is a briefing the review asked for. Only turns that advance the work
         // unattended come out of the budget.
-        let (parent_thread_id, recap_turn) = match self
+        let recap_turn = match self
             .send_message_to_thread(parent_thread_id, parent_recap_prompt(), None, None)
             .await
         {
-            Ok(dispatched) if dispatched.turn_id.is_some() => {
-                (dispatched.thread_id, dispatched.turn_id)
-            }
-            Ok(dispatched) => {
+            Ok(dispatched) if dispatched.turn_id.is_some() => dispatched.turn_id,
+            Ok(_) => {
                 self.fail_after_uncertain_turn_start(
                     job_id,
-                    &dispatched.thread_id,
+                    parent_thread_id,
                     "parent did not return a recap turn id",
                 )
                 .await;
@@ -1760,14 +1714,13 @@ started ({error}); finishing with round {round}'s findings."
             Err(error) => {
                 self.fail_after_uncertain_turn_start(
                     job_id,
-                    &self.dispatched_thread_id(parent_thread_id).await,
+                    parent_thread_id,
                     format!("failed to ask the parent for a recap: {error}"),
                 )
                 .await;
                 return RecapOutcome::Aborted;
             }
         };
-        let parent_thread_id = parent_thread_id.as_str();
         self.update_job(job_id, |job| job.parent_recap_turn_id = recap_turn)
             .await;
         match self
@@ -1809,7 +1762,7 @@ started ({error}); finishing with round {round}'s findings."
         }
         match self.latest_assistant_entry(parent_thread_id).await {
             Some((item_id, text)) if recap_baseline.as_deref() != Some(item_id.as_str()) => {
-                RecapOutcome::Text(parent_thread_id.to_string(), text)
+                RecapOutcome::Text(text)
             }
             _ => {
                 // The recap turn settled without a fresh assistant reply (e.g. it ended
@@ -2143,7 +2096,7 @@ tree would review commits this thread never made"
     async fn ensure_review_candidate_advanced(
         &self,
         job_id: &str,
-        parent_thread_id: &mut String,
+        parent_thread_id: &str,
         device_id: &str,
         round_base_sha: &str,
     ) -> Result<bool, String> {
@@ -2155,9 +2108,7 @@ tree would review commits this thread never made"
                 .drive_parent_commit_prompt(job_id, parent_thread_id, round_base_sha)
                 .await
             {
-                AuthorTurnOutcome::Completed(promoted) => {
-                    *parent_thread_id = promoted;
-                }
+                AuthorTurnOutcome::Completed => {}
                 AuthorTurnOutcome::WorkspaceGone => return Ok(true),
                 AuthorTurnOutcome::Aborted => return Ok(false),
             }
@@ -2212,15 +2163,15 @@ tree would review commits this thread never made"
         round_base_sha: &str,
     ) -> AuthorTurnOutcome {
         let prompt = parent_commit_prompt(round_base_sha);
-        let dispatched = match self
+        match self
             .send_message_to_thread(parent_thread_id, &prompt, None, None)
             .await
         {
-            Ok(dispatched) if dispatched.turn_id.is_some() => dispatched,
-            Ok(dispatched) => {
+            Ok(dispatched) if dispatched.turn_id.is_some() => {}
+            Ok(_) => {
                 self.fail_after_uncertain_turn_start(
                     job_id,
-                    &dispatched.thread_id,
+                    parent_thread_id,
                     "the author did not return a turn id for the commit",
                 )
                 .await;
@@ -2230,24 +2181,21 @@ tree would review commits this thread never made"
             Err(error) => {
                 self.fail_after_uncertain_turn_start(
                     job_id,
-                    &self.dispatched_thread_id(parent_thread_id).await,
+                    parent_thread_id,
                     format!("failed to ask the author to commit the candidate: {error}"),
                 )
                 .await;
                 return AuthorTurnOutcome::Aborted;
             }
-        };
+        }
         match self
-            .wait_for_thread_idle_outcome(job_id, &dispatched.thread_id)
+            .wait_for_thread_idle_outcome(job_id, parent_thread_id)
             .await
         {
-            WaitOutcome::Completed => AuthorTurnOutcome::Completed(dispatched.thread_id),
+            WaitOutcome::Completed => AuthorTurnOutcome::Completed,
             WaitOutcome::Cancelled => AuthorTurnOutcome::Aborted,
             WaitOutcome::FailedApproval | WaitOutcome::FailedAskUser | WaitOutcome::TimedOut => {
-                if self
-                    .stop_thread_or_block(job_id, &dispatched.thread_id)
-                    .await
-                {
+                if self.stop_thread_or_block(job_id, parent_thread_id).await {
                     self.fail_job(
                         job_id,
                         "the author could not commit the review candidate automatically",
@@ -2427,26 +2375,16 @@ tree would review commits this thread never made"
         // relay reads provider output on its own task, so this turn can start AND
         // finish while we are still queued for the write lock below; the revision is
         // how we tell "nothing has happened yet" from "the turn already settled".
-        // Taken on the id we are about to send to, which is the same clock the real
-        // id carries afterwards — `promote_background_thread` max-folds `turn_revision`
-        // across the handoff precisely so a promoted thread's clock never rewinds.
         let turn_revision = { self.relay.read().await.thread_turn_revision(thread_id) };
         let turn_id = classify_workspace_result(
             &workspace,
             target.start_turn(text, &model, &effort, &[]).await,
         )?;
 
-        // Which thread the turn ACTUALLY runs under. A deferred-start provider
-        // (Claude) has no session id until it sees a user message, so this very turn
-        // is what creates the session: the synthetic `claude-pending-…` id is
-        // promoted to the real one *during* `start_turn`, which returns only after
-        // `session_started`. The bookkeeping below must land on that id — the
-        // placeholder's runtime no longer exists, and seeding the turn against it
-        // would spawn a phantom working thread. Every other provider returns the
-        // requested id unchanged, so this is a no-op for them. Same call the ordinary
-        // send path makes (`sessions.rs`).
-        let effective_thread_id = target.resolve_started_thread_id().await;
-        let thread_id = effective_thread_id.as_str();
+        // A deferred-start provider (Claude) creates its session during this very
+        // `start_turn`, but that only moves the binding: the relay session id the
+        // bookkeeping below lands on is the one we resolved the target from.
+        let thread_id = target.session_id.as_str();
 
         {
             let mut relay = self.relay.write().await;
@@ -2475,22 +2413,19 @@ tree would review commits this thread never made"
             relay.notify();
         }
 
-        Ok(DispatchedTurn {
-            thread_id: effective_thread_id,
-            turn_id,
-        })
+        Ok(DispatchedTurn { turn_id })
     }
 
     /// Create a clean reviewer thread as a BACKGROUND thread — it never becomes
     /// the active thread, so the user's conversation is never displaced. Returns
-    /// `(reviewer thread id, the resolved model the reviewer turn runs on)`. The id
-    /// is a synthetic placeholder for a clean Claude thread, promoted to the real
-    /// session id once its first turn runs (see `RelayState::promote_background_thread`).
-    /// The resolved model is surfaced so the caller can record the EFFECTIVE model on
-    /// the job — a clean reviewer on the provider default carries no explicit request
-    /// model, but the card should still show what actually ran. Crucially this does
-    /// NOT mutate the active thread, `provider_name`, or `available_models`, which
-    /// belong to the user's active session.
+    /// `(reviewer thread id, the resolved model the reviewer turn runs on)`.
+    ///
+    /// The id is the relay's own and stays put when a deferred Claude session
+    /// materializes behind it. The resolved model is surfaced so the caller can
+    /// record the EFFECTIVE model on the job — a clean reviewer on the provider
+    /// default carries no explicit request model, but the card should still show what
+    /// actually ran. Crucially this does NOT mutate the active thread,
+    /// `provider_name`, or `available_models`, which belong to the user's session.
     async fn start_background_reviewer_thread(
         &self,
         job_id: &str,
@@ -2703,45 +2638,6 @@ tree would review commits this thread never made"
         }
 
         Ok((model, effort))
-    }
-
-    /// The thread a turn we just dispatched is actually running under.
-    ///
-    /// Pair this with every `send_message_to_thread` call whose FAILURE path acts on
-    /// the thread — reviews, workflows and task teams all share that dispatch.
-    ///
-    /// A failed or empty turn-start response is not proof the provider did no work,
-    /// and for a deferred-start provider it is the case where work is MOST likely to
-    /// be in flight: the SDK session is created by this very turn, so a `start` that
-    /// gets as far as `session_started` and only then loses its response has left a
-    /// real, running session behind. By that point the placeholder's runtime is gone,
-    /// so cleanup aimed at it finds nothing, reads that absence as "nothing to stop",
-    /// and lets the run go terminal — releasing its locks while the agent keeps
-    /// working on the tree. For a task-team seat that agent has `bypass` permissions.
-    ///
-    /// Resolved from the relay's own promotion record, NOT from the bridge: a bridge
-    /// only learns the real id from a SUCCESSFUL start (`claude.rs` populates
-    /// `promoted_thread_ids` after the response), which is exactly the case this does
-    /// not cover. It is also why this is keyed off the id we sent to rather than each
-    /// caller's own ownership map — one rule, and it holds for callers that have no
-    /// such map.
-    ///
-    /// Returns `sent_to` unchanged for every provider that hands back a real thread id
-    /// up front, and for a placeholder whose promotion never happened — where the
-    /// placeholder is itself the correct (and still present) cleanup target.
-    pub(super) async fn dispatched_thread_id(&self, sent_to: &str) -> String {
-        self.relay.read().await.resolve_promoted_thread_id(sent_to)
-    }
-
-    /// The current reviewer thread id recorded on the job (re-read because a
-    /// background Claude reviewer's pending id is promoted to the real session id
-    /// in place once its turn starts).
-    async fn current_reviewer_thread_id(&self, job_id: &str) -> Option<String> {
-        self.relay
-            .read()
-            .await
-            .review_job(job_id)
-            .and_then(|job| job.reviewer_thread_id.clone())
     }
 
     /// Whether the user has asked to cancel this review (set by

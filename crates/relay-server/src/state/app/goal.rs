@@ -588,11 +588,8 @@ running — set the goal again once it is free",
                     )
                     .await;
                 }
-                // A deferred-start provider creates its session during this very
-                // call, so the id the goal is filed under can be stale the moment
-                // the send returns.
                 Ok(dispatched) => {
-                    let landed_on = dispatched.thread_id;
+                    let landed_on = thread_id.clone();
                     // Not the live turn: this turn can be over already, and a goal that
                     // never learns which turn was its own reads as owing one forever.
                     let started = dispatched.turn_id;

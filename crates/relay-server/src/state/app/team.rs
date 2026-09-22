@@ -17,11 +17,11 @@
 //!    reconciling. The public host still runs its crash net after every driver
 //!    return; that net deliberately treats a resumable run as already settled.
 //!
-//! 3. **`team_turn` re-reads the thread id from the record after send AND after
-//!    wait.** `run_turn` does not need to because its author is the parent thread,
-//!    whose id is already real. Every team thread is background-started, so every
-//!    one of them can be a Claude `claude-pending-*` id that gets re-keyed by
-//!    `promote_background_thread` the moment its first turn starts.
+//! 3. **`team_turn` resolves its seat once, on entry, and keeps that thread for the
+//!    whole turn.** The run record owns every seat's id and the driver may put a
+//!    different session in a seat, but only at a driver boundary — between turns.
+//!    Re-reading mid-turn would wait on, stop, or read back from a session that
+//!    never ran the turn being answered for.
 
 use std::time::Duration;
 
@@ -2960,11 +2960,10 @@ over on resume"
 
     /// Run one turn on a team thread and return its fresh reply.
     ///
-    /// `thread_ref` names where the run records this thread's id, because the id
-    /// can CHANGE mid-turn: a Claude thread starts life as a synthetic
-    /// `claude-pending-*` id and `promote_background_thread` re-keys it on the
-    /// first turn. Re-reading after send and after wait is what keeps the driver
-    /// from talking to a thread that no longer exists.
+    /// `slot` names WHERE the run records this seat's id, so the driver addresses a
+    /// seat rather than passing a value it captured earlier. The seat is resolved ONCE,
+    /// on entry, and the whole turn — send, wait, stop, read-back — belongs to that
+    /// session; a seat the run fills later is the next turn's business.
     async fn team_turn(
         &self,
         run_id: &str,
@@ -3003,7 +3002,7 @@ over on resume"
             return TeamTurnOutcome::Failed(reason);
         }
 
-        let Some(mut thread_id) = self.resolve_team_slot(run_id, slot).await else {
+        let Some(thread_id) = self.resolve_team_slot(run_id, slot).await else {
             return TeamTurnOutcome::Failed(format!("task run {run_id} has no thread in {slot:?}"));
         };
         if let Some(reason) = self.settled_team_turn_refusal(run_id).await {
@@ -3059,9 +3058,8 @@ over on resume"
         // stop landing in that window would drain an idle runtime, record the run
         // stopped, and then watch this line start a turn anyway. Under the gate a
         // stop either completes first (and the preflight below sees it) or waits.
-        // The id `send_message_to_thread` returns for THIS turn — not `thread_id`,
-        // which promotion can change. Matching a later failure against this (not
-        // merely its presence) is what stops a stale failure left over from an
+        // THIS turn's id. Matching a later failure against it — not merely against a
+        // failure being present — is what stops a stale failure left over from an
         // earlier turn on the same thread from poisoning this one. Assigned exactly
         // once below; every other path returns before it would be read.
         let sent_turn_id: Option<String>;
@@ -3101,10 +3099,6 @@ over on resume"
                 .await;
             match &outcome {
                 Ok(dispatched) if dispatched.turn_id.is_some() => {
-                    // Follow the turn: a clean Claude seat is promoted off its
-                    // placeholder by this very (first) turn, and the wait below would
-                    // otherwise read the removed runtime as "already finished".
-                    thread_id = dispatched.thread_id.clone();
                     // Kept past the wait below: it is what lets a failed terminal be
                     // told apart from a stale failure left over from an earlier turn
                     // on the same thread (see the `last_turn_failure` check below).
@@ -3123,18 +3117,6 @@ over on resume"
                         Err(error) => error.to_string(),
                         Ok(_) => "the provider returned no turn id".to_string(),
                     };
-                    if let Ok(dispatched) = &outcome {
-                        thread_id = dispatched.thread_id.clone();
-                    }
-                    // Look at the thread the turn really runs on. A clean Claude seat
-                    // is a `claude-pending-…` placeholder until its FIRST turn creates
-                    // the SDK session, and that promotion happens inside the
-                    // `start_turn` above — so on a start that failed only after the
-                    // session was created, the id we sent to no longer has a runtime.
-                    // Observing it would see nothing, skip the stop, and leave a seat
-                    // with `bypass` permissions writing the worktree after the run has
-                    // been marked failed and its cwd lock released.
-                    thread_id = self.dispatched_thread_id(&thread_id).await;
                     // Draining FIRST would prove nothing. A provider marks a thread
                     // working only after `start_turn` returns, and codex refuses a
                     // stop without a turn id it never gave us — so `stop_and_drain`
@@ -3159,14 +3141,12 @@ over on resume"
                 }
             }
         }
-        if let Some(promoted) = self.resolve_team_slot(run_id, slot).await {
-            thread_id = promoted;
-        }
-
+        // Deliberately NOT re-resolved from the slot here. This turn was sent to
+        // `thread_id`; waiting on, stopping, or reading back from whoever occupies the
+        // seat now would be answering for a turn that session never ran. Seat changes
+        // (a TL succession, the MR dev chosen after the gate) happen at driver
+        // boundaries and belong to the NEXT turn.
         let outcome = self.wait_for_team_step(run_id, &thread_id, role).await;
-        if let Some(promoted) = self.resolve_team_slot(run_id, slot).await {
-            thread_id = promoted;
-        }
         if let Some(error) = outcome {
             if !self.stop_and_drain(&thread_id).await {
                 return TeamTurnOutcome::Blocked(format!(
@@ -3426,8 +3406,8 @@ over on resume"
         Ok((TeamThreadSlot::RunOwned(index), release_immediately))
     }
 
-    /// The live id in a seat. Re-read rather than remembered, because
-    /// `promote_background_thread` can replace it mid-turn.
+    /// Who currently occupies a seat, per the run record. Read once per turn: see
+    /// `team_turn` for why the answer is not re-read after the turn is under way.
     async fn resolve_team_slot(&self, run_id: &str, slot: TeamThreadSlot) -> Option<String> {
         self.relay
             .read()

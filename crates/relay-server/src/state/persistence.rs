@@ -56,10 +56,6 @@ pub(super) struct PersistedRelayState {
     /// keeps pre-fork state files loadable.
     #[serde(default)]
     pub(super) thread_forked_from: std::collections::HashMap<String, String>,
-    /// Deferred-thread lineage (promoted real id -> `claude-pending-…` id).
-    /// `#[serde(default)]` keeps pre-promotion state files loadable.
-    #[serde(default)]
-    pub(super) thread_promoted_from: std::collections::HashMap<String, String>,
     /// session id -> the provider handle it currently reaches
     /// (`markdown/STABLE_SESSION_ID_DESIGN.md`). `#[serde(default)]` keeps every
     /// existing schema-v2 file loadable, which is why this needs no version bump —
@@ -278,7 +274,6 @@ impl PersistedRelayState {
                 })
                 .map(|(thread_id, source_id)| (thread_id.clone(), source_id.clone()))
                 .collect(),
-            thread_promoted_from: relay.thread_promoted_from.clone(),
             session_bindings: relay.persistable_session_bindings(),
             thread_workspace: relay
                 .thread_workspace
@@ -342,9 +337,9 @@ impl PersistedRelayState {
             // Persist ALL team runs, terminal and not — a `Paused` run in
             // particular exists precisely to be picked up after a restart.
             //
-            // A run whose TL thread is still a synthetic `claude-pending-*` id
-            // (the SDK only mints a real session id on the first turn) cannot be
-            // resumed: that thread will not exist after a restart. But DROPPING
+            // A run whose TL seat has no provider session behind it yet (the SDK
+            // only creates one on the first turn) cannot be resumed: that session
+            // will not exist after a restart. But DROPPING
             // the run would lose the spec, the card, and — worse — the record of a
             // worktree and branch that are still sitting on disk with nothing
             // pointing at them. So the id is cleared and the run is recorded

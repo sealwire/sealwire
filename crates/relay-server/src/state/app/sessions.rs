@@ -870,7 +870,9 @@ impl AppState {
 
         let turn_base_sha = self.session_turn_base_sha(&target_cwd).await;
         let turn_id = target.start_turn(&text, &model, &effort, images).await?;
-        let effective_thread_id = target.resolve_started_thread_id().await;
+        // The provider may have materialized its binding while this call was in
+        // flight; the relay session id it was resolved from is unaffected.
+        let effective_thread_id = target.session_id.clone();
         {
             let mut relay = self.relay.write().await;
             relay.focus_thread_runtime(&effective_thread_id, &device_id);

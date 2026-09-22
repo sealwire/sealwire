@@ -1,19 +1,20 @@
 #!/usr/bin/env node
-// Faithful pending-promotion fake worker, used to REPRODUCE the
+// Faithful deferred-start fake worker, used to REPRODUCE the
 // "Claude remote first message is invisible until refresh" bug.
 //
 // fake-claude-worker.mjs is deliberately dumb: on `start` it emits a
 // `session_started` but NEVER replays the first user message, so it can't model
 // the timing window the bug lives in. This worker mirrors the REAL worker.mjs
-// pending-start sequence instead:
+// deferred-start sequence instead:
 //
-//   1. emit `session_started` (carrying pending_thread_id) so the relay promotes
-//      the synthetic `claude-pending-*` id to a *distinct* real session id and
-//      pushes a snapshot whose transcript is still EMPTY;
+//   1. emit `session_started` (carrying pending_thread_id) so the relay resolves
+//      that temporary handle and MATERIALIZES the session's binding onto a
+//      *distinct* real SDK id — the relay session id the client sees does not
+//      move — and pushes a snapshot whose transcript is still EMPTY;
 //   2. emit the `start` `response` so the bridge's send_request resolves and
 //      start_turn() returns. Like the real worker, the response even carries
-//      `initial_user_message` — which the relay's pending path throws away
-//      (claude.rs start_turn pending branch never reads the result), proving the
+//      `initial_user_message` — which the relay's deferred path throws away
+//      (claude.rs start_turn deferred branch never reads the result), proving the
 //      message has no synchronous projection path;
 //   3. only AFTER a short delay emit the `user_message` event carrying the first
 //      prompt. This is the async replay the relay actually depends on, and the
@@ -21,7 +22,7 @@
 //      Rust test.
 //
 // The replayed message uses the worker's OWN turn id (the relay omits ids on the
-// pending `start`), so it diverges from the relay turn id start_turn returned —
+// deferred `start`), so it diverges from the relay turn id start_turn returned —
 // the id-mismatch the investigation flagged.
 //
 // Env knobs:
@@ -70,9 +71,10 @@ for await (const line of rl) {
     continue;
   }
 
-  // A pending `start` promotes to a brand-new real session id (NOT the pending
-  // placeholder) — that distinct id is what makes the relay swap active_thread_id
-  // and drop the placeholder row, exactly like the real SDK.
+  // A deferred `start` mints a brand-new SDK session id, distinct from the handle
+  // the relay called with. That distinctness is the point: it is what forces the
+  // relay to move the BINDING while leaving its own session id alone, exactly like
+  // the real SDK.
   const sessionId =
     cmd.type === "start"
       ? `claude-real-session-${(counter += 1)}`
@@ -90,7 +92,7 @@ for await (const line of rl) {
     process.exit(0);
   }
 
-  // 1. Promote / announce the session. Transcript is still empty here.
+  // 1. Announce the session. Transcript is still empty here.
   if (cmd.type === "start" || cmd.type === "resume") {
     send({
       type: "session_started",
@@ -100,7 +102,7 @@ for await (const line of rl) {
     });
   }
 
-  // The worker-owned identity of the first user message. The relay's pending
+  // The worker-owned identity of the first user message. The relay's deferred
   // `start` omits ids, so the worker mints its own — diverging from the relay
   // turn id start_turn() returns.
   let replayUserMessage = null;
@@ -118,7 +120,7 @@ for await (const line of rl) {
 
   // 2. Resolve the request so send_request() / start_turn() returns. Mirror the
   //    real worker by attaching initial_user_message to the start response — the
-  //    relay's pending path ignores it, which is the heart of the bug.
+  //    relay's deferred path ignores it, which is the heart of the bug.
   if (cmd.id !== undefined && cmd.id !== null) {
     let result;
     if (cmd.type === "start" || cmd.type === "resume") {

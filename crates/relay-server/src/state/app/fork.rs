@@ -492,9 +492,8 @@ impl AppState {
                 // Lineage was recorded above so the branch is linked the moment
                 // it appears, but the fork never actually started. Keeping the
                 // row would persist a link to a thread that carries none of the
-                // source's context — and for Claude the id is a
-                // `claude-pending-*` placeholder that is now never promoted, so
-                // the entry could never be cleaned up later either.
+                // source's context — and for a deferred Claude session no provider
+                // thread was ever created, so nothing later would clean it up.
                 let mut relay = self.relay.write().await;
                 relay.clear_thread_forked_from(&started_thread_id);
             }

@@ -141,11 +141,10 @@ pub struct SessionSnapshot {
     #[serde(default)]
     pub beta_features_enabled: bool,
     pub active_thread_id: Option<String>,
-    /// When the ACTIVE thread was promoted from a deferred `claude-pending-…`
-    /// id at first send: that pending id. Authoritative promotion signal for
-    /// every client (observers included) — the active-id sequence alone cannot
-    /// distinguish a promotion from a normal thread switch. `#[serde(default)]`
-    /// keeps older peers parseable; consumers treat absence as "no promotion".
+    /// Always `None`. A session's public id no longer changes, so there is no
+    /// promotion left to report; the field stays on the wire for one release so a
+    /// saved client that still reads it parses this snapshot. Removed with the
+    /// frontend code that consumes it.
     #[serde(default)]
     pub active_thread_promoted_from: Option<String>,
     /// The ACTIVE thread is a task reviewer: readable, never conversable. Clients

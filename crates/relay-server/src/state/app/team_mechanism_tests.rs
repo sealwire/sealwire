@@ -1,6 +1,6 @@
 // Public task-team mechanism tests.
 //
-// These pin relay-owned behavior only: thread-id promotion, git safety,
+// These pin relay-owned behavior only: seat/thread identity, git safety,
 // workspace/path isolation, public views, and lifecycle authorization. The
 // workflow scenarios and prompt-shaped assertions live in the private crate.
 
@@ -1962,79 +1962,6 @@ async fn missing_workspace_is_not_flattened_into_an_absent_commit_or_merge_base(
 }
 
 #[tokio::test]
-async fn a_claude_style_pending_promotion_keeps_every_team_seat_addressable() {
-    // The failure this pins: Claude mints a synthetic `claude-pending-*` id and
-    // only swaps in the real session id once the first turn starts. Every team
-    // seat is background-started, so any of them can be promoted mid-turn. A
-    // driver still holding the pending id finds no runtime, reads that as "not
-    // working", and treats a running turn as finished — losing that agent's
-    // output entirely. No fake provider models this, so it has to be asserted
-    // on the record directly.
-    let (_repo, root) = init_team_repo().await;
-    let (app, providers) = build_review_app(&root, &["codex"]).await;
-    providers
-        .get("codex")
-        .unwrap()
-        .complete_turns
-        .store(false, Ordering::Relaxed);
-    let run_id = app
-        .start_team_run(team_input(&root))
-        .await
-        .expect("the team should start");
-
-    // Put a pending id in every seat the driver can address.
-    {
-        let mut relay = app.relay.write().await;
-        relay.update_team_run(&run_id, |run| {
-            run.tl_thread_id = "claude-pending-1".to_string();
-            run.run_owned_thread_ids = vec!["claude-pending-1".to_string()];
-            run.sub_tasks = vec![crate::state::SubTask {
-                id: "s1".to_string(),
-                dev_thread_id: Some("claude-pending-1".to_string()),
-                reviewer_thread_id: Some("claude-pending-1".to_string()),
-                owned_thread_ids: vec!["claude-pending-1".to_string()],
-                ..crate::state::SubTask::default()
-            }];
-        });
-        relay.promote_background_thread("claude-pending-1", "sess-real");
-    }
-
-    let run = app.relay.read().await.team_run(&run_id).cloned().unwrap();
-    assert_eq!(
-        run.tl_thread_id, "sess-real",
-        "the TL seat must follow the promotion"
-    );
-    assert_eq!(
-        run.thread_in_slot(crate::state::TeamThreadSlot::Tl)
-            .as_deref(),
-        Some("sess-real")
-    );
-    assert_eq!(
-        run.thread_in_slot(crate::state::TeamThreadSlot::SubTaskDev(0))
-            .as_deref(),
-        Some("sess-real"),
-    );
-    assert_eq!(
-        run.thread_in_slot(crate::state::TeamThreadSlot::SubTaskReviewer(0))
-            .as_deref(),
-        Some("sess-real"),
-    );
-    assert_eq!(
-        run.thread_in_slot(crate::state::TeamThreadSlot::RunOwned(0))
-            .as_deref(),
-        Some("sess-real"),
-        "design/MR reviewers live here and were previously unreachable",
-    );
-    assert!(
-        !run.owned_thread_ids()
-            .iter()
-            .any(|id| id.starts_with("claude-pending-")),
-        "no seat may still name a dead pending id: {:?}",
-        run.owned_thread_ids()
-    );
-}
-
-#[tokio::test]
 async fn commit_failures_propagate_instead_of_being_swallowed() {
     // The shape being pinned: "nothing to commit" is success, but a git
     // failure must NOT be mistaken for it. Swallowing one means the MR gate
@@ -2635,23 +2562,22 @@ impl relay_api::TeamDriver for OneDevTurnDriver {
 }
 
 #[tokio::test]
-async fn a_dev_seat_start_that_fails_after_promotion_stops_the_session_it_really_started() {
+async fn a_dev_seat_start_that_fails_after_the_session_exists_stops_it() {
     // The worst instance of the deferred-start orphan, because a Dev seat is
     // WRITE-CAPABLE: `team_thread_settings` gives a non-reviewer Claude seat
     // ("bypass", default_sandbox) — full write access with no approval prompts.
     //
-    // A clean seat is a `claude-pending-…` placeholder until its FIRST turn creates
-    // the SDK session, and that promotion happens inside `start_turn`. On a start
-    // that fails only AFTER the session was created, the id the driver sent to has
-    // no runtime left — so `observe_turn_liveness` saw nothing, skipped the stop
-    // entirely, and the run settled and released its cwd lock while a bypass-mode
-    // agent kept editing the task worktree.
+    // A clean seat has no SDK session until its FIRST turn creates one, inside
+    // `start_turn`. On a start that fails only AFTER that, the seat's cleanup has to
+    // reach the live session through the binding; anything else sees no live turn,
+    // skips the stop, and lets the run settle and release its cwd lock while a
+    // bypass-mode agent keeps editing the task worktree.
     let (_repo, root) = init_team_repo().await;
     let (app, providers) = build_review_app(&root, &["codex", "claude_code"]).await;
     let claude = providers.get("claude_code").unwrap().clone();
     claude.deferred_start.store(true, Ordering::Relaxed);
     claude
-        .fail_turn_after_promotion
+        .fail_turn_after_materialization
         .store(true, Ordering::Relaxed);
     let observed = std::sync::Arc::new(Mutex::new(None));
     let app = app.with_team_driver(std::sync::Arc::new(OneDevTurnDriver {
@@ -2669,26 +2595,29 @@ async fn a_dev_seat_start_that_fails_after_promotion_stops_the_session_it_really
         .clone()
         .expect("the driver ran a dev turn");
     assert!(
-        sent_to.starts_with("claude-pending-"),
-        "the seat starts as a placeholder: {sent_to}"
+        sent_to.starts_with("session-"),
+        "the driver addresses the seat by its relay session id: {sent_to}"
     );
     assert!(
         matches!(outcome, relay_api::team::TeamTurnOutcome::Failed(_)),
         "the lost start response surfaces as a failed turn: {outcome:?}"
     );
 
-    let promoted = {
+    let provider_handle = {
         let relay = app.relay.read().await;
-        relay
-            .runtimes
-            .keys()
-            .find(|id| id.starts_with("claude_code-session-"))
-            .cloned()
-            .expect("the seat was promoted to a real session id")
+        let handle = relay
+            .resolve_session_target(&sent_to)
+            .expect("the seat still resolves")
+            .provider_handle;
+        assert_ne!(
+            handle, sent_to,
+            "the failed turn still created the SDK session behind the seat"
+        );
+        handle
     };
     let interrupts = claude.interrupts.lock().await.clone();
     assert!(
-        interrupts.iter().any(|id| id == &promoted),
+        interrupts.iter().any(|id| id == &provider_handle),
         "the write-capable session that actually started must be interrupted, not \
 abandoned (interrupted: {interrupts:?})"
     );
@@ -2696,7 +2625,7 @@ abandoned (interrupted: {interrupts:?})"
         !app.relay
             .read()
             .await
-            .runtime_for_thread(&promoted)
+            .runtime_for_thread(&sent_to)
             .is_some_and(|runtime| runtime.is_working()),
         "no seat may still be writing the worktree once the run has settled"
     );
@@ -2784,96 +2713,6 @@ async fn a_run_owned_thread_attributes_to_the_seat_it_was_started_as() {
         Some("reviewer"),
         "a run-owned seat that billed under no role at all is spend nobody can \
 trace: 38% of one real run landed in that bucket"
-    );
-}
-
-/// The role map is keyed BY the thread id, so a promotion that skipped it
-/// strands the role on a dead thread and the live seat bills under none.
-#[tokio::test]
-async fn a_promoted_run_owned_seat_keeps_the_role_it_was_started_as() {
-    let (_repo, root) = init_team_repo().await;
-    let (app, _providers) = build_review_app(&root, &["codex"]).await;
-    let run_id = app
-        .start_team_run(team_input(&root))
-        .await
-        .expect("the team should start");
-
-    {
-        let mut relay = app.relay.write().await;
-        relay.update_team_run(&run_id, |run| {
-            run.record_run_thread("claude-pending-mr-dev");
-            run.record_run_thread_role("claude-pending-mr-dev", relay_api::team::TeamRole::Dev);
-        });
-        relay.promote_background_thread("claude-pending-mr-dev", "sess-mr-dev");
-    }
-
-    let relay = app.relay.read().await;
-    let run = relay.team_run(&run_id).cloned().expect("the run is live");
-    assert!(
-        run.run_owned_thread_ids
-            .iter()
-            .any(|id| id == "sess-mr-dev"),
-        "the id itself has always followed the promotion"
-    );
-    assert_eq!(
-        run.run_owned_thread_roles
-            .get("sess-mr-dev")
-            .map(String::as_str),
-        Some("dev"),
-        "the role is keyed by thread id, so it has to be re-keyed with it"
-    );
-    assert!(
-        !run.run_owned_thread_roles
-            .contains_key("claude-pending-mr-dev"),
-        "the dead id must not linger as a second entry"
-    );
-    assert_eq!(
-        relay.thread_attribution("sess-mr-dev").role.as_deref(),
-        Some("dev"),
-        "spend after a promotion must still name the seat that made it"
-    );
-}
-
-/// This seat WRITES, so a drain that missed it would leave files changing after
-/// the run's locks were released.
-#[tokio::test]
-async fn the_mr_revision_dev_is_rekeyed_and_drained_like_every_other_seat() {
-    let (_repo, root) = init_team_repo().await;
-    let (app, _providers) = build_review_app(&root, &["codex"]).await;
-    let run_id = app
-        .start_team_run(team_input(&root))
-        .await
-        .expect("the team should start");
-
-    {
-        let mut relay = app.relay.write().await;
-        relay.update_team_run(&run_id, |run| {
-            run.mr_dev_thread_id = Some("claude-pending-mr".to_string());
-        });
-        relay.promote_background_thread("claude-pending-mr", "sess-mr");
-    }
-
-    let run = app
-        .relay
-        .read()
-        .await
-        .team_run(&run_id)
-        .cloned()
-        .expect("the run is live");
-    assert_eq!(
-        run.mr_dev_thread_id.as_deref(),
-        Some("sess-mr"),
-        "a seat still holding a promoted-away id reads as idle while it is working"
-    );
-    assert_eq!(
-        run.thread_in_slot(crate::state::TeamThreadSlot::MrDev)
-            .as_deref(),
-        Some("sess-mr"),
-        "the slot re-resolves rather than handing back what it captured"
-    );
-    assert!(
-        run.owned_thread_ids().iter().any(|id| id == "sess-mr"),
-        "the seat that writes must be in the set the drain walks"
     );
 }
 

@@ -9,6 +9,8 @@ mod fake_provider;
 mod file_changes;
 mod host_guard;
 mod instance_lock;
+#[cfg(test)]
+mod legacy_promotion_audit;
 mod orchestrator_tools;
 mod protocol;
 #[cfg(test)]

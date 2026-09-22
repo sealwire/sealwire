@@ -77,7 +77,7 @@ fn new_ask_id() -> String {
 
 /// What `precheck_ask` established, so `ask_agent` does not read it all again.
 struct PrecheckedAsk {
-    /// The asker after promotion is resolved — what every later write must name.
+    /// The asker, canonicalized — what every later write must name.
     asker_thread_id: String,
     message: String,
     asker_cwd: String,
@@ -195,7 +195,7 @@ impl AppState {
                 .ask_agent_filling(&asker, request, Some(background_ask_id.clone()))
                 .await
             {
-                app.fail_detached_ask(&background_ask_id, &asker, error.message())
+                app.fail_detached_ask(&background_ask_id, error.message())
                     .await;
             }
         });
@@ -205,21 +205,12 @@ impl AppState {
     /// Report an accepted delegate's failure on the record the panel is showing, rather
     /// than in a log the phone never renders — that card is all the caller ever gets.
     ///
-    /// The asker is re-resolved because the failure can BE the promotion: a brief that
-    /// created the session and then wrote nothing leaves the record on an id that
-    /// resolves to no workspace, which every scoped device filters the card out of.
-    pub(super) async fn fail_detached_ask(
-        &self,
-        ask_id: &str,
-        asker_thread_id: &str,
-        reason: String,
-    ) {
+    /// The record already exists and already names its asker: `ask_agent_detached`
+    /// writes it before answering the caller, precisely so a failure in the minutes
+    /// that follow has somewhere to land.
+    pub(super) async fn fail_detached_ask(&self, ask_id: &str, reason: String) {
         let mut relay = self.relay.write().await;
-        let asker_thread_id = relay.resolve_promoted_thread_id(asker_thread_id);
-        relay.update_ask(ask_id, |ask| {
-            ask.asker_thread_id = asker_thread_id;
-            ask.fail(reason);
-        });
+        relay.update_ask(ask_id, |ask| ask.fail(reason));
         relay.notify();
     }
 
@@ -244,13 +235,8 @@ impl AppState {
         // before anything else so a missing asker fails before a thread is
         // started rather than after.
         //
-        // Resolving the promotion is part of THIS read, not a separate one: a
-        // deferred-start session is promoted by its first turn while clients still hold
-        // the id they were shown, and a promotion landing between two reads would refuse
-        // a session that is alive.
         let (asker_thread_id, asker_cwd, asker_approval, asker_sandbox, asker_provider, peers) = {
             let relay = self.relay.read().await;
-            let asker_thread_id = &relay.resolve_promoted_thread_id(asker_thread_id);
             let cwd = relay
                 .thread_cwd(asker_thread_id)
                 .ok_or(AskError::NoSuchAsker)?;
@@ -304,7 +290,7 @@ impl AppState {
                 .or_else(|| relay.provider_hint_for_thread(asker_thread_id))
                 .unwrap_or_default();
             (
-                asker_thread_id.clone(),
+                asker_thread_id.to_string(),
                 cwd,
                 defaults_approval,
                 defaults_sandbox,
@@ -375,31 +361,12 @@ Carry on with one of those instead of bringing in another."
         // A person's one-liner becomes a brief before anyone else sees it. This
         // costs a turn on the asking agent, which is why it is opt-in: an agent
         // calling the tool already wrote its message with the context in view.
-        // It hands back the id it ran under too: the brief is the asker's FIRST turn, so
-        // a deferred start is promoted by it and everything below would name a dead id.
-        let (asker_thread_id, message) =
-            if request.started_by == relay_api::delegation::StartedBy::Person {
-                self.brief_from_asker(&asker_thread_id, &message).await?
-            } else {
-                (asker_thread_id, message)
-            };
+        let message = if request.started_by == relay_api::delegation::StartedBy::Person {
+            self.brief_from_asker(&asker_thread_id, &message).await?
+        } else {
+            message
+        };
         let asker_thread_id = asker_thread_id.as_str();
-
-        // Onto the accepted record NOW, ahead of starting the peer and everything else
-        // that can fail: a failure filed under the retired id reaches no device, and that
-        // card is all a caller answered ahead of the work ever gets.
-        if let Some(ask_id) = existing_ask_id.as_deref() {
-            let mut relay = self.relay.write().await;
-            if relay
-                .ask(ask_id)
-                .is_some_and(|ask| ask.asker_thread_id != asker_thread_id)
-            {
-                relay.update_ask(ask_id, |ask| {
-                    ask.asker_thread_id = asker_thread_id.to_string()
-                });
-                relay.notify();
-            }
-        }
 
         // Re-read rather than reuse what the precheck saw: writing the brief can take
         // minutes, and a narrowing in that window must bind the peer. Otherwise the peer
@@ -529,20 +496,14 @@ Carry on with one of those instead of bringing in another."
             .await
         {
             Ok(dispatched) => {
-                // A deferred-start provider promotes its placeholder during this
-                // very call, so the id the ask was recorded against is already
-                // stale. Fix it here; nobody else can.
                 {
                     let mut relay = self.relay.write().await;
-                    relay.update_ask(&ask_id, |ask| {
-                        // Which turn to listen for. Without it a reply meant for
-                        // somebody else gets handed back as this ask's answer.
-                        ask.turn_id = dispatched.turn_id.clone();
-                        ask.peer_thread_id = dispatched.thread_id.clone();
-                    });
+                    // Which turn to listen for. Without it a reply meant for
+                    // somebody else gets handed back as this ask's answer.
+                    relay.update_ask(&ask_id, |ask| ask.turn_id = dispatched.turn_id.clone());
                     relay.notify();
                 }
-                Ok(dispatched.thread_id)
+                Ok(peer_thread_id)
             }
             Err(error) => {
                 let reason = error.to_string();
@@ -600,22 +561,17 @@ Carry on with one of those instead of bringing in another."
     ///
     /// `deadline` is the delegate's ONE budget, shared with the turn that follows: both are
     /// the same person waiting for the same answer, and the desktop route blocks on it.
-    /// Returns the id to actually send to: a deferred start promotes the asker while we
-    /// wait, and the placeholder stops routing the moment it does.
     async fn wait_for_asker_idle(
         &self,
         thread_id: &str,
         deadline: tokio::time::Instant,
-    ) -> Result<String, AskError> {
+    ) -> Result<(), AskError> {
         let mut changes = self.subscribe();
         loop {
             {
                 let relay = self.relay.read().await;
-                // Re-resolved every pass, not once: the promotion can land at any point in
-                // this wait, and afterwards only the real id has a runtime to ask about.
-                let effective = relay.resolve_promoted_thread_id(thread_id);
-                match relay.runtime_for_thread(&effective) {
-                    Some(runtime) if !runtime.has_live_turn() => return Ok(effective),
+                match relay.runtime_for_thread(thread_id) {
+                    Some(runtime) if !runtime.has_live_turn() => return Ok(()),
                     None => return Err(AskError::NoSuchAsker),
                     Some(_) => {}
                 }
@@ -643,19 +599,18 @@ write the brief — try again once it is done"
     /// No tools involved — this is an ordinary turn — so it works for every
     /// provider, including ones that can never be given a tool.
     ///
-    /// Returns the id it ran under as well, which a deferred start's own brief promotes.
     async fn brief_from_asker(
         &self,
         asker_thread_id: &str,
         task: &str,
-    ) -> Result<(String, String), AskError> {
+    ) -> Result<String, AskError> {
         // ONE budget for the whole delegate — queueing behind another turn and waiting for
         // our own are the same person waiting, and the desktop route blocks on the total.
         let deadline = tokio::time::Instant::now() + BRIEF_WAIT_BUDGET;
         // Same rule `wake_idle_askers` already holds: a message cannot interrupt a running
         // turn. Sending anyway is worse than waiting — Claude and ACP both overwrite the
         // live turn's id on the way in, so the turn that answers is not the one waited on.
-        let asker_thread_id = &self.wait_for_asker_idle(asker_thread_id, deadline).await?;
+        self.wait_for_asker_idle(asker_thread_id, deadline).await?;
         // What it had already said, so a stale reply cannot be read as the brief.
         let baseline = self
             .latest_assistant_entry(asker_thread_id)
@@ -667,8 +622,6 @@ write the brief — try again once it is done"
             .await
             .map_err(|error| AskError::Failed(format!("could not ask for a brief: {error}")))?;
 
-        // The id may have been promoted by this very turn.
-        let asker_thread_id = dispatched.thread_id.as_str();
         // An UNCERTAIN start (see `DispatchedTurn`): the provider may be working, but
         // nothing it writes could be matched to what we asked, so there is no brief to
         // wait for.
@@ -693,7 +646,7 @@ write the brief — try again once it is done"
             .await;
         match crate::state::delegation::brief_from_reply(entry, baseline.as_deref(), Some(turn_id))
         {
-            Some(text) => Ok((asker_thread_id.to_string(), text)),
+            Some(text) => Ok(text),
             // Nothing new, nothing said, or said in some other turn. Sending the raw
             // words is worse than failing: the peer would act on an instruction with
             // no referent.
@@ -1213,11 +1166,8 @@ impl AppState {
                 .send_message_to_thread(&asker, &message, None, None)
                 .await
             {
-                // A deferred-start provider creates its session inside this call, so the
-                // goal moved to the real id while we were in it; closing the dispatch on
-                // the id we sent to would leave the real one looking never-started.
                 Ok(dispatched) if charged => {
-                    self.goal_dispatch_landed(&dispatched.thread_id, dispatched.turn_id.clone())
+                    self.goal_dispatch_landed(&asker, dispatched.turn_id.clone())
                         .await
                 }
                 Ok(_) => {}

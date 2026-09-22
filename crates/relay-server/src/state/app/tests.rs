@@ -4352,52 +4352,6 @@ tree; got {}",
         assert!(app.relay.read().await.thread_custom_name("t1").is_none());
     }
 
-    /// A rename can race the pending→real promotion, and must not be lost to it.
-    ///
-    /// A Claude session is renamable the moment its tab appears, while it still lives
-    /// under a synthetic `claude-pending-…` id. Promotion happens on the first send, and
-    /// clients only learn about it from the NEXT snapshot — so a rename sent in that
-    /// window arrives naming an id the relay has already retired. Writing it verbatim
-    /// would return 200 while storing the title under a dead key: invisible to every
-    /// reader, and orphaned forever in a persisted map (no cleanup path ever sees a
-    /// pending id again).
-    #[tokio::test]
-    async fn rename_thread_follows_a_session_that_was_promoted_mid_flight() {
-        let (app, _p, _o) = build_app("/tmp/rename-promotion").await;
-        seed_thread_cwd(&app, "real-7", "/tmp/rename-promotion").await;
-        {
-            let mut relay = app.relay.write().await;
-            relay.promote_background_thread("claude-pending-7", "real-7");
-        }
-
-        // The client is still holding the pending id it was shown.
-        let receipt = app
-            .rename_thread(
-                "claude-pending-7",
-                RenameThreadInput {
-                    name: Some("Auth work".to_string()),
-                    device_id: None,
-                },
-            )
-            .await
-            .expect("rename");
-
-        let relay = app.relay.read().await;
-        assert_eq!(
-            relay.thread_custom_name("real-7"),
-            Some("Auth work".to_string()),
-            "the rename must follow the promotion to the real session id"
-        );
-        assert!(
-            relay.thread_custom_name("claude-pending-7").is_none(),
-            "a write under the retired id would orphan in a persisted map"
-        );
-        assert_eq!(
-            receipt.thread_id, "real-7",
-            "the receipt tells the client which session it actually renamed"
-        );
-    }
-
     /// A title is per-SESSION metadata, and sessions are scope-filtered — so a paired
     /// device that cannot SEE a session must not be able to relabel it for everyone
     /// else. Every other per-thread operation (list, transcript, resume, send, review,
@@ -10427,13 +10381,12 @@ tree; got {}",
         );
     }
 
-    // Withholding the prompt from `start_thread` (required to carry images)
-    // puts Claude on its synthetic `claude-pending-*` deferred-start path, and
-    // the relay records fork lineage against that placeholder BEFORE the first
-    // turn is sent. `thread_forked_from` is persisted, so if that turn fails —
-    // a vision-less model rejecting the image, a worker crash — the placeholder
-    // never gets promoted and the lineage row survives every restart. A failed
-    // fork must not leave durable lineage behind.
+    // Withholding the prompt from `start_thread` (required to carry images) puts
+    // Claude on its deferred-start path, and the relay records fork lineage under the
+    // new session's stable id BEFORE the first turn is sent. `thread_forked_from` is
+    // persisted, so if that turn fails — a vision-less model rejecting the image, a
+    // worker crash — the session never materializes and the row has to be removed, or
+    // it survives every restart. A failed fork must not leave durable lineage behind.
     #[tokio::test]
     async fn a_failed_image_fork_leaves_no_persisted_lineage_behind() {
         let project = TempDir::new().expect("project tempdir");
@@ -14392,29 +14345,25 @@ mod review_tests {
         // models a provider whose updated_at is a bumpable mtime (like Codex) →
         // resume freezes (or-insert) to avoid click-to-top creep.
         report_activity_time: Arc<AtomicBool>,
-        // When true, models Claude's DEFERRED START: `start_thread` with no
-        // initial prompt cannot get a session id out of the SDK, so it hands back
-        // a synthetic `claude-pending-…` placeholder and the real session is only
-        // created by the FIRST turn — which promotes the placeholder to the real
-        // id (`RelayState::promote_background_thread`) before `start_turn`
-        // returns, exactly as `claude.rs` does off the worker's ordered stdout.
-        // Codex has no such phase: `thread/start` returns a real id.
+        // When true, models Claude's DEFERRED START: `start_thread` with no initial
+        // prompt cannot get a session id out of the SDK, so it reports no provider
+        // thread id and hands back a `claude-pending-…` BRIDGE HANDLE. The real
+        // session is created by the FIRST turn, which materializes the binding
+        // before `start_turn` returns — exactly as `claude.rs` does off the worker's
+        // ordered stdout. Codex has no such phase: `thread/start` returns a real id.
         deferred_start: Arc<AtomicBool>,
-        // When true, a turn that PROMOTED a deferred-start placeholder then loses its
+        // When true, a turn that MATERIALIZED a deferred-start session then loses its
         // start response — the SDK session exists and is running, but the caller only
-        // sees an error. Distinct from `fail_next_turn_with`, which fails BEFORE
-        // promotion (nothing was ever created). This is the shape where an orphaned
-        // agent can keep working after its run is torn down.
-        fail_turn_after_promotion: Arc<AtomicBool>,
+        // sees an error. Distinct from `fail_next_turn_with`, which fails before the
+        // session was ever created. This is the shape where an orphaned agent can
+        // keep working after its run is torn down.
+        fail_turn_after_materialization: Arc<AtomicBool>,
         // When true, the turn runs to completion BEFORE `start_turn` returns.
         // The relay reads a provider's stdout on its own task, so a turn's terminal
         // line can be processed while the caller of `start_turn` is still waiting to
         // re-acquire the relay lock — the caller then writes its turn bookkeeping on
         // top of already-settled state.
         settle_turn_before_start_returns: Arc<AtomicBool>,
-        // placeholder id -> the real id its first turn promoted it to, drained by
-        // `resolve_started_thread_id` exactly as the Claude bridge does.
-        promoted_thread_ids: Arc<Mutex<HashMap<String, String>>>,
         // (reason, kind), one-shot: the NEXT turn that would otherwise complete
         // normally instead ends as a FAILED terminal — an `Error` transcript entry
         // (status "failed", carrying the turn id) and NO assistant message, exactly
@@ -14490,57 +14439,73 @@ mod review_tests {
                 complete_delay_ms: Arc::new(AtomicU64::new(15)),
                 report_activity_time: Arc::new(AtomicBool::new(false)),
                 deferred_start: Arc::new(AtomicBool::new(false)),
-                fail_turn_after_promotion: Arc::new(AtomicBool::new(false)),
+                fail_turn_after_materialization: Arc::new(AtomicBool::new(false)),
                 settle_turn_before_start_returns: Arc::new(AtomicBool::new(false)),
-                promoted_thread_ids: Arc::new(Mutex::new(HashMap::new())),
                 fail_completed_turn_with: Arc::new(Mutex::new(None)),
                 report_turn_usage: Arc::new(Mutex::new(None)),
                 next_id: Arc::new(AtomicU64::new(1)),
             }
         }
 
-        /// Promote a `claude-pending-…` placeholder to a real session id, the way
+        /// Create the SDK session a `claude-pending-…` handle stood in for, the way
         /// `claude.rs` does when the worker's `session_started` lands (which the
         /// relay processes BEFORE the `start` response resolves `start_turn`).
-        /// Returns the real id the rest of the turn runs under.
-        async fn promote_pending_thread(&self, pending_id: &str) -> String {
-            let real_id = self.next_token("session");
+        ///
+        /// The bridge re-keys its OWN storage to the new provider id; relay-owned
+        /// state keeps the session id it already had, because only the binding moves.
+        /// Returns `(relay session id, provider thread id)` — deliberately two
+        /// values, so a caller cannot use one where it means the other.
+        async fn materialize_pending_thread(&self, pending_handle: &str) -> (String, String) {
+            let provider_thread_id = self.next_token("session");
             let cwd = {
                 let cwds = self.start_thread_cwds.lock().await;
                 cwds.iter()
-                    .find(|(id, _)| id == pending_id)
+                    .find(|(id, _)| id == pending_handle)
                     .map(|(_, cwd)| cwd.clone())
                     .unwrap_or_default()
             };
-            let mut summary = self.summary(&real_id, &cwd);
+            let mut summary = self.summary(&provider_thread_id, &cwd);
             summary.status = "active".to_string();
             {
                 let mut threads = self.threads.lock().await;
-                threads.remove(pending_id);
-                threads.insert(real_id.clone(), summary.clone());
+                threads.remove(pending_handle);
+                threads.insert(provider_thread_id.clone(), summary.clone());
             }
             self.start_thread_cwds
                 .lock()
                 .await
-                .push((real_id.clone(), cwd.clone()));
-            {
+                .push((provider_thread_id.clone(), cwd.clone()));
+            let session_id = {
                 let mut relay = self.state.write().await;
-                // claude.rs moves the ACTIVE pointer first when the promoted thread is
-                // the user's own (claude.rs:1136-1143); a workflow's author turn runs
-                // on exactly such a thread.
-                if relay.active_thread_id.as_deref() == Some(pending_id) {
-                    relay.active_thread_id = Some(real_id.clone());
-                }
-                relay.promote_background_thread(pending_id, &real_id);
-                // claude.rs upserts the real row off the same `session_started`.
+                let session_id = relay
+                    .materialize_deferred_session_binding(
+                        self.name,
+                        pending_handle,
+                        &provider_thread_id,
+                    )
+                    .expect("deferred binding materialization")
+                    .unwrap_or_else(|| {
+                        panic!("deferred start '{pending_handle}' has no stable binding")
+                    });
+                // claude.rs upserts the row off the same `session_started`, under the
+                // id the relay owns rather than the one the SDK just minted.
+                summary.id = session_id.clone();
                 relay.upsert_thread(summary);
                 relay.notify();
-            }
-            self.promoted_thread_ids
-                .lock()
+                session_id
+            };
+            (session_id, provider_thread_id)
+        }
+
+        /// The relay session a provider handle belongs to. Relay-owned state is
+        /// never keyed by a handle, so every write this double makes on a bridge
+        /// argument has to come back through the binding first.
+        async fn relay_session(&self, provider_handle: &str) -> String {
+            self.state
+                .read()
                 .await
-                .insert(pending_id.to_string(), real_id.clone());
-            real_id
+                .session_for_provider_handle(self.name, provider_handle)
+                .unwrap_or_else(|| provider_handle.to_string())
         }
 
         async fn cwd_for_thread(&self, thread_id: &str) -> Option<String> {
@@ -14743,10 +14708,11 @@ mod review_tests {
             let initial_prompt = request.initial_prompt.as_deref();
             let _ = (model, approval_policy, sandbox, initial_prompt);
 
-            // Claude's deferred start: no prompt means the SDK cannot mint a
-            // session id yet, so the bridge hands back a synthetic placeholder and
-            // creates the real session on the first turn.
-            let id = if self.deferred_start.load(Ordering::Relaxed) && initial_prompt.is_none() {
+            // Claude's deferred start: no prompt means the SDK cannot mint a session
+            // id yet, so the bridge hands back a temporary handle and reports that it
+            // has no provider thread id. The real session is created on the first turn.
+            let deferred = self.deferred_start.load(Ordering::Relaxed) && initial_prompt.is_none();
+            let id = if deferred {
                 format!(
                     "claude-pending-{}",
                     self.next_id.fetch_add(1, Ordering::Relaxed)
@@ -14770,7 +14736,7 @@ mod review_tests {
                 sandbox.to_string(),
             ));
             Ok(crate::provider::StartThreadResult {
-                provider_thread_id: Some(thread.id.clone()),
+                provider_thread_id: (!deferred).then(|| thread.id.clone()),
                 thread,
                 consumed_initial_prompt: false,
                 initial_user_message: None,
@@ -14912,6 +14878,10 @@ mod review_tests {
             effort: &str,
             _images: &[ProviderImage],
         ) -> Result<Option<String>, String> {
+            // The id the BRIDGE was called under, kept for the call log below: for a
+            // deferred first turn that is the pending handle, not the session id the
+            // relay keeps its own state under.
+            let called_under = thread_id.to_string();
             // A thread evicted by a simulated restart can't run a turn until it has
             // been re-loaded via resume_thread (mirrors Codex needing thread/resume).
             if self.unloaded_threads.lock().await.contains(thread_id) {
@@ -14934,7 +14904,7 @@ mod review_tests {
                 if self.fail_next_turn_live.load(Ordering::Relaxed) {
                     let delay = self.fail_next_turn_live_delay_ms.load(Ordering::Relaxed);
                     let state = self.state.clone();
-                    let thread_id = thread_id.to_string();
+                    let thread_id = self.relay_session(thread_id).await;
                     let turn = self.next_token("turn");
                     tokio::spawn(async move {
                         sleep(Duration::from_millis(delay)).await;
@@ -14957,25 +14927,35 @@ mod review_tests {
                     return Err(error);
                 }
             }
-            // Claude's deferred start: the first turn on a `claude-pending-…`
-            // placeholder is what creates the SDK session. The relay learns the real
-            // id — and moves the runtime, the reviewer map and the review job onto it
-            // — from the worker's `session_started`, which it processes BEFORE the
-            // `start` response resolves this call (claude.rs:823).
+            // Claude's deferred start: the first turn on a `claude-pending-…` handle
+            // is what creates the SDK session. The relay learns the real provider id
+            // from the worker's `session_started`, which it processes BEFORE the
+            // `start` response resolves this call (claude.rs:823), and binds it to the
+            // session id it already had.
             //
             // Deliberately AFTER the failure hooks above: a `start` that errors
             // restores the pending config and never emits `session_started`
-            // (claude.rs:814), so a failed first turn leaves the placeholder — and the
-            // fact that it never ran — completely intact.
-            let promoted = if thread_id.starts_with("claude-pending-") {
-                Some(self.promote_pending_thread(thread_id).await)
+            // (claude.rs:814), so a failed first turn leaves the handle — and the fact
+            // that it never ran — completely intact.
+            let materialized = if thread_id.starts_with("claude-pending-") {
+                Some(self.materialize_pending_thread(thread_id).await)
             } else {
                 None
             };
-            let thread_id: &str = promoted.as_deref().unwrap_or(thread_id);
-            if promoted.is_some() && self.fail_turn_after_promotion.load(Ordering::Relaxed) {
+            // Relay-owned bookkeeping below keys off the session id; the bridge's own
+            // transcript store keys off the provider id, which is what `read_thread`
+            // is later called with. Every LATER turn arrives on the created SDK id,
+            // so the split has to survive the materializing turn, not just make it.
+            let (session_id, provider_thread_id) = match &materialized {
+                Some((session, provider)) => (session.clone(), provider.clone()),
+                None => (self.relay_session(thread_id).await, thread_id.to_string()),
+            };
+            let thread_id: &str = session_id.as_str();
+            if materialized.is_some()
+                && self.fail_turn_after_materialization.load(Ordering::Relaxed)
+            {
                 // The session was created and the prompt delivered; only the response
-                // was lost. Publish liveness on the PROMOTED id so there is something
+                // was lost. Publish liveness on the created session so there is something
                 // real for cleanup to find — and fail to stop.
                 let mut relay = self.state.write().await;
                 relay.set_thread_status(thread_id, "active".to_string(), Vec::new());
@@ -14985,9 +14965,9 @@ mod review_tests {
             self.turns
                 .lock()
                 .await
-                .push((thread_id.to_string(), text.to_string()));
+                .push((called_under.clone(), text.to_string()));
             self.turn_models.lock().await.push((
-                thread_id.to_string(),
+                called_under,
                 model.to_string(),
                 effort.to_string(),
             ));
@@ -15035,6 +15015,7 @@ mod review_tests {
             let state = self.state.clone();
             let transcripts = self.transcripts.clone();
             let thread_id = thread_id.to_string();
+            let provider_thread_id = provider_thread_id.clone();
             let user_text = text.to_string();
             let turn = turn_id.clone();
             let user_item = self.next_token("user");
@@ -15206,7 +15187,7 @@ mod review_tests {
                     relay.notify();
                 }
                 let mut transcripts = transcripts.lock().await;
-                let entries = transcripts.entry(thread_id).or_default();
+                let entries = transcripts.entry(provider_thread_id).or_default();
                 entries.push(TranscriptEntryView {
                     row_id: None,
                     order_seq: None,
@@ -15453,7 +15434,7 @@ mod review_tests {
                     relay.notify();
                 }
                 let mut transcripts = transcripts.lock().await;
-                let entries = transcripts.entry(thread_id).or_default();
+                let entries = transcripts.entry(provider_thread_id).or_default();
                 entries.push(TranscriptEntryView {
                     row_id: None,
                     order_seq: None,
@@ -15507,8 +15488,9 @@ mod review_tests {
             // Simulate the provider acknowledging the cancel by ending the turn — a
             // real provider clears `active_turn` via a turn/completed event, which
             // is the only signal the orchestrator trusts as "stopped".
+            let thread_id = &self.relay_session(thread_id).await;
             let mut relay = self.state.write().await;
-            if relay.active_thread_id.as_deref() == Some(thread_id) {
+            if relay.active_thread_id.as_deref() == Some(thread_id.as_str()) {
                 relay.set_active_turn(None);
                 relay.set_thread_status(thread_id, "idle".to_string(), Vec::new());
             } else {
@@ -15542,14 +15524,6 @@ mod review_tests {
                 .await
                 .insert(request_id.to_string());
             Ok(())
-        }
-
-        async fn resolve_started_thread_id(&self, requested_thread_id: &str) -> String {
-            self.promoted_thread_ids
-                .lock()
-                .await
-                .remove(requested_thread_id)
-                .unwrap_or_else(|| requested_thread_id.to_string())
         }
 
         fn provider_name(&self) -> &'static str {
@@ -15727,15 +15701,16 @@ mod review_tests {
     }
 
     #[tokio::test]
-    async fn a_turn_that_promotes_a_deferred_start_thread_seeds_the_real_ids_turn_marker() {
-        // `send_message_to_thread` seeds the active-turn marker "so the wait loop
-        // sees 'working' before the provider's first event". For a deferred-start
-        // provider the placeholder runtime is GONE by the time `start_turn` returns
-        // (its first turn promoted it), so the `else if runtime_for_thread(id)`
-        // guard skips the seeding entirely and the turn is tracked nowhere.
+    async fn a_deferred_start_turn_seeds_the_marker_on_the_stable_session_id() {
+        // `send_message_to_thread` seeds the active-turn marker "so the wait loop sees
+        // 'working' before the provider's first event". It is guarded on the thread
+        // still having a runtime — and for a deferred start that guard is exactly
+        // where a moving public id used to drop the turn on the floor, tracked
+        // nowhere, with a stop that targets nothing and an idle wait that reads a
+        // just-started turn as finished.
         //
-        // The marker belongs on the PROMOTED id — which the bridge reports through
-        // `resolve_started_thread_id`, exactly as the ordinary send path does.
+        // The marker belongs on the relay session id, which the first turn does not
+        // move: only the binding behind it does.
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["claude_code"]).await;
@@ -15745,24 +15720,34 @@ mod review_tests {
         claude.complete_turns.store(false, Ordering::Relaxed);
 
         let bridge: Arc<dyn crate::provider::ProviderBridge> = Arc::new(claude.clone());
-        let started = bridge
-            .start_thread(crate::provider::StartThreadRequest::new(
-                cwd,
-                "claude_code-model",
-                "review_read_only",
-                "workspace-write",
-            ))
+        let started = app
+            .start_provider_thread(
+                "claude_code",
+                &bridge,
+                crate::provider::StartThreadRequest::new(
+                    cwd,
+                    "claude_code-model",
+                    "review_read_only",
+                    "workspace-write",
+                ),
+            )
             .await
             .expect("start_thread");
-        let pending = started.thread.id.clone();
+        let session_id = started.identity.session_id.clone();
+        let pending_handle = started.identity.provider_handle.clone();
         assert!(
-            pending.starts_with("claude-pending-"),
-            "a deferred start hands back a placeholder: {pending}"
+            pending_handle.starts_with("claude-pending-"),
+            "a deferred start hands back a bridge handle: {pending_handle}"
+        );
+        assert_ne!(session_id, pending_handle);
+        assert_eq!(
+            started.result.thread.id, session_id,
+            "the adopted summary carries the relay id, never the handle"
         );
         {
             let mut relay = app.relay.write().await;
             relay.register_background_thread(
-                started.thread,
+                started.result.thread,
                 cwd,
                 "claude_code-model",
                 "review_read_only",
@@ -15772,7 +15757,7 @@ mod review_tests {
         }
 
         let dispatched = app
-            .send_message_to_thread(&pending, "review this", None, None)
+            .send_message_to_thread(&session_id, "review this", None, None)
             .await
             .expect("the turn starts");
         let turn_id = dispatched
@@ -15781,27 +15766,27 @@ mod review_tests {
             .expect("the provider returns a turn id");
 
         let relay = app.relay.read().await;
+
         assert!(
-            relay.runtime_for_thread(&pending).is_none(),
-            "the placeholder runtime is gone once its first turn promoted it"
+            relay.runtime_for_thread(&pending_handle).is_none(),
+            "no runtime may ever be keyed by a bridge handle"
         );
-        let promoted = relay
-            .runtimes
-            .keys()
-            .find(|id| id.starts_with("claude_code-session-"))
-            .cloned()
-            .expect("the promoted runtime exists");
         assert_eq!(
-            dispatched.thread_id, promoted,
-            "the dispatch reports the id the turn actually runs under, so a caller cannot carry on with the removed placeholder"
+            relay
+                .resolve_session_target(&session_id)
+                .expect("the session still resolves")
+                .provider_handle
+                .starts_with("claude_code-session-"),
+            true,
+            "the first turn moved the binding to the created SDK session"
         );
         let runtime = relay
-            .runtime_for_thread(&promoted)
-            .expect("the promoted runtime exists");
+            .runtime_for_thread(&session_id)
+            .expect("the stable session's runtime");
         assert_eq!(
             runtime.active_turn_id.as_deref(),
             Some(turn_id.as_str()),
-            "the in-flight turn must be tracked under the promoted id, or a stop \
+            "the in-flight turn must be tracked under the stable id, or a stop \
 targets no turn and the idle wait sees a just-started turn as finished"
         );
         assert!(
@@ -15857,23 +15842,23 @@ strand it in Blocked: {:?}",
     }
 
     #[tokio::test]
-    async fn a_start_that_fails_after_promotion_stops_the_session_it_really_started() {
+    async fn a_start_that_fails_after_the_session_exists_stops_it() {
         // The dangerous half of a deferred start: `session_started` lands (so the SDK
-        // session EXISTS and the relay has already promoted the placeholder), and then
-        // the start response is lost or rejected. The turn may well be running.
+        // session EXISTS and the binding now names it), and then the start response is
+        // lost or rejected. The turn may well be running.
         //
-        // The orchestrator's uncertain-start cleanup exists precisely for that, but it
-        // was handed `this_reviewer_id` — the placeholder, whose runtime promotion had
-        // just removed. Reading "not working" off a thread that no longer exists, it
-        // skipped the stop entirely, marked the job terminal and unlocked the parent,
-        // leaving a real reviewer session running against the tree under review.
+        // The orchestrator's uncertain-start cleanup exists precisely for that, and it
+        // has to reach the live session through the reviewer's binding. Stopping the
+        // id the bridge was originally called with would find nothing, read that as
+        // "not working", mark the job terminal and unlock the parent — leaving a real
+        // reviewer session running against the tree under review.
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["codex", "claude_code"]).await;
         app.set_review_drain_max_ms(200);
         let claude = providers.get("claude_code").unwrap();
         claude.deferred_start.store(true, Ordering::Relaxed);
-        // Publishes liveness on the PROMOTED id, then loses the start response.
+        // Publishes liveness on the created session, then loses the start response.
         claude.fail_reviewer_start.store(true, Ordering::Relaxed);
         let parent = start_parent(&app, cwd, "codex").await;
 
@@ -15889,12 +15874,23 @@ strand it in Blocked: {:?}",
             .as_deref()
             .expect("the job records the reviewer thread");
         assert!(
-            !reviewer.starts_with("claude-pending-"),
-            "promotion rewrote the job's reviewer id: {reviewer}"
+            reviewer.starts_with("session-"),
+            "the job keeps the relay session id it was given: {reviewer}"
+        );
+        let provider_handle = app
+            .relay
+            .read()
+            .await
+            .resolve_session_target(reviewer)
+            .expect("the reviewer session still resolves")
+            .provider_handle;
+        assert_ne!(
+            provider_handle, reviewer,
+            "the first turn created the SDK session behind the same relay id"
         );
         let interrupts = claude.interrupts.lock().await.clone();
         assert!(
-            interrupts.iter().any(|id| id == reviewer),
+            interrupts.iter().any(|id| id == &provider_handle),
             "the session that actually started must be interrupted, not abandoned \
 (interrupted: {interrupts:?})"
         );
@@ -15911,31 +15907,31 @@ parent {} is unlocked",
     }
 
     #[tokio::test]
-    async fn a_workflow_author_start_that_fails_after_promotion_stops_the_real_session() {
+    async fn a_workflow_author_start_that_fails_after_materialization_stops_the_real_session() {
         // Same orphan as the review path, in the other consumer of the shared
         // dispatch. Note this targets the AUTHOR turn, not the reviewer one: a
         // workflow refuses any reviewer without a hard read-only sandbox, so its
         // reviewer can never be Claude. The author can — and a workflow started on a
         // Claude session that has never been messaged runs its execute step as that
-        // session's FIRST turn, which is the promoting one.
+        // session's FIRST turn, which is the one that creates the SDK session.
         //
-        // That makes this the WRITE-CAPABLE case: `run_turn`'s uncertain-start branch
-        // drained the id it sent to, and the placeholder is gone by then, so
-        // `stop_and_drain` reads the missing runtime as "not working" and answers
-        // "stopped" for a session it never looked at.
+        // That makes this the WRITE-CAPABLE case: a start that fails only after the
+        // session exists leaves a bypass-mode agent running, and the drain has to
+        // reach it through the binding rather than through the id it was called with.
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["codex", "claude_code"]).await;
         let claude = providers.get("claude_code").unwrap();
         claude.deferred_start.store(true, Ordering::Relaxed);
         claude
-            .fail_turn_after_promotion
+            .fail_turn_after_materialization
             .store(true, Ordering::Relaxed);
-        // Never messaged, so it is still a placeholder when the workflow starts.
+        // Never messaged, so the SDK session does not exist yet when the workflow
+        // starts. The relay id is its own from the moment the tab appears.
         let parent = start_parent(&app, cwd, "claude_code").await;
         assert!(
-            parent.id.starts_with("claude-pending-"),
-            "the author thread starts as a placeholder: {}",
+            parent.id.starts_with("session-"),
+            "a deferred start gets a relay-minted id: {}",
             parent.id
         );
 
@@ -15958,18 +15954,21 @@ parent {} is unlocked",
         terminal.push("blocked");
         wait_for_workflow_status(&app, &receipt.workflow_run_id, &terminal).await;
 
-        let promoted = {
+        let provider_handle = {
             let relay = app.relay.read().await;
-            relay
-                .runtimes
-                .keys()
-                .find(|id| id.starts_with("claude_code-session-"))
-                .cloned()
-                .expect("the author thread was promoted to a real session id")
+            let handle = relay
+                .resolve_session_target(&parent.id)
+                .expect("the author session still resolves")
+                .provider_handle;
+            assert_ne!(
+                handle, parent.id,
+                "the first turn created the SDK session behind the same relay id"
+            );
+            handle
         };
         let interrupts = claude.interrupts.lock().await.clone();
         assert!(
-            interrupts.iter().any(|id| id == &promoted),
+            interrupts.iter().any(|id| id == &provider_handle),
             "the session that actually started must be interrupted, not abandoned \
 (interrupted: {interrupts:?})"
         );
@@ -15977,24 +15976,24 @@ parent {} is unlocked",
             !app.relay
                 .read()
                 .await
-                .runtime_for_thread(&promoted)
+                .runtime_for_thread(&parent.id)
                 .is_some_and(|runtime| runtime.is_working()),
             "no author turn may still be writing once the run is torn down"
         );
     }
 
     #[tokio::test]
-    async fn a_workflow_author_turn_that_promotes_is_waited_on_under_its_real_id() {
+    async fn a_workflow_author_turn_that_materializes_is_waited_on_under_its_stable_id() {
         // The SUCCESS path, which is the common one — no lost response, nothing
         // unusual: a workflow started on a Claude session that was never messaged
-        // runs its execute step as that session's FIRST turn, which promotes it.
+        // runs its execute step as that session's FIRST turn, which creates the SDK
+        // session behind it.
         //
-        // `promote_background_thread` re-keys workflow STEP threads and team seats,
-        // but not a run's `parent_thread_id`, and the author turn runs on the parent.
-        // So the runner kept waiting on the placeholder: no runtime, read as idle
-        // immediately, no reply found, "the execute step produced no output" — while
-        // the real, write-capable author session carried on with the workflow's
-        // workspace lock released.
+        // The run's `parent_thread_id` is what the author turn is waited on, so if
+        // that id ever stopped naming the live session the runner would read the
+        // author as idle immediately, find no reply, and report "the execute step
+        // produced no output" — while the real, write-capable session carried on with
+        // the workflow's workspace lock released.
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["codex", "claude_code"]).await;
@@ -16005,11 +16004,7 @@ parent {} is unlocked",
             .store(true, Ordering::Relaxed);
         queue_verdicts(providers.get("codex").unwrap(), &["APPROVE"]).await;
         let parent = start_parent(&app, cwd, "claude_code").await;
-        assert!(
-            parent.id.starts_with("claude-pending-"),
-            "the author thread starts as a placeholder: {}",
-            parent.id
-        );
+        assert!(parent.id.starts_with("session-"), "{}", parent.id);
 
         let receipt = app
             .start_code_workflow(StartWorkflowInput {
@@ -16030,21 +16025,27 @@ parent {} is unlocked",
             wait_for_workflow_status(&app, &receipt.workflow_run_id, WORKFLOW_TERMINAL).await;
         assert_eq!(
             status, "done",
-            "a promoting author turn must be waited on and read under its real id"
+            "a materializing author turn must be waited on and read under its \
+relay session id"
+        );
+        let relay = app.relay.read().await;
+        assert_eq!(
+            relay
+                .workflow_run(&receipt.workflow_run_id)
+                .map(|run| run.parent_thread_id.clone()),
+            Some(parent.id.clone()),
+            "the run's author id must survive the turn that created the SDK session"
         );
     }
 
     #[tokio::test]
-    async fn a_promoted_workflow_author_survives_a_revise_round() {
+    async fn a_materializing_workflow_author_survives_a_revise_round() {
         // The single-round version of this test passes even with a stale caller-local
         // id, because nothing after the execute turn ever addresses the author again.
         // A NEEDS_CHANGES verdict does: the run reads the author's recap and then
-        // dispatches a revise turn to it.
-        //
-        // `run_turn` follows the promotion internally but hands back only the reply
-        // text, so `run_workflow_job` keeps the placeholder — and promotion has by now
-        // rewritten the persisted run's parent id, so preflight no longer recognises
-        // that placeholder as owned by this run and blocks it.
+        // dispatches a revise turn to it — which has to reach the SDK session created
+        // by the FIRST turn, through the binding rather than the id it was created
+        // under.
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["codex", "claude_code"]).await;
@@ -16057,7 +16058,7 @@ parent {} is unlocked",
         )
         .await;
         let parent = start_parent(&app, cwd, "claude_code").await;
-        assert!(parent.id.starts_with("claude-pending-"));
+        assert!(parent.id.starts_with("session-"), "{}", parent.id);
 
         let receipt = app
             .start_code_workflow(StartWorkflowInput {
@@ -16078,34 +16079,36 @@ parent {} is unlocked",
             wait_for_workflow_status(&app, &receipt.workflow_run_id, WORKFLOW_TERMINAL).await;
         assert_eq!(
             status, "done",
-            "the author must still be reachable for its revise turn after promotion"
+            "the author must still be reachable for its revise turn after its \
+session was created"
         );
 
         let turns = claude.turns.lock().await.clone();
-        let promoted = {
+        let provider_handle = {
             let relay = app.relay.read().await;
             relay
-                .runtimes
-                .keys()
-                .find(|id| id.starts_with("claude_code-session-"))
-                .cloned()
-                .expect("the author was promoted")
+                .resolve_session_target(&parent.id)
+                .expect("the author session still resolves")
+                .provider_handle
         };
+        assert_ne!(provider_handle, parent.id);
         assert!(
             turns
                 .iter()
-                .any(|(id, text)| id == &promoted && text.contains("Address the findings")),
-            "the revise turn must be dispatched to the promoted id: {turns:?}"
+                .any(|(id, text)| id == &provider_handle && text.contains("Address the findings")),
+            "the revise turn must reach the bridge under the SDK id the binding \
+now names: {turns:?}"
         );
     }
 
     #[tokio::test]
-    async fn a_review_recap_turn_that_promotes_is_waited_on_under_its_real_id() {
+    async fn a_review_recap_turn_that_materializes_is_waited_on_under_its_stable_id() {
         // Same shape on the review side: reviewing a Claude session that has never
         // been messaged drives a recap turn, which is that session's FIRST turn and
-        // therefore the promoting one. `job.parent_thread_id` is not re-keyed either,
-        // so the recap was waited on and read back under the removed placeholder and
-        // the review died with "the parent produced no recap for this turn".
+        // therefore the one that creates the SDK session. `job.parent_thread_id` is
+        // what the recap is waited on and read back under, so if that id ever stopped
+        // naming the live session the review would die with "the parent produced no
+        // recap for this turn".
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["codex", "claude_code"]).await;
@@ -16115,7 +16118,7 @@ parent {} is unlocked",
             .deferred_start
             .store(true, Ordering::Relaxed);
         let parent = start_parent(&app, cwd, "claude_code").await;
-        assert!(parent.id.starts_with("claude-pending-"));
+        assert!(parent.id.starts_with("session-"), "{}", parent.id);
 
         let mut input = review_input("codex");
         input.parent_thread_id = Some(parent.id.clone());
@@ -16126,13 +16129,18 @@ parent {} is unlocked",
         let job = wait_for_review(&app, &receipt.review_job_id).await;
         assert_eq!(
             job.status, "complete",
-            "a promoting recap turn must be waited on and read under its real id: {:?}",
+            "a materializing recap turn must be waited on and read under its relay \
+session id: {:?}",
             job.error
+        );
+        assert_eq!(
+            job.parent_thread_id, parent.id,
+            "the job's author id must survive the turn that created the SDK session"
         );
     }
 
     #[tokio::test]
-    async fn a_promoted_review_parent_survives_a_second_round() {
+    async fn a_materializing_review_parent_survives_a_second_round() {
         // The review-side twin of the workflow revise case, and the same reason the
         // single-round tests could not see it: nothing addresses the author again
         // until a NEEDS_CHANGES verdict drives a fix turn on it.
@@ -16147,7 +16155,7 @@ parent {} is unlocked",
         )
         .await;
         let parent = start_parent(&app, cwd, "claude_code").await;
-        assert!(parent.id.starts_with("claude-pending-"));
+        assert!(parent.id.starts_with("session-"), "{}", parent.id);
 
         let mut input = review_input("codex");
         input.parent_thread_id = Some(parent.id.clone());
@@ -16156,25 +16164,26 @@ parent {} is unlocked",
         let job = wait_for_review(&app, &receipt.review_job_id).await;
         assert_eq!(
             job.status, "complete",
-            "the author must stay reachable for its fix turn after promotion: {:?}",
+            "the author must stay reachable for its fix turn once its session \
+exists: {:?}",
             job.error
         );
 
-        let promoted = {
-            let relay = app.relay.read().await;
-            relay
-                .runtimes
-                .keys()
-                .find(|id| id.starts_with("claude_code-session-"))
-                .cloned()
-                .expect("the author was promoted")
-        };
+        let provider_handle = app
+            .relay
+            .read()
+            .await
+            .resolve_session_target(&parent.id)
+            .expect("the author session still resolves")
+            .provider_handle;
+        assert_ne!(provider_handle, parent.id);
         let turns = claude.turns.lock().await.clone();
         assert!(
             turns
                 .iter()
-                .any(|(id, text)| id == &promoted && text.contains("Address the findings")),
-            "the fix turn must be dispatched to the promoted id: {turns:?}"
+                .any(|(id, text)| id == &provider_handle && text.contains("Address the findings")),
+            "the fix turn must reach the bridge under the SDK id the binding now \
+names: {turns:?}"
         );
     }
 
@@ -16188,7 +16197,7 @@ parent {} is unlocked",
         //
         // The ordinary send path guards this with `thread_turn_revision`; the
         // background dispatch must too, carrying the pre-call revision across the
-        // pending-to-real promotion.
+        // turn that creates the provider session.
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["codex", "claude_code"]).await;
@@ -16232,39 +16241,34 @@ resurrected into a turn that never completes: {:?}",
     #[tokio::test]
     async fn a_blank_deferred_start_session_can_still_change_its_settings() {
         // A Claude session is visible and editable before its first prompt: it has no
-        // SDK session and no turn, only a placeholder whose provider summary reports
-        // "active". `update_session_settings` refuses a `runtime.is_working()` thread,
-        // so if that summary status were ever trusted as liveness the model/effort
-        // pickers would be dead on every freshly-created Claude session.
+        // SDK session and no turn, only a provider summary that reports "active".
+        // `update_session_settings` refuses a `runtime.is_working()` thread, so if that
+        // summary status were ever trusted as liveness the model/effort pickers would be
+        // dead on every freshly-created Claude session.
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["claude_code"]).await;
-        let claude = providers.get("claude_code").unwrap().clone();
-        claude.deferred_start.store(true, Ordering::Relaxed);
+        providers
+            .get("claude_code")
+            .unwrap()
+            .deferred_start
+            .store(true, Ordering::Relaxed);
 
-        let bridge: Arc<dyn crate::provider::ProviderBridge> = Arc::new(claude);
-        let started = bridge
-            .start_thread(crate::provider::StartThreadRequest::new(
-                cwd,
-                "claude_code-model",
-                "on-request",
-                "workspace-write",
-            ))
-            .await
-            .expect("start_thread");
-        let pending = started.thread.id.clone();
-        assert!(pending.starts_with("claude-pending-"));
+        // Through the ordinary start path, so the session id under test is the one a
+        // client would actually be handed.
+        let session = start_parent(&app, cwd, "claude_code").await;
+        assert!(session.id.starts_with("session-"), "{}", session.id);
         {
-            let mut relay = app.relay.write().await;
-            relay.activate_started_thread(
-                started.thread,
-                cwd,
-                "claude_code-model",
-                "on-request",
-                "workspace-write",
-                "medium",
-                "device-1",
+            let relay = app.relay.read().await;
+            let target = relay
+                .resolve_session_target(&session.id)
+                .expect("the deferred session has a binding");
+            assert!(
+                target.provider_handle.starts_with("claude-pending-"),
+                "the provider is still only reachable through a temporary handle: {}",
+                target.provider_handle
             );
+            assert!(!relay.session_is_materialized(&session.id));
         }
 
         app.update_session_settings(crate::protocol::UpdateSessionSettingsInput {
@@ -16273,7 +16277,7 @@ resurrected into a turn that never completes: {:?}",
             effort: Some("high".to_string()),
             model: None,
             device_id: Some("device-1".to_string()),
-            thread_id: pending.clone(),
+            thread_id: session.id.clone(),
         })
         .await
         .expect("a blank session with no turn must accept a settings change");
@@ -16282,7 +16286,7 @@ resurrected into a turn that never completes: {:?}",
             app.relay
                 .read()
                 .await
-                .thread_settings(&pending)
+                .thread_settings(&session.id)
                 .expect("settings recorded")
                 .reasoning_effort,
             "high"
@@ -16296,10 +16300,9 @@ resurrected into a turn that never completes: {:?}",
         // Codex hands back a real thread id from `thread/start`, so the reviewer
         // runtime the orchestrator waits on is the one the turn runs under. Claude
         // cannot: the SDK only mints a session id once it has seen a user message,
-        // so a clean reviewer is created as a synthetic `claude-pending-…`
-        // placeholder and the FIRST turn promotes it to the real id — moving the
-        // runtime, the reviewer map and the job's `reviewer_thread_id` across
-        // before `start_turn` returns.
+        // so a clean reviewer is created against a `claude-pending-…` bridge handle
+        // and the FIRST turn creates the SDK session behind it, rebinding before
+        // `start_turn` returns.
         //
         // Every existing review test uses the codex-shaped provider, so this whole
         // phase is untested. Round 1 must still complete.
@@ -16330,7 +16333,7 @@ resurrected into a turn that never completes: {:?}",
             .expect("the job records the reviewer thread");
         assert!(
             !reviewer_id.starts_with("claude-pending-"),
-            "the job must end up on the promoted session id, not the placeholder: {reviewer_id}"
+            "the job must keep the relay session id, never a bridge handle: {reviewer_id}"
         );
     }
 
@@ -22772,16 +22775,17 @@ the provider, not forwarded ({turn_models:?})"
 
     #[tokio::test]
     async fn list_threads_retains_reviewer_rows_in_routing_cache() {
-        // A background Claude reviewer is registered under a synthetic pending id
-        // and must remain routable even if list_threads is called before its first
-        // turn (when the provider cannot return it yet).
+        // A background Claude reviewer has a stable relay id from the moment it is
+        // registered, but until its first turn its binding holds only a temporary bridge
+        // handle — so the provider cannot return it from `list_threads`. Its relay row is
+        // the only thing that can route to it, and a refresh must not drop it.
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, _providers) = build_review_app(cwd, &["codex"]).await;
         let parent = start_parent(&app, cwd, "codex").await;
 
-        let pending = "claude-pending-review-test";
-        let task_pending = "claude-pending-task-review-test";
+        let unsent = "session-review-cache";
+        let unsent_task = "session-task-review-cache";
         {
             // Mirror production ordering: insert the job WITHOUT reviewer_thread_id,
             // then register the background thread and assign reviewer_thread_id
@@ -22789,6 +22793,8 @@ the provider, not forwarded ({turn_models:?})"
             // list_threads called between insert_review_job and the atomic
             // (register + assign) step must not lose the row.
             let mut relay = app.relay.write().await;
+            relay.bind_session_to_pending_handle(unsent, "claude_code", "claude-pending-1");
+            relay.bind_session_to_pending_handle(unsent_task, "claude_code", "claude-pending-2");
             let job = crate::state::ReviewJob::new(
                 "review-cache".to_string(),
                 parent.id.clone(),
@@ -22807,7 +22813,7 @@ the provider, not forwarded ({turn_models:?})"
             relay.register_background_thread(
                 ThreadSummaryView {
                     workspace_trusted: false,
-                    id: pending.to_string(),
+                    id: unsent.to_string(),
                     name: None,
                     preview: String::new(),
                     cwd: cwd.to_string(),
@@ -22827,16 +22833,16 @@ the provider, not forwarded ({turn_models:?})"
                 "medium",
             );
             relay.update_review_job("review-cache", |job| {
-                job.reviewer_thread_id = Some(pending.to_string());
+                job.reviewer_thread_id = Some(unsent.to_string());
             });
 
-            // A deferred-start task reviewer is nav-visible by origin, but until
-            // promotion it is absent from the provider list just like the bound
+            // A deferred-start task reviewer is nav-visible by origin, but until its
+            // session exists it is absent from the provider list just like the bound
             // reviewer above. It still needs its cached row for routing.
             relay.register_background_thread(
                 ThreadSummaryView {
                     workspace_trusted: false,
-                    id: task_pending.to_string(),
+                    id: unsent_task.to_string(),
                     name: None,
                     preview: String::new(),
                     cwd: cwd.to_string(),
@@ -22856,23 +22862,23 @@ the provider, not forwarded ({turn_models:?})"
                 "medium",
             );
             relay.register_task_reviewer_thread(
-                task_pending.to_string(),
+                unsent_task.to_string(),
                 "task-team-lead".to_string(),
             );
         }
 
         // Trigger two refreshes (simulates the periodic poll) and verify neither
-        // kind of pending reviewer is lost or duplicated in the routing cache.
+        // kind of unlisted reviewer is lost or duplicated in the routing cache.
         let listed = app.list_threads(50, None).await.expect("list_threads");
         assert!(
-            listed.threads.iter().all(|t| t.id != pending),
+            listed.threads.iter().all(|t| t.id != unsent),
             "reviewer thread must not appear in the nav-visible response"
         );
         app.list_threads(50, None)
             .await
             .expect("second list_threads");
         let relay = app.relay.read().await;
-        for reviewer_id in [pending, task_pending] {
+        for reviewer_id in [unsent, unsent_task] {
             assert_eq!(
                 relay
                     .threads
@@ -22880,7 +22886,7 @@ the provider, not forwarded ({turn_models:?})"
                     .filter(|thread| thread.id == reviewer_id)
                     .count(),
                 1,
-                "pending reviewer {reviewer_id} must survive refresh exactly once"
+                "reviewer {reviewer_id} must survive refresh exactly once"
             );
         }
     }
@@ -23696,9 +23702,9 @@ the provider, not forwarded ({turn_models:?})"
 
     #[tokio::test]
     async fn resolve_stops_a_working_thread_with_no_turn_id() {
-        // A Claude clean reviewer can be `working` (status) with no surfaced turn
-        // id during the pending→promotion window. Cancel-by-session must still work
-        // so the review doesn't wedge in Blocked forever.
+        // A Claude clean reviewer can be `working` (status) with no surfaced turn id
+        // while its session is being created. Cancel-by-session must still work so the
+        // review doesn't wedge in Blocked forever.
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["codex"]).await;
@@ -24674,105 +24680,6 @@ turn) must allow a review: {error:?}"
                 "the parent must be sendable after a failed review: {error}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn promote_background_thread_rewrites_job_and_moves_runtime() {
-        // Directly exercises the Claude background-promotion logic: a clean reviewer
-        // runs off to the side under a synthetic `claude-pending-…` id and is
-        // promoted to the real session id without ever becoming the active thread.
-        let dir = TempDir::new().expect("tmpdir");
-        let cwd = dir.path().to_str().unwrap();
-        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
-        let parent = start_parent(&app, cwd, "codex").await;
-
-        let pending = "claude-pending-xyz";
-        let real = "real-session-9";
-        {
-            let mut relay = app.relay.write().await;
-            let job = crate::state::ReviewJob::new(
-                "review-promote".to_string(),
-                parent.id.clone(),
-                "codex".to_string(),
-                "claude_code".to_string(),
-                None,
-                crate::state::ReviewMode::CleanThread,
-                cwd.to_string(),
-                "device-1".to_string(),
-                relay_api::delegation::StartedBy::Person,
-                None,
-                1,
-            );
-            relay.insert_review_job(job);
-            relay.update_review_job("review-promote", |job| {
-                job.reviewer_thread_id = Some(pending.to_string())
-            });
-            relay.register_background_thread(
-                ThreadSummaryView {
-                    workspace_trusted: false,
-                    id: pending.to_string(),
-                    name: None,
-                    preview: String::new(),
-                    cwd: cwd.to_string(),
-                    updated_at: 1,
-                    source: "claude_code".to_string(),
-                    status: "active".to_string(),
-                    model_provider: "anthropic".to_string(),
-                    provider: "claude_code".to_string(),
-                    forked_from: None,
-                    renamed: false,
-                    flagged: false,
-                },
-                cwd,
-                "claude-model",
-                "on-request",
-                "workspace-write",
-                "medium",
-            );
-            relay.register_reviewer_thread(pending.to_string(), parent.id.clone());
-            // The active thread (parent) must NOT change across promotion.
-            assert_eq!(relay.active_thread_id.as_deref(), Some(parent.id.as_str()));
-            relay.promote_background_thread(pending, real);
-            assert_eq!(
-                relay.active_thread_id.as_deref(),
-                Some(parent.id.as_str()),
-                "promotion must not touch the active thread"
-            );
-        }
-
-        let relay = app.relay.read().await;
-        let job = relay.review_job("review-promote").expect("job present");
-        assert_eq!(
-            job.reviewer_thread_id.as_deref(),
-            Some(real),
-            "the job's reviewer id is rewritten pending -> real"
-        );
-        assert!(
-            relay.runtime_for_thread(pending).is_none(),
-            "the pending runtime is moved away"
-        );
-        assert!(
-            relay.runtime_for_thread(real).is_some(),
-            "the real-id runtime exists"
-        );
-        assert!(
-            !relay.threads.iter().any(|thread| thread.id == pending),
-            "the stale pending thread row is dropped"
-        );
-        assert!(
-            relay.reviewer_thread_ids().contains(real),
-            "nav-hiding follows the real id"
-        );
-        // The durable reviewer→parent map entry also moves pending -> real.
-        assert_eq!(
-            relay.reviewer_threads_of_parent(&parent.id),
-            vec![real.to_string()],
-            "the persisted reviewer map entry moves pending -> real"
-        );
-        assert!(
-            relay.is_thread_review_locked(real),
-            "the real reviewer thread is review-locked"
-        );
     }
 
     #[tokio::test]
@@ -26956,24 +26863,37 @@ mod ask_tests {
         );
     }
 
-    // A provider whose session is created BY the first turn promotes the id mid-send, and
-    // the goal moves with it. Closing the dispatch on the id we sent to leaves the real
-    // goal reading "charged, never started", which the watchdog settles Blocked.
+    // A provider whose session is created BY the first turn rebinds mid-send. The goal is
+    // filed under the relay session id, which does not move — so the dispatch must close
+    // on it, or the goal reads "charged, never started" and the watchdog settles Blocked.
     #[tokio::test]
-    async fn a_wake_that_promotes_the_session_closes_the_dispatch_on_the_real_one() {
+    async fn a_wake_that_creates_the_session_closes_the_dispatch_on_the_same_id() {
         let project = TempDir::new().expect("tempdir");
         let cwd = project.path().to_string_lossy().to_string();
         let (app, bridge, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
         grant_workspace(&app, &cwd).await;
-        let placeholder = goal_session(&app, &cwd).await;
-        let real_id = format!("{placeholder}-promoted");
-        bridge.promote_on_first_turn(&placeholder, &real_id).await;
+        // A goal on a session that has never been messaged: the wake IS the turn that
+        // creates the provider session, so the dispatch is closed in the same window
+        // the binding moves.
+        bridge.defer_next_start();
+        let session_id = goal_session(&app, &cwd).await;
+        let pending_handle = app
+            .relay
+            .read()
+            .await
+            .resolve_session_target(&session_id)
+            .expect("deferred binding")
+            .provider_handle;
+        assert_ne!(pending_handle, session_id);
+        bridge
+            .materialize_on_first_turn(&pending_handle, &format!("{pending_handle}-session"))
+            .await;
 
-        app.set_goal(&placeholder, "ship the mobile door", None, false, None)
+        app.set_goal(&session_id, "ship the mobile door", None, false, None)
             .await
             .expect("the user sets it");
         app.ask_agent(
-            &placeholder,
+            &session_id,
             AskRequest {
                 device_id: None,
                 started_by: relay_api::delegation::StartedBy::Agent,
@@ -26993,7 +26913,7 @@ mod ask_tests {
             {
                 let relay = app.relay.read().await;
                 if relay
-                    .goal_for_thread(&real_id)
+                    .goal_for_thread(&session_id)
                     .is_some_and(|goal| goal.turns > 0)
                 {
                     break;
@@ -27003,9 +26923,17 @@ mod ask_tests {
         }
 
         let relay = app.relay.read().await;
+        assert_ne!(
+            relay
+                .resolve_session_target(&session_id)
+                .expect("the session still resolves")
+                .provider_handle,
+            pending_handle,
+            "the wake turn created the provider session",
+        );
         let goal = relay
-            .goal_for_thread(&real_id)
-            .expect("the goal moved with the session");
+            .goal_for_thread(&session_id)
+            .expect("the goal never moved off the id it was set on");
         assert_eq!(goal.turns, 1, "the wake charged it");
         assert!(
             !goal.dispatch_never_started(),
@@ -28436,49 +28364,6 @@ watchdog settle this Blocked",
         );
     }
 
-    // A deferred-start session is promoted the moment its first turn runs, and the id the
-    // delegate was accepted under stops routing. The brief must follow the promotion —
-    // sending to the placeholder finds no provider and refuses a session that is alive.
-    #[tokio::test]
-    async fn a_brief_follows_the_asker_through_a_promotion() {
-        let project = TempDir::new().expect("tempdir");
-        let cwd = project.path().to_string_lossy().to_string();
-        let (app, _p, _o) = build_app(&cwd).await;
-        grant_workspace(&app, &cwd).await;
-        let real_id = goal_session(&app, &cwd).await;
-        // The synthetic id a Claude tab lives under until its first turn runs. Promotion
-        // retires it, and the client — here the delegate — is still holding it.
-        let placeholder = "claude-pending-delegate-1";
-        {
-            let mut relay = app.relay.write().await;
-            relay.promote_background_thread(placeholder, &real_id);
-            relay.notify();
-        }
-
-        let accepted = tokio::time::timeout(
-            std::time::Duration::from_millis(3000),
-            app.ask_agent(
-                &placeholder,
-                AskRequest {
-                    device_id: None,
-                    started_by: relay_api::delegation::StartedBy::Person,
-                    peer_thread_id: None,
-                    provider: Some("fake".to_string()),
-                    model: None,
-                    effort: None,
-                    message: "look at the retry loop".to_string(),
-                },
-            ),
-        )
-        .await
-        .expect("the delegate must not hang on a promoted asker");
-
-        assert!(
-            accepted.is_ok(),
-            "the asker was promoted, not deleted; the brief must follow it: {accepted:?}",
-        );
-    }
-
     /// A never-used deferred-start session and the provider id its first turn creates.
     /// The returned relay id is stable across that materialization.
     async fn deferred_start_asker(
@@ -28514,7 +28399,9 @@ watchdog settle this Blocked",
             .provider_handle;
         assert!(pending_handle.starts_with("claude-pending-"));
         let real = format!("{pending_handle}-session");
-        bridge.promote_on_first_turn(&pending_handle, &real).await;
+        bridge
+            .materialize_on_first_turn(&pending_handle, &real)
+            .await;
         (stable, real)
     }
 
@@ -28548,11 +28435,11 @@ watchdog settle this Blocked",
         })
     }
 
-    // The brief is the asker's FIRST turn, so a `/delegate` on a session that has never
-    // run one is accepted under an id that same brief retires. An ask left on that id is
-    // one nobody can be woken for — the answer lands on a session that no longer exists.
+    // The brief is the asker's FIRST turn, so a `/delegate` on a session nobody has
+    // messaged runs it and materializes the provider session mid-accept. The ask has to
+    // stay on the relay session id throughout, or nobody can be woken for the answer.
     #[tokio::test]
-    async fn an_answer_follows_an_asker_its_own_brief_promoted() {
+    async fn an_answer_follows_an_asker_whose_own_brief_materialized_it() {
         let project = TempDir::new().expect("tempdir");
         let cwd = project.path().to_string_lossy().to_string();
         let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
@@ -28608,10 +28495,10 @@ watchdog settle this Blocked",
     }
 
     // The phone's delegate writes its record BEFORE the brief runs, so that record is
-    // the one holding the placeholder when the promotion lands. Filling it in must
-    // correct the asker too — otherwise the accepted delegate is the one that strands.
+    // the one on screen while the brief materializes the asker's provider session.
+    // Filling it in must leave the asker naming the same relay session throughout.
     #[tokio::test]
-    async fn a_detached_delegate_corrects_the_asker_it_was_accepted_under() {
+    async fn a_detached_delegate_retains_the_asker_it_was_accepted_under() {
         let project = TempDir::new().expect("tempdir");
         let cwd = project.path().to_string_lossy().to_string();
         let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
@@ -28655,12 +28542,12 @@ watchdog settle this Blocked",
     }
 
     // A delegate that has been accepted can still fail after its brief has created the
-    // session — starting the peer is the next thing that can go wrong, and by then the
-    // id the record was written under is retired. The card is the only place the caller
-    // ever hears about it, and one filed under a dead id resolves to no workspace, so
-    // the scoped device it was for filters it out and the delegate fails silently.
+    // session — starting the peer is the next thing that can go wrong. The card written
+    // when it was accepted is the only place the caller ever hears about that, so the
+    // failure has to land on it, still naming the session that asked and still visible
+    // to the scoped device it was for.
     #[tokio::test]
-    async fn a_detached_delegate_that_fails_after_the_promotion_is_still_on_the_phone() {
+    async fn a_detached_delegate_that_fails_after_materialization_is_still_on_the_phone() {
         let project = TempDir::new().expect("tempdir");
         let cwd = project.path().to_string_lossy().to_string();
         let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
@@ -28712,61 +28599,6 @@ watchdog settle this Blocked",
             "the phone that asked must be shown the failure, not filtered out of it",
         );
         assert_ne!(stable, real);
-    }
-
-    // A delegate can fail inside the brief itself, and that brief is what created the
-    // session: the promotion and the failure are the same turn, so nothing has corrected
-    // the record yet. What the caller is told must still be filed where it can be read.
-    #[tokio::test]
-    async fn a_failure_reported_after_the_promotion_is_filed_on_the_live_session() {
-        let project = TempDir::new().expect("tempdir");
-        let cwd = project.path().to_string_lossy().to_string();
-        let (app, _p, _o) = build_app(&cwd).await;
-        grant_workspace(&app, &cwd).await;
-        pair_device(&app, "phone", vec![cwd.clone()]).await;
-        let real = goal_session(&app, &cwd).await;
-        let pending = "claude-pending-accepted-1";
-        let ask_id = "ask-detached-1";
-
-        {
-            let mut relay = app.relay.write().await;
-            relay.insert_ask(crate::state::delegation::Ask::new(
-                ask_id.to_string(),
-                pending.to_string(),
-                String::new(),
-                "fake".to_string(),
-                None,
-                None,
-                "look at the retry loop".to_string(),
-                cwd.clone(),
-                None,
-                relay_api::delegation::StartedBy::Person,
-            ));
-            relay.promote_background_thread(pending, &real);
-            relay.notify();
-        }
-
-        app.fail_detached_ask(
-            ask_id,
-            pending,
-            "this session did not write a brief".to_string(),
-        )
-        .await;
-
-        let relay = app.relay.read().await;
-        let ask = relay.ask(ask_id).expect("on record");
-        assert_eq!(
-            ask.asker_thread_id, real,
-            "the id the delegate was accepted under is retired; the failure is not",
-        );
-        assert!(
-            relay
-                .reviews_response(Some("phone"))
-                .asks
-                .into_iter()
-                .any(|ask| ask.id == ask_id),
-            "the phone that asked must be shown the failure, not filtered out of it",
-        );
     }
 
     #[tokio::test]
@@ -31678,11 +31510,8 @@ mod provider_call_boundary_tests {
             vec![handle.clone()],
         );
         assert!(
-            bridge
-                .thread_ids_seen_by("resolve_started_thread_id")
-                .await
-                .is_empty(),
-            "a stable relay id does not need the legacy public-id promotion query",
+            bridge.calls_that_saw(&session_id).await.is_empty(),
+            "the relay session id must not reach the bridge under any method",
         );
         assert_eq!(
             snapshot.active_thread_id.as_deref(),
@@ -31739,7 +31568,7 @@ mod provider_call_boundary_tests {
         };
         assert_ne!(started, pending_handle);
         bridge
-            .promote_on_first_turn(&pending_handle, "real-provider-id")
+            .materialize_on_first_turn(&pending_handle, "real-provider-id")
             .await;
 
         let snapshot = app
@@ -31765,11 +31594,8 @@ mod provider_call_boundary_tests {
             "the first provider call must use the pending bridge handle",
         );
         assert!(
-            bridge
-                .thread_ids_seen_by("resolve_started_thread_id")
-                .await
-                .is_empty(),
-            "the stable path must not ask the bridge for a replacement public id",
+            bridge.calls_that_saw(&started).await.is_empty(),
+            "the relay session id must not reach the bridge under any method",
         );
 
         for _ in 0..400 {
@@ -32510,9 +32336,7 @@ mod provider_boundary_lint {
     ///
     /// `respond_to_approval` is here because it carries the thread id INDIRECTLY, in
     /// `PendingApproval.thread_id`, which is the relay's own id on the relay's own
-    /// record. `resolve_started_thread_id` is here because its argument is the handle
-    /// whose promotion is being asked about, and its answer becomes a relay key.
-    /// `respond_to_ask_user_question` is deliberately absent: it names only a request
+    /// record. `respond_to_ask_user_question` is deliberately absent: it names only a request
     /// id, so nothing can leak through its arguments — only its ROUTING matters, and
     /// routing is not what a text scan can see.
     const ID_BEARING_METHODS: &[&str] = &[
@@ -32520,7 +32344,6 @@ mod provider_boundary_lint {
         "resume_thread",
         "start_turn",
         "request_turn_stop",
-        "resolve_started_thread_id",
         "archive_thread",
         "release_thread",
         "delete_thread_permanently",

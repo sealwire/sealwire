@@ -478,14 +478,12 @@ pub struct FakeProviderBridge {
     approval_gates: Arc<Mutex<HashMap<String, FakeApprovalGate>>>,
     ask_user_gates: Arc<Mutex<HashMap<String, FakeAskUserGate>>>,
     turn_stop_behaviors: Arc<Mutex<HashMap<String, FakeStopBehavior>>>,
-    /// Placeholder id -> the id the session really gets, applied during `start_turn`.
-    /// Models Claude, whose session does not exist until its first user message.
-    promote_on_start: Arc<Mutex<HashMap<String, String>>>,
+    /// Pending bridge handle -> the provider id the session really gets, applied
+    /// during `start_turn`. Models Claude, whose session does not exist until its
+    /// first user message.
+    materialize_on_start: Arc<Mutex<HashMap<String, String>>>,
     /// One-shot: the next `start_thread` hands back a `claude-pending-…` placeholder.
     defer_next_start: Arc<AtomicBool>,
-    /// Legacy promotions drained by `resolve_started_thread_id`. Stable deferred
-    /// sessions update their binding and never add an entry here.
-    promoted_thread_ids: Arc<Mutex<HashMap<String, String>>>,
     stopped_turns: Arc<Mutex<HashSet<String>>>,
     /// Every stop ASKED for, whatever the configured behaviour did with it.
     stop_requests: Arc<Mutex<HashSet<String>>>,
@@ -601,6 +599,19 @@ impl FakeProviderBridge {
     }
 
     /// Every thread id `method` was called with, in call order.
+    /// Every bridge method that was handed `thread_id`. Empty is the assertion a
+    /// stable-id test wants: a relay session id must never cross this boundary, and
+    /// naming the methods individually would miss the one nobody thought of.
+    pub(crate) async fn calls_that_saw(&self, thread_id: &str) -> Vec<&'static str> {
+        self.thread_id_arguments
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, id)| id == thread_id)
+            .map(|(called, _)| *called)
+            .collect()
+    }
+
     pub(crate) async fn thread_ids_seen_by(&self, method: &str) -> Vec<String> {
         self.thread_id_arguments
             .lock()
@@ -635,18 +646,19 @@ impl FakeProviderBridge {
     }
 
     /// Start the next thread the way Claude starts one with no initial prompt: a
-    /// synthetic `claude-pending-…` id, reading active, with no session behind it.
-    /// Name what its first turn promotes it to with `promote_on_first_turn`.
+    /// `claude-pending-…` BRIDGE HANDLE, reading active, with no session behind it
+    /// and no provider thread id reported. Name the provider id its first turn
+    /// creates with `materialize_on_first_turn`.
     pub(crate) fn defer_next_start(&self) {
         self.defer_next_start.store(true, Ordering::Relaxed);
     }
 
     /// Make `placeholder` become `real_id` when its first turn starts.
-    pub(crate) async fn promote_on_first_turn(&self, placeholder: &str, real_id: &str) {
-        self.promote_on_start
+    pub(crate) async fn materialize_on_first_turn(&self, handle: &str, provider_id: &str) {
+        self.materialize_on_start
             .lock()
             .await
-            .insert(placeholder.to_string(), real_id.to_string());
+            .insert(handle.to_string(), provider_id.to_string());
     }
 
     pub async fn spawn(state: Arc<RwLock<RelayState>>) -> Result<Self, String> {
@@ -684,9 +696,8 @@ impl FakeProviderBridge {
             approval_gates: Arc::new(Mutex::new(HashMap::new())),
             ask_user_gates: Arc::new(Mutex::new(HashMap::new())),
             turn_stop_behaviors: Arc::new(Mutex::new(HashMap::new())),
-            promote_on_start: Arc::new(Mutex::new(HashMap::new())),
+            materialize_on_start: Arc::new(Mutex::new(HashMap::new())),
             defer_next_start: Arc::new(AtomicBool::new(false)),
-            promoted_thread_ids: Arc::new(Mutex::new(HashMap::new())),
             stopped_turns: Arc::new(Mutex::new(HashSet::new())),
             stop_requests: Arc::new(Mutex::new(HashSet::new())),
             scenario_harness,
@@ -969,16 +980,6 @@ impl ProviderBridge for FakeProviderBridge {
         })
     }
 
-    async fn resolve_started_thread_id(&self, requested_thread_id: &str) -> String {
-        self.record_thread_id_argument("resolve_started_thread_id", requested_thread_id)
-            .await;
-        self.promoted_thread_ids
-            .lock()
-            .await
-            .remove(requested_thread_id)
-            .unwrap_or_else(|| requested_thread_id.to_string())
-    }
-
     /// The trait's own default, plus the recording. A task seat records its owning
     /// provider up front, which is what makes this call distinguishable from an
     /// ordinary delete in the boundary assertions.
@@ -1009,9 +1010,11 @@ impl ProviderBridge for FakeProviderBridge {
 
         // The session is created BY this turn. Provider storage moves from the
         // temporary handle to the real one, while relay state keeps its stable id.
-        let promoted = self.promote_on_start.lock().await.remove(thread_id);
-        let provider_thread_id = promoted.clone().unwrap_or_else(|| thread_id.to_string());
-        let session_id = if let Some(real_id) = promoted.clone() {
+        let materialized = self.materialize_on_start.lock().await.remove(thread_id);
+        let provider_thread_id = materialized
+            .clone()
+            .unwrap_or_else(|| thread_id.to_string());
+        let session_id = if let Some(real_id) = materialized.clone() {
             let mut summary = {
                 let mut threads = self.threads.lock().await;
                 let mut thread = threads.remove(thread_id).expect("checked above");
@@ -1022,25 +1025,12 @@ impl ProviderBridge for FakeProviderBridge {
                 summary
             };
             let mut relay = self.state.write().await;
-            let session_id = match relay
+            let session_id = relay
                 .materialize_deferred_session_binding("fake", thread_id, &real_id)
                 .expect("fake deferred binding materialization")
-            {
-                Some(session_id) => session_id,
-                None => {
-                    // Legacy compatibility for tests or restored in-flight state
-                    // that predates stable deferred bindings.
-                    if relay.active_thread_id.as_deref() == Some(thread_id) {
-                        relay.active_thread_id = Some(real_id.clone());
-                    }
-                    relay.promote_background_thread(thread_id, &real_id);
-                    self.promoted_thread_ids
-                        .lock()
-                        .await
-                        .insert(thread_id.to_string(), real_id.clone());
-                    real_id.clone()
-                }
-            };
+                .unwrap_or_else(|| {
+                    panic!("fake deferred start '{thread_id}' has no stable binding to materialize")
+                });
             summary.id = session_id.clone();
             relay.upsert_thread(summary);
             relay.notify();

@@ -32,7 +32,7 @@ use crate::state::{
 
 use super::review::{
     classify_workspace_result, random_suffix, reviewer_read_only_is_enforced,
-    reviewer_thread_settings, ReviewWorkspace, ThreadDriveError,
+    reviewer_thread_settings, DispatchedTurn, ReviewWorkspace, ThreadDriveError,
 };
 use super::*;
 
@@ -519,7 +519,7 @@ finish before starting a workflow"
 
     async fn run_workflow_job(&self, run_id: String, workflow: Workflow) {
         let Some(WorkflowRunFields {
-            mut parent_thread_id,
+            parent_thread_id,
             cwd,
         }) = self.workflow_run_fields(&run_id).await
         else {
@@ -571,9 +571,7 @@ finish before starting a workflow"
                 .run_turn(&run_id, &parent_thread_id, &prompt, step.model.as_deref())
                 .await
             {
-                // The execute step is where an untouched Claude author gets promoted;
-                // every later step (the recap read, the revise turn) must follow it.
-                Some((author_thread_id, _)) => parent_thread_id = author_thread_id,
+                Some(_) => {}
                 None => {
                     self.fail_run(&run_id, "the execute step produced no output")
                         .await;
@@ -599,7 +597,7 @@ finish before starting a workflow"
             .await;
             return;
         };
-        let (mut reviewer_thread_id, reviewer_model) = match self
+        let (reviewer_thread_id, reviewer_model) = match self
             .start_workflow_step_thread(
                 &run_id,
                 &review.id,
@@ -665,8 +663,7 @@ finish before starting a workflow"
             let review_text = match self
                 .run_reviewer_turn(
                     &run_id,
-                    &review.id,
-                    &mut reviewer_thread_id,
+                    &reviewer_thread_id,
                     &prompt,
                     Some(reviewer_model.as_str()),
                 )
@@ -733,9 +730,7 @@ finish before starting a workflow"
                 )
                 .await
             {
-                // A revise turn can be the promoting one too, when the execute step was
-                // skipped (a workflow whose first step is the review).
-                Some((author_thread_id, _)) => parent_thread_id = author_thread_id,
+                Some(_) => {}
                 None => {
                     self.push_runtime_log(
                         "info",
@@ -754,22 +749,13 @@ finish before starting a workflow"
     /// parked/timed-out turn is stopped before returning so it can't keep mutating
     /// files after the run ends.
     ///
-    /// Run one author turn and return `(the thread it actually ran on, its reply)`.
-    ///
-    /// The id is returned for the same reason `send_message_to_thread` returns one: an
-    /// author that is a Claude session nobody has messaged yet is promoted off its
-    /// `claude-pending-…` placeholder by this very turn. A caller that kept the id it
-    /// passed in would address a thread that no longer exists on every later step —
-    /// and, because promotion has already rewritten the PERSISTED run's parent id,
-    /// preflight would not even recognise that placeholder as owned by this run, so
-    /// the next turn blocks the whole workflow instead of failing legibly.
     async fn run_turn(
         &self,
         run_id: &str,
         thread_id: &str,
         prompt: &str,
         model: Option<&str>,
-    ) -> Option<(String, String)> {
+    ) -> Option<String> {
         if let Err(error) = self.workflow_turn_preflight(run_id, thread_id).await {
             self.block_run(run_id, error).await;
             return None;
@@ -778,36 +764,26 @@ finish before starting a workflow"
             .latest_assistant_entry(thread_id)
             .await
             .map(|(id, _)| id);
-        // The id the turn RUNS under. A workflow started on a Claude session that was
-        // never messaged runs its execute step as that session's FIRST turn, which
-        // promotes it off its placeholder mid-send — so the wait and the read-back
-        // below must follow the turn, not the id we addressed.
-        let thread_id = &match self
-            .send_message_to_thread(thread_id, prompt, model, None)
-            .await
-        {
-            Ok(dispatched) if dispatched.turn_id.is_some() => dispatched.thread_id,
-            // Both are uncertain starts: no turn id, or a provider that can begin work
-            // before returning Err (response-loss). Drain either way so a started turn
-            // can't keep mutating after the run goes terminal.
-            outcome => {
-                let started = match outcome {
-                    Ok(dispatched) => dispatched.thread_id,
-                    Err(_) => self.dispatched_thread_id(thread_id).await,
-                };
-                if !self.stop_and_drain(&started).await {
-                    self.block_run(
-                        run_id,
-                        format!(
-                            "thread {started}'s turn did not confirm stopping after an \
+        // Both are uncertain starts: no turn id, or a provider that can begin work
+        // before returning Err (response-loss). Drain either way so a started turn
+        // can't keep mutating after the run goes terminal.
+        if !matches!(
+            self.send_message_to_thread(thread_id, prompt, model, None)
+                .await,
+            Ok(DispatchedTurn { turn_id: Some(_) })
+        ) {
+            if !self.stop_and_drain(thread_id).await {
+                self.block_run(
+                    run_id,
+                    format!(
+                        "thread {thread_id}'s turn did not confirm stopping after an \
 uncertain workflow turn start; the workflow remains locked"
-                        ),
-                    )
-                    .await;
-                }
-                return None;
+                    ),
+                )
+                .await;
             }
-        };
+            return None;
+        }
         match self.wait_for_step_idle(thread_id).await {
             StepOutcome::Completed => {}
             StepOutcome::NeedsHuman | StepOutcome::TimedOut => {
@@ -825,23 +801,19 @@ workflow remains locked"
             }
         }
         match self.latest_assistant_entry(thread_id).await {
-            Some((id, text)) if baseline.as_deref() != Some(id.as_str()) => {
-                Some((thread_id.to_string(), text))
-            }
+            Some((id, text)) if baseline.as_deref() != Some(id.as_str()) => Some(text),
             _ => None,
         }
     }
 
-    /// Run one reviewer turn, tolerant of a clean Claude reviewer's synthetic
-    /// `claude-pending-*` id being promoted to its real session id once the turn
-    /// starts: the id is re-read from the run's `step_threads` (which
-    /// `promote_background_thread` rewrites) after sending and after the wait, and
-    /// `*reviewer_thread_id` is updated so later rounds use the live id.
+    /// Run one reviewer turn on the reviewer this run spawned, and return its reply.
+    ///
+    /// The reviewer is created once, before the first round, and every round addresses
+    /// that same session: `step_threads` is written at creation and never again.
     async fn run_reviewer_turn(
         &self,
         run_id: &str,
-        review_step_id: &str,
-        reviewer_thread_id: &mut String,
+        reviewer_thread_id: &str,
         prompt: &str,
         model: Option<&str>,
     ) -> Option<String> {
@@ -856,48 +828,34 @@ workflow remains locked"
             .latest_assistant_entry(reviewer_thread_id)
             .await
             .map(|(id, _)| id);
-        // Same rule as the author turn. A workflow reviewer cannot be a deferred-start
-        // provider today (`start_code_workflow` requires a hard read-only sandbox,
-        // which Claude has no mode for), so this resolves to the id we sent to — it is
-        // here so the rule has no hole in it if that allowlist ever widens.
-        let dispatched_reviewer = match self
-            .send_message_to_thread(reviewer_thread_id, prompt, model, None)
-            .await
-        {
-            Ok(dispatched) if dispatched.turn_id.is_some() => dispatched.thread_id,
-            // Uncertain start (no turn id, or a started turn lost to an error) —
-            // drain before failing so it can't keep running after the run ends.
-            outcome => {
-                let started = match outcome {
-                    Ok(dispatched) => dispatched.thread_id,
-                    Err(_) => self.dispatched_thread_id(reviewer_thread_id).await,
-                };
-                if !self.stop_and_drain(&started).await {
-                    self.block_run(
-                        run_id,
-                        format!(
-                            "reviewer thread {started}'s turn did not confirm \
+        // Uncertain start (no turn id, or a started turn lost to an error) — drain
+        // before failing so it can't keep running after the run ends.
+        if !matches!(
+            self.send_message_to_thread(reviewer_thread_id, prompt, model, None)
+                .await,
+            Ok(DispatchedTurn { turn_id: Some(_) })
+        ) {
+            if !self.stop_and_drain(reviewer_thread_id).await {
+                self.block_run(
+                    run_id,
+                    format!(
+                        "reviewer thread {reviewer_thread_id}'s turn did not confirm \
 stopping after an uncertain workflow turn start; the workflow remains locked"
-                        ),
-                    )
-                    .await;
-                }
-                return None;
+                    ),
+                )
+                .await;
             }
-        };
-        let current = self
-            .current_step_thread(run_id, review_step_id)
-            .await
-            .unwrap_or(dispatched_reviewer);
-        match self.wait_for_step_idle(&current).await {
+            return None;
+        }
+        match self.wait_for_step_idle(reviewer_thread_id).await {
             StepOutcome::Completed => {}
             StepOutcome::NeedsHuman | StepOutcome::TimedOut => {
-                if !self.stop_and_drain(&current).await {
+                if !self.stop_and_drain(reviewer_thread_id).await {
                     self.block_run(
                         run_id,
                         format!(
-                            "reviewer thread {current}'s workflow turn did not confirm stopping; \
-the workflow remains locked"
+                            "reviewer thread {reviewer_thread_id}'s workflow turn did not confirm \
+stopping; the workflow remains locked"
                         ),
                     )
                     .await;
@@ -905,12 +863,7 @@ the workflow remains locked"
                 return None;
             }
         }
-        let current = self
-            .current_step_thread(run_id, review_step_id)
-            .await
-            .unwrap_or(current);
-        *reviewer_thread_id = current.clone();
-        match self.latest_assistant_entry(&current).await {
+        match self.latest_assistant_entry(reviewer_thread_id).await {
             Some((id, text)) if baseline.as_deref() != Some(id.as_str()) => Some(text),
             _ => None,
         }
@@ -1116,13 +1069,6 @@ Bash can still write without approval (best-effort read-only)"
             self.handle_parent_reviewer_threads(evict_ids, true).await;
         }
         Ok((thread_id, model))
-    }
-
-    async fn current_step_thread(&self, run_id: &str, step_id: &str) -> Option<String> {
-        let relay = self.relay.read().await;
-        relay
-            .workflow_run(run_id)
-            .and_then(|run| run.step_threads.get(step_id).cloned())
     }
 
     /// Best-effort current workspace diff text for `{artifact}` substitution.

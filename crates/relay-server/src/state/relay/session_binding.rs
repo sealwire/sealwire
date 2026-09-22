@@ -42,8 +42,9 @@ impl SessionBinding {
         }
     }
 
-    /// Whether the provider has handed over a durable id yet. Phase 3 replaces the
-    /// `starts_with("claude-pending-")` persistence checks with this.
+    /// Whether the provider has handed over a durable id yet. This is the ONLY
+    /// authority on that question — the persistence decisions that used to read a
+    /// `claude-pending-` prefix off the session id all ask this instead.
     pub(crate) fn is_materialized(&self) -> bool {
         self.provider_thread_id.is_some()
     }
@@ -231,7 +232,7 @@ impl SessionBindingRegistry {
     /// provider id. The session id and every relay-owned key stay unchanged.
     /// `Ok(None)` means no unmaterialized binding owns the pending handle. The
     /// caller must still distinguish an already-materialized replay from a legacy
-    /// public-id promotion.
+    /// already-materialized replay.
     pub(crate) fn materialize_deferred(
         &mut self,
         provider: &str,
@@ -449,7 +450,7 @@ mod tests {
 
     /// A real Claude session id, bound under a session id that is NOT it — the
     /// Phase-3 shape, used here to prove Phase 1 already stores and reloads it.
-    fn promoted() -> SessionBinding {
+    fn materialized() -> SessionBinding {
         SessionBinding {
             provider: "claude_code".to_string(),
             provider_handle: "real-sdk-id".to_string(),
@@ -500,8 +501,8 @@ mod tests {
             )
             .expect("pending bind");
         registry
-            .bind("session-a", promoted())
-            .expect("promote to the real id");
+            .bind("session-a", materialized())
+            .expect("bind the created session id");
 
         assert_eq!(
             registry.session_for_provider_handle("claude_code", "claude-pending-1"),
@@ -516,7 +517,7 @@ mod tests {
         assert_eq!(
             registry.reverse_len(),
             1,
-            "a rebind that leaves its old reverse key behind leaks one entry per promotion",
+            "a rebind that leaves its old reverse key behind leaks one entry per session",
         );
     }
 
@@ -678,7 +679,9 @@ mod tests {
                 },
             )
             .expect("pending");
-        registry.bind("session-real", promoted()).expect("promoted");
+        registry
+            .bind("session-real", materialized())
+            .expect("materialized");
 
         let persistable = registry.persistable();
         assert_eq!(
@@ -692,8 +695,8 @@ has no provider history to come back to",
     #[test]
     fn restore_rebuilds_the_reverse_index_and_drops_conflicts_deterministically() {
         let mut persisted = HashMap::new();
-        persisted.insert("session-b".to_string(), promoted());
-        persisted.insert("session-a".to_string(), promoted());
+        persisted.insert("session-b".to_string(), materialized());
+        persisted.insert("session-a".to_string(), materialized());
         persisted.insert(
             "session-c".to_string(),
             SessionBinding::identity("codex", "codex-1"),
@@ -721,7 +724,7 @@ has no provider history to come back to",
     #[test]
     fn a_bound_handle_routes_to_its_session_and_binds_nothing_new() {
         let mut registry = SessionBindingRegistry::default();
-        registry.bind("session-a", promoted()).expect("bind");
+        registry.bind("session-a", materialized()).expect("bind");
 
         assert_eq!(
             registry.route_provider_event("claude_code", "real-sdk-id"),
@@ -779,7 +782,7 @@ has no provider history to come back to",
     #[test]
     fn a_handle_equal_to_a_session_id_on_the_same_provider_is_refused_too() {
         let mut registry = SessionBindingRegistry::default();
-        registry.bind("session-a", promoted()).expect("bind");
+        registry.bind("session-a", materialized()).expect("bind");
 
         assert_eq!(
             registry.route_provider_event("claude_code", "session-a"),

@@ -52,8 +52,8 @@ const CLAUDE_PROVIDER_KEY: &str = "claude_code";
 /// Configuration captured when a Claude session is created without an initial
 /// prompt. The SDK only assigns a `session_id` after it sees the first user
 /// message, so we cannot call the worker yet — we hand back a synthetic
-/// `claude-pending-…` thread id and use this config on the first turn to
-/// promote it to a real session.
+/// `claude-pending-…` bridge handle and use this config on the first turn to
+/// create the real session behind it.
 #[derive(Clone)]
 struct PendingClaudeConfig {
     cwd: String,
@@ -95,9 +95,6 @@ pub struct ClaudeCodeBridge {
     /// persisted to disk because no Anthropic session exists yet. The pending
     /// key is a bridge handle; relay-owned state uses its stable session id.
     pending_threads: Arc<Mutex<HashMap<String, PendingClaudeConfig>>>,
-    /// Legacy one-shot handoff for a pre-Phase-3 public pending id. Stable relay
-    /// sessions materialize their binding from `session_started` and never use it.
-    promoted_thread_ids: Arc<Mutex<HashMap<String, String>>>,
     /// Prevent a provider list from discovering and identity-adopting the SDK id
     /// between deferred `start` creating it and `session_started` binding it to
     /// the stable relay session. Ordinary sends/starts do not need this gate.
@@ -118,7 +115,7 @@ pub struct ClaudeCodeBridge {
 /// Which sealwire tool surface a thread gets, resolved FRESH every turn.
 ///
 /// Never remembered by the bridge: re-deriving it each turn is what makes it
-/// survive a relay restart and a `claude-pending-…` promotion without a second
+/// survive a relay restart and a deferred session's materialization without a second
 /// copy to keep in sync.
 #[derive(Debug, PartialEq, Eq)]
 enum SessionTools {
@@ -423,7 +420,6 @@ impl ClaudeCodeBridge {
             next_request_id: AtomicU64::new(1),
             state,
             pending_threads: Arc::new(Mutex::new(HashMap::new())),
-            promoted_thread_ids: Arc::new(Mutex::new(HashMap::new())),
             deferred_start_list_gate: Arc::new(RwLock::new(())),
             cached_models: Arc::new(RwLock::new(None)),
             worker_path: worker_path.to_string(),
@@ -889,8 +885,8 @@ impl ProviderBridge for ClaudeCodeBridge {
         let result = self.send_request("read_session", cmd).await?;
         let mut thread =
             parse_thread_summary(value_at(&result, &["thread"]).unwrap_or(&Value::Null))?;
-        // Keep the public thread id stable when the underlying SDK session id
-        // differs (i.e. a promoted pending thread).
+        // Keep the id the caller asked with, which is the relay's, when the SDK
+        // session id behind it differs.
         thread.id = thread_id.to_string();
         let items = value_at(&result, &["transcript"]).and_then(Value::as_array);
         let transcript = items
@@ -1130,18 +1126,6 @@ impl ProviderBridge for ClaudeCodeBridge {
             // the remote surface had no repair path for).
             let real_session_id =
                 string_at(&result, &["thread", "id"]).unwrap_or_else(|| thread_id.to_string());
-            let has_stable_binding = self
-                .state
-                .read()
-                .await
-                .session_for_provider_handle(CLAUDE_PROVIDER_KEY, &real_session_id)
-                .is_some_and(|session_id| session_id != real_session_id);
-            if real_session_id != thread_id && !has_stable_binding {
-                self.promoted_thread_ids
-                    .lock()
-                    .await
-                    .insert(thread_id.to_string(), real_session_id.clone());
-            }
             self.record_local_user_message(
                 &real_session_id,
                 user_item_id,
@@ -1207,14 +1191,6 @@ impl ProviderBridge for ClaudeCodeBridge {
         self.record_local_user_message(thread_id, user_item_id, transcript_text, turn_id.clone())
             .await;
         Ok(Some(turn_id))
-    }
-
-    async fn resolve_started_thread_id(&self, requested_thread_id: &str) -> String {
-        self.promoted_thread_ids
-            .lock()
-            .await
-            .remove(requested_thread_id)
-            .unwrap_or_else(|| requested_thread_id.to_string())
     }
 
     async fn request_turn_stop(
@@ -1462,7 +1438,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
     // handle. Materializing the binding changes no relay-owned key.
     let pending_provider_handle =
         string_at(&payload, &["pending_thread_id"]).filter(|pending| !pending.is_empty());
-    let (event_thread_id, materialized_deferred_binding) = if event_type == "session_started" {
+    let event_thread_id = if event_type == "session_started" {
         match (
             pending_provider_handle.as_deref(),
             provider_session_id.as_deref(),
@@ -1473,31 +1449,23 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     pending,
                     provider_thread_id,
                 ) {
-                    Ok(Some(session_id)) => (Some(session_id), true),
-                    Ok(None) => {
-                        if let Some(session_id) = relay
-                            .materialized_non_identity_session_for_provider_handle(
-                                CLAUDE_PROVIDER_KEY,
-                                provider_thread_id,
-                            )
-                        {
-                            // Idempotent replay: the first delivery already moved
-                            // the binding from the pending handle to this SDK id.
-                            (Some(session_id), true)
-                        } else {
-                            (
-                                match relay.session_for_provider_event(
-                                    CLAUDE_PROVIDER_KEY,
-                                    Some(provider_thread_id),
-                                ) {
-                                    ProviderEventSession::Session(session_id) => Some(session_id),
-                                    ProviderEventSession::Unnamed => None,
-                                    ProviderEventSession::Refused => return,
-                                },
-                                false,
-                            )
-                        }
-                    }
+                    Ok(Some(session_id)) => Some(session_id),
+                    // Idempotent replay: the first delivery already moved the binding
+                    // from the pending handle to this SDK id.
+                    Ok(None) => match relay.materialized_non_identity_session_for_provider_handle(
+                        CLAUDE_PROVIDER_KEY,
+                        provider_thread_id,
+                    ) {
+                        Some(session_id) => Some(session_id),
+                        None => match relay.session_for_provider_event(
+                            CLAUDE_PROVIDER_KEY,
+                            Some(provider_thread_id),
+                        ) {
+                            ProviderEventSession::Session(session_id) => Some(session_id),
+                            ProviderEventSession::Unnamed => None,
+                            ProviderEventSession::Refused => return,
+                        },
+                    },
                     Err(error) => {
                         tracing::warn!(
                             pending_handle = pending,
@@ -1509,28 +1477,21 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     }
                 }
             }
-            _ => (
-                match relay
-                    .session_for_provider_event(CLAUDE_PROVIDER_KEY, provider_session_id.as_deref())
-                {
-                    ProviderEventSession::Session(session_id) => Some(session_id),
-                    ProviderEventSession::Unnamed => None,
-                    ProviderEventSession::Refused => return,
-                },
-                false,
-            ),
-        }
-    } else {
-        (
-            match relay
+            _ => match relay
                 .session_for_provider_event(CLAUDE_PROVIDER_KEY, provider_session_id.as_deref())
             {
                 ProviderEventSession::Session(session_id) => Some(session_id),
                 ProviderEventSession::Unnamed => None,
                 ProviderEventSession::Refused => return,
             },
-            false,
-        )
+        }
+    } else {
+        match relay.session_for_provider_event(CLAUDE_PROVIDER_KEY, provider_session_id.as_deref())
+        {
+            ProviderEventSession::Session(session_id) => Some(session_id),
+            ProviderEventSession::Unnamed => None,
+            ProviderEventSession::Refused => return,
+        }
     };
 
     match event_type {
@@ -1550,33 +1511,10 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
         }
 
         "session_started" => {
-            // SDK system/init message — the full session init. A Phase-3 deferred
-            // session was already resolved through its pending handle above, so only
-            // its binding changed. The promotion below is legacy compatibility for
-            // restored/in-flight public pending ids.
+            // SDK system/init message — the full session init. A deferred session was
+            // already resolved through its pending handle above, and only its binding
+            // moved: every relay-owned key, the active pointer included, is unchanged.
             let session_id = event_thread_id.clone();
-            if let Some(sid) = session_id.as_deref() {
-                let pending_thread_id = pending_session_id(&relay, &payload);
-                let stale_pending_id = relay
-                    .active_thread_id
-                    .as_deref()
-                    .filter(|id| Some(*id) == pending_thread_id.as_deref())
-                    .map(|id| id.to_string());
-                if stale_pending_id.is_some() || relay.active_thread_id.as_deref() == Some(sid) {
-                    relay.active_thread_id = Some(sid.to_string());
-                }
-                if !materialized_deferred_binding {
-                    if let Some(pending_id) = stale_pending_id {
-                        relay.promote_background_thread(&pending_id, sid);
-                    } else if let Some(pending_id) = pending_thread_id.as_deref() {
-                        // Legacy compatibility: a pre-Phase-3 pending public id
-                        // still needs the old domain re-key until Phase 4 removes it.
-                        if pending_id != sid {
-                            relay.promote_background_thread(pending_id, sid);
-                        }
-                    }
-                }
-            }
             let is_active_session = session_id
                 .as_deref()
                 .map_or(false, |sid| relay.active_thread_id.as_deref() == Some(sid));
@@ -3180,7 +3118,7 @@ mod tests {
         format!("{workspace_root}/claude-worker/fake-claude-worker.mjs")
     }
 
-    // Faithful pending-promotion fake: unlike the dumb fake above it replays the
+    // Faithful deferred-start fake: unlike the dumb fake above it replays the
     // first user message asynchronously (after the start response), so it can
     // reproduce the timing window the remote "first message invisible" bug needs.
     fn pending_repro_worker_path() -> String {
@@ -3880,8 +3818,8 @@ for await (const line of rl) {
     }
 
     #[tokio::test]
-    async fn deferred_start_promotes_with_its_permission_mode() {
-        // A thread started without a prompt promotes on the first turn via a
+    async fn deferred_start_materializes_with_its_permission_mode() {
+        // A thread started without a prompt reaches the SDK on its first turn via a
         // `start` command — that command must carry the mode chosen at creation.
         let Some((bridge, state)) = spawn_fake_bridge().await else {
             return;
@@ -3911,14 +3849,14 @@ for await (const line of rl) {
                 &[],
             )
             .await
-            .expect("first turn promotes the thread");
+            .expect("the first turn creates the session");
         assert!(
             wait_for_log(&state, "type=start permissionMode=bypassPermissions", 5).await,
-            "promotion `start` must carry the deferred thread's mode",
+            "the materializing `start` must carry the deferred thread's mode",
         );
         assert!(
             wait_for_log(&state, "prompt=yes", 5).await,
-            "promotion `start` must include the first user message",
+            "the materializing `start` must include the first user message",
         );
     }
 
@@ -3988,7 +3926,7 @@ for await (const line of rl) {
         assert_ne!(session_id, pending_handle);
 
         // Regression: the blank conversation must show up in the thread list even
-        // though the claude bridge can't list a not-yet-promoted pending session
+        // though the claude bridge can't list a session the SDK has not created yet
         // (the fake worker returns no sessions). Without preserving the active
         // thread, `list_threads` would overwrite it away and the new session would
         // "never appear" in the sidebar.
@@ -4007,8 +3945,8 @@ for await (const line of rl) {
         );
 
         // Open another blank thread first so the original pending thread is no
-        // longer the relay's live projection. Its first send must still promote
-        // and focus the correct real Claude session.
+        // longer the relay's live projection. Its first send must still create and
+        // focus the correct real Claude session.
         let second = app
             .start_session(crate::protocol::StartSessionInput {
                 cwd: Some("/tmp".to_string()),
@@ -4050,7 +3988,7 @@ for await (const line of rl) {
                 .transcript
                 .iter()
                 .any(|entry| entry.text.as_deref() == Some("first message")),
-            "the focused promoted session must contain the targeted first message"
+            "the focused session must contain the targeted first message"
         );
     }
 
@@ -6769,7 +6707,7 @@ for await (const line of rl) {
 
         // A successful cancel reports the distinct stopped lifecycle event.
         let _stopped = wait_for_log(&state, "Claude session stopped", 5).await;
-        // The live provider may have no promoted session yet; just verify no crash.
+        // The live provider may have no SDK session yet; just verify no crash.
         let relay = state.read().await;
         let snap = relay.snapshot();
         assert!(!snap
@@ -7075,7 +7013,7 @@ mod session_binding_boundary_tests {
     }
 
     #[tokio::test]
-    async fn replayed_session_started_keeps_the_stable_session_out_of_legacy_promotion() {
+    async fn a_replayed_session_started_moves_no_relay_owned_key() {
         let (tx, _) = tokio::sync::watch::channel(0);
         let state = Arc::new(RwLock::new(RelayState::new(
             "/tmp/b".to_string(),
@@ -7132,71 +7070,7 @@ mod session_binding_boundary_tests {
                 .iter()
                 .all(|thread| thread.id != "claude-pending-replayed"
                     && thread.id != "real-sdk-replayed"));
-            assert_eq!(relay.legacy_thread_promotion_count(), 0);
             assert!(relay.snapshot().active_thread_promoted_from.is_none());
         }
-    }
-
-    // The 2b compatibility contract: a deferred session still promotes off its
-    // pending handle exactly as before, and leaves no binding behind under it.
-    #[tokio::test]
-    async fn a_deferred_session_still_promotes_off_its_pending_handle() {
-        let (tx, _) = tokio::sync::watch::channel(0);
-        let state = Arc::new(RwLock::new(RelayState::new(
-            "/tmp/b".to_string(),
-            tx,
-            crate::state::SecurityProfile::private(),
-        )));
-        {
-            let mut relay = state.write().await;
-            relay.activate_thread(
-                test_thread("claude-pending-1", "/tmp/b"),
-                "/tmp/b",
-                "sonnet",
-                "default",
-                "workspace-write",
-                "medium",
-                "device-1",
-            );
-        }
-        {
-            let relay = state.read().await;
-            assert!(relay.thread_settings("claude-pending-1").is_some());
-        }
-
-        handle_worker_event(
-            json!({
-                "type": "session_started",
-                "provider_session_id": "real-sdk-id",
-                "pending_thread_id": "claude-pending-1",
-                "cwd": "/tmp/b"
-            }),
-            &state,
-        )
-        .await;
-
-        let relay = state.read().await;
-        assert_eq!(relay.active_thread_id.as_deref(), Some("real-sdk-id"));
-        assert_eq!(
-            relay.snapshot().active_thread_promoted_from.as_deref(),
-            Some("claude-pending-1"),
-            "the compatibility promotion the frontend still reads must survive 2b",
-        );
-        assert!(
-            relay.thread_settings("real-sdk-id").is_some(),
-            "promotion still carries relay metadata over",
-        );
-        assert!(relay.thread_settings("claude-pending-1").is_none());
-        assert!(
-            relay.resolve_session_target("claude-pending-1").is_none(),
-            "the placeholder must not be left owning a binding",
-        );
-        assert_eq!(
-            relay
-                .resolve_session_target("real-sdk-id")
-                .expect("the promoted session is bound")
-                .provider_handle,
-            "real-sdk-id",
-        );
     }
 }

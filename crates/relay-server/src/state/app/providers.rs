@@ -664,25 +664,6 @@ impl SessionTarget {
             .await
     }
 
-    /// Which relay id this session's just-started turn belongs to.
-    ///
-    /// A stable relay session already knows its answer: provider events changed the
-    /// binding while `start_turn` was in flight, and its public id never moved. Only
-    /// an identity session can still need the legacy provider-promotion handoff.
-    pub(crate) async fn resolve_started_thread_id(&self) -> String {
-        if self.session_id != self.provider_handle {
-            return self.session_id.clone();
-        }
-        let promoted = self
-            .bridge
-            .resolve_started_thread_id(&self.provider_handle)
-            .await;
-        if promoted != self.provider_handle && self.session_id == self.provider_handle {
-            return promoted;
-        }
-        self.session_id.clone()
-    }
-
     /// The raw source half of a native fork. Only `AppState::fork_provider_thread`
     /// calls this helper, and it adopts the returned provider row immediately.
     async fn fork_thread_raw(

@@ -251,12 +251,13 @@ impl AppState {
             .filter(|thread| !hidden_reviewer_ids.contains(&thread.id))
             .collect::<Vec<_>>();
 
-        // Preserve the active thread even when no provider lists it yet. A
-        // deferred-start Claude session lives under a synthetic `claude-pending-`
-        // id until its first turn promotes it to a real SDK session, so the
-        // bridge's `list_threads` can't return it. Without this, starting a blank
-        // session (or any later thread-list refresh) would drop the conversation
-        // the user is actively viewing — it would never appear in the sidebar.
+        // Preserve the active thread even when no provider lists it yet. Relay rows are
+        // keyed by stable session id; a deferred-start Claude session has one from the
+        // moment it opens, but its binding still holds only a temporary bridge handle, so
+        // the provider has no session to list and `list_threads` cannot return it.
+        // Without this, starting a blank session (or any later thread-list refresh) would
+        // drop the conversation the user is actively viewing — it would never appear in
+        // the sidebar.
         // ...but never re-add a nav-hidden reviewer thread: it must stay hidden even
         // when it is the active thread mid-review. A task-team reviewer is not in this
         // narrower set and can therefore be restored like any other visible session.
@@ -336,9 +337,10 @@ impl AppState {
         } else {
             // The routing cache (relay.threads) must retain reviewer-thread rows even
             // though they are filtered from the nav-visible response. `find_thread_provider`
-            // looks up threads by id in this cache, and a synthetic `claude-pending-…`
-            // reviewer is only there (not yet in the provider's own thread list), so
-            // losing its row would make it unroutable for `send_message_to_thread`.
+            // looks up threads by id in this cache, and a reviewer whose binding still
+            // holds only a temporary handle is only there — the provider has no session to
+            // list yet — so losing its row would make it unroutable for
+            // `send_message_to_thread`.
             // Preserve only rows not already returned. A task reviewer may now be in
             // BOTH sets (nav-visible response and semantic reviewer set); blindly
             // appending every cached reviewer would add another duplicate on every
@@ -729,12 +731,6 @@ impl AppState {
         };
 
         let mut relay = self.relay.write().await;
-        // A client can legitimately still be holding a `claude-pending-…` id: promotion
-        // to the real SDK id happens on the first send, and clients only learn about it
-        // from the next snapshot. Keying the write off the id as sent would land it on a
-        // dead key — invisible to every reader, and orphaned forever in a PERSISTED map,
-        // since no cleanup path ever sees a pending id again. Resolve first, then act.
-        let thread_id = &relay.resolve_promoted_thread_id(thread_id);
         if relay
             .navigation_hidden_reviewer_thread_ids()
             .contains(thread_id)
@@ -847,7 +843,6 @@ impl AppState {
         let flagged = input.flagged;
 
         let mut relay = self.relay.write().await;
-        let thread_id = &relay.resolve_promoted_thread_id(thread_id);
         if relay
             .navigation_hidden_reviewer_thread_ids()
             .contains(thread_id)
@@ -1009,7 +1004,7 @@ impl AppState {
     ///     navigable threads.
     /// Either way, any in-memory review job that referenced a handled reviewer
     /// thread is dropped so the Reviewer panel can't show a card pointing at a
-    /// deleted/promoted thread.
+    /// thread that was deleted or un-hidden.
     pub async fn delete_thread_permanently(
         &self,
         thread_id: &str,

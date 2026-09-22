@@ -661,9 +661,10 @@ pub struct AwaitingUser {
 
 /// WHERE in the record a thread id lives.
 ///
-/// The driver addresses seats by slot rather than by value so it can re-resolve
-/// after a mid-turn promotion. Holding the id itself is exactly the bug: the
-/// value it captured before sending can be dead by the time the turn ends.
+/// The driver names a seat rather than passing a thread id around, so the record
+/// stays the single place a seat's occupant is written down — a TL succession and
+/// the MR dev chosen after the gate both change WHO is in a seat, and every later
+/// turn should find that out by asking, not by being told.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeamThreadSlot {
     Tl,
@@ -1773,10 +1774,10 @@ impl TeamRun {
     /// Snapshot this run as unresumable because its TL thread never materialized.
     ///
     /// Applied by the persistence writer, not to the live run: the in-memory run
-    /// keeps going, and the next write (after the provider promotes the id)
-    /// records the real state. What this protects is the RESTORE — a synthetic
-    /// `claude-pending-*` id names nothing after a restart, so the run must come
-    /// back terminal rather than as something the user can press Resume on. The
+    /// keeps going, and the next write — once the seat's first turn has created its
+    /// provider session — records the real state. What this protects is the RESTORE:
+    /// a seat with no provider session behind it names nothing after a restart, so
+    /// the run must come back terminal rather than something to press Resume on. The
     /// spec, worktree path and branch are deliberately kept: a tree and a branch
     /// exist on disk, and a card that says so beats a card that vanished.
     pub fn detach_unresumable_tl(&mut self) {
@@ -1942,81 +1943,9 @@ impl TeamRun {
             .position(|task| !task.status.is_terminal() || !task.digested)
     }
 
-    /// Rewrite every reference to `pending_id` as `real_id`.
-    ///
-    /// Claude mints a synthetic `claude-pending-*` id and only replaces it with a
-    /// real session id once the first turn starts, at which point
-    /// `promote_background_thread` re-keys the runtime map. EVERY seat here is
-    /// background-started, so every one of them can be promoted mid-turn — and a
-    /// driver still holding the pending id would find no runtime, read that as
-    /// "not working", and treat a turn that is very much running as finished.
-    pub fn rekey_thread(&mut self, pending_id: &str, real_id: &str) -> bool {
-        if pending_id.is_empty() || pending_id == real_id {
-            return false;
-        }
-        let mut changed = false;
-        let mut swap = |slot: &mut String| {
-            if slot == pending_id {
-                *slot = real_id.to_string();
-                changed = true;
-            }
-        };
-        swap(&mut self.tl_thread_id);
-        for generation in self.tl_succession.iter_mut() {
-            swap(&mut generation.thread_id);
-        }
-        for thread_id in self.run_owned_thread_ids.iter_mut() {
-            swap(thread_id);
-        }
-        if let Some(mr_dev) = self.mr_dev_thread_id.as_mut() {
-            swap(mr_dev);
-        }
-        if let Some(reviewer) = self.reviewer_thread_id.as_mut() {
-            swap(reviewer);
-        }
-        for task in self.sub_tasks.iter_mut() {
-            if let Some(dev) = task.dev_thread_id.as_mut() {
-                swap(dev);
-            }
-            if let Some(reviewer) = task.reviewer_thread_id.as_mut() {
-                swap(reviewer);
-            }
-            for thread_id in task.owned_thread_ids.iter_mut() {
-                swap(thread_id);
-            }
-        }
-        // Left behind, the seat bills under no role and reads as one nobody
-        // ever started.
-        if let Some(role) = self.run_owned_thread_roles.remove(pending_id) {
-            self.run_owned_thread_roles
-                .insert(real_id.to_string(), role);
-            changed = true;
-        }
-        if let Some(provider) = self.owned_thread_providers.remove(pending_id) {
-            self.owned_thread_providers
-                .insert(real_id.to_string(), provider);
-            changed = true;
-        }
-        if let Some(in_flight) = self.in_flight_thread.as_mut() {
-            if in_flight == pending_id {
-                *in_flight = real_id.to_string();
-                changed = true;
-            }
-        }
-        if let Some(awaiting) = self.awaiting.as_mut() {
-            if awaiting.thread_id == pending_id {
-                awaiting.thread_id = real_id.to_string();
-                changed = true;
-            }
-        }
-        if changed {
-            self.updated_at = unix_now();
-        }
-        changed
-    }
-
-    /// Read the CURRENT id in a seat, so a caller can re-resolve after a promotion
-    /// instead of holding one it captured before the turn started.
+    /// Who currently occupies a seat. A caller resolves this once per turn and keeps
+    /// the answer for that turn's whole lifetime: the turn belongs to the session it
+    /// was sent to, and a seat filled afterwards belongs to the next one.
     pub fn thread_in_slot(&self, slot: TeamThreadSlot) -> Option<String> {
         let id = match slot {
             TeamThreadSlot::Tl => self.tl_thread_id.clone(),
@@ -3412,7 +3341,7 @@ mod tests {
     fn a_run_with_an_unresumable_tl_settles_terminal_but_keeps_its_worktree() {
         let mut run = run_with(TeamPhase::Intake, vec![]);
         run.status = TeamRunStatus::Paused;
-        run.tl_thread_id = "claude-pending-3".to_string();
+        run.tl_thread_id = "session-tl".to_string();
         run.branch = "task/x".to_string();
         run.cwd = "/repo/.sealwire/worktrees/x".to_string();
 
@@ -3551,14 +3480,8 @@ mod tests {
             Some("cursor"),
             "the provider captured at seat creation beats role-level inference"
         );
-        assert!(run.rekey_thread("old-mixed", "real-mixed"));
-        assert_eq!(
-            run.provider_for_owned_thread("real-mixed"),
-            Some("cursor"),
-            "pending-session promotion must carry provider ownership"
-        );
-        run.release_owned_thread("real-mixed");
-        assert!(!run.owned_thread_providers.contains_key("real-mixed"));
+        run.release_owned_thread("old-mixed");
+        assert!(!run.owned_thread_providers.contains_key("old-mixed"));
     }
 
     fn spent_sub_task(id: &str, status: SubTaskStatus) -> SubTask {
