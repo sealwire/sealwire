@@ -62,3 +62,48 @@ test("both lockfiles record the SDK spec exactly (no stale range)", () => {
     assert.equal(spec, manifest, `${lock} spec must match the manifest pin`);
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Guard: what is INSTALLED must be what is pinned.
+//
+// Everything above compares manifests to lockfiles — all static, all green while
+// the tree on disk is months out of date. `claude-worker/` is not a workspace and
+// has no postinstall, so a root `npm ci` never touches it: after a pin bump,
+// every local machine (and the relay's worker, which resolves the SDK from there)
+// keeps running whatever was installed last. That is how a probe campaign got run
+// against 0.3.220 while the repo shipped 0.3.269.
+//
+// A location that is not installed at all is skipped, not failed: CI installs the
+// root only, and a fresh clone has neither.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Read the manifest off disk rather than resolving it: the SDK's `exports` map
+// has no `./package.json` entry, so require.resolve cannot reach it.
+function installedSdkVersion(fromDir) {
+  try {
+    const manifest = join(fromDir, "node_modules", ...SDK.split("/"), "package.json");
+    return JSON.parse(readFileSync(manifest, "utf8")).version;
+  } catch {
+    return null;
+  }
+}
+
+test("the installed SDK is the pinned one, wherever it is installed", () => {
+  const pinned = sdkDep(join(here, "package.json"));
+  const checked = [];
+  for (const [label, dir] of [
+    ["root", join(here, "..")],
+    ["claude-worker", here],
+  ]) {
+    const installed = installedSdkVersion(dir);
+    if (installed === null) continue; // not installed here; nothing to disagree with
+    checked.push(label);
+    assert.equal(
+      installed,
+      pinned,
+      `${label} has ${SDK}@${installed} installed but the repo pins ${pinned} — ` +
+        `run \`npm ci\` there; a stale tree means every test and probe ran against a version nobody ships`,
+    );
+  }
+  assert.ok(checked.length > 0, "no installed copy found to check — expected at least one");
+});

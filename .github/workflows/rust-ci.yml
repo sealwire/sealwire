@@ -25,6 +25,12 @@ jobs:
       - name: npm ci
         run: npm ci
 
+      # claude-worker is NOT a workspace and has no postinstall, so the install
+      # above never reaches it. Without this the pinned SDK is only ever checked
+      # at the root, and the worker's own tree stays whatever a machine had.
+      - name: npm ci (claude-worker)
+        run: npm ci --prefix claude-worker
+
       - name: npm test
         run: npm test
 
