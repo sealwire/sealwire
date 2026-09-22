@@ -559,6 +559,14 @@ function createSessionEntry({ key, providerSessionId = null, cmd, pendingStartRe
     pendingStartResponse,
     initialUserMessage: null,
     currentTurnId: null,
+    // Sends waiting for the CLI to actually start their turn, `{uuid, turnId}` in
+    // send order. The SDK drains our queue eagerly, so a send can sit here behind
+    // a turn that is still streaming; see claimPendingTurn.
+    pendingTurns: [],
+    /// Set when a terminal reports that its reply answered several sends at once.
+    /// Keyed BY TURN: a suppressed terminal (cancel) would otherwise leave the mark
+    /// behind for an unrelated later turn to wear.
+    foldedReply: null,
     running: false,
     stopGeneration: 0,
     stopOperation: null,
@@ -695,7 +703,9 @@ function releaseSession(sessions, providerSessionId, context) {
   // seat whose process was already reclaimed.
   const entry = findSessionEntry(sessions, providerSessionId);
   if (!entry) return { released: false, noop: true, reason: "no live session for that id" };
-  if (entry.running || entry.pendingStartResponse) {
+  // `pendingTurns` too: a send is accepted before its turn starts, and the relay
+  // is already waiting on that id.
+  if (entry.running || entry.pendingTurns.length > 0 || entry.pendingStartResponse) {
     return { released: false, reason: "session is mid-turn" };
   }
   if (entry.backgroundTasks.length > 0) {
@@ -729,12 +739,17 @@ function evictSessionsIfNeeded(sessions, context) {
       .filter((entry) => entry.stopOperation?.state !== "cancelling")
       .sort((left, right) => left.lastUsedAt - right.lastUsedAt);
     if (candidates.length === 0) break;
-    const idle = candidates.find((entry) => !entry.running && !entry.pendingStartResponse);
+    const idle = candidates.find(
+      (entry) => !entry.running && entry.pendingTurns.length === 0 && !entry.pendingStartResponse,
+    );
     const nonPending = candidates.find((entry) => !entry.pendingStartResponse);
     const evict = idle || nonPending || candidates[0];
     if (!evict) break;
     const providerSessionId = evict.providerSessionId;
-    const evictedTurnId = evict.currentTurnId;
+    const evictedTurnIds = [
+      ...(evict.currentTurnId ? [evict.currentTurnId] : []),
+      ...evict.pendingTurns.splice(0).map((pending) => pending.turnId),
+    ];
     closeAndRemoveSession(sessions, evict, context);
     if (providerSessionId) {
       const message = "Claude background session was evicted because the session limit was reached";
@@ -743,21 +758,25 @@ function evictSessionsIfNeeded(sessions, context) {
         message,
         provider_session_id: providerSessionId,
       });
-      emit({
-        type: "done",
-        provider_session_id: providerSessionId,
-        turn_id: evictedTurnId,
-        // A turn was actually in flight (not just an idle session reclaimed):
-        // it must settle FAILED, not a clean done, or a dev that had already
-        // emitted text reads as Replied and can still consume review rounds.
-        // Distinct from "usage_limit" — this is the worker's own concurrency
-        // cap, not a provider quota — but it still maps onto the same
-        // recoverable halt in the relay so the run stays resumable until a
-        // seat is free again.
-        ...(evictedTurnId
-          ? { failed: true, reason: message, failure_kind: "session_capacity" }
-          : {}),
-      });
+      // A turn was actually in flight (not just an idle session reclaimed): it
+      // must settle FAILED, not a clean done, or a dev that had already emitted
+      // text reads as Replied and can still consume review rounds. Distinct from
+      // "usage_limit" — this is the worker's own concurrency cap, not a provider
+      // quota — but it still maps onto the same recoverable halt in the relay so
+      // the run stays resumable until a seat is free again.
+      if (evictedTurnIds.length === 0) {
+        emit({ type: "done", provider_session_id: providerSessionId, turn_id: null });
+      }
+      for (const evictedTurnId of evictedTurnIds) {
+        emit({
+          type: "done",
+          provider_session_id: providerSessionId,
+          turn_id: evictedTurnId,
+          failed: true,
+          reason: message,
+          failure_kind: "session_capacity",
+        });
+      }
     }
   }
 }
@@ -769,7 +788,10 @@ function settleUnexpectedStreamEnd(sessions, entry, context) {
     turn_id: entry.currentTurnId ?? null,
     psid: entry.providerSessionId ?? entry.pendingThreadId ?? null,
   });
-  if (entry.cancelFlag.current || !entry.running) return;
+  if (entry.cancelFlag.current) return;
+  // Queued sends die with the stream too — the relay waits on each by id.
+  const pendingTurns = entry.pendingTurns.splice(0);
+  if (!entry.running && pendingTurns.length === 0) return;
 
   const providerSessionId = entry.providerSessionId || entry.pendingThreadId;
   const turnId = entry.currentTurnId;
@@ -801,11 +823,17 @@ function settleUnexpectedStreamEnd(sessions, entry, context) {
       message: "Claude session stream ended before the turn became idle",
       provider_session_id: providerSessionId,
     });
-    emit({
-      type: "session_stopped",
-      provider_session_id: providerSessionId,
-      turn_id: turnId,
-    });
+    const settledIds = [
+      ...(turnId ? [turnId] : []),
+      ...pendingTurns.map((pending) => pending.turnId),
+    ];
+    for (const settledId of settledIds) {
+      emit({
+        type: "session_stopped",
+        provider_session_id: providerSessionId,
+        turn_id: settledId,
+      });
+    }
   }
 
   evictSessionsIfNeeded(sessions, context);
@@ -832,6 +860,11 @@ function trackBackgroundTasks(entry, msg) {
 async function* dedupResultReplays(stream, entry) {
   for await (const msg of stream) {
     trackBackgroundTasks(entry, msg);
+    if (msg?.type === "command_lifecycle") {
+      // Worker-internal: never surfaced as a relay event.
+      if (msg.state === "started") claimPendingTurn(entry, msg.command_uuid);
+      continue;
+    }
     if (msg?.type === "result" && msg?.uuid) {
       const seen = (entry.seenResultUuids ??= new Set());
       if (seen.has(msg.uuid)) {
@@ -845,6 +878,12 @@ async function* dedupResultReplays(stream, entry) {
       if (seen.size > RESULT_REPLAY_MEMORY) {
         seen.delete(seen.values().next().value);
       }
+    }
+    // AFTER the replay drop, never before: a terminal that is about to be discarded
+    // must not end sends or mark a turn, or the mark outlives the `done` that would
+    // have carried it and lands on whatever settles next.
+    if (msg?.type === "result") {
+      settleFoldedPendingTurns(entry, msg);
     }
     yield msg;
   }
@@ -892,33 +931,12 @@ const TURN_REVEALING_EVENTS = new Set([
 // and a user turn can never stream at once, so `running` is false exactly when a
 // spontaneous turn begins.
 //
-// ACCEPTED RESIDUAL WINDOW: a user send can land in the few ms between this
-// announcement and the relay applying it (the relay's busy-send guard only
-// rejects sends once it has), and the send handler below overwrites
-// currentTurnId — so this turn's terminal goes out stamped with the USER's turn
-// id. That is survivable by construction, and deliberately left alone:
-//
-//   1. This announcement bumps the relay's turn revision, and its send path only
-//      seeds active_turn_id when that revision is UNCHANGED across start_turn
-//      (state/app/sessions.rs) — so the racing send never adopts its own id.
-//   2. The relay therefore still holds THIS turn's id, and the mis-stamped
-//      terminal is rejected as a stale completion rather than settling it.
-//   3. When the SDK dequeues the user's turn, it re-arms liveness right here
-//      under a fresh id and settles normally — on its first activity event, or
-//      on its TERMINAL if it fails before producing any (which is why the
-//      terminal is in TURN_REVEALING_EVENTS; without that, step 3 had a
-//      no-activity hole that stranded liveness and dropped the failure entry).
-//
-// All three are pinned by tests in claude.rs (see
-// `a_mis_stamped_completion_cannot_settle_a_spontaneous_turn`,
-// `turn_started_bumps_the_turn_revision_so_a_racing_send_cannot_seed`, and
-// `an_announced_terminal_only_turn_settles_and_keeps_its_failure_visible`). The
-// cost is cosmetic: the racing turn is tracked under a worker-minted id instead
-// of the relay's, and one stale-completion warning is logged.
-//
-// Making the ids exact would need the worker to own a QUEUE of turn ids and
-// announce each as it becomes current — a deliberate reshaping of the
-// turn-completion contract, not a bolt-on to this fix.
+// A user send racing this turn can no longer steal its stamp: the send only
+// registers a pending id, and claiming needs the CLI's `command_lifecycle
+// started` for OUR uuid — which a continuation cannot fake. See claimPendingTurn.
+// (The relay-side guards this used to lean on are pinned in claude.rs:
+// `a_mis_stamped_completion_cannot_settle_a_spontaneous_turn` and
+// `turn_started_bumps_the_turn_revision_so_a_racing_send_cannot_seed`.)
 function armSpontaneousTurn(entry, event) {
   if (entry.running || entry.cancelFlag.current) return;
   if (!TURN_REVEALING_EVENTS.has(event.type)) return;
@@ -939,6 +957,92 @@ function armSpontaneousTurn(entry, event) {
     },
     entry.progressTracker,
   );
+}
+
+// Fail every send that was accepted but whose turn can no longer run. Recoverable
+// on the relay side, like eviction: the prompt was never delivered to a model.
+function settleDiscardedPendingTurns(entry, reason) {
+  const discarded = entry.pendingTurns.splice(0);
+  if (discarded.length === 0) return;
+  const providerSessionId = entry.providerSessionId || entry.pendingThreadId || null;
+  for (const pending of discarded) {
+    diag("pending_turn_discarded", { turn_id: pending.turnId, psid: providerSessionId });
+    emit({
+      type: "done",
+      ...(providerSessionId ? { provider_session_id: providerSessionId } : {}),
+      turn_id: pending.turnId,
+      failed: true,
+      reason,
+      failure_kind: "session_capacity",
+    });
+  }
+}
+
+// End sends the host FOLDED into another turn.
+//
+// A turn's terminal names every user message it consumed (`user_message_uuids`,
+// sdk.d.ts). Anything still pending that appears there was answered inside THIS
+// turn and will never be announced or settled on its own. It is failed rather
+// than completed on purpose: its caller asked for the reply to one exact turn,
+// and handing it a combined answer meant for someone else is the worse error.
+function settleFoldedPendingTurns(entry, result) {
+  if (entry.pendingTurns.length === 0) return;
+  const consumed = Array.isArray(result?.user_message_uuids)
+    ? result.user_message_uuids
+    : result?.user_message_uuid
+      ? [result.user_message_uuid]
+      : [];
+  if (consumed.length === 0) return;
+  const folded = entry.pendingTurns.filter((pending) => consumed.includes(pending.uuid));
+  if (folded.length === 0) return;
+  entry.pendingTurns = entry.pendingTurns.filter((pending) => !consumed.includes(pending.uuid));
+  // The turn that DID run answered several requests in one reply, so it is not an
+  // exclusive answer to the one it is filed under either. Its terminal still carries
+  // the accounting; the flag only stops the reply being taken as that request's own.
+  if (entry.currentTurnId) {
+    entry.foldedReply = {
+      turnId: entry.currentTurnId,
+      reason: "Claude answered several messages in one reply, so no single request owns it",
+    };
+  }
+  const providerSessionId = entry.providerSessionId || entry.pendingThreadId || null;
+  for (const pending of folded) {
+    diag("pending_turn_folded", { turn_id: pending.turnId, psid: providerSessionId });
+    emit({
+      type: "done",
+      ...(providerSessionId ? { provider_session_id: providerSessionId } : {}),
+      turn_id: pending.turnId,
+      failed: true,
+      reason: "Claude answered this together with another message, so it has no reply of its own",
+      failure_kind: "session_capacity",
+    });
+  }
+}
+
+// Arm a queued send at the moment the CLI reports its command started. Identity,
+// not order: only a `command_lifecycle started` carrying the uuid WE put on the
+// message claims its id, so a spontaneous continuation can never take it.
+function claimPendingTurn(entry, commandUuid) {
+  if (typeof commandUuid !== "string") return;
+  const index = entry.pendingTurns.findIndex((pending) => pending.uuid === commandUuid);
+  if (index === -1) return;
+  const [pending] = entry.pendingTurns.splice(index, 1);
+  entry.currentTurnId = pending.turnId;
+  entry.running = true;
+  entry.progressTracker?.start();
+  const providerSessionId = entry.providerSessionId || null;
+  diag("pending_turn_claimed", {
+    turn_id: pending.turnId,
+    psid: providerSessionId ?? entry.pendingThreadId ?? null,
+  });
+  // The start path's first turn predates session_started; the relay already got
+  // its id from the start response, and there is no session id to file this under.
+  if (providerSessionId) {
+    emit(
+      { type: "turn_started", turn_id: pending.turnId, provider_session_id: providerSessionId },
+      entry.progressTracker,
+    );
+  }
 }
 
 function startSessionStream(sessions, entry, context) {
@@ -972,6 +1076,15 @@ function startSessionStream(sessions, entry, context) {
       // stale id; it cannot catch one re-stamped with the live turn id.
       if (entry.currentTurnId && !event.turn_id) {
         event.turn_id = entry.currentTurnId;
+      }
+      // See settleFoldedPendingTurns: the reply this terminal closes was shared with
+      // requests that are already failed, so it cannot settle this one as a clean
+      // answer of its own. Stamped here, on the one terminal, so accounting lands once.
+      if (event.type === "done" && entry.foldedReply?.turnId === event.turn_id) {
+        event.failed = true;
+        event.reason = entry.foldedReply.reason;
+        event.failure_kind = "session_capacity";
+        entry.foldedReply = null;
       }
     },
     entry.progressTracker,
@@ -1123,6 +1236,13 @@ async function ensureLiveSession(
       // block here: the frontend only allows settings changes while idle, so no
       // turn is in flight.
       const oldTask = entry.streamTask;
+      // The new query gets a FRESH input queue and we kept only ids, not the
+      // messages — so anything still queued can never run. Settle it here or the
+      // relay waits out its budget on a turn that no longer exists.
+      settleDiscardedPendingTurns(
+        entry,
+        "Claude session was rebuilt for new settings before this turn started",
+      );
       closeSessionEntry(entry);
       if (oldTask) {
         try {
@@ -1145,6 +1265,7 @@ async function ensureLiveSession(
   // The level is per-CLI-process and nothing is emitted at startup, so a fresh
   // query must start from the empty set or it inherits the dead process's.
   entry.backgroundTasks = [];
+  entry.foldedReply = null;
   entry.session = await createWorkerSession(sdk, entry.options, resumeId || undefined);
   startSessionStream(sessions, entry, context);
 }
@@ -1200,7 +1321,12 @@ async function main() {
         for (const entry of targets) {
           const doneSessionId =
             entry.providerSessionId || entry.pendingThreadId || providerSessionId;
-          const stoppedTurnId = entry.currentTurnId;
+          // The running turn AND every send still queued behind it: the relay
+          // waits on each id separately.
+          const stoppedTurnIds = [
+            ...(entry.currentTurnId ? [entry.currentTurnId] : []),
+            ...entry.pendingTurns.splice(0).map((pending) => pending.turnId),
+          ];
           const isPending = !entry.providerSessionId && entry.pendingThreadId;
           // Reject any pending interactions immediately so the relay isn't left
           // waiting on them.
@@ -1219,11 +1345,20 @@ async function main() {
               sessions.delete(entry.key);
             }
             if (doneSessionId) {
-              emit({
-                type: "session_stopped",
-                provider_session_id: doneSessionId,
-                turn_id: stoppedTurnId,
-              });
+              if (stoppedTurnIds.length === 0) {
+                emit({
+                  type: "session_stopped",
+                  provider_session_id: doneSessionId,
+                  turn_id: null,
+                });
+              }
+              for (const stoppedTurnId of stoppedTurnIds) {
+                emit({
+                  type: "session_stopped",
+                  provider_session_id: doneSessionId,
+                  turn_id: stoppedTurnId,
+                });
+              }
             }
           });
           stopWaits.push(waitForSessionStop(operation));
@@ -1281,8 +1416,10 @@ async function main() {
               messageUuid: cmd.user_message_uuid || null,
             });
             entry.initialUserMessage = userTurn.event;
-            entry.currentTurnId = userTurn.event.turn_id;
-            entry.running = true;
+            entry.pendingTurns.push({
+              uuid: userTurn.sdkMessage.uuid,
+              turnId: userTurn.event.turn_id,
+            });
             entry.progressTracker.start();
             await entry.session.send(userTurn.sdkMessage);
           }
@@ -1346,8 +1483,10 @@ async function main() {
               messageUuid: cmd.user_message_uuid || null,
             });
             userTurn.event.provider_session_id = cmd.provider_session_id;
-            entry.currentTurnId = userTurn.event.turn_id;
-            entry.running = true;
+            entry.pendingTurns.push({
+              uuid: userTurn.sdkMessage.uuid,
+              turnId: userTurn.event.turn_id,
+            });
             entry.progressTracker.start();
             emit(userTurn.event, entry.progressTracker);
             await entry.session.send(userTurn.sdkMessage);
@@ -1411,8 +1550,12 @@ async function main() {
             messageUuid: cmd.user_message_uuid || null,
           });
           userTurn.event.provider_session_id = providerSessionId;
-          entry.currentTurnId = userTurn.event.turn_id;
-          entry.running = true;
+          // Bound at the CLI's `started`, not here: this send may sit behind a
+          // turn still streaming, whose events must keep THEIR id.
+          entry.pendingTurns.push({
+            uuid: userTurn.sdkMessage.uuid,
+            turnId: userTurn.event.turn_id,
+          });
           touchSessionEntry(entry);
           emit(userTurn.event, entry.progressTracker);
           await entry.session.send(userTurn.sdkMessage);

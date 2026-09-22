@@ -418,16 +418,16 @@ still be working. Stop the session itself to be sure."
     /// Records WHICH turn, not just that one landed: a revision has to be able to stop
     /// the goal's own turn and leave a turn the person typed alone, and every path that
     /// starts a goal turn owes it that — not only the watchdog's continuation.
-    pub(crate) async fn goal_dispatch_landed(&self, thread_id: &str) {
+    ///
+    /// `started` is the id the send answered with, never the live turn: a provider can
+    /// finish a turn before the send returns, and the live turn then reads as nothing.
+    pub(crate) async fn goal_dispatch_landed(&self, thread_id: &str, started: Option<String>) {
         let mut relay = self.relay.write().await;
         relay.update_goal(thread_id, |goal| goal.dispatch_landed());
         let generation = relay
             .goal_for_thread(thread_id)
             .map(|goal| goal.dispatch_generation)
             .unwrap_or_default();
-        let started = relay
-            .runtime_for_thread(thread_id)
-            .and_then(|runtime| runtime.active_turn_id.clone());
         relay.update_goal(thread_id, |goal| {
             goal.note_dispatch_turn(generation, started)
         });
@@ -589,12 +589,12 @@ running — set the goal again once it is free",
                 // the send returns.
                 Ok(dispatched) => {
                     let landed_on = dispatched.thread_id;
+                    // Not the live turn: this turn can be over already, and a goal that
+                    // never learns which turn was its own reads as owing one forever.
+                    let started = dispatched.turn_id;
                     let superseded = {
                         let mut relay = self.relay.write().await;
                         relay.update_goal(&landed_on, |goal| goal.dispatch_landed());
-                        let started = relay
-                            .runtime_for_thread(&landed_on)
-                            .and_then(|runtime| runtime.active_turn_id.clone());
                         relay.update_goal(&landed_on, |goal| {
                             goal.note_dispatch_turn(generation, started)
                         });
