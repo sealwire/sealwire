@@ -27367,7 +27367,8 @@ watchdog settle this Blocked",
         }
         // The shape every non-watchdog driver uses: charge, then report it landed.
         assert!(app.charge_goal_for_driven_turn(&thread).await);
-        app.goal_dispatch_landed(&thread).await;
+        app.goal_dispatch_landed(&thread, Some("turn-woken".to_string()))
+            .await;
 
         app.set_goal(&thread, "a different objective", None, false, Some(12))
             .await
@@ -27376,6 +27377,155 @@ watchdog settle this Blocked",
         assert!(
             provider.stop_was_requested_for("turn-woken").await,
             "a goal turn started by a wake was left working to the objective it replaced"
+        );
+    }
+
+    // A provider may publish a turn's start AND its completion before the send returns —
+    // `send_message_to_thread` names the case and stops seeding the live turn when it
+    // happens. Reading the live turn back afterwards therefore answers "nothing", and a
+    // goal that never learns which turn it started reads as owing one forever.
+    #[tokio::test]
+    async fn the_watchdogs_turn_is_recorded_even_when_it_ends_inside_the_send() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "dev", Vec::new()).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "ship the mobile door", None, false, Some(10))
+            .await
+            .expect("the user sets one");
+
+        provider.finish_turns_before_start_returns();
+        app.drive_goals_at(crate::state::unix_now()).await;
+
+        assert!(
+            app.relay
+                .read()
+                .await
+                .goal_for_thread(&thread)
+                .expect("recorded")
+                .dispatch_turn_id
+                .is_some(),
+            "the driver had the turn it started in hand and filed the goal without it"
+        );
+        assert!(
+            app.set_goal(&thread, "a different objective", None, false, Some(12))
+                .await
+                .is_ok(),
+            "the turn was over before this revision; warning that it may still be working \
+             to the old objective sends the user looking for nothing"
+        );
+    }
+
+    // The severe half of the same defect. Claude's worker opens turns of its own
+    // (`armSpontaneousTurn`); that announcement stops the send seeding its own id, so the
+    // thread's live turn is someone else's AND still running. Recording it made the next
+    // revision stop a turn the goal never started.
+    #[tokio::test]
+    async fn a_goal_never_records_a_turn_the_provider_opened_for_itself() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "dev", Vec::new()).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "ship the mobile door", None, false, Some(10))
+            .await
+            .expect("the user sets one");
+
+        app.set_review_drain_max_ms(200);
+        provider
+            .announce_foreign_turn_during_next_start("spontaneous-1")
+            .await;
+        app.drive_goals_at(crate::state::unix_now()).await;
+
+        assert_ne!(
+            app.relay
+                .read()
+                .await
+                .goal_for_thread(&thread)
+                .expect("recorded")
+                .dispatch_turn_id
+                .as_deref(),
+            Some("spontaneous-1"),
+            "the goal filed the provider's own turn as the one it started",
+        );
+
+        let _ = app
+            .set_goal(&thread, "a different objective", None, false, Some(12))
+            .await;
+        assert!(
+            !provider.stop_was_requested_for("spontaneous-1").await,
+            "revising the goal stopped a turn the goal never started",
+        );
+    }
+
+    // Same window, the other driver. A wake hands peer answers back on the goal's budget,
+    // and `goal_dispatch_landed` is where that turn gets recorded.
+    #[tokio::test]
+    async fn a_wake_turn_is_recorded_even_when_it_ends_inside_the_send() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "dev", Vec::new()).await;
+        let thread = goal_session(&app, &cwd).await;
+        app.set_goal(&thread, "ship the mobile door", None, false, Some(10))
+            .await
+            .expect("the user sets one");
+
+        provider.finish_turns_before_start_returns();
+        app.ask_agent(
+            &thread,
+            AskRequest {
+                device_id: None,
+                started_by: relay_api::delegation::StartedBy::Agent,
+                peer_thread_id: None,
+                provider: Some("fake".to_string()),
+                model: None,
+                effort: None,
+                message: "look at the retry loop".to_string(),
+            },
+        )
+        .await
+        .expect("the ask goes through");
+
+        let mut delivered = false;
+        for _ in 0..50 {
+            app.settle_and_deliver_asks_at(crate::state::unix_now())
+                .await;
+            {
+                let relay = app.relay.read().await;
+                if relay
+                    .asks_of_asker(&thread)
+                    .iter()
+                    .all(|ask| ask.status.is_terminal() && ask.delivered)
+                {
+                    delivered = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+        assert!(delivered, "the fake peer should answer and be handed back");
+
+        assert!(
+            app.relay
+                .read()
+                .await
+                .goal_for_thread(&thread)
+                .expect("recorded")
+                .dispatch_turn_id
+                .is_some(),
+            "the wake had the turn it started in hand and filed the goal without it"
+        );
+        assert!(
+            app.set_goal(&thread, "a different objective", None, false, Some(12))
+                .await
+                .is_ok(),
+            "the turn was over before this revision; warning that it may still be working \
+             to the old objective sends the user looking for nothing"
         );
     }
 
@@ -28138,6 +28288,172 @@ watchdog settle this Blocked",
         assert!(
             refused.unwrap_err().message().contains("limit"),
             "and it must say why"
+        );
+    }
+
+    // `wake_idle_askers` refuses to inject into a running turn — "there is no way to
+    // interrupt a provider turn with a message". The brief is the same injection into the
+    // same thread, but sends regardless, and no bridge refuses it either: on Claude and ACP
+    // the send overwrites the live turn's id, so the turn that answers is not the one the
+    // relay is waiting on.
+    #[tokio::test]
+    async fn the_brief_is_never_sent_into_a_turn_that_is_already_running() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+
+        provider.hold_terminals();
+        let asker = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("bypass".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: Some("work on the retry loop".to_string()),
+                model: None,
+                effort: None,
+                project_id: None,
+                sandbox: None,
+            })
+            .await
+            .expect("session starts")
+            .active_thread_id
+            .clone()
+            .expect("thread");
+        provider.wait_for_held_turn().await;
+
+        let live = {
+            let relay = app.relay.read().await;
+            relay
+                .runtime_for_thread(&asker)
+                .and_then(|runtime| runtime.active_turn_id.clone())
+                .expect("the person's own turn is running")
+        };
+
+        app.ask_agent_detached(
+            &asker,
+            AskRequest {
+                device_id: None,
+                started_by: relay_api::delegation::StartedBy::Person,
+                peer_thread_id: None,
+                provider: Some("fake".to_string()),
+                model: None,
+                effort: None,
+                message: "look at the retry loop".to_string(),
+            },
+        )
+        .await
+        .expect("a delegate while busy is still accepted");
+
+        // Sampled rather than checked once: the detached half reaches its send on its own
+        // schedule, and the window is over as soon as it does.
+        for _ in 0..25 {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            let now = {
+                let relay = app.relay.read().await;
+                relay
+                    .runtime_for_thread(&asker)
+                    .and_then(|runtime| runtime.active_turn_id.clone())
+            };
+            assert_eq!(
+                now.as_deref(),
+                Some(live.as_str()),
+                "the brief started a second turn on a thread that was already running one"
+            );
+        }
+    }
+
+    // A deferred-start provider hands back a thread that is already "active" with no turn
+    // behind it — the session is created BY its first turn (`claude.rs`, the pending
+    // branch). `is_working()` counts a working STATUS as well as a live turn, so waiting
+    // on it here would wait for a turn that does not exist and can never arrive: the brief
+    // IS the first turn. The ordinary send path avoids the same trap by asking about a
+    // live turn rather than the status.
+    #[tokio::test]
+    async fn a_delegate_is_not_held_by_a_session_that_has_never_run_a_turn() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = goal_session(&app, &cwd).await;
+
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_thread_status(&asker, "active".to_string(), Vec::new());
+            assert!(
+                relay
+                    .runtime_for_thread(&asker)
+                    .expect("runtime")
+                    .active_turn_id
+                    .is_none(),
+                "the shape under test is a working STATUS with no turn",
+            );
+        }
+
+        let accepted = tokio::time::timeout(
+            std::time::Duration::from_millis(2000),
+            app.ask_agent(
+                &asker,
+                AskRequest {
+                    device_id: None,
+                    started_by: relay_api::delegation::StartedBy::Person,
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "look at the retry loop".to_string(),
+                },
+            ),
+        )
+        .await;
+
+        assert!(
+            accepted.is_ok(),
+            "the brief is this session's first turn; waiting for it to stop working waits forever",
+        );
+    }
+
+    // A deferred-start session is promoted the moment its first turn runs, and the id the
+    // delegate was accepted under stops routing. The brief must follow the promotion —
+    // sending to the placeholder finds no provider and refuses a session that is alive.
+    #[tokio::test]
+    async fn a_brief_follows_the_asker_through_a_promotion() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let real_id = goal_session(&app, &cwd).await;
+        // The synthetic id a Claude tab lives under until its first turn runs. Promotion
+        // retires it, and the client — here the delegate — is still holding it.
+        let placeholder = "claude-pending-delegate-1";
+        {
+            let mut relay = app.relay.write().await;
+            relay.promote_background_thread(placeholder, &real_id);
+            relay.notify();
+        }
+
+        let accepted = tokio::time::timeout(
+            std::time::Duration::from_millis(3000),
+            app.ask_agent(
+                &placeholder,
+                AskRequest {
+                    device_id: None,
+                    started_by: relay_api::delegation::StartedBy::Person,
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "look at the retry loop".to_string(),
+                },
+            ),
+        )
+        .await
+        .expect("the delegate must not hang on a promoted asker");
+
+        assert!(
+            accepted.is_ok(),
+            "the asker was promoted, not deleted; the brief must follow it: {accepted:?}",
         );
     }
 

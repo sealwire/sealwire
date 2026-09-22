@@ -77,6 +77,8 @@ fn new_ask_id() -> String {
 
 /// What `precheck_ask` established, so `ask_agent` does not read it all again.
 struct PrecheckedAsk {
+    /// The asker after promotion is resolved — what every later write must name.
+    asker_thread_id: String,
     message: String,
     asker_cwd: String,
     asker_approval: String,
@@ -153,7 +155,7 @@ impl AppState {
             let mut relay = self.relay.write().await;
             let mut ask = Ask::new(
                 ask_id.clone(),
-                asker_thread_id.to_string(),
+                prechecked.asker_thread_id.clone(),
                 // Filled in when the peer exists; until then this is the delegation.
                 String::new(),
                 request.provider.clone().unwrap_or_default(),
@@ -171,7 +173,7 @@ impl AppState {
         }
 
         let app = self.clone();
-        let asker = asker_thread_id.to_string();
+        let asker = prechecked.asker_thread_id.clone();
         let background_ask_id = ask_id.clone();
         tokio::spawn(async move {
             if let Err(error) = app
@@ -204,12 +206,17 @@ impl AppState {
                 "say what you want done — an agent starting from nothing cannot guess".to_string(),
             ));
         }
-
         // The asker's own settings are the ceiling for the peer's. Read them
         // before anything else so a missing asker fails before a thread is
         // started rather than after.
-        let (asker_cwd, asker_approval, asker_sandbox, asker_provider, peers) = {
+        //
+        // Resolving the promotion is part of THIS read, not a separate one: a
+        // deferred-start session is promoted by its first turn while clients still hold
+        // the id they were shown, and a promotion landing between two reads would refuse
+        // a session that is alive.
+        let (asker_thread_id, asker_cwd, asker_approval, asker_sandbox, asker_provider, peers) = {
             let relay = self.relay.read().await;
+            let asker_thread_id = &relay.resolve_promoted_thread_id(asker_thread_id);
             let cwd = relay
                 .thread_cwd(asker_thread_id)
                 .ok_or(AskError::NoSuchAsker)?;
@@ -263,6 +270,7 @@ impl AppState {
                 .or_else(|| relay.provider_hint_for_thread(asker_thread_id))
                 .unwrap_or_default();
             (
+                asker_thread_id.clone(),
                 cwd,
                 defaults_approval,
                 defaults_sandbox,
@@ -270,6 +278,7 @@ impl AppState {
                 distinct_peers,
             )
         };
+        let asker_thread_id = &asker_thread_id;
 
         // Up front, not in the branch that would start one: a detached delegate is
         // acknowledged before it gets there, so a refusal that late reaches nobody.
@@ -281,6 +290,7 @@ Carry on with one of those instead of bringing in another."
         }
 
         Ok(PrecheckedAsk {
+            asker_thread_id: asker_thread_id.clone(),
             message,
             asker_cwd,
             asker_approval,
@@ -306,6 +316,7 @@ Carry on with one of those instead of bringing in another."
         existing_ask_id: Option<String>,
     ) -> Result<String, AskError> {
         let PrecheckedAsk {
+            asker_thread_id,
             message,
             asker_cwd,
             asker_approval,
@@ -314,6 +325,7 @@ Carry on with one of those instead of bringing in another."
         } = self
             .precheck_ask(asker_thread_id, &request, existing_ask_id.as_deref())
             .await?;
+        let asker_thread_id = asker_thread_id.as_str();
 
         // A person's one-liner becomes a brief before anyone else sees it. This
         // costs a turn on the asking agent, which is why it is opt-in: an agent
@@ -488,9 +500,9 @@ Carry on with one of those instead of bringing in another."
         &self,
         thread_id: &str,
         turn_id: &str,
+        deadline: tokio::time::Instant,
     ) -> Option<crate::state::TurnOutcome> {
         let mut changes = self.subscribe();
-        let deadline = tokio::time::Instant::now() + BRIEF_WAIT_BUDGET;
         loop {
             {
                 let relay = self.relay.read().await;
@@ -514,6 +526,53 @@ Carry on with one of those instead of bringing in another."
         }
     }
 
+    /// Hold the brief until the asker has no turn of its own running.
+    ///
+    /// A LIVE TURN, not `is_working()`: a deferred-start thread reads "active" with no turn
+    /// behind it, and the brief is the very turn that would create its session — waiting on
+    /// the status there waits for something that can never arrive. Same question the
+    /// ordinary send path asks (`sessions.rs`).
+    ///
+    /// `deadline` is the delegate's ONE budget, shared with the turn that follows: both are
+    /// the same person waiting for the same answer, and the desktop route blocks on it.
+    /// Returns the id to actually send to: a deferred start promotes the asker while we
+    /// wait, and the placeholder stops routing the moment it does.
+    async fn wait_for_asker_idle(
+        &self,
+        thread_id: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<String, AskError> {
+        let mut changes = self.subscribe();
+        loop {
+            {
+                let relay = self.relay.read().await;
+                // Re-resolved every pass, not once: the promotion can land at any point in
+                // this wait, and afterwards only the real id has a runtime to ask about.
+                let effective = relay.resolve_promoted_thread_id(thread_id);
+                match relay.runtime_for_thread(&effective) {
+                    Some(runtime) if !runtime.has_live_turn() => return Ok(effective),
+                    None => return Err(AskError::NoSuchAsker),
+                    Some(_) => {}
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(AskError::Failed(
+                    "this session never stopped working on something else, so it could not \
+write the brief — try again once it is done"
+                        .to_string(),
+                ));
+            }
+            tokio::select! {
+                changed = changes.changed() => {
+                    if changed.is_err() {
+                        return Err(AskError::NoSuchAsker);
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => {}
+            }
+        }
+    }
+
     /// Drive one turn on the asking agent and take what it wrote as the brief.
     ///
     /// No tools involved — this is an ordinary turn — so it works for every
@@ -523,6 +582,13 @@ Carry on with one of those instead of bringing in another."
         asker_thread_id: &str,
         task: &str,
     ) -> Result<String, AskError> {
+        // ONE budget for the whole delegate — queueing behind another turn and waiting for
+        // our own are the same person waiting, and the desktop route blocks on the total.
+        let deadline = tokio::time::Instant::now() + BRIEF_WAIT_BUDGET;
+        // Same rule `wake_idle_askers` already holds: a message cannot interrupt a running
+        // turn. Sending anyway is worse than waiting — Claude and ACP both overwrite the
+        // live turn's id on the way in, so the turn that answers is not the one waited on.
+        let asker_thread_id = &self.wait_for_asker_idle(asker_thread_id, deadline).await?;
         // What it had already said, so a stale reply cannot be read as the brief.
         let baseline = self
             .latest_assistant_entry(asker_thread_id)
@@ -547,7 +613,10 @@ Carry on with one of those instead of bringing in another."
         // text carrying the right turn id, and half an instruction is not a shorter
         // instruction. The row's own status cannot answer this — ACP stamps an agent
         // row "completed" on every streamed chunk — so the turn's outcome does.
-        match self.wait_for_turn_terminal(asker_thread_id, turn_id).await {
+        match self
+            .wait_for_turn_terminal(asker_thread_id, turn_id, deadline)
+            .await
+        {
             Some(crate::state::TurnOutcome::Completed) => {}
             _ => return Err(AskError::Failed(no_brief_written())),
         }
@@ -1081,7 +1150,10 @@ impl AppState {
                 // A deferred-start provider creates its session inside this call, so the
                 // goal moved to the real id while we were in it; closing the dispatch on
                 // the id we sent to would leave the real one looking never-started.
-                Ok(dispatched) if charged => self.goal_dispatch_landed(&dispatched.thread_id).await,
+                Ok(dispatched) if charged => {
+                    self.goal_dispatch_landed(&dispatched.thread_id, dispatched.turn_id.clone())
+                        .await
+                }
                 Ok(_) => {}
                 Err(error) => {
                     self.push_runtime_log(

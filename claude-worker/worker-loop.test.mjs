@@ -108,6 +108,10 @@ const isStarted = (sid) => (event) =>
   event.type === "session_started" && event.provider_session_id === sid;
 const isDone = (event) => event.type === "done";
 const isStopped = (event) => event.type === "session_stopped";
+// The worker also announces CLAIMED turns (under the relay's own id), so a test
+// after the spontaneous one has to select by the worker-minted prefix.
+const isSpontaneousStarted = (event) =>
+  event.type === "turn_started" && String(event.turn_id).startsWith("auto-turn-");
 
 const START_DEFAULT = {
   type: "start",
@@ -688,7 +692,7 @@ test("an SDK-spontaneous turn after done re-arms liveness with a fresh turn id",
     assert.equal(firstDone.turn_id, "relay-turn-1", "the relay-armed turn settles under its own id");
 
     // The SDK continues on its own — the worker must announce the new turn.
-    const started = await worker.waitFor((event) => event.type === "turn_started", {
+    const started = await worker.waitFor(isSpontaneousStarted, {
       label: "turn_started",
     });
     assert.equal(started.provider_session_id, "sess-1");
@@ -732,6 +736,225 @@ test("an SDK-spontaneous turn after done re-arms liveness with a fresh turn id",
   }
 });
 
+// The production /delegate refusal: a send lands while a spontaneous continuation
+// is still streaming. Binding the new id at ENQUEUE stamped the continuation's
+// terminal with it — an empty done under claude-turn-2 — and the actual reply then
+// armed as a fresh auto-turn nobody was waiting on.
+test("a send racing a spontaneous turn keeps both turn ids straight", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_SPONTANEOUS_RACE: "1" });
+  try {
+    worker.send({ ...START_DEFAULT, turn_id: "relay-turn-1" });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    await worker.waitFor(isDone, { label: "done#1" });
+
+    const spontaneous = await worker.waitFor(isSpontaneousStarted, {
+      label: "spontaneous turn_started",
+    });
+    await worker.waitFor(
+      (event) => event.type === "assistant_message" && event.text === "subagent finished",
+      { label: "spontaneous text" },
+    );
+
+    worker.send({
+      type: "send",
+      provider_session_id: "sess-1",
+      model: "claude-sonnet-4-6",
+      permissionMode: "default",
+      prompt: "write the brief",
+      turn_id: "claude-turn-2",
+      user_item_id: "user:cccccccc-0000-4000-8000-000000000003",
+      user_message_uuid: "cccccccc-0000-4000-8000-000000000003",
+    });
+
+    const spontaneousDone = await worker.waitFor(isDone, { count: 2, label: "done#2" });
+    assert.equal(
+      spontaneousDone.turn_id,
+      spontaneous.turn_id,
+      "the continuation's terminal must settle the continuation, not the queued send",
+    );
+
+    const brief = await worker.waitFor(
+      (event) => event.type === "assistant_message" && event.text === "the brief for the peer",
+      { label: "brief text" },
+    );
+    assert.equal(
+      brief.turn_id,
+      "claude-turn-2",
+      "the queued turn's reply must carry the id the relay is waiting on",
+    );
+    const briefDone = await worker.waitFor(isDone, { count: 3, label: "done#3" });
+    assert.equal(briefDone.turn_id, "claude-turn-2", "and settle under it");
+  } finally {
+    await worker.close();
+  }
+});
+
+// A send is accepted before its turn starts, and `running` no longer covers that
+// window. Releasing there dropped work the relay is already waiting on: no
+// terminal is emitted for it, and closeSessionEntry's cancel flag then suppresses
+// stream-end cleanup, so the waiter only learns at its timeout.
+test("release refuses while an accepted send has not started yet", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_HOLD_TURNS: "1" });
+  try {
+    worker.send({ ...START_DEFAULT, turn_id: "relay-turn-1" });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+
+    worker.send({ type: "release_session", id: "release-1", provider_session_id: "sess-1" });
+    const response = await worker.waitFor(isResponse("release-1"), { label: "release response" });
+    assert.equal(
+      response.result?.released,
+      false,
+      `a queued turn is accepted work; releasing it loses it: ${JSON.stringify(response.result)}`,
+    );
+  } finally {
+    await worker.close();
+  }
+});
+
+// A settings change rebuilds the SDK query with a FRESH input queue, so a send
+// that was accepted but never started is gone — its message cannot be replayed
+// (only the ids are kept). It has to settle, or the relay waits out its budget
+// on a turn that will never run.
+test("a rebuild settles sends that were accepted but never started", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_HOLD_TURNS: "1" });
+  try {
+    worker.send({ ...START_DEFAULT, turn_id: "relay-turn-1" });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+
+    // Same settings change the frontend makes: it rebuilds the live session.
+    worker.send({
+      type: "send",
+      provider_session_id: "sess-1",
+      model: "claude-opus-4-6",
+      permissionMode: "bypassPermissions",
+      prompt: "second turn under new settings",
+      turn_id: "relay-turn-2",
+      user_item_id: "user:ffffffff-0000-4000-8000-000000000006",
+      user_message_uuid: "ffffffff-0000-4000-8000-000000000006",
+    });
+
+    const settled = await worker.waitFor(
+      (event) =>
+        (event.type === "done" || event.type === "session_stopped") &&
+        event.turn_id === "relay-turn-1",
+      { label: "relay-turn-1 settles across the rebuild", timeoutMs: 6000 },
+    );
+    assert.ok(settled, "the queued turn the rebuild discarded must be settled, not stranded");
+  } finally {
+    await worker.close();
+  }
+});
+
+// The host may FOLD several queued sends into one model turn (sdk.d.ts documents
+// it for messages sent close together and for one folded in between tool rounds).
+// Only the last is announced started, and one `result` names them all. The folded
+// one can never get a terminal of its own, so the worker has to end it — silence
+// leaves the relay waiting out its whole budget on a turn that already happened.
+test("a send folded into another turn is settled, not left pending forever", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_FOLD_SENDS: "1" });
+  try {
+    worker.send({ ...START_DEFAULT, turn_id: "relay-turn-folded" });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+
+    worker.send({
+      type: "send",
+      provider_session_id: "sess-1",
+      model: "claude-sonnet-4-6",
+      permissionMode: "default",
+      prompt: "the second, which the host folds in",
+      turn_id: "relay-turn-winner",
+      user_item_id: "user:99999999-0000-4000-8000-000000000009",
+      user_message_uuid: "99999999-0000-4000-8000-000000000009",
+    });
+
+    const foldedTerminal = await worker.waitFor(
+      (event) =>
+        (event.type === "done" || event.type === "session_stopped") &&
+        event.turn_id === "relay-turn-folded",
+      { label: "the folded turn settles", timeoutMs: 6000 },
+    );
+    assert.ok(foldedTerminal, "the folded send must not be left pending forever");
+
+    const winnerDone = await worker.waitFor(
+      (event) => event.type === "done" && event.turn_id === "relay-turn-winner",
+      { label: "the turn that actually ran settles" },
+    );
+    assert.ok(winnerDone, "the turn the host actually ran still settles under its own id");
+    // And it must not read as a clean reply to THIS request: the text answers two
+    // requests at once, so handing it back as one request's exclusive brief would
+    // send another person's handoff to the wrong peer.
+    assert.equal(
+      winnerDone.failed,
+      true,
+      "a reply that answers several requests cannot settle any of them as its own",
+    );
+    assert.equal(
+      worker.events.filter((event) => event.type === "done" && event.turn_id === "relay-turn-winner")
+        .length,
+      1,
+      "exactly one terminal for the turn that ran, so accounting still lands once",
+    );
+  } finally {
+    await worker.close();
+  }
+});
+
+// The fold mark is set when the result is read, but the terminal that wears it can
+// be suppressed on the way out (a cancel lands mid-stream). A mark left behind would
+// be worn by whatever turn settled next — reporting a perfectly good turn as failed,
+// which pauses a team run and refuses a valid brief. It belongs to ONE turn.
+//
+// SCOPE: this waits for the merged terminal before the clean turn, so it does NOT
+// stand in the suppression window — it passes with a session-wide mark too. What
+// closes that race is structural (the mark carries its turn id, and a rebuilt query
+// resets it); this pins the ordinary sequence. Staging the suppression deterministically
+// needs a gated fake plus a close between the mark and the survivor's terminal, at the
+// worker.test.mjs level rather than here.
+test("a fold mark never reaches a turn it did not belong to", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_FOLD_SENDS: "1" });
+  try {
+    worker.send({ ...START_DEFAULT, turn_id: "relay-turn-folded" });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    worker.send({
+      type: "send",
+      provider_session_id: "sess-1",
+      model: "claude-sonnet-4-6",
+      permissionMode: "default",
+      prompt: "the second, which the host folds in",
+      turn_id: "relay-turn-merged",
+      user_item_id: "user:88888888-0000-4000-8000-000000000008",
+      user_message_uuid: "88888888-0000-4000-8000-000000000008",
+    });
+    await worker.waitFor(
+      (event) => event.type === "done" && event.turn_id === "relay-turn-merged",
+      { label: "the merged turn settles" },
+    );
+
+    // A later, ordinary turn on the same session must be untouched by it.
+    worker.send({
+      type: "send",
+      provider_session_id: "sess-1",
+      model: "claude-sonnet-4-6",
+      permissionMode: "default",
+      prompt: "an ordinary turn afterwards",
+      turn_id: "relay-turn-clean",
+      user_item_id: "user:77777777-0000-4000-8000-000000000007",
+      user_message_uuid: "77777777-0000-4000-8000-000000000007",
+    });
+    const clean = await worker.waitFor(
+      (event) => event.type === "done" && event.turn_id === "relay-turn-clean",
+      { label: "the later turn settles" },
+    );
+    assert.notEqual(
+      clean.failed,
+      true,
+      "a turn that answered one request alone must not inherit another turn's fold",
+    );
+  } finally {
+    await worker.close();
+  }
+});
+
 test("a spontaneous turn whose only message is its terminal is still announced", async () => {
   // The no-activity hole in arming: a continuation that fails before emitting
   // any assistant/tool output has NO activity event to arm on, so its terminal
@@ -746,7 +969,7 @@ test("a spontaneous turn whose only message is its terminal is still announced",
     const firstDone = await worker.waitFor(isDone, { label: "done#1" });
     assert.equal(firstDone.turn_id, "relay-turn-1");
 
-    const started = await worker.waitFor((event) => event.type === "turn_started", {
+    const started = await worker.waitFor(isSpontaneousStarted, {
       label: "turn_started",
     });
     const secondDone = await worker.waitFor(isDone, { count: 2, label: "done#2" });

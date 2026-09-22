@@ -81,6 +81,15 @@ export function query({ prompt, options = {} }) {
   // identity — which is the SDK-contract violation documented on `decorateEvent`
   // in worker.mjs, not a case any worker-side bookkeeping can disambiguate.
   const spontaneousTurn = process.env.CLAUDE_FAKE_SPONTANEOUS_TURN === "1";
+  // Turn 1 settles, a spontaneous continuation opens and STAYS open until a
+  // second user message arrives — the /delegate brief race, in the order the
+  // real CLI produced it (markdown/repro-delegate-alias/probe-RESULTS.md).
+  const spontaneousRace = process.env.CLAUDE_FAKE_SPONTANEOUS_RACE === "1";
+  // Two sends the host FOLDS into one model turn: only the last is announced
+  // started, and the single `result` names both in `user_message_uuids`
+  // (sdk.d.ts documents this for messages sent close together, and for a message
+  // folded in between tool rounds).
+  const foldSends = process.env.CLAUDE_FAKE_FOLD_SENDS === "1";
   // A spontaneous continuation that FAILS before emitting any assistant/tool
   // output: its terminal is the only stream message it ever produces. Nothing
   // "activity"-shaped exists to notice the turn by, so the terminal itself has to
@@ -128,6 +137,16 @@ export function query({ prompt, options = {} }) {
     drain();
   };
   let userTurnCount = 0;
+  const foldedUuids = [];
+
+  // Real-CLI shape (probes): queued at receipt, started when the turn actually
+  // runs, keyed by the uuid the caller put on its own message.
+  const commandLifecycle = (message, state) => ({
+    type: "command_lifecycle",
+    command_uuid: message.uuid ?? null,
+    state,
+    session_id: sessionId,
+  });
 
   // Ack each user turn with a terminal so the worker emits a `done`/
   // `session_stopped` the test can synchronize on. NOTE: the real SDK ends a
@@ -138,8 +157,61 @@ export function query({ prompt, options = {} }) {
       for await (const message of prompt) {
         if (message?.type === "user") {
           recordUserMessage(sessionId, message);
+          pushOut(commandLifecycle(message, "queued"));
+          // Folds the FIRST TWO sends into one turn; later sends run normally, so a
+          // test can watch what the fold leaves behind.
+          if (foldSends && foldedUuids.length < 2) {
+            foldedUuids.push(message.uuid);
+            // The first send is swallowed into the second's turn: no started of
+            // its own, and no terminal of its own.
+            if (foldedUuids.length < 2) continue;
+            pushOut(commandLifecycle(message, "started"));
+            pushOut({
+              type: "assistant",
+              uuid: "folded-assistant-uuid",
+              message: { content: [{ type: "text", text: "answering both at once" }] },
+            });
+            pushOut({
+              type: "result",
+              uuid: "folded-result-uuid",
+              usage: {},
+              user_message_uuid: message.uuid,
+              user_message_uuids: [...foldedUuids],
+            });
+            continue;
+          }
           if (!holdTurns) {
             userTurnCount += 1;
+            if (spontaneousRace && userTurnCount === 2) {
+              // The send landed while the continuation was streaming: the real
+              // CLI closes that turn FIRST, then starts the queued one.
+              pushOut({ type: "result", usage: {} });
+              pushOut(commandLifecycle(message, "started"));
+              pushOut({
+                type: "assistant",
+                uuid: "race-brief-uuid",
+                message: { content: [{ type: "text", text: "the brief for the peer" }] },
+              });
+              pushOut({ type: "result", usage: {} });
+              pushOut(commandLifecycle(message, "completed"));
+              continue;
+            }
+            if (!(holdAfterFirst && userTurnCount > 1)) {
+              pushOut(commandLifecycle(message, "started"));
+            }
+            if (userTurnCount === 1 && spontaneousRace) {
+              pushOut({ type: "result", usage: {} });
+              // Settled; the SDK continues by itself, and the continuation is
+              // HELD OPEN — its result goes out when the racing send arrives.
+              setTimeout(() => {
+                pushOut({
+                  type: "assistant",
+                  uuid: "spontaneous-race-assistant-uuid",
+                  message: { content: [{ type: "text", text: "subagent finished" }] },
+                });
+              }, 20);
+              continue;
+            }
             if (userTurnCount === 1 && replayHistory) {
               // Replayed AFTER the turn settles, onto an idle stream.
               pushOut({ type: "result", usage: {} });

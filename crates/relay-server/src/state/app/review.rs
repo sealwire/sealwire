@@ -1644,7 +1644,8 @@ started ({error}); finishing with round {round}'s findings."
         {
             Ok(dispatched) => {
                 if charged {
-                    self.goal_dispatch_landed(parent_thread_id).await;
+                    self.goal_dispatch_landed(parent_thread_id, dispatched.turn_id.clone())
+                        .await;
                 }
                 dispatched.turn_id
             }

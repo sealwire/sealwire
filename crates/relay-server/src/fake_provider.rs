@@ -492,6 +492,14 @@ pub struct FakeProviderBridge {
     /// STARTED does not know the reply is still unwritten, which is the whole premise
     /// of standing in the window.
     terminal_hold_arrivals: watch::Sender<u64>,
+    /// Finish the whole turn before `start_turn` answers — a real provider can
+    /// (`turn_settled_meanwhile` names the case), and a double that always answers
+    /// first can never stand a caller in that window.
+    finish_turn_before_start_returns: Arc<AtomicBool>,
+    /// Arm a turn of the provider's OWN inside `start_turn`, and let the sent one never go
+    /// live — Claude's `armSpontaneousTurn`. The only way the live turn and the dispatched
+    /// id are both set and disagree.
+    announce_foreign_turn_during_start: Arc<Mutex<Option<String>>>,
     /// `(cwd, system_prompt)` for every thread opened with a persona. The fake
     /// has no model to feed it to, so recording is the whole point: it lets a
     /// test assert the relay ASKED for a persona without standing up a real
@@ -536,6 +544,17 @@ impl FakeProviderBridge {
 
     pub(crate) fn release_terminals(&self) {
         self.terminal_hold.send_replace(false);
+    }
+
+    /// Answer `start_turn` only once the turn it started has also ended.
+    pub(crate) fn finish_turns_before_start_returns(&self) {
+        self.finish_turn_before_start_returns
+            .store(true, Ordering::Relaxed);
+    }
+
+    /// See `announce_foreign_turn_during_start`. Consumed by the next `start_turn`.
+    pub(crate) async fn announce_foreign_turn_during_next_start(&self, turn_id: &str) {
+        *self.announce_foreign_turn_during_start.lock().await = Some(turn_id.to_string());
     }
 
     /// Resolve once a turn has actually parked at the terminal hold, so a caller
@@ -608,6 +627,8 @@ impl FakeProviderBridge {
             scenario_harness,
             terminal_hold: watch::channel(false).0,
             terminal_hold_arrivals: watch::channel(0).0,
+            finish_turn_before_start_returns: Arc::new(AtomicBool::new(false)),
+            announce_foreign_turn_during_start: Arc::new(Mutex::new(None)),
             system_prompts: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -824,6 +845,20 @@ impl ProviderBridge for FakeProviderBridge {
             relay.notify();
         }
 
+        // A provider that opens a turn of its own while this send is being queued. The
+        // sent turn never goes live, so the thread's live turn and the id we answer with
+        // are both set and disagree — the shape no other knob can stage.
+        if let Some(foreign) = self.announce_foreign_turn_during_start.lock().await.take() {
+            let mut relay = self.state.write().await;
+            if relay.active_thread_id.as_deref() == Some(thread_id) {
+                relay.set_active_turn(Some(foreign));
+            } else {
+                relay.bg_set_active_turn(thread_id, Some(foreign), unix_now());
+            }
+            relay.notify();
+            return Ok(Some(self.next_token("fake-turn")));
+        }
+
         let thread_id = thread_id.to_string();
         let prompt = text.to_string();
         let scenario = self
@@ -984,7 +1019,7 @@ impl ProviderBridge for FakeProviderBridge {
             .await
             .insert(turn_id.clone(), stop_behavior);
 
-        tokio::spawn(async move {
+        let running = tokio::spawn(async move {
             let user_entry = TranscriptEntryView {
                 // A raw provider read: not a relay row until the relay numbers it.
                 row_id: None,
@@ -1906,6 +1941,13 @@ impl ProviderBridge for FakeProviderBridge {
                 stopped_turns.lock().await.remove(&turn_id_for_task);
             }
         });
+
+        if self
+            .finish_turn_before_start_returns
+            .load(Ordering::Relaxed)
+        {
+            let _ = running.await;
+        }
 
         Ok(Some(turn_id))
     }
