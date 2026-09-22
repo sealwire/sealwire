@@ -4,6 +4,7 @@ mod background;
 mod device;
 mod push;
 mod runtime;
+mod session_binding;
 mod transcript;
 mod transcript_store;
 
@@ -41,6 +42,9 @@ pub(crate) use self::push::{
 };
 pub(crate) use self::runtime::{
     CodexStartReservation, ThreadRuntime, TurnFailure, TurnFailureKind, TurnOutcome, TurnSpend,
+};
+pub(crate) use self::session_binding::{
+    ResolvedProviderTarget, SessionBinding, SessionBindingError, SessionBindingRegistry,
 };
 pub(crate) use self::transcript::TranscriptRecord;
 pub(crate) use self::transcript_store::{IdSpace, ThreadTranscript};
@@ -367,6 +371,11 @@ pub struct RelayState {
     /// that never sent — can recognize the promotion authoritatively; the id
     /// sequence alone is indistinguishable from a normal thread switch.
     pub(super) thread_promoted_from: HashMap<String, String>,
+    /// Where each relay session currently reaches its provider — the one place a
+    /// provider handle is allowed to live (see `markdown/STABLE_SESSION_ID_DESIGN.md`).
+    /// Every entry is an identity mapping until Phase 3; only the non-identity ones
+    /// are persisted, the rest are re-adopted from each provider's thread list.
+    pub(super) session_bindings: SessionBindingRegistry,
     /// Per-thread pin/proven paths. Absent = birth cwd.
     pub(super) thread_workspace: HashMap<String, ThreadWorkspace>,
     /// Git `HEAD` observed immediately before the last ordinary author turn for a
@@ -699,6 +708,7 @@ impl RelayState {
             thread_settings: HashMap::new(),
             thread_forked_from: HashMap::new(),
             thread_promoted_from: HashMap::new(),
+            session_bindings: SessionBindingRegistry::default(),
             thread_workspace: HashMap::new(),
             thread_last_turn_base_sha: HashMap::new(),
             thread_last_turn_base_cwd: HashMap::new(),
@@ -5190,6 +5200,10 @@ impl RelayState {
         // Same reasoning: a hint left behind would keep an archived/deleted session
         // routable from a stale search result the client still has on screen.
         self.forget_search_routing_hint(thread_id);
+        // Both callers (archive and permanent delete) run the provider operation FIRST
+        // and only reach here on success, so a failed one leaves the binding intact —
+        // and a future thread reusing this id cannot inherit this one's provider.
+        self.session_bindings.remove(thread_id);
         self.runtimes.remove(thread_id);
         self.drop_pending_requests_for_thread(thread_id);
         self.threads.len() != before_len
@@ -5266,6 +5280,69 @@ impl RelayState {
             }
         }
         Some(pending)
+    }
+
+    /// The session id that owns a provider handle, or `None` if nothing claims it.
+    /// Provider-qualified because the same native id may exist under two providers.
+    pub(crate) fn session_for_provider_handle(
+        &self,
+        provider: &str,
+        handle: &str,
+    ) -> Option<String> {
+        self.session_bindings
+            .session_for_provider_handle(provider, handle)
+            .map(str::to_string)
+    }
+
+    /// Session id -> what to call the provider with. Phase 2 replaces
+    /// `find_thread_provider` at every provider boundary with this.
+    pub(crate) fn resolve_session_target(
+        &self,
+        session_id: &str,
+    ) -> Option<ResolvedProviderTarget> {
+        self.session_bindings.resolve(session_id)
+    }
+
+    /// Record the compatibility binding `session_id == provider handle == native id`.
+    ///
+    /// Re-binding to a different provider is allowed on purpose: restore seeds the
+    /// PERSISTED provider and then corrects itself from whichever provider actually
+    /// resumed the session.
+    pub(crate) fn register_identity_session_binding(
+        &mut self,
+        provider: &str,
+        session_id: &str,
+    ) -> Result<(), SessionBindingError> {
+        self.session_bindings.bind_identity(provider, session_id)
+    }
+
+    /// Bring one provider row under a relay session id before anything routes,
+    /// filters, or renders it.
+    ///
+    /// Phase 1 is identity-only, so `id` never actually moves — the rewrite below is
+    /// the seam Phase 2c fills in. A native id already owned by ANOTHER provider's
+    /// session is left unbound rather than rebound: Phase 1 may not mint a
+    /// replacement id, and an unbound row still routes exactly the way it does today.
+    pub(crate) fn adopt_provider_summary(&mut self, summary: &mut ThreadSummaryView) {
+        if summary.id.is_empty() || summary.provider.is_empty() {
+            return;
+        }
+        if let Some(session_id) = self.session_for_provider_handle(&summary.provider, &summary.id) {
+            summary.id = session_id;
+            return;
+        }
+        if let Some(existing) = self.session_bindings.binding(&summary.id) {
+            if existing.provider != summary.provider {
+                return;
+            }
+        }
+        let _ = self
+            .session_bindings
+            .bind_identity(&summary.provider, &summary.id);
+    }
+
+    pub(super) fn persistable_session_bindings(&self) -> HashMap<String, SessionBinding> {
+        self.session_bindings.persistable()
     }
 
     pub fn filter_deleted_threads(
@@ -6027,6 +6104,30 @@ impl RelayState {
         }
         self.thread_forked_from = persisted.thread_forked_from.clone();
         self.thread_promoted_from = persisted.thread_promoted_from.clone();
+        // The reverse index is derived, so it is rebuilt here rather than read.
+        let (bindings, dropped) = SessionBindingRegistry::restore(&persisted.session_bindings);
+        self.session_bindings = bindings;
+        for session_id in dropped {
+            tracing::warn!(
+                session_id = %session_id,
+                "dropped a persisted session binding: another session already claims its handle"
+            );
+        }
+        // A state file can carry no binding for the restored active session at all —
+        // every file written before this map existed, and every file since whose
+        // sessions are all identity-bound (those are deliberately not written). Its
+        // provider is the one persisted beside it; every other session re-adopts from
+        // the first provider list, and `restore_persisted_session` corrects this one if
+        // the resume proves a different owner.
+        if let Some(active) = self.active_thread_id.clone() {
+            if !persisted.provider_name.is_empty()
+                && self.session_bindings.binding(&active).is_none()
+            {
+                let _ = self
+                    .session_bindings
+                    .bind_identity(&persisted.provider_name, &active);
+            }
+        }
         self.thread_workspace = persisted.thread_workspace.clone();
         self.thread_last_turn_base_sha = persisted.thread_last_turn_base_sha.clone();
         self.thread_last_turn_base_cwd = persisted.thread_last_turn_base_cwd.clone();
@@ -6492,8 +6593,8 @@ fn remote_action_cache_key(device_id: &str, action_id: &str) -> String {
 mod tests {
     use super::{
         BrokerPendingMessage, PendingPairingResult, PendingTranscriptDelta, PersistedRelayState,
-        RelayState, ReviewJob, SecurityProfile, TeamRun, TeamRunStatus, TeamThreadGate,
-        TranscriptDeltaKind, WorkflowRun, MAX_WORKFLOW_RUNS,
+        RelayState, ReviewJob, SecurityProfile, SessionBinding, TeamRun, TeamRunStatus,
+        TeamThreadGate, TranscriptDeltaKind, WorkflowRun, MAX_WORKFLOW_RUNS,
     };
     use crate::protocol::ThreadSummaryView;
     use crate::state::{ReviewMode, RunStatus};
@@ -8884,6 +8985,214 @@ mod tests {
                 .expect("explicit"),
             "done-1"
         );
+    }
+
+    fn provider_row(id: &str, provider: &str) -> ThreadSummaryView {
+        ThreadSummaryView {
+            workspace_trusted: false,
+            id: id.to_string(),
+            name: None,
+            preview: String::new(),
+            cwd: "/tmp/project".to_string(),
+            updated_at: 1,
+            source: provider.to_string(),
+            status: "idle".to_string(),
+            model_provider: provider.to_string(),
+            provider: provider.to_string(),
+            forked_from: None,
+            renamed: false,
+            flagged: false,
+        }
+    }
+
+    /// Re-encode through JSON, the way a restart actually reads state back.
+    fn reload(persisted: &PersistedRelayState) -> PersistedRelayState {
+        let json = serde_json::to_string(persisted).expect("state encodes");
+        serde_json::from_str(&json).expect("state decodes")
+    }
+
+    // Every state file on disk today predates `session_bindings`, so restore has to
+    // work with the field simply absent — and still know which provider owns the
+    // session it is about to resume.
+    #[test]
+    fn a_state_file_without_session_bindings_restores_and_seeds_the_active_session() {
+        let mut relay = test_relay();
+        relay.active_thread_id = Some("thread-1".to_string());
+        relay.provider_name = "codex".to_string();
+
+        let mut value = serde_json::to_value(PersistedRelayState::from_relay(&relay))
+            .expect("state serializes");
+        let removed = value
+            .as_object_mut()
+            .expect("state is a JSON object")
+            .remove("session_bindings");
+        assert!(
+            removed.is_some(),
+            "precondition: the writer must emit the field this test then strips"
+        );
+        let legacy: PersistedRelayState =
+            serde_json::from_value(value).expect("a state file without bindings must still decode");
+
+        let mut restored = test_relay();
+        restored.apply_persisted(&legacy);
+
+        assert_eq!(
+            restored.resolve_session_target("thread-1"),
+            Some(super::ResolvedProviderTarget {
+                session_id: "thread-1".to_string(),
+                provider: "codex".to_string(),
+                provider_handle: "thread-1".to_string(),
+            }),
+            "the persisted provider is the only thing that says who owns the restored session",
+        );
+        assert_eq!(
+            restored.session_for_provider_handle("codex", "thread-1"),
+            Some("thread-1".to_string()),
+            "the derived reverse index must be seeded too, not just the forward map",
+        );
+    }
+
+    // The Phase-3 shape. An identity binding can be re-derived from the provider's
+    // own list; a session whose id is NOT its provider handle cannot, so losing it
+    // across a restart would strand the session.
+    #[test]
+    fn a_binding_whose_handle_differs_survives_the_state_file() {
+        let mut relay = test_relay();
+        relay.active_thread_id = Some("session-a".to_string());
+        relay.provider_name = "claude_code".to_string();
+        relay
+            .session_bindings
+            .bind(
+                "session-a",
+                SessionBinding {
+                    provider: "claude_code".to_string(),
+                    provider_handle: "real-sdk-id".to_string(),
+                    provider_thread_id: Some("real-sdk-id".to_string()),
+                },
+            )
+            .expect("bind");
+
+        let persisted = reload(&PersistedRelayState::from_relay(&relay));
+        assert_eq!(
+            persisted.session_bindings.len(),
+            1,
+            "a non-identity binding is exactly what has to be written"
+        );
+
+        let mut restored = test_relay();
+        restored.apply_persisted(&persisted);
+        assert_eq!(
+            restored.resolve_session_target("session-a"),
+            Some(super::ResolvedProviderTarget {
+                session_id: "session-a".to_string(),
+                provider: "claude_code".to_string(),
+                provider_handle: "real-sdk-id".to_string(),
+            }),
+        );
+        assert_eq!(
+            restored.session_for_provider_handle("claude_code", "real-sdk-id"),
+            Some("session-a".to_string()),
+            "the reverse index is rebuilt from the bindings, never read from disk",
+        );
+        assert!(
+            restored
+                .session_for_provider_handle("claude_code", "session-a")
+                .is_none(),
+            "the session id is not a provider handle and must not route as one",
+        );
+    }
+
+    // A deep search scans a thousand rows per provider. Writing a binding for each
+    // one would grow session.json without changing any decision — the next list
+    // re-adopts them.
+    #[test]
+    fn identity_bindings_are_not_written_and_are_re_adopted_from_the_provider_list() {
+        let mut relay = test_relay();
+        relay.provider_name = "codex".to_string();
+        for index in 0..3 {
+            relay
+                .register_identity_session_binding("codex", &format!("thread-{index}"))
+                .expect("identity bind");
+        }
+
+        let persisted = reload(&PersistedRelayState::from_relay(&relay));
+        assert!(
+            persisted.session_bindings.is_empty(),
+            "identity bindings must not accumulate on disk: {:?}",
+            persisted.session_bindings,
+        );
+
+        let mut restored = test_relay();
+        restored.apply_persisted(&persisted);
+        assert!(restored.resolve_session_target("thread-2").is_none());
+        let mut row = provider_row("thread-2", "codex");
+        restored.adopt_provider_summary(&mut row);
+        assert_eq!(row.id, "thread-2", "adoption must not move a public id");
+        assert_eq!(
+            restored
+                .resolve_session_target("thread-2")
+                .map(|t| t.provider),
+            Some("codex".to_string()),
+            "one provider list refresh is what brings an identity binding back",
+        );
+    }
+
+    // Archive and permanent delete both reach `remove_thread` only AFTER the provider
+    // call succeeded, so this is where a binding may be dropped — leaving it would
+    // keep routing a session that no longer exists, and hand its provider to whatever
+    // reuses the id.
+    #[test]
+    fn removing_a_thread_drops_its_binding() {
+        let mut relay = test_relay();
+        relay.upsert_thread(provider_row("thread-1", "codex"));
+        relay
+            .register_identity_session_binding("codex", "thread-1")
+            .expect("bind");
+
+        assert!(relay.remove_thread("thread-1"));
+        assert!(relay.resolve_session_target("thread-1").is_none());
+        assert!(relay
+            .session_for_provider_handle("codex", "thread-1")
+            .is_none());
+    }
+
+    // Two providers can hand back the same native id string. Phase 1 may not mint a
+    // replacement id, so the second row stays unbound and keeps routing the way it
+    // does today — what it must NOT do is silently steal the first session's provider.
+    #[test]
+    fn adopting_a_native_id_another_provider_owns_leaves_the_row_alone() {
+        let mut relay = test_relay();
+        relay
+            .register_identity_session_binding("codex", "abc")
+            .expect("bind");
+
+        let mut row = provider_row("abc", "fake");
+        relay.adopt_provider_summary(&mut row);
+
+        assert_eq!(row.id, "abc", "the row keeps the id the provider gave it");
+        assert_eq!(
+            relay.resolve_session_target("abc").map(|t| t.provider),
+            Some("codex".to_string()),
+            "the first owner keeps the session id",
+        );
+        assert!(
+            relay.session_for_provider_handle("fake", "abc").is_none(),
+            "no binding may be invented for the losing row",
+        );
+    }
+
+    // `list_threads` re-adopts every row on every poll (every 12s per client), so
+    // adoption has to be a no-op the second time — and never move an id.
+    #[test]
+    fn re_adopting_a_row_is_idempotent() {
+        let mut relay = test_relay();
+        for _ in 0..3 {
+            let mut row = provider_row("thread-1", "codex");
+            relay.adopt_provider_summary(&mut row);
+            assert_eq!(row.id, "thread-1");
+        }
+        assert_eq!(relay.session_bindings.len(), 1);
+        assert_eq!(relay.session_bindings.reverse_len(), 1);
     }
 }
 

@@ -152,6 +152,37 @@ impl AppState {
         ))
     }
 
+    /// Session id -> the provider handle to call with: the Phase-2 replacement for
+    /// `find_thread_provider` at every `ProviderBridge` boundary.
+    ///
+    /// Falls back to discovery for a session no list has adopted yet (a reviewer
+    /// thread created this run, a row older than the deepest page), and records the
+    /// identity binding so the next call is a map read.
+    ///
+    /// Unused in production in Phase 1 BY DESIGN: bindings are identity mappings, so
+    /// converting a call site would change nothing, and converting them all is the
+    /// separately reviewable Phase 2 (`markdown/STABLE_SESSION_ID_DESIGN.md`).
+    #[allow(dead_code)]
+    pub(crate) async fn resolve_session_target(
+        &self,
+        session_id: &str,
+    ) -> Result<ResolvedProviderTarget, String> {
+        if let Some(target) = {
+            let relay = self.relay.read().await;
+            relay.resolve_session_target(session_id)
+        } {
+            return Ok(target);
+        }
+        let provider = self.find_thread_provider(session_id).await?.0.to_string();
+        let mut relay = self.relay.write().await;
+        relay
+            .register_identity_session_binding(&provider, session_id)
+            .map_err(|error| error.to_string())?;
+        relay
+            .resolve_session_target(session_id)
+            .ok_or_else(|| format!("session '{session_id}' has no provider binding"))
+    }
+
     /// Warm every provider's model catalog in the background at startup.
     ///
     /// The remote client pulls each provider's models right after the handshake

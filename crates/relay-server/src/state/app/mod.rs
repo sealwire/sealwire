@@ -45,8 +45,8 @@ use super::{
     sort_threads_by_recency, thread_status_is_working, unix_now, vapid_key_path,
     BrokerPendingMessage, CachedRemoteActionResult, ClaimChallenge, CompletedRemoteClaim,
     IssuedClaimChallenge, PendingPairingResult, PushDispatcher, PushSubscriptionInput, RelayState,
-    RemoteActionReplayDecision, SecurityProfile, DEFAULT_EFFORT, DEFAULT_MODEL,
-    STALE_TURN_PROGRESS_TIMEOUT_SECS,
+    RemoteActionReplayDecision, ResolvedProviderTarget, SecurityProfile, DEFAULT_EFFORT,
+    DEFAULT_MODEL, STALE_TURN_PROGRESS_TIMEOUT_SECS,
 };
 
 /// Drive the server-side push attention tracker once per (debounced) state
@@ -1369,6 +1369,15 @@ in thread {thread_id}: {error}"
             relay.set_available_models(models);
         }
         relay.restore_thread_data(thread_data, &persisted);
+        // The resume above is the authority on which provider owns this session, so it
+        // overrides whatever `apply_persisted` seeded from a possibly stale
+        // `provider_name`.
+        if let Err(error) = relay.register_identity_session_binding(&provider_name, &thread_id) {
+            relay.push_log(
+                "warn",
+                format!("Could not bind restored session {thread_id} to {provider_name}: {error}"),
+            );
+        }
         expire_controller_if_needed(&mut relay);
         relay.push_log(
             "info",

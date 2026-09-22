@@ -30975,3 +30975,161 @@ watchdog settle this Blocked",
         );
     }
 }
+
+/// Phase 1 of `markdown/STABLE_SESSION_ID_DESIGN.md` at the app level: the binding
+/// registry now sits in the thread-list path, and the whole point of the phase is
+/// that nothing outside it can tell.
+#[cfg(test)]
+mod session_binding_tests {
+    use super::path_scope_tests::{build_app_with_bridge, pair_device};
+    use crate::protocol::StartSessionInput;
+    use crate::provider::ProviderBridge;
+    use tempfile::TempDir;
+
+    async fn start(app: &crate::state::AppState, cwd: &str) -> String {
+        app.start_session(StartSessionInput {
+            device_id: Some("device-1".to_string()),
+            cwd: Some(cwd.to_string()),
+            model: None,
+            effort: None,
+            approval_policy: None,
+            sandbox: None,
+            provider: Some("fake".to_string()),
+            initial_prompt: None,
+            project_id: None,
+        })
+        .await
+        .expect("start_session")
+        .active_thread_id
+        .expect("a started session has a thread")
+    }
+
+    // The acceptance criterion for the phase: every row the provider returns comes
+    // out of `list_threads` under the id the provider gave it, and is bound.
+    #[tokio::test]
+    async fn listing_threads_binds_every_row_without_moving_a_single_id() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let first = start(&app, &cwd).await;
+        let second = start(&app, &cwd).await;
+
+        let mut provider_ids = ProviderBridge::list_threads(bridge.as_ref(), 50)
+            .await
+            .expect("the provider lists its own threads")
+            .into_iter()
+            .map(|thread| thread.id)
+            .collect::<Vec<_>>();
+        provider_ids.sort();
+        assert!(
+            provider_ids.contains(&first) && provider_ids.contains(&second),
+            "precondition: both started sessions are provider rows"
+        );
+
+        let listed = app.list_threads(50, None).await.expect("list");
+        let mut listed_ids = listed
+            .threads
+            .iter()
+            .map(|thread| thread.id.clone())
+            .collect::<Vec<_>>();
+        listed_ids.sort();
+        assert_eq!(
+            listed_ids, provider_ids,
+            "Phase 1 must hand back the provider's own ids, unchanged",
+        );
+
+        let relay = app.relay.read().await;
+        for id in &listed_ids {
+            let target = relay
+                .resolve_session_target(id)
+                .unwrap_or_else(|| panic!("row {id} left the list unbound"));
+            assert_eq!(
+                (target.provider.as_str(), target.provider_handle.as_str()),
+                ("fake", id.as_str()),
+                "Phase 1 bindings are identity mappings",
+            );
+            assert_eq!(
+                relay.session_for_provider_handle("fake", id).as_deref(),
+                Some(id.as_str()),
+                "the reverse index is what Phase 2 routes provider events through",
+            );
+        }
+    }
+
+    // A poll every 12s per client re-adopts the whole page. If that could move an id,
+    // a session would change identity under the user mid-conversation.
+    #[tokio::test]
+    async fn repeated_refreshes_return_the_same_ids() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let started = start(&app, &cwd).await;
+
+        let first = app.list_threads(50, None).await.expect("list");
+        let baseline = first
+            .threads
+            .iter()
+            .map(|thread| thread.id.clone())
+            .collect::<Vec<_>>();
+        for round in 0..3 {
+            let again = app.list_threads(50, None).await.expect("list");
+            let ids = again
+                .threads
+                .iter()
+                .map(|thread| thread.id.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(ids, baseline, "round {round} moved a public id");
+        }
+        assert_eq!(
+            app.relay.read().await.active_thread_id.as_deref(),
+            Some(started.as_str()),
+            "and the active session is still the one that was started",
+        );
+    }
+
+    // The Phase-2 seam, exercised on the path it will actually take: a session the
+    // registry has never seen falls back to provider discovery, records the identity
+    // binding, and answers with the same string every current call site passes today.
+    #[tokio::test]
+    async fn resolving_an_unbound_session_discovers_it_and_answers_identity() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _bridge, _p, _o) = build_app_with_bridge(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let started = start(&app, &cwd).await;
+
+        {
+            let mut relay = app.relay.write().await;
+            relay.session_bindings = Default::default();
+        }
+
+        let target = app
+            .resolve_session_target(&started)
+            .await
+            .expect("an unbound but live session must still resolve");
+        assert_eq!(target.session_id, started);
+        assert_eq!(target.provider, "fake");
+        assert_eq!(
+            target.provider_handle, started,
+            "session id and provider handle are the same string until Phase 3",
+        );
+
+        assert_eq!(
+            app.relay
+                .read()
+                .await
+                .session_for_provider_handle("fake", &started)
+                .as_deref(),
+            Some(started.as_str()),
+            "discovery must leave the binding behind so the next call is a map read",
+        );
+
+        assert!(
+            app.resolve_session_target("no-such-session").await.is_err(),
+            "an unknown session must not be invented a binding",
+        );
+    }
+}

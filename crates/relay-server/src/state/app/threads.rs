@@ -231,8 +231,16 @@ impl AppState {
         // reviewers are first-class seats in the task worktree, so they stay visible
         // alongside the TL and Dev sessions.
         let (reviewer_ids, hidden_reviewer_ids) = relay.reviewer_thread_ids_and_navigation_hidden();
-        let mut threads = relay
-            .filter_deleted_threads(all_threads)
+        let mut merged = relay.filter_deleted_threads(all_threads);
+        // The one seam every provider row crosses on its way into relay state or a
+        // client (`markdown/STABLE_SESSION_ID_DESIGN.md`, Phase 1). Ahead of the scope
+        // and reviewer filters on purpose: a row hidden from THIS device is still a
+        // session the relay has to be able to route. Identity-only for now, so no id
+        // here changes — see `RelayState::adopt_provider_summary`.
+        for thread in &mut merged {
+            relay.adopt_provider_summary(thread);
+        }
+        let mut threads = merged
             .into_iter()
             .filter(|thread| path_within_device_scope(&thread.cwd, &device_scope, &allowed_roots))
             .filter(|thread| !hidden_reviewer_ids.contains(&thread.id))

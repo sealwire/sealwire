@@ -9,8 +9,8 @@ use tokio::sync::{watch, RwLock};
 use tracing::warn;
 
 use super::{
-    Ask, DeviceRecord, Goal, PairedDevice, RelayState, ReviewJob, ReviewerThread, TeamRun,
-    ThreadSessionSettings, WorkflowRun, PERSISTED_STATE_VERSION,
+    Ask, DeviceRecord, Goal, PairedDevice, RelayState, ReviewJob, ReviewerThread, SessionBinding,
+    TeamRun, ThreadSessionSettings, WorkflowRun, PERSISTED_STATE_VERSION,
 };
 
 const PERSISTENCE_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -60,6 +60,17 @@ pub(super) struct PersistedRelayState {
     /// `#[serde(default)]` keeps pre-promotion state files loadable.
     #[serde(default)]
     pub(super) thread_promoted_from: std::collections::HashMap<String, String>,
+    /// session id -> the provider handle it currently reaches
+    /// (`markdown/STABLE_SESSION_ID_DESIGN.md`). `#[serde(default)]` keeps every
+    /// existing schema-v2 file loadable, which is why this needs no version bump —
+    /// a bump is a hard load error, not a migration.
+    ///
+    /// Deliberately NOT the whole registry: identity bindings are re-adopted from
+    /// each provider's thread list on the first refresh, so writing one per row a
+    /// deep search happened to scan would grow this file without changing a single
+    /// decision. The reverse index is derived and never written.
+    #[serde(default)]
+    pub(super) session_bindings: std::collections::HashMap<String, SessionBinding>,
     /// Pin/proven paths. Persist so a worktree move and an explicit pin survive restart.
     #[serde(default)]
     pub(super) thread_workspace:
@@ -256,6 +267,7 @@ impl PersistedRelayState {
             thread_settings: relay.thread_settings.clone(),
             thread_forked_from: relay.thread_forked_from.clone(),
             thread_promoted_from: relay.thread_promoted_from.clone(),
+            session_bindings: relay.persistable_session_bindings(),
             // Drop pending ids: a pin on a synthetic id would persist a dead key.
             thread_workspace: relay
                 .thread_workspace
