@@ -30,8 +30,8 @@ use crate::{
         ThreadTranscriptPageData,
     },
     state::{
-        BrokerPendingMessage, PendingApproval, PendingTranscriptDelta, RelayState,
-        TranscriptDeltaKind, TurnFailureKind, TurnOutcome,
+        BrokerPendingMessage, PendingApproval, PendingTranscriptDelta, ProviderEventSession,
+        RelayState, TranscriptDeltaKind, TurnFailureKind, TurnOutcome,
     },
 };
 
@@ -170,9 +170,12 @@ fn resolve_session_tools(
 async fn attach_orchestrator_session(
     state: &Arc<RwLock<RelayState>>,
     worker_path: &str,
-    thread_id: &str,
+    provider_session_id: &str,
     cmd: &mut Value,
 ) {
+    // Every lookup below is relay-owned, and so is the ask token this may mint —
+    // all of them keyed by the session, not the id the worker is addressed with.
+    let thread_id = &relay_session_for_claude_handle(state, provider_session_id).await;
     let (options, seat_run_id, standalone, unrestricted) = {
         let relay = state.read().await;
         let settings = relay.thread_settings(thread_id);
@@ -480,7 +483,10 @@ impl ClaudeCodeBridge {
             })?
     }
 
-    async fn cwd_for_thread(&self, thread_id: &str) -> Option<String> {
+    /// `relay.threads` is keyed by session id, so a worker handle has to be
+    /// translated before it can find its own row.
+    async fn cwd_for_thread(&self, provider_session_id: &str) -> Option<String> {
+        let thread_id = relay_session_for_claude_handle(&self.state, provider_session_id).await;
         let relay = self.state.read().await;
         relay
             .threads
@@ -549,14 +555,20 @@ impl ClaudeCodeBridge {
         )
     }
 
+    /// `provider_session_id` is the SDK's id for the session — this row is a relay
+    /// record, so it is keyed by the session bound to that id.
     async fn record_local_user_message(
         &self,
-        thread_id: &str,
+        provider_session_id: &str,
         item_id: String,
         text: String,
         turn_id: String,
     ) {
         let mut relay = self.state.write().await;
+        let Some(thread_id) = session_for_claude_handle(&mut relay, provider_session_id) else {
+            return;
+        };
+        let thread_id = thread_id.as_str();
         match claude_thread_route(&relay, Some(thread_id)) {
             ClaudeThreadRoute::Active => {
                 relay.upsert_user_message(item_id, text, turn_id);
@@ -1137,8 +1149,9 @@ impl ProviderBridge for ClaudeCodeBridge {
         let user_message_uuid = new_user_message_uuid();
         let user_item_id = format!("user:{user_message_uuid}");
         let settings = {
+            let session_id = relay_session_for_claude_handle(&self.state, thread_id).await;
             let relay = self.state.read().await;
-            relay.thread_settings(thread_id)
+            relay.thread_settings(&session_id)
         };
         let permission_mode = settings
             .as_ref()
@@ -1375,19 +1388,70 @@ async fn handle_worker_line(
     handle_worker_event(payload, state).await;
 }
 
+/// The relay session key for a handle the WORKER is addressed by.
+///
+/// Lookup only, unlike the event-side resolver: a provider call may not adopt a
+/// binding, and an unbound handle is still its own relay key today.
+async fn relay_session_for_claude_handle(
+    state: &Arc<RwLock<RelayState>>,
+    provider_session_id: &str,
+) -> String {
+    state
+        .read()
+        .await
+        .session_for_provider_handle(CLAUDE_PROVIDER_KEY, provider_session_id)
+        .unwrap_or_else(|| provider_session_id.to_string())
+}
+
+/// The relay session an SDK session id belongs to, adopting the id when nothing
+/// claims it. `None` means the caller must drop the event.
+fn session_for_claude_handle(relay: &mut RelayState, provider_session_id: &str) -> Option<String> {
+    match relay.session_for_provider_event(CLAUDE_PROVIDER_KEY, Some(provider_session_id)) {
+        ProviderEventSession::Session(session_id) => Some(session_id),
+        ProviderEventSession::Unnamed | ProviderEventSession::Refused => None,
+    }
+}
+
+/// The relay session a deferred-start placeholder stands for.
+///
+/// Lookup only, deliberately: `claude-pending-*` is a bridge handle and not a
+/// native id, so adopting one would leave a binding behind the moment
+/// `session_started` promotes off it. Phase 3 is where the placeholder gets a
+/// binding of its own; until then an unbound placeholder IS the relay's key.
+fn pending_session_id(relay: &RelayState, payload: &Value) -> Option<String> {
+    let pending = string_at(payload, &["pending_thread_id"]).filter(|id| !id.is_empty())?;
+    Some(
+        relay
+            .session_for_provider_handle(CLAUDE_PROVIDER_KEY, &pending)
+            .unwrap_or(pending),
+    )
+}
+
 async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
     let event_type = payload
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let event_thread_id = string_at(&payload, &["provider_session_id"]);
+    let provider_session_id = string_at(&payload, &["provider_session_id"]);
 
     let mut relay = state.write().await;
 
+    // Phase 2b seam: the worker addresses sessions by the SDK's id, and every
+    // record below is keyed by the relay's. An id the relay will not route drops
+    // the event rather than falling through as "unaddressed", which
+    // `claude_thread_route` would otherwise read as the active thread.
+    let event_thread_id = match relay
+        .session_for_provider_event(CLAUDE_PROVIDER_KEY, provider_session_id.as_deref())
+    {
+        ProviderEventSession::Session(session_id) => Some(session_id),
+        ProviderEventSession::Unnamed => None,
+        ProviderEventSession::Refused => return,
+    };
+
     match event_type {
         "session_created" | "session_resumed" => {
-            if let Some(sid) = payload.get("provider_session_id").and_then(Value::as_str) {
-                let pending_thread_id = string_at(&payload, &["pending_thread_id"]);
+            if let Some(sid) = event_thread_id.as_deref() {
+                let pending_thread_id = pending_session_id(&relay, &payload);
                 let should_activate = relay.active_thread_id.is_none()
                     || relay.active_thread_id.as_deref() == Some(sid)
                     || pending_thread_id.as_deref() == relay.active_thread_id.as_deref();
@@ -1405,12 +1469,12 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
             // while we are sitting on a synthetic `claude-pending-…` id (the
             // deferred-start placeholder), promote the thread: swap the public
             // id over to the real SDK session id and drop the placeholder row.
-            let provider_session_id = payload
-                .get("provider_session_id")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            if let Some(sid) = provider_session_id.as_deref() {
-                let pending_thread_id = string_at(&payload, &["pending_thread_id"]);
+            //
+            // The RESOLVED session, not the raw SDK id: the promotion below rekeys
+            // relay-owned maps, so both ends of it have to be relay keys.
+            let session_id = event_thread_id.clone();
+            if let Some(sid) = session_id.as_deref() {
+                let pending_thread_id = pending_session_id(&relay, &payload);
                 let stale_pending_id = relay
                     .active_thread_id
                     .as_deref()
@@ -1429,7 +1493,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     }
                 }
             }
-            let is_active_session = provider_session_id
+            let is_active_session = session_id
                 .as_deref()
                 .map_or(false, |sid| relay.active_thread_id.as_deref() == Some(sid));
             let payload_cwd = payload.get("cwd").and_then(Value::as_str);
@@ -1459,7 +1523,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
             if is_active_session {
                 relay.set_provider_name("claude_code".to_string());
             }
-            let thread_id = provider_session_id
+            let thread_id = session_id
                 .clone()
                 .or_else(|| relay.active_thread_id.clone())
                 .unwrap_or_default();
@@ -1487,15 +1551,11 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
         }
 
         "cwd_changed" => {
+            let pending = pending_session_id(&relay, &payload);
             let thread_id = event_thread_id
                 .as_deref()
                 .filter(|id| !id.is_empty())
-                .or_else(|| {
-                    payload
-                        .get("pending_thread_id")
-                        .and_then(Value::as_str)
-                        .filter(|id| !id.is_empty())
-                });
+                .or(pending.as_deref());
             if let (Some(thread_id), Some(cwd)) = (
                 thread_id,
                 payload
@@ -1815,7 +1875,9 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
         }
 
         "approval_requested" => {
-            if let Some(pending) = parse_claude_approval(&payload, &relay) {
+            if let Some(pending) =
+                parse_claude_approval(&payload, &relay, event_thread_id.as_deref())
+            {
                 let route = claude_thread_route(&relay, Some(&pending.thread_id));
                 relay.set_thread_status(
                     &pending.thread_id,
@@ -2975,7 +3037,7 @@ mod tests {
         relay.notify();
     }
 
-    fn test_thread(id: &str, cwd: &str) -> ThreadSummaryView {
+    pub(super) fn test_thread(id: &str, cwd: &str) -> ThreadSummaryView {
         ThreadSummaryView {
             workspace_trusted: false,
             id: id.to_string(),
@@ -6437,5 +6499,299 @@ mod tests {
             .logs
             .iter()
             .any(|l| l.kind == "error" && l.message.contains("crash")));
+    }
+}
+
+/// Phase 2b of `markdown/STABLE_SESSION_ID_DESIGN.md` for the Claude worker.
+///
+/// Every binding in production is an identity mapping, so each test here injects
+/// one whose relay session id and SDK session id are deliberately different
+/// strings — the only shape that can tell a translated router apart from one that
+/// hands the SDK's id straight to `RelayState`.
+#[cfg(test)]
+mod session_binding_boundary_tests {
+    use super::tests::test_thread;
+    use super::*;
+    use serde_json::json;
+
+    const HANDLE: &str = "sdk-session-1";
+    const SESSION: &str = "session-stable-1";
+
+    async fn bound_relay() -> Arc<RwLock<RelayState>> {
+        let (tx, _) = tokio::sync::watch::channel(0);
+        let state = Arc::new(RwLock::new(RelayState::new(
+            "/tmp/b".to_string(),
+            tx,
+            crate::state::SecurityProfile::private(),
+        )));
+        {
+            let mut relay = state.write().await;
+            relay.activate_thread(
+                test_thread(SESSION, "/tmp/b"),
+                "/tmp/b",
+                "sonnet",
+                "default",
+                "workspace-write",
+                "medium",
+                "device-1",
+            );
+            relay.bind_session_to_foreign_handle(SESSION, "claude_code", HANDLE);
+        }
+        state
+    }
+
+    #[tokio::test]
+    async fn an_assistant_message_lands_on_the_session_not_the_sdk_id() {
+        let state = bound_relay().await;
+
+        handle_worker_event(
+            json!({
+                "type": "assistant_message",
+                "provider_session_id": HANDLE,
+                "item_id": "assistant-1",
+                "turn_id": "turn-1",
+                "text": "hello",
+                "status": "completed"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert!(
+            relay.runtime_for_thread(HANDLE).is_none(),
+            "an untranslated worker event builds a second session under the SDK id",
+        );
+        assert!(
+            relay
+                .snapshot()
+                .transcript
+                .iter()
+                .any(|entry| entry.item_id.as_deref() == Some("assistant-1")),
+            "the row belongs to the session the SDK id is bound to",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_terminal_settles_the_session_and_bills_it() {
+        let state = bound_relay().await;
+        {
+            let mut relay = state.write().await;
+            relay.set_active_turn(Some("turn-1".to_string()));
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "done",
+                "provider_session_id": HANDLE,
+                "turn_id": "turn-1",
+                "model_usage": { "claude-opus-5": { "inputTokens": 120, "outputTokens": 40 } }
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert!(relay.turn_terminal(SESSION, "turn-1").is_some());
+        assert!(relay.turn_terminal(HANDLE, "turn-1").is_none());
+        assert_eq!(
+            relay.last_turn_spend(SESSION).map(|spend| spend.billed),
+            Some(160),
+            "spend has to be attributed to the session, not the SDK id",
+        );
+        assert!(relay.last_turn_spend(HANDLE).is_none());
+    }
+
+    // A capability-bearing event: the answer is routed by the id stored on the card.
+    #[tokio::test]
+    async fn an_ask_user_question_is_parked_under_the_session_id() {
+        let state = bound_relay().await;
+
+        handle_worker_event(
+            json!({
+                "type": "ask_user_question_requested",
+                "provider_session_id": HANDLE,
+                "id": "ask-1",
+                "tool_use_id": "toolu_1",
+                "questions": [{
+                    "question": "Which one?",
+                    "header": "Pick",
+                    "multiSelect": false,
+                    "options": [{"label": "A", "description": "a"}, {"label": "B", "description": "b"}]
+                }]
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        let pending = relay
+            .pending_ask_user_questions
+            .get("ask-1")
+            .expect("the question must be parked");
+        assert_eq!(pending.thread_id, SESSION);
+        assert!(relay.runtime_for_thread(HANDLE).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_approval_request_is_parked_under_the_session_id() {
+        let state = bound_relay().await;
+
+        handle_worker_event(
+            json!({
+                "type": "approval_requested",
+                "provider_session_id": HANDLE,
+                "id": "approval-1",
+                "tool_name": "Bash",
+                "action": "Claude wants to run a command.",
+                "input": { "command": "rm -rf /tmp/x" }
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        let pending = relay
+            .pending_approvals
+            .get("approval-1")
+            .expect("the approval must be parked");
+        assert_eq!(pending.thread_id, SESSION);
+        assert!(relay.runtime_for_thread(HANDLE).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unheard_of_sdk_session_is_adopted_as_its_own_session() {
+        let (tx, _) = tokio::sync::watch::channel(0);
+        let state = Arc::new(RwLock::new(RelayState::new(
+            "/tmp/b".to_string(),
+            tx,
+            crate::state::SecurityProfile::private(),
+        )));
+        {
+            let mut relay = state.write().await;
+            relay.active_thread_id = Some("some-other-thread".to_string());
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "status_changed",
+                "provider_session_id": "brand-new",
+                "state": "active"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        let target = relay
+            .resolve_session_target("brand-new")
+            .expect("an unknown SDK session is adopted so the event has a session");
+        assert_eq!(target.provider, "claude_code");
+    }
+
+    #[tokio::test]
+    async fn an_sdk_id_that_names_another_providers_session_is_refused() {
+        let (tx, _) = tokio::sync::watch::channel(0);
+        let state = Arc::new(RwLock::new(RelayState::new(
+            "/tmp/b".to_string(),
+            tx,
+            crate::state::SecurityProfile::private(),
+        )));
+        {
+            let mut relay = state.write().await;
+            relay
+                .register_identity_session_binding("codex", "abc")
+                .expect("codex owns abc");
+            relay.active_thread_id = Some("some-other-thread".to_string());
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "assistant_message",
+                "provider_session_id": "abc",
+                "item_id": "assistant-1",
+                "turn_id": "turn-1",
+                "text": "hello",
+                "status": "completed"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert!(
+            relay.runtime_for_thread("abc").is_none(),
+            "a Claude event must not write into the Codex session that owns `abc`",
+        );
+        assert_eq!(
+            relay
+                .resolve_session_target("abc")
+                .expect("the binding survives")
+                .provider,
+            "codex",
+        );
+    }
+
+    // The 2b compatibility contract: a deferred session still promotes off its
+    // pending handle exactly as before, and leaves no binding behind under it.
+    #[tokio::test]
+    async fn a_deferred_session_still_promotes_off_its_pending_handle() {
+        let (tx, _) = tokio::sync::watch::channel(0);
+        let state = Arc::new(RwLock::new(RelayState::new(
+            "/tmp/b".to_string(),
+            tx,
+            crate::state::SecurityProfile::private(),
+        )));
+        {
+            let mut relay = state.write().await;
+            relay.activate_thread(
+                test_thread("claude-pending-1", "/tmp/b"),
+                "/tmp/b",
+                "sonnet",
+                "default",
+                "workspace-write",
+                "medium",
+                "device-1",
+            );
+        }
+        {
+            let relay = state.read().await;
+            assert!(relay.thread_settings("claude-pending-1").is_some());
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "session_started",
+                "provider_session_id": "real-sdk-id",
+                "pending_thread_id": "claude-pending-1",
+                "cwd": "/tmp/b"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert_eq!(relay.active_thread_id.as_deref(), Some("real-sdk-id"));
+        assert_eq!(
+            relay.snapshot().active_thread_promoted_from.as_deref(),
+            Some("claude-pending-1"),
+            "the compatibility promotion the frontend still reads must survive 2b",
+        );
+        assert!(
+            relay.thread_settings("real-sdk-id").is_some(),
+            "promotion still carries relay metadata over",
+        );
+        assert!(relay.thread_settings("claude-pending-1").is_none());
+        assert!(
+            relay.resolve_session_target("claude-pending-1").is_none(),
+            "the placeholder must not be left owning a binding",
+        );
+        assert_eq!(
+            relay
+                .resolve_session_target("real-sdk-id")
+                .expect("the promoted session is bound")
+                .provider_handle,
+            "real-sdk-id",
+        );
     }
 }

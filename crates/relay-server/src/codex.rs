@@ -30,7 +30,7 @@ use crate::{
     state::{ApprovalKind, PendingApproval, RelayState, TurnFailureKind},
 };
 
-mod rpc;
+pub(crate) mod rpc;
 
 use rpc::{spawn_stderr_reader, spawn_stdout_reader};
 
@@ -681,6 +681,18 @@ impl CodexBridge {
         Ok(summary)
     }
 
+    /// The relay session key for the handle Codex is addressed by.
+    ///
+    /// Lookup only — a provider CALL may not adopt a binding (that is the event
+    /// router's job), and an unbound handle is still its own relay key today.
+    async fn session_for_handle(&self, thread_id: &str) -> String {
+        self.state
+            .read()
+            .await
+            .session_for_provider_handle(self.provider_name, thread_id)
+            .unwrap_or_else(|| thread_id.to_string())
+    }
+
     pub async fn resume_thread(
         &self,
         thread_id: &str,
@@ -697,14 +709,17 @@ impl CodexBridge {
                 "sandbox": sandbox,
                 "personality": "pragmatic"
             });
+            // Relay-owned lookups, and the ask token minted from them, are keyed by
+            // the session — not by the handle `thread/resume` is addressed with.
+            let session_id = self.session_for_handle(thread_id).await;
             // Retained Task seat first, then the same ordinary-standalone peer
             // gate the call path uses. Permissions alone cannot tell a reviewer
             // (wide so it can read) from a person's own session.
             let (seat_run_id, standalone) = {
                 let relay = self.state.read().await;
                 (
-                    relay.retained_seat_run_id_for_thread(thread_id),
-                    relay.thread_is_standalone(thread_id),
+                    relay.retained_seat_run_id_for_thread(&session_id),
+                    relay.thread_is_standalone(&session_id),
                 )
             };
             let unrestricted = crate::state::session_is_unrestricted(&approval_policy, &sandbox);
@@ -714,7 +729,7 @@ impl CodexBridge {
                     params["config"] = json!({ "mcp_servers": seat_mcp_servers(&run_id) });
                 }
                 crate::provider::SealwireMcpIdentity::Peer => {
-                    let token = { self.state.write().await.ask_token_for_thread(thread_id) };
+                    let token = { self.state.write().await.ask_token_for_thread(&session_id) };
                     params["config"] = json!({ "mcp_servers": peer_mcp_servers(&token) });
                 }
                 crate::provider::SealwireMcpIdentity::None => {}
@@ -833,10 +848,15 @@ impl CodexBridge {
         // approval policy + sandbox (see `codex_turn_start_params`). Fall back to
         // no override only when the relay has no record — codex then keeps
         // whatever policy `thread/start` / `thread/resume` last bound.
+        //
+        // `thread_id` addresses Codex; `session_id` is what relay state is keyed by.
+        // The start reservation below is a relay record the event router reads back
+        // under the session id, so both ends have to spell it the same way.
+        let session_id = self.session_for_handle(thread_id).await;
         let policy = {
             let relay = self.state.read().await;
             relay
-                .remembered_thread_settings(thread_id)
+                .remembered_thread_settings(&session_id)
                 .map(|settings| (settings.approval_policy, settings.sandbox))
         };
         let policy = policy
@@ -848,7 +868,7 @@ impl CodexBridge {
             let transcript_text = user_message_transcript_text(text, images.len())
                 .unwrap_or_else(|| text.to_string());
             let mut relay = self.state.write().await;
-            match relay.begin_codex_user_turn(thread_id, &transcript_text) {
+            match relay.begin_codex_user_turn(&session_id, &transcript_text) {
                 Ok(reservation_id) => {
                     relay.notify();
                     reservation_id
@@ -905,7 +925,7 @@ impl CodexBridge {
                     .await
                 {
                     let mut relay = self.state.write().await;
-                    relay.fail_codex_user_turn_definitive(thread_id, &reservation_id);
+                    relay.fail_codex_user_turn_definitive(&session_id, &reservation_id);
                     relay.push_log(
                         "warn",
                         format!(
@@ -923,7 +943,7 @@ impl CodexBridge {
                     // the next turn would re-invent the policy all over again.
                     let mut relay = self.state.write().await;
                     relay.remember_thread_settings(
-                        thread_id,
+                        &session_id,
                         approval_policy,
                         sandbox,
                         effort,
@@ -961,7 +981,7 @@ read-only with approvals required. Change File access if this turn needs to writ
                         let mut relay = self.state.write().await;
                         finish_codex_turn_start_error(
                             &mut relay,
-                            thread_id,
+                            &session_id,
                             &reservation_id,
                             &error,
                         );
@@ -972,7 +992,7 @@ read-only with approvals required. Change File access if this turn needs to writ
             }
             Err(error) => {
                 let mut relay = self.state.write().await;
-                finish_codex_turn_start_error(&mut relay, thread_id, &reservation_id, &error);
+                finish_codex_turn_start_error(&mut relay, &session_id, &reservation_id, &error);
                 relay.notify();
                 return Err(error);
             }
@@ -987,7 +1007,7 @@ read-only with approvals required. Change File access if this turn needs to writ
             })?;
         {
             let mut relay = self.state.write().await;
-            relay.bind_codex_user_reservation(thread_id, &reservation_id, &turn_id);
+            relay.bind_codex_user_reservation(&session_id, &reservation_id, &turn_id);
             relay.notify();
         }
         Ok(Some(turn_id))

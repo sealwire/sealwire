@@ -894,6 +894,10 @@ where
     result.map(|bridge| Arc::new(bridge) as Arc<dyn ProviderBridge>)
 }
 
+/// The provider-event boundary checklist, plus its tripwire scan.
+#[cfg(test)]
+mod event_ingress_audit;
+
 #[cfg(test)]
 mod registry_tests {
     use super::*;

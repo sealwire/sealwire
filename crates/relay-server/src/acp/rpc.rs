@@ -19,8 +19,8 @@ use crate::{
         TranscriptEntryView,
     },
     state::{
-        ApprovalKind, BrokerPendingMessage, PendingApproval, PendingTranscriptDelta, RelayState,
-        TranscriptDeltaKind, TurnOutcome,
+        ApprovalKind, BrokerPendingMessage, PendingApproval, PendingTranscriptDelta,
+        ProviderEventSession, RelayState, TranscriptDeltaKind, TurnOutcome,
     },
 };
 
@@ -679,14 +679,37 @@ pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp
     }
 }
 
+/// The relay session an ACP session id belongs to, or `None` when the event must
+/// be dropped.
+///
+/// Every `apply_*` below takes the AGENT's session id, so each resolves here on
+/// entry rather than trusting its caller — the ingress points are the stdout
+/// reader, `start_turn` and the prompt task, and only one of them is in this file.
+/// `provider_key` is what the bridge was configured as (`cursor`), which is also
+/// what the binding is keyed by; the literal "acp" would match nothing.
+fn session_for_acp_id(
+    relay: &mut RelayState,
+    provider_key: &'static str,
+    acp_session_id: &str,
+) -> Option<String> {
+    match relay.session_for_provider_event(provider_key, Some(acp_session_id)) {
+        ProviderEventSession::Session(session_id) => Some(session_id),
+        ProviderEventSession::Unnamed | ProviderEventSession::Refused => None,
+    }
+}
+
 /// Apply an op to live state. Returns whether anything changed.
 pub(crate) fn apply_op(
     relay: &mut RelayState,
-    thread_id: &str,
+    acp_session_id: &str,
     turn_id: Option<String>,
     op: TranscriptOp,
     provider_key: &'static str,
 ) -> bool {
+    let Some(thread_id) = session_for_acp_id(relay, provider_key, acp_session_id) else {
+        return false;
+    };
+    let thread_id = thread_id.as_str();
     let route = thread_route(relay, thread_id, provider_key);
     if matches!(route, ThreadRoute::Drop) {
         return false;
@@ -697,7 +720,7 @@ pub(crate) fn apply_op(
 
     match op {
         TranscriptOp::User { item_id, text } => {
-            apply_user_message(relay, thread_id, item_id, text, turn, provider_key);
+            apply_user_message_for_session(relay, thread_id, item_id, text, turn, provider_key);
         }
         TranscriptOp::AgentChunk {
             item_id,
@@ -830,6 +853,22 @@ pub(crate) fn apply_op(
 
 pub(crate) fn apply_user_message(
     relay: &mut RelayState,
+    acp_session_id: &str,
+    item_id: String,
+    text: String,
+    turn_id: String,
+    provider_key: &'static str,
+) {
+    let Some(thread_id) = session_for_acp_id(relay, provider_key, acp_session_id) else {
+        return;
+    };
+    apply_user_message_for_session(relay, &thread_id, item_id, text, turn_id, provider_key);
+}
+
+/// The half of `apply_user_message` that is past translation, so `apply_op` — which
+/// has already resolved — cannot resolve a session id a second time.
+fn apply_user_message_for_session(
+    relay: &mut RelayState,
     thread_id: &str,
     item_id: String,
     text: String,
@@ -848,10 +887,14 @@ pub(crate) fn apply_user_message(
 
 pub(crate) fn apply_turn_started(
     relay: &mut RelayState,
-    thread_id: &str,
+    acp_session_id: &str,
     turn_id: &str,
     provider_key: &'static str,
 ) {
+    let Some(thread_id) = session_for_acp_id(relay, provider_key, acp_session_id) else {
+        return;
+    };
+    let thread_id = thread_id.as_str();
     match thread_route(relay, thread_id, provider_key) {
         ThreadRoute::Background => {
             relay.bg_set_active_turn(
@@ -877,11 +920,15 @@ pub(crate) fn apply_turn_started(
 
 pub(crate) fn apply_turn_finished(
     relay: &mut RelayState,
-    thread_id: &str,
+    acp_session_id: &str,
     turn_id: &str,
     outcome: Result<Value, String>,
     provider_key: &'static str,
 ) {
+    let Some(thread_id) = session_for_acp_id(relay, provider_key, acp_session_id) else {
+        return;
+    };
+    let thread_id = thread_id.as_str();
     let failure = match &outcome {
         Ok(result) => {
             // `stopReason` is the turn's verdict; `end_turn` is the only clean one.
@@ -1134,6 +1181,31 @@ async fn handle_server_request(
         .filter(|cwd| !cwd.is_empty());
 
     let mut relay = state.write().await;
+    // The card the user answers is a relay record, so it has to be keyed by the
+    // session id, not the agent's. A handle the relay will not route has no surface
+    // to ask on: cancel rather than park an unanswerable card or leave the agent
+    // blocked. (`respond_to_approval` replies on `raw_request_id`, so storing the
+    // session id here costs the round trip nothing.)
+    let Some(session_id) = session_for_acp_id(&mut relay, provider_key, &session_id) else {
+        relay.push_log(
+            "warn",
+            format!("Cancelled a {provider_key} permission request for unroutable session `{session_id}`."),
+        );
+        relay.notify();
+        drop(relay);
+        let mut stdin = stdin.lock().await;
+        let _ = write_line(
+            &mut **stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": { "outcome": { "outcome": "cancelled" } },
+            }),
+            provider_key,
+        )
+        .await;
+        return;
+    };
     relay.add_pending_approval(PendingApproval {
         request_id: {
             let id = format!("{PERMISSION_APPROVAL_PREFIX}{}", normalize_id(&request_id));
@@ -1263,7 +1335,7 @@ async fn handle_create_plan(
     // wrong match — and parking a card there would break the contract in
     // `state/relay.rs` that a pending request is only added to a thread already
     // marked working, leaving an unanswerable card on an idle thread.
-    let resolved = if tool_call_id.is_empty() {
+    let announced = if tool_call_id.is_empty() {
         None
     } else {
         let sessions = sessions.lock().await;
@@ -1271,6 +1343,17 @@ async fn handle_create_plan(
             (session.tool_items.contains_key(&tool_call_id) && session.turn_id.is_some())
                 .then(|| (session_id.clone(), session.cwd.clone()))
         })
+    };
+    // The bridge's map is keyed by the AGENT's session id; every check below is a
+    // relay lookup. An id the relay will not route is as unmatched as no id at all,
+    // and takes the same branch — see why that one accepts rather than blocks.
+    let resolved = match announced {
+        Some((acp_session_id, cwd)) => {
+            let mut relay = state.write().await;
+            session_for_acp_id(&mut relay, provider_key, &acp_session_id)
+                .map(|session_id| (session_id, cwd))
+        }
+        None => None,
     };
 
     let Some((session_id, cwd)) = resolved else {

@@ -44,7 +44,8 @@ pub(crate) use self::runtime::{
     CodexStartReservation, ThreadRuntime, TurnFailure, TurnFailureKind, TurnOutcome, TurnSpend,
 };
 pub(crate) use self::session_binding::{
-    ResolvedProviderTarget, SessionBinding, SessionBindingError, SessionBindingRegistry,
+    ProviderEventSession, ProviderEventTarget, ResolvedProviderTarget, SessionBinding,
+    SessionBindingError, SessionBindingRegistry,
 };
 pub(crate) use self::transcript::TranscriptRecord;
 pub(crate) use self::transcript_store::{IdSpace, ThreadTranscript};
@@ -2376,6 +2377,16 @@ impl RelayState {
         // (carrying its parent + created_at, so FIFO order is preserved).
         if let Some(record) = self.reviewer_threads.remove(pending_id) {
             self.reviewer_threads.insert(real_id.to_string(), record);
+        }
+        // A placeholder that reached the registry (an event router adopted it, a
+        // test injected it) must not be left owning a route key after the session
+        // it named is gone — a recycled handle would route straight back into it.
+        if let Some(stale) = self.session_bindings.remove(pending_id) {
+            if self.session_bindings.binding(real_id).is_none() {
+                let _ = self
+                    .session_bindings
+                    .bind_identity(&stale.provider, real_id);
+            }
         }
         // The reviewer's turn is in flight; mark the real runtime working until the
         // provider's `done`/`session_stopped` event flips it idle. This keeps the
@@ -5292,6 +5303,44 @@ impl RelayState {
         self.session_bindings
             .session_for_provider_handle(provider, handle)
             .map(str::to_string)
+    }
+
+    /// Translate the thread/session field of ONE arriving provider event.
+    ///
+    /// Phase 2b's single event-routing seam: every router calls this before it
+    /// compares against `active_thread_id`, picks a runtime, or writes any
+    /// relay-owned record, so a provider handle never becomes a relay key.
+    ///
+    /// Caller holds the relay write lock already — resolution has to happen inside
+    /// the same critical section as the mutation it addresses, or an adoption and a
+    /// concurrent rebind can interleave.
+    pub(crate) fn session_for_provider_event(
+        &mut self,
+        provider: &str,
+        handle: Option<&str>,
+    ) -> ProviderEventSession {
+        let Some(handle) = handle.filter(|handle| !handle.is_empty()) else {
+            return ProviderEventSession::Unnamed;
+        };
+        match self.session_bindings.route_provider_event(provider, handle) {
+            ProviderEventTarget::Bound(session_id) | ProviderEventTarget::Adopted(session_id) => {
+                ProviderEventSession::Session(session_id)
+            }
+            ProviderEventTarget::Refused { owner_provider } => {
+                // Not `push_log`: this is a should-never-happen on a hot path, and a
+                // provider that emits it once emits it per event.
+                tracing::warn!(
+                    provider,
+                    handle,
+                    owner_provider,
+                    "dropped a provider event whose handle names another provider's session",
+                );
+                ProviderEventSession::Refused
+            }
+            // Blank provider key: routing on it would collide every unbound event on
+            // the empty key, which is the one mistake worse than dropping.
+            ProviderEventTarget::Unroutable => ProviderEventSession::Refused,
+        }
     }
 
     /// Session id -> what to call the provider with. Phase 2 replaces

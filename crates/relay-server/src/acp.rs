@@ -493,12 +493,17 @@ impl AcpBridge {
 
     /// Reattach MCP: retained Task seat wins, then ordinary standalone peer,
     /// else empty — same precedence Codex uses on `thread/resume`.
-    async fn mcp_servers_for_reattach(&self, thread_id: &str) -> Value {
+    async fn mcp_servers_for_reattach(&self, acp_session_id: &str) -> Value {
         // Keep the peer decision and token mint under the same lock, as the old
         // `ask_token_if_allowed` path did. A team must not be able to adopt the
         // thread between those two operations and leave it holding peer identity.
         let (identity, peer_token) = {
             let mut relay = self.state.write().await;
+            // Relay-owned lookups, and the ask token minted from them, are keyed by
+            // the session — never by the id the agent addresses.
+            let thread_id = &relay
+                .session_for_provider_handle(self.provider_name, acp_session_id)
+                .unwrap_or_else(|| acp_session_id.to_string());
             let unrestricted = relay
                 .thread_settings(thread_id)
                 .map(|s| crate::state::session_is_unrestricted(&s.approval_policy, &s.sandbox))
@@ -1065,7 +1070,11 @@ impl AcpBridge {
     async fn sync_thread_policy(&self, thread_id: &str) -> Result<(), String> {
         let settings = {
             let relay = self.state.read().await;
-            relay.thread_settings(thread_id)
+            // `thread_id` is the ACP session id; settings are keyed by the relay's.
+            let session_id = relay
+                .session_for_provider_handle(self.provider_name, thread_id)
+                .unwrap_or_else(|| thread_id.to_string());
+            relay.thread_settings(&session_id)
         };
         let Some(settings) = settings else {
             return Ok(());

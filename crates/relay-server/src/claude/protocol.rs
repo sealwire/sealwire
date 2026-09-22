@@ -35,9 +35,12 @@ pub(super) fn parse_thread_summary(value: &Value) -> Result<ThreadSummaryView, S
     })
 }
 
+/// `session_id` is the relay session the event was already resolved to — the card
+/// is a relay record, so it must never carry the SDK's own id.
 pub(super) fn parse_claude_approval(
     payload: &Value,
     relay: &RelayState,
+    session_id: Option<&str>,
 ) -> Option<PendingApproval> {
     let request_id = string_at(payload, &["id"])?;
     let tool_name = string_at(payload, &["tool_name"]).unwrap_or_else(|| "tool".to_string());
@@ -47,7 +50,8 @@ pub(super) fn parse_claude_approval(
     let command = value_at(payload, &["input", "command"])
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
-    let thread_id = string_at(payload, &["provider_session_id"])
+    let thread_id = session_id
+        .map(str::to_string)
         .or_else(|| relay.active_thread_id.clone())
         .unwrap_or_default();
     let cwd = value_at(payload, &["input", "cwd"])

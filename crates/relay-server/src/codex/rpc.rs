@@ -10,7 +10,8 @@ use tokio::{
 use tracing::{debug, trace};
 
 use crate::state::{
-    BrokerPendingMessage, PendingTranscriptDelta, RelayState, TranscriptDeltaKind, TurnOutcome,
+    BrokerPendingMessage, PendingTranscriptDelta, ProviderEventSession, RelayState,
+    TranscriptDeltaKind, TurnOutcome,
 };
 
 use super::*;
@@ -265,8 +266,15 @@ async fn handle_server_request_for_provider(
         _ => None,
     };
 
-    if let Some(pending) = pending {
+    if let Some(mut pending) = pending {
         let mut relay = state.write().await;
+        // The request names a CODEX thread. The card the user answers is a relay
+        // record, so it has to carry the session id from the moment it is built.
+        match relay.session_for_provider_event(provider_key, Some(pending.thread_id.as_str())) {
+            ProviderEventSession::Session(session_id) => pending.thread_id = session_id,
+            ProviderEventSession::Unnamed => {}
+            ProviderEventSession::Refused => return,
+        }
         let route = if pending.thread_id.is_empty() {
             ThreadRoute::Drop
         } else {
@@ -309,6 +317,17 @@ pub(super) async fn handle_notification(payload: Value, state: &Arc<RwLock<Relay
     handle_notification_for_provider(payload, state, "codex").await;
 }
 
+/// The same entry point under a chosen provider key, for the tests that prove the
+/// reverse lookup is provider-qualified.
+#[cfg(test)]
+pub(crate) async fn handle_notification_for_test(
+    payload: Value,
+    state: &Arc<RwLock<RelayState>>,
+    provider_key: &'static str,
+) {
+    handle_notification_for_provider(payload, state, provider_key).await;
+}
+
 async fn handle_notification_for_provider(
     payload: Value,
     state: &Arc<RwLock<RelayState>>,
@@ -321,7 +340,17 @@ async fn handle_notification_for_provider(
     let params = payload.get("params").cloned().unwrap_or(Value::Null);
     let mut relay = state.write().await;
     let mut changed = false;
-    let notification_thread_id = notification_thread_id(&params);
+    // Phase 2b seam: from here `notification_thread_id` is a RELAY session id, never
+    // the handle Codex addressed. A handle the relay refuses to route drops the whole
+    // notification rather than falling through as "unaddressed", which `thread_route`
+    // would otherwise read as the active thread.
+    let notification_thread_id = match relay
+        .session_for_provider_event(provider_key, notification_thread_id(&params).as_deref())
+    {
+        ProviderEventSession::Session(session_id) => Some(session_id),
+        ProviderEventSession::Unnamed => None,
+        ProviderEventSession::Refused => return,
+    };
     if is_session_notification_method(method) {
         trace!(
             method,
@@ -345,9 +374,16 @@ async fn handle_notification_for_provider(
 
     match method {
         "thread/started" => {
-            if let Some(thread) =
+            if let Some(mut thread) =
                 value_at(&params, &["thread"]).and_then(|value| parse_thread_summary(value).ok())
             {
+                // The summary arrives under the provider's own id; `relay.threads` is
+                // keyed by session id, so rewrite it before it enters relay state.
+                match relay.session_for_provider_event(provider_key, Some(thread.id.as_str())) {
+                    ProviderEventSession::Session(session_id) => thread.id = session_id,
+                    ProviderEventSession::Unnamed => {}
+                    ProviderEventSession::Refused => return,
+                }
                 relay.upsert_thread(thread);
                 changed = true;
             }
@@ -356,7 +392,8 @@ async fn handle_notification_for_provider(
             observe_notification_cwd(&mut relay, notification_thread_id.as_deref(), &params);
         }
         "thread/status/changed" => {
-            let thread_id = string_at(&params, &["threadId"]).unwrap_or_default();
+            // The resolved id, not a second raw read of `threadId`.
+            let thread_id = notification_thread_id.clone().unwrap_or_default();
             if thread_id.is_empty() {
                 return;
             }

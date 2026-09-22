@@ -3,8 +3,8 @@
 //! Phase 1 of `markdown/STABLE_SESSION_ID_DESIGN.md`: the registry exists and is
 //! kept correct, but every binding it holds is an IDENTITY mapping
 //! (`session_id == provider_handle == provider_thread_id`), so no public id moves.
-//! Phase 2 routes provider calls and events through it; Phase 3 is the first phase
-//! allowed to mint a session id that differs from the handle.
+//! Phase 2 routes provider calls (2a) and provider events (2b) through it; Phase 3
+//! is the first phase allowed to mint a session id that differs from the handle.
 
 use std::collections::HashMap;
 
@@ -59,6 +59,40 @@ impl SessionBinding {
 pub(crate) struct ProviderRouteKey {
     pub(crate) provider: String,
     pub(crate) handle: String,
+}
+
+/// What an arriving provider event's handle resolves to.
+///
+/// Separate from a bare `Option` because "the handle names a session that is not
+/// yours" and "nothing named a session" are opposite instructions: one is a drop
+/// with a reason, the other is the ordinary unaddressed event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderEventTarget {
+    /// A binding already owns `(provider, handle)`.
+    Bound(String),
+    /// Nothing owned the handle, so an identity binding was created for it —
+    /// invariant 7, applied to events rather than list rows.
+    Adopted(String),
+    /// The handle spells a session id that belongs to a different provider
+    /// address. Adopting it would point two providers at one session's state.
+    Refused { owner_provider: String },
+    /// Blank provider or handle: there is nothing to route on.
+    Unroutable,
+}
+
+/// What a provider router should do with one event, after translation.
+///
+/// `Unnamed` is not `Refused`: an event that named no session at all is the
+/// ordinary "applies to whatever is active" case every router already had, while
+/// `Refused` means a handle was named and the relay will not route it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderEventSession {
+    /// The event carried no thread/session field.
+    Unnamed,
+    /// The stable relay session id to key every record by.
+    Session(String),
+    /// Drop the event.
+    Refused,
 }
 
 /// What a caller needs to reach a provider: never the session id on its own.
@@ -179,6 +213,39 @@ impl SessionBindingRegistry {
                 handle: handle.to_string(),
             })
             .map(String::as_str)
+    }
+
+    /// Route one provider event to the session that owns its handle, adopting the
+    /// handle when nothing claims it yet.
+    ///
+    /// The refusal arm is the whole reason this is not `session_for_provider_handle`
+    /// plus a `bind_identity`: past the lookup, a binding stored UNDER the handle
+    /// string can only be some other address's, and `bind` would silently drop that
+    /// session's reverse key on the way past.
+    pub(crate) fn route_provider_event(
+        &mut self,
+        provider: &str,
+        handle: &str,
+    ) -> ProviderEventTarget {
+        if provider.is_empty() || handle.is_empty() {
+            return ProviderEventTarget::Unroutable;
+        }
+        if let Some(session_id) = self.session_for_provider_handle(provider, handle) {
+            return ProviderEventTarget::Bound(session_id.to_string());
+        }
+        if let Some(existing) = self.bindings.get(handle) {
+            return ProviderEventTarget::Refused {
+                owner_provider: existing.provider.clone(),
+            };
+        }
+        match self.bind_identity(provider, handle) {
+            Ok(()) => ProviderEventTarget::Adopted(handle.to_string()),
+            // Both refusal causes are checked above, so this is unreachable today —
+            // but a refused bind must never be reported as a routable session.
+            Err(_) => ProviderEventTarget::Refused {
+                owner_provider: provider.to_string(),
+            },
+        }
     }
 
     pub(crate) fn remove(&mut self, session_id: &str) -> Option<SessionBinding> {
@@ -462,6 +529,121 @@ has no provider history to come back to",
         );
         assert_eq!(registry.len(), 2);
         assert_eq!(registry.reverse_len(), 2);
+    }
+
+    // Phase 2b. The routing decision itself, away from any provider.
+    #[test]
+    fn a_bound_handle_routes_to_its_session_and_binds_nothing_new() {
+        let mut registry = SessionBindingRegistry::default();
+        registry.bind("session-a", promoted()).expect("bind");
+
+        assert_eq!(
+            registry.route_provider_event("claude_code", "real-sdk-id"),
+            ProviderEventTarget::Bound("session-a".to_string()),
+        );
+        assert_eq!(registry.len(), 1, "a lookup must not grow the registry");
+    }
+
+    #[test]
+    fn an_unknown_handle_is_adopted_so_the_event_has_a_session() {
+        let mut registry = SessionBindingRegistry::default();
+
+        assert_eq!(
+            registry.route_provider_event("codex", "thread-1"),
+            ProviderEventTarget::Adopted("thread-1".to_string()),
+        );
+        assert_eq!(
+            registry.session_for_provider_handle("codex", "thread-1"),
+            Some("thread-1"),
+            "adoption is what makes the SECOND event a plain lookup",
+        );
+    }
+
+    // The collision adoption must refuse. Binding here would drop `session-a`'s
+    // reverse key on the way past and hand Codex a Claude session's state.
+    #[test]
+    fn a_handle_that_spells_another_addresss_session_id_is_refused() {
+        let mut registry = SessionBindingRegistry::default();
+        registry
+            .bind(
+                "session-a",
+                SessionBinding::identity("claude_code", "session-a"),
+            )
+            .expect("bind");
+
+        assert_eq!(
+            registry.route_provider_event("codex", "session-a"),
+            ProviderEventTarget::Refused {
+                owner_provider: "claude_code".to_string(),
+            },
+        );
+        assert_eq!(
+            registry.session_for_provider_handle("claude_code", "session-a"),
+            Some("session-a"),
+            "the refusal leaves the owner exactly as it was",
+        );
+        assert_eq!(
+            registry.session_for_provider_handle("codex", "session-a"),
+            None
+        );
+    }
+
+    // Same session id, non-identity binding: the handle string is free, but the id
+    // is taken, and adopting it would rebind `session-a` away from its real handle.
+    #[test]
+    fn a_handle_equal_to_a_session_id_on_the_same_provider_is_refused_too() {
+        let mut registry = SessionBindingRegistry::default();
+        registry.bind("session-a", promoted()).expect("bind");
+
+        assert_eq!(
+            registry.route_provider_event("claude_code", "session-a"),
+            ProviderEventTarget::Refused {
+                owner_provider: "claude_code".to_string(),
+            },
+        );
+        assert_eq!(
+            registry.session_for_provider_handle("claude_code", "real-sdk-id"),
+            Some("session-a"),
+            "the session keeps the handle it actually lives at",
+        );
+    }
+
+    #[test]
+    fn two_providers_emitting_one_raw_handle_route_apart() {
+        let mut registry = SessionBindingRegistry::default();
+        registry
+            .bind("session-codex", SessionBinding::identity("codex", "abc"))
+            .expect("codex abc");
+        registry
+            .bind(
+                "session-claude",
+                SessionBinding::identity("claude_code", "abc"),
+            )
+            .expect("claude abc");
+
+        assert_eq!(
+            registry.route_provider_event("codex", "abc"),
+            ProviderEventTarget::Bound("session-codex".to_string()),
+        );
+        assert_eq!(
+            registry.route_provider_event("claude_code", "abc"),
+            ProviderEventTarget::Bound("session-claude".to_string()),
+        );
+    }
+
+    #[test]
+    fn a_blank_provider_or_handle_routes_nowhere() {
+        let mut registry = SessionBindingRegistry::default();
+        assert_eq!(
+            registry.route_provider_event("", "thread-1"),
+            ProviderEventTarget::Unroutable,
+        );
+        assert_eq!(
+            registry.route_provider_event("codex", ""),
+            ProviderEventTarget::Unroutable,
+        );
+        assert_eq!(registry.len(), 0);
+        assert_eq!(registry.reverse_len(), 0);
     }
 
     #[test]

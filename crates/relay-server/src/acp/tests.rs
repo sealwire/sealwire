@@ -3446,3 +3446,200 @@ async fn a_live_acp_seat_resume_restores_seat_mcp_on_provider_reattach() {
     assert_acp_seat_mcp(&load["params"]["mcpServers"], "run-reopen");
     let _ = answerer.await;
 }
+
+/// Phase 2b of `markdown/STABLE_SESSION_ID_DESIGN.md` for the ACP bridge.
+///
+/// Every binding in production is an identity mapping, so each test here injects
+/// one whose session id and ACP session id are deliberately different strings.
+/// The provider key is the one the bridge was CONFIGURED under — `cursor`, never
+/// the literal "acp" — which is what the reverse lookup has to be qualified by.
+mod session_binding_boundary_tests {
+    use super::*;
+    use crate::acp::rpc::{apply_op, apply_turn_finished, TranscriptOp};
+
+    const HANDLE: &str = "acp-session-1";
+    const SESSION: &str = "session-stable-1";
+
+    async fn bound_relay() -> std::sync::Arc<RwLock<RelayState>> {
+        let state = relay_state();
+        {
+            let mut relay = state.write().await;
+            relay.bind_session_to_foreign_handle(SESSION, "cursor", HANDLE);
+            relay.active_thread_id = Some(SESSION.to_string());
+        }
+        state
+    }
+
+    #[tokio::test]
+    async fn a_session_update_lands_on_the_session_not_the_acp_id() {
+        let state = bound_relay().await;
+
+        {
+            let mut relay = state.write().await;
+            apply_op(
+                &mut relay,
+                HANDLE,
+                Some("acp-turn-1".to_string()),
+                TranscriptOp::AgentChunk {
+                    item_id: "acp-msg-1".to_string(),
+                    delta: "hello".to_string(),
+                    text: "hello".to_string(),
+                },
+                "cursor",
+            );
+        }
+
+        let relay = state.read().await;
+        assert!(
+            relay.runtime_for_thread(HANDLE).is_none(),
+            "an untranslated update builds a second session under the ACP id",
+        );
+        assert!(
+            relay
+                .snapshot()
+                .transcript
+                .iter()
+                .any(|entry| entry.item_id.as_deref() == Some("acp-msg-1")),
+            "the row belongs to the session the ACP id is bound to",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_turn_pushes_and_settles_the_session_not_the_acp_id() {
+        let state = bound_relay().await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        {
+            let mut relay = state.write().await;
+            relay.set_push_runtime(tx, "test-vapid".to_string());
+            relay.set_active_turn(Some("acp-turn-1".to_string()));
+        }
+
+        {
+            let mut relay = state.write().await;
+            apply_turn_finished(
+                &mut relay,
+                HANDLE,
+                "acp-turn-1",
+                Err("the agent died".to_string()),
+                "cursor",
+            );
+        }
+
+        let job = rx.try_recv().expect("a failed turn must enqueue a push");
+        assert_eq!(
+            job.thread_id, SESSION,
+            "a push addressed to the ACP id reaches no subscriber",
+        );
+        let relay = state.read().await;
+        assert!(relay.turn_terminal(SESSION, "acp-turn-1").is_some());
+        assert!(relay.turn_terminal(HANDLE, "acp-turn-1").is_none());
+    }
+
+    // A capability-bearing event: the answer is routed by the id stored on the card.
+    #[tokio::test]
+    async fn a_permission_request_is_parked_under_the_session_id() {
+        let state = bound_relay().await;
+        let (outbound, _outbound_peer) = tokio::io::duplex(8192);
+        let (inbound_writer, inbound) = tokio::io::duplex(8192);
+        let bridge = AcpBridge::for_test(state.clone(), outbound, inbound, "cursor");
+        bridge.seed_session_for_test(HANDLE, "/tmp/project").await;
+
+        let mut writer = inbound_writer;
+        tokio::io::AsyncWriteExt::write_all(
+            &mut writer,
+            format!("{}\n", permission_request(31, HANDLE)).as_bytes(),
+        )
+        .await
+        .expect("write");
+
+        let parked = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                {
+                    let relay = state.read().await;
+                    if let Some(pending) = relay.pending_approvals.values().next() {
+                        return pending.clone();
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the permission must reach the user");
+
+        assert_eq!(parked.thread_id, SESSION);
+        assert!(state.read().await.runtime_for_thread(HANDLE).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unheard_of_acp_session_is_adopted_under_its_configured_provider_key() {
+        let state = relay_state();
+        {
+            let mut relay = state.write().await;
+            relay.active_thread_id = Some("some-other-thread".to_string());
+        }
+
+        {
+            let mut relay = state.write().await;
+            apply_op(
+                &mut relay,
+                "brand-new",
+                Some("acp-turn-1".to_string()),
+                TranscriptOp::AgentChunk {
+                    item_id: "acp-msg-1".to_string(),
+                    delta: "hi".to_string(),
+                    text: "hi".to_string(),
+                },
+                "cursor",
+            );
+        }
+
+        let relay = state.read().await;
+        let target = relay
+            .resolve_session_target("brand-new")
+            .expect("an unknown ACP session is adopted so the event has a session");
+        assert_eq!(
+            target.provider, "cursor",
+            "the binding key is the provider the bridge runs as, not the protocol name",
+        );
+    }
+
+    #[tokio::test]
+    async fn an_acp_id_that_names_another_providers_session_is_refused() {
+        let state = relay_state();
+        {
+            let mut relay = state.write().await;
+            relay
+                .register_identity_session_binding("claude_code", "abc")
+                .expect("claude owns abc");
+            relay.active_thread_id = Some("some-other-thread".to_string());
+        }
+
+        {
+            let mut relay = state.write().await;
+            apply_op(
+                &mut relay,
+                "abc",
+                Some("acp-turn-1".to_string()),
+                TranscriptOp::AgentChunk {
+                    item_id: "acp-msg-1".to_string(),
+                    delta: "hi".to_string(),
+                    text: "hi".to_string(),
+                },
+                "cursor",
+            );
+        }
+
+        let relay = state.read().await;
+        assert!(
+            relay.runtime_for_thread("abc").is_none(),
+            "an ACP event must not write into the Claude session that owns `abc`",
+        );
+        assert_eq!(
+            relay
+                .resolve_session_target("abc")
+                .expect("the binding survives")
+                .provider,
+            "claude_code",
+        );
+    }
+}

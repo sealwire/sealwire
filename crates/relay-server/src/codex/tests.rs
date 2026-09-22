@@ -5570,3 +5570,253 @@ async fn a_reopened_codex_seat_keeps_the_same_seat_mcp_across_terminal() {
         .expect("same seat identity after reopen");
     assert_codex_seat_mcp(mcp, "run-reopen");
 }
+
+/// Phase 2b of `markdown/STABLE_SESSION_ID_DESIGN.md`: a Codex notification names
+/// a PROVIDER handle, and every relay record it touches must be keyed by the
+/// session id bound to that handle.
+///
+/// Production bindings are identity mappings, so each test here injects one whose
+/// session id and handle are deliberately different strings — that is the only
+/// shape that can tell a translated router from an untranslated one.
+#[cfg(test)]
+mod session_binding_boundary_tests {
+    use super::*;
+    use crate::codex::rpc::handle_notification_for_test;
+
+    const HANDLE: &str = "codex-handle-1";
+    const SESSION: &str = "session-stable-1";
+
+    async fn relay_bound_to_a_foreign_handle() -> std::sync::Arc<RwLock<RelayState>> {
+        let (change_tx, _) = watch::channel(0_u64);
+        let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+            "/tmp/project".to_string(),
+            change_tx,
+            SecurityProfile::private(),
+        )));
+        {
+            let mut relay = state.write().await;
+            relay.bind_session_to_foreign_handle(SESSION, "codex", HANDLE);
+            relay.active_thread_id = Some(SESSION.to_string());
+        }
+        state
+    }
+
+    #[tokio::test]
+    async fn a_transcript_notification_lands_on_the_session_not_the_handle() {
+        let state = relay_bound_to_a_foreign_handle().await;
+
+        handle_notification(
+            json!({
+                "method": "item/started",
+                "params": {
+                    "threadId": HANDLE,
+                    "turnId": "turn-1",
+                    "item": {
+                        "id": "item-command",
+                        "type": "commandExecution",
+                        "command": "npm test",
+                        "status": "running"
+                    }
+                }
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert!(
+            relay.runtime_for_thread(HANDLE).is_none(),
+            "an untranslated notification builds a whole second session under the handle",
+        );
+        assert!(
+            relay
+                .snapshot()
+                .transcript
+                .iter()
+                .any(|entry| entry.item_id.as_deref() == Some("item-command")),
+            "the row belongs to the session the handle is bound to",
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_status_settles_the_session_not_the_handle() {
+        let state = relay_bound_to_a_foreign_handle().await;
+        {
+            let mut relay = state.write().await;
+            relay.set_thread_status(SESSION, "active".to_string(), Vec::new());
+            relay.set_active_turn(Some("turn-1".to_string()));
+        }
+
+        handle_notification(
+            json!({
+                "method": "turn/completed",
+                "params": { "threadId": HANDLE, "turn": { "id": "turn-1", "status": "completed" } }
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert_eq!(relay.snapshot().active_turn_id, None);
+        assert_eq!(relay.snapshot().current_status, "idle");
+        assert!(
+            relay.turn_terminal(SESSION, "turn-1").is_some(),
+            "the terminal a waiter reads is filed under the session id",
+        );
+        assert!(
+            relay.turn_terminal(HANDLE, "turn-1").is_none(),
+            "and never under the provider's handle",
+        );
+    }
+
+    // A capability-bearing event: whoever answers this approval looks the thread up
+    // by the id stored here, and a handle would send the answer to nothing.
+    #[tokio::test]
+    async fn an_approval_request_is_parked_under_the_session_id() {
+        let state = relay_bound_to_a_foreign_handle().await;
+
+        handle_server_request(
+            json!({
+                "id": 7,
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "threadId": HANDLE,
+                    "itemId": "item-1",
+                    "command": "rm -rf /tmp/x",
+                    "cwd": "/tmp/project"
+                }
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        let pending = relay
+            .pending_approvals
+            .values()
+            .next()
+            .expect("the approval must be parked");
+        assert_eq!(pending.thread_id, SESSION);
+        assert!(relay.runtime_for_thread(HANDLE).is_none());
+        assert!(relay
+            .runtime_for_thread(SESSION)
+            .is_some_and(|runtime| !runtime.pending_approvals.is_empty()));
+    }
+
+    // Native ids are unique only WITHIN a provider, so the reverse lookup has to be
+    // provider-qualified — and with the key the provider was actually configured
+    // under, which for the ACP bridge is `cursor`, never the literal "acp".
+    #[tokio::test]
+    async fn the_same_raw_handle_under_two_providers_keeps_its_own_session() {
+        let (change_tx, _) = watch::channel(0_u64);
+        let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+            "/tmp/project".to_string(),
+            change_tx,
+            SecurityProfile::private(),
+        )));
+        {
+            let mut relay = state.write().await;
+            relay.bind_session_to_foreign_handle("session-codex", "codex", "shared-1");
+            relay.bind_session_to_foreign_handle("session-cursor", "cursor", "shared-1");
+            relay.active_thread_id = Some("session-codex".to_string());
+        }
+
+        handle_notification_for_test(
+            json!({
+                "method": "thread/status/changed",
+                "params": { "threadId": "shared-1", "status": "idle" }
+            }),
+            &state,
+            "cursor",
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert!(
+            relay.runtime_for_thread("session-cursor").is_some(),
+            "a `cursor` event on `shared-1` belongs to the cursor session",
+        );
+        assert!(
+            relay.runtime_for_thread("session-codex").is_none(),
+            "and must not touch the codex session that shares the raw handle",
+        );
+        assert!(relay.runtime_for_thread("shared-1").is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unheard_of_handle_is_adopted_as_its_own_session() {
+        let (change_tx, _) = watch::channel(0_u64);
+        let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+            "/tmp/project".to_string(),
+            change_tx,
+            SecurityProfile::private(),
+        )));
+        {
+            let mut relay = state.write().await;
+            relay.active_thread_id = Some("some-other-thread".to_string());
+        }
+
+        handle_notification(
+            json!({
+                "method": "thread/status/changed",
+                "params": { "threadId": "brand-new", "status": "idle" }
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        let target = relay
+            .resolve_session_target("brand-new")
+            .expect("an unknown provider thread is adopted so the event has a session");
+        assert_eq!(target.provider, "codex");
+        assert_eq!(target.provider_handle, "brand-new");
+    }
+
+    // The collision the adoption above must refuse: `abc` is already a Claude
+    // session's id, so adopting it for Codex would point two providers at one
+    // session's runtime, transcript and status.
+    #[tokio::test]
+    async fn a_handle_that_names_another_providers_session_is_refused() {
+        let (change_tx, _) = watch::channel(0_u64);
+        let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+            "/tmp/project".to_string(),
+            change_tx,
+            SecurityProfile::private(),
+        )));
+        {
+            let mut relay = state.write().await;
+            relay
+                .register_identity_session_binding("claude_code", "abc")
+                .expect("claude owns abc");
+            relay.active_thread_id = Some("some-other-thread".to_string());
+        }
+
+        handle_notification(
+            json!({
+                "method": "item/started",
+                "params": {
+                    "threadId": "abc",
+                    "turnId": "turn-1",
+                    "item": { "id": "item-1", "type": "agentMessage" }
+                }
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert!(
+            relay.runtime_for_thread("abc").is_none(),
+            "a Codex event must not write into the Claude session that owns `abc`",
+        );
+        assert_eq!(
+            relay
+                .resolve_session_target("abc")
+                .expect("the binding survives")
+                .provider,
+            "claude_code",
+            "and must not steal the binding either",
+        );
+    }
+}
