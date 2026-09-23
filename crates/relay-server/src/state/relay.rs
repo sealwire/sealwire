@@ -2617,44 +2617,49 @@ impl RelayState {
         self.asks.insert(job.id.clone(), job);
     }
 
-    /// Make room, read ones first.
+    /// Make room among the outcomes nobody needs any more.
     ///
-    /// An unseen failure is evicted only when nothing already-read is left to drop,
-    /// and never quietly: it is the one record whose whole purpose is to be shown, so
-    /// the log says which one went. Live records are never evicted — something is
-    /// still driving them, and the restore side settles the rest.
+    /// ONLY read ones. An unread failure is the single record whose entire purpose is to
+    /// be seen, and evicting one — even into the relay's log — is the false success this
+    /// whole lifecycle was built to make impossible; a log drawer is not a channel the
+    /// person reads. Live ones are not evicted either: something is still driving them.
+    /// The cap is held at the other end instead, by refusing a new handover while the
+    /// unread ones are stacked up (see `unread_handover_pressure`).
     fn prune_handovers(&mut self) {
         // Strict `<` so there is always room for the caller's insertion.
         if self.handovers.len() < MAX_HANDOVERS {
             return;
         }
-        let mut terminal: Vec<(String, bool, u64)> = self
+        let mut spent: Vec<(String, u64)> = self
             .handovers
             .iter()
-            .filter(|(_, handover)| handover.status.is_terminal())
-            .map(|(id, handover)| (id.clone(), handover.acknowledged, handover.updated_at))
+            .filter(|(_, handover)| handover.status.is_terminal() && handover.acknowledged)
+            .map(|(id, handover)| (id.clone(), handover.updated_at))
             .collect();
-        // Read ones first, oldest first within each half.
-        terminal.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.2.cmp(&right.2)));
-        let mut dropped_unread: Vec<String> = Vec::new();
-        for (id, acknowledged, _) in terminal {
+        spent.sort_by_key(|(_, updated_at)| *updated_at);
+        for (id, _) in spent {
             if self.handovers.len() < MAX_HANDOVERS {
                 break;
             }
-            if !acknowledged {
-                dropped_unread.push(id.clone());
-            }
             self.handovers.remove(&id);
         }
-        for id in dropped_unread {
-            self.push_log(
-                "warn",
-                format!(
-                    "Forgot handover {id} to make room; its outcome was never read. \
-Raise the limit if this keeps happening."
-                ),
-            );
-        }
+    }
+
+    /// How many records are being kept because somebody still has to see them.
+    ///
+    /// Live ones and unread failures both count: neither may be dropped to make room, so
+    /// this is what a new handover has to be refused against. Read outcomes are not
+    /// here — those are prunable, so they never stop anything.
+    pub(crate) fn unread_handover_pressure(&self) -> usize {
+        self.handovers
+            .values()
+            .filter(|handover| handover.needs_attention())
+            .count()
+    }
+
+    /// The point at which a new handover is refused rather than an old outcome dropped.
+    pub(crate) const fn handover_capacity() -> usize {
+        MAX_HANDOVERS
     }
 
     /// Reserve `target_thread_id` for this handover, or say who already has it.

@@ -8157,12 +8157,12 @@ see — a device can share the TARGET's workspace without sharing that source's:
         .expect("a settled handover holds nothing");
 }
 
-// Outcomes are durable until they are READ, which means unread ones can pile up if
-// nobody ever looks. The cap still has to hold — but an unseen failure is the one record
-// whose entire purpose is to be shown, so read ones go first and dropping an unread one
-// is said out loud rather than done quietly.
+// Outcomes are durable until they are READ, so unread ones can pile up if nobody looks.
+// The cap still has to hold — but an unread failure is the one record whose entire
+// purpose is to be shown, so it is NOT the thing that gives way. Only spent ones are
+// prunable; the cap is held at the other end, by refusing a new handover.
 #[test]
-fn making_room_forgets_what_has_been_read_before_what_has_not() {
+fn making_room_never_touches_an_outcome_nobody_has_read() {
     let mut relay = test_state();
     let record = |id: &str, acknowledged: bool| {
         let mut handover = crate::state::Handover::new(
@@ -8177,7 +8177,6 @@ fn making_room_forgets_what_has_been_read_before_what_has_not() {
         handover.acknowledged = acknowledged;
         handover
     };
-    // Fill it: mostly read, one that nobody has seen.
     for index in 0..80 {
         relay
             .reserve_handover(record(&format!("read-{index:03}"), true))
@@ -8186,28 +8185,30 @@ fn making_room_forgets_what_has_been_read_before_what_has_not() {
     relay
         .reserve_handover(record("unread-1", false))
         .expect("distinct target");
+    // Read ones are spent, so they are what gives way.
+    assert!(relay.handovers.len() <= 64);
 
+    for index in 0..200 {
+        relay
+            .reserve_handover(record(&format!("unread-{index:03}"), false))
+            .expect("reserved");
+    }
     assert!(
         relay.handover("unread-1").is_some(),
-        "the unread one survived eighty insertions that all had to make room",
+        "an unseen failure is never dropped to make room — a log drawer is not a channel \
+the person reads, and losing it here is exactly the false success this record exists to \
+make impossible",
+    );
+    assert_eq!(
+        relay.unread_handover_pressure(),
+        relay.handovers.len(),
+        "everything still held is held because somebody has yet to see it",
     );
     assert!(
-        relay.handovers.len() <= 64,
-        "the cap still holds: {}",
-        relay.handovers.len()
-    );
-
-    // Now leave it nothing already-read to drop.
-    let unread: Vec<String> = (0..200).map(|index| format!("unread-{index:03}")).collect();
-    for id in &unread {
-        relay.reserve_handover(record(id, false)).expect("reserved");
-    }
-    assert!(relay.handovers.len() <= 64);
-    assert!(
-        relay
+        !relay
             .logs
             .iter()
-            .any(|entry| entry.message.contains("its outcome was never read")),
-        "an unseen failure may be forgotten under pressure, but never silently",
+            .any(|entry| entry.message.contains("never read")),
+        "and nothing was quietly written off to the log",
     );
 }

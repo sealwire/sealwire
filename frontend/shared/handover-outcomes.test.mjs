@@ -103,13 +103,16 @@ test("every failure on one thread is shown together, and none is consumed unseen
   );
 });
 
-test("a reason that would not fit is counted rather than silently dropped", () => {
+test("a reason that would not fit is promised, not summarised away", () => {
+  // The line says how many are still coming rather than writing them off, because the
+  // caller acknowledges exactly what the line said — so "…and 2 more" must read as a
+  // promise the person will see them, not as a receipt for having seen them.
   const many = Array.from({ length: 5 }, (_, index) =>
     failure(`handover-${index}`, "thread-a", `reason ${index}`, index)
   );
   const message = handoverFailureText(many);
   assert.match(message, /^5 handovers did not finish/);
-  assert.match(message, /…and 2 more\./, "the count is the promise that none was lost");
+  assert.match(message, /2 more will follow once you have read these/);
 });
 
 test("failures on different threads each get their own line", () => {
@@ -201,4 +204,100 @@ test("switching sessions while a handover is pending leaves the failure on its o
   assert.equal(line.hidden, false, "and coming back to it is where the failure is waiting");
 
   resetComposerErrorsForTest();
+});
+
+// The whole chain in one place, because every join in it has silently dropped the
+// payload at least once: the relay serves the outcome on ReviewsResponse, the reviews
+// cache is what both surfaces actually read, and the reporter is what turns it into a
+// line. Each part had a passing test while the two between them lost the data.
+test("an outcome served on ReviewsResponse survives the cache and reaches the composer", async () => {
+  const { createReviewsCache } = await import("./reviews-cache.js");
+  const cache = createReviewsCache();
+  const reported = [];
+  const acked = [];
+  const reporter = createHandoverOutcomeReporter({
+    report: (threadId, message) => reported.push([threadId, message]),
+    acknowledge: (id) => acked.push(id),
+  });
+
+  // Exactly the shape the relay's `reviews_response` builds for this actor.
+  await cache.sync(
+    3,
+    async () => ({
+      reviews_revision: 3,
+      review_jobs: [],
+      reviewer_threads: [],
+      asks: [],
+      goals: [],
+      handovers: [BUSY],
+    }),
+    () => {}
+  );
+
+  // The person is still on the session they handed the work to, not the one they left.
+  reporter.sync(cache.current().handovers, { viewedThreadId: "thread-b" });
+  assert.deepEqual(
+    reported.map(([threadId]) => threadId),
+    ["thread-a"],
+    "the failure got all the way from the channel to the source thread's composer"
+  );
+  assert.match(reported[0][1], /busy right now/);
+  assert.deepEqual(acked, [], "and is still the relay's until they look at it");
+
+  reporter.sync(cache.current().handovers, { viewedThreadId: "thread-a" });
+  assert.deepEqual(acked, ["handover-1"]);
+});
+
+// Counting a reason is not showing it. There is no panel and no detail route for a
+// handover outcome — the composer line is the whole of it — so an id represented only by
+// "…and 2 more" and then acknowledged is a failure consumed unseen, which is the exact
+// invariant this lifecycle exists to hold.
+test("only the failures whose reason was on the line are acknowledged", () => {
+  const h = harness();
+  const group = [1, 2, 3, 4, 5].map((n) =>
+    failure(`handover-${n}`, "thread-a", `reason number ${n}`, 10 - n)
+  );
+
+  h.sync(group, { viewedThreadId: "thread-a" });
+
+  const line = h.reported[0][1];
+  for (const id of h.acked) {
+    const spoken = group.find((entry) => entry.id === id);
+    assert.ok(
+      line.includes(spoken.error),
+      `${id} was acknowledged but its reason (${spoken.error}) was never on the line`
+    );
+  }
+  assert.ok(h.acked.length >= 1 && h.acked.length < group.length, "some are held back");
+  assert.match(line, /will follow once you have read these/, "and the person is told so");
+});
+
+test("the failures held back are rendered on the next pass, and only then acknowledged", () => {
+  // The loop has to terminate: acknowledging the spoken ones takes them out of the
+  // relay's feed, so the remainder becomes the whole of the next line.
+  const h = harness();
+  const group = [1, 2, 3, 4, 5].map((n) =>
+    failure(`handover-${n}`, "thread-a", `reason number ${n}`, 10 - n)
+  );
+
+  h.sync(group, { viewedThreadId: "thread-a" });
+  const firstRound = h.acked.slice();
+  const remaining = group.filter((entry) => !firstRound.includes(entry.id));
+  assert.ok(remaining.length > 0);
+
+  // The relay now serves only what is left.
+  h.sync(remaining, { viewedThreadId: "thread-a" });
+
+  const secondLine = h.reported.at(-1)[1];
+  for (const entry of remaining) {
+    assert.ok(
+      secondLine.includes(entry.error),
+      `${entry.id}'s reason never reached the person: ${secondLine}`
+    );
+  }
+  assert.deepEqual(
+    h.acked.slice().sort(),
+    group.map((entry) => entry.id).sort(),
+    "and every one of them is consumed, none left stranded"
+  );
 });

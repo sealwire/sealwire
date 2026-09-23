@@ -364,6 +364,22 @@ or hand over again"
             )
         };
 
+        // Before anything is STARTED. An outcome nobody has read may not be dropped to
+        // make room — that is the false success this whole lifecycle exists to prevent —
+        // so the cap is held here instead, where refusing costs nothing. Doing it after
+        // the target was started would leave a session behind with no record naming it.
+        {
+            let relay = self.relay.read().await;
+            let waiting = relay.unread_handover_pressure();
+            if waiting >= crate::state::RelayState::handover_capacity() {
+                return Err(HandoverError::Failed(format!(
+                    "there are already {waiting} handovers whose outcome nobody has read, \
+which is as many as this relay will hold. Open those sessions to read what happened, \
+then hand over again."
+                )));
+            }
+        }
+
         // Refused rather than queued, unlike a delegate. The person is sitting in the
         // session they are handing over, so "not while it is mid-turn" is something
         // they can act on now — and it is the one failure that would otherwise leave a
@@ -439,30 +455,67 @@ finished"
         // ONE budget for the whole handover: queueing behind a turn that started between
         // the precheck and here, and waiting for our own, are the same person waiting.
         let deadline = tokio::time::Instant::now() + BRIEF_WAIT_BUDGET;
-        self.wait_for_asker_idle(&source_thread_id, deadline)
-            .await
-            .map_err(|_| HandoverError::NoSuchSource)?;
 
-        // What it had already said, so a stale reply cannot be read as the handover.
-        let baseline = self
-            .latest_assistant_entry(&source_thread_id)
-            .await
-            .map(|(item_id, _)| item_id);
+        // Starting the summary is a check-then-act on the SOURCE, and it has exactly the
+        // race the delivery onto the target has: acceptance already returned, so the
+        // person can press Send on this very session in the gap. Their send holds the
+        // relay's drive gate for its own window, so the summary has to take the same one
+        // — re-reading idleness INSIDE it, because what `wait_for_asker_idle` saw a
+        // moment ago is not what is true once the gate is ours.
+        //
+        // The gate is dropped the instant the turn is dispatched. It is never held while
+        // waiting for a model to finish: that is minutes, and it would stop every other
+        // session in the relay.
+        let dispatched = loop {
+            self.wait_for_asker_idle(&source_thread_id, deadline)
+                .await
+                .map_err(|_| HandoverError::NoSuchSource)?;
+            let gate = self.wait_for_drive_gate().await?;
+            {
+                let relay = self.relay.read().await;
+                match relay.runtime_for_thread(&source_thread_id) {
+                    None => return Err(HandoverError::NoSuchSource),
+                    // They got there first. Let go and wait for their turn, inside the
+                    // same budget — never start a second one alongside it.
+                    Some(runtime) if runtime.has_live_turn() => {
+                        drop(relay);
+                        drop(gate);
+                        if tokio::time::Instant::now() >= deadline {
+                            return Err(HandoverError::Failed(no_summary_written()));
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        continue;
+                    }
+                    Some(_) => {}
+                }
+            }
 
-        let dispatched = self
-            .send_message_to_thread(
-                &source_thread_id,
-                &handover_summary_prompt(&note),
-                None,
-                None,
-            )
-            .await
-            .map_err(|error| {
-                self.log_handover_detail(handover_id, format!("summary turn failed: {error}"));
-                HandoverError::Failed(
-                    "this session could not be asked to write the handover — try again".to_string(),
+            // Read under the gate too: what it had already said is the baseline a stale
+            // reply is measured against, and a turn landing between the read and the send
+            // would move it.
+            let baseline = self
+                .latest_assistant_entry(&source_thread_id)
+                .await
+                .map(|(item_id, _)| item_id);
+            let dispatched = self
+                .send_message_to_thread(
+                    &source_thread_id,
+                    &handover_summary_prompt(&note),
+                    None,
+                    None,
                 )
-            })?;
+                .await
+                .map_err(|error| {
+                    self.log_handover_detail(handover_id, format!("summary turn failed: {error}"));
+                    HandoverError::Failed(
+                        "this session could not be asked to write the handover — try again"
+                            .to_string(),
+                    )
+                })?;
+            drop(gate);
+            break (dispatched, baseline);
+        };
+        let (dispatched, baseline) = dispatched;
 
         // An UNCERTAIN start: the provider may be working, but nothing it writes could
         // be matched to what we asked, so there is no handover to wait for.

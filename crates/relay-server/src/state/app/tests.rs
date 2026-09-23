@@ -33041,6 +33041,71 @@ whole regardless of its path scope",
     }
 
     #[tokio::test]
+    async fn a_handover_is_refused_at_the_cap_rather_than_forgetting_an_unread_outcome() {
+        // The cap has to give somewhere. It must not be the unread outcomes: dropping one
+        // is the false success this record exists to prevent, and a log line is not a
+        // channel the person reads. So a new handover is refused instead — BEFORE any
+        // target is started, or the refusal would leave a session behind with no record
+        // naming it, which is the same bug one step along.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        let capacity = crate::state::RelayState::handover_capacity();
+        {
+            let mut relay = app.relay.write().await;
+            for index in 0..capacity {
+                let mut record = crate::state::Handover::new(
+                    format!("unread-{index:03}"),
+                    source.clone(),
+                    format!("target-{index:03}"),
+                    false,
+                    None,
+                    None,
+                );
+                record.fail("that agent is busy right now");
+                relay.reserve_handover(record).expect("reserved");
+            }
+        }
+        let threads_before = app.relay.read().await.threads.len();
+
+        let refused = app
+            .handover(&source, request())
+            .await
+            .expect_err("the relay is full of outcomes nobody has read");
+        assert!(
+            refused.message().contains("nobody has read"),
+            "and it says why, and what to do about it: {}",
+            refused.message()
+        );
+        assert!(
+            refused.message().contains("Open those sessions"),
+            "a cap with no way out is a dead end: {}",
+            refused.message()
+        );
+
+        let relay = app.relay.read().await;
+        assert_eq!(
+            relay.threads.len(),
+            threads_before,
+            "refused before anything was started — no target, no orphan",
+        );
+        assert_eq!(
+            relay.unread_handover_pressure(),
+            capacity,
+            "and not one of the outcomes already waiting was dropped to make room",
+        );
+        for index in 0..capacity {
+            assert!(
+                relay.handover(&format!("unread-{index:03}")).is_some(),
+                "unread-{index:03} was evicted",
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_target_turn_that_started_and_finished_during_the_summary_still_blocks_delivery() {
         // The case no liveness test can answer. The summary takes minutes; a person can
         // open the target, send something, and have it finish inside that window. The
@@ -33088,6 +33153,125 @@ whole regardless of its path scope",
             received(&app, &target).await.is_empty(),
             "the handover must not land in a session somebody has since started using",
         );
+    }
+
+    #[tokio::test]
+    async fn the_summary_turn_does_not_start_through_an_ordinary_send_on_the_source() {
+        // The same check-then-act as the delivery, one step earlier and on the other
+        // session. Acceptance has already returned, so the person can press Send on the
+        // very session they just handed over in the gap between "is it idle" and the
+        // summary going out. Their send holds the relay's drive gate for its own window;
+        // if the summary does not take the same one, two provider turns start on one
+        // thread and interleave.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _provider, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        // Stand in the gate exactly as an ordinary send does for its own window.
+        let held = app.acquire_session_slot().expect("the gate is free");
+
+        let (handover_id, target) = app
+            .handover_detached(&source, request())
+            .await
+            .expect("accepted");
+
+        for _ in 0..25 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            received(&app, &source).await.is_empty(),
+            "the summary must not be dispatched while another session op holds the gate",
+        );
+        assert!(
+            app.relay
+                .read()
+                .await
+                .handover(&handover_id)
+                .is_some_and(|handover| !handover.status.is_terminal()),
+            "…and it is still going, not quietly failed",
+        );
+
+        drop(held);
+        let asked = delivered(&app, &source).await;
+        assert!(
+            asked
+                .last()
+                .is_some_and(|prompt| prompt.contains("Remaining work")),
+            "once the gate is free the summary goes out: {asked:?}"
+        );
+        // …and the whole thing still completes, so the gate is a queue, not a wall.
+        let handed = delivered(&app, &target).await;
+        assert!(handed
+            .last()
+            .is_some_and(|message| message.contains("That work is now yours")));
+    }
+
+    #[tokio::test]
+    async fn a_turn_started_on_the_source_after_acceptance_is_waited_for_not_raced() {
+        // Acceptance refuses a source that is ALREADY mid-turn, so the race is the gap
+        // after it returns: the person presses Send on the very session they just handed
+        // over. The summary must queue behind their turn rather than start a second one
+        // alongside it — two provider turns on one thread interleave, and the reply the
+        // handover reads back could be either.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        provider.hold_terminals();
+        // Stand in the gate the way an ordinary send does, so the handover is accepted
+        // (the source IS idle) and its summary then has to come through here.
+        let held = app.acquire_session_slot().expect("the gate is free");
+        let (handover_id, target) = app
+            .handover_detached(&source, request())
+            .await
+            .expect("accepted while the source is idle");
+
+        // …and inside that window their message goes out and its turn parks.
+        app.send_message_to_thread(&source, "one more thing first", None, None)
+            .await
+            .expect("their send goes out");
+        provider.wait_for_held_turn().await;
+        drop(held);
+
+        for _ in 0..25 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            received(&app, &source).await.len(),
+            1,
+            "only their message: a second turn must not be started alongside a live one",
+        );
+        assert!(
+            app.relay
+                .read()
+                .await
+                .handover(&handover_id)
+                .is_some_and(|handover| !handover.status.is_terminal()),
+            "the handover is waiting for them, not failed",
+        );
+
+        provider.release_terminals();
+        for _ in 0..300 {
+            if received(&app, &source).await.len() > 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let asked = received(&app, &source).await;
+        assert!(
+            asked
+                .last()
+                .is_some_and(|prompt| prompt.contains("Remaining work")),
+            "and once they are done the summary follows: {asked:?}"
+        );
+        let handed = delivered(&app, &target).await;
+        assert!(handed
+            .last()
+            .is_some_and(|message| message.contains("That work is now yours")));
     }
 
     #[tokio::test]

@@ -63,6 +63,7 @@ export function createReviewsCache() {
           reviewer_threads: resp?.reviewer_threads || [],
           asks: resp?.asks || [],
           goals: resp?.goals || [],
+          handovers: resp?.handovers || [],
         };
         if (typeof onUpdate === "function") {
           onUpdate();

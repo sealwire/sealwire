@@ -163,7 +163,9 @@ test("the cache keeps every list the channel carries, not just the ones it start
         reviews_revision: 7,
         review_jobs: [{ id: "r1" }],
         reviewer_threads: [{ reviewer_thread_id: "t1" }],
-        asks: [{ id: "a1", asker_thread_id: "me" }],
+          asks: [{ id: "a1", asker_thread_id: "me" }],
+        goals: [{ id: "g1", thread_id: "me" }],
+        handovers: [{ id: "handover-1", source_thread_id: "me", status: "failed" }],
       }),
       () => {}
     )
@@ -172,5 +174,31 @@ test("the cache keeps every list the channel carries, not just the ones it start
       assert.equal(data.review_jobs.length, 1);
       assert.equal(data.reviewer_threads.length, 1);
       assert.equal(data.asks.length, 1, "asks survive the cache");
+      assert.equal(data.goals.length, 1, "and goals");
+      // It happened again, to `handovers`: initialised in the empty shape and then left
+      // out of the assignment, so the relay's answer was fetched and thrown away. The
+      // only thing on screen was nothing, which is what a working relay also looks like.
+      assert.equal(data.handovers.length, 1, "and handover outcomes");
+      assert.equal(data.handovers[0].id, "handover-1");
     });
+});
+
+// The list is enumerated by hand in the assignment, so every field the relay may send
+// has to be named there. One left out is fetched, returned, and silently dropped — which
+// from the surface is indistinguishable from the relay never sending it.
+test("no list the channel carries is left out of the assignment", () => {
+  const cache = createReviewsCache();
+  const carried = ["review_jobs", "reviewer_threads", "asks", "goals", "handovers"];
+  const response = Object.fromEntries(carried.map((name) => [name, [{ id: name }]]));
+  return cache.sync(11, async () => ({ reviews_revision: 11, ...response }), () => {}).then(() => {
+    const data = cache.current();
+    for (const name of carried) {
+      assert.equal(data[name]?.length, 1, `${name} was dropped on the way through`);
+    }
+    assert.deepEqual(
+      Object.keys(data).sort(),
+      carried.slice().sort(),
+      "and the cache's shape is exactly the channel's, so a new list cannot be forgotten"
+    );
+  });
 });
