@@ -141,6 +141,12 @@ pub(super) struct PersistedRelayState {
     /// accepted.
     #[serde(default)]
     pub(super) asks: std::collections::HashMap<String, Ask>,
+    /// Handovers, live ones included — the same rule as `asks`, for a stronger
+    /// reason: a handover is ACCEPTED before it is delivered, so dropping a live
+    /// one loses an operation the person was told was under way. The restore side
+    /// settles it as a failure they can see.
+    #[serde(default)]
+    pub(super) handovers: std::collections::HashMap<String, crate::state::Handover>,
     /// Goals, INCLUDING active ones — the opposite rule to `asks`, on purpose.
     /// An in-flight ask has nothing driving it after a restart; an objective is
     /// the user's and is still worth having. The restore side reconciles a live
@@ -328,6 +334,9 @@ impl PersistedRelayState {
             // kept and reconciled on restore. Dropping it lost an accepted request with
             // nothing to show the person who was told it was under way.
             asks: relay.asks.clone(),
+            // Same rule, and the restore side fails every live one: nothing drives a
+            // handover after a restart, and a summary turn leaves no result to read back.
+            handovers: relay.handovers.clone(),
             // …and the opposite rule for goals: keep the live ones too.
             goals: relay.goals.clone(),
             // Persist ALL workflow runs (terminal cards AND non-terminal): a

@@ -63,6 +63,9 @@ const MAX_SEARCH_ROUTING_HINTS: usize = 2_000;
 /// a timer — is what eventually evicts old completed reviews.
 const MAX_REVIEW_JOBS: usize = 64;
 const MAX_ASKS: usize = 64;
+/// Only the ones still wanting attention are ever on the wire, so this is a floor on
+/// forgetting rather than a page size.
+const MAX_HANDOVERS: usize = 64;
 /// Backstop on retained workflow runs, mirroring `MAX_REVIEW_JOBS`: evict the
 /// oldest TERMINAL runs first; non-terminal runs are never auto-evicted (they
 /// have a live or restart-recoverable orchestrator).
@@ -558,6 +561,7 @@ pub struct RelayState {
     /// doing. Unlike a review, a delegation locks no thread — the worker stays
     /// open so the user can take it over.
     pub(super) asks: HashMap<String, Ask>,
+    pub(super) handovers: HashMap<String, crate::state::Handover>,
     /// One goal per thread, keyed by the thread pursuing it.
     ///
     /// Unlike `asks`, ACTIVE goals persist: an in-flight ask has nothing driving
@@ -753,6 +757,7 @@ impl RelayState {
             recent_remote_actions: HashMap::new(),
             review_jobs: HashMap::new(),
             asks: HashMap::new(),
+            handovers: HashMap::new(),
             goals: HashMap::new(),
             ask_tokens: HashMap::new(),
             reviewer_threads: HashMap::new(),
@@ -2612,6 +2617,86 @@ impl RelayState {
         self.asks.insert(job.id.clone(), job);
     }
 
+    fn prune_handovers(&mut self) {
+        // Strict `<` so there is always room for the caller's insertion.
+        if self.handovers.len() < MAX_HANDOVERS {
+            return;
+        }
+        let mut terminal: Vec<(String, u64)> = self
+            .handovers
+            .iter()
+            .filter(|(_, handover)| handover.status.is_terminal() && handover.acknowledged)
+            .map(|(id, handover)| (id.clone(), handover.updated_at))
+            .collect();
+        terminal.sort_by_key(|(_, updated_at)| *updated_at);
+        for (id, _) in terminal {
+            if self.handovers.len() < MAX_HANDOVERS {
+                break;
+            }
+            self.handovers.remove(&id);
+        }
+    }
+
+    /// Reserve `target_thread_id` for this handover, or say who already has it.
+    ///
+    /// The reservation and the check are one write, which is the whole point: two
+    /// handovers aimed at the same idle session both pass admission before either
+    /// of them starts, and the second would then send into a session the first is
+    /// about to fill.
+    pub(crate) fn reserve_handover(
+        &mut self,
+        handover: crate::state::Handover,
+    ) -> Result<(), String> {
+        if let Some(existing) = self.handovers.values().find(|other| {
+            !other.status.is_terminal()
+                && other.id != handover.id
+                && other.target_thread_id == handover.target_thread_id
+        }) {
+            return Err(format!(
+                "another handover is already on its way to that agent (from {})",
+                existing.source_thread_id
+            ));
+        }
+        self.prune_handovers();
+        self.handovers.insert(handover.id.clone(), handover);
+        Ok(())
+    }
+
+    pub(crate) fn handover(&self, handover_id: &str) -> Option<&crate::state::Handover> {
+        self.handovers.get(handover_id)
+    }
+
+    pub(crate) fn update_handover<F: FnOnce(&mut crate::state::Handover)>(
+        &mut self,
+        handover_id: &str,
+        update: F,
+    ) -> bool {
+        match self.handovers.get_mut(handover_id) {
+            Some(handover) => {
+                update(handover);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The handovers a client is shown: only those still wanting attention, newest
+    /// first. A delivered one is not news and never reaches the wire.
+    pub(crate) fn handovers_view(&self) -> Vec<crate::protocol::HandoverView> {
+        let mut live: Vec<&crate::state::Handover> = self
+            .handovers
+            .values()
+            .filter(|handover| handover.needs_attention())
+            .collect();
+        live.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        live.into_iter().map(|handover| handover.view()).collect()
+    }
+
     /// Every ask this session made, live or settled. The caps read it, and so
     /// does the "may I talk to this peer" check — a session may only carry on
     /// with an agent it brought in itself.
@@ -3140,6 +3225,41 @@ impl RelayState {
                     ask.fail("it never got started before the relay restarted".to_string());
                 }
                 (id.clone(), ask)
+            })
+            .collect()
+    }
+
+    /// Settle every handover a restart caught mid-flight.
+    ///
+    /// Unlike an ask there is nothing to recover from and nothing to read back: the
+    /// summary turn was being driven in this process and its result was written
+    /// nowhere. Restoring one live would leave it "under way" with nobody driving
+    /// it — which is the false success this record exists to make impossible.
+    /// Resuming is worse still: it would spend a turn the person never asked for.
+    fn restored_handovers(
+        persisted: &HashMap<String, crate::state::Handover>,
+    ) -> HashMap<String, crate::state::Handover> {
+        persisted
+            .iter()
+            .map(|(id, handover)| {
+                let mut handover = handover.clone();
+                if !handover.status.is_terminal() {
+                    let reason = if handover.target_started {
+                        format!(
+                            "the relay restarted while this session was writing the handover, \
+so {} never got it — that session was started for this and is empty; hand over again",
+                            handover.target_thread_id
+                        )
+                    } else {
+                        format!(
+                            "the relay restarted while this session was writing the handover, \
+so {} never got it — hand over again",
+                            handover.target_thread_id
+                        )
+                    };
+                    handover.fail(reason);
+                }
+                (id.clone(), handover)
             })
             .collect()
     }
@@ -4038,6 +4158,7 @@ impl RelayState {
             transcript_truncated: false,
             transcript,
             logs: self.logs.clone(),
+            handovers: self.handovers_view(),
             active_review_jobs: Vec::new(),
             reviewer_threads: Vec::new(),
             review_activity: self.review_activity_view(),
@@ -4571,6 +4692,7 @@ impl RelayState {
         // the sweep to settle from that peer's transcript, and only one that never got a
         // peer is settled here.
         self.asks = Self::restored_asks(&persisted.asks);
+        self.handovers = Self::restored_handovers(&persisted.handovers);
         // A goal survives, but never running: whatever was driving it died with
         // the process, and picking the work back up unasked — minutes or days
         // later — is its own surprise.
@@ -6084,6 +6206,7 @@ impl RelayState {
         // the sweep to settle from that peer's transcript, and only one that never got a
         // peer is settled here.
         self.asks = Self::restored_asks(&persisted.asks);
+        self.handovers = Self::restored_handovers(&persisted.handovers);
         // A goal survives, but never running: whatever was driving it died with
         // the process, and picking the work back up unasked — minutes or days
         // later — is its own surprise.

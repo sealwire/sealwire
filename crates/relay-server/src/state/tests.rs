@@ -63,6 +63,7 @@ fn test_persisted_state() -> PersistedRelayState {
     );
     PersistedRelayState {
         asks: Default::default(),
+        handovers: Default::default(),
         goals: Default::default(),
         session_bindings: Default::default(),
         trusted_workspaces: Vec::new(),
@@ -396,6 +397,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             transcript_truncated: false,
             transcript: Vec::new(),
             logs: Vec::new(),
+            handovers: Vec::new(),
             active_review_jobs: Vec::new(),
             reviewer_threads: Vec::new(),
             review_activity: Vec::new(),
@@ -8029,4 +8031,120 @@ mod row_identity_tests {
             "and the correction must mark the row dirty, or it never reaches a client"
         );
     }
+}
+
+// An accepted handover is the one operation in the relay whose whole middle is a turn on
+// somebody else's model: it is answered "under way" minutes before it is delivered. If a
+// restart drops it, the person was told something happened that did not — so it is
+// persisted live, and the restore side turns it into a failure they can read.
+#[test]
+fn a_handover_a_restart_caught_mid_flight_comes_back_as_a_visible_failure() {
+    let mut relay = test_state();
+    relay
+        .reserve_handover(crate::state::Handover::new(
+            "handover-1".to_string(),
+            "source-thread".to_string(),
+            "target-thread".to_string(),
+            true,
+            Some("phone-1".to_string()),
+        ))
+        .expect("nothing else is going there");
+
+    let persisted = PersistedRelayState::from_relay(&relay);
+    assert!(
+        persisted.handovers.contains_key("handover-1"),
+        "dropping a live handover loses an operation the person was told was under way",
+    );
+
+    let mut restored = test_state();
+    restored.apply_persisted(&persisted);
+    let handover = restored.handover("handover-1").expect("it survives");
+    assert_eq!(
+        handover.status,
+        crate::state::HandoverStatus::Failed,
+        "nothing drives a handover after a restart, so restoring it live would leave it \
+'under way' with nobody behind it",
+    );
+    let reason = handover.error.clone().unwrap_or_default();
+    assert!(reason.contains("restarted"), "{reason}");
+    assert!(
+        reason.contains("target-thread"),
+        "the person has to be told which session was left behind: {reason}"
+    );
+    assert!(
+        reason.contains("empty"),
+        "a session started for a handover that never arrived is an orphan, and saying so \
+is the only recovery on offer: {reason}"
+    );
+    assert!(
+        handover.needs_attention(),
+        "a reconciled failure that nobody is shown is the same as losing it",
+    );
+    assert!(
+        restored
+            .snapshot()
+            .handovers
+            .iter()
+            .any(|view| view.id == "handover-1" && view.status == "failed"),
+        "and it reaches the composer through the snapshot",
+    );
+}
+
+// The opposite half: one that finished has nothing to say, so it must not come back from
+// a restart as an alarm.
+#[test]
+fn a_delivered_handover_survives_a_restart_without_raising_anything() {
+    let mut relay = test_state();
+    relay
+        .reserve_handover(crate::state::Handover::new(
+            "handover-done".to_string(),
+            "source-thread".to_string(),
+            "target-thread".to_string(),
+            true,
+            None,
+        ))
+        .expect("reserved");
+    relay.update_handover("handover-done", |handover| handover.finish());
+
+    let mut restored = test_state();
+    restored.apply_persisted(&PersistedRelayState::from_relay(&relay));
+    let handover = restored.handover("handover-done").expect("it survives");
+    assert_eq!(handover.status, crate::state::HandoverStatus::Done);
+    assert_eq!(handover.error, None);
+    assert!(restored.snapshot().handovers.is_empty());
+}
+
+// Two people (or two devices) aiming a handover at the same idle session both pass
+// admission before either of them starts writing. The loser would then deliver into a
+// session the winner is about to fill, and whichever arrived second would read as the
+// whole of the work.
+#[test]
+fn only_one_handover_at_a_time_may_claim_an_agent() {
+    let mut relay = test_state();
+    let handover = |id: &str, source: &str| {
+        crate::state::Handover::new(
+            id.to_string(),
+            source.to_string(),
+            "target-thread".to_string(),
+            false,
+            None,
+        )
+    };
+    relay
+        .reserve_handover(handover("first", "source-a"))
+        .expect("the first one takes it");
+    let refused = relay
+        .reserve_handover(handover("second", "source-b"))
+        .expect_err("the second must be told, not queued behind it");
+    assert!(refused.contains("already on its way"), "{refused}");
+    assert!(
+        refused.contains("source-a"),
+        "naming who has it is what makes this actionable: {refused}"
+    );
+
+    // …and the reservation is released by the outcome, not held for ever.
+    relay.update_handover("first", |handover| handover.fail("the target went busy"));
+    relay
+        .reserve_handover(handover("third", "source-b"))
+        .expect("a settled handover holds nothing");
 }

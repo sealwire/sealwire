@@ -43,3 +43,55 @@ test("the controller is handed the handover author, not the delegate one", () =>
     "handing /handover to delegateAuthor records an ask and wakes the source back up"
   );
 });
+
+// The half that no unit test can reach: both shells read the snapshot in a module that
+// only evaluates inside a browser (app.js is the desktop boot module; session-ops needs
+// the whole remote store). Wired-but-inert is the exact shape this class of bug takes,
+// so each check names what the wiring has to be, not that the function appears.
+test("the desktop reports accepted-then-failed handovers off the snapshot", () => {
+  assert.match(
+    APP_SOURCE,
+    /import \{ createHandoverOutcomeReporter \} from "\.\/shared\/handover-outcomes\.js"/,
+    "a second copy of the once-only rule is how the two surfaces drift apart"
+  );
+  assert.match(
+    APP_SOURCE,
+    /createHandoverOutcomeReporter\(\{[\s\S]{0,400}?report:[\s\S]{0,120}?showComposerError\(threadId, message\)/,
+    "the failure has to reach the composer error line for the thread the RECORD names"
+  );
+  assert.match(
+    APP_SOURCE,
+    /createHandoverOutcomeReporter\(\{[\s\S]{0,500}?"\/api\/session\/handover\/ack"/,
+    "without the receipt the same failure comes back on every reload"
+  );
+  assert.match(
+    APP_SOURCE,
+    /reportHandoverOutcomes\(session\?\.handovers\)/,
+    "a reporter nothing feeds is the same as no reporter"
+  );
+});
+
+const REMOTE_OPS = readFileSync(new URL("./remote/session-ops.js", import.meta.url), "utf8");
+
+test("the phone reports them too, off the raw snapshot", () => {
+  assert.match(
+    REMOTE_OPS,
+    /import \{ createHandoverOutcomeReporter \} from "\.\.\/shared\/handover-outcomes\.js"/
+  );
+  assert.match(
+    REMOTE_OPS,
+    /createHandoverOutcomeReporter\(\{[\s\S]{0,400}?setComposerError\(threadId, message\)/,
+    "the phone's log drawer is `display: none`, so the composer is the only channel there is"
+  );
+  assert.match(
+    REMOTE_OPS,
+    /createHandoverOutcomeReporter\(\{[\s\S]{0,600}?dispatchOrRecover\("ack_handover"/,
+    "and the receipt goes through the same claim/recovery path as every other write"
+  );
+  assert.match(
+    REMOTE_OPS,
+    /reportHandoverOutcomes\(snapshot\?\.handovers\)/,
+    "fed from the RAW snapshot: the view-only projection rewrites the session around "
+      + "whichever thread this phone is looking at"
+  );
+});

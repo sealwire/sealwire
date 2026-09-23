@@ -279,6 +279,13 @@ pub(super) enum RemoteActionRequest {
         #[serde(default)]
         device_id: Option<String>,
     },
+    /// A read receipt on a handover's outcome. Relay-owned bookkeeping (no turn), so
+    /// not claim-gated: reading a failure must not require taking the controller lease.
+    AckHandover {
+        handover_id: String,
+        #[serde(default)]
+        device_id: Option<String>,
+    },
     SetGoal {
         thread_id: String,
         objective: String,
@@ -347,6 +354,7 @@ impl RemoteActionRequest {
             Self::DeleteReview { .. } => RemoteActionKind::DeleteReview,
             Self::Delegate { .. } => RemoteActionKind::Delegate,
             Self::Handover { .. } => RemoteActionKind::Handover,
+            Self::AckHandover { .. } => RemoteActionKind::AckHandover,
             Self::SetGoal { .. } => RemoteActionKind::SetGoal,
             Self::StopGoal { .. } => RemoteActionKind::StopGoal,
             Self::RegisterPushSubscription { .. } => RemoteActionKind::RegisterPushSubscription,
@@ -575,6 +583,10 @@ impl RemoteActionRequest {
                 effort,
                 device_id: Some(device_id),
             },
+            Self::AckHandover { handover_id, .. } => Self::AckHandover {
+                handover_id,
+                device_id: Some(device_id),
+            },
             Self::SetGoal {
                 thread_id,
                 objective,
@@ -646,6 +658,7 @@ pub(super) enum RemoteActionKind {
     DeleteReview,
     Delegate,
     Handover,
+    AckHandover,
     SetGoal,
     StopGoal,
     RegisterPushSubscription,
@@ -696,6 +709,7 @@ impl RemoteActionKind {
             Self::DeleteReview => "delete_review",
             Self::Delegate => "delegate",
             Self::Handover => "handover",
+            Self::AckHandover => "ack_handover",
             Self::SetGoal => "set_goal",
             Self::StopGoal => "stop_goal",
             Self::RegisterPushSubscription => "register_push_subscription",
@@ -1777,6 +1791,16 @@ async fn execute_remote_action(
             .await
             .map(|_| RemoteActionOutcome::default())
             .map_err(|error| error.message()),
+        RemoteActionRequest::AckHandover {
+            handover_id,
+            device_id,
+        } => {
+            let device_id = device_id.ok_or_else(|| "missing device id".to_string())?;
+            state
+                .acknowledge_handover(&handover_id, Some(&device_id))
+                .await
+                .map(|()| RemoteActionOutcome::default())
+        }
         // The objective is written whole, never merged: re-sending the same one is how a
         // stopped goal resumes, and how "not done — keep going" answers a completion claim.
         RemoteActionRequest::SetGoal {
@@ -3315,6 +3339,7 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         | RemoteActionKind::DeleteReview
         | RemoteActionKind::Delegate
         | RemoteActionKind::Handover
+        | RemoteActionKind::AckHandover
         | RemoteActionKind::SetGoal
         | RemoteActionKind::StopGoal
         | RemoteActionKind::RegisterPushSubscription

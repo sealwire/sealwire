@@ -70,6 +70,7 @@ fn make_snapshot() -> SessionSnapshot {
             })
             .collect(),
         logs: vec![],
+        handovers: vec![],
         active_review_jobs: vec![],
         reviewer_threads: vec![],
         review_activity: vec![],
@@ -2030,6 +2031,49 @@ fn handing_over_from_a_paired_device_round_trips_and_binds_it() {
     assert!(requires_session_claim(RemoteActionKind::Handover));
     assert!(matches!(
         remote_action_result_kind(RemoteActionKind::Handover),
+        RemoteActionResultKind::RemoteActionAck
+    ));
+}
+
+// The receipt half. A handover that failed after being accepted is held on the snapshot
+// until it has been read; without this door the phone can see one and never clear it, so
+// the same failure lands under every draft it writes from then on.
+#[test]
+fn acknowledging_a_handover_binds_the_device_and_takes_no_session_claim() {
+    let ack: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "ack_handover",
+        "handover_id": "handover-9",
+        "device_id": "somebody-elses-device"
+    }))
+    .expect("ack_handover should parse");
+    assert_eq!(ack.kind(), RemoteActionKind::AckHandover);
+    assert_eq!(RemoteActionKind::AckHandover.as_str(), "ack_handover");
+    match ack.bind_device("device-6".to_string(), "surface-test", test_origin()) {
+        RemoteActionRequest::AckHandover {
+            handover_id,
+            device_id,
+        } => {
+            assert_eq!(handover_id, "handover-9");
+            assert_eq!(
+                device_id.as_deref(),
+                Some("device-6"),
+                "the claimed device is overwritten by the bound one, so the scope check \
+is against who is really asking"
+            );
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // Reading a failure is not starting work. Requiring the controller lease to dismiss
+    // a notice would be a worse bargain than the one this closes — a second device would
+    // have to take control of the session just to clear its own composer.
+    assert!(!requires_session_claim(RemoteActionKind::AckHandover));
+    assert!(
+        requires_session_claim(RemoteActionKind::Handover),
+        "…while the handover itself still is"
+    );
+    assert!(matches!(
+        remote_action_result_kind(RemoteActionKind::AckHandover),
         RemoteActionResultKind::RemoteActionAck
     ));
 }

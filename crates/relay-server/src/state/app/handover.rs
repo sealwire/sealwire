@@ -13,8 +13,8 @@
 
 use relay_api::handover::{HandoverError, HandoverRequest};
 
-use super::super::delegation::{brief_from_reply, peer_is_wider_than_asker, peer_thread_settings};
-use super::delegation::BRIEF_WAIT_BUDGET;
+use super::super::delegation::{brief_from_reply, peer_thread_settings};
+use super::delegation::{PeerLiveness, BRIEF_WAIT_BUDGET};
 use crate::provider::StartThreadRequest;
 use crate::state::AppState;
 
@@ -91,6 +91,16 @@ struct PreparedHandover {
     effort: Option<String>,
 }
 
+/// A short, sortable id. Mirrors the ask and review shapes so the three read alike
+/// in a state file.
+fn new_handover_id() -> String {
+    format!(
+        "handover-{}-{}",
+        crate::state::unix_now(),
+        super::review::random_suffix()
+    )
+}
+
 impl AppState {
     /// Accept a handover now, write and deliver it in the background.
     ///
@@ -100,51 +110,56 @@ impl AppState {
     /// real model, happens out of sight; and it happens in the source session, so
     /// the person handing over watches it being written.
     ///
-    /// Returns the target's thread id.
+    /// What makes that acceptance honest is the record written before this returns.
+    /// It is the operation: it is persisted, so a restart reconciles it into a
+    /// failure the person can read instead of losing it, and it is what carries a
+    /// terminal failure back to the composer that typed the command. A `tokio::spawn`
+    /// alone owns nothing and can only report into a log drawer.
+    ///
+    /// Returns (handover id, target thread id).
     pub(crate) async fn handover_detached(
         &self,
         source_thread_id: &str,
-        mut request: HandoverRequest,
-    ) -> Result<String, HandoverError> {
-        let source_thread_id = self
-            .canonical_session_id(source_thread_id)
-            .await
-            .map_err(HandoverError::Failed)?;
-        if let Some(target) = request.target_thread_id.as_deref() {
-            request.target_thread_id = Some(
-                self.canonical_session_id(target)
-                    .await
-                    .map_err(HandoverError::Failed)?,
-            );
-        }
-        let prepared = self.prepare_handover(&source_thread_id, &request).await?;
+        request: HandoverRequest,
+    ) -> Result<(String, String), HandoverError> {
+        let (handover_id, prepared) = self.accept_handover(source_thread_id, request).await?;
         let target_thread_id = prepared.target_thread_id.clone();
 
         let app = self.clone();
-        let source = source_thread_id.clone();
-        let target = target_thread_id.clone();
+        let background_id = handover_id.clone();
         tokio::spawn(async move {
-            if let Err(error) = app.deliver_handover(prepared).await {
-                app.push_runtime_log(
-                    "warn",
-                    format!(
-                        "The handover from {source} to {target} was not delivered: {}",
-                        error.message()
-                    ),
-                )
-                .await;
-            }
+            // Dropped on purpose: `run_handover` has already written the outcome onto
+            // the record, which is where the person reads it. There is nobody left here
+            // to return it to.
+            let _ = app.run_handover(background_id, prepared).await;
         });
-        Ok(target_thread_id)
+        Ok((handover_id, target_thread_id))
     }
 
-    /// The whole thing in one call, for tests and for any caller that wants the
-    /// failure rather than a log line.
+    /// The whole thing in one call. Both doors use the detached form; this exists so a
+    /// test can observe the outcome without a clock, and it is the SAME two halves —
+    /// `accept_handover` then `run_handover` — so there is no second path to drift.
+    #[cfg(test)]
     pub(crate) async fn handover(
         &self,
         source_thread_id: &str,
-        mut request: HandoverRequest,
+        request: HandoverRequest,
     ) -> Result<String, HandoverError> {
+        let (handover_id, prepared) = self.accept_handover(source_thread_id, request).await?;
+        let target_thread_id = prepared.target_thread_id.clone();
+        match self.run_handover(handover_id, prepared).await {
+            Ok(()) => Ok(target_thread_id),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Validate, start or reserve the target, and write the record. Everything that
+    /// can be refused to the caller's face happens here.
+    async fn accept_handover(
+        &self,
+        source_thread_id: &str,
+        mut request: HandoverRequest,
+    ) -> Result<(String, PreparedHandover), HandoverError> {
         let source_thread_id = self
             .canonical_session_id(source_thread_id)
             .await
@@ -157,9 +172,117 @@ impl AppState {
             );
         }
         let prepared = self.prepare_handover(&source_thread_id, &request).await?;
-        let target_thread_id = prepared.target_thread_id.clone();
-        self.deliver_handover(prepared).await?;
-        Ok(target_thread_id)
+
+        let handover_id = new_handover_id();
+        let record = crate::state::Handover::new(
+            handover_id.clone(),
+            source_thread_id.clone(),
+            prepared.target_thread_id.clone(),
+            prepared.target_is_fresh,
+            request.device_id.clone(),
+        );
+        {
+            // The reservation and the "is anyone else already going there" check are ONE
+            // write. Two handovers aimed at the same idle session both pass admission
+            // before either starts, and the loser would deliver into a session the winner
+            // is about to fill.
+            let mut relay = self.relay.write().await;
+            relay
+                .reserve_handover(record)
+                .map_err(HandoverError::Failed)?;
+            relay.notify();
+        }
+        Ok((handover_id, prepared))
+    }
+
+    /// Drive the delivery and settle the record either way.
+    async fn run_handover(
+        &self,
+        handover_id: String,
+        prepared: PreparedHandover,
+    ) -> Result<(), HandoverError> {
+        match self.deliver_handover(prepared).await {
+            Ok(()) => {
+                let mut relay = self.relay.write().await;
+                relay.update_handover(&handover_id, |handover| handover.finish());
+                relay.notify();
+                Ok(())
+            }
+            Err(error) => {
+                self.settle_handover_failure(&handover_id, error.message())
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Record a failure where the person who typed the command will see it, saying
+    /// what was left behind.
+    ///
+    /// A session started for a handover that never arrived is not deleted: it may
+    /// have been opened and typed into by the time this runs, and there is no
+    /// version of "tidy up" that is worth destroying somebody's work. So it is named
+    /// instead, with what to do about it.
+    async fn settle_handover_failure(&self, handover_id: &str, reason: String) {
+        let started = {
+            let relay = self.relay.read().await;
+            relay
+                .handover(handover_id)
+                .map(|handover| (handover.target_started, handover.target_thread_id.clone()))
+        };
+        let note = match started {
+            Some((true, target)) => self.orphan_note(&target).await,
+            _ => String::new(),
+        };
+        let mut relay = self.relay.write().await;
+        relay.update_handover(handover_id, |handover| {
+            handover.fail(format!("{reason}{note}"))
+        });
+        relay.notify();
+    }
+
+    /// What is left of a target this handover started, in the person's words.
+    async fn orphan_note(&self, target_thread_id: &str) -> String {
+        let relay = self.relay.read().await;
+        match relay.runtime_for_thread(target_thread_id) {
+            // Already gone — deleted, or never really there. Nothing was left behind.
+            None => String::new(),
+            Some(runtime) if runtime.transcript.is_empty() => format!(
+                ". The session started for this ({target_thread_id}) is empty — close it, \
+or hand over again"
+            ),
+            // It has content, so it is somebody's now: do not call it empty and do not
+            // suggest closing it.
+            Some(_) => format!(". The session started for this is {target_thread_id}"),
+        }
+    }
+
+    /// Mark a handover's outcome as read.
+    ///
+    /// A read receipt, not a resolution: the record keeps its status and its reason.
+    /// Without it the relay re-pushes the same failure on every snapshot and undoes
+    /// the composer's own rule that a new attempt retires the last one's line.
+    ///
+    /// Deliberately NOT gated on the session claim. Reading a failure is not starting
+    /// work, and a second device having to take the controller lease in order to
+    /// dismiss a notice would be a worse bargain than the one this closes.
+    pub(crate) async fn acknowledge_handover(
+        &self,
+        handover_id: &str,
+        device_id: Option<&str>,
+    ) -> Result<(), String> {
+        let mut relay = self.relay.write().await;
+        let source = relay
+            .handover(handover_id)
+            .map(|handover| handover.source_thread_id.clone())
+            .ok_or_else(|| "there is no such handover".to_string())?;
+        if device_id.is_some() {
+            super::goal::ensure_thread_in_device_scope(&relay, &source, device_id)
+                .map_err(|_| "there is no such handover".to_string())?;
+        }
+        relay.update_handover(handover_id, |handover| handover.acknowledged = true);
+        relay.notify();
+        Ok(())
     }
 
     async fn prepare_handover(
@@ -229,9 +352,15 @@ finished"
             Some(existing) => {
                 // The same admission the peer tool uses: not yourself, an ordinary
                 // standalone session, idle, and never wider than you are.
-                self.check_peer_is_askable(source_thread_id, existing, &approval, &sandbox)
-                    .await
-                    .map_err(handover_admission_error)?;
+                self.check_peer_is_askable(
+                    source_thread_id,
+                    existing,
+                    &approval,
+                    &sandbox,
+                    PeerLiveness::AnySignOfWork,
+                )
+                .await
+                .map_err(handover_admission_error)?;
                 (existing.to_string(), false)
             }
             None => (
@@ -337,49 +466,29 @@ finished"
                     .unwrap_or(source_sandbox),
             )
         };
-        if target_is_fresh {
-            // Only the ceiling, deliberately. This session was started by this handover
-            // minutes ago and nobody else has it; re-running the whole admission would
-            // race its own start, where a provider that has not yet reported idle reads
-            // as busy and the handover would be dropped for no reason.
-            let (target_approval, target_sandbox) = {
-                let relay = self.relay.read().await;
-                let settings = relay.thread_settings(&target_thread_id);
-                (
-                    settings
-                        .as_ref()
-                        .map(|s| s.approval_policy.clone())
-                        .unwrap_or_default(),
-                    settings
-                        .as_ref()
-                        .map(|s| s.sandbox.clone())
-                        .unwrap_or_default(),
-                )
-            };
-            if peer_is_wider_than_asker(
-                &approval_now,
-                &sandbox_now,
-                &target_approval,
-                &target_sandbox,
-            ) {
-                return Err(HandoverError::Failed(
-                    "this session was narrowed while the handover was being written, so the \
-agent it was going to is now allowed to do more than you are"
-                        .to_string(),
-                ));
-            }
-        } else {
-            // Somebody else's session: it may have been picked up, locked into a review,
-            // or widened since it was admitted.
-            self.check_peer_is_askable(
-                &source_thread_id,
-                &target_thread_id,
-                &approval_now,
-                &sandbox_now,
-            )
-            .await
-            .map_err(handover_admission_error)?;
-        }
+        // The FULL admission again, fresh target included. The first version skipped it
+        // for a fresh one on the grounds that nobody else had it — which is false the
+        // moment the summary takes a minute and the person opens the new session and
+        // starts typing. It also misses the session being deleted, pulled into a Code
+        // Flow, or made a reviewer while we were away. Blind-sending into any of those
+        // is a turn nobody asked for landing in the middle of somebody's conversation.
+        //
+        // Only the busy TEST differs, and only for a fresh target: it has no history for
+        // a provider status word to describe, so the word is not evidence about it — an
+        // in-flight turn is.
+        self.check_peer_is_askable(
+            &source_thread_id,
+            &target_thread_id,
+            &approval_now,
+            &sandbox_now,
+            if target_is_fresh {
+                PeerLiveness::LiveTurnOnly
+            } else {
+                PeerLiveness::AnySignOfWork
+            },
+        )
+        .await
+        .map_err(handover_admission_error)?;
 
         self.send_message_to_thread(
             &target_thread_id,

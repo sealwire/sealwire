@@ -195,6 +195,7 @@ import { canRequestReview, selectReviewLaunchModel } from "./shared/review-state
 import { createGoalActions } from "./shared/goal-actions.js";
 import { createDelegateAuthor } from "./local/delegate-authoring.js";
 import { createHandoverAuthor } from "./local/handover-authoring.js";
+import { createHandoverOutcomeReporter } from "./shared/handover-outcomes.js";
 import { createReviewAuthor } from "./local/review-authoring.js";
 import { createGoalAuthor } from "./local/goal-authoring.js";
 import { recordComposerError, syncComposerError } from "./local/composer-error.js";
@@ -1426,6 +1427,7 @@ renderer.renderSession = function wrappedRenderSession(session) {
   // bails, and the one-attempt guard suppresses every retry. _baseRenderSession
   // sets it again (idempotent).
   state.session = session;
+  reportHandoverOutcomes(session?.handovers);
   maybeRefreshViewOnly(session);
   // The active thread can also change WITHOUT a navigation — another device switches the
   // relay — and the composer has to follow it or the next keystroke lands in the previous
@@ -2911,6 +2913,16 @@ const handoverAuthor = createHandoverAuthor({
   handover: (threadId, args) =>
     postRelayCommand("/api/session/handover", { thread_id: threadId, ...args }),
   setComposerError: showComposerError,
+});
+
+// A handover is accepted before it is delivered, so the only failures left by then
+// arrive minutes later on the snapshot. They belong to the thread the command was typed
+// into — which by now may not be the one on screen — so they are written against that
+// id and the composer shows them when it comes back to it.
+const reportHandoverOutcomes = createHandoverOutcomeReporter({
+  report: (threadId, message) => showComposerError(threadId, message),
+  acknowledge: (handoverId) =>
+    void postRelayCommand("/api/session/handover/ack", { handover_id: handoverId }),
 });
 
 // The command door onto a review. The request modal keeps calling the controller

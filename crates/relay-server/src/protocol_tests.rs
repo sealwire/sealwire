@@ -65,6 +65,7 @@ fn review_action_input_supports_an_explicit_job_and_keeps_legacy_omission() {
 
 fn make_snapshot() -> SessionSnapshot {
     SessionSnapshot {
+        handovers: Vec::new(),
         transcript_generation: String::new(),
         provider_fork_capabilities: Vec::new(),
         relay_resolves_fork_points: true,

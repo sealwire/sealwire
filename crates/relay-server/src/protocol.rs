@@ -197,6 +197,13 @@ pub struct SessionSnapshot {
     pub transcript_truncated: bool,
     pub transcript: Vec<TranscriptEntryView>,
     pub logs: Vec<LogEntryView>,
+    /// Handovers that still want the person's attention: accepted-and-running, or
+    /// failed and not yet read. Deliberately NOT a card channel — this is how the
+    /// composer that typed `/handover` learns the operation it was told was under
+    /// way did not finish. A handover that worked never appears here at all, so in
+    /// the ordinary case this costs zero bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handovers: Vec<HandoverView>,
     /// Deprecated compatibility shell. Full review cards live on the dedicated
     /// Reviews channel; newly-produced snapshots carry only `review_activity`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -292,6 +299,29 @@ pub struct SessionSnapshot {
 
 fn is_zero_u64(value: &u64) -> bool {
     *value == 0
+}
+
+/// One handover's state, as the composer reads it.
+///
+/// No summary body and no note, and that is deliberate rather than economy: the
+/// session snapshot is not device-scoped (`review_activity` has the same property),
+/// so anything here is visible to every paired device. Thread ids and the relay's
+/// own sentence are what that budget allows. Whoever wants to read what was actually
+/// handed over opens the target session, which IS fenced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoverView {
+    pub id: String,
+    pub source_thread_id: String,
+    pub target_thread_id: String,
+    /// Whether the handover started the target. A failure then leaves a session
+    /// behind that exists for no other reason, and the client says so.
+    #[serde(default)]
+    pub target_started: bool,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub updated_at: u64,
 }
 
 /// Uncompacted reviewer-panel payload served on demand (decoupled from the byte-budgeted

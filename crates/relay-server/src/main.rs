@@ -383,6 +383,10 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         )
         .route("/api/session/delegate", post(delegate_to_agent))
         .route("/api/session/handover", post(hand_over_session))
+        .route(
+            "/api/session/handover/ack",
+            post(acknowledge_handover_outcome),
+        )
         .route("/api/session/goal", post(set_session_goal))
         .route("/api/orchestrator/tools", get(list_orchestrator_tools))
         .route(
@@ -825,6 +829,12 @@ struct HandoverInput {
     effort: Option<String>,
 }
 
+/// `POST /api/session/handover/ack` — a read receipt on a handover's outcome.
+#[derive(serde::Deserialize)]
+struct HandoverAckInput {
+    handover_id: String,
+}
+
 #[derive(serde::Deserialize)]
 struct OrchestratorToolCallInput {
     #[serde(default)]
@@ -942,13 +952,34 @@ async fn hand_over_session(
             },
         )
         .await
-        .map(|target| {
+        .map(|(handover_id, target)| {
             format!(
-                "Handing over. That agent's id is {target}; it is being given where the \
-work stands and will carry on from there."
+                "Handing over ({handover_id}). That agent's id is {target}; it is being \
+given where the work stands and will carry on from there."
             )
         })
         .map_err(|error| error.message());
+    Ok(Json(
+        crate::state::app::orchestrator_dispatch::tool_result_envelope(outcome),
+    ))
+}
+
+/// Not a resolution: the record keeps its status and its reason. This only stops the
+/// relay re-pushing a failure the person has already read, which would otherwise undo
+/// the composer's own "a new attempt retires the last one's line".
+async fn acknowledge_handover_outcome(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(input): Json<HandoverAckInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    let outcome = context
+        .app
+        // Loopback callers carry no path scope to be checked against.
+        .acknowledge_handover(&input.handover_id, None)
+        .await
+        .map(|()| "Noted.".to_string());
     Ok(Json(
         crate::state::app::orchestrator_dispatch::tool_result_envelope(outcome),
     ))

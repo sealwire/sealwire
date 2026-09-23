@@ -75,6 +75,22 @@ fn new_ask_id() -> String {
     format!("ask-{}-{}", unix_now(), super::review::random_suffix())
 }
 
+/// How much evidence of work is enough to call a thread busy.
+///
+/// The two answers are not interchangeable, and picking the wrong one breaks in
+/// opposite directions.
+pub(super) enum PeerLiveness {
+    /// An in-flight turn OR a provider status word that is not one of the handful
+    /// we read as idle. Right for a session that belongs to somebody else, where
+    /// its own status is the best evidence there is.
+    AnySignOfWork,
+    /// An in-flight turn, and nothing else. Right ONLY for a session this
+    /// operation started moments ago: it has no history for a status word to be
+    /// describing, so a provider whose freshly-started status is not on that short
+    /// list would otherwise read as busy and fail every handover into it.
+    LiveTurnOnly,
+}
+
 /// What `precheck_ask` established, so `ask_agent` does not read it all again.
 struct PrecheckedAsk {
     /// The asker, canonicalized — what every later write must name.
@@ -401,6 +417,7 @@ Carry on with one of those instead of bringing in another."
                     existing,
                     &asker_approval,
                     &asker_sandbox,
+                    PeerLiveness::AnySignOfWork,
                 )
                 .await?;
                 let provider = {
@@ -666,6 +683,7 @@ write the brief — try again once it is done"
         peer_thread_id: &str,
         asker_approval: &str,
         asker_sandbox: &str,
+        liveness: PeerLiveness,
     ) -> Result<(), AskError> {
         if peer_thread_id == asker_thread_id {
             return Err(AskError::Failed(
@@ -733,7 +751,10 @@ get around your own permissions"
         // reports something other than "idle" while being perfectly free.
         let working = relay
             .runtime_for_thread(peer_thread_id)
-            .map(|runtime| runtime.is_working())
+            .map(|runtime| match liveness {
+                PeerLiveness::AnySignOfWork => runtime.is_working(),
+                PeerLiveness::LiveTurnOnly => runtime.has_live_turn(),
+            })
             .unwrap_or(false);
         if working {
             return Err(AskError::Failed(

@@ -32931,6 +32931,272 @@ mod handover_tests {
         );
     }
 
+    /// Poll the record until it has an outcome. The delivery is detached on purpose.
+    async fn settled(app: &crate::state::AppState, handover_id: &str) -> crate::state::Handover {
+        for _ in 0..400 {
+            {
+                let relay = app.relay.read().await;
+                if let Some(handover) = relay.handover(handover_id) {
+                    if handover.status.is_terminal() {
+                        return handover.clone();
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("{handover_id} never settled");
+    }
+
+    fn failure_of(handover: &crate::state::Handover) -> String {
+        assert_eq!(
+            handover.status,
+            crate::state::HandoverStatus::Failed,
+            "expected a failure, got {:?}",
+            handover.status
+        );
+        handover.error.clone().unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn an_accepted_handover_is_recorded_before_the_caller_is_answered() {
+        // The caller is told the work is on its way minutes before it is. Without a
+        // record the only owner of those minutes is a `tokio::spawn`: a restart loses
+        // it, and a failure has nowhere to go but a log drawer nobody opens.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        provider.hold_terminals();
+        let (handover_id, target) = app
+            .handover_detached(&source, request())
+            .await
+            .expect("accepted");
+
+        let relay = app.relay.read().await;
+        let record = relay.handover(&handover_id).expect("recorded");
+        assert_eq!(record.status, crate::state::HandoverStatus::Working);
+        assert_eq!(record.source_thread_id, source);
+        assert_eq!(record.target_thread_id, target);
+        assert!(record.target_started, "this one started its own target");
+        assert!(
+            relay
+                .snapshot()
+                .handovers
+                .iter()
+                .any(|view| view.id == handover_id && view.status == "working"),
+            "an accepted operation has to be visible while it runs, not only when it ends",
+        );
+        drop(relay);
+        provider.release_terminals();
+    }
+
+    #[tokio::test]
+    async fn a_fresh_target_the_user_starts_using_is_not_sent_into_behind_their_back() {
+        // The target is created before the summary is written, so it is on screen and
+        // openable for the whole of it. The first version skipped the final admission
+        // for a fresh target on the grounds that "nobody else has it" — which stops
+        // being true the moment somebody opens it and types.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        provider.hold_terminals();
+        let (handover_id, target) = app
+            .handover_detached(&source, request())
+            .await
+            .expect("accepted");
+        provider.wait_for_held_turn().await;
+        {
+            // The person opens the new session and sends something of their own.
+            let mut relay = app.relay.write().await;
+            relay.ensure_runtime_for_thread(&target).active_turn_id = Some("their-turn".into());
+        }
+        provider.release_terminals();
+
+        let reason = failure_of(&settled(&app, &handover_id).await);
+        assert!(reason.contains("busy"), "{reason}");
+        assert!(
+            received(&app, &target).await.is_empty(),
+            "blind-sending lands a turn in the middle of somebody's conversation",
+        );
+        // Retained, not deleted — it may hold their work by now — and named, so the
+        // failure is something they can act on.
+        assert!(reason.contains(&target), "{reason}");
+        assert!(
+            app.relay.read().await.runtime_for_thread(&target).is_some(),
+            "a session somebody may have typed into is never tidied away",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_target_that_disappears_during_the_summary_settles_instead_of_sending_into_nothing() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        provider.hold_terminals();
+        let (handover_id, target) = app
+            .handover_detached(&source, request())
+            .await
+            .expect("accepted");
+        provider.wait_for_held_turn().await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.remove_thread(&target);
+        }
+        provider.release_terminals();
+
+        let reason = failure_of(&settled(&app, &handover_id).await);
+        assert!(
+            reason.contains("no such agent"),
+            "the person is told the target went, not left to guess: {reason}"
+        );
+        assert!(
+            !reason.contains("is empty"),
+            "nothing was left behind, so nothing is offered to close: {reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_target_pulled_into_another_role_during_the_summary_is_refused_too() {
+        // Deletion is the easy case. The target being made the Orchestrator, a Task
+        // seat, a reviewer or workflow-locked all look perfectly idle.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+        let existing = session(&app, &cwd, "never").await;
+
+        provider.hold_terminals();
+        let (handover_id, _target) = app
+            .handover_detached(
+                &source,
+                HandoverRequest {
+                    target_thread_id: Some(existing.clone()),
+                    ..request()
+                },
+            )
+            .await
+            .expect("an idle standalone session is admitted");
+        provider.wait_for_held_turn().await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.orchestrator_thread_id = Some(existing.clone());
+        }
+        provider.release_terminals();
+
+        let reason = failure_of(&settled(&app, &handover_id).await);
+        assert!(reason.contains("Orchestrator"), "{reason}");
+        assert!(
+            received(&app, &existing).await.is_empty(),
+            "and nothing was sent into it",
+        );
+        assert!(
+            !reason.contains("is empty"),
+            "we did not start this one, so there is no orphan to report: {reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_handover_stays_on_the_wire_until_it_has_been_read() {
+        // The composer clears its own error line on every new attempt, so a relay that
+        // re-pushes the same failure on every snapshot would fight it. And one that
+        // drops the failure the first time a client sees it loses it on a reload.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        provider.hold_terminals();
+        let (handover_id, target) = app
+            .handover_detached(&source, request())
+            .await
+            .expect("accepted");
+        provider.wait_for_held_turn().await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.remove_thread(&target);
+        }
+        provider.release_terminals();
+        let record = settled(&app, &handover_id).await;
+
+        let on_wire = |app: &crate::state::AppState| {
+            let app = app.clone();
+            let handover_id = handover_id.clone();
+            async move {
+                app.relay
+                    .read()
+                    .await
+                    .snapshot()
+                    .handovers
+                    .into_iter()
+                    .find(|view| view.id == handover_id)
+            }
+        };
+        let view = on_wire(&app).await.expect("a failure is news");
+        assert_eq!(view.status, "failed");
+        assert_eq!(view.error.as_deref(), record.error.as_deref());
+        assert_eq!(
+            view.source_thread_id, source,
+            "it is reported against the session the command was typed into, whichever \
+composer happens to be on screen",
+        );
+
+        app.acknowledge_handover(&handover_id, None)
+            .await
+            .expect("a read receipt");
+        assert!(on_wire(&app).await.is_none(), "read once is read");
+        let relay = app.relay.read().await;
+        let kept = relay.handover(&handover_id).expect("the record stays");
+        assert_eq!(kept.status, crate::state::HandoverStatus::Failed);
+        assert_eq!(
+            kept.error, record.error,
+            "an acknowledgement is a receipt, not a resolution",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_device_can_only_acknowledge_a_handover_it_could_see() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let elsewhere = TempDir::new().expect("other tempdir");
+        let outside = elsewhere.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+        pair_device(&app, "phone", vec![outside.clone()]).await;
+        {
+            let mut relay = app.relay.write().await;
+            relay
+                .reserve_handover(crate::state::Handover::new(
+                    "handover-x".to_string(),
+                    source.clone(),
+                    "target".to_string(),
+                    true,
+                    None,
+                ))
+                .expect("reserved");
+        }
+
+        let refused = app
+            .acknowledge_handover("handover-x", Some("phone"))
+            .await
+            .expect_err("a device outside the scope must not silence it");
+        assert!(refused.contains("no such handover"), "{refused}");
+        assert!(app.acknowledge_handover("no-such-id", None).await.is_err());
+        app.acknowledge_handover("handover-x", None)
+            .await
+            .expect("the local door carries no scope to check");
+    }
+
     #[tokio::test]
     async fn a_handover_records_no_ask_and_never_wakes_the_source() {
         // The whole point of the separation. A delegate records an `Ask`, the sweeper
