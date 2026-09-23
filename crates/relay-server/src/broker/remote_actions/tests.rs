@@ -1963,6 +1963,77 @@ fn delegating_from_a_paired_device_round_trips_and_binds_it() {
     ));
 }
 
+// `/handover` from a phone. Same door as `delegate`, and deliberately a different
+// action: a delegate insists on a message, a handover carries only an optional note.
+#[test]
+fn handing_over_from_a_paired_device_round_trips_and_binds_it() {
+    let handover: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "handover",
+        "thread_id": "thread-1",
+        "agent": "thread-2"
+    }))
+    .expect("handover should parse with nothing but a thread and a target");
+    assert_eq!(handover.kind(), RemoteActionKind::Handover);
+    assert_eq!(RemoteActionKind::Handover.as_str(), "handover");
+    match handover.bind_device("device-5".to_string(), "surface-test", test_origin()) {
+        RemoteActionRequest::Handover {
+            thread_id,
+            note,
+            agent,
+            device_id,
+            ..
+        } => {
+            assert_eq!(thread_id, "thread-1");
+            assert_eq!(note, "", "an omitted note is a handover, not a bad request");
+            assert_eq!(agent.as_deref(), Some("thread-2"));
+            assert_eq!(device_id.as_deref(), Some("device-5"));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // The device on the wire is never trusted: whatever a client claims is replaced by
+    // the one this connection is bound to.
+    let spoofed: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "handover",
+        "thread_id": "thread-1",
+        "note": "mind the parser",
+        "provider": "codex",
+        "model": "gpt-5.6",
+        "effort": "xhigh",
+        "device_id": "somebody-elses-device"
+    }))
+    .expect("handover should parse");
+    match spoofed.bind_device("device-5".to_string(), "surface-test", test_origin()) {
+        RemoteActionRequest::Handover {
+            note,
+            provider,
+            model,
+            effort,
+            device_id,
+            ..
+        } => {
+            assert_eq!(note, "mind the parser");
+            assert_eq!(provider.as_deref(), Some("codex"));
+            assert_eq!(model.as_deref(), Some("gpt-5.6"));
+            assert_eq!(effort.as_deref(), Some("xhigh"));
+            assert_eq!(
+                device_id.as_deref(),
+                Some("device-5"),
+                "the claimed device is overwritten by the bound one"
+            );
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // Starting somebody else's session on this work is starting work, so it is gated
+    // exactly as sending a message is.
+    assert!(requires_session_claim(RemoteActionKind::Handover));
+    assert!(matches!(
+        remote_action_result_kind(RemoteActionKind::Handover),
+        RemoteActionResultKind::RemoteActionAck
+    ));
+}
+
 /// The relay repeats "still running" faster than the phone gives up. If these two drift
 /// apart the phone reports a failure between two notices — for a write that is running.
 #[test]

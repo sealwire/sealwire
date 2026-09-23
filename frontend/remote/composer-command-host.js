@@ -13,6 +13,9 @@ export const CONTROLLER_CAPABILITIES = [
   // controller built once per textarea outlives every session switch under it.
   "getScope",
   "askAgent",
+  // `/handover`. A separate capability, not a flag on askAgent: the two reach different
+  // relay doors and only one of them has an answer coming back.
+  "handOver",
   "setGoal",
   "requestReview",
   // What a command stopped itself, which never reached the relay. `log` is where these

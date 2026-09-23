@@ -1528,3 +1528,140 @@ async fn workspace_git_context_route_refuses_a_path_outside_the_allowed_roots() 
         "the refusal must not describe the target: {message}"
     );
 }
+
+async fn post_json(
+    router: axum::Router,
+    uri: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header(header::HOST, "127.0.0.1:8787")
+                .header(header::AUTHORIZATION, "Bearer secret")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request should build"),
+        )
+        .await
+        .expect("router should respond");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 256 * 1024)
+        .await
+        .expect("body should read");
+    let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, value)
+}
+
+/// A router over a relay that can actually start sessions, so `/api/session/handover`
+/// reaches the real path rather than failing on a missing provider.
+async fn handover_router(cwd: &str) -> (axum::Router, crate::state::AppState) {
+    let (change_tx, _rx) = tokio::sync::watch::channel(0_u64);
+    let relay = std::sync::Arc::new(tokio::sync::RwLock::new(crate::state::RelayState::new(
+        cwd.to_string(),
+        change_tx.clone(),
+        crate::state::SecurityProfile::private(),
+    )));
+    {
+        let mut relay = relay.write().await;
+        relay.trusted_workspaces = vec![cwd.to_string()];
+    }
+    let bridge = std::sync::Arc::new(
+        crate::fake_provider::FakeProviderBridge::spawn(relay.clone())
+            .await
+            .expect("fake provider should spawn"),
+    );
+    let mut providers: std::collections::HashMap<
+        String,
+        std::sync::Arc<dyn crate::provider::ProviderBridge>,
+    > = std::collections::HashMap::new();
+    providers.insert(
+        "fake".to_string(),
+        std::sync::Arc::clone(&bridge) as std::sync::Arc<dyn crate::provider::ProviderBridge>,
+    );
+    let app = crate::state::AppState::from_parts(relay, providers, change_tx);
+    let context = AppContext {
+        app: app.clone(),
+        auth: test_auth(),
+        launch_id: None,
+        security_headers: SecurityHeadersConfig::default(),
+        host_policy: HostPolicy::loopback_only(),
+    };
+    (build_router(context, WebAssets::Embedded), app)
+}
+
+/// The desktop door. A refusal here is a 200 carrying `isError` — the composer reads
+/// the reason as text, and mapping it to a 4xx would surface as a dead Send instead.
+#[tokio::test]
+async fn the_handover_route_accepts_a_bare_thread_and_answers_refusals_as_text() {
+    let dir = tempfile::TempDir::new().expect("tmp");
+    let cwd = dir.path().to_string_lossy().to_string();
+    let (router, app) = handover_router(&cwd).await;
+
+    let started = app
+        .start_session(crate::protocol::StartSessionInput {
+            cwd: Some(cwd.clone()),
+            provider: Some("fake".to_string()),
+            approval_policy: Some("never".to_string()),
+            device_id: Some("dev".to_string()),
+            initial_prompt: None,
+            model: None,
+            effort: None,
+            project_id: None,
+            sandbox: None,
+        })
+        .await
+        .expect("session starts")
+        .active_thread_id
+        .clone()
+        .expect("thread");
+
+    // No note, no agent, no provider: the ordinary handover, and every field omitted.
+    let (status, body) = post_json(
+        router,
+        "/api/session/handover",
+        serde_json::json!({ "thread_id": started }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_ne!(
+        body["isError"],
+        serde_json::json!(true),
+        "an empty note is the normal case, not a bad request: {body}"
+    );
+    let text = body["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("Handing over"),
+        "the caller is told where the work went: {text}"
+    );
+
+    // …and a refusal comes back the same shape, so the composer can show the reason.
+    let (router, _app) = handover_router(&cwd).await;
+    let (status, body) = post_json(
+        router,
+        "/api/session/handover",
+        serde_json::json!({ "thread_id": "no-such-thread" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a refusal is not a transport failure: {body}"
+    );
+    assert_eq!(body["isError"], serde_json::json!(true), "body={body}");
+    assert!(
+        body["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .trim()
+            .len()
+            > 0,
+        "a silent refusal is indistinguishable from a dead Send: {body}"
+    );
+}

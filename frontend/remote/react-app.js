@@ -1257,6 +1257,7 @@ function RemoteApp() {
         setGoal: (threadId, objective) => handlersRef.current.onSetGoal?.(threadId, objective),
         stopGoal: (threadId) => handlersRef.current.onStopGoal?.(threadId),
         delegate: (threadId, args) => handlersRef.current.onDelegate?.(threadId, args),
+        handover: (threadId, args) => handlersRef.current.onHandover?.(threadId, args),
         setComposerError: (threadId, message) =>
           handlersRef.current.onComposerError?.(threadId, message),
         setComposerHeld: (threadId, message) =>

@@ -194,6 +194,7 @@ import { createComposerCommandController } from "./local/composer-commands.js";
 import { canRequestReview, selectReviewLaunchModel } from "./shared/review-state.js";
 import { createGoalActions } from "./shared/goal-actions.js";
 import { createDelegateAuthor } from "./local/delegate-authoring.js";
+import { createHandoverAuthor } from "./local/handover-authoring.js";
 import { createReviewAuthor } from "./local/review-authoring.js";
 import { createGoalAuthor } from "./local/goal-authoring.js";
 import { recordComposerError, syncComposerError } from "./local/composer-error.js";
@@ -2904,6 +2905,14 @@ const delegateAuthor = createDelegateAuthor({
   setComposerError: showComposerError,
 });
 
+// The relay answers a handover before it starts it — every refusal a person can act on
+// is decided while the call is open — so its reason is a failure too.
+const handoverAuthor = createHandoverAuthor({
+  handover: (threadId, args) =>
+    postRelayCommand("/api/session/handover", { thread_id: threadId, ...args }),
+  setComposerError: showComposerError,
+});
+
 // The command door onto a review. The request modal keeps calling the controller
 // directly — it shows the relay's reason inline itself.
 const reviewAuthor = createReviewAuthor({
@@ -2949,6 +2958,10 @@ const composerCommands = createComposerCommandController({
   // act on. Forwarding "carry on with the next step" verbatim hands a stranger
   // an instruction with no referent.
   askAgent: delegateAuthor,
+  // One-way, and deliberately NOT the delegate door: nothing is recorded, nothing is
+  // waited on, and this session is never woken with an answer. What it does share is the
+  // shape — the source writes the summary, the target is created and given it.
+  handOver: handoverAuthor,
   // Authoring via /goal — length-gated. "Keep going" on the Agents card uses
   // createGoalActions → postSessionGoal directly so a pre-cap dump can resume.
   setGoal: postSessionGoalFromComposer,

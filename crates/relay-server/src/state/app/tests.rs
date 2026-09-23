@@ -32534,3 +32534,448 @@ AppState::resolve_session_target, or add them to EXEMPT with the reason:\n  {}",
         );
     }
 }
+
+/// `/handover`: one session writing up where its work stands and stepping away.
+#[cfg(test)]
+mod handover_tests {
+    use super::path_scope_tests::{build_app, grant_workspace, pair_device};
+    use crate::protocol::{StartSessionInput, TranscriptEntryKind};
+    use relay_api::handover::{HandoverError, HandoverRequest};
+    use tempfile::TempDir;
+
+    async fn session(app: &crate::state::AppState, cwd: &str, approval: &str) -> String {
+        app.start_session(StartSessionInput {
+            cwd: Some(cwd.to_string()),
+            provider: Some("fake".to_string()),
+            approval_policy: Some(approval.to_string()),
+            device_id: Some("dev".to_string()),
+            initial_prompt: None,
+            model: None,
+            effort: None,
+            project_id: None,
+            sandbox: None,
+        })
+        .await
+        .expect("session starts")
+        .active_thread_id
+        .clone()
+        .expect("thread")
+    }
+
+    fn request() -> HandoverRequest {
+        HandoverRequest {
+            provider: Some("fake".to_string()),
+            ..HandoverRequest::default()
+        }
+    }
+
+    /// Every message a thread was SENT, oldest first.
+    async fn received(app: &crate::state::AppState, thread_id: &str) -> Vec<String> {
+        let relay = app.relay.read().await;
+        relay
+            .runtime_for_thread(thread_id)
+            .map(|runtime| {
+                runtime
+                    .transcript
+                    .iter()
+                    .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+                    .filter_map(|entry| entry.text.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The same, once the row is actually there. A send returns as soon as the bridge has
+    /// the turn; the transcript row arrives with the provider's own event.
+    async fn delivered(app: &crate::state::AppState, thread_id: &str) -> Vec<String> {
+        for _ in 0..200 {
+            let messages = received(app, thread_id).await;
+            if !messages.is_empty() {
+                return messages;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("{thread_id} was never handed anything");
+    }
+
+    #[tokio::test]
+    async fn a_handover_starts_a_visible_target_and_hands_it_the_summary() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.create_project("proj-handover".to_string(), "Relay".to_string());
+            relay
+                .assign_thread_to_project(&source, "proj-handover")
+                .expect("the source is filed");
+        }
+
+        let target = app
+            .handover(&source, request())
+            .await
+            .expect("the handover goes through");
+        assert_ne!(target, source);
+
+        let relay = app.relay.read().await;
+        // Visible and navigation-neutral: a row and a runtime, and the person is still
+        // looking at the session they typed into.
+        assert!(
+            relay.threads.iter().any(|thread| thread.id == target),
+            "the continuation must be openable from the sidebar",
+        );
+        assert!(relay.runtime_for_thread(&target).is_some());
+        assert_eq!(
+            relay.thread_cwd(&target),
+            relay.thread_cwd(&source),
+            "the continuation runs in the same tree",
+        );
+        assert_eq!(
+            relay.project_for_thread(&target).map(|p| p.id.as_str()),
+            Some("proj-handover"),
+            "the work did not change project, so neither does the session doing it",
+        );
+        let settings = relay.thread_settings(&target).expect("settings");
+        assert_eq!(settings.approval_policy, "never", "inherited, not widened");
+        drop(relay);
+
+        let handed = delivered(&app, &target).await;
+        let message = handed.first().expect("the target was given something");
+        assert!(
+            message.contains("That work is now yours"),
+            "the target must be told to carry on: {message}"
+        );
+        assert!(
+            !message.contains("answer_ask"),
+            "a handover is one-way; nobody is waiting: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_source_writes_a_structured_summary_rather_than_the_note_being_forwarded() {
+        // The point of the command: what the target receives is written from the source's
+        // own context, under fixed headings. Forwarding "carry on with the parser" hands a
+        // stranger an instruction with no referent.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        let target = app
+            .handover(
+                &source,
+                HandoverRequest {
+                    note: "carry on with the parser".to_string(),
+                    ..request()
+                },
+            )
+            .await
+            .expect("the handover goes through");
+
+        let asked = received(&app, &source).await;
+        let prompt = asked
+            .last()
+            .expect("the source was asked to write the handover");
+        for heading in [
+            "Goal",
+            "Current state",
+            "Completed work",
+            "Remaining work",
+            "Key decisions and constraints",
+            "Files changed",
+            "Tests",
+            "Blockers and risks",
+        ] {
+            assert!(prompt.contains(heading), "missing `{heading}` in: {prompt}");
+        }
+        assert!(
+            prompt.contains("carry on with the parser"),
+            "the note steers the summary: {prompt}"
+        );
+
+        let handed = delivered(&app, &target).await;
+        let message = handed.first().expect("the target was given something");
+        assert!(
+            !message.starts_with("carry on with the parser"),
+            "the raw note is not the handover: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_note_is_a_complete_handover() {
+        // Unlike a delegate, where the draft IS the task. Here there is nothing the
+        // person has to supply, so refusing an empty one would refuse the normal case.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        app.handover(&source, request())
+            .await
+            .expect("nothing typed is still a handover");
+    }
+
+    #[tokio::test]
+    async fn an_existing_idle_session_takes_the_work_instead_of_a_new_one() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+        let existing = session(&app, &cwd, "never").await;
+        let before = app.relay.read().await.threads.len();
+
+        let target = app
+            .handover(
+                &source,
+                HandoverRequest {
+                    target_thread_id: Some(existing.clone()),
+                    ..request()
+                },
+            )
+            .await
+            .expect("an idle standalone session can take a handover");
+
+        assert_eq!(target, existing);
+        assert_eq!(
+            app.relay.read().await.threads.len(),
+            before,
+            "naming a session must not also start one",
+        );
+        let handed = delivered(&app, &existing).await;
+        assert!(
+            handed
+                .last()
+                .is_some_and(|message| message.contains("That work is now yours")),
+            "got: {handed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handing_work_to_yourself_is_refused_after_the_id_is_canonicalized() {
+        // Defense in depth behind the picker, which filters the source out of its own
+        // list: a caller that names the source by any of its ids must still be refused,
+        // which is why the check runs on the canonical id rather than the one supplied.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        let refused = app
+            .handover(
+                &source,
+                HandoverRequest {
+                    target_thread_id: Some(source.clone()),
+                    ..request()
+                },
+            )
+            .await
+            .expect_err("a session cannot hand its work to itself");
+        assert!(
+            refused.message().contains("yourself"),
+            "got: {}",
+            refused.message()
+        );
+        assert!(
+            received(&app, &source).await.is_empty(),
+            "a refusal must cost no turn at all",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_busy_or_non_standalone_target_is_refused_to_the_callers_face() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+        let target = session(&app, &cwd, "never").await;
+
+        // The Orchestrator is not an ordinary session and cannot be handed work.
+        {
+            let mut relay = app.relay.write().await;
+            relay.orchestrator_thread_id = Some(target.clone());
+        }
+        let refused = app
+            .handover(
+                &source,
+                HandoverRequest {
+                    target_thread_id: Some(target.clone()),
+                    ..request()
+                },
+            )
+            .await
+            .expect_err("the Orchestrator cannot take a handover");
+        assert!(
+            refused.message().contains("Orchestrator"),
+            "got: {}",
+            refused.message()
+        );
+
+        // …and one that does not exist is refused without confirming anything about it.
+        {
+            let mut relay = app.relay.write().await;
+            relay.orchestrator_thread_id = None;
+        }
+        let missing = app
+            .handover(
+                &source,
+                HandoverRequest {
+                    target_thread_id: Some("no-such-thread".to_string()),
+                    ..request()
+                },
+            )
+            .await
+            .expect_err("a thread that does not exist is not addressable");
+        assert!(
+            missing.message().contains("no such"),
+            "got: {}",
+            missing.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_target_allowed_to_do_more_than_the_source_is_refused() {
+        // Otherwise the ceiling is bypassed by NAMING a wider session instead of
+        // starting one: a restricted session hands its work to a bypass one and the
+        // work carries on with powers it never had.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "on-request").await;
+        let wider = session(&app, &cwd, "bypass").await;
+
+        let refused = app
+            .handover(
+                &source,
+                HandoverRequest {
+                    target_thread_id: Some(wider.clone()),
+                    ..request()
+                },
+            )
+            .await
+            .expect_err("a wider existing session cannot take the work");
+        assert!(
+            refused.message().contains("around your own permissions"),
+            "got: {}",
+            refused.message()
+        );
+        assert!(received(&app, &wider).await.is_empty());
+
+        // A session no wider than the source is fine, so this cannot pass by refusing
+        // every named target.
+        let peer = session(&app, &cwd, "on-request").await;
+        app.handover(
+            &source,
+            HandoverRequest {
+                target_thread_id: Some(peer.clone()),
+                ..request()
+            },
+        )
+        .await
+        .expect("an equally restricted session may take it");
+    }
+
+    #[tokio::test]
+    async fn a_target_outside_the_devices_scope_is_no_such_agent() {
+        // A session claim is not a path-scope grant. The refusal must not confirm the
+        // thread exists, exactly as the goal and delegate doors refuse.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let elsewhere = TempDir::new().expect("other tempdir");
+        let outside = elsewhere.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        grant_workspace(&app, &outside).await;
+        let source = session(&app, &cwd, "never").await;
+        let target = session(&app, &outside, "never").await;
+        pair_device(&app, "phone", vec![cwd.clone()]).await;
+
+        let refused = app
+            .handover(
+                &source,
+                HandoverRequest {
+                    target_thread_id: Some(target.clone()),
+                    device_id: Some("phone".to_string()),
+                    ..request()
+                },
+            )
+            .await
+            .expect_err("a target outside the device's scope must be refused");
+        assert_eq!(refused, HandoverError::NoSuchTarget);
+        assert!(
+            received(&app, &target).await.is_empty(),
+            "and nothing reaches it",
+        );
+
+        // The source being out of scope is refused the same way, and says nothing about
+        // the target either.
+        pair_device(&app, "other-phone", vec![outside.clone()]).await;
+        assert_eq!(
+            app.handover(
+                &source,
+                HandoverRequest {
+                    device_id: Some("other-phone".to_string()),
+                    ..request()
+                },
+            )
+            .await
+            .expect_err("the source is outside this device's scope"),
+            HandoverError::NoSuchSource,
+        );
+    }
+
+    #[tokio::test]
+    async fn a_handover_records_no_ask_and_never_wakes_the_source() {
+        // The whole point of the separation. A delegate records an `Ask`, the sweeper
+        // settles it, and the asker is woken with the answer — none of which may happen
+        // here, or the source is dragged back into work it has just handed away.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        let target = app
+            .handover(&source, request())
+            .await
+            .expect("the handover goes through");
+
+        assert!(
+            app.relay.read().await.asks.is_empty(),
+            "a handover is not an ask and must leave no record to settle",
+        );
+
+        // Let the target actually finish, then sweep with a clock far past every
+        // delegate timeout there is.
+        for _ in 0..60 {
+            let idle = {
+                let relay = app.relay.read().await;
+                relay
+                    .runtime_for_thread(&target)
+                    .is_some_and(|runtime| !runtime.is_working())
+            };
+            if idle {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let before = received(&app, &source).await.len();
+        app.settle_and_deliver_asks_at(crate::state::unix_now() + 365 * 24 * 60 * 60)
+            .await;
+
+        assert!(app.relay.read().await.asks.is_empty());
+        assert_eq!(
+            received(&app, &source).await.len(),
+            before,
+            "the source must not be woken with anything: {:?}",
+            received(&app, &source).await,
+        );
+    }
+}

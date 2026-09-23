@@ -2428,6 +2428,30 @@ export async function delegateRemote(threadId, args = {}) {
   }
 }
 
+// A person's `/handover`. One-way: the source writes up where the work stands and the
+// target carries on, so there is no answer to wait for and nothing comes back here.
+export async function handoverRemote(threadId, args = {}) {
+  if (!threadId) {
+    renderLog("No session to hand over.");
+    return false;
+  }
+  renderLog("Handing this work over…");
+  // Cleared as the attempt starts, not when it succeeds: a success clearing on its way
+  // out can erase a newer failure that landed while it was still in flight.
+  setComposerError(threadId, "");
+  try {
+    await dispatchOrRecover("handover", { thread_id: threadId, ...args });
+    await syncRemoteSnapshot("post-handover", true);
+    return true;
+  } catch (error) {
+    renderLog(`Remote handover failed: ${error.message}`);
+    // The log drawer this surface has is `display: none`, so without this the refusal
+    // has nowhere to land and Send reads as dead.
+    setComposerError(threadId, error.message);
+    return false;
+  }
+}
+
 export async function deleteRemoteReview(reviewId) {
   if (!reviewId) {
     renderLog("No review to delete.");

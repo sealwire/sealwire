@@ -382,6 +382,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
             post(confirm_orchestrator_proposal),
         )
         .route("/api/session/delegate", post(delegate_to_agent))
+        .route("/api/session/handover", post(hand_over_session))
         .route("/api/session/goal", post(set_session_goal))
         .route("/api/orchestrator/tools", get(list_orchestrator_tools))
         .route(
@@ -806,6 +807,24 @@ struct DelegateInput {
     effort: Option<String>,
 }
 
+/// `POST /api/session/handover` — one-way. Unlike a delegate there is no answer
+/// to wait for, so `note` may be empty: the summary is written from what the
+/// session already knows and the note only steers it.
+#[derive(serde::Deserialize)]
+struct HandoverInput {
+    thread_id: String,
+    #[serde(default)]
+    note: String,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+}
+
 #[derive(serde::Deserialize)]
 struct OrchestratorToolCallInput {
     #[serde(default)]
@@ -890,6 +909,43 @@ async fn delegate_to_agent(
         .map(|peer| {
             format!(
                 "Asked. That agent's id is {peer}; you will be sent its answer when it is done."
+            )
+        })
+        .map_err(|error| error.message());
+    Ok(Json(
+        crate::state::app::orchestrator_dispatch::tool_result_envelope(outcome),
+    ))
+}
+
+/// Accepted and answered as soon as the target exists, never held for the summary
+/// turn behind it. The delegate route does block on that turn, and its five-minute
+/// budget is five minutes of a composer that cannot say whether anything happened.
+async fn hand_over_session(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(input): Json<HandoverInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    let outcome = context
+        .app
+        .handover_detached(
+            &input.thread_id,
+            relay_api::handover::HandoverRequest {
+                target_thread_id: input.agent,
+                provider: input.provider,
+                model: input.model,
+                effort: input.effort,
+                note: input.note,
+                // Loopback callers carry no path scope to be checked against.
+                device_id: None,
+            },
+        )
+        .await
+        .map(|target| {
+            format!(
+                "Handing over. That agent's id is {target}; it is being given where the \
+work stands and will carry on from there."
             )
         })
         .map_err(|error| error.message());

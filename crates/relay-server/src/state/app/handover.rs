@@ -1,0 +1,544 @@
+//! Handing this session's work to another one, and stepping away from it.
+//!
+//! One-way, and that is the whole of the design. A delegate is a question: it
+//! records an `Ask`, the sweeper settles it, and the asker is woken with the
+//! answer. None of that happens here — nothing is recorded, nothing is swept,
+//! and the source is never woken. The source writes a summary of where the work
+//! stands, the target is given it, and the two sessions have nothing more to do
+//! with each other.
+//!
+//! What IS shared with delegation is the mechanism, not the lifecycle: the same
+//! idle wait, the same turn-terminal read, the same settings ceiling and the
+//! same existing-session admission rules.
+
+use relay_api::handover::{HandoverError, HandoverRequest};
+
+use super::super::delegation::{brief_from_reply, peer_is_wider_than_asker, peer_thread_settings};
+use super::delegation::BRIEF_WAIT_BUDGET;
+use crate::provider::StartThreadRequest;
+use crate::state::AppState;
+
+/// Appended to the summary the target is given.
+///
+/// Deliberately NOT `answer_instruction`: naming `answer_ask` here would tell an
+/// agent to report back to a session that is not waiting and will never be
+/// woken — and, worse, `answer_ask` finds its ask from the caller, so it would
+/// answer some unrelated delegate that happened to be open on that thread.
+fn continue_instruction() -> &'static str {
+    "\n\n---\nThat work is now yours. Nobody is waiting on a reply and there is \
+nothing to report back: carry on from where the handover leaves off and do what \
+is left, starting with the next action above. If something is unclear, decide it \
+yourself and say what you decided."
+}
+
+/// One sentence for every way the summary can fail to arrive. Which way it was is
+/// the relay's business, not the person's — what they do next is the same either way.
+fn no_summary_written() -> String {
+    "this session did not write the handover; try again once it is idle".to_string()
+}
+
+/// What the source session is asked to write.
+///
+/// The headings are fixed and stated in full, because the failure this exists to
+/// prevent is a summary that reads well and omits the one thing the next agent
+/// needed. Asking for "a summary" reliably produced a paragraph about what was
+/// done and nothing about what was left.
+fn handover_summary_prompt(note: &str) -> String {
+    let mut prompt = String::from(
+        "This work is being handed over to another agent, in a session that \
+cannot see any of this conversation. Write the handover itself — everything \
+that agent needs in order to pick the work up and carry it on.\n\n\
+Use these headings, and drop one only if there is genuinely nothing under it:\n\n\
+Goal — what this work is trying to achieve.\n\
+Current state — where things stand right now.\n\
+Completed work — what has already been done.\n\
+Remaining work — what is left, and the very next action to take.\n\
+Key decisions and constraints — what was decided and why, and what must not be \
+changed.\n\
+Files changed — the paths, and what changed in each.\n\
+Tests — what was run and what it said.\n\
+Blockers and risks — what is in the way, and what is likely to bite.\n\n\
+Be concrete: name files, commands, ids and symbols rather than writing \"this\", \
+\"the above\" or \"the next step\" — none of those have a referent in the session \
+that will read it. Do NOT do any of the remaining work now, and do not reply to \
+me: reply with the handover and nothing else.",
+    );
+    if !note.is_empty() {
+        prompt.push_str("\n\nThe person handing over added: ");
+        prompt.push_str(note);
+        prompt.push_str(
+            "\n\nLet that steer what you go into detail about. It adds to the \
+handover; it does not replace any of the headings.",
+        );
+    }
+    prompt
+}
+
+/// What the synchronous half established, so the background half re-reads only
+/// what could have changed while the summary was being written.
+struct PreparedHandover {
+    source_thread_id: String,
+    target_thread_id: String,
+    /// Whether this handover started the target itself. It decides how the target is
+    /// re-checked before delivery — see `deliver_handover`.
+    target_is_fresh: bool,
+    note: String,
+    /// The ceiling as it stood when the target was admitted or started. Re-read
+    /// before delivery: a narrowing inside that window has to bind the target.
+    source_approval: String,
+    source_sandbox: String,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+impl AppState {
+    /// Accept a handover now, write and deliver it in the background.
+    ///
+    /// Everything a person can act on is decided before this returns — the target
+    /// is validated or STARTED here — so a refusal reaches the composer they typed
+    /// into rather than a log. Only the summary turn, which is a real turn on a
+    /// real model, happens out of sight; and it happens in the source session, so
+    /// the person handing over watches it being written.
+    ///
+    /// Returns the target's thread id.
+    pub(crate) async fn handover_detached(
+        &self,
+        source_thread_id: &str,
+        mut request: HandoverRequest,
+    ) -> Result<String, HandoverError> {
+        let source_thread_id = self
+            .canonical_session_id(source_thread_id)
+            .await
+            .map_err(HandoverError::Failed)?;
+        if let Some(target) = request.target_thread_id.as_deref() {
+            request.target_thread_id = Some(
+                self.canonical_session_id(target)
+                    .await
+                    .map_err(HandoverError::Failed)?,
+            );
+        }
+        let prepared = self.prepare_handover(&source_thread_id, &request).await?;
+        let target_thread_id = prepared.target_thread_id.clone();
+
+        let app = self.clone();
+        let source = source_thread_id.clone();
+        let target = target_thread_id.clone();
+        tokio::spawn(async move {
+            if let Err(error) = app.deliver_handover(prepared).await {
+                app.push_runtime_log(
+                    "warn",
+                    format!(
+                        "The handover from {source} to {target} was not delivered: {}",
+                        error.message()
+                    ),
+                )
+                .await;
+            }
+        });
+        Ok(target_thread_id)
+    }
+
+    /// The whole thing in one call, for tests and for any caller that wants the
+    /// failure rather than a log line.
+    pub(crate) async fn handover(
+        &self,
+        source_thread_id: &str,
+        mut request: HandoverRequest,
+    ) -> Result<String, HandoverError> {
+        let source_thread_id = self
+            .canonical_session_id(source_thread_id)
+            .await
+            .map_err(HandoverError::Failed)?;
+        if let Some(target) = request.target_thread_id.as_deref() {
+            request.target_thread_id = Some(
+                self.canonical_session_id(target)
+                    .await
+                    .map_err(HandoverError::Failed)?,
+            );
+        }
+        let prepared = self.prepare_handover(&source_thread_id, &request).await?;
+        let target_thread_id = prepared.target_thread_id.clone();
+        self.deliver_handover(prepared).await?;
+        Ok(target_thread_id)
+    }
+
+    async fn prepare_handover(
+        &self,
+        source_thread_id: &str,
+        request: &HandoverRequest,
+    ) -> Result<PreparedHandover, HandoverError> {
+        let (cwd, approval, sandbox, provider, busy) = {
+            let relay = self.relay.read().await;
+            let cwd = relay
+                .thread_cwd(source_thread_id)
+                .ok_or(HandoverError::NoSuchSource)?;
+            // Scoped before anything else is read or confirmed: a device outside the
+            // scope must not learn either thread exists.
+            if let Some(device) = request.device_id.as_deref() {
+                super::goal::ensure_thread_in_device_scope(&relay, source_thread_id, Some(device))
+                    .map_err(|_| HandoverError::NoSuchSource)?;
+                if let Some(target) = request.target_thread_id.as_deref() {
+                    super::goal::ensure_thread_in_device_scope(&relay, target, Some(device))
+                        .map_err(|_| HandoverError::NoSuchTarget)?;
+                }
+            }
+            let settings = relay.thread_settings(source_thread_id);
+            let provider = relay
+                .runtime_for_thread(source_thread_id)
+                .and_then(|runtime| runtime.summary.as_ref())
+                .map(|summary| summary.provider.clone())
+                .filter(|provider| !provider.is_empty())
+                .or_else(|| relay.provider_hint_for_thread(source_thread_id))
+                .unwrap_or_default();
+            // A LIVE TURN, not `is_working()`: a deferred-start thread reads active with
+            // no turn behind it, and its session is created by the summary turn itself.
+            let busy = relay
+                .runtime_for_thread(source_thread_id)
+                .map(|runtime| runtime.has_live_turn())
+                .unwrap_or(false);
+            (
+                cwd,
+                settings
+                    .as_ref()
+                    .map(|s| s.approval_policy.clone())
+                    .unwrap_or_default(),
+                settings
+                    .as_ref()
+                    .map(|s| s.sandbox.clone())
+                    .unwrap_or_default(),
+                provider,
+                busy,
+            )
+        };
+
+        // Refused rather than queued, unlike a delegate. The person is sitting in the
+        // session they are handing over, so "not while it is mid-turn" is something
+        // they can act on now — and it is the one failure that would otherwise leave a
+        // freshly started target with nothing ever sent to it.
+        if busy {
+            return Err(HandoverError::Failed(
+                "this session is in the middle of a turn — hand it over once that has \
+finished"
+                    .to_string(),
+            ));
+        }
+
+        let (approval_policy, sandbox_policy) =
+            peer_thread_settings(&approval, &sandbox, None, None);
+        let (target_thread_id, target_is_fresh) = match request.target_thread_id.as_deref() {
+            Some(existing) => {
+                // The same admission the peer tool uses: not yourself, an ordinary
+                // standalone session, idle, and never wider than you are.
+                self.check_peer_is_askable(source_thread_id, existing, &approval, &sandbox)
+                    .await
+                    .map_err(handover_admission_error)?;
+                (existing.to_string(), false)
+            }
+            None => (
+                self.start_handover_thread(
+                    source_thread_id,
+                    &cwd,
+                    request,
+                    &approval_policy,
+                    &sandbox_policy,
+                    &provider,
+                )
+                .await?,
+                true,
+            ),
+        };
+
+        Ok(PreparedHandover {
+            source_thread_id: source_thread_id.to_string(),
+            target_thread_id,
+            target_is_fresh,
+            note: request.note.trim().to_string(),
+            source_approval: approval,
+            source_sandbox: sandbox,
+            model: request.model.clone(),
+            effort: request.effort.clone(),
+        })
+    }
+
+    /// Drive the summary turn on the source, then give it to the target.
+    async fn deliver_handover(&self, prepared: PreparedHandover) -> Result<(), HandoverError> {
+        let PreparedHandover {
+            source_thread_id,
+            target_thread_id,
+            target_is_fresh,
+            note,
+            source_approval,
+            source_sandbox,
+            model,
+            effort,
+        } = prepared;
+
+        // ONE budget for the whole handover: queueing behind a turn that started between
+        // the precheck and here, and waiting for our own, are the same person waiting.
+        let deadline = tokio::time::Instant::now() + BRIEF_WAIT_BUDGET;
+        self.wait_for_asker_idle(&source_thread_id, deadline)
+            .await
+            .map_err(|_| HandoverError::NoSuchSource)?;
+
+        // What it had already said, so a stale reply cannot be read as the handover.
+        let baseline = self
+            .latest_assistant_entry(&source_thread_id)
+            .await
+            .map(|(item_id, _)| item_id);
+
+        let dispatched = self
+            .send_message_to_thread(
+                &source_thread_id,
+                &handover_summary_prompt(&note),
+                None,
+                None,
+            )
+            .await
+            .map_err(|error| {
+                HandoverError::Failed(format!("could not ask for the handover: {error}"))
+            })?;
+
+        // An UNCERTAIN start: the provider may be working, but nothing it writes could
+        // be matched to what we asked, so there is no handover to wait for.
+        let Some(turn_id) = dispatched.turn_id.as_deref() else {
+            return Err(HandoverError::Failed(no_summary_written()));
+        };
+        match self
+            .wait_for_turn_terminal(&source_thread_id, turn_id, deadline)
+            .await
+        {
+            Some(crate::state::TurnOutcome::Completed) => {}
+            // Half a handover is not a shorter handover: the target would act on the
+            // part that happened to be written before the stop.
+            _ => return Err(HandoverError::Failed(no_summary_written())),
+        }
+
+        let entry = self
+            .assistant_entry_for_turn(&source_thread_id, turn_id)
+            .await;
+        let summary = brief_from_reply(entry, baseline.as_deref(), Some(turn_id))
+            .ok_or_else(|| HandoverError::Failed(no_summary_written()))?;
+
+        // Re-checked against the settings as they are NOW, not as the precheck saw them:
+        // writing the handover takes minutes, and a narrowing inside that window must
+        // bind the target. The target was admitted or started before the turn, so this
+        // is the only place that can catch it.
+        let (approval_now, sandbox_now) = {
+            let relay = self.relay.read().await;
+            let settings = relay.thread_settings(&source_thread_id);
+            (
+                settings
+                    .as_ref()
+                    .map(|s| s.approval_policy.clone())
+                    .unwrap_or(source_approval),
+                settings
+                    .as_ref()
+                    .map(|s| s.sandbox.clone())
+                    .unwrap_or(source_sandbox),
+            )
+        };
+        if target_is_fresh {
+            // Only the ceiling, deliberately. This session was started by this handover
+            // minutes ago and nobody else has it; re-running the whole admission would
+            // race its own start, where a provider that has not yet reported idle reads
+            // as busy and the handover would be dropped for no reason.
+            let (target_approval, target_sandbox) = {
+                let relay = self.relay.read().await;
+                let settings = relay.thread_settings(&target_thread_id);
+                (
+                    settings
+                        .as_ref()
+                        .map(|s| s.approval_policy.clone())
+                        .unwrap_or_default(),
+                    settings
+                        .as_ref()
+                        .map(|s| s.sandbox.clone())
+                        .unwrap_or_default(),
+                )
+            };
+            if peer_is_wider_than_asker(
+                &approval_now,
+                &sandbox_now,
+                &target_approval,
+                &target_sandbox,
+            ) {
+                return Err(HandoverError::Failed(
+                    "this session was narrowed while the handover was being written, so the \
+agent it was going to is now allowed to do more than you are"
+                        .to_string(),
+                ));
+            }
+        } else {
+            // Somebody else's session: it may have been picked up, locked into a review,
+            // or widened since it was admitted.
+            self.check_peer_is_askable(
+                &source_thread_id,
+                &target_thread_id,
+                &approval_now,
+                &sandbox_now,
+            )
+            .await
+            .map_err(handover_admission_error)?;
+        }
+
+        self.send_message_to_thread(
+            &target_thread_id,
+            &format!("{summary}{}", continue_instruction()),
+            model.as_deref(),
+            effort.as_deref(),
+        )
+        .await
+        .map_err(|error| HandoverError::Failed(error.to_string()))?;
+        Ok(())
+    }
+
+    /// Start the session the work is being handed to.
+    ///
+    /// Visible in the sidebar and navigation-neutral, like a peer: the point is that
+    /// the person can open it and watch it carry on. It inherits the source's
+    /// directory, its project, and a ceiling it can never exceed.
+    async fn start_handover_thread(
+        &self,
+        source_thread_id: &str,
+        cwd: &str,
+        request: &HandoverRequest,
+        approval_policy: &str,
+        sandbox: &str,
+        source_provider: &str,
+    ) -> Result<String, HandoverError> {
+        let (provider_name, bridge) = {
+            let wanted = request
+                .provider
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_string)
+                // Unlike a delegate, which prefers a DIFFERENT agent because a second
+                // opinion from the same model is worth less: a handover is the same work
+                // carrying on, so the same kind of agent is the neutral choice.
+                .or_else(|| Some(source_provider.to_string()).filter(|name| !name.is_empty()));
+            let (name, bridge) = self
+                .resolve_provider(wanted.as_deref())
+                .map_err(HandoverError::Failed)?;
+            (name.to_string(), bridge.clone())
+        };
+        let provider_models = self
+            .load_provider_model_catalog(&provider_name, &bridge)
+            .await;
+        let model = super::resolve_provider_model(
+            &provider_name,
+            &provider_models,
+            request.model.clone(),
+            super::PROVIDER_DEFAULT_MODEL.to_string(),
+        );
+        let effort = request.effort.clone().unwrap_or_default();
+
+        let start = self
+            .start_provider_thread(
+                &provider_name,
+                &bridge,
+                StartThreadRequest::new(cwd, &model, approval_policy, sandbox).with_effort(&effort),
+            )
+            .await
+            .map_err(HandoverError::Failed)?;
+        let thread = start.result.thread;
+        let target_thread_id = start.identity.session_id;
+
+        {
+            let mut relay = self.relay.write().await;
+            // Nav-neutral: it adds the row and a runtime and nothing else. Never the
+            // reviewer set — a handover target writes code, and everything in that set
+            // is assumed read-only by the workspace concurrency guard.
+            relay.register_background_thread(
+                thread,
+                cwd,
+                &model,
+                approval_policy,
+                sandbox,
+                &effort,
+            );
+            // The work has not changed project, so neither has the session doing it.
+            // Without this the continuation appears under "Unassigned" and drops out of
+            // the filter the person was working in.
+            if let Some(project_id) = relay
+                .project_for_thread(source_thread_id)
+                .map(|project| project.id.clone())
+            {
+                let _ = relay.assign_thread_to_project(&target_thread_id, &project_id);
+                relay.bump_projects_revision();
+            }
+            relay.push_log(
+                "info",
+                format!("Handing this work to a {provider_name} agent in {cwd}."),
+            );
+            relay.notify();
+        }
+        Ok(target_thread_id)
+    }
+}
+
+/// Delegation's admission answers in its own vocabulary; a handover shows these
+/// straight to the person who typed the command, so only the "no such thread"
+/// shape needs translating.
+fn handover_admission_error(error: relay_api::delegation::AskError) -> HandoverError {
+    match error {
+        relay_api::delegation::AskError::NoSuchPeer => HandoverError::NoSuchTarget,
+        relay_api::delegation::AskError::NoSuchAsker => HandoverError::NoSuchSource,
+        other => HandoverError::Failed(other.message()),
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn the_summary_prompt_asks_for_every_section_a_stranger_needs() {
+        // The failure this replaced: "summarise the work" reliably produced what was
+        // DONE and nothing about what was left, which is the only part the next agent
+        // cannot reconstruct by reading the tree.
+        let prompt = handover_summary_prompt("");
+        for heading in [
+            "Goal",
+            "Current state",
+            "Completed work",
+            "Remaining work",
+            "Key decisions and constraints",
+            "Files changed",
+            "Tests",
+            "Blockers and risks",
+        ] {
+            assert!(prompt.contains(heading), "missing `{heading}`: {prompt}");
+        }
+        assert!(
+            prompt.contains("next action"),
+            "the next action is the one thing a handover is for"
+        );
+        assert!(
+            prompt.contains("Do NOT do any of the remaining work now"),
+            "left vague, models start solving the problem in this turn"
+        );
+    }
+
+    #[test]
+    fn a_note_steers_the_handover_instead_of_replacing_it() {
+        let prompt = handover_summary_prompt("mind the retry loop");
+        assert!(prompt.contains("mind the retry loop"));
+        assert!(
+            prompt.contains("it does not replace any of the headings"),
+            "a note must not be read as the whole brief"
+        );
+        // …and an empty one adds nothing at all, rather than an empty quotation.
+        assert!(!handover_summary_prompt("").contains("The person handing over added"));
+    }
+
+    #[test]
+    fn the_target_is_never_told_to_answer_anybody() {
+        // A handover is one-way. `answer_ask` finds its ask FROM THE CALLER, so an
+        // instruction to call it would answer whatever unrelated delegate happened to
+        // be open on that thread — and the source is never woken either way.
+        let instruction = continue_instruction();
+        assert!(!instruction.contains("answer_ask"), "{instruction}");
+        assert!(instruction.contains("Nobody is waiting on a reply"));
+        assert!(instruction.contains("carry on"));
+    }
+}

@@ -262,6 +262,23 @@ pub(super) enum RemoteActionRequest {
         #[serde(default)]
         device_id: Option<String>,
     },
+    /// `/handover` from a phone. One-way, so unlike `Delegate` there is no message
+    /// to insist on: `note` only steers a summary the source writes for itself.
+    Handover {
+        thread_id: String,
+        #[serde(default)]
+        note: String,
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        effort: Option<String>,
+        #[serde(default)]
+        device_id: Option<String>,
+    },
     SetGoal {
         thread_id: String,
         objective: String,
@@ -329,6 +346,7 @@ impl RemoteActionRequest {
             Self::ResolveWorkflow { .. } => RemoteActionKind::ResolveWorkflow,
             Self::DeleteReview { .. } => RemoteActionKind::DeleteReview,
             Self::Delegate { .. } => RemoteActionKind::Delegate,
+            Self::Handover { .. } => RemoteActionKind::Handover,
             Self::SetGoal { .. } => RemoteActionKind::SetGoal,
             Self::StopGoal { .. } => RemoteActionKind::StopGoal,
             Self::RegisterPushSubscription { .. } => RemoteActionKind::RegisterPushSubscription,
@@ -540,6 +558,23 @@ impl RemoteActionRequest {
                 effort,
                 device_id: Some(device_id),
             },
+            Self::Handover {
+                thread_id,
+                note,
+                agent,
+                provider,
+                model,
+                effort,
+                ..
+            } => Self::Handover {
+                thread_id,
+                note,
+                agent,
+                provider,
+                model,
+                effort,
+                device_id: Some(device_id),
+            },
             Self::SetGoal {
                 thread_id,
                 objective,
@@ -610,6 +645,7 @@ pub(super) enum RemoteActionKind {
     ResolveWorkflow,
     DeleteReview,
     Delegate,
+    Handover,
     SetGoal,
     StopGoal,
     RegisterPushSubscription,
@@ -659,6 +695,7 @@ impl RemoteActionKind {
             Self::ResolveWorkflow => "resolve_workflow",
             Self::DeleteReview => "delete_review",
             Self::Delegate => "delegate",
+            Self::Handover => "handover",
             Self::SetGoal => "set_goal",
             Self::StopGoal => "stop_goal",
             Self::RegisterPushSubscription => "register_push_subscription",
@@ -1714,6 +1751,32 @@ async fn execute_remote_action(
             .await
             .map(|_| RemoteActionOutcome::default())
             .map_err(|error| error.message()),
+        // A person typing `/handover` on a phone. The summary is written by the SOURCE
+        // session and nothing is handed back, so unlike a delegate this records no ask
+        // and the source is never woken.
+        RemoteActionRequest::Handover {
+            thread_id,
+            note,
+            agent,
+            provider,
+            model,
+            effort,
+            device_id,
+        } => state
+            .handover_detached(
+                &thread_id,
+                relay_api::handover::HandoverRequest {
+                    device_id: Some(device_id.ok_or_else(|| "missing device id".to_string())?),
+                    target_thread_id: agent,
+                    provider,
+                    model,
+                    effort,
+                    note,
+                },
+            )
+            .await
+            .map(|_| RemoteActionOutcome::default())
+            .map_err(|error| error.message()),
         // The objective is written whole, never merged: re-sending the same one is how a
         // stopped goal resumes, and how "not done — keep going" answers a completion claim.
         RemoteActionRequest::SetGoal {
@@ -1813,6 +1876,7 @@ fn requires_session_claim(action: RemoteActionKind) -> bool {
             // The stop too: unlike `stop_turn` it settles the goal Cancelled and takes the
             // card away, so an unclaimed device could erase the controller's objective.
             | RemoteActionKind::Delegate
+            | RemoteActionKind::Handover
             | RemoteActionKind::SetGoal
             | RemoteActionKind::StopGoal
     )
@@ -3250,6 +3314,7 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         | RemoteActionKind::ResolveWorkflow
         | RemoteActionKind::DeleteReview
         | RemoteActionKind::Delegate
+        | RemoteActionKind::Handover
         | RemoteActionKind::SetGoal
         | RemoteActionKind::StopGoal
         | RemoteActionKind::RegisterPushSubscription

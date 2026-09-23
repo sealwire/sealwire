@@ -38,6 +38,7 @@ export function createRemoteComposerCommandActions({
   setGoal,
   stopGoal,
   delegate,
+  handover,
   // The phone's log drawer is `display: none` and nothing opens it, so unlike the
   // desktop there is no second channel: without this a refusal lands nowhere.
   setComposerError = () => {},
@@ -70,5 +71,6 @@ export function createRemoteComposerCommandActions({
       return settledGoal(() => setGoal(threadId, prepared.objective), report);
     },
     askAgent: (threadId, args) => settledSelfReporting(() => delegate(threadId, args)),
+    handOver: (threadId, args) => settledSelfReporting(() => handover(threadId, args)),
   };
 }

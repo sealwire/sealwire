@@ -248,3 +248,82 @@ test("a refusal that never reaches the relay does not supersede the card", async
 
   assert.deepEqual(began, []);
 });
+
+// `/handover` is its own relay door, so it is its own capability: wiring it to the
+// delegate one would send a one-way handover down a path that records an ask and wakes
+// this session back up with an "answer" nobody asked for.
+test("handover forwards every field the command collected, note included", async () => {
+  const handover = spy();
+  const actions = createRemoteComposerCommandActions({
+    setGoal: spy(),
+    stopGoal: spy(),
+    delegate: spy(),
+    handover,
+  });
+
+  await actions.handOver("thread-1", {
+    note: "mind the parser",
+    agent: "peer-7",
+    provider: "codex",
+    model: "gpt-5.6",
+    effort: "xhigh",
+  });
+
+  assert.deepEqual(handover.calls, [
+    [
+      "thread-1",
+      {
+        note: "mind the parser",
+        agent: "peer-7",
+        provider: "codex",
+        model: "gpt-5.6",
+        effort: "xhigh",
+      },
+    ],
+  ]);
+});
+
+test("an empty note still reaches the relay, because that is the ordinary handover", async () => {
+  const handover = spy();
+  const delegate = spy();
+  const actions = createRemoteComposerCommandActions({
+    setGoal: spy(),
+    stopGoal: spy(),
+    delegate,
+    handover,
+  });
+
+  await actions.handOver("thread-1", { note: "" });
+
+  assert.deepEqual(handover.calls, [["thread-1", { note: "" }]]);
+  assert.equal(delegate.calls.length, 0, "a handover must not go out as a delegate");
+});
+
+test("a refused handover comes back as an error so the draft is not cleared", async () => {
+  const actions = createRemoteComposerCommandActions({
+    setGoal: spy(),
+    stopGoal: spy(),
+    delegate: spy(),
+    handover: spy(false),
+  });
+
+  const answer = await actions.handOver("t", { note: "" });
+  assert.equal(answer.isError, true);
+  // It renders its own reason as it fails, so repeating it would say it twice.
+  assert.equal(answer.text, "");
+});
+
+test("a thrown transport failure during a handover is an error, not a crash", async () => {
+  const actions = createRemoteComposerCommandActions({
+    setGoal: spy(),
+    stopGoal: spy(),
+    delegate: spy(),
+    handover: async () => {
+      throw new Error("broker is down");
+    },
+  });
+
+  const answer = await actions.handOver("t", { note: "" });
+  assert.equal(answer.isError, true);
+  assert.match(answer.text, /broker is down/);
+});

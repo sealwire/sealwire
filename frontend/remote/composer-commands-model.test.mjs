@@ -11,7 +11,11 @@ function model(overrides = {}) {
     requestReview: async () => {},
     hold: () => {},
     log: () => {},
-    actions: { setGoal: async () => ({}), askAgent: async () => ({}) },
+    actions: {
+      setGoal: async () => ({}),
+      askAgent: async () => ({}),
+      handOver: async () => ({}),
+    },
     ...overrides,
   });
 }
@@ -34,6 +38,7 @@ test("the model answers every capability the host forwards", () => {
 test("the capability list is the host's, not a second copy that can drift", () => {
   assert.ok(CONTROLLER_CAPABILITIES.includes("log"));
   assert.ok(CONTROLLER_CAPABILITIES.includes("askAgent"));
+  assert.ok(CONTROLLER_CAPABILITIES.includes("handOver"));
   assert.ok(CONTROLLER_CAPABILITIES.includes("setGoal"));
   assert.ok(CONTROLLER_CAPABILITIES.includes("hold"));
 });

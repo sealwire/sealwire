@@ -302,6 +302,7 @@ mod delegation;
 mod fork;
 mod git_context;
 mod goal;
+mod handover;
 mod orchestrator;
 pub(crate) mod orchestrator_dispatch;
 pub(crate) mod orchestrator_proposals;

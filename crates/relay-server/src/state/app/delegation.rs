@@ -43,7 +43,7 @@ that asked you needs to know — it is still waiting."
 /// How long to wait for a brief before giving up. Generous: writing a brief is a
 /// real turn on a real model. It is the only bound — there is no shorter guess about
 /// when a turn is "probably done" that would be anything but a narrower race.
-const BRIEF_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(300);
+pub(super) const BRIEF_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// One sentence for every way a brief can fail to arrive. Which way it was is the
 /// relay's business, not the person's — the answer is the same either way.
@@ -522,7 +522,7 @@ Carry on with one of those instead of bringing in another."
     /// This waited on idleness, which arrives early in the gap every bridge leaves
     /// between clearing its live marker and writing the turn's last rows — and read a
     /// previous turn's reply there. A terminal is published after those rows.
-    async fn wait_for_turn_terminal(
+    pub(super) async fn wait_for_turn_terminal(
         &self,
         thread_id: &str,
         turn_id: &str,
@@ -561,7 +561,7 @@ Carry on with one of those instead of bringing in another."
     ///
     /// `deadline` is the delegate's ONE budget, shared with the turn that follows: both are
     /// the same person waiting for the same answer, and the desktop route blocks on it.
-    async fn wait_for_asker_idle(
+    pub(super) async fn wait_for_asker_idle(
         &self,
         thread_id: &str,
         deadline: tokio::time::Instant,
@@ -660,7 +660,7 @@ write the brief — try again once it is done"
     /// agent would take an hour to rebuild. What is not fair game is a session
     /// somebody is in the middle of using, or one that is not an ordinary
     /// standalone agent (Orchestrator, retained Task seat, reviewer, Code Flow).
-    async fn check_peer_is_askable(
+    pub(super) async fn check_peer_is_askable(
         &self,
         asker_thread_id: &str,
         peer_thread_id: &str,
