@@ -8157,12 +8157,12 @@ see — a device can share the TARGET's workspace without sharing that source's:
         .expect("a settled handover holds nothing");
 }
 
-// Outcomes are durable until they are READ, so unread ones can pile up if nobody looks.
-// The cap still has to hold — but an unread failure is the one record whose entire
-// purpose is to be shown, so it is NOT the thing that gives way. Only spent ones are
-// prunable; the cap is held at the other end, by refusing a new handover.
+// Outcomes are durable until they are READ, so unread ones pile up if nobody looks. The
+// cap still has to hold — but an unread failure is the one record whose whole purpose is
+// to be shown, so it is not the thing that gives way. The reservation refuses instead,
+// and only spent outcomes are prunable.
 #[test]
-fn making_room_never_touches_an_outcome_nobody_has_read() {
+fn a_full_quota_refuses_the_next_handover_and_forgets_nothing_unread() {
     let mut relay = test_state();
     let record = |id: &str, acknowledged: bool| {
         let mut handover = crate::state::Handover::new(
@@ -8177,38 +8177,28 @@ fn making_room_never_touches_an_outcome_nobody_has_read() {
         handover.acknowledged = acknowledged;
         handover
     };
-    for index in 0..80 {
-        relay
-            .reserve_handover(record(&format!("read-{index:03}"), true))
-            .expect("distinct targets");
-    }
-    relay
-        .reserve_handover(record("unread-1", false))
-        .expect("distinct target");
-    // Read ones are spent, so they are what gives way.
-    assert!(relay.handovers.len() <= 64);
-
-    for index in 0..200 {
+    let quota = crate::state::RelayState::handover_quota_per_actor();
+    for index in 0..quota {
         relay
             .reserve_handover(record(&format!("unread-{index:03}"), false))
-            .expect("reserved");
+            .expect("up to the quota is fine");
     }
-    assert!(
-        relay.handover("unread-1").is_some(),
-        "an unseen failure is never dropped to make room — a log drawer is not a channel \
-the person reads, and losing it here is exactly the false success this record exists to \
-make impossible",
-    );
-    assert_eq!(
-        relay.unread_handover_pressure(),
-        relay.handovers.len(),
-        "everything still held is held because somebody has yet to see it",
-    );
-    assert!(
-        !relay
-            .logs
-            .iter()
-            .any(|entry| entry.message.contains("never read")),
-        "and nothing was quietly written off to the log",
-    );
+
+    let refused = relay
+        .reserve_handover(record("one-too-many", false))
+        .expect_err("the quota is enforced in the write that takes the slot");
+    assert!(refused.contains("have not read"), "{refused}");
+    for index in 0..quota {
+        assert!(
+            relay.handover(&format!("unread-{index:03}")).is_some(),
+            "unread-{index:03} was dropped to make room, which is the false success this \
+record exists to prevent",
+        );
+    }
+
+    // Reading one gives the slot back — and a read outcome IS prunable, unlike an unread.
+    relay.update_handover("unread-000", |handover| handover.acknowledged = true);
+    relay
+        .reserve_handover(record("now-there-is-room", false))
+        .expect("reading one frees a slot");
 }

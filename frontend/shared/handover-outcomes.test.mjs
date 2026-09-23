@@ -103,16 +103,21 @@ test("every failure on one thread is shown together, and none is consumed unseen
   );
 });
 
-test("a reason that would not fit is promised, not summarised away", () => {
-  // The line says how many are still coming rather than writing them off, because the
-  // caller acknowledges exactly what the line said — so "…and 2 more" must read as a
-  // promise the person will see them, not as a receipt for having seen them.
+test("every reason is on the line — none is reduced to a count", () => {
+  // Paging was the wrong answer to a long line. Acknowledging the first few changes the
+  // revision, the automatic refetch renders the next few over the top, and the earlier
+  // ones flash past on ONE continuous view — so the promise of a second visit was a
+  // promise this code never kept. Nothing here is user-driven, so nothing here may
+  // assume the person will come back.
   const many = Array.from({ length: 5 }, (_, index) =>
-    failure(`handover-${index}`, "thread-a", `reason ${index}`, index)
+    failure(`handover-${index}`, "thread-a", `reason number ${index}`, index)
   );
   const message = handoverFailureText(many);
   assert.match(message, /^5 handovers did not finish/);
-  assert.match(message, /2 more will follow once you have read these/);
+  for (let index = 0; index < 5; index += 1) {
+    assert.ok(message.includes(`reason number ${index}`), `reason ${index} is missing`);
+  }
+  assert.doesNotMatch(message, /more will follow|and \d+ more/);
 });
 
 test("failures on different threads each get their own line", () => {
@@ -252,7 +257,10 @@ test("an outcome served on ReviewsResponse survives the cache and reaches the co
 // handover outcome — the composer line is the whole of it — so an id represented only by
 // "…and 2 more" and then acknowledged is a failure consumed unseen, which is the exact
 // invariant this lifecycle exists to hold.
-test("only the failures whose reason was on the line are acknowledged", () => {
+test("nothing is acknowledged whose reason was not on the line", () => {
+  // The invariant, stated as a property rather than as a count: whatever was consumed,
+  // the person read the reason for it. There is no panel and no detail route, so an id
+  // acknowledged without its reason on screen is one nobody can ever find out about.
   const h = harness();
   const group = [1, 2, 3, 4, 5].map((n) =>
     failure(`handover-${n}`, "thread-a", `reason number ${n}`, 10 - n)
@@ -260,6 +268,7 @@ test("only the failures whose reason was on the line are acknowledged", () => {
 
   h.sync(group, { viewedThreadId: "thread-a" });
 
+  assert.equal(h.reported.length, 1, "one stable line, not a sequence of them");
   const line = h.reported[0][1];
   for (const id of h.acked) {
     const spoken = group.find((entry) => entry.id === id);
@@ -268,36 +277,56 @@ test("only the failures whose reason was on the line are acknowledged", () => {
       `${id} was acknowledged but its reason (${spoken.error}) was never on the line`
     );
   }
-  assert.ok(h.acked.length >= 1 && h.acked.length < group.length, "some are held back");
-  assert.match(line, /will follow once you have read these/, "and the person is told so");
+  assert.deepEqual(
+    h.acked.slice().sort(),
+    group.map((entry) => entry.id).sort(),
+    "and all five were on it, so all five are consumed in one go"
+  );
 });
 
-test("the failures held back are rendered on the next pass, and only then acknowledged", () => {
-  // The loop has to terminate: acknowledging the spoken ones takes them out of the
-  // relay's feed, so the remainder becomes the whole of the next line.
+// The effect a paging design actually had, spelled out through the real cache and the
+// real revision key: acking the first few moves the revision, the refetch lands, and a
+// second line replaces the first while the person is still reading it. The line must be
+// written ONCE and then stay put.
+test("five failures land as one stable line no automatic follow-up overwrites", async () => {
+  const { createReviewsCache } = await import("./reviews-cache.js");
+  const cache = createReviewsCache();
   const h = harness();
   const group = [1, 2, 3, 4, 5].map((n) =>
     failure(`handover-${n}`, "thread-a", `reason number ${n}`, 10 - n)
   );
 
-  h.sync(group, { viewedThreadId: "thread-a" });
-  const firstRound = h.acked.slice();
-  const remaining = group.filter((entry) => !firstRound.includes(entry.id));
-  assert.ok(remaining.length > 0);
+  const served = () => group.filter((entry) => !h.acked.includes(entry.id));
+  const fetchReviews = async () => ({
+    reviews_revision: 40 + h.acked.length,
+    review_jobs: [],
+    reviewer_threads: [],
+    asks: [],
+    goals: [],
+    handovers: served(),
+  });
 
-  // The relay now serves only what is left.
-  h.sync(remaining, { viewedThreadId: "thread-a" });
+  // The person is on the source thread and stays there, which is precisely the case
+  // paging could not survive.
+  await cache.sync(40, fetchReviews, () => {});
+  h.sync(cache.current().handovers, { viewedThreadId: "thread-a" });
 
-  const secondLine = h.reported.at(-1)[1];
-  for (const entry of remaining) {
-    assert.ok(
-      secondLine.includes(entry.error),
-      `${entry.id}'s reason never reached the person: ${secondLine}`
-    );
+  // Whatever the ack changed, the surface refetches and syncs again — many times, as it
+  // does on every render.
+  for (const revision of [41, 42, 43, 44, 45]) {
+    await cache.sync(revision, fetchReviews, () => {});
+    h.sync(cache.current().handovers, { viewedThreadId: "thread-a" });
   }
-  assert.deepEqual(
-    h.acked.slice().sort(),
-    group.map((entry) => entry.id).sort(),
-    "and every one of them is consumed, none left stranded"
+
+  assert.equal(
+    h.reported.length,
+    1,
+    `the line was rewritten ${h.reported.length} times; earlier reasons flashed past`
   );
+  const line = h.reported[0][1];
+  for (let n = 1; n <= 5; n += 1) {
+    assert.ok(line.includes(`reason number ${n}`), `reason ${n} never reached the person`);
+  }
+  assert.equal(h.acked.length, 5, "and all five are settled, none left stranded");
+  assert.deepEqual(served(), [], "the relay is holding nothing back");
 });

@@ -89,6 +89,12 @@ struct PreparedHandover {
     source_sandbox: String,
     model: Option<String>,
     effort: Option<String>,
+    /// What starting a fresh target needs, read while the source was validated so the
+    /// start itself holds no lock.
+    cwd: String,
+    approval_policy: String,
+    sandbox_policy: String,
+    provider: String,
 }
 
 /// How long to keep trying for the drive gate before giving up on delivery.
@@ -195,15 +201,16 @@ impl AppState {
                     .map_err(HandoverError::Failed)?,
             );
         }
-        let prepared = self.prepare_handover(&source_thread_id, &request).await?;
+        let mut prepared = self.prepare_handover(&source_thread_id, &request).await?;
 
         let handover_id = new_handover_id();
         {
-            // The reservation, the "is anyone else already going there" check and the
-            // activity reading are ONE write. Two handovers aimed at the same idle
-            // session both pass admission before either starts, and the loser would
-            // deliver into a session the winner is about to fill; and a fingerprint read
-            // outside this lock could already be a turn stale.
+            // The quota, the "is anyone else already going there" check and the activity
+            // reading are ONE write, and they come BEFORE anything is started. Two
+            // handovers aimed at the same idle session both pass admission before either
+            // begins, and the loser would deliver into a session the winner is about to
+            // fill; a fingerprint read outside this lock could already be a turn stale;
+            // and a quota read outside it is advisory, which is no quota at all.
             let mut relay = self.relay.write().await;
             let record = crate::state::Handover::new(
                 handover_id.clone(),
@@ -217,6 +224,37 @@ impl AppState {
                 .reserve_handover(record)
                 .map_err(HandoverError::Failed)?;
             relay.notify();
+        }
+
+        if prepared.target_is_fresh {
+            // The slot is ours, so the session this creates is accounted for whatever
+            // happens next. A start that fails gives the slot straight back rather than
+            // leaving the person charged for a refusal they are being told to their face.
+            match self
+                .start_handover_thread(
+                    &source_thread_id,
+                    &prepared.cwd,
+                    &request,
+                    &prepared.approval_policy,
+                    &prepared.sandbox_policy,
+                    &prepared.provider,
+                )
+                .await
+            {
+                Ok(target_thread_id) => {
+                    let mut relay = self.relay.write().await;
+                    let activity = target_activity(&relay, &target_thread_id);
+                    relay.bind_handover_target(&handover_id, target_thread_id.clone(), activity);
+                    relay.notify();
+                    prepared.target_thread_id = target_thread_id;
+                }
+                Err(error) => {
+                    let mut relay = self.relay.write().await;
+                    relay.release_handover(&handover_id);
+                    relay.notify();
+                    return Err(error);
+                }
+            }
         }
         Ok((handover_id, prepared))
     }
@@ -364,22 +402,6 @@ or hand over again"
             )
         };
 
-        // Before anything is STARTED. An outcome nobody has read may not be dropped to
-        // make room — that is the false success this whole lifecycle exists to prevent —
-        // so the cap is held here instead, where refusing costs nothing. Doing it after
-        // the target was started would leave a session behind with no record naming it.
-        {
-            let relay = self.relay.read().await;
-            let waiting = relay.unread_handover_pressure();
-            if waiting >= crate::state::RelayState::handover_capacity() {
-                return Err(HandoverError::Failed(format!(
-                    "there are already {waiting} handovers whose outcome nobody has read, \
-which is as many as this relay will hold. Open those sessions to read what happened, \
-then hand over again."
-                )));
-            }
-        }
-
         // Refused rather than queued, unlike a delegate. The person is sitting in the
         // session they are handing over, so "not while it is mid-turn" is something
         // they can act on now — and it is the one failure that would otherwise leave a
@@ -394,44 +416,37 @@ finished"
 
         let (approval_policy, sandbox_policy) =
             peer_thread_settings(&approval, &sandbox, None, None);
-        let (target_thread_id, target_is_fresh) = match request.target_thread_id.as_deref() {
-            Some(existing) => {
-                // The same admission the peer tool uses: not yourself, an ordinary
-                // standalone session, idle, and never wider than you are.
-                self.check_peer_is_askable(
-                    source_thread_id,
-                    existing,
-                    &approval,
-                    &sandbox,
-                    PeerLiveness::AnySignOfWork,
-                )
-                .await
-                .map_err(handover_admission_error)?;
-                (existing.to_string(), false)
-            }
-            None => (
-                self.start_handover_thread(
-                    source_thread_id,
-                    &cwd,
-                    request,
-                    &approval_policy,
-                    &sandbox_policy,
-                    &provider,
-                )
-                .await?,
-                true,
-            ),
-        };
+        // Validated, NOT started. Starting a session is the one thing here with a
+        // consequence outside the relay, so it happens only once the slot that accounts
+        // for it is owned — otherwise several requests at the last free slot each leave
+        // a visible provider session behind and only one of them is ever recorded.
+        if let Some(existing) = request.target_thread_id.as_deref() {
+            // The same admission the peer tool uses: not yourself, an ordinary
+            // standalone session, idle, and never wider than you are.
+            self.check_peer_is_askable(
+                source_thread_id,
+                existing,
+                &approval,
+                &sandbox,
+                PeerLiveness::AnySignOfWork,
+            )
+            .await
+            .map_err(handover_admission_error)?;
+        }
 
         Ok(PreparedHandover {
             source_thread_id: source_thread_id.to_string(),
-            target_thread_id,
-            target_is_fresh,
+            target_thread_id: request.target_thread_id.clone().unwrap_or_default(),
+            target_is_fresh: request.target_thread_id.is_none(),
             note: request.note.trim().to_string(),
             source_approval: approval,
             source_sandbox: sandbox,
             model: request.model.clone(),
             effort: request.effort.clone(),
+            cwd,
+            approval_policy,
+            sandbox_policy,
+            provider,
         })
     }
 
@@ -450,6 +465,7 @@ finished"
             source_sandbox,
             model,
             effort,
+            ..
         } = prepared;
 
         // ONE budget for the whole handover: queueing behind a turn that started between

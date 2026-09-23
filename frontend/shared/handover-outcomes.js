@@ -21,44 +21,36 @@
 //      they are looking at another session), and not when it is only counted in an "…and
 //      2 more" — a number is not a reason, and there is no second place to go and read
 //      the rest.
-
-// How many reasons one line spells out. The rest are named as still to come and are NOT
-// acknowledged, so the next pass renders them: acknowledging the shown ones removes them
-// from the relay's feed, the remainder becomes the whole of the next line, and the loop
-// terminates. A cap at all exists only so one thread's line stays readable.
-const REASONS_SHOWN = 3;
+//
+// Which is why the line carries EVERY unread reason rather than paging through them.
+// Paging looked safer and was not: acknowledging the first few changes the revision, the
+// automatic refetch renders the next few over the top, and the earlier ones flash past
+// on one continuous view. Nothing here is user-driven, so nothing here may assume a
+// second visit. The lists stay short because the relay's reasons are its own authored
+// sentences and an actor's unread outcomes are quota-bounded.
 
 function reasonOf(handover) {
   return String(handover?.error || "").trim() || "the relay did not say why";
 }
 
-/** The ids this line actually gives a reason for — exactly what may be acknowledged. */
+/** The ids this line gives a reason for — which, by construction, is all of them. */
 function spokenFor(handovers = []) {
-  return (handovers || [])
-    .slice(0, REASONS_SHOWN)
-    .map((handover) => handover?.id)
-    .filter(Boolean);
+  return (handovers || []).map((handover) => handover?.id).filter(Boolean);
 }
 
 /**
  * One line for this thread's failures, newest first.
  *
- * Every reason it names is one the person has now read. Any it cannot fit is announced
- * as still to come rather than summarised away, because the caller acknowledges exactly
- * what this line said and nothing else.
+ * Every one of them, with its own reason — never a count. The caller acknowledges
+ * exactly what this line said, so a reason left out here is a failure consumed unseen,
+ * and there is no panel or detail route to go and find it in afterwards.
  */
 export function handoverFailureText(handovers = []) {
   const reasons = (handovers || []).map(reasonOf);
   if (!reasons.length) return "";
   if (reasons.length === 1) return `Handing over did not finish: ${reasons[0]}`;
-  const spelled = reasons
-    .slice(0, REASONS_SHOWN)
-    .map((reason, index) => `(${index + 1}) ${reason}`)
-    .join(" ");
-  const held = reasons.length - Math.min(reasons.length, REASONS_SHOWN);
-  return `${reasons.length} handovers did not finish. ${spelled}${
-    held > 0 ? ` ${held} more will follow once you have read these.` : ""
-  }`;
+  const spelled = reasons.map((reason, index) => `(${index + 1}) ${reason}`).join(" ");
+  return `${reasons.length} handovers did not finish. ${spelled}`;
 }
 
 /**
@@ -117,10 +109,9 @@ export function createHandoverOutcomeReporter({ report, acknowledge = () => {} }
   }
 
   /**
-   * The reasons currently on this thread's line have been put in front of the person —
-   * its composer is on screen, or they have deliberately replaced them by handing over
-   * again. Only those may be forgotten; anything the line could not fit stays the
-   * relay's until a later line spells it out.
+   * The reasons on this thread's line have been put in front of the person — its
+   * composer is on screen, or they have deliberately replaced them by handing over
+   * again. The line carries all of them, so this consumes all of them, once.
    *
    * @returns {string[]} the ids acknowledged
    */
@@ -128,8 +119,6 @@ export function createHandoverOutcomeReporter({ report, acknowledge = () => {} }
     const ids = spoken.get(threadId);
     if (!ids || !ids.length) return [];
     spoken.delete(threadId);
-    // The line is consumed with them, so the next feed — now shorter — is a change and
-    // gets written afresh with whatever is left.
     written.delete(threadId);
     for (const id of ids) acknowledge(id);
     return ids;

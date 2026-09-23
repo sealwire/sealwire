@@ -63,9 +63,19 @@ const MAX_SEARCH_ROUTING_HINTS: usize = 2_000;
 /// a timer — is what eventually evicts old completed reviews.
 const MAX_REVIEW_JOBS: usize = 64;
 const MAX_ASKS: usize = 64;
-/// Only the ones still wanting attention are ever on the wire, so this is a floor on
-/// forgetting rather than a page size.
+/// Total handover records kept, across every actor. Only ones nobody needs any more
+/// are ever dropped to hold it (see `prune_handovers`), so this is a floor on
+/// forgetting rather than a quota.
 const MAX_HANDOVERS: usize = 64;
+/// How many unread outcomes ONE actor may have before it is refused a new handover.
+///
+/// Per actor, not global, because the records are per actor: a device cannot see or
+/// acknowledge another's, so a shared budget would let one phone lock out everybody
+/// else and tell them to go and read outcomes they are fenced out of. The total is
+/// bounded by this times the number of actors, and an actor's records are retired with
+/// the thing that made them reachable — the source session — so that does not grow
+/// without end either.
+const MAX_UNREAD_HANDOVERS_PER_ACTOR: usize = 16;
 /// Backstop on retained workflow runs, mirroring `MAX_REVIEW_JOBS`: evict the
 /// oldest TERMINAL runs first; non-terminal runs are never auto-evicted (they
 /// have a live or restart-recoverable orchestrator).
@@ -2630,10 +2640,21 @@ impl RelayState {
         if self.handovers.len() < MAX_HANDOVERS {
             return;
         }
+        let owner = |handover: &crate::state::Handover| match handover.device_id.clone() {
+            Some(device_id) => crate::state::HandoverActor::Device(device_id),
+            None => crate::state::HandoverActor::LocalOperator,
+        };
         let mut spent: Vec<(String, u64)> = self
             .handovers
             .iter()
-            .filter(|(_, handover)| handover.status.is_terminal() && handover.acknowledged)
+            .filter(|(_, handover)| {
+                handover.status.is_terminal()
+                    // Read, or unreachable by the only actor that could read it — a
+                    // device whose scope was narrowed away from the source. Neither can
+                    // still be shown to anybody, so neither is what the cap is for.
+                    && (handover.acknowledged
+                        || !self.handover_is_visible_to(handover, &owner(handover)))
+            })
             .map(|(id, handover)| (id.clone(), handover.updated_at))
             .collect();
         spent.sort_by_key(|(_, updated_at)| *updated_at);
@@ -2645,21 +2666,65 @@ impl RelayState {
         }
     }
 
-    /// How many records are being kept because somebody still has to see them.
+    /// May `actor` actually see this record?
     ///
-    /// Live ones and unread failures both count: neither may be dropped to make room, so
-    /// this is what a new handover has to be refused against. Read outcomes are not
-    /// here — those are prunable, so they never stop anything.
-    pub(crate) fn unread_handover_pressure(&self) -> usize {
+    /// Ownership first, then the device's path scope — which can be narrowed AFTER a
+    /// handover was made, and what a device may see has to follow that. ONE predicate,
+    /// because a record counted against a quota its owner cannot spend, and a record
+    /// served on a channel it may not read, are the same bug in opposite directions.
+    fn handover_is_visible_to(
+        &self,
+        handover: &crate::state::Handover,
+        actor: &crate::state::HandoverActor,
+    ) -> bool {
+        if !handover.belongs_to(actor) {
+            return false;
+        }
+        match actor {
+            crate::state::HandoverActor::LocalOperator => true,
+            crate::state::HandoverActor::Device(device_id) => {
+                let scope = self.device_path_scope(device_id);
+                self.thread_cwd(&handover.source_thread_id)
+                    .is_some_and(|cwd| {
+                        crate::state::path_within_device_scope(&cwd, &scope, &self.allowed_roots)
+                    })
+            }
+        }
+    }
+
+    /// How many records THIS actor is being kept waiting on.
+    ///
+    /// Only what it can actually see. A record it has been fenced out of — its scope
+    /// narrowed, its source deleted — is one it can never read or acknowledge, so
+    /// counting it would lock the actor out for good over something invisible.
+    pub(crate) fn unread_handover_pressure_for(
+        &self,
+        actor: &crate::state::HandoverActor,
+    ) -> usize {
         self.handovers
             .values()
             .filter(|handover| handover.needs_attention())
+            .filter(|handover| self.handover_is_visible_to(handover, actor))
             .count()
     }
 
-    /// The point at which a new handover is refused rather than an old outcome dropped.
-    pub(crate) const fn handover_capacity() -> usize {
-        MAX_HANDOVERS
+    /// The point at which ONE actor is refused a new handover rather than an outcome of
+    /// its own being dropped.
+    pub(crate) const fn handover_quota_per_actor() -> usize {
+        MAX_UNREAD_HANDOVERS_PER_ACTOR
+    }
+
+    /// Retire every handover whose source session this was.
+    ///
+    /// An outcome is only ever shown on its source thread's composer, so deleting or
+    /// archiving that session removes the only place it could be read — and the person
+    /// did that deliberately. Keeping it would hold quota for ever against something
+    /// nobody can reach. Live ones go too: the background half then finds no record to
+    /// settle and writes nothing, which is what stops one coming back afterwards as a
+    /// failure about a session that no longer exists.
+    fn retire_handovers_for_thread(&mut self, thread_id: &str) {
+        self.handovers
+            .retain(|_, handover| handover.source_thread_id != thread_id);
     }
 
     /// Reserve `target_thread_id` for this handover, or say who already has it.
@@ -2672,11 +2737,30 @@ impl RelayState {
         &mut self,
         handover: crate::state::Handover,
     ) -> Result<(), String> {
-        if self.handovers.values().any(|other| {
-            !other.status.is_terminal()
-                && other.id != handover.id
-                && other.target_thread_id == handover.target_thread_id
-        }) {
+        // The quota is enforced HERE, in the same write that takes the slot. Checked
+        // only before starting anything it is advisory: several requests at quota-1 all
+        // read room, all start a provider session, and all insert.
+        let actor = match handover.device_id.clone() {
+            Some(device_id) => crate::state::HandoverActor::Device(device_id),
+            None => crate::state::HandoverActor::LocalOperator,
+        };
+        let waiting = self.unread_handover_pressure_for(&actor);
+        if waiting >= MAX_UNREAD_HANDOVERS_PER_ACTOR {
+            return Err(format!(
+                "there are already {waiting} handovers of yours whose outcome you have \
+not read, which is as many as the relay holds at once. Open those sessions to read what \
+happened, then hand over again."
+            ));
+        }
+        // A fresh target has no id yet — it is started only once this slot is owned — so
+        // there is nothing it could collide with.
+        if !handover.target_thread_id.is_empty()
+            && self.handovers.values().any(|other| {
+                !other.status.is_terminal()
+                    && other.id != handover.id
+                    && other.target_thread_id == handover.target_thread_id
+            })
+        {
             // Deliberately does not name the other side. A device can share the
             // TARGET's workspace without sharing the other source's, and a refusal
             // that names it would hand over a thread id the asker may not see.
@@ -2685,6 +2769,31 @@ impl RelayState {
         self.prune_handovers();
         self.handovers.insert(handover.id.clone(), handover);
         Ok(())
+    }
+
+    /// Fill in the target a reserved handover went on to start.
+    ///
+    /// The slot is taken before that session exists, so this is the other half of the
+    /// reservation: until it runs, the record holds quota under an empty target.
+    pub(crate) fn bind_handover_target(
+        &mut self,
+        handover_id: &str,
+        target_thread_id: String,
+        target_activity: Option<String>,
+    ) {
+        if let Some(handover) = self.handovers.get_mut(handover_id) {
+            handover.target_thread_id = target_thread_id;
+            handover.target_activity = target_activity;
+        }
+    }
+
+    /// Give a reserved slot back, for a handover that never got off the ground.
+    ///
+    /// Only called on one whose target was never started and whose caller is being told
+    /// why to its face — so there is nothing for anybody to read later, and holding the
+    /// slot would charge them for a refusal.
+    pub(crate) fn release_handover(&mut self, handover_id: &str) {
+        self.handovers.remove(handover_id);
     }
 
     pub(crate) fn handover(&self, handover_id: &str) -> Option<&crate::state::Handover> {
@@ -2716,28 +2825,11 @@ impl RelayState {
         &self,
         actor: &crate::state::HandoverActor,
     ) -> Vec<crate::protocol::HandoverView> {
-        let scope = match actor {
-            crate::state::HandoverActor::LocalOperator => Vec::new(),
-            crate::state::HandoverActor::Device(device_id) => self.device_path_scope(device_id),
-        };
         let mut mine: Vec<&crate::state::Handover> = self
             .handovers
             .values()
-            .filter(|handover| handover.needs_attention() && handover.belongs_to(actor))
-            // Belt and braces behind the ownership fence: a device's scope can be
-            // narrowed after it asked, and what it may see has to follow that.
-            .filter(|handover| {
-                matches!(actor, crate::state::HandoverActor::LocalOperator)
-                    || self
-                        .thread_cwd(&handover.source_thread_id)
-                        .is_some_and(|cwd| {
-                            crate::state::path_within_device_scope(
-                                &cwd,
-                                &scope,
-                                &self.allowed_roots,
-                            )
-                        })
-            })
+            .filter(|handover| handover.needs_attention())
+            .filter(|handover| self.handover_is_visible_to(handover, actor))
             .collect();
         mine.sort_by(|left, right| {
             right
@@ -5173,6 +5265,10 @@ so {} never got it — hand over again when you are ready.",
         self.session_bindings.remove(thread_id);
         self.runtimes.remove(thread_id);
         self.drop_pending_requests_for_thread(thread_id);
+        // An outcome is only ever shown on its source thread's composer, so taking that
+        // session away takes the only place it could ever be read. Shared by archive and
+        // permanent delete, like everything else here.
+        self.retire_handovers_for_thread(thread_id);
         self.threads.len() != before_len
     }
 

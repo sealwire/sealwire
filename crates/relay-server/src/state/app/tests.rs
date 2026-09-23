@@ -33041,22 +33041,21 @@ whole regardless of its path scope",
     }
 
     #[tokio::test]
-    async fn a_handover_is_refused_at_the_cap_rather_than_forgetting_an_unread_outcome() {
-        // The cap has to give somewhere. It must not be the unread outcomes: dropping one
-        // is the false success this record exists to prevent, and a log line is not a
-        // channel the person reads. So a new handover is refused instead — BEFORE any
-        // target is started, or the refusal would leave a session behind with no record
-        // naming it, which is the same bug one step along.
+    async fn a_handover_is_refused_at_the_quota_rather_than_forgetting_an_unread_outcome() {
+        // The quota has to give somewhere. It must not be the unread outcomes: dropping
+        // one is the false success this record exists to prevent. So a new handover is
+        // refused instead — BEFORE any target is started, or the refusal would leave a
+        // session behind with no record naming it, which is the same bug one step along.
         let project = TempDir::new().expect("tempdir");
         let cwd = project.path().to_string_lossy().to_string();
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let source = session(&app, &cwd, "never").await;
 
-        let capacity = crate::state::RelayState::handover_capacity();
+        let quota = crate::state::RelayState::handover_quota_per_actor();
         {
             let mut relay = app.relay.write().await;
-            for index in 0..capacity {
+            for index in 0..quota {
                 let mut record = crate::state::Handover::new(
                     format!("unread-{index:03}"),
                     source.clone(),
@@ -33074,15 +33073,15 @@ whole regardless of its path scope",
         let refused = app
             .handover(&source, request())
             .await
-            .expect_err("the relay is full of outcomes nobody has read");
+            .expect_err("this door is full of outcomes nobody has read");
         assert!(
-            refused.message().contains("nobody has read"),
-            "and it says why, and what to do about it: {}",
+            refused.message().contains("have not read"),
+            "and it says why: {}",
             refused.message()
         );
         assert!(
             refused.message().contains("Open those sessions"),
-            "a cap with no way out is a dead end: {}",
+            "a quota with no way out is a dead end: {}",
             refused.message()
         );
 
@@ -33093,16 +33092,321 @@ whole regardless of its path scope",
             "refused before anything was started — no target, no orphan",
         );
         assert_eq!(
-            relay.unread_handover_pressure(),
-            capacity,
+            relay.unread_handover_pressure_for(&crate::state::HandoverActor::LocalOperator),
+            quota,
             "and not one of the outcomes already waiting was dropped to make room",
         );
-        for index in 0..capacity {
+    }
+
+    #[tokio::test]
+    async fn one_actors_full_quota_does_not_lock_out_another() {
+        // The quota is per ACTOR because the records are. A device cannot see or
+        // acknowledge another's, so a shared budget would let one phone lock out the
+        // desktop and tell it to go and read outcomes it is fenced out of — and the
+        // count alone would leak how many another actor is sitting on.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+        pair_device(&app, "phone-a", vec![cwd.clone()]).await;
+        pair_device(&app, "phone-b", vec![cwd.clone()]).await;
+
+        let quota = crate::state::RelayState::handover_quota_per_actor();
+        {
+            let mut relay = app.relay.write().await;
+            for index in 0..quota {
+                let mut record = crate::state::Handover::new(
+                    format!("phone-a-{index:03}"),
+                    source.clone(),
+                    format!("target-{index:03}"),
+                    false,
+                    Some("phone-a".to_string()),
+                    None,
+                );
+                record.fail("that agent is busy right now");
+                relay
+                    .reserve_handover(record)
+                    .expect("phone-a fills its own quota");
+            }
+        }
+
+        let phone_a = crate::state::HandoverActor::Device("phone-a".to_string());
+        let phone_b = crate::state::HandoverActor::Device("phone-b".to_string());
+        let local = crate::state::HandoverActor::LocalOperator;
+        {
+            let relay = app.relay.read().await;
+            assert_eq!(relay.unread_handover_pressure_for(&phone_a), quota);
+            assert_eq!(
+                relay.unread_handover_pressure_for(&phone_b),
+                0,
+                "another device is told nothing about how full phone-a is",
+            );
+            assert_eq!(relay.unread_handover_pressure_for(&local), 0);
+        }
+
+        // The desktop and the other phone carry on; only phone-a, which really is full,
+        // is refused — and its refusal names only its own count.
+        app.handover(&source, request())
+            .await
+            .expect("the local door is unaffected");
+        let refused = app
+            .handover(
+                &source,
+                HandoverRequest {
+                    device_id: Some("phone-a".to_string()),
+                    ..request()
+                },
+            )
+            .await
+            .expect_err("phone-a is at its own quota");
+        assert!(
+            refused
+                .message()
+                .contains(&format!("{quota} handovers of yours")),
+            "the count is this actor's own: {}",
+            refused.message()
+        );
+        app.handover(
+            &source,
+            HandoverRequest {
+                device_id: Some("phone-b".to_string()),
+                ..request()
+            },
+        )
+        .await
+        .expect("and phone-b is unaffected too");
+    }
+
+    #[tokio::test]
+    async fn concurrent_handovers_at_the_last_slot_start_at_most_one_session() {
+        // The check used to be a read taken before the target was started and the record
+        // written long after, so at quota-1 every concurrent request read room, every one
+        // started a visible provider session, and every one inserted. The advertised cap
+        // was not a cap, and the sessions the losers created were accounted for by
+        // nothing at all.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        let quota = crate::state::RelayState::handover_quota_per_actor();
+        {
+            let mut relay = app.relay.write().await;
+            for index in 0..(quota - 1) {
+                let mut record = crate::state::Handover::new(
+                    format!("unread-{index:03}"),
+                    source.clone(),
+                    format!("target-{index:03}"),
+                    false,
+                    None,
+                    None,
+                );
+                record.fail("that agent is busy right now");
+                relay.reserve_handover(record).expect("reserved");
+            }
+        }
+        let threads_before = app.relay.read().await.threads.len();
+
+        // Six at once, into one free slot.
+        let mut racing = Vec::new();
+        for _ in 0..6 {
+            let app = app.clone();
+            let source = source.clone();
+            racing.push(tokio::spawn(async move {
+                app.handover_detached(&source, request()).await
+            }));
+        }
+        let mut accepted = Vec::new();
+        for attempt in racing {
+            if let Ok(Ok((handover_id, target))) = attempt.await {
+                accepted.push((handover_id, target));
+            }
+        }
+
+        assert_eq!(
+            accepted.len(),
+            1,
+            "one free slot must accept exactly one handover, not {}",
+            accepted.len()
+        );
+
+        let relay = app.relay.read().await;
+        assert_eq!(
+            relay.threads.len(),
+            threads_before + 1,
+            "and exactly one provider session was created — the losers started none",
+        );
+        assert!(
+            relay.unread_handover_pressure_for(&crate::state::HandoverActor::LocalOperator)
+                <= quota,
+            "the quota is a quota: {}",
+            relay.unread_handover_pressure_for(&crate::state::HandoverActor::LocalOperator)
+        );
+        for index in 0..(quota - 1) {
             assert!(
                 relay.handover(&format!("unread-{index:03}")).is_some(),
-                "unread-{index:03} was evicted",
+                "unread-{index:03} was lost in the race",
             );
         }
+        // Every session in the tree is one a record accounts for.
+        let (handover_id, target) = &accepted[0];
+        let recorded = relay.handover(handover_id).expect("the winner is recorded");
+        assert_eq!(
+            &recorded.target_thread_id, target,
+            "and it names its target"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_the_source_retires_its_outcomes_instead_of_stranding_them() {
+        // An outcome is only ever shown on its source thread's composer. Archive or
+        // delete that session and there is no composer to come back to, no cwd for the
+        // scope check to pass, and nothing the person can do — yet it would hold a quota
+        // slot for ever. Deleting the session is them saying they are done with it.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+        pair_device(&app, "phone", vec![cwd.clone()]).await;
+
+        {
+            let mut relay = app.relay.write().await;
+            for (id, device) in [("local-1", None), ("phone-1", Some("phone"))] {
+                let mut record = crate::state::Handover::new(
+                    id.to_string(),
+                    source.clone(),
+                    format!("target-{id}"),
+                    true,
+                    device.map(str::to_string),
+                    None,
+                );
+                record.fail("that agent is busy right now");
+                relay.reserve_handover(record).expect("reserved");
+            }
+        }
+        let local = crate::state::HandoverActor::LocalOperator;
+        let phone = crate::state::HandoverActor::Device("phone".to_string());
+        assert_eq!(
+            app.relay.read().await.unread_handover_pressure_for(&local),
+            1
+        );
+        assert_eq!(
+            app.relay.read().await.unread_handover_pressure_for(&phone),
+            1
+        );
+
+        {
+            let mut relay = app.relay.write().await;
+            relay.remove_thread(&source);
+        }
+
+        let relay = app.relay.read().await;
+        assert!(
+            relay.handover("local-1").is_none(),
+            "the local one is retired"
+        );
+        assert!(relay.handover("phone-1").is_none(), "and so is the phone's");
+        assert_eq!(
+            relay.unread_handover_pressure_for(&local),
+            0,
+            "so neither holds a slot against a session that no longer exists",
+        );
+        assert_eq!(relay.unread_handover_pressure_for(&phone), 0);
+        assert!(relay.reviews_response(None).handovers.is_empty());
+        assert!(relay.reviews_response(Some("phone")).handovers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_source_deleted_mid_handover_leaves_nothing_to_settle_back_into() {
+        // The window between acceptance and the summary. Deleting the source there must
+        // not have the background half write a failure about a session that is gone, onto
+        // a record nobody could ever read — it would be unacknowledgeable AND hold a slot.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        let held = app.acquire_session_slot().expect("the gate is free");
+        let (handover_id, _target) = app
+            .handover_detached(&source, request())
+            .await
+            .expect("accepted");
+        {
+            let mut relay = app.relay.write().await;
+            relay.remove_thread(&source);
+        }
+        drop(held);
+        provider.release_terminals();
+
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if app.relay.read().await.handover(&handover_id).is_none() {
+                break;
+            }
+        }
+        let relay = app.relay.read().await;
+        assert!(
+            relay.handover(&handover_id).is_none(),
+            "the record went with its source and must not be resurrected as a failure",
+        );
+        assert_eq!(
+            relay.unread_handover_pressure_for(&crate::state::HandoverActor::LocalOperator),
+            0,
+            "and it holds no slot",
+        );
+    }
+
+    #[tokio::test]
+    async fn narrowing_a_devices_scope_frees_the_slot_it_can_no_longer_reach() {
+        // Round three deliberately makes an outcome unreadable once the device's scope no
+        // longer covers its source. Unreadable must not also mean "charged for it for
+        // ever": a record the owner cannot see is one it can never acknowledge.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let elsewhere = TempDir::new().expect("other tempdir");
+        let outside = elsewhere.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+        pair_device(&app, "phone", vec![cwd.clone()]).await;
+        let phone = crate::state::HandoverActor::Device("phone".to_string());
+
+        {
+            let mut relay = app.relay.write().await;
+            for index in 0..crate::state::RelayState::handover_quota_per_actor() {
+                let mut record = crate::state::Handover::new(
+                    format!("phone-{index:03}"),
+                    source.clone(),
+                    format!("target-{index:03}"),
+                    false,
+                    Some("phone".to_string()),
+                    None,
+                );
+                record.fail("that agent is busy right now");
+                relay.reserve_handover(record).expect("reserved");
+            }
+        }
+        assert_eq!(
+            app.relay.read().await.unread_handover_pressure_for(&phone),
+            crate::state::RelayState::handover_quota_per_actor(),
+        );
+
+        pair_device(&app, "phone", vec![outside.clone()]).await;
+
+        let relay = app.relay.read().await;
+        assert!(
+            relay.reviews_response(Some("phone")).handovers.is_empty(),
+            "still fenced out of them, which is the round-three rule",
+        );
+        assert_eq!(
+            relay.unread_handover_pressure_for(&phone),
+            0,
+            "…but not charged for records it can never read or acknowledge",
+        );
     }
 
     #[tokio::test]
