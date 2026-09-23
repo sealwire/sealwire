@@ -1427,7 +1427,12 @@ renderer.renderSession = function wrappedRenderSession(session) {
   // bails, and the one-attempt guard suppresses every retry. _baseRenderSession
   // sets it again (idempotent).
   state.session = session;
-  reportHandoverOutcomes(session?.handovers);
+  // Off the reviews channel, which is fetched per actor. Runs on every render, so it
+  // catches both a fresh fetch landing and the person navigating BACK to the thread a
+  // failure belongs to — which is when it counts as shown and may be acknowledged.
+  handoverOutcomes.sync(reviewsCache.current()?.handovers, {
+    viewedThreadId: viewedThreadId(),
+  });
   maybeRefreshViewOnly(session);
   // The active thread can also change WITHOUT a navigation — another device switches the
   // relay — and the composer has to follow it or the next keystroke lands in the previous
@@ -2913,14 +2918,20 @@ const handoverAuthor = createHandoverAuthor({
   handover: (threadId, args) =>
     postRelayCommand("/api/session/handover", { thread_id: threadId, ...args }),
   setComposerError: showComposerError,
+  // Handing over again is the person saying they have read the last attempt's failure
+  // and replaced it. Without this the relay keeps holding an outcome that is no longer
+  // the current word and re-offers it on the next reload.
+  supersedeOutcomes: (threadId) => handoverOutcomes.confirmShown(threadId),
 });
 
 // A handover is accepted before it is delivered, so the only failures left by then
-// arrive minutes later on the snapshot. They belong to the thread the command was typed
-// into — which by now may not be the one on screen — so they are written against that
-// id and the composer shows them when it comes back to it.
-const reportHandoverOutcomes = createHandoverOutcomeReporter({
+// arrive minutes later. They come over the reviews channel, which is fetched per actor —
+// NOT the snapshot, which every paired device receives whole. They belong to the thread
+// the command was typed into, which by now may not be the one on screen, so they are
+// written against that id and shown when the person comes back to it.
+const handoverOutcomes = createHandoverOutcomeReporter({
   report: (threadId, message) => showComposerError(threadId, message),
+  // Only reached once the failure has actually been on screen for its own thread.
   acknowledge: (handoverId) =>
     void postRelayCommand("/api/session/handover/ack", { handover_id: handoverId }),
 });

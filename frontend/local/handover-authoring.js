@@ -15,12 +15,20 @@ import { commandOutcomeOrContractError } from "../shared/command-outcome.js";
  * @param {{
  *   handover: (threadId: string, args: object) => Promise<{text: string, isError: boolean}>,
  *   setComposerError?: (threadId: string, message: string) => void,
+ *   supersedeOutcomes?: (threadId: string) => void,
  * }} deps
  */
-export function createHandoverAuthor({ handover, setComposerError = () => {} }) {
+export function createHandoverAuthor({
+  handover,
+  setComposerError = () => {},
+  // A new attempt replaces whatever the last one left, so the relay may stop holding
+  // that outcome. Without this it is durable for ever and comes back on every reload.
+  supersedeOutcomes = () => {},
+}) {
   return async function authorHandover(threadId, args) {
     // Cleared as the attempt starts, never when it finishes: a success clearing on its
     // way out can erase a newer failure that landed while it was still in flight.
+    supersedeOutcomes(threadId);
     setComposerError(threadId, "");
     // Normalised, never trusted as-is: the controller decides whether to keep the draft
     // from `isError`, so a helper answering a bare boolean would read as success and

@@ -8,7 +8,7 @@ import { mountIosInstallHint } from "./ios-install.js";
 import { registerRemotePwa } from "./pwa.js";
 import { renderLog } from "./session-surface.js";
 import { sidebarGestureDebugEnabled } from "./sidebar-debug-flag.js";
-import { applyFileChange, applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent, cancelRemoteThreadSearch, cancelRemoteThreadsPoll, clearSessionRuntime, delegateRemote, deleteRemoteReview, fetchAskDetail, fetchAskUserQuestionDetail, fetchRemoteProviderModels, fetchRemoteProviders, fetchRemoteThreadTranscript, fetchTranscriptEntryDetail, forkRemoteSession, handoverRemote, probeRemoteThreadsExist, refreshRemoteThreads, repairRemoteWorkspace, requestRemoteReview, resolveRemoteReview, resolveRemoteWorkflow, resetDeclaredWatchedThreads, resumeRemoteSession, sendMessage, beginGoalActionOn, clearGoalErrorOn, setComposerError, setComposerHeld, setGoalError, setRemoteGoal, startRemoteSession, startRemoteWorkflow, stopActiveTurn, stopRemoteGoal, submitAskUserAnswer, submitDecision, syncRemoteSnapshot, takeOverControl, updateRemoteSessionSettings, viewRemoteThread } from "./session-ops.js";
+import { applyFileChange, applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent, cancelRemoteThreadSearch, cancelRemoteThreadsPoll, clearSessionRuntime, delegateRemote, deleteRemoteReview, fetchAskDetail, fetchAskUserQuestionDetail, fetchRemoteProviderModels, fetchRemoteProviders, fetchRemoteThreadTranscript, fetchTranscriptEntryDetail, forkRemoteSession, handoverOutcomes, handoverRemote, probeRemoteThreadsExist, refreshRemoteThreads, repairRemoteWorkspace, requestRemoteReview, resolveRemoteReview, resolveRemoteWorkflow, resetDeclaredWatchedThreads, resumeRemoteSession, sendMessage, beginGoalActionOn, clearGoalErrorOn, setComposerError, setComposerHeld, setGoalError, setRemoteGoal, startRemoteSession, startRemoteWorkflow, stopActiveTurn, stopRemoteGoal, submitAskUserAnswer, submitDecision, syncRemoteSnapshot, takeOverControl, updateRemoteSessionSettings, viewRemoteThread } from "./session-ops.js";
 import { clearActiveRelaySelection, ensureDeviceIdentity, hasActivePairing, hydrateStoredRemoteSecrets, selectRelayProfile, state } from "./state.js";
 import { applyRemoteSurfacePatch, createResetRemoteSurfaceStatePatch } from "./surface-state.js";
 
@@ -328,6 +328,12 @@ export function createRemoteAppHandlers() {
     },
     onHandover(threadId, args) {
       return handoverRemote(threadId, args);
+    },
+    // Accepted-then-failed handovers, off the per-device reviews channel. Given the
+    // thread on screen so a failure counts as SHOWN — and may be acknowledged — only
+    // once its own session's composer is the one being looked at.
+    onHandoverOutcomes(handovers, viewedThreadId) {
+      return handoverOutcomes.sync(handovers, { viewedThreadId });
     },
     onSetGoal(threadId, objective) {
       return setRemoteGoal(threadId, objective);

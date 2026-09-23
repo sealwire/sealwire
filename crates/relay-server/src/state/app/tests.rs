@@ -32982,11 +32982,19 @@ mod handover_tests {
         assert!(record.target_started, "this one started its own target");
         assert!(
             relay
-                .snapshot()
+                .reviews_response(None)
                 .handovers
                 .iter()
                 .any(|view| view.id == handover_id && view.status == "working"),
             "an accepted operation has to be visible while it runs, not only when it ends",
+        );
+        assert_eq!(
+            serde_json::to_value(relay.snapshot())
+                .expect("the snapshot encodes")
+                .get("handovers"),
+            None,
+            "and never on the broadcast snapshot, which every paired device receives \
+whole regardless of its path scope",
         );
         drop(relay);
         provider.release_terminals();
@@ -33029,6 +33037,108 @@ mod handover_tests {
         assert!(
             app.relay.read().await.runtime_for_thread(&target).is_some(),
             "a session somebody may have typed into is never tidied away",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_target_turn_that_started_and_finished_during_the_summary_still_blocks_delivery() {
+        // The case no liveness test can answer. The summary takes minutes; a person can
+        // open the target, send something, and have it finish inside that window. The
+        // session is then idle again and looks EXACTLY like the one we reserved — so
+        // "is it busy right now" waves the handover straight into a conversation that is
+        // already under way. Only the fingerprint taken at acceptance tells them apart.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        provider.hold_terminals();
+        let (handover_id, target) = app
+            .handover_detached(&source, request())
+            .await
+            .expect("accepted");
+        provider.wait_for_held_turn().await;
+        {
+            // A whole turn of somebody else's, start to finish — written the way the
+            // relay itself records one, so the state it leaves is the real one.
+            let mut relay = app.relay.write().await;
+            let runtime = relay.ensure_runtime_for_thread(&target);
+            runtime.active_turn_id = Some("their-turn".to_string());
+            runtime.note_turn_event();
+            runtime.active_turn_id = None;
+            runtime.note_turn_event();
+            runtime.record_finished_turn("their-turn", crate::state::TurnOutcome::Completed);
+            // The premise of the test, asserted rather than assumed: by every liveness
+            // test there is, this session is free.
+            assert!(!runtime.has_live_turn());
+            assert!(
+                !runtime.is_working(),
+                "if this were busy the test would be proving the easy case instead",
+            );
+        }
+        provider.release_terminals();
+
+        let reason = failure_of(&settled(&app, &handover_id).await);
+        assert!(
+            reason.contains("used while this handover was being written"),
+            "{reason}"
+        );
+        assert!(
+            received(&app, &target).await.is_empty(),
+            "the handover must not land in a session somebody has since started using",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_manual_send_racing_the_delivery_is_serialised_by_the_drive_gate() {
+        // `check_peer_is_askable` then `send_message_to_thread` is a check-then-act, and
+        // the window between them is exactly where an ordinary message lands: the check
+        // says idle, the person presses Send, their turn starts, and the handover is
+        // appended into it. The ordinary send path takes the relay's session gate for
+        // its own brief window; the delivery has to take the same one, or agreeing about
+        // the rule is worth nothing.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        provider.hold_terminals();
+        let (handover_id, target) = app
+            .handover_detached(&source, request())
+            .await
+            .expect("accepted");
+        provider.wait_for_held_turn().await;
+
+        // Stand in the gate, as a user's send does for its check-then-act.
+        let held = app.acquire_session_slot().expect("the gate is free");
+        provider.release_terminals();
+
+        // The summary finishes and the delivery reaches the gate — and stops there.
+        for _ in 0..25 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            received(&app, &target).await.is_empty(),
+            "the delivery must not send while another session op holds the gate",
+        );
+        assert!(
+            app.relay
+                .read()
+                .await
+                .handover(&handover_id)
+                .is_some_and(|handover| !handover.status.is_terminal()),
+            "…and it is still going, not quietly failed",
+        );
+
+        drop(held);
+        let handed = delivered(&app, &target).await;
+        assert!(
+            handed
+                .last()
+                .is_some_and(|message| message.contains("That work is now yours")),
+            "and once the gate is free it lands: {handed:?}"
         );
     }
 
@@ -33135,7 +33245,7 @@ mod handover_tests {
                 app.relay
                     .read()
                     .await
-                    .snapshot()
+                    .reviews_response(None)
                     .handovers
                     .into_iter()
                     .find(|view| view.id == handover_id)
@@ -33150,7 +33260,7 @@ mod handover_tests {
 composer happens to be on screen",
         );
 
-        app.acknowledge_handover(&handover_id, None)
+        app.acknowledge_handover(&handover_id, &crate::state::HandoverActor::LocalOperator)
             .await
             .expect("a read receipt");
         assert!(on_wire(&app).await.is_none(), "read once is read");
@@ -33164,7 +33274,113 @@ composer happens to be on screen",
     }
 
     #[tokio::test]
-    async fn a_device_can_only_acknowledge_a_handover_it_could_see() {
+    async fn a_handover_outcome_belongs_to_the_door_it_was_typed_at() {
+        // The broadcast snapshot reaches every paired device as one payload, so these
+        // records are fetched per actor instead. Two things have to hold: an unrelated
+        // device cannot READ the outcome (it names two of the person's sessions and
+        // what went wrong with their work), and it cannot ACKNOWLEDGE it either —
+        // silencing somebody's failure before they see it is the worse half.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let elsewhere = TempDir::new().expect("other tempdir");
+        let outside = elsewhere.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        grant_workspace(&app, &outside).await;
+        let source = session(&app, &cwd, "never").await;
+        // Two paired devices with DISJOINT scopes, plus one that shares the workspace.
+        pair_device(&app, "phone-a", vec![cwd.clone()]).await;
+        pair_device(&app, "phone-b", vec![outside.clone()]).await;
+        pair_device(&app, "phone-neighbour", vec![cwd.clone()]).await;
+        {
+            let mut relay = app.relay.write().await;
+            let mut record = crate::state::Handover::new(
+                "handover-x".to_string(),
+                source.clone(),
+                "target-thread".to_string(),
+                true,
+                Some("phone-a".to_string()),
+                None,
+            );
+            record.fail("that agent is busy right now");
+            relay.reserve_handover(record).expect("reserved");
+        }
+
+        let seen_by = |device: Option<&str>| {
+            let app = app.clone();
+            let device = device.map(str::to_string);
+            async move {
+                let relay = app.relay.read().await;
+                relay
+                    .reviews_response(device.as_deref())
+                    .handovers
+                    .into_iter()
+                    .map(|view| view.id)
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        assert_eq!(
+            seen_by(Some("phone-a")).await,
+            vec!["handover-x".to_string()],
+            "the device that asked reads its own outcome, which is the whole point",
+        );
+        assert!(
+            seen_by(Some("phone-b")).await.is_empty(),
+            "a device in another workspace must not learn the ids or the reason",
+        );
+        assert!(
+            seen_by(Some("phone-neighbour")).await.is_empty(),
+            "nor may one that merely SHARES the workspace — ownership is the fence, and \
+sharing a directory is not being the person who typed the command",
+        );
+        assert!(
+            seen_by(None).await.is_empty(),
+            "…and a handover typed on a phone is not the local operator's either",
+        );
+
+        // The same fence on the receipt, so nobody can silence it before it is read.
+        for stranger in ["phone-b", "phone-neighbour"] {
+            let refused = app
+                .acknowledge_handover(
+                    "handover-x",
+                    &crate::state::HandoverActor::Device(stranger.to_string()),
+                )
+                .await
+                .expect_err("only the device that asked may consume its own outcome");
+            assert!(
+                refused.contains("no such handover"),
+                "a refusal must not confirm it exists: {refused}"
+            );
+        }
+        assert!(
+            app.acknowledge_handover("handover-x", &crate::state::HandoverActor::LocalOperator)
+                .await
+                .is_err(),
+            "the local door does not own a phone's handover either",
+        );
+        assert!(
+            app.relay
+                .read()
+                .await
+                .handover("handover-x")
+                .is_some_and(|handover| !handover.acknowledged),
+            "and none of those refusals may have consumed it",
+        );
+
+        app.acknowledge_handover(
+            "handover-x",
+            &crate::state::HandoverActor::Device("phone-a".to_string()),
+        )
+        .await
+        .expect("its own device may");
+        assert!(seen_by(Some("phone-a")).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_narrowed_scope_takes_the_outcome_away_even_from_the_device_that_asked() {
+        // Ownership is checked first, but it is not the only fence: a device's scope can
+        // be narrowed after it asked, and what it may see has to follow that.
         let project = TempDir::new().expect("tempdir");
         let cwd = project.path().to_string_lossy().to_string();
         let elsewhere = TempDir::new().expect("other tempdir");
@@ -33172,29 +33388,47 @@ composer happens to be on screen",
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let source = session(&app, &cwd, "never").await;
-        pair_device(&app, "phone", vec![outside.clone()]).await;
+        pair_device(&app, "phone", vec![cwd.clone()]).await;
         {
             let mut relay = app.relay.write().await;
-            relay
-                .reserve_handover(crate::state::Handover::new(
-                    "handover-x".to_string(),
-                    source.clone(),
-                    "target".to_string(),
-                    true,
-                    None,
-                ))
-                .expect("reserved");
+            let mut record = crate::state::Handover::new(
+                "handover-y".to_string(),
+                source.clone(),
+                "target-thread".to_string(),
+                false,
+                Some("phone".to_string()),
+                None,
+            );
+            record.fail("that agent is busy right now");
+            relay.reserve_handover(record).expect("reserved");
         }
+        assert_eq!(
+            app.relay
+                .read()
+                .await
+                .reviews_response(Some("phone"))
+                .handovers
+                .len(),
+            1
+        );
 
-        let refused = app
-            .acknowledge_handover("handover-x", Some("phone"))
+        pair_device(&app, "phone", vec![outside.clone()]).await;
+        assert!(
+            app.relay
+                .read()
+                .await
+                .reviews_response(Some("phone"))
+                .handovers
+                .is_empty(),
+            "narrowing a device's scope takes its own handover's outcome with it",
+        );
+        assert!(app
+            .acknowledge_handover(
+                "handover-y",
+                &crate::state::HandoverActor::Device("phone".to_string())
+            )
             .await
-            .expect_err("a device outside the scope must not silence it");
-        assert!(refused.contains("no such handover"), "{refused}");
-        assert!(app.acknowledge_handover("no-such-id", None).await.is_err());
-        app.acknowledge_handover("handover-x", None)
-            .await
-            .expect("the local door carries no scope to check");
+            .is_err());
     }
 
     #[tokio::test]

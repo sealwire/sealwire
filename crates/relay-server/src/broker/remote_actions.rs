@@ -1797,7 +1797,10 @@ async fn execute_remote_action(
         } => {
             let device_id = device_id.ok_or_else(|| "missing device id".to_string())?;
             state
-                .acknowledge_handover(&handover_id, Some(&device_id))
+                .acknowledge_handover(
+                    &handover_id,
+                    &crate::state::HandoverActor::Device(device_id),
+                )
                 .await
                 .map(|()| RemoteActionOutcome::default())
         }

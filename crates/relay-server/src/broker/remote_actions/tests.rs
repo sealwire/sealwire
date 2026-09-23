@@ -70,7 +70,6 @@ fn make_snapshot() -> SessionSnapshot {
             })
             .collect(),
         logs: vec![],
-        handovers: vec![],
         active_review_jobs: vec![],
         reviewer_threads: vec![],
         review_activity: vec![],
@@ -1093,6 +1092,7 @@ fn plain_fetch_reviews_result_carries_the_reviews_payload_to_the_device() {
     // only chunks when it exceeds MAX_BROKER_TEXT_FRAME_BYTES — so the field survived on
     // big workspaces and vanished on small ones.
     let reviews = crate::protocol::ReviewsResponse {
+        handovers: Vec::new(),
         asks: Vec::new(),
         goals: Vec::new(),
         reviews_revision: 99,

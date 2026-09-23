@@ -2617,23 +2617,43 @@ impl RelayState {
         self.asks.insert(job.id.clone(), job);
     }
 
+    /// Make room, read ones first.
+    ///
+    /// An unseen failure is evicted only when nothing already-read is left to drop,
+    /// and never quietly: it is the one record whose whole purpose is to be shown, so
+    /// the log says which one went. Live records are never evicted — something is
+    /// still driving them, and the restore side settles the rest.
     fn prune_handovers(&mut self) {
         // Strict `<` so there is always room for the caller's insertion.
         if self.handovers.len() < MAX_HANDOVERS {
             return;
         }
-        let mut terminal: Vec<(String, u64)> = self
+        let mut terminal: Vec<(String, bool, u64)> = self
             .handovers
             .iter()
-            .filter(|(_, handover)| handover.status.is_terminal() && handover.acknowledged)
-            .map(|(id, handover)| (id.clone(), handover.updated_at))
+            .filter(|(_, handover)| handover.status.is_terminal())
+            .map(|(id, handover)| (id.clone(), handover.acknowledged, handover.updated_at))
             .collect();
-        terminal.sort_by_key(|(_, updated_at)| *updated_at);
-        for (id, _) in terminal {
+        // Read ones first, oldest first within each half.
+        terminal.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.2.cmp(&right.2)));
+        let mut dropped_unread: Vec<String> = Vec::new();
+        for (id, acknowledged, _) in terminal {
             if self.handovers.len() < MAX_HANDOVERS {
                 break;
             }
+            if !acknowledged {
+                dropped_unread.push(id.clone());
+            }
             self.handovers.remove(&id);
+        }
+        for id in dropped_unread {
+            self.push_log(
+                "warn",
+                format!(
+                    "Forgot handover {id} to make room; its outcome was never read. \
+Raise the limit if this keeps happening."
+                ),
+            );
         }
     }
 
@@ -2647,15 +2667,15 @@ impl RelayState {
         &mut self,
         handover: crate::state::Handover,
     ) -> Result<(), String> {
-        if let Some(existing) = self.handovers.values().find(|other| {
+        if self.handovers.values().any(|other| {
             !other.status.is_terminal()
                 && other.id != handover.id
                 && other.target_thread_id == handover.target_thread_id
         }) {
-            return Err(format!(
-                "another handover is already on its way to that agent (from {})",
-                existing.source_thread_id
-            ));
+            // Deliberately does not name the other side. A device can share the
+            // TARGET's workspace without sharing the other source's, and a refusal
+            // that names it would hand over a thread id the asker may not see.
+            return Err("another handover is already on its way to that agent".to_string());
         }
         self.prune_handovers();
         self.handovers.insert(handover.id.clone(), handover);
@@ -2680,21 +2700,69 @@ impl RelayState {
         }
     }
 
-    /// The handovers a client is shown: only those still wanting attention, newest
-    /// first. A delivered one is not news and never reaches the wire.
-    pub(crate) fn handovers_view(&self) -> Vec<crate::protocol::HandoverView> {
-        let mut live: Vec<&crate::state::Handover> = self
+    /// The handovers THIS actor is shown: its own, still wanting attention, newest
+    /// first. A delivered one is not news and never reaches any wire.
+    ///
+    /// Never broadcast. The session snapshot goes to every paired device as one
+    /// payload with no regard for path scope, so a handover's outcome — two of the
+    /// person's session ids and what went wrong with their work — is fetched per
+    /// actor instead, exactly as the reviewer panel's cards are.
+    pub(crate) fn handovers_for(
+        &self,
+        actor: &crate::state::HandoverActor,
+    ) -> Vec<crate::protocol::HandoverView> {
+        let scope = match actor {
+            crate::state::HandoverActor::LocalOperator => Vec::new(),
+            crate::state::HandoverActor::Device(device_id) => self.device_path_scope(device_id),
+        };
+        let mut mine: Vec<&crate::state::Handover> = self
             .handovers
             .values()
-            .filter(|handover| handover.needs_attention())
+            .filter(|handover| handover.needs_attention() && handover.belongs_to(actor))
+            // Belt and braces behind the ownership fence: a device's scope can be
+            // narrowed after it asked, and what it may see has to follow that.
+            .filter(|handover| {
+                matches!(actor, crate::state::HandoverActor::LocalOperator)
+                    || self
+                        .thread_cwd(&handover.source_thread_id)
+                        .is_some_and(|cwd| {
+                            crate::state::path_within_device_scope(
+                                &cwd,
+                                &scope,
+                                &self.allowed_roots,
+                            )
+                        })
+            })
             .collect();
-        live.sort_by(|left, right| {
+        mine.sort_by(|left, right| {
             right
                 .updated_at
                 .cmp(&left.updated_at)
                 .then_with(|| right.id.cmp(&left.id))
         });
-        live.into_iter().map(|handover| handover.view()).collect()
+        mine.into_iter().map(|handover| handover.view()).collect()
+    }
+
+    /// A cache key for the handover feed, and the ONLY thing about handovers on the
+    /// broadcast snapshot.
+    ///
+    /// A scalar derived from ids and stamps: it tells a client "go and ask again",
+    /// and tells anyone else nothing but that something, somewhere, moved. Same
+    /// bargain `reviews_revision` already makes.
+    pub(crate) fn handovers_revision(&self) -> u64 {
+        let mut revision: u64 = 0;
+        for handover in self.handovers.values() {
+            if !handover.needs_attention() {
+                continue;
+            }
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&handover.id, &mut hasher);
+            std::hash::Hash::hash(&handover.updated_at, &mut hasher);
+            std::hash::Hash::hash(&handover.status.as_str(), &mut hasher);
+            // XOR so the order the map iterates in cannot change the answer.
+            revision ^= std::hash::Hasher::finish(&hasher);
+        }
+        revision
     }
 
     /// Every ask this session made, live or settled. The caps read it, and so
@@ -3244,16 +3312,22 @@ impl RelayState {
             .map(|(id, handover)| {
                 let mut handover = handover.clone();
                 if !handover.status.is_terminal() {
+                    // Never "it is empty": the transcripts are rebuilt from the
+                    // providers after this runs, so there is nothing here to inspect,
+                    // and the session may well have been opened and used in the
+                    // meantime. Advising someone to close a session on a guess is the
+                    // one outcome worse than saying too little.
                     let reason = if handover.target_started {
                         format!(
                             "the relay restarted while this session was writing the handover, \
-so {} never got it — that session was started for this and is empty; hand over again",
+so {} never got it. That session was started for this handover — look at it before \
+reusing or closing it, and hand over again when you are ready.",
                             handover.target_thread_id
                         )
                     } else {
                         format!(
                             "the relay restarted while this session was writing the handover, \
-so {} never got it — hand over again",
+so {} never got it — hand over again when you are ready.",
                             handover.target_thread_id
                         )
                     };
@@ -3341,7 +3415,10 @@ so {} never got it — hand over again",
     pub(crate) fn reviews_revision(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         // XOR per-entry hashes so the result is independent of map iteration order.
-        let mut acc: u64 = 0;
+        // Handovers ride this channel, so they have to move this key too — otherwise a
+        // failure lands in the payload and no client ever asks for it. Rotated so a
+        // handover change cannot cancel an identical review hash.
+        let mut acc: u64 = self.handovers_revision().rotate_left(3);
         for job in self.active_review_jobs_view() {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             job.id.hash(&mut h);
@@ -3454,6 +3531,13 @@ so {} never got it — hand over again",
                 .into_iter()
                 .filter(|goal| in_scope(&goal.thread_id))
                 .collect(),
+            // Fenced by OWNERSHIP first, which is stricter than the path scope around
+            // it: a handover's outcome belongs to the door it was typed at, so sharing
+            // a workspace with it is not enough to read — or to silence — it.
+            handovers: self.handovers_for(&match device_id {
+                Some(device_id) => crate::state::HandoverActor::Device(device_id.to_string()),
+                None => crate::state::HandoverActor::LocalOperator,
+            }),
         }
     }
 
@@ -4158,7 +4242,6 @@ so {} never got it — hand over again",
             transcript_truncated: false,
             transcript,
             logs: self.logs.clone(),
-            handovers: self.handovers_view(),
             active_review_jobs: Vec::new(),
             reviewer_threads: Vec::new(),
             review_activity: self.review_activity_view(),

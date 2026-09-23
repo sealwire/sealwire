@@ -91,6 +91,30 @@ struct PreparedHandover {
     effort: Option<String>,
 }
 
+/// How long to keep trying for the drive gate before giving up on delivery.
+///
+/// Short on purpose: the gate is only ever held across brief check-then-act windows,
+/// so anything longer than this means something is wrong rather than busy.
+const DRIVE_GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// What the target's turn history looked like, as one comparable value.
+///
+/// TURN activity only, deliberately not the transcript length: a history re-read
+/// merges provider rows into a runtime that had none, which grows the transcript
+/// without anybody having done anything, and refusing a handover because somebody
+/// merely OPENED the target would make the feature unusable. Every way a person puts
+/// work into a session goes through a turn, and `turn_revision` moves on both its
+/// start and its end — so a turn that began AND finished inside the summary window,
+/// which "is it busy right now" cannot see, still shows up here.
+fn target_activity(relay: &crate::state::RelayState, thread_id: &str) -> Option<String> {
+    let runtime = relay.runtime_for_thread(thread_id)?;
+    Some(format!(
+        "{}:{}",
+        runtime.turn_revision,
+        runtime.finished_turns.len()
+    ))
+}
+
 /// A short, sortable id. Mirrors the ask and review shapes so the three read alike
 /// in a state file.
 fn new_handover_id() -> String {
@@ -174,19 +198,21 @@ impl AppState {
         let prepared = self.prepare_handover(&source_thread_id, &request).await?;
 
         let handover_id = new_handover_id();
-        let record = crate::state::Handover::new(
-            handover_id.clone(),
-            source_thread_id.clone(),
-            prepared.target_thread_id.clone(),
-            prepared.target_is_fresh,
-            request.device_id.clone(),
-        );
         {
-            // The reservation and the "is anyone else already going there" check are ONE
-            // write. Two handovers aimed at the same idle session both pass admission
-            // before either starts, and the loser would deliver into a session the winner
-            // is about to fill.
+            // The reservation, the "is anyone else already going there" check and the
+            // activity reading are ONE write. Two handovers aimed at the same idle
+            // session both pass admission before either starts, and the loser would
+            // deliver into a session the winner is about to fill; and a fingerprint read
+            // outside this lock could already be a turn stale.
             let mut relay = self.relay.write().await;
+            let record = crate::state::Handover::new(
+                handover_id.clone(),
+                source_thread_id.clone(),
+                prepared.target_thread_id.clone(),
+                prepared.target_is_fresh,
+                request.device_id.clone(),
+                target_activity(&relay, &prepared.target_thread_id),
+            );
             relay
                 .reserve_handover(record)
                 .map_err(HandoverError::Failed)?;
@@ -201,7 +227,7 @@ impl AppState {
         handover_id: String,
         prepared: PreparedHandover,
     ) -> Result<(), HandoverError> {
-        match self.deliver_handover(prepared).await {
+        match self.deliver_handover(&handover_id, prepared).await {
             Ok(()) => {
                 let mut relay = self.relay.write().await;
                 relay.update_handover(&handover_id, |handover| handover.finish());
@@ -269,16 +295,20 @@ or hand over again"
     pub(crate) async fn acknowledge_handover(
         &self,
         handover_id: &str,
-        device_id: Option<&str>,
+        actor: &crate::state::HandoverActor,
     ) -> Result<(), String> {
         let mut relay = self.relay.write().await;
+        // "No such handover" rather than "not yours": one that is not this actor's must
+        // not be confirmed to exist, and what they do next is the same either way.
+        let missing = || "there is no such handover".to_string();
         let source = relay
             .handover(handover_id)
+            .filter(|handover| handover.belongs_to(actor))
             .map(|handover| handover.source_thread_id.clone())
-            .ok_or_else(|| "there is no such handover".to_string())?;
-        if device_id.is_some() {
-            super::goal::ensure_thread_in_device_scope(&relay, &source, device_id)
-                .map_err(|_| "there is no such handover".to_string())?;
+            .ok_or_else(missing)?;
+        if let crate::state::HandoverActor::Device(device_id) = actor {
+            super::goal::ensure_thread_in_device_scope(&relay, &source, Some(device_id))
+                .map_err(|_| missing())?;
         }
         relay.update_handover(handover_id, |handover| handover.acknowledged = true);
         relay.notify();
@@ -390,7 +420,11 @@ finished"
     }
 
     /// Drive the summary turn on the source, then give it to the target.
-    async fn deliver_handover(&self, prepared: PreparedHandover) -> Result<(), HandoverError> {
+    async fn deliver_handover(
+        &self,
+        handover_id: &str,
+        prepared: PreparedHandover,
+    ) -> Result<(), HandoverError> {
         let PreparedHandover {
             source_thread_id,
             target_thread_id,
@@ -424,7 +458,10 @@ finished"
             )
             .await
             .map_err(|error| {
-                HandoverError::Failed(format!("could not ask for the handover: {error}"))
+                self.log_handover_detail(handover_id, format!("summary turn failed: {error}"));
+                HandoverError::Failed(
+                    "this session could not be asked to write the handover — try again".to_string(),
+                )
             })?;
 
         // An UNCERTAIN start: the provider may be working, but nothing it writes could
@@ -466,7 +503,15 @@ finished"
                     .unwrap_or(source_sandbox),
             )
         };
-        // The FULL admission again, fresh target included. The first version skipped it
+        // Everything from here to the send is one check-then-act window, held under the
+        // SAME gate the ordinary send path takes (`AppState::send_message`). Without it
+        // a person's message can pass the check and start its turn between our answer
+        // and our send, and the handover lands in the middle of it. The gate is taken
+        // here and not around the summary turn: holding a relay-wide lock across minutes
+        // of somebody's model would stop every other session in the relay.
+        let _gate = self.wait_for_drive_gate().await?;
+
+        // The FULL admission again, fresh target included. An earlier version skipped it
         // for a fresh one on the grounds that nobody else had it — which is false the
         // moment the summary takes a minute and the person opens the new session and
         // starts typing. It also misses the session being deleted, pulled into a Code
@@ -490,6 +535,25 @@ finished"
         .await
         .map_err(handover_admission_error)?;
 
+        // …and the part no liveness test can answer: a turn that STARTED AND FINISHED
+        // while the summary was being written leaves the target idle again, looking
+        // exactly like the session we reserved. The fingerprint taken at acceptance is
+        // the only thing that can tell those two apart.
+        {
+            let relay = self.relay.read().await;
+            let reserved = relay
+                .handover(handover_id)
+                .and_then(|handover| handover.target_activity.clone());
+            let now = target_activity(&relay, &target_thread_id);
+            if reserved != now {
+                return Err(HandoverError::Failed(
+                    "that agent was used while this handover was being written, so it is \
+no longer the session this was meant for — hand over again"
+                        .to_string(),
+                ));
+            }
+        }
+
         self.send_message_to_thread(
             &target_thread_id,
             &format!("{summary}{}", continue_instruction()),
@@ -497,8 +561,51 @@ finished"
             effort.as_deref(),
         )
         .await
-        .map_err(|error| HandoverError::Failed(error.to_string()))?;
+        // The provider's own words are not repeated: this reason is shown to a person
+        // and, unlike the relay's log, it is a channel a paired device reads.
+        .map_err(|error| {
+            self.log_handover_detail(handover_id, format!("delivery failed: {error}"));
+            HandoverError::Failed(
+                "that agent could not be given the handover; its session may have gone \
+— hand over again"
+                    .to_string(),
+            )
+        })?;
         Ok(())
+    }
+
+    /// The gate every session-mutating op takes for its check-then-act window.
+    ///
+    /// Waited for, not tried once: this runs minutes after the person asked, and
+    /// failing a whole handover because some unrelated op held the gate for a moment
+    /// would be a refusal about nothing.
+    async fn wait_for_drive_gate(&self) -> Result<tokio::sync::OwnedMutexGuard<()>, HandoverError> {
+        let deadline = tokio::time::Instant::now() + DRIVE_GATE_WAIT;
+        loop {
+            if let Ok(gate) = self.acquire_session_slot() {
+                return Ok(gate);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(HandoverError::Failed(
+                    "the relay was busy with something else for too long to deliver this \
+handover — try again"
+                        .to_string(),
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Detail for the operator's log, kept OFF the record.
+    ///
+    /// A provider's error text can carry paths, prompts and ids. The record is read by
+    /// a paired device; the relay log is this machine's.
+    fn log_handover_detail(&self, handover_id: &str, detail: String) {
+        let app = self.clone();
+        let line = format!("Handover {handover_id}: {detail}");
+        tokio::spawn(async move {
+            app.push_runtime_log("warn", line).await;
+        });
     }
 
     /// Start the session the work is being handed to.

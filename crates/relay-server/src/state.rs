@@ -38,7 +38,7 @@ pub(crate) use self::relay::{
 // assert an Error push); gate the re-export so non-test builds don't warn.
 pub(crate) use self::delegation::{session_is_unrestricted, Ask};
 pub(crate) use self::goal::{Goal, GoalStatus, MAX_GOAL_OBJECTIVE_CHARS};
-pub(crate) use self::handover::Handover;
+pub(crate) use self::handover::{Handover, HandoverActor};
 // Only the tests name the status directly; production code asks `is_terminal()`.
 #[cfg(test)]
 pub(crate) use self::handover::HandoverStatus;

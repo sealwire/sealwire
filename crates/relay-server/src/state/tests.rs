@@ -397,7 +397,6 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             transcript_truncated: false,
             transcript: Vec::new(),
             logs: Vec::new(),
-            handovers: Vec::new(),
             active_review_jobs: Vec::new(),
             reviewer_threads: Vec::new(),
             review_activity: Vec::new(),
@@ -8046,7 +8045,8 @@ fn a_handover_a_restart_caught_mid_flight_comes_back_as_a_visible_failure() {
             "source-thread".to_string(),
             "target-thread".to_string(),
             true,
-            Some("phone-1".to_string()),
+            None,
+            Some("0:0".to_string()),
         ))
         .expect("nothing else is going there");
 
@@ -8072,9 +8072,14 @@ fn a_handover_a_restart_caught_mid_flight_comes_back_as_a_visible_failure() {
         "the person has to be told which session was left behind: {reason}"
     );
     assert!(
-        reason.contains("empty"),
-        "a session started for a handover that never arrived is an orphan, and saying so \
-is the only recovery on offer: {reason}"
+        reason.contains("look at it before reusing or closing it"),
+        "the person is told a session was left behind and what to do about it: {reason}"
+    );
+    assert!(
+        !reason.contains("empty"),
+        "…but never that it is EMPTY. The transcripts are rebuilt from the providers \
+after this runs, so there is nothing here to inspect, and the session may well have been \
+opened and used: {reason}"
     );
     assert!(
         handover.needs_attention(),
@@ -8082,11 +8087,11 @@ is the only recovery on offer: {reason}"
     );
     assert!(
         restored
-            .snapshot()
+            .reviews_response(None)
             .handovers
             .iter()
             .any(|view| view.id == "handover-1" && view.status == "failed"),
-        "and it reaches the composer through the snapshot",
+        "and it reaches the composer through the actor-scoped channel",
     );
 }
 
@@ -8102,6 +8107,7 @@ fn a_delivered_handover_survives_a_restart_without_raising_anything() {
             "target-thread".to_string(),
             true,
             None,
+            None,
         ))
         .expect("reserved");
     relay.update_handover("handover-done", |handover| handover.finish());
@@ -8111,7 +8117,7 @@ fn a_delivered_handover_survives_a_restart_without_raising_anything() {
     let handover = restored.handover("handover-done").expect("it survives");
     assert_eq!(handover.status, crate::state::HandoverStatus::Done);
     assert_eq!(handover.error, None);
-    assert!(restored.snapshot().handovers.is_empty());
+    assert!(restored.reviews_response(None).handovers.is_empty());
 }
 
 // Two people (or two devices) aiming a handover at the same idle session both pass
@@ -8128,6 +8134,7 @@ fn only_one_handover_at_a_time_may_claim_an_agent() {
             "target-thread".to_string(),
             false,
             None,
+            None,
         )
     };
     relay
@@ -8138,8 +8145,9 @@ fn only_one_handover_at_a_time_may_claim_an_agent() {
         .expect_err("the second must be told, not queued behind it");
     assert!(refused.contains("already on its way"), "{refused}");
     assert!(
-        refused.contains("source-a"),
-        "naming who has it is what makes this actionable: {refused}"
+        !refused.contains("source-a"),
+        "naming the other side hands over a thread id the asker may not be allowed to \
+see — a device can share the TARGET's workspace without sharing that source's: {refused}"
     );
 
     // …and the reservation is released by the outcome, not held for ever.
@@ -8147,4 +8155,59 @@ fn only_one_handover_at_a_time_may_claim_an_agent() {
     relay
         .reserve_handover(handover("third", "source-b"))
         .expect("a settled handover holds nothing");
+}
+
+// Outcomes are durable until they are READ, which means unread ones can pile up if
+// nobody ever looks. The cap still has to hold — but an unseen failure is the one record
+// whose entire purpose is to be shown, so read ones go first and dropping an unread one
+// is said out loud rather than done quietly.
+#[test]
+fn making_room_forgets_what_has_been_read_before_what_has_not() {
+    let mut relay = test_state();
+    let record = |id: &str, acknowledged: bool| {
+        let mut handover = crate::state::Handover::new(
+            id.to_string(),
+            "source-thread".to_string(),
+            format!("target-{id}"),
+            false,
+            None,
+            None,
+        );
+        handover.fail("that agent is busy right now");
+        handover.acknowledged = acknowledged;
+        handover
+    };
+    // Fill it: mostly read, one that nobody has seen.
+    for index in 0..80 {
+        relay
+            .reserve_handover(record(&format!("read-{index:03}"), true))
+            .expect("distinct targets");
+    }
+    relay
+        .reserve_handover(record("unread-1", false))
+        .expect("distinct target");
+
+    assert!(
+        relay.handover("unread-1").is_some(),
+        "the unread one survived eighty insertions that all had to make room",
+    );
+    assert!(
+        relay.handovers.len() <= 64,
+        "the cap still holds: {}",
+        relay.handovers.len()
+    );
+
+    // Now leave it nothing already-read to drop.
+    let unread: Vec<String> = (0..200).map(|index| format!("unread-{index:03}")).collect();
+    for id in &unread {
+        relay.reserve_handover(record(id, false)).expect("reserved");
+    }
+    assert!(relay.handovers.len() <= 64);
+    assert!(
+        relay
+            .logs
+            .iter()
+            .any(|entry| entry.message.contains("its outcome was never read")),
+        "an unseen failure may be forgotten under pressure, but never silently",
+    );
 }

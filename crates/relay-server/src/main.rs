@@ -977,7 +977,10 @@ async fn acknowledge_handover_outcome(
     let outcome = context
         .app
         // Loopback callers carry no path scope to be checked against.
-        .acknowledge_handover(&input.handover_id, None)
+        .acknowledge_handover(
+            &input.handover_id,
+            &crate::state::HandoverActor::LocalOperator,
+        )
         .await
         .map(|()| "Noted.".to_string());
     Ok(Json(

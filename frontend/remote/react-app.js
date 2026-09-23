@@ -1483,6 +1483,15 @@ function RemoteApp() {
       () => setRemoteReviews(remoteReviewsCacheRef.current.current())
     );
   }, [session?.reviews_revision]);
+  // Handover outcomes ride the same per-device channel. Re-run on navigation as well as
+  // on fresh data: coming BACK to the thread a failure belongs to is the moment it is
+  // actually shown, which is the only moment it may be acknowledged.
+  useEffect(() => {
+    handlersRef.current.onHandoverOutcomes?.(
+      remoteReviewsCacheRef.current.current()?.handovers,
+      remoteViewedThreadId
+    );
+  }, [remoteReviews, remoteViewedThreadId]);
   const remoteWorkflowsCacheRef = useRef(null);
   if (!remoteWorkflowsCacheRef.current) {
     remoteWorkflowsCacheRef.current = createWorkflowsCache();

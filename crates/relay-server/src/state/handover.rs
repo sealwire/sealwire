@@ -79,10 +79,21 @@ pub(crate) struct Handover {
     /// a handover that never arrived is an orphan the person has to be told about
     /// by name, while somebody else's session is simply untouched.
     pub(crate) target_started: bool,
-    /// The device that asked, when one did. Provenance in the state file, NOT an
-    /// authorization input: what a device can be fenced against is the source
-    /// thread's workspace, and that is what `acknowledge_handover` checks.
+    /// The device that asked, or `None` for the local operator door.
+    ///
+    /// AUTHORIZATION, not provenance: this record is readable and acknowledgeable
+    /// by exactly that actor and nobody else. The outcome of a handover names two
+    /// of the person's sessions and says what went wrong with their work — it is
+    /// not something every paired device is entitled to, and a device that could
+    /// acknowledge somebody else's failure could silence it before they saw it.
     pub(crate) device_id: Option<String>,
+    /// What the target's turn history looked like when this handover was accepted.
+    ///
+    /// The summary takes minutes, and "is it busy right now" cannot see a turn the
+    /// person started and finished inside that window — which is the case where
+    /// delivering anyway drops a handover into a conversation already under way.
+    /// Compared again before the send; anything but equal refuses.
+    pub(crate) target_activity: Option<String>,
     pub(crate) status: HandoverStatus,
     pub(crate) error: Option<String>,
     /// Whether the person has been shown how this ended.
@@ -102,6 +113,7 @@ impl Handover {
         target_thread_id: String,
         target_started: bool,
         device_id: Option<String>,
+        target_activity: Option<String>,
     ) -> Self {
         let now = unix_now();
         Self {
@@ -110,6 +122,7 @@ impl Handover {
             target_thread_id,
             target_started,
             device_id,
+            target_activity,
             status: HandoverStatus::Working,
             error: None,
             // A success has nothing to say, so it starts already answered for.
@@ -156,6 +169,21 @@ impl Handover {
         !self.status.is_terminal() || (self.status == HandoverStatus::Failed && !self.acknowledged)
     }
 
+    /// Is this `actor`'s to read and to answer for?
+    ///
+    /// Exactly one actor per record, which is what makes a single `acknowledged`
+    /// flag actor-specific rather than a bool any surface can clear: the local
+    /// operator owns the ones typed on this machine, and a paired device owns the
+    /// ones it sent. Nobody else ever sees one, so nobody else can consume it.
+    pub(crate) fn belongs_to(&self, actor: &HandoverActor) -> bool {
+        match actor {
+            HandoverActor::LocalOperator => self.device_id.is_none(),
+            HandoverActor::Device(device_id) => {
+                self.device_id.as_deref() == Some(device_id.as_str())
+            }
+        }
+    }
+
     pub(crate) fn view(&self) -> crate::protocol::HandoverView {
         crate::protocol::HandoverView {
             id: self.id.clone(),
@@ -169,6 +197,16 @@ impl Handover {
     }
 }
 
+/// Who is asking. There is no "everyone": a handover's outcome belongs to the door
+/// it was typed at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HandoverActor {
+    /// The loopback API — this machine's own operator surface. It carries no device
+    /// identity and no path scope, and it only ever sees handovers started here.
+    LocalOperator,
+    Device(String),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,7 +218,30 @@ mod tests {
             "target".into(),
             true,
             Some("dev".into()),
+            Some("0:0".into()),
         )
+    }
+
+    #[test]
+    fn a_handover_belongs_to_the_door_it_was_typed_at_and_to_nobody_else() {
+        // The outcome names two of the person's sessions and says what went wrong with
+        // their work. A device that could read somebody else's would learn both; one
+        // that could acknowledge it could silence it before they ever saw it.
+        let from_phone = handover();
+        assert!(from_phone.belongs_to(&HandoverActor::Device("dev".into())));
+        assert!(!from_phone.belongs_to(&HandoverActor::Device("another-phone".into())));
+        assert!(
+            !from_phone.belongs_to(&HandoverActor::LocalOperator),
+            "a remote handover is the asking device's, not this machine's",
+        );
+
+        let mut from_desktop = handover();
+        from_desktop.device_id = None;
+        assert!(from_desktop.belongs_to(&HandoverActor::LocalOperator));
+        assert!(
+            !from_desktop.belongs_to(&HandoverActor::Device("dev".into())),
+            "…and a locally typed handover stays local, which is the deliberate trade",
+        );
     }
 
     #[test]

@@ -197,13 +197,6 @@ pub struct SessionSnapshot {
     pub transcript_truncated: bool,
     pub transcript: Vec<TranscriptEntryView>,
     pub logs: Vec<LogEntryView>,
-    /// Handovers that still want the person's attention: accepted-and-running, or
-    /// failed and not yet read. Deliberately NOT a card channel — this is how the
-    /// composer that typed `/handover` learns the operation it was told was under
-    /// way did not finish. A handover that worked never appears here at all, so in
-    /// the ordinary case this costs zero bytes.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub handovers: Vec<HandoverView>,
     /// Deprecated compatibility shell. Full review cards live on the dedicated
     /// Reviews channel; newly-produced snapshots carry only `review_activity`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -340,6 +333,16 @@ pub struct ReviewsResponse {
     /// …and what those sessions are working toward, for the same reason.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub goals: Vec<GoalView>,
+    /// How this actor's handovers ended.
+    ///
+    /// Here rather than on the session snapshot BECAUSE this channel is fetched per
+    /// actor and that one is broadcast: the snapshot goes to every paired device as
+    /// one payload with no regard for path scope (see its confidentiality note), and
+    /// a handover's outcome names two of the person's sessions and says what went
+    /// wrong with their work. Scoped twice over here — to the door the handover was
+    /// typed at, and then to that device's workspace.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handovers: Vec<HandoverView>,
 }
 
 /// Uncompacted device/security payload served on demand. Device records are

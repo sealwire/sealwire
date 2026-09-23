@@ -67,3 +67,19 @@ test("the arguments the command collected reach the relay untouched", async () =
 
   assert.deepEqual(sent, [["thread-1", args]]);
 });
+
+// A failure is held by the relay until it has been READ, which is what stops one being
+// consumed while the person is looking at another session. Handing over again is the
+// other way it stops being news — they have replaced it — and without this it stays
+// durable for ever and comes back under the new draft on the next reload.
+test("handing over again retires whatever the last attempt left on that thread", async () => {
+  const superseded = [];
+  const author = createHandoverAuthor({
+    handover: async () => ({ text: "Handing over.", isError: false }),
+    supersedeOutcomes: (threadId) => superseded.push(threadId),
+  });
+
+  await author("thread-1", { note: "" });
+
+  assert.deepEqual(superseded, ["thread-1"], "and against the thread it was typed on");
+});

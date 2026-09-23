@@ -961,10 +961,6 @@ export function applySessionSnapshot(snapshot) {
     console.log(message);
     return;
   }
-  // Off the RAW snapshot, before any view-only projection: the projection rewrites the
-  // session around whichever thread this phone is looking at, and a handover's failure
-  // belongs to the thread it was typed into either way.
-  reportHandoverOutcomes(snapshot?.handovers);
   const displaySnapshot = stampThreadActivitySnapshotTime(
     preserveVisibleTranscriptText(state.realSession, snapshot)
   );
@@ -2034,15 +2030,18 @@ export function setComposerHeld(threadId, message) {
   });
 }
 
-// Accepted-then-failed handovers, read off the snapshot. Same rule as the desktop: the
-// failure belongs to the thread the command was typed into, not to the composer now on
-// screen, and each one is said once. `dispatchOrRecover` rather than a bare fetch so it
-// follows the same claim/recovery path as every other remote write.
-const reportHandoverOutcomes = createHandoverOutcomeReporter({
+// Accepted-then-failed handovers, read off the `fetch_reviews` channel — which is
+// fetched per device, unlike the snapshot, which every paired device receives whole.
+// Same rules as the desktop: the failure belongs to the thread the command was typed
+// into rather than the composer now on screen, all of a thread's are shown together, and
+// none is acknowledged until it has actually been on screen for its own thread.
+// `dispatchOrRecover` rather than a bare fetch so the receipt follows the same
+// claim/recovery path as every other remote write.
+export const handoverOutcomes = createHandoverOutcomeReporter({
   report: (threadId, message) => setComposerError(threadId, message),
   acknowledge: (handoverId) => {
-    // Best effort: the failure has already been shown, so a receipt that does not land
-    // only means it is shown once more after a reload.
+    // Best effort: it has already been shown, so a receipt that does not land only means
+    // it is offered once more after a reload.
     void dispatchOrRecover("ack_handover", { handover_id: handoverId }).catch(() => {});
   },
 });
@@ -2455,7 +2454,10 @@ export async function handoverRemote(threadId, args = {}) {
   }
   renderLog("Handing this work over…");
   // Cleared as the attempt starts, not when it succeeds: a success clearing on its way
-  // out can erase a newer failure that landed while it was still in flight.
+  // out can erase a newer failure that landed while it was still in flight. Handing over
+  // again is also the person saying they have read the last attempt's outcome, so the
+  // relay may stop holding it.
+  handoverOutcomes.confirmShown(threadId);
   setComposerError(threadId, "");
   try {
     await dispatchOrRecover("handover", { thread_id: threadId, ...args });
