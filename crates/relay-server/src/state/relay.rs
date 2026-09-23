@@ -63,19 +63,29 @@ const MAX_SEARCH_ROUTING_HINTS: usize = 2_000;
 /// a timer — is what eventually evicts old completed reviews.
 const MAX_REVIEW_JOBS: usize = 64;
 const MAX_ASKS: usize = 64;
-/// Total handover records kept, across every actor. Only ones nobody needs any more
-/// are ever dropped to hold it (see `prune_handovers`), so this is a floor on
-/// forgetting rather than a quota.
+/// The HARD total, across every actor. A reservation past it is refused, not absorbed.
+///
+/// Per-actor quotas alone are not a bound: pairing has no device cap, so N devices at
+/// their own quota each is N × quota records and N is whatever the user pairs. Two
+/// limits, and they answer different questions — the quota keeps one actor from filling
+/// the relay and is told to that actor in its own terms; this one is the relay's own
+/// ceiling and is reported WITHOUT a count, because the pressure behind it is other
+/// actors' and telling anyone about it is the leak the fence exists to prevent.
 const MAX_HANDOVERS: usize = 64;
 /// How many unread outcomes ONE actor may have before it is refused a new handover.
 ///
 /// Per actor, not global, because the records are per actor: a device cannot see or
 /// acknowledge another's, so a shared budget would let one phone lock out everybody
-/// else and tell them to go and read outcomes they are fenced out of. The total is
-/// bounded by this times the number of actors, and an actor's records are retired with
-/// the thing that made them reachable — the source session — so that does not grow
-/// without end either.
+/// else and tell them to go and read outcomes they are fenced out of.
 const MAX_UNREAD_HANDOVERS_PER_ACTOR: usize = 16;
+/// What a refusal says when the relay itself is full rather than this actor.
+///
+/// Deliberately says nothing about how many, whose, or where: the records holding the
+/// ceiling belong to other actors, and an actor cannot be told to go and read what it
+/// is fenced out of. Nothing was started, which is the part that matters.
+pub(crate) const HANDOVER_STORAGE_FULL_MSG: &str =
+    "the relay is holding as many handover outcomes as it can right now, so this one \
+was not started. Try again in a little while.";
 /// Backstop on retained workflow runs, mirroring `MAX_REVIEW_JOBS`: evict the
 /// oldest TERMINAL runs first; non-terminal runs are never auto-evicted (they
 /// have a live or restart-recoverable orchestrator).
@@ -2714,6 +2724,11 @@ impl RelayState {
         MAX_UNREAD_HANDOVERS_PER_ACTOR
     }
 
+    /// The relay's own hard total, whatever the actors add up to.
+    pub(crate) const fn handover_storage_ceiling() -> usize {
+        MAX_HANDOVERS
+    }
+
     /// Retire every handover whose source session this was.
     ///
     /// An outcome is only ever shown on its source thread's composer, so deleting or
@@ -2725,6 +2740,17 @@ impl RelayState {
     fn retire_handovers_for_thread(&mut self, thread_id: &str) {
         self.handovers
             .retain(|_, handover| handover.source_thread_id != thread_id);
+    }
+
+    /// Retire every handover a device asked for, because that device is gone.
+    ///
+    /// Revoking is the other way an actor stops existing. Its records can no longer be
+    /// read or acknowledged by anybody — ownership is the fence — so keeping them holds
+    /// the relay's ceiling against something nobody will ever look at, and that is what
+    /// turns "quota × actors" into no bound at all.
+    pub(super) fn retire_handovers_for_device(&mut self, device_id: &str) {
+        self.handovers
+            .retain(|_, handover| handover.device_id.as_deref() != Some(device_id));
     }
 
     /// Reserve `target_thread_id` for this handover, or say who already has it.
@@ -2752,6 +2778,14 @@ not read, which is as many as the relay holds at once. Open those sessions to re
 happened, then hand over again."
             ));
         }
+        // Reclaim first, then the relay's own ceiling. Pruning only ever takes records
+        // nobody can still act on (read, or unreachable by their owner), so what is left
+        // holding the line is somebody's unread outcome — and there is nothing this
+        // caller can do about that, which is why it is told so in general terms.
+        self.prune_handovers();
+        if self.handovers.len() >= MAX_HANDOVERS {
+            return Err(HANDOVER_STORAGE_FULL_MSG.to_string());
+        }
         // A fresh target has no id yet — it is started only once this slot is owned — so
         // there is nothing it could collide with.
         if !handover.target_thread_id.is_empty()
@@ -2766,7 +2800,6 @@ happened, then hand over again."
             // that names it would hand over a thread id the asker may not see.
             return Err("another handover is already on its way to that agent".to_string());
         }
-        self.prune_handovers();
         self.handovers.insert(handover.id.clone(), handover);
         Ok(())
     }
@@ -2775,15 +2808,23 @@ happened, then hand over again."
     ///
     /// The slot is taken before that session exists, so this is the other half of the
     /// reservation: until it runs, the record holds quota under an empty target.
+    /// Answers whether the record was still there. A silent miss would let a handover
+    /// whose record had been retired mid-start report itself accepted, with a session
+    /// created and nothing accounting for it.
+    #[must_use]
     pub(crate) fn bind_handover_target(
         &mut self,
         handover_id: &str,
         target_thread_id: String,
         target_activity: Option<String>,
-    ) {
-        if let Some(handover) = self.handovers.get_mut(handover_id) {
-            handover.target_thread_id = target_thread_id;
-            handover.target_activity = target_activity;
+    ) -> bool {
+        match self.handovers.get_mut(handover_id) {
+            Some(handover) => {
+                handover.target_thread_id = target_thread_id;
+                handover.target_activity = target_activity;
+                true
+            }
+            None => false,
         }
     }
 

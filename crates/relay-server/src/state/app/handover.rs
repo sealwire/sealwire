@@ -201,17 +201,34 @@ impl AppState {
                     .map_err(HandoverError::Failed)?,
             );
         }
+        // ONE gate over validate → reserve → start → bind, and that is the whole of the
+        // synchronous half. It is the SAME gate archive, delete and `start_session` hold
+        // across their own provider round trips, which is what makes this coherent with
+        // them: without it, the source can be archived between being validated and being
+        // reserved (leaving a record for a session that no longer exists, unshowable and
+        // holding quota for ever), or between the reservation and the start returning
+        // (leaving a visible new session that nothing accounts for, reported as a
+        // success). Released before the summary — that part waits on a model and must
+        // never hold this.
+        let gate = self.wait_for_drive_gate().await?;
         let mut prepared = self.prepare_handover(&source_thread_id, &request).await?;
 
         let handover_id = new_handover_id();
         {
-            // The quota, the "is anyone else already going there" check and the activity
-            // reading are ONE write, and they come BEFORE anything is started. Two
-            // handovers aimed at the same idle session both pass admission before either
-            // begins, and the loser would deliver into a session the winner is about to
-            // fill; a fingerprint read outside this lock could already be a turn stale;
-            // and a quota read outside it is advisory, which is no quota at all.
+            // The quota, the ceiling, the "is anyone else already going there" check and
+            // the activity reading are ONE write, and they come BEFORE anything is
+            // started. Two handovers aimed at the same idle session both pass admission
+            // before either begins, and the loser would deliver into a session the winner
+            // is about to fill; a fingerprint read outside this lock could already be a
+            // turn stale; and a quota read outside it is advisory, which is no quota.
             let mut relay = self.relay.write().await;
+            // Re-read inside the write that takes the slot. The gate already keeps
+            // archive and delete out, so this is the belt to that braces — but it is the
+            // one check that makes a reserved record impossible to create for a session
+            // that is not there, which is a record nobody could ever read.
+            if relay.thread_cwd(&source_thread_id).is_none() {
+                return Err(HandoverError::NoSuchSource);
+            }
             let record = crate::state::Handover::new(
                 handover_id.clone(),
                 source_thread_id.clone(),
@@ -242,10 +259,37 @@ impl AppState {
                 .await
             {
                 Ok(target_thread_id) => {
-                    let mut relay = self.relay.write().await;
-                    let activity = target_activity(&relay, &target_thread_id);
-                    relay.bind_handover_target(&handover_id, target_thread_id.clone(), activity);
-                    relay.notify();
+                    let bound = {
+                        let mut relay = self.relay.write().await;
+                        let activity = target_activity(&relay, &target_thread_id);
+                        let bound = relay.bind_handover_target(
+                            &handover_id,
+                            target_thread_id.clone(),
+                            activity,
+                        );
+                        relay.notify();
+                        bound
+                    };
+                    if !bound {
+                        // The record was retired while the provider was starting, which
+                        // means the source went. Answering Ok here would report an
+                        // accepted handover with nothing accounting for it and a session
+                        // nobody knows about — so say what happened and name what was
+                        // created. It is not deleted: it is a session, and the one rule
+                        // that outranks tidiness is never destroying somebody's work.
+                        self.log_handover_detail(
+                            &handover_id,
+                            format!(
+                                "the source went while the target was starting; \
+{target_thread_id} was created and is not recorded"
+                            ),
+                        );
+                        return Err(HandoverError::Failed(format!(
+                            "this session went away while the other agent was being \
+started, so the handover was not recorded. The session that was created is \
+{target_thread_id}."
+                        )));
+                    }
                     prepared.target_thread_id = target_thread_id;
                 }
                 Err(error) => {
@@ -256,6 +300,7 @@ impl AppState {
                 }
             }
         }
+        drop(gate);
         Ok((handover_id, prepared))
     }
 

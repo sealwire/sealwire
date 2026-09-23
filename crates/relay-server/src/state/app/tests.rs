@@ -33320,47 +33320,6 @@ whole regardless of its path scope",
     }
 
     #[tokio::test]
-    async fn a_source_deleted_mid_handover_leaves_nothing_to_settle_back_into() {
-        // The window between acceptance and the summary. Deleting the source there must
-        // not have the background half write a failure about a session that is gone, onto
-        // a record nobody could ever read — it would be unacknowledgeable AND hold a slot.
-        let project = TempDir::new().expect("tempdir");
-        let cwd = project.path().to_string_lossy().to_string();
-        let (app, provider, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
-        grant_workspace(&app, &cwd).await;
-        let source = session(&app, &cwd, "never").await;
-
-        let held = app.acquire_session_slot().expect("the gate is free");
-        let (handover_id, _target) = app
-            .handover_detached(&source, request())
-            .await
-            .expect("accepted");
-        {
-            let mut relay = app.relay.write().await;
-            relay.remove_thread(&source);
-        }
-        drop(held);
-        provider.release_terminals();
-
-        for _ in 0..100 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            if app.relay.read().await.handover(&handover_id).is_none() {
-                break;
-            }
-        }
-        let relay = app.relay.read().await;
-        assert!(
-            relay.handover(&handover_id).is_none(),
-            "the record went with its source and must not be resurrected as a failure",
-        );
-        assert_eq!(
-            relay.unread_handover_pressure_for(&crate::state::HandoverActor::LocalOperator),
-            0,
-            "and it holds no slot",
-        );
-    }
-
-    #[tokio::test]
     async fn narrowing_a_devices_scope_frees_the_slot_it_can_no_longer_reach() {
         // Round three deliberately makes an outcome unreadable once the device's scope no
         // longer covers its source. Unreadable must not also mean "charged for it for
@@ -33460,65 +33419,187 @@ whole regardless of its path scope",
     }
 
     #[tokio::test]
-    async fn the_summary_turn_does_not_start_through_an_ordinary_send_on_the_source() {
-        // The same check-then-act as the delivery, one step earlier and on the other
-        // session. Acceptance has already returned, so the person can press Send on the
-        // very session they just handed over in the gap between "is it idle" and the
-        // summary going out. Their send holds the relay's drive gate for its own window;
-        // if the summary does not take the same one, two provider turns start on one
-        // thread and interleave.
+    async fn acceptance_waits_for_the_gate_that_archive_and_delete_hold() {
+        // Acceptance validates the source, reserves a slot, starts a session and binds
+        // it — four steps with provider round trips between them, against a relay that
+        // archive and delete are mutating under the SAME gate. Without taking it, the
+        // source can be archived between being validated and being reserved (a record
+        // for a session that is not there, unshowable and holding quota for ever) or
+        // between the reservation and the start returning (a visible new session that
+        // nothing accounts for, reported as a success).
         let project = TempDir::new().expect("tempdir");
         let cwd = project.path().to_string_lossy().to_string();
-        let (app, _provider, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
+        let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
         let source = session(&app, &cwd, "never").await;
+        let threads_before = app.relay.read().await.threads.len();
 
-        // Stand in the gate exactly as an ordinary send does for its own window.
+        // Stand in the gate exactly as `archive_thread` does across its provider call.
         let held = app.acquire_session_slot().expect("the gate is free");
+        let accepting = {
+            let app = app.clone();
+            let source = source.clone();
+            tokio::spawn(async move { app.handover_detached(&source, request()).await })
+        };
 
-        let (handover_id, target) = app
-            .handover_detached(&source, request())
-            .await
-            .expect("accepted");
-
-        for _ in 0..25 {
+        for _ in 0..20 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert!(
-            received(&app, &source).await.is_empty(),
-            "the summary must not be dispatched while another session op holds the gate",
-        );
-        assert!(
-            app.relay
-                .read()
-                .await
-                .handover(&handover_id)
-                .is_some_and(|handover| !handover.status.is_terminal()),
-            "…and it is still going, not quietly failed",
-        );
+        {
+            let relay = app.relay.read().await;
+            assert_eq!(
+                relay.threads.len(),
+                threads_before,
+                "nothing may be started while the gate is somebody else's",
+            );
+            assert!(
+                relay.handovers.is_empty(),
+                "and no slot may be taken either",
+            );
+        }
 
         drop(held);
-        let asked = delivered(&app, &source).await;
-        assert!(
-            asked
-                .last()
-                .is_some_and(|prompt| prompt.contains("Remaining work")),
-            "once the gate is free the summary goes out: {asked:?}"
-        );
-        // …and the whole thing still completes, so the gate is a queue, not a wall.
-        let handed = delivered(&app, &target).await;
-        assert!(handed
-            .last()
-            .is_some_and(|message| message.contains("That work is now yours")));
+        let (handover_id, target) = accepting
+            .await
+            .expect("the task ran")
+            .expect("and once the gate is free it is accepted");
+        let relay = app.relay.read().await;
+        let record = relay.handover(&handover_id).expect("recorded");
+        assert_eq!(record.target_thread_id, target, "bound to what it created");
+        assert!(relay.thread_cwd(&target).is_some());
     }
 
     #[tokio::test]
-    async fn a_turn_started_on_the_source_after_acceptance_is_waited_for_not_raced() {
-        // Acceptance refuses a source that is ALREADY mid-turn, so the race is the gap
-        // after it returns: the person presses Send on the very session they just handed
-        // over. The summary must queue behind their turn rather than start a second one
-        // alongside it — two provider turns on one thread interleave, and the reply the
-        // handover reads back could be either.
+    async fn archiving_the_source_cannot_interleave_with_acceptance() {
+        // The barrier: both want the same gate, so whichever loses runs against a
+        // settled relay rather than halfway through the other. Whichever way it falls,
+        // the invariant is the same — no session exists that no record accounts for,
+        // and no record exists for a session that does not.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        let held = app.acquire_session_slot().expect("the gate is free");
+        let accepting = {
+            let app = app.clone();
+            let source = source.clone();
+            tokio::spawn(async move { app.handover_detached(&source, request()).await })
+        };
+        let archiving = {
+            let app = app.clone();
+            let source = source.clone();
+            tokio::spawn(async move { app.archive_thread(&source, Some(false)).await })
+        };
+        for _ in 0..10 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        drop(held);
+
+        let accepted = accepting.await.expect("the task ran");
+        let _ = archiving.await.expect("the task ran");
+
+        let relay = app.relay.read().await;
+        for handover in relay.handovers.values() {
+            assert!(
+                relay.thread_cwd(&handover.source_thread_id).is_some(),
+                "a record for a source that is not there can never be read: {handover:?}",
+            );
+        }
+        match accepted {
+            Ok((handover_id, target)) => {
+                let record = relay.handover(&handover_id).expect(
+                    "an accepted handover \
+must be recorded, or the session it made is accounted for by nothing",
+                );
+                assert_eq!(record.target_thread_id, target);
+            }
+            Err(error) => {
+                // A refusal is fine; a refusal that left a session behind unnamed is not.
+                let message = error.message();
+                let stray: Vec<&str> = relay
+                    .threads
+                    .iter()
+                    .map(|thread| thread.id.as_str())
+                    .filter(|id| *id != source)
+                    .filter(|id| {
+                        !relay
+                            .handovers
+                            .values()
+                            .any(|handover| handover.target_thread_id == **id)
+                    })
+                    .collect();
+                for id in &stray {
+                    assert!(
+                        message.contains(id),
+                        "{id} was created and is named by neither a record nor the \
+refusal: {message}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_target_started_for_a_record_that_went_is_never_reported_as_accepted() {
+        // The bind used to be a silent no-op, so a source retired while the provider was
+        // starting left a visible session, no record, and an Ok telling the caller its
+        // handover was on its way.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        // A long provider start is the window; the test steps into it.
+        provider.set_start_thread_delay_ms(600);
+        let accepting = {
+            let app = app.clone();
+            let source = source.clone();
+            tokio::spawn(async move { app.handover_detached(&source, request()).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        {
+            // Straight at the state, under the gate acceptance is holding — which is the
+            // only way this window can be reached at all, and exactly what the gate stops
+            // the real archive and delete paths from doing.
+            let mut relay = app.relay.write().await;
+            relay.remove_thread(&source);
+        }
+
+        let refused = accepting
+            .await
+            .expect("the task ran")
+            .expect_err("a handover with no record is not an accepted handover");
+        let message = refused.message();
+        assert!(message.contains("was not recorded"), "{message}");
+
+        let relay = app.relay.read().await;
+        let created: Vec<&str> = relay
+            .threads
+            .iter()
+            .map(|thread| thread.id.as_str())
+            .filter(|id| *id != source)
+            .collect();
+        for id in &created {
+            assert!(
+                message.contains(id),
+                "the session that was created has to be named, or nothing knows it \
+exists: {message}",
+            );
+        }
+        assert!(
+            relay.handovers.is_empty(),
+            "and no slot is held for a handover that never happened",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_source_deleted_after_acceptance_leaves_nothing_to_settle_back_into() {
+        // The window after acceptance. Deleting the source there must not have the
+        // background half write a failure about a session that is gone, onto a record
+        // nobody could ever read — it would be unacknowledgeable AND hold a slot.
         let project = TempDir::new().expect("tempdir");
         let cwd = project.path().to_string_lossy().to_string();
         let (app, provider, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
@@ -33526,22 +33607,67 @@ whole regardless of its path scope",
         let source = session(&app, &cwd, "never").await;
 
         provider.hold_terminals();
-        // Stand in the gate the way an ordinary send does, so the handover is accepted
-        // (the source IS idle) and its summary then has to come through here.
-        let held = app.acquire_session_slot().expect("the gate is free");
-        let (handover_id, target) = app
+        let (handover_id, _target) = app
             .handover_detached(&source, request())
             .await
-            .expect("accepted while the source is idle");
+            .expect("accepted");
+        provider.wait_for_held_turn().await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.remove_thread(&source);
+        }
+        provider.release_terminals();
 
-        // …and inside that window their message goes out and its turn parks.
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if app.relay.read().await.handover(&handover_id).is_none() {
+                break;
+            }
+        }
+        let relay = app.relay.read().await;
+        assert!(
+            relay.handover(&handover_id).is_none(),
+            "the record went with its source and must not be resurrected as a failure",
+        );
+        assert_eq!(
+            relay.unread_handover_pressure_for(&crate::state::HandoverActor::LocalOperator),
+            0,
+            "and it holds no slot",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_started_on_the_source_during_acceptance_is_waited_for_not_raced() {
+        // Their send does not take the acceptance gate — it lands in the window while the
+        // target is still being started. The summary must queue behind their turn rather
+        // than start a second one alongside it: two provider turns on one thread
+        // interleave, and the reply the handover reads back could be either.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        provider.hold_terminals();
+        provider.set_start_thread_delay_ms(600);
+        let accepting = {
+            let app = app.clone();
+            let source = source.clone();
+            tokio::spawn(async move { app.handover_detached(&source, request()).await })
+        };
+        // Inside the start window: the source was idle when it was validated, and is not
+        // any more.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         app.send_message_to_thread(&source, "one more thing first", None, None)
             .await
             .expect("their send goes out");
         provider.wait_for_held_turn().await;
-        drop(held);
 
-        for _ in 0..25 {
+        let (handover_id, target) = accepting
+            .await
+            .expect("the task ran")
+            .expect("accepted — the source was idle when it was validated");
+        for _ in 0..20 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert_eq!(
@@ -33576,6 +33702,150 @@ whole regardless of its path scope",
         assert!(handed
             .last()
             .is_some_and(|message| message.contains("That work is now yours")));
+    }
+
+    #[tokio::test]
+    async fn the_relays_own_ceiling_refuses_without_naming_anybody_elses_outcomes() {
+        // Per-actor quotas are not a bound: pairing has no device cap, so N devices at
+        // their own quota each is N × quota and N is whatever the user pairs. The hard
+        // total is the bound — and the pressure holding it belongs to OTHER actors, so
+        // the refusal says nothing about how many, whose, or where.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        let quota = crate::state::RelayState::handover_quota_per_actor();
+        let ceiling = crate::state::RelayState::handover_storage_ceiling();
+        let crowd = ["phone-a", "phone-b", "phone-c", "phone-d", "phone-e"];
+        assert!(
+            crowd.len() * quota > ceiling,
+            "this test has to actually exceed the ceiling",
+        );
+        for device in crowd {
+            pair_device(&app, device, vec![cwd.clone()]).await;
+        }
+
+        let mut refusals = Vec::new();
+        {
+            let mut relay = app.relay.write().await;
+            for device in crowd {
+                for index in 0..quota {
+                    let mut record = crate::state::Handover::new(
+                        format!("{device}-{index:03}"),
+                        source.clone(),
+                        format!("target-{device}-{index:03}"),
+                        false,
+                        Some(device.to_string()),
+                        None,
+                    );
+                    record.fail("that agent is busy right now");
+                    if let Err(error) = relay.reserve_handover(record) {
+                        refusals.push(error);
+                    }
+                }
+            }
+        }
+
+        let relay = app.relay.read().await;
+        assert!(
+            relay.handovers.len() <= ceiling,
+            "the ceiling is a ceiling: {} kept",
+            relay.handovers.len()
+        );
+        assert!(!refusals.is_empty(), "somebody has to have been refused");
+        let ceiling_refusals: Vec<&String> = refusals
+            .iter()
+            .filter(|reason| reason.contains("as many handover outcomes as it can"))
+            .collect();
+        assert!(
+            !ceiling_refusals.is_empty(),
+            "the ceiling refusal must be the relay's, not a quota one: {refusals:?}",
+        );
+        for reason in &ceiling_refusals {
+            for device in crowd {
+                assert!(!reason.contains(device), "names another actor: {reason}");
+            }
+            assert!(
+                !reason.chars().any(|ch| ch.is_ascii_digit()),
+                "a count is another actor's pressure: {reason}"
+            );
+            assert!(
+                !reason.contains("Open those sessions"),
+                "it cannot clear what it cannot see: {reason}"
+            );
+        }
+        // Nothing unread was thrown away to make room for any of it.
+        assert!(
+            relay
+                .handovers
+                .values()
+                .all(|handover| handover.needs_attention()),
+            "only records nobody can still act on may be reclaimed",
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_a_device_gives_its_handover_storage_back() {
+        // The other way an actor stops existing. Its records can never be read or
+        // acknowledged again — ownership is the fence — so keeping them holds the
+        // relay's ceiling for ever against something nobody will look at, which is what
+        // turns "quota times actors" into no bound at all.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+        pair_device(&app, "phone-a", vec![cwd.clone()]).await;
+        pair_device(&app, "phone-b", vec![cwd.clone()]).await;
+
+        let quota = crate::state::RelayState::handover_quota_per_actor();
+        {
+            let mut relay = app.relay.write().await;
+            for device in ["phone-a", "phone-b"] {
+                for index in 0..quota {
+                    let mut record = crate::state::Handover::new(
+                        format!("{device}-{index:03}"),
+                        source.clone(),
+                        format!("target-{device}-{index:03}"),
+                        false,
+                        Some(device.to_string()),
+                        None,
+                    );
+                    record.fail("that agent is busy right now");
+                    relay.reserve_handover(record).expect("reserved");
+                }
+            }
+        }
+        let before = app.relay.read().await.handovers.len();
+        assert_eq!(before, quota * 2);
+
+        {
+            let mut relay = app.relay.write().await;
+            assert!(relay.revoke_paired_device("phone-a", crate::state::unix_now()));
+        }
+
+        let relay = app.relay.read().await;
+        assert_eq!(
+            relay.handovers.len(),
+            quota,
+            "the revoked device's records are retired, not left holding the ceiling",
+        );
+        assert!(
+            relay
+                .handovers
+                .values()
+                .all(|handover| handover.device_id.as_deref() == Some("phone-b")),
+            "and only its own went",
+        );
+        assert_eq!(
+            relay.unread_handover_pressure_for(&crate::state::HandoverActor::Device(
+                "phone-b".to_string()
+            )),
+            quota,
+            "the other device is untouched",
+        );
     }
 
     #[tokio::test]

@@ -645,6 +645,11 @@ impl RelayState {
             self.active_controller_last_seen_at = None;
         }
         self.clear_orchestrator_pin_if_device(device_id);
+        // A handover's outcome belongs to the device that asked for it and to nobody
+        // else, so a revoked device's records can never be read or acknowledged again.
+        // Leaving them would hold the relay's handover ceiling for ever against
+        // something nobody will look at.
+        self.retire_handovers_for_device(device_id);
         true
     }
 
