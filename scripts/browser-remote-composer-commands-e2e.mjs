@@ -667,10 +667,93 @@ function assertFitsAboveComposer(state, label) {
     state.menu.height <= state.viewportHeight * 0.45,
     `${label}: however many rows, the list keeps to a slice of the screen — ${JSON.stringify(state)}`
   );
+}
+
+// Where the control sits in the list, and what it is drawn with. Alignment is measured
+// between first glyphs, the only thing that says the text starts where a name does.
+async function readControlLayout(page) {
+  return page.evaluate(() => {
+    const firstGlyph = (el) => {
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const at = node.textContent.search(/\S/);
+        if (at < 0) continue;
+        const range = document.createRange();
+        range.setStart(node, at);
+        range.setEnd(node, at + 1);
+        return range.getBoundingClientRect();
+      }
+      return null;
+    };
+    const menu = document.querySelector(".composer-command-menu");
+    const footer = document.querySelector(".composer-command-footer");
+    const control = document.querySelector(".composer-command-expand");
+    const name = document.querySelector(".composer-command-row.is-provider .composer-command-name");
+    const menuBox = menu.getBoundingClientRect();
+    const controlBox = control.getBoundingClientRect();
+    const footerStyle = getComputedStyle(footer);
+    const controlStyle = getComputedStyle(control);
+    const edges = (style) =>
+      ["Top", "Right", "Bottom", "Left"].map((side) => parseFloat(style[`border${side}Width`]) || 0);
+    return {
+      nameX: firstGlyph(name).left,
+      controlX: firstGlyph(control).left,
+      footerPosition: footerStyle.position,
+      footerBorders: edges(footerStyle),
+      controlBorders: edges(controlStyle),
+      footerShadow: footerStyle.boxShadow,
+      controlShadow: controlStyle.boxShadow,
+      rules: menu.querySelectorAll("hr, [role='separator']").length,
+      // The control's end within the scrolled content, against where that content ends.
+      controlEnd: control.offsetTop + control.offsetHeight,
+      contentEnd: menu.scrollHeight - parseFloat(getComputedStyle(menu).paddingBottom),
+      scrollTop: menu.scrollTop,
+      scrollHeight: menu.scrollHeight,
+      clientHeight: menu.clientHeight,
+      controlVisible: controlBox.top >= menuBox.top - 1 && controlBox.bottom <= menuBox.bottom + 1,
+      controlBelow: controlBox.top >= menuBox.bottom - 1,
+    };
+  });
+}
+
+// The control is a plain last item: text aligned with the names, no divider, not pinned.
+function assertControlReadsAsPartOfList(layout, label) {
   assert.ok(
-    state.control && state.control.top >= state.menu.top && state.control.bottom <= state.menu.bottom + 1,
-    `${label}: the control stays in reach inside the list — ${JSON.stringify(state)}`
+    Math.abs(layout.controlX - layout.nameX) <= 1,
+    `${label}: the control's text starts where a skill name does — ${JSON.stringify(layout)}`
   );
+  assert.equal(layout.footerPosition, "static", `${label}: nothing pins the control — ${JSON.stringify(layout)}`);
+  assert.deepEqual(
+    [...layout.footerBorders, ...layout.controlBorders],
+    [0, 0, 0, 0, 0, 0, 0, 0],
+    `${label}: no divider or outline sets it apart — ${JSON.stringify(layout)}`
+  );
+  assert.equal(layout.footerShadow, "none");
+  assert.equal(layout.controlShadow, "none");
+  assert.equal(layout.rules, 0, `${label}: no rule element either`);
+  assert.ok(
+    layout.contentEnd - layout.controlEnd <= 1,
+    `${label}: it is the list's last item — ${JSON.stringify(layout)}`
+  );
+}
+
+// Scrolled to the top of an overflowing list the control is out of sight below; scrolled
+// to the real bottom, it is the last thing there.
+async function assertControlAtListEnd(page, label) {
+  await page.evaluate(() => {
+    document.querySelector(".composer-command-menu").scrollTop = 0;
+  });
+  const top = await readControlLayout(page);
+  assert.ok(top.scrollHeight > top.clientHeight, `${label}: the list overflows — ${JSON.stringify(top)}`);
+  assert.ok(top.controlBelow, `${label}: at the top, the control is below, not frozen in view — ${JSON.stringify(top)}`);
+  await page.evaluate(() => {
+    const menu = document.querySelector(".composer-command-menu");
+    menu.scrollTop = menu.scrollHeight;
+  });
+  const bottom = await readControlLayout(page);
+  assert.ok(bottom.controlVisible, `${label}: at the bottom, the control is in view — ${JSON.stringify(bottom)}`);
+  assertControlReadsAsPartOfList(bottom, label);
+  return bottom;
 }
 
 // A finger drag through the list, through the browser's own touch pipeline, so the
@@ -803,6 +886,7 @@ async function expandOnPhone(page) {
     preview.every((row) => row.lines === 1 && row.clipped),
     `capped rows keep to one line — ${JSON.stringify(preview)}`
   );
+  await assertControlAtListEnd(page, "phone, collapsed");
 
   await page.tap(".composer-command-expand");
   await page.waitForFunction(
@@ -825,22 +909,35 @@ async function expandOnPhone(page) {
   await waitExpanded(page, false);
   await page.locator(".composer-command-expand").dispatchEvent("click");
   await waitExpanded(page, true);
+  await assertControlAtListEnd(page, "phone, expanded");
+  if (process.env.SKILLS_SCREENSHOT) {
+    await page.screenshot({ path: process.env.SKILLS_SCREENSHOT.replace(/\.png$/, "-phone-list-end.png") });
+  }
+  await page.evaluate(() => {
+    document.querySelector(".composer-command-menu").scrollTop = 0;
+  });
   if (process.env.SKILLS_SCREENSHOT) {
     await page.screenshot({ path: process.env.SKILLS_SCREENSHOT.replace(/\.png$/, "-phone-expanded.png") });
   }
 
   // A drag that starts on a row scrolls the list and picks nothing.
   const start = expanded.menu.top + Math.round(expanded.menu.height * 0.7);
+  const beforeDrag = await readExpandedMenu(page);
   await dragList(page, start, start - 180);
   const dragged = await readExpandedMenu(page);
-  assert.ok(dragged.scrollTop > expanded.scrollTop + 60, `the drag scrolled the list — ${JSON.stringify(dragged)}`);
+  assert.ok(dragged.scrollTop > beforeDrag.scrollTop + 60, `the drag scrolled the list — ${JSON.stringify(dragged)}`);
   assert.deepEqual(dragged.pills, [], `a drag is not a pick — ${JSON.stringify(dragged)}`);
   assertFitsAboveComposer(dragged, "phone, scrolled");
   if (process.env.SKILLS_SCREENSHOT) {
     await page.screenshot({ path: process.env.SKILLS_SCREENSHOT.replace(/\.png$/, "-phone-scrolled.png") });
   }
 
-  // "Show fewer" is still in reach from down here, and collapses back.
+  // "Show fewer" is reached by scrolling to the list's real end, and collapses it back.
+  await page.evaluate(() => {
+    const menu = document.querySelector(".composer-command-menu");
+    menu.scrollTop = menu.scrollHeight;
+  });
+  assert.ok((await readControlLayout(page)).controlVisible, "the end of the list shows the control");
   await page.tap(".composer-command-expand");
   await page.waitForFunction(
     () => document.querySelector(".composer-command-expand")?.getAttribute("aria-expanded") === "false",
@@ -920,6 +1017,27 @@ async function expandOnDesktop(browser, origin) {
     assert.equal((await readExpandedMenu(page)).expanded, false, "one click, one toggle");
     await page.click(".composer-command-expand");
     await waitExpanded(page, true);
+    await assertControlAtListEnd(page, "desktop, expanded");
+
+    // The keyboard reaches it at the real end too: from the first row, ArrowUp wraps to
+    // the control, and the list scrolls down to show it.
+    await page.evaluate(() => {
+      document.querySelector(".composer-command-menu").scrollTop = 0;
+    });
+    await page.focus("#remote-message-input");
+    while (!(await page.$(".composer-command-row.is-active"))) await page.keyboard.press("ArrowDown");
+    const firstActive = await page.$eval(".composer-command-row.is-active", (row) => [...row.parentElement.parentElement.querySelectorAll(".composer-command-row")].indexOf(row));
+    for (let step = 0; step <= firstActive; step += 1) await page.keyboard.press("ArrowUp");
+    const reached = await readControlLayout(page);
+    assert.ok(
+      await page.$(".composer-command-expand.is-active"),
+      "ArrowUp from the first row lands on the control"
+    );
+    assert.ok(reached.controlVisible, `and the list scrolled to show it — ${JSON.stringify(reached)}`);
+    await page.keyboard.press("ArrowDown");
+    await page.evaluate(() => {
+      document.querySelector(".composer-command-menu").scrollTop = 0;
+    });
 
     // Walk the keyboard well past what fits: the active row scrolls into view each time,
     // clear of the pinned footer.
@@ -928,7 +1046,6 @@ async function expandOnDesktop(browser, origin) {
     await page.waitForTimeout(400);
     const walked = await page.evaluate(() => {
       const menu = document.querySelector(".composer-command-menu").getBoundingClientRect();
-      const footer = document.querySelector(".composer-command-footer").getBoundingClientRect();
       const active = document.querySelector(".composer-command-row.is-active");
       const row = active.getBoundingClientRect();
       const neighbour = active.previousElementSibling;
@@ -939,12 +1056,12 @@ async function expandOnDesktop(browser, origin) {
         rowTop: row.top,
         rowBottom: row.bottom,
         menuTop: menu.top,
-        footerTop: footer.top,
+        menuBottom: menu.bottom,
       };
     });
     assert.ok(
-      walked.rowTop >= walked.menuTop - 1 && walked.rowBottom <= walked.footerTop + 1,
-      `the active row is scrolled into view, above the footer — ${JSON.stringify(walked)}`
+      walked.rowTop >= walked.menuTop - 1 && walked.rowBottom <= walked.menuBottom + 1,
+      `the active row is scrolled into view — ${JSON.stringify(walked)}`
     );
     assert.notEqual(
       walked.activeBackground,
@@ -965,6 +1082,10 @@ async function expandOnDesktop(browser, origin) {
     await page.waitForSelector(".composer-command-expand", { timeout: TIMEOUT_MS });
     const preview = await readLongNames(page);
     assert.ok(preview.every((row) => row.lines === 1), `capped rows keep to one line — ${JSON.stringify(preview)}`);
+    await assertControlAtListEnd(page, "desktop, collapsed");
+    if (process.env.SKILLS_SCREENSHOT) {
+      await page.screenshot({ path: process.env.SKILLS_SCREENSHOT.replace(/\.png$/, "-desktop-collapsed-end.png") });
+    }
     await page.click(".composer-command-expand");
     await waitExpanded(page, true);
     await assertLongNamesReadable(page, "desktop, expanded");
