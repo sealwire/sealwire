@@ -264,13 +264,7 @@ pub(super) async fn repository_root(start: &Path) -> Option<PathBuf> {
 /// does not have the worktree registered.
 async fn main_worktree_of(dir: &Path, dot_git: &Path) -> Option<PathBuf> {
     let pointer = read_small_regular_file(dot_git).await?;
-    let target = pointer.trim().strip_prefix("gitdir:")?.trim();
-    let target = Path::new(target);
-    let target = if target.is_absolute() {
-        target.to_path_buf()
-    } else {
-        dir.join(target)
-    };
+    let target = resolve_gitdir_pointer(dir, pointer.trim().strip_prefix("gitdir:")?).await?;
 
     // <main>/.git/worktrees/<name> — anything else is not a worktree pointer, and a
     // shape we do not recognise inherits nothing.
@@ -287,7 +281,35 @@ async fn main_worktree_of(dir: &Path, dot_git: &Path) -> Option<PathBuf> {
     // A genuine worktree is registered here, pointing back at the `.git` file we came
     // from; a forged one is not.
     let back = read_small_regular_file(&target.join("gitdir")).await?;
-    (Path::new(back.trim()) == dot_git).then(|| main.to_path_buf())
+    let back = resolve_gitdir_pointer(&target, &back).await?;
+    let here = tokio::fs::canonicalize(dot_git).await.ok()?;
+    (back == here).then(|| main.to_path_buf())
+}
+
+/// A pointer as git reads it (a relative one from the directory holding it), resolved on disk:
+/// lexically collapsing `sub/..` is wrong when `sub` is a symlink, and lets a pointer borrow a repo.
+async fn resolve_gitdir_pointer(base: &Path, pointer: &str) -> Option<PathBuf> {
+    let pointer = pointer.trim();
+    if pointer.is_empty() {
+        return None;
+    }
+    tokio::fs::canonicalize(base.join(pointer)).await.ok()
+}
+
+/// Checked on disk, both directions: `git worktree list` believes any `gitdir` entry, so a
+/// forged one could name an unrelated repo.
+pub(crate) async fn is_linked_worktree_of(path: &Path, main: &Path) -> bool {
+    let dot_git = path.join(".git");
+    match tokio::fs::symlink_metadata(&dot_git).await {
+        Ok(metadata) if metadata.is_file() => {}
+        _ => return false,
+    }
+    let Some(found) = main_worktree_of(path, &dot_git).await else {
+        return false;
+    };
+    tokio::fs::canonicalize(main)
+        .await
+        .is_ok_and(|main| main == found)
 }
 
 /// The path a grant should be RECORDED under: the repository, when there is one.
@@ -555,5 +577,142 @@ mod tests {
             admission.trusted().is_some(),
             "`/repo/src/..` and `/repo` are the same directory and must decide the same way"
         );
+    }
+
+    /// `<root>/main` plus `<root>/linked`, with both pointers rewritten to the relative form
+    /// git ≥ 2.48 writes under `worktree.useRelativePaths`, so no particular git is needed.
+    async fn relative_worktree_fixture(root: &Path) -> (PathBuf, PathBuf) {
+        let main_path = root.join("main");
+        std::fs::create_dir_all(&main_path).expect("mkdir");
+        let main = init_repo(&main_path).await;
+        let linked = root.join("linked");
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                &linked.to_string_lossy(),
+                "-b",
+                "side",
+            ],
+        )
+        .await;
+        std::fs::write(
+            linked.join(".git"),
+            "gitdir: ../main/.git/worktrees/linked\n",
+        )
+        .expect("pointer");
+        std::fs::write(
+            main.join(".git/worktrees/linked/gitdir"),
+            "../../../../linked/.git\n",
+        )
+        .expect("back-pointer");
+        (main, linked)
+    }
+
+    #[tokio::test]
+    async fn a_relative_linked_worktree_inherits_its_main_repo() {
+        let dir = TempDir::new().expect("tmp");
+        let root = dir.path().canonicalize().expect("canonicalize");
+        let (main, linked) = relative_worktree_fixture(&root).await;
+
+        let admission = grants(&[&main]).admit(&linked.to_string_lossy()).await;
+
+        assert!(admission.trusted().is_some(), "{admission:?}");
+        assert_eq!(
+            repository_root(&linked).await.as_deref(),
+            Some(main.as_path())
+        );
+        assert_eq!(
+            grant_key(&linked.to_string_lossy()).await,
+            main.to_string_lossy()
+        );
+        assert!(is_linked_worktree_of(&linked, &main).await);
+    }
+
+    // Relative pointers must not reopen the forgery: aiming at a genuine worktree's admin dir
+    // still fails, because its back-pointer names that worktree, not this one.
+    #[tokio::test]
+    async fn a_forged_relative_pointer_at_a_genuine_worktree_does_not_inherit_trust() {
+        let dir = TempDir::new().expect("tmp");
+        let root = dir.path().canonicalize().expect("canonicalize");
+        let (main, _linked) = relative_worktree_fixture(&root).await;
+        let hostile = root.join("hostile");
+        std::fs::create_dir_all(&hostile).expect("mkdir");
+        std::fs::write(
+            hostile.join(".git"),
+            "gitdir: ../main/.git/worktrees/linked\n",
+        )
+        .expect("pointer");
+
+        let admission = grants(&[&main]).admit(&hostile.to_string_lossy()).await;
+
+        assert!(admission.trusted().is_none());
+        assert!(!is_linked_worktree_of(&hostile, &main).await);
+    }
+
+    // `main/sub/..` is lexically `main` but physically wherever `sub` links to; collapsing
+    // `..` by string would hand the granted repo to an admin dir the attacker wrote.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dotdot_through_a_symlink_cannot_borrow_a_granted_repo() {
+        let dir = TempDir::new().expect("tmp");
+        let root = dir.path().canonicalize().expect("canonicalize");
+        let main_path = root.join("main");
+        std::fs::create_dir_all(&main_path).expect("mkdir");
+        let main = init_repo(&main_path).await;
+        let attacker = root.join("attacker");
+        std::fs::create_dir_all(attacker.join("deep")).expect("mkdir");
+        std::os::unix::fs::symlink(attacker.join("deep"), main.join("sub")).expect("symlink");
+        let hostile = root.join("hostile");
+        std::fs::create_dir_all(&hostile).expect("mkdir");
+        let admin = attacker.join(".git/worktrees/x");
+        std::fs::create_dir_all(&admin).expect("mkdir");
+        std::fs::write(
+            admin.join("gitdir"),
+            format!("{}\n", hostile.join(".git").display()),
+        )
+        .expect("back-pointer");
+        std::fs::write(
+            hostile.join(".git"),
+            "gitdir: ../main/sub/../.git/worktrees/x\n",
+        )
+        .expect("pointer");
+
+        let admission = grants(&[&main]).admit(&hostile.to_string_lossy()).await;
+
+        assert!(admission.trusted().is_none());
+        assert!(!is_linked_worktree_of(&hostile, &main).await);
+    }
+
+    // Git writes real paths, but a pointer spelled through a symlinked prefix names the same
+    // files; identity is the file, so such a genuine worktree still inherits.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pointer_spelled_through_a_symlinked_prefix_is_the_same_worktree() {
+        let dir = TempDir::new().expect("tmp");
+        let root = dir.path().canonicalize().expect("canonicalize");
+        let (main, linked) = relative_worktree_fixture(&root).await;
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&root, &alias).expect("symlink");
+        std::fs::write(
+            linked.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                alias.join("main/.git/worktrees/linked").display()
+            ),
+        )
+        .expect("pointer");
+        std::fs::write(
+            main.join(".git/worktrees/linked/gitdir"),
+            format!("{}\n", alias.join("linked/.git").display()),
+        )
+        .expect("back-pointer");
+
+        let admission = grants(&[&main]).admit(&linked.to_string_lossy()).await;
+
+        assert!(admission.trusted().is_some(), "{admission:?}");
+        assert!(is_linked_worktree_of(&linked, &main).await);
     }
 }

@@ -7,6 +7,7 @@ import {
   computeChangeStats,
   createWorkspaceDiffStore,
   WorkspaceChangesPanel,
+  WorkspaceDiffChip,
 } from "./workspace-diff.js";
 import { localViewedWorkspaceKey } from "../shared/viewed-workspace-key.js";
 
@@ -89,6 +90,54 @@ test("computeChangeStats handles file changes with empty diff strings", () => {
   assert.equal(stats.fileCount, 1);
   assert.equal(stats.added, 0);
   assert.equal(stats.removed, 0);
+});
+
+test("the mobile Changes chip keeps restricted previews reachable after closing the sheet", () => {
+  const restricted = renderToStaticMarkup(
+    React.createElement(WorkspaceDiffChip, {
+      store: fakeStore({
+        status: "loaded",
+        data: { cwd: "/repo-feature", unavailable: true, restricted: true, file_changes: [] },
+      }),
+    })
+  );
+  assert.match(restricted, /class="workspace-diff-chip"/);
+  assert.match(restricted, /Trust needed/);
+  assert.doesNotMatch(restricted, /0 files/);
+
+  const missing = renderToStaticMarkup(
+    React.createElement(WorkspaceDiffChip, {
+      store: fakeStore({ status: "loaded", data: { unavailable: true, file_changes: [] } }),
+    })
+  );
+  assert.equal(missing, "", "a genuinely missing workspace still has no Changes chip");
+});
+
+test("a clean current tree still opens the mobile picker when a sibling can be previewed", () => {
+  const clean = { status: "loaded", data: { file_changes: [] } };
+  const sibling = renderToStaticMarkup(
+    React.createElement(WorkspaceDiffChip, {
+      store: fakeStore({
+        ...clean,
+        workspace: {
+          cwd: "/repo",
+          roots: [
+            { path: "/repo" },
+            { path: "/repo-feature", preview_only: true },
+          ],
+        },
+      }),
+    })
+  );
+  assert.match(sibling, /Worktrees/);
+  assert.doesNotMatch(sibling, /0 files/);
+
+  const alone = renderToStaticMarkup(
+    React.createElement(WorkspaceDiffChip, {
+      store: fakeStore({ ...clean, workspace: { cwd: "/repo", roots: [{ path: "/repo" }] } }),
+    })
+  );
+  assert.equal(alone, "", "a clean repo without another tree keeps the usual hidden chip");
 });
 
 // The workspace read rides alongside the diff on the local surface, so tests about the
@@ -2058,4 +2107,59 @@ test("a refused grant is reported next to the control, not swallowed", async () 
     /outside the paths/,
     "a button that silently does nothing is indistinguishable from a broken one"
   );
+});
+
+// The session's own tree is granted; the previewed sibling is not, so Trust must name the sibling.
+test("previewing an ungranted tree offers Trust for that tree, not 'unavailable'", async () => {
+  const { WorkspaceDiffSheetBody } = await import("./workspace-diff.js");
+  const sibling = "/elsewhere/repo-feature";
+  const state = {
+    status: "loaded",
+    expanded: true,
+    data: { unavailable: true, restricted: true, cwd: sibling, file_changes: [] },
+    workspace: {
+      ...RESOLVED,
+      cwd: "/repo/main",
+      origin: { kind: "proven" },
+      git: { cwd: "/repo/main", is_repo: true, branch: "main", dirty: false, dirty_known: true },
+      roots: [...RESOLVED.roots, { path: sibling, branch: "feat/sibling", preview_only: true }],
+    },
+    viewRoot: sibling,
+  };
+
+  for (const [name, Component] of [
+    ["desktop rail (local + remote)", WorkspaceChangesPanel],
+    ["phone sheet / remote modal", WorkspaceDiffSheetBody],
+  ]) {
+    const html = renderToStaticMarkup(
+      React.createElement(Component, {
+        store: fakeStore(state, {
+          setViewRoot() {},
+          canTrustWorkspace: true,
+          trustWorkspace: async () => {},
+        }),
+      })
+    );
+    assert.match(html, /Trust this folder/, `${name} offers the grant`);
+    assert.match(html, /title="Trust \/elsewhere\/repo-feature /, `${name} grants the previewed tree`);
+    assert.doesNotMatch(html, /Workspace unavailable/, `${name} must not call it missing`);
+  }
+});
+
+test("a stale restricted reply for another tree does not prompt for the one in view", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(WorkspaceChangesPanel, {
+      store: fakeStore(
+        {
+          status: "loading",
+          expanded: true,
+          data: { unavailable: true, restricted: true, cwd: "/elsewhere/old", file_changes: [] },
+          workspace: { ...RESOLVED, cwd: "/repo/main", origin: { kind: "proven" } },
+          viewRoot: "/repo/wt",
+        },
+        { setViewRoot() {}, canTrustWorkspace: true, trustWorkspace: async () => {} }
+      ),
+    })
+  );
+  assert.doesNotMatch(html, /Trust this folder/);
 });

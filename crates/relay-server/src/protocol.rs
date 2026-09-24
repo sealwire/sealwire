@@ -1673,6 +1673,10 @@ pub struct WorkspaceRootView {
     /// full of unignored build output can produce megabytes of `git status`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub changed_files_capped: bool,
+    /// Outside the caller's allowed roots, offered only because it is a verified worktree of
+    /// an allowed repository: it may be previewed, never pinned or inferred as the session's tree.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preview_only: bool,
 }
 
 /// The git standing of a workspace path, for the launch dialog's `main · clean` chip.
@@ -1732,7 +1736,7 @@ pub struct ResolvedWorkspace {
     pub origin: WorkspaceOrigin,
     /// Live git standing of `cwd`, never stored.
     pub git: WorkspaceGitContextView,
-    /// In-scope trees of this repo; `cwd` is one of them unless enumeration was empty.
+    /// Trees of this repo the caller may see; `cwd` is a non-`preview_only` one unless enumeration was empty.
     pub roots: Vec<WorkspaceRootView>,
     /// Birth cwd (provider identity); distinct from `cwd`.
     pub birth_cwd: String,
@@ -1766,6 +1770,9 @@ pub struct WorkspaceDiffResponse {
     /// than falling back to another workspace's diff. Distinct from a clean tree.
     #[serde(default)]
     pub unavailable: bool,
+    /// With `unavailable`: `cwd` is live but git may not run there, so the panel offers Trust.
+    #[serde(default)]
+    pub restricted: bool,
     /// The workspace this response was ASKED for but could not use, because that
     /// directory no longer exists — a `git worktree` the thread was born in and that
     /// has since been removed. `Some` means `cwd` is a fallback workspace, not the
@@ -1801,6 +1808,7 @@ impl WorkspaceDiffResponse {
             // workspace the caller was just refused.
             roots: Vec::new(),
             unavailable: true,
+            restricted: false,
             fallback_from: None,
             base_ref: None,
             base_commit: None,

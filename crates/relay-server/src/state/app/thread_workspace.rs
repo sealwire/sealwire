@@ -50,14 +50,24 @@ no workspace related to it is available instead"
         // `git worktree list`, which is still git running in a directory nobody vouched
         // for. An ungranted tree simply reports no sibling roots — the picker shows fewer
         // rows instead of the relay executing an unfamiliar repo to populate them.
-        let roots: Vec<WorkspaceRootView> = match self.admit(usable.as_str()).await.trusted() {
-            Some(workspace) => list_worktrees_in(workspace)
+        let offered: Vec<WorkspaceRootView> = match self.admit(usable.as_str()).await.trusted() {
+            Some(workspace) => {
+                reachable_roots(
+                    list_worktrees_in(workspace).await,
+                    usable.as_str(),
+                    &device_scope,
+                    &allowed_roots,
+                )
                 .await
-                .into_iter()
-                .filter(|root| path_within_device_scope(&root.path, &device_scope, &allowed_roots))
-                .collect(),
+            }
             None => Vec::new(),
         };
+        // The session's tree is where reviewers run, so it never resolves into a preview-only one.
+        let roots: Vec<WorkspaceRootView> = offered
+            .iter()
+            .filter(|root| !root.preview_only)
+            .cloned()
+            .collect();
 
         #[cfg(test)]
         {
@@ -227,7 +237,7 @@ no workspace related to it is available instead"
             cwd,
             origin,
             git,
-            roots,
+            roots: offered,
             birth_cwd,
             birth_cwd_exists,
         })

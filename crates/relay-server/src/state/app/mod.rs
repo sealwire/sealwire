@@ -1873,6 +1873,48 @@ pub(crate) async fn list_worktrees(cwd: &str, grants: &TrustGrants) -> Vec<Works
     list_worktrees_in(&workspace).await
 }
 
+/// Roots outside `allowed_roots` survive as `preview_only` when verified as linked worktrees of
+/// `anchor`'s allowed main checkout. A device's path scope is a per-device grant and stays literal.
+pub(crate) async fn reachable_roots(
+    listed: Vec<WorkspaceRootView>,
+    anchor: &str,
+    device_scope: &[String],
+    allowed_roots: &[String],
+) -> Vec<WorkspaceRootView> {
+    let mut main: Option<Option<std::path::PathBuf>> = None;
+    let mut reachable = Vec::with_capacity(listed.len());
+    for mut root in listed {
+        if path_within_device_scope(&root.path, device_scope, allowed_roots) {
+            reachable.push(root);
+            continue;
+        }
+        if !device_scope.is_empty() && !path_within_allowed_roots(&root.path, device_scope) {
+            continue;
+        }
+        if main.is_none() {
+            main = Some(
+                workspace_trust::repository_root(std::path::Path::new(anchor))
+                    .await
+                    .filter(|main| {
+                        path_within_device_scope(
+                            &main.to_string_lossy(),
+                            device_scope,
+                            allowed_roots,
+                        )
+                    }),
+            );
+        }
+        let Some(Some(main)) = main.as_ref() else {
+            continue;
+        };
+        if workspace_trust::is_linked_worktree_of(std::path::Path::new(&root.path), main).await {
+            root.preview_only = true;
+            reachable.push(root);
+        }
+    }
+    reachable
+}
+
 /// Keep only the records that HAVE a working tree to diff. Neither a bare repo nor a
 /// prunable entry does: prunable is the `rm -rf`-without-`git worktree remove` case, which
 /// git keeps listing until pruned, and offering it would be an option guaranteed to fail.
@@ -1887,6 +1929,7 @@ fn diffable_roots(records: Vec<WorktreeRecord>) -> Vec<WorkspaceRootView> {
             // Left unmeasured here on purpose — see `measure_root_changes`.
             changed_files: None,
             changed_files_capped: false,
+            preview_only: false,
         })
         .collect()
 }
@@ -2449,6 +2492,7 @@ pub(crate) async fn collect_workspace_diff_against_capped(
             // Roots are attached by the caller, which owns the picker's scope rules.
             roots: Vec::new(),
             unavailable: false,
+            restricted: false,
             // Attached by the caller, which owns the fallback decision.
             fallback_from: None,
             // Attached by the caller, which knows the branch's display name.
@@ -2516,6 +2560,7 @@ pub(crate) async fn collect_workspace_diff_against_capped(
         // Roots are attached by the caller, which owns the picker's scope rules.
         roots: Vec::new(),
         unavailable: false,
+        restricted: false,
         // Attached by the caller, which owns the fallback decision.
         fallback_from: None,
         // Attached by the caller, which knows the branch's display name.

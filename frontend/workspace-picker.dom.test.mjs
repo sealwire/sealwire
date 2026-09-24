@@ -721,3 +721,39 @@ test("a paired device cannot grant, and is told where the grant lives", () => {
   assert.match(note.textContent, /computer running the relay/i);
   view.cleanup();
 });
+
+// A worktree outside allowed_roots (`../repo-feature`): the relay lets it be previewed, never pinned.
+const SIBLING_CWD = "/elsewhere/repo-feature";
+const WITH_SIBLING = {
+  ...WORKSPACE,
+  roots: [
+    ...ROOTS,
+    { path: SIBLING_CWD, branch: "feat/sibling", is_main: false, preview_only: true },
+  ],
+};
+
+test("the Changes preview picker offers a sibling worktree outside allowed_roots", () => {
+  const viewed = [];
+  const view = mount(ThreadWorkspaceField, {
+    workspace: WITH_SIBLING,
+    sessionCwd: SESSION_CWD,
+    onView: (path) => viewed.push(path),
+  });
+  open(view.host);
+
+  const row = rows(view.host).find((candidate) => candidate.textContent.includes("feat/sibling"));
+  assert.ok(row, `the sibling must be offered; got ${JSON.stringify(rowText(view.host))}`);
+  click(row);
+  assert.deepEqual(viewed, [SIBLING_CWD]);
+});
+
+test("the Review pin picker does not offer a tree the relay would refuse to pin", () => {
+  const view = mount(ThreadWorkspaceField, {
+    workspace: WITH_SIBLING,
+    onPin: () => {},
+  });
+  open(view.host);
+
+  assert.equal(rows(view.host).length, ROOTS.length, JSON.stringify(rowText(view.host)));
+  assert.ok(!rowText(view.host).some((text) => text.includes("feat/sibling")));
+});

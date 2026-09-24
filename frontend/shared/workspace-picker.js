@@ -577,10 +577,11 @@ export function ThreadWorkspaceField({
   if (!workspace && !note && !error) {
     return null;
   }
-  const roots = workspace?.roots || [];
   const pinned = workspace?.origin?.kind === "pinned";
   const canChange = typeof onPin === "function" || typeof onView === "function";
   const preview = typeof onView === "function";
+  // The relay refuses to pin a preview-only tree, so only the preview picker offers one.
+  const roots = (workspace?.roots || []).filter((root) => preview || !root?.preview_only);
   const onChange = (path) => {
     if (preview) {
       // Choosing the session's own tree is "follow again", not "pin a preview to it":

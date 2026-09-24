@@ -351,6 +351,11 @@ the trees the relay listed for it"
         )
         .await?;
         if response.unavailable {
+            // Live but ungranted is a Trust prompt for this tree, not a missing workspace.
+            if matches!(grants.admit(&diff_cwd).await, Admission::Restricted(_)) {
+                response.cwd = diff_cwd;
+                response.restricted = true;
+            }
             return Ok(response);
         }
         response.roots = resolved.roots;

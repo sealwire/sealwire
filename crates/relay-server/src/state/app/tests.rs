@@ -619,6 +619,7 @@ break the agent's own git commands: {offenders:?}"
             is_main: true,
             changed_files: None,
             changed_files_capped: false,
+            preview_only: false,
         }];
         let grants = grants_for(&[roots[0].path.as_str()]);
 
@@ -662,6 +663,7 @@ break the agent's own git commands: {offenders:?}"
             is_main: false,
             changed_files: None,
             changed_files_capped: false,
+            preview_only: false,
         }];
 
         let app = app_trusting(&[roots[0].path.clone()]).await;
@@ -2407,6 +2409,389 @@ is also what keeps the refusal from confirming it exists: {error}"
             unscoped.roots.len(),
             2,
             "an unscoped caller keeps every worktree"
+        );
+    }
+
+    // ---- sibling worktrees outside allowed_roots --------------------------------------
+
+    async fn run_git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = tokio::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .await
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    async fn allow_only(app: &AppState, roots: &[&str]) {
+        app.relay.write().await.allowed_roots =
+            normalize_allowed_roots(roots.iter().map(|root| root.to_string()).collect())
+                .expect("allowed roots");
+    }
+
+    struct SiblingFixture {
+        app: AppState,
+        main: String,
+        sibling: String,
+        outside: TempDir,
+        _dirs: (TempDir, TempDir),
+    }
+
+    /// `../repo-feature` beside an allowed `repo`: the layout `git worktree add ../x` makes.
+    async fn sibling_fixture(grant_main: bool) -> SiblingFixture {
+        let tmp = TempDir::new().expect("tmp");
+        let (main, sibling) = init_repo_with_worktree(tmp.path()).await;
+        std::fs::write(
+            std::path::Path::new(&sibling).join("seed.txt"),
+            "line1\nCHANGED-IN-SIBLING\n",
+        )
+        .unwrap();
+        let (app, project, outside) = build_app(&main).await;
+        if grant_main {
+            grant_workspace(&app, &main).await;
+        }
+        allow_only(&app, &[&main]).await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.active_thread_id = Some("thread-a".to_string());
+            relay.ensure_runtime_for_thread("thread-a").current_cwd = main.clone();
+        }
+        SiblingFixture {
+            app,
+            main,
+            sibling,
+            outside,
+            _dirs: (tmp, project),
+        }
+    }
+
+    fn find_root<'a>(
+        roots: &'a [crate::protocol::WorkspaceRootView],
+        path: &str,
+    ) -> Option<&'a crate::protocol::WorkspaceRootView> {
+        roots.iter().find(|root| same_path(&root.path, path))
+    }
+
+    #[tokio::test]
+    async fn a_sibling_worktree_outside_allowed_roots_is_offered_and_previewable() {
+        let fx = sibling_fixture(true).await;
+
+        let resolved = resolve(&fx.app, "thread-a").await;
+        let sibling = find_root(&resolved.roots, &fx.sibling).unwrap_or_else(|| {
+            panic!(
+                "a worktree of the allowed repo must be offered wherever it lives; got {:?}",
+                resolved.roots
+            )
+        });
+        assert!(
+            sibling.preview_only,
+            "outside allowed_roots it may be looked at, not moved into"
+        );
+        assert!(
+            !find_root(&resolved.roots, &fx.main)
+                .expect("main")
+                .preview_only
+        );
+
+        let preview = fx
+            .app
+            .workspace_diff(
+                None,
+                Some("thread-a".to_string()),
+                Some(sibling.path.clone()),
+            )
+            .await
+            .expect("an offered tree must be previewable");
+        assert!(!preview.unavailable && !preview.restricted);
+        assert!(same_path(&preview.cwd, &fx.sibling), "got {}", preview.cwd);
+        assert!(preview.diff.contains("CHANGED-IN-SIBLING"));
+        assert!(find_root(&preview.roots, &fx.sibling).is_some());
+
+        let settled = resolve(&fx.app, "thread-a").await;
+        assert!(same_path(&settled.cwd, &fx.main), "a preview is not a pin");
+        assert!(matches!(settled.origin, WorkspaceOrigin::Birth));
+    }
+
+    // Git ≥ 2.48 with `worktree.useRelativePaths` writes both pointers relative; still the same repo.
+    #[tokio::test]
+    async fn a_relative_path_sibling_worktree_is_offered_and_previewable() {
+        let tmp = TempDir::new().expect("tmp");
+        let root = tmp.path().canonicalize().unwrap();
+        let main = root.join("repo");
+        std::fs::create_dir_all(&main).unwrap();
+        run_git(&main, &["init", "-q", "-b", "main"]).await;
+        run_git(&main, &["config", "user.email", "t@example.com"]).await;
+        run_git(&main, &["config", "user.name", "T"]).await;
+        std::fs::write(main.join("seed.txt"), "line1\n").unwrap();
+        run_git(&main, &["add", "seed.txt"]).await;
+        run_git(&main, &["commit", "-q", "-m", "seed"]).await;
+        let sibling = root.join("repo-feature");
+        let added = tokio::process::Command::new("git")
+            .args([
+                "-c",
+                "worktree.useRelativePaths=true",
+                "worktree",
+                "add",
+                "-q",
+            ])
+            .args(["-b", "feature", sibling.to_str().unwrap()])
+            .current_dir(&main)
+            .output()
+            .await
+            .expect("git runs");
+        let pointer = std::fs::read_to_string(sibling.join(".git")).unwrap_or_default();
+        if !added.status.success() || !pointer.starts_with("gitdir: ../") {
+            eprintln!("skipped: this git cannot write relative worktree pointers ({pointer:?})");
+            return;
+        }
+        std::fs::write(
+            sibling.join("seed.txt"),
+            "line1\nCHANGED-IN-RELATIVE-SIBLING\n",
+        )
+        .unwrap();
+        let (main, sibling) = (
+            main.to_string_lossy().to_string(),
+            sibling.to_string_lossy().to_string(),
+        );
+
+        let (app, _project, _outside) = build_app(&main).await;
+        grant_workspace(&app, &main).await;
+        allow_only(&app, &[&main]).await;
+        app.relay
+            .write()
+            .await
+            .ensure_runtime_for_thread("thread-a")
+            .current_cwd = main.clone();
+
+        let resolved = resolve(&app, "thread-a").await;
+        let listed = find_root(&resolved.roots, &sibling)
+            .unwrap_or_else(|| panic!("got {:?}", resolved.roots))
+            .clone();
+        assert!(listed.preview_only);
+
+        let preview = app
+            .workspace_diff(None, Some("thread-a".to_string()), Some(listed.path))
+            .await
+            .expect("preview");
+        assert!(!preview.unavailable && !preview.restricted, "{preview:?}");
+        assert!(preview.diff.contains("CHANGED-IN-RELATIVE-SIBLING"));
+    }
+
+    // Where the session's tree resolves is where reviewers run, so that stays inside allowed_roots.
+    #[tokio::test]
+    async fn a_preview_only_sibling_never_becomes_the_sessions_tree() {
+        let fx = sibling_fixture(true).await;
+
+        let error = pin(&fx.app, "thread-a", Some(&fx.sibling))
+            .await
+            .expect_err("pinning outside allowed_roots must be refused");
+        assert!(error.contains("allowed roots"), "{error}");
+
+        {
+            let mut relay = fx.app.relay.write().await;
+            let edited = format!("{}/seed.txt", fx.sibling);
+            seed_transcript(&mut relay, "thread-a", vec![file_tool(&[&edited])]);
+        }
+        let resolved = resolve(&fx.app, "thread-a").await;
+        assert!(
+            same_path(&resolved.cwd, &fx.main),
+            "writes in a preview-only tree must not relocate the session; got {}",
+            resolved.cwd
+        );
+        assert!(find_root(&resolved.roots, &fx.sibling).is_some());
+    }
+
+    // A grant on a literal subdirectory (pre repo-keyed grants) runs git there but not in the
+    // sibling; the preview must then ask for trust, never error and never grant by itself.
+    #[tokio::test]
+    async fn an_untrusted_sibling_preview_asks_for_trust_instead_of_failing() {
+        let fx = sibling_fixture(false).await;
+        let sub = std::path::Path::new(&fx.main).join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let sub = sub.to_string_lossy().to_string();
+        grant_workspace(&fx.app, &sub).await;
+        fx.app
+            .relay
+            .write()
+            .await
+            .ensure_runtime_for_thread("thread-a")
+            .current_cwd = sub.clone();
+
+        let resolved = resolve(&fx.app, "thread-a").await;
+        let sibling = find_root(&resolved.roots, &fx.sibling)
+            .unwrap_or_else(|| panic!("got {:?}", resolved.roots))
+            .clone();
+
+        let preview = fx
+            .app
+            .workspace_diff(
+                None,
+                Some("thread-a".to_string()),
+                Some(sibling.path.clone()),
+            )
+            .await
+            .expect("an untrusted tree is a prompt, not a refusal");
+        assert!(preview.unavailable && preview.restricted, "{preview:?}");
+        assert!(
+            same_path(&preview.cwd, &fx.sibling),
+            "Trust must name the previewed tree; got {:?}",
+            preview.cwd
+        );
+        assert!(preview.diff.is_empty() && preview.file_changes.is_empty());
+        assert_eq!(
+            fx.app.relay.read().await.trusted_workspaces,
+            vec![sub.clone()],
+            "looking must never grant"
+        );
+
+        fx.app
+            .set_workspace_trust(crate::protocol::WorkspaceTrustInput {
+                cwd: sibling.path.clone(),
+                trusted: true,
+            })
+            .await
+            .expect("grant");
+        let granted = fx
+            .app
+            .workspace_diff(None, Some("thread-a".to_string()), Some(sibling.path))
+            .await
+            .expect("diff");
+        assert!(!granted.restricted && granted.diff.contains("CHANGED-IN-SIBLING"));
+    }
+
+    // `git worktree list` reports whatever `.git/worktrees/*/gitdir` names; only a tree whose
+    // own `.git` points back is the same repository. Trusted, so only the relation can refuse.
+    #[tokio::test]
+    async fn an_unrelated_repo_is_never_offered_even_when_git_lists_it() {
+        let fx = sibling_fixture(true).await;
+        let other_dir = TempDir::new().expect("other");
+        let (other, _) = init_repo_with_worktree(other_dir.path()).await;
+        std::fs::write(
+            std::path::Path::new(&other).join("seed.txt"),
+            "line1\nTOP-SECRET-FROM-OTHER-REPO\n",
+        )
+        .unwrap();
+        grant_workspace(&fx.app, &other).await;
+
+        let other_real = std::fs::canonicalize(&other).unwrap();
+        let admin = std::path::Path::new(&fx.main)
+            .join(".git")
+            .join("worktrees")
+            .join("forged");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(
+            admin.join("gitdir"),
+            format!("{}/.git\n", other_real.display()),
+        )
+        .unwrap();
+        std::fs::write(admin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+        let listed = run_git(
+            std::path::Path::new(&fx.main),
+            &["worktree", "list", "--porcelain"],
+        )
+        .await;
+        assert!(
+            listed.contains(&*other_real.to_string_lossy()),
+            "precondition: git lists the forged tree\n{listed}"
+        );
+
+        let resolved = resolve(&fx.app, "thread-a").await;
+        assert!(
+            find_root(&resolved.roots, &other).is_none(),
+            "got {:?}",
+            resolved.roots
+        );
+        assert!(find_root(&resolved.roots, &fx.sibling).is_some());
+
+        let arbitrary = fx.outside.path().to_string_lossy().to_string();
+        for target in [other.clone(), arbitrary] {
+            let error = fx
+                .app
+                .workspace_diff(None, Some("thread-a".to_string()), Some(target.clone()))
+                .await
+                .expect_err("only an offered tree may be previewed");
+            assert!(error.contains("working trees"), "{target}: {error}");
+            assert!(!error.contains("TOP-SECRET"));
+        }
+    }
+
+    // Only the relay-wide roots are relaxed; a device the operator narrowed stays narrow.
+    #[tokio::test]
+    async fn a_narrow_device_scope_still_hides_a_sibling_worktree() {
+        let fx = sibling_fixture(true).await;
+        pair_device(&fx.app, "device-narrow", vec![fx.main.clone()]).await;
+
+        let narrow = fx
+            .app
+            .resolve_thread_workspace("thread-a", Some("device-narrow"))
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.into_message()));
+        assert!(
+            find_root(&narrow.roots, &fx.sibling).is_none(),
+            "got {:?}",
+            narrow.roots
+        );
+        let error = fx
+            .app
+            .workspace_diff(
+                Some("device-narrow".to_string()),
+                Some("thread-a".to_string()),
+                Some(fx.sibling.clone()),
+            )
+            .await
+            .expect_err("a narrow device must not preview outside its scope");
+        assert!(error.contains("working trees"), "{error}");
+
+        let unscoped = resolve(&fx.app, "thread-a").await;
+        assert!(find_root(&unscoped.roots, &fx.sibling).is_some());
+    }
+
+    // Allowing one linked worktree must not open up the rest of its repository.
+    #[tokio::test]
+    async fn an_allowed_linked_worktree_does_not_widen_to_its_repository() {
+        let tmp = TempDir::new().expect("tmp");
+        let (main, sibling) = init_repo_with_worktree(tmp.path()).await;
+        let nested = std::path::Path::new(&main)
+            .join(".claude")
+            .join("worktrees")
+            .join("nested");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        run_git(
+            std::path::Path::new(&main),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "nested",
+                nested.to_str().unwrap(),
+            ],
+        )
+        .await;
+        let nested = nested.to_string_lossy().to_string();
+        let (app, _project, _outside) = build_app(&nested).await;
+        grant_workspace(&app, &main).await;
+        allow_only(&app, &[&nested]).await;
+        app.relay
+            .write()
+            .await
+            .ensure_runtime_for_thread("thread-a")
+            .current_cwd = nested.clone();
+
+        let resolved = resolve(&app, "thread-a").await;
+        assert!(find_root(&resolved.roots, &nested).is_some());
+        assert!(
+            find_root(&resolved.roots, &main).is_none()
+                && find_root(&resolved.roots, &sibling).is_none(),
+            "got {:?}",
+            resolved.roots
         );
     }
 

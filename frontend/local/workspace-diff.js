@@ -663,12 +663,19 @@ export function WorkspaceTreeBar({ store, state }) {
     Boolean(viewRoot) &&
     workspace?.cwd &&
     viewRoot !== workspace.cwd;
+  // The relay declined git in the previewed tree, so Trust must name it, not the session's.
+  const previewRestricted =
+    previewing && state.data?.restricted === true && state.data?.cwd === viewRoot;
   const displayWorkspace = workspace
     ? {
         ...workspace,
         // Preview cwd for the picker; origin still describes the session.
         cwd: viewRoot || workspace.cwd,
-        git: previewing ? null : workspace.git,
+        git: previewing
+          ? previewRestricted
+            ? { cwd: viewRoot, is_repo: true, dirty_known: false, restricted: true }
+            : null
+          : workspace.git,
       }
     : null;
   return h(ThreadWorkspaceField, {
@@ -841,7 +848,7 @@ function renderDiffContent(state, variant = "transcript") {
   }
   if (data.unavailable) {
     // Restricted is explained by the Trust row above; don't repeat it here.
-    if (isWorkspaceRestricted(state.workspace?.git)) {
+    if (data.restricted || isWorkspaceRestricted(state.workspace?.git)) {
       return null;
     }
     return h(
@@ -883,30 +890,40 @@ const TERMINAL_REVIEW = new Set(["complete", "failed", "cancelled"]);
 export function WorkspaceDiffChip({ store, onTap }) {
   const state = useStoreState(store);
   const stats = computeChangeStats(state.data);
-  const isClean = state.status === "loaded" && stats.fileCount === 0;
+  const restricted = state.data?.restricted === true;
+  const isClean = !restricted && state.status === "loaded" && stats.fileCount === 0;
+  const hasOtherWorktrees = state.workspace?.roots?.some(
+    (root) => root.path && root.path !== state.workspace.cwd
+  );
   const notRepo = state.data?.not_a_git_repo;
   const unavailable = state.data?.unavailable;
-  if (notRepo || unavailable) return null;
+  if (notRepo || (unavailable && !restricted)) return null;
   if (state.status === "idle" && !state.data) return null;
-  if (isClean) return null;
+  if (isClean && !hasOtherWorktrees) return null;
   return h(
     "button",
     {
       type: "button",
       className: "workspace-diff-chip",
       onClick: () => onTap?.(),
-      title: "Tap to view file diffs",
+      title: restricted ? "Tap to view workspace access" : "Tap to view file diffs",
     },
     h(
       "span",
       { className: "workspace-diff-chip-label" },
-      stats.fileCount === 1 ? "1 file" : `${stats.fileCount} files`
+      restricted
+        ? "Trust needed"
+        : isClean
+          ? "Worktrees"
+          : stats.fileCount === 1
+            ? "1 file"
+            : `${stats.fileCount} files`
     ),
-    h("span", { className: "workspace-diff-chip-sep" }, "·"),
-    stats.added > 0
+    restricted || isClean ? null : h("span", { className: "workspace-diff-chip-sep" }, "·"),
+    !restricted && stats.added > 0
       ? h("span", { className: "workspace-diff-chip-add" }, `+${stats.added}`)
       : null,
-    stats.removed > 0
+    !restricted && stats.removed > 0
       ? h("span", { className: "workspace-diff-chip-del" }, `−${stats.removed}`)
       : null
   );
