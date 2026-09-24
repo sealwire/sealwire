@@ -67,3 +67,10 @@ export async function fetchRemoteThreadSettings(threadId) {
   const result = await dispatchOrRecover("fetch_thread_settings", { thread_id: threadId });
   return result?.thread_settings || null;
 }
+
+// The "/" menu's provider skills. A read, so not claim-gated; the relay scopes it to
+// this device's folders.
+export async function fetchRemoteThreadSkills(threadId) {
+  const result = await dispatchOrRecover("fetch_thread_skills", { thread_id: threadId });
+  return result?.thread_skills || null;
+}

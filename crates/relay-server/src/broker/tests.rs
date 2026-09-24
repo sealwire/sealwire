@@ -936,10 +936,11 @@ fn parse_inbound_payload_parses_remote_action_requests() {
         InboundBrokerPayload::RemoteAction {
             action_id,
             device_id,
-            request: RemoteActionRequest::SendMessage { input },
+            request: RemoteActionRequest::SendMessage { input, skill },
             session_claim,
         } => {
             assert_eq!(action_id, "act-1");
+            assert!(skill.is_none(), "an older client's send carries no skill");
             assert_eq!(device_id.as_deref(), Some("phone-1"));
             assert!(session_claim.is_none());
             assert_eq!(input.text, "hello");
@@ -1041,6 +1042,10 @@ fn parse_inbound_payload_parses_encrypted_remote_actions() {
                 device_id: None,
                 thread_id: "thread-1".to_string(),
             },
+            skill: Some(crate::protocol::SkillInvocationInput {
+                name: "probe".to_string(),
+                path: Some("/repo/.codex/skills/probe/SKILL.md".to_string()),
+            }),
         },
     )
     .expect("encrypted action should encrypt");
@@ -1068,8 +1073,17 @@ fn parse_inbound_payload_parses_encrypted_remote_actions() {
             let request: RemoteActionRequest =
                 decrypt_json("device-secret", &envelope).expect("payload should decrypt");
             match request {
-                RemoteActionRequest::SendMessage { input } => {
+                RemoteActionRequest::SendMessage { input, skill } => {
                     assert_eq!(input.text, "encrypted hello");
+                    // The path is what tells two same-name Codex skills apart, so it has
+                    // to survive the sealed hop intact.
+                    assert_eq!(
+                        skill,
+                        Some(crate::protocol::SkillInvocationInput {
+                            name: "probe".to_string(),
+                            path: Some("/repo/.codex/skills/probe/SKILL.md".to_string()),
+                        })
+                    );
                 }
                 other => panic!("unexpected request: {other:?}"),
             }

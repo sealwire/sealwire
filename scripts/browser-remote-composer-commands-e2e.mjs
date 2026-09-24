@@ -238,12 +238,24 @@ async function main() {
         const BROKER_PROTOCOL_VERSION = 1;
         const RELAY_PROTOCOL_VERSION = 2;
 
+        // What the fake relay currently reports; a test can move the session's folder.
+        let liveSnapshot = truncatedSnapshot;
+
         class FakeWebSocket extends EventTarget {
           static OPEN = 1;
           constructor(url) {
             super();
             this.url = url;
             this.readyState = FakeWebSocket.OPEN;
+            window.__fakeRelay = {
+              moveSession: (patch) => {
+                liveSnapshot = { ...truncatedSnapshot, ...patch };
+                this.#emit({
+                  type: "message",
+                  payload: { protocol_version: RELAY_PROTOCOL_VERSION, kind: "session_snapshot", snapshot: liveSnapshot },
+                });
+              },
+            };
             queueMicrotask(() => {
               this.dispatchEvent(new Event("open"));
               this.#emit({
@@ -260,7 +272,7 @@ async function main() {
               });
               this.#emit({
                 type: "message",
-                payload: { protocol_version: RELAY_PROTOCOL_VERSION, kind: "session_snapshot", snapshot: truncatedSnapshot },
+                payload: { protocol_version: RELAY_PROTOCOL_VERSION, kind: "session_snapshot", snapshot: liveSnapshot },
               });
             });
           }
@@ -268,15 +280,72 @@ async function main() {
             const frame = JSON.parse(raw);
             const payload = frame.payload;
             const request = payload?.request || {};
+            // The provider's own skills for this thread, including one that shares a
+            // name with Sealwire's `/review`.
+            if (request.type === "fetch_thread_skills") {
+              this.#respond(payload.action_id, {
+                action: "fetch_thread_skills",
+                ok: true,
+                thread_skills: {
+                  thread_id: request.thread_id,
+                  provider: "codex",
+                  cwd: "/tmp/e2e-mobile-header",
+                  source: "runtime",
+                  invocation: "skill_input",
+                  skills: [
+                    {
+                      name: "review",
+                      description: "The repository's own review checklist, which is long enough to need truncating on a phone",
+                      scope: "repo",
+                      path: "/tmp/e2e-mobile-header/.agents/skills/review/SKILL.md",
+                    },
+                    {
+                      name: "spreadsheets:Spreadsheets",
+                      description: "Create and edit spreadsheets",
+                      scope: "plugin",
+                      origin: "spreadsheets@openai-primary-runtime",
+                      path: "/home/.codex/plugins/spreadsheets/SKILL.md",
+                    },
+                  ],
+                },
+              });
+              return;
+            }
+            if (request.type === "claim_challenge") {
+              this.#respond(payload.action_id, {
+                action: "claim_challenge",
+                ok: true,
+                claim_challenge_id: "challenge-e2e",
+                claim_challenge: "challenge-bytes-e2e",
+                claim_challenge_expires_at: Math.floor(Date.now() / 1000) + 60,
+              });
+              return;
+            }
+            if (request.type === "claim_device") {
+              window.__claimedAt = Date.now();
+              this.#respond(payload.action_id, {
+                action: "claim_device",
+                ok: true,
+                session_claim: "session-claim-e2e",
+                session_claim_expires_at: Math.floor(Date.now() / 1000) + 3600,
+              });
+              return;
+            }
+            if (request.type === "send_message") {
+              window.__sentMessages = [...(window.__sentMessages || []), request];
+              this.#respond(payload.action_id, { action: "send_message", ok: true, snapshot: liveSnapshot });
+              return;
+            }
             if (request.type === "heartbeat") {
-              this.#respond(payload.action_id, { action: "heartbeat", ok: true, snapshot: truncatedSnapshot });
+              this.#respond(payload.action_id, { action: "heartbeat", ok: true, snapshot: liveSnapshot });
               return;
             }
             if (request.type === "list_threads") {
+              if (window.__claimedAt) window.__listsAfterClaim = (window.__listsAfterClaim || 0) + 1;
               this.#respond(payload.action_id, {
                 action: "list_threads",
                 ok: true,
-                snapshot: truncatedSnapshot,
+                snapshot: liveSnapshot,
                 threads: { threads: [threadSummary] },
               });
               return;
@@ -285,7 +354,7 @@ async function main() {
               this.#respond(payload.action_id, {
                 action: "fetch_projects",
                 ok: true,
-                snapshot: truncatedSnapshot,
+                snapshot: liveSnapshot,
                 projects: {
                   projects_revision: 1,
                   projects: [{ id: projectId, name: projectName }],
@@ -298,7 +367,7 @@ async function main() {
               this.#respond(payload.action_id, {
                 action: "fetch_thread_transcript",
                 ok: true,
-                snapshot: truncatedSnapshot,
+                snapshot: liveSnapshot,
                 thread_transcript: {
                   thread_id: threadId,
                   entries: [
@@ -327,7 +396,13 @@ async function main() {
             });
           }
           #emit(frame) {
-            this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(frame) }));
+            // The surface drops a payload not stamped as the relay's, which a real broker
+            // does; without this every answer below is silently ignored.
+            const stamped =
+              frame.type === "message"
+                ? { from_role: "relay", from_peer_id: "relay-peer-e2e", ...frame }
+                : frame;
+            this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(stamped) }));
           }
         }
         window.WebSocket = FakeWebSocket;
@@ -349,6 +424,10 @@ async function main() {
       return t.includes("MOBILE-HEADER-TAIL-E2E");
     }, null, { timeout: TIMEOUT_MS });
     await page.waitForSelector("#remote-message-input", { timeout: TIMEOUT_MS });
+    // The claim answered at boot is followed by a re-sync that re-opens the session; a
+    // draft typed while that is still landing is what the re-open replaces.
+    await page.waitForFunction(() => (window.__listsAfterClaim || 0) > 0, null, { timeout: TIMEOUT_MS });
+    await page.waitForTimeout(500);
 
     // Type the way a person does, so the controller's own input listener runs.
     await page.click("#remote-message-input");
@@ -418,7 +497,86 @@ async function main() {
 ordinary message sends THAT instead of what the user types — ${JSON.stringify(committed)}`
     );
 
-    console.log(`remote-composer-commands-e2e OK ${JSON.stringify({ open, committed })}`);
+    // The provider's own skills sit beside Sealwire's commands. Peel the pill staged
+    // above, then ask for the name both sides own.
+    await page.keyboard.press("Backspace");
+    await page.waitForFunction(() => !document.querySelector(".composer-command-pill"), null, {
+      timeout: TIMEOUT_MS,
+    });
+    await page.type("#remote-message-input", "/rev", { delay: 30 });
+    await page.waitForSelector(".composer-command-row.is-provider", { timeout: TIMEOUT_MS });
+    const skillRows = await page.evaluate(() =>
+      [...document.querySelectorAll(".composer-command-menu [role='option']")].map((row) => {
+        const box = row.getBoundingClientRect();
+        const origin = row.querySelector(".composer-command-origin");
+        const originBox = origin?.getBoundingClientRect();
+        return {
+          name: row.querySelector(".composer-command-name")?.textContent || "",
+          origin: origin?.textContent || "",
+          mark: row.querySelector(".composer-command-mark")?.getAttribute("data-provider") || "",
+          right: Math.round(box.right),
+          originVisible: Boolean(originBox && originBox.width > 0 && originBox.right <= box.right + 1),
+        };
+      })
+    );
+    const viewportWidth = await page.evaluate(() => window.innerWidth);
+    assert.deepEqual(
+      skillRows.map(({ name, origin, mark }) => ({ name, origin, mark })),
+      [
+        { name: "/review", origin: "Sealwire", mark: "" },
+        { name: "$review", origin: "Repo", mark: "codex" },
+      ],
+      `Sealwire's /review and Codex's $review must be two labelled rows — ${JSON.stringify(skillRows)}`
+    );
+    for (const row of skillRows) {
+      assert.ok(row.right <= viewportWidth + 2, `a row overflows the phone — ${JSON.stringify(row)}`);
+      assert.ok(row.originVisible, `the origin label is clipped out of its row — ${JSON.stringify(row)}`);
+    }
+    if (process.env.SKILLS_SCREENSHOT) {
+      await page.screenshot({ path: process.env.SKILLS_SCREENSHOT });
+    }
+
+    // The session moves folder under the open menu, with nothing typed. The Codex row
+    // was listed for the old folder and must leave at once; Sealwire's stays.
+    const menuRows = () =>
+      page.evaluate(() =>
+        [...document.querySelectorAll(".composer-command-menu [role='option']")].map(
+          (row) => row.querySelector(".composer-command-origin")?.textContent || ""
+        )
+      );
+    await page.evaluate(() => window.__fakeRelay.moveSession({ current_cwd: "/tmp/e2e-elsewhere" }));
+    await page.waitForFunction(
+      () => !document.querySelector(".composer-command-row.is-provider"),
+      null,
+      { timeout: TIMEOUT_MS }
+    );
+    assert.deepEqual(await menuRows(), ["Sealwire"], "only Sealwire's row may stay on screen");
+    assert.equal(await page.inputValue("#remote-message-input"), "/rev", "the draft is untouched");
+    await page.evaluate(() => window.__fakeRelay.moveSession({ current_cwd: "/tmp/e2e-mobile-header" }));
+    await page.waitForSelector(".composer-command-row.is-provider", { timeout: TIMEOUT_MS });
+
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(
+      () => [...document.querySelectorAll(".composer-command-pill")].some((p) => p.textContent.includes("$review")),
+      null,
+      { timeout: TIMEOUT_MS }
+    );
+    await page.type("#remote-message-input", "the parser", { delay: 10 });
+    await page.click("#remote-send-button");
+    await page.waitForFunction(() => (window.__sentMessages || []).length > 0, null, { timeout: TIMEOUT_MS });
+    const sent = await page.evaluate(() => window.__sentMessages[0]);
+    assert.equal(sent.input.text, "the parser", `the words go as the message — ${JSON.stringify(sent)}`);
+    assert.deepEqual(
+      sent.skill,
+      { name: "review", path: "/tmp/e2e-mobile-header/.agents/skills/review/SKILL.md" },
+      `the picked skill rides beside the text, by path — ${JSON.stringify(sent)}`
+    );
+    await page.waitForFunction(() => !document.querySelector(".composer-command-pill"), null, {
+      timeout: TIMEOUT_MS,
+    });
+
+    console.log(`remote-composer-commands-e2e OK ${JSON.stringify({ open, committed, skillRows, sent })}`);
   } catch (error) {
     await writeFailureArtifacts({
       scenario: "remote-composer-commands-e2e",

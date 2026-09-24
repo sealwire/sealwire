@@ -1508,3 +1508,66 @@ test("a live session keeps its own turn id while another session's turn is newer
     await worker.close();
   }
 });
+
+test("skills/list probes the session's own folder and settings without holding up the loop", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "skills-probe-"));
+  const worker = spawnWorker({ CLAUDE_FAKE_SKILLS_DELAY_MS: "400" });
+  try {
+    worker.send({ type: "skills/list", id: "skills-1", cwd });
+    // Sent after, answered first: the probe must not queue other commands behind it.
+    worker.send({ type: "model/list", id: "models-during-skills", cwd });
+    await worker.waitFor(
+      (event) => event.type === "response" && event.id === "models-during-skills",
+      { label: "model/list while skills/list is still out" },
+    );
+    const early = worker.events.find(
+      (event) => event.type === "response" && event.id === "skills-1",
+    );
+    assert.equal(early, undefined, "the model answer must not have waited for the probe");
+
+    const res = await worker.waitFor(
+      (event) => event.type === "response" && event.id === "skills-1",
+      { label: "skills/list response" },
+    );
+    assert.equal(res.ok, true, JSON.stringify(res));
+    assert.deepEqual(res.result.skills, [
+      {
+        name: "review",
+        description: `Repo review in ${cwd}`,
+        scope: "repo",
+        origin: null,
+        argument_hint: "<focus>",
+      },
+      { name: "mine", description: "Mine", scope: "global", origin: null, argument_hint: null },
+      {
+        name: "code-review",
+        description: "Bundled",
+        scope: "builtin",
+        origin: null,
+        argument_hint: null,
+      },
+    ]);
+    const probe = worker.queries().find((query) => query.cwd === cwd);
+    assert.deepEqual(probe?.settingSources, ["user", "project", "local"]);
+  } finally {
+    await worker.close();
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("skills/list falls back to the command list, minus built-ins, on a CLI without reloadSkills", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_NO_RELOAD_SKILLS: "1" });
+  try {
+    worker.send({ type: "skills/list", id: "skills-old", cwd: "/tmp" });
+    const res = await worker.waitFor(
+      (event) => event.type === "response" && event.id === "skills-old",
+      { label: "skills/list response" },
+    );
+    assert.deepEqual(
+      res.result.skills.map((skill) => [skill.name, skill.scope]),
+      [["fallback-skill", "repo"]],
+    );
+  } finally {
+    await worker.close();
+  }
+});

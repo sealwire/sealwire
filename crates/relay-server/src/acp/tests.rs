@@ -3643,3 +3643,59 @@ mod session_binding_boundary_tests {
         );
     }
 }
+
+#[tokio::test]
+async fn announced_commands_become_the_sessions_skills_and_nothing_is_guessed_before_them() {
+    use tokio::io::AsyncWriteExt;
+
+    let state = relay_state();
+    let (outbound, _outbound_peer) = tokio::io::duplex(4096);
+    let (mut inbound_writer, inbound) = tokio::io::duplex(4096);
+    let bridge = AcpBridge::for_test(state.clone(), outbound, inbound, "cursor");
+    bridge.seed_session_for_test("t1", "/tmp/project").await;
+
+    let before = crate::provider::ProviderBridge::list_skills(&bridge, "t1", "/tmp/project").await;
+    assert!(
+        before.is_err(),
+        "no announcement yet is a reason to fall back, not an empty list: {before:?}"
+    );
+
+    let update = json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "t1",
+            "update": {
+                "sessionUpdate": "available_commands_update",
+                "availableCommands": [
+                    {"name": "web", "description": "Search the web", "input": {"hint": "query"}},
+                    {"name": "", "description": "nameless rows are dropped"}
+                ]
+            }
+        }
+    });
+    inbound_writer
+        .write_all(format!("{update}\n").as_bytes())
+        .await
+        .unwrap();
+
+    let mut skills = None;
+    for _ in 0..50 {
+        if let Ok(Some(found)) =
+            crate::provider::ProviderBridge::list_skills(&bridge, "t1", "/tmp/project").await
+        {
+            skills = Some(found);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let skills = skills.expect("the announcement reaches the session");
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].name, "web");
+    assert_eq!(skills[0].description, "Search the web");
+    assert_eq!(skills[0].argument_hint.as_deref(), Some("query"));
+    assert_eq!(skills[0].scope, "session");
+
+    let other = crate::provider::ProviderBridge::list_skills(&bridge, "t2", "/tmp/project").await;
+    assert!(other.is_err(), "one session's commands are not another's");
+}

@@ -16,6 +16,7 @@ mod protocol;
 #[cfg(test)]
 mod protocol_tests;
 mod provider;
+mod skills;
 mod state;
 mod state_paths;
 mod teams;
@@ -56,15 +57,15 @@ use protocol::{
     ReadThreadEntryDetailInput, ReadThreadTranscriptInput, RenameThreadInput, RepairWorkspaceInput,
     RequestReviewInput, RequestReviewReceipt, ResolvedWorkspace, ResumeSessionInput,
     ReviewActionInput, ReviewDeleteReceipt, ReviewsResponse, RevokeDeviceReceipt, SendMessageInput,
-    SessionSnapshot, SessionSnapshotCompactProfile, SetThreadFlagInput, StartSessionInput,
-    StartTeamInput, StartTeamReceipt, StartWorkflowInput, StartWorkflowReceipt, StopTurnInput,
-    SubmitAskUserAnswerInput, TakeOverInput, TeamActionInput, TeamActionReceipt, TeamFileResponse,
-    TeamMarkInput, TeamsResponse, ThreadArchiveReceipt, ThreadDeleteReceipt,
+    SessionSnapshot, SessionSnapshotCompactProfile, SetThreadFlagInput, SkillInvocationInput,
+    StartSessionInput, StartTeamInput, StartTeamReceipt, StartWorkflowInput, StartWorkflowReceipt,
+    StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput, TeamActionInput, TeamActionReceipt,
+    TeamFileResponse, TeamMarkInput, TeamsResponse, ThreadArchiveReceipt, ThreadDeleteReceipt,
     ThreadEntryDetailResponse, ThreadFlagReceipt, ThreadRenameReceipt, ThreadSettingsView,
-    ThreadTranscriptResponse, ThreadWorkspaceInput, ThreadsQuery, ThreadsResponse,
-    TickReviewFileInput, TranscriptDeltaEvent, UpdateSessionSettingsInput, WatchThreadsInput,
-    WorkflowActionInput, WorkflowActionReceipt, WorkflowsResponse, WorkspaceDiffResponse,
-    WorkspaceGitContextView, WorkspaceTrustInput, WorkspaceTrustReceipt,
+    ThreadSkillsView, ThreadTranscriptResponse, ThreadWorkspaceInput, ThreadsQuery,
+    ThreadsResponse, TickReviewFileInput, TranscriptDeltaEvent, UpdateSessionSettingsInput,
+    WatchThreadsInput, WorkflowActionInput, WorkflowActionReceipt, WorkflowsResponse,
+    WorkspaceDiffResponse, WorkspaceGitContextView, WorkspaceTrustInput, WorkspaceTrustReceipt,
 };
 use provider::ProviderImage;
 use relay_http::{
@@ -162,6 +163,9 @@ struct LocalSendMessageInput {
     message: SendMessageInput,
     #[serde(default)]
     images: Vec<LocalImageInput>,
+    /// Picked from the "/" menu; the relay writes it into the turn for the provider.
+    #[serde(default)]
+    skill: Option<SkillInvocationInput>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -417,6 +421,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
             get(thread_workspace).post(pin_thread_workspace),
         )
         .route("/api/threads/:thread_id/settings", get(thread_settings))
+        .route("/api/threads/:thread_id/skills", get(thread_skills))
         .route("/api/stream", get(session_stream))
         .route("/api/threads", get(list_threads))
         .route("/api/threads/:thread_id/transcript", get(thread_transcript))
@@ -1259,6 +1264,23 @@ async fn thread_settings(
         .map_err(bad_request)
 }
 
+/// The skills this thread's own provider offers in its own folder, for the "/" menu.
+async fn thread_skills(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(thread_id): Path<String>,
+    Query(query): Query<DeviceQuery>,
+) -> Result<Json<ApiEnvelope<ThreadSkillsView>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    context
+        .app
+        .thread_skills(query.device_id, &thread_id)
+        .await
+        .map(|response| Json(ApiEnvelope::ok(response)))
+        .map_err(bad_request)
+}
+
 /// Query for `/api/stream`. `device_id` identifies the surface so its declared thread
 /// watch set can filter the delta stream; without one the connection still gets
 /// snapshots, just no low-latency tail.
@@ -1728,7 +1750,7 @@ async fn send_message(
     let images = parse_local_message_images(input.images).map_err(bad_request)?;
     context
         .app
-        .send_message_with_images(input.message, images)
+        .send_message_with_skill(input.message, images, input.skill)
         .await
         .map(|snapshot| Json(ApiEnvelope::ok(compact_local_snapshot(snapshot))))
         .map_err(bad_request)

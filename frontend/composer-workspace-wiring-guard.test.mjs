@@ -105,3 +105,10 @@ test("a deleted session's draft is discarded through the binding, on every path"
     "forgetting the key alone leaves the outgoing capture free to write it straight back"
   );
 });
+
+test("every render tells the '/' menu when the session under it moved", () => {
+  // Same thread, new agent or folder: no navigation and no keystroke, so the render is
+  // the only moment an open menu can learn its rows are about somewhere else.
+  const render = slice("syncComposerWorkspace();\n  _baseRenderSession(session);", "syncVerbTimer(session);");
+  assert.match(render, /composerCommandController\?\.refreshContext\?\.\(\)/);
+});

@@ -6,6 +6,7 @@
 // Split out of app.js because that file is not evaluable in a test, and "the draft
 // followed the wrong session" is a behaviour, not a wiring detail.
 import { isEmptyComposerWorkspace as isEmpty } from "../shared/composer-workspace.js";
+import { withoutSentSkill } from "../shared/thread-skills.js";
 
 /**
  * @param {object} deps
@@ -76,10 +77,14 @@ export function createComposerWorkspaceBinding({
     /// Takes the submit's OPERATION TOKEN, not the key it started under. A deferred
     /// Claude thread is renamed by the very send that is still in flight here, and a key
     /// captured before that lands names a thread that no longer exists.
-    clearSubmitted(operationId, { text = "", attachmentIds = [] } = {}) {
+    clearSubmitted(operationId, { text = "", attachmentIds = [], skill = null } = {}) {
       const key = workspaces.operationScope(operationId);
       if (!key) return;
       const sent = new Set(attachmentIds);
+      // The staged skill went with the message; a different one staged since did not.
+      const pills = workspaces.read(key).commandPills || [];
+      const remaining = withoutSentSkill(pills, skill);
+      if (remaining !== pills) workspaces.write(key, { commandPills: remaining });
       if (key === bound) {
         if (getText() === text) setText("");
         setImageAttachments(getImageAttachments().filter((image) => !sent.has(image.id)));

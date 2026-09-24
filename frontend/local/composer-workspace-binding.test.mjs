@@ -264,3 +264,28 @@ test("discarding, unlike forgetting, survives the route commit that follows a de
 
   assert.deepEqual(discarded.workspaces.keys(), [], "discarding empties the box first, so it does not");
 });
+
+test("a sent skill pill is consumed on its own thread, and only if it is still the one that went", () => {
+  const ui = harness();
+  ui.binding.sync();
+  const sent = { kind: "skill", value: "codex:/a/.codex/skills/probe/SKILL.md", label: "$probe" };
+  ui.workspaces.write("local::a", { commandPills: [sent] });
+  ui.box.text = "tidy";
+  const operationId = ui.workspaces.beginOperation("local::a");
+
+  ui.go("local::b");
+  const other = { kind: "skill", value: "claude_code:review", label: "/review" };
+  ui.workspaces.write("local::b", { commandPills: [other] });
+
+  ui.binding.clearSubmitted(operationId, {
+    text: "tidy",
+    attachmentIds: [],
+    skill: { key: sent.value, name: "probe", path: "/a/.codex/skills/probe/SKILL.md" },
+  });
+  assert.deepEqual(ui.workspaces.read("local::a").commandPills, [], "A's skill went, so it goes");
+  assert.deepEqual(
+    ui.workspaces.read("local::b").commandPills,
+    [other],
+    "B's staged skill is not A's send to consume"
+  );
+});

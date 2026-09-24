@@ -433,6 +433,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
         workspace_git_context: None,
         thread_workspace: None,
         thread_settings: None,
+        thread_skills: None,
         reviews: None,
         workflows: None,
         devices: None,

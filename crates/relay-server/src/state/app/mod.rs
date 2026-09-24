@@ -117,6 +117,7 @@ pub struct AppState {
     review_anchors: Arc<dyn relay_api::ReviewAnchors>,
     providers: HashMap<String, Arc<dyn ProviderBridge>>,
     provider_model_catalogs: Arc<RwLock<HashMap<String, Vec<ModelOptionView>>>>,
+    provider_skill_catalogs: skills::SkillCatalogs,
     change_tx: watch::Sender<u64>,
     /// Serializes individual session-mutating ops against each other (op-vs-op
     /// atomicity for their brief check-then-act windows). Unlike before, a review
@@ -183,6 +184,9 @@ pub struct AppState {
     /// rather than hoping for it.
     #[cfg(test)]
     team_turn_barrier: Arc<tokio::sync::Mutex<()>>,
+    /// Where the skills fallback scans, so a test never reads the real home folder.
+    #[cfg(test)]
+    skill_roots_override: Arc<std::sync::Mutex<Option<crate::skills::SkillRoots>>>,
     /// Counts drivers that have REACHED that latch, so a test can wait for the
     /// driver to be genuinely past its cheap gates instead of sleeping.
     #[cfg(test)]
@@ -314,6 +318,7 @@ mod review;
 mod review_comments;
 mod review_ticks;
 mod sessions;
+mod skills;
 pub(crate) mod team;
 mod team_command_reducer;
 mod team_diff;
@@ -422,6 +427,7 @@ impl AppState {
             review_anchors: Arc::new(crate::usage::review_anchors::UnavailableReviewAnchors),
             providers,
             provider_model_catalogs: Arc::new(RwLock::new(HashMap::new())),
+            provider_skill_catalogs: Arc::new(RwLock::new(HashMap::new())),
             change_tx,
             session_guard: Arc::new(tokio::sync::Mutex::new(())),
             orchestrator_create_guard: Arc::new(tokio::sync::Mutex::new(())),
@@ -435,6 +441,8 @@ impl AppState {
             team_liveness_window_ms: Arc::new(std::sync::atomic::AtomicU64::new(1_000)),
             #[cfg(test)]
             team_turn_barrier: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            skill_roots_override: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
             team_turn_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(test)]
@@ -611,6 +619,7 @@ impl AppState {
             review_anchors: Arc::new(crate::usage::review_anchors::UnavailableReviewAnchors),
             providers,
             provider_model_catalogs: Arc::new(RwLock::new(HashMap::new())),
+            provider_skill_catalogs: Arc::new(RwLock::new(HashMap::new())),
             change_tx,
             session_guard: Arc::new(tokio::sync::Mutex::new(())),
             orchestrator_create_guard: Arc::new(tokio::sync::Mutex::new(())),
@@ -624,6 +633,8 @@ impl AppState {
             team_liveness_window_ms: Arc::new(std::sync::atomic::AtomicU64::new(1_000)),
             #[cfg(test)]
             team_turn_barrier: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            skill_roots_override: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
             team_turn_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(test)]

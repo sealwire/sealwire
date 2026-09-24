@@ -191,6 +191,10 @@ import {
 } from "./shared/thread-multi-select.js";
 import { matchesApplePlatform } from "./shared/composer-keys.js";
 import { createComposerCommandController } from "./local/composer-commands.js";
+import {
+  createThreadSkillsStore,
+  skillForSend,
+} from "./shared/thread-skills.js";
 import { canRequestReview, selectReviewLaunchModel } from "./shared/review-state.js";
 import { createGoalActions } from "./shared/goal-actions.js";
 import { createDelegateAuthor } from "./local/delegate-authoring.js";
@@ -1439,6 +1443,9 @@ renderer.renderSession = function wrappedRenderSession(session) {
   // thread's draft. A no-op when the scope is unchanged.
   syncComposerWorkspace();
   _baseRenderSession(session);
+  // Same thread, new agent or folder: an open "/" menu must not keep the old one's
+  // rows. A no-op unless one of the three changed.
+  composerCommandController?.refreshContext?.();
   syncVerbTimer(session);
   if (viewedThreadWasLive) {
     void loadViewOnlyTranscript(state.viewThreadId);
@@ -2944,6 +2951,35 @@ const reviewAuthor = createReviewAuthor({
   setComposerError: showComposerError,
 });
 
+// The "/" menu's provider rows. Fetched per thread, so a list never outlives the
+// thread, provider and folder the relay listed it for.
+const threadSkills = createThreadSkillsStore({
+  fetchSkills: async (threadId) => {
+    const response = await apiFetch(
+      `/api/threads/${encodeURIComponent(threadId)}/skills?device_id=${encodeURIComponent(state.deviceId || "")}`
+    );
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) throw new Error(payload?.error?.message || "no skills");
+    return payload.data;
+  },
+});
+
+function composerThreadProvider(threadId) {
+  if (!threadId) return "";
+  const row = (state.threads || []).find((thread) => thread.id === threadId);
+  if (row?.provider) return row.provider;
+  return state.session?.active_thread_id === threadId ? state.session?.provider || "" : "";
+}
+
+// The folder the relay lists this thread's skills for: its runtime cwd, which moves.
+// Empty when this surface cannot know it; the relay still checks on send.
+function composerThreadCwd(threadId) {
+  if (!threadId) return "";
+  const pin = state.viewOnlyThread;
+  if (pin?.threadId === threadId) return pin.cwd || "";
+  return state.session?.active_thread_id === threadId ? state.session?.current_cwd || "" : "";
+}
+
 const composerCommands = createComposerCommandController({
   input: messageInput,
   mount: composerCommandMount,
@@ -2962,12 +2998,15 @@ const composerCommands = createComposerCommandController({
       name: thread.name || "",
       provider: thread.provider || "",
     })),
+    ...composerSkillsCatalog(),
   }),
   getContext: () => {
     const session = state.session || null;
     const threadId = state.viewThreadId || session?.active_thread_id || null;
     return {
       threadId,
+      provider: composerThreadProvider(threadId),
+      cwd: composerThreadCwd(threadId),
       canReview: canRequestReview(session, state.deviceId, threadId),
       defaultReviewerProvider: composerCommandLaunchModel().defaultProvider,
     };
@@ -2998,6 +3037,19 @@ const composerCommands = createComposerCommandController({
   log: logLine,
 });
 composerCommandController = composerCommands;
+
+// A function declaration: `composerCommands` is built from it before this line runs.
+function composerSkillsCatalog() {
+  const threadId = state.viewThreadId || state.session?.active_thread_id || null;
+  const provider = composerThreadProvider(threadId);
+  const cwd = composerThreadCwd(threadId);
+  return {
+    skills: threadSkills.peek(threadId, { provider, cwd }),
+    skillsLoading: threadSkills.isLoading(threadId),
+    loadSkills: (id) =>
+      threadSkills.load(id, { provider: composerThreadProvider(id), cwd: composerThreadCwd(id) }),
+  };
+}
 
 // A refusal comes back 200 + `isError`, so only a transport failure is an error here. A
 // function declaration: the reviewer actions above are built before this line runs.
@@ -3098,6 +3150,9 @@ async function runComposerSubmit() {
   // Ours, or an ordinary message? `submit` returns null for a "/word" we do not
   // own — and for every draft at all in a public build — which then reaches the
   // provider verbatim. That is what keeps a user's own .claude/commands/* working.
+  // A provider skill staged from the menu is not a command of ours: it rides this
+  // ordinary send, and the relay writes it into the turn the provider's own way.
+  const stagedSkill = composerCommands.stagedSkill?.() || null;
   const running = composerCommands.submit();
   if (running) {
     const operationId = composerWorkspaces.beginOperation(scope);
@@ -3110,7 +3165,7 @@ async function runComposerSubmit() {
     }
     return;
   }
-  if (!text.trim() && imageAttachments.length === 0) {
+  if (!text.trim() && imageAttachments.length === 0 && !stagedSkill) {
     void sendMessage(text); // empty → sendMessage logs the parity message
     return;
   }
@@ -3132,7 +3187,9 @@ async function runComposerSubmit() {
         data_url: await imageFileToDataUrl(attachment.file),
       }))
     );
-    const sent = await sendMessage(text, targetThreadId, images);
+    const sent = await sendMessage(text, targetThreadId, images, {
+      skill: skillForSend(stagedSkill),
+    });
     if (sent) {
       // Only what this send actually consumed, and only on the thread it was sent
       // from — the user may be mid-sentence in another session by now, and a deferred
@@ -3140,6 +3197,7 @@ async function runComposerSubmit() {
       composerWorkspace.clearSubmitted(operationId, {
         text,
         attachmentIds: imageAttachments.map((attachment) => attachment.id),
+        skill: stagedSkill,
       });
     }
   } catch (error) {

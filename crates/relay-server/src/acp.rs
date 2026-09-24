@@ -198,6 +198,8 @@ pub(crate) struct SessionRuntime {
     /// The open reasoning entry, if one is streaming.
     pub(crate) thought_item: Option<String>,
     pub(crate) thought_text: String,
+    /// The agent's last `available_commands_update`. `None` until it sends one.
+    pub(crate) available_commands: Option<Vec<crate::protocol::ProviderSkillView>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1326,6 +1328,45 @@ impl ProviderBridge for AcpBridge {
 
         threads.truncate(limit);
         Ok(threads)
+    }
+
+    fn skills_are_per_session(&self) -> bool {
+        true
+    }
+
+    /// What the agent itself announced for this session. Labelled from disk where a
+    /// command's file can be found, since ACP names no scope of its own.
+    async fn list_skills(
+        &self,
+        thread_id: &str,
+        cwd: &str,
+    ) -> Result<Option<Vec<crate::protocol::ProviderSkillView>>, String> {
+        let announced = self
+            .sessions
+            .lock()
+            .await
+            .get(thread_id)
+            .and_then(|session| session.available_commands.clone());
+        let Some(commands) = announced else {
+            return Err(format!(
+                "{} announces its commands once the session is open",
+                crate::provider::provider_display_name(self.provider_name)
+            ));
+        };
+        let provider = self.provider_name.to_string();
+        let cwd = std::path::PathBuf::from(cwd);
+        Ok(Some(
+            tokio::task::spawn_blocking(move || {
+                crate::skills::label_from_disk(
+                    commands,
+                    &provider,
+                    &cwd,
+                    &crate::skills::SkillRoots::from_env(),
+                )
+            })
+            .await
+            .map_err(|error| error.to_string())?,
+        ))
     }
 
     async fn list_models(&self) -> Result<Vec<ModelOptionView>, String> {

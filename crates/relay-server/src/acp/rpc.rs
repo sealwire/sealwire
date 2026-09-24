@@ -554,10 +554,42 @@ pub(crate) fn plan_update(update: &Value, session: &mut SessionRuntime) -> Trans
             .filter(|title| !title.is_empty())
             .map(|title| TranscriptOp::Title(title.to_string()))
             .unwrap_or(TranscriptOp::Ignore),
-        // `available_commands_update`, `plan`, `usage_update` have no relay
-        // equivalent yet.
+        // Not a transcript entry: the composer's "/" menu reads it off the session.
+        "available_commands_update" => {
+            session.available_commands = Some(available_commands(update));
+            TranscriptOp::Ignore
+        }
+        // `plan` and `usage_update` have no relay equivalent yet.
         _ => TranscriptOp::Ignore,
     }
+}
+
+fn available_commands(update: &Value) -> Vec<crate::protocol::ProviderSkillView> {
+    update
+        .get("availableCommands")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|command| {
+            let name = command.get("name").and_then(Value::as_str)?.trim();
+            (!name.is_empty()).then(|| crate::protocol::ProviderSkillView {
+                name: name.to_string(),
+                description: command
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                scope: "session".to_string(),
+                origin: None,
+                path: None,
+                argument_hint: command
+                    .pointer("/input/hint")
+                    .and_then(Value::as_str)
+                    .filter(|hint| !hint.is_empty())
+                    .map(str::to_string),
+            })
+        })
+        .collect()
 }
 
 fn tool_view(

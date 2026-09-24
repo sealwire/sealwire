@@ -12,7 +12,10 @@ use tracing::warn;
 
 use crate::{
     codex_local::LocalThreadDeleteSummary,
-    protocol::{ApprovalDecisionInput, ModelOptionView, ThreadSummaryView, TranscriptEntryView},
+    protocol::{
+        ApprovalDecisionInput, ModelOptionView, ProviderSkillView, ThreadSummaryView,
+        TranscriptEntryView,
+    },
     state::{PendingApproval, RelayState},
 };
 
@@ -410,6 +413,32 @@ impl StartThreadRequest {
     }
 }
 
+/// How a picked skill reaches a provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillInvocation {
+    /// `/name args` as the turn text; the provider parses its own slash commands.
+    Slash,
+    /// `$name args` plus a structured `skill` input naming the file, which is the only
+    /// way Codex can tell two same-name skills apart.
+    SkillInput,
+}
+
+impl SkillInvocation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Slash => "slash",
+            Self::SkillInput => "skill_input",
+        }
+    }
+}
+
+/// A skill handed to `start_turn_with_skills`, by the path its provider listed it at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillInputRef {
+    pub name: String,
+    pub path: String,
+}
+
 #[async_trait]
 pub trait ProviderBridge: Send + Sync {
     async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String>;
@@ -507,6 +536,44 @@ pub trait ProviderBridge: Send + Sync {
         effort: &str,
         images: &[ProviderImage],
     ) -> Result<Option<String>, String>;
+    /// Answered per provider, never guessed from the text: see `SkillInvocation`.
+    fn skill_invocation(&self) -> SkillInvocation {
+        SkillInvocation::Slash
+    }
+    /// Whether a list belongs to one session rather than to its folder, as ACP's does:
+    /// then no other session may be served it from a cache, whatever folder it shares.
+    fn skills_are_per_session(&self) -> bool {
+        false
+    }
+    /// The skills this provider would load for a session in `cwd`. `None` means the
+    /// provider has no way to say, and the relay falls back to scanning disk — openly.
+    async fn list_skills(
+        &self,
+        _thread_id: &str,
+        _cwd: &str,
+    ) -> Result<Option<Vec<ProviderSkillView>>, String> {
+        Ok(None)
+    }
+    /// `start_turn` with skills attached by path. A provider that cannot take them must
+    /// refuse: running the turn without the skill the person picked is a silent lie.
+    async fn start_turn_with_skills(
+        &self,
+        thread_id: &str,
+        text: &str,
+        model: &str,
+        effort: &str,
+        images: &[ProviderImage],
+        skills: &[SkillInputRef],
+    ) -> Result<Option<String>, String> {
+        if !skills.is_empty() {
+            return Err(format!(
+                "{} cannot be handed a skill by path",
+                provider_display_name(self.provider_name())
+            ));
+        }
+        self.start_turn(thread_id, text, model, effort, images)
+            .await
+    }
     /// Request that the provider stop the in-flight work for `thread_id`.
     ///
     /// Providers with turn-scoped cancellation (Codex) require `turn_id`.

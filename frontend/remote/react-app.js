@@ -245,6 +245,7 @@ import {
   createRemoteProject,
   fetchRemoteProjects,
   fetchRemoteThreadSettings,
+  fetchRemoteThreadSkills,
   fetchRemoteWorkspaceGitContext,
   renameRemoteProject,
   renameRemoteThread,
@@ -266,6 +267,7 @@ import { renderLog } from "./session-surface.js";
 import { formatRelativeTime, formatTimestamp, shortId } from "./utils.js";
 import { SessionTabStrip, buildSessionTabItems } from "../shared/session-tab-strip.js";
 import { layoutThreadIds } from "../shared/tab-layout.js";
+import { createThreadSkillsStore, skillForSend } from "../shared/thread-skills.js";
 import { sessionViewContextKey } from "../shared/session-view-state.js";
 import { BOOT_RESTORE_REASON, useRemoteSessionTabs } from "./session-tabs-host.js";
 
@@ -649,6 +651,12 @@ function RemoteApp() {
     threadId: session?.active_thread_id || null,
   });
   const composerWorkspace = useComposerWorkspace(composerWorkspaces, composerScope);
+  // One store per relay: thread ids are only unique within one.
+  const remoteRelayId = currentState.remoteAuth?.relayId || null;
+  const threadSkills = useMemo(
+    () => createThreadSkillsStore({ fetchSkills: fetchRemoteThreadSkills }),
+    [remoteRelayId]
+  );
   const composerDraft = composerWorkspace.text;
   const composerSendPending = Boolean(composerWorkspace.pendingOperationId);
   // Every pending thread against the REAL session — not the view-only projection
@@ -2092,11 +2100,12 @@ function RemoteApp() {
   const handleSendMessage = createRemoteComposerSend({
     workspaces: composerWorkspaces,
     getScope: () => composerScope,
-    send: (draft) =>
+    send: (draft, { skill = null } = {}) =>
       handlers.onSendMessage(
         draft,
         remoteUi.composerEffort || session?.reasoning_effort || "",
-        remoteUi.composerModel || session?.model || ""
+        remoteUi.composerModel || session?.model || "",
+        skillForSend(skill)
       ),
   });
 
@@ -2499,8 +2508,8 @@ function RemoteApp() {
             closeRemoteNavigation();
             void handlers.onSelectRelay(relayId);
           },
-          onSendMessage() {
-            void handleSendMessage();
+          onSendMessage(options) {
+            void handleSendMessage(options);
           },
           onStopTurn() {
             void handleStopTurn();
@@ -2548,13 +2557,33 @@ function RemoteApp() {
                 name: thread.name || "",
                 provider: thread.provider || "",
               })),
+              // The viewed thread's runtime cwd, which is what the relay lists for.
+              skills: threadSkills.peek(remoteViewedThreadId, {
+                provider: session?.provider || "",
+                cwd: session?.current_cwd || "",
+              }),
+              skillsLoading: threadSkills.isLoading(remoteViewedThreadId),
+              loadSkills: (threadId) =>
+                threadSkills.load(
+                  threadId,
+                  threadId === remoteViewedThreadId
+                    ? { provider: session?.provider || "", cwd: session?.current_cwd || "" }
+                    : {}
+                ),
             }),
             getContext: () => ({
               threadId: remoteViewedThreadId,
+              provider: session?.provider || "",
+              cwd: session?.current_cwd || "",
               canReview: canRequestRemoteReview,
               defaultReviewerProvider: reviewLaunchModel?.defaultProvider || "",
             }),
             getScope: () => composerScope,
+            contextKey: [
+              remoteViewedThreadId || "",
+              session?.provider || "",
+              session?.current_cwd || "",
+            ].join("|"),
             // The command door only: the request modal shows the relay's reason inline
             // itself, and the controller turns this rejection into a bare `false`.
             requestReview: (values) =>
@@ -3349,7 +3378,7 @@ function RemoteThreadPanel({
           composerWorkspaces.endOperation(operations.get(scope));
           operations.delete(scope);
         },
-        sendMessage: () => onSendMessageRef.current(),
+        sendMessage: (options) => onSendMessageRef.current(options),
         log: renderLog,
       }),
     []

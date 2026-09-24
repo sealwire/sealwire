@@ -7946,3 +7946,86 @@ test("a relay coming back re-sends a pairing request that was still in flight", 
   state.socket = null;
   seedPairingState(state);
 });
+
+test("a skill-only send reaches the relay with the skill's name and path beside the text", async () => {
+  activeBrowser = installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { ensureRemoteRuntimeConfigured } = await import("./remote-runtime.js");
+  const { applySessionSnapshot, clearSessionRuntime, sendMessage } = await import(
+    "./session-ops.js"
+  );
+
+  ensureRemoteRuntimeConfigured();
+  clearSessionRuntime();
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-skill-send",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  seedTranscriptHydrationState(state);
+  applySessionSnapshot({
+    active_thread_id: "codex-thread-1",
+    active_turn_id: null,
+    current_cwd: "/tmp/project",
+    current_status: "idle",
+    pending_approvals: [],
+    pending_ask_user_questions: [],
+    transcript: [],
+    transcript_truncated: false,
+  });
+
+  let request = null;
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      if (frame.payload?.request?.type !== "send_message") return;
+      request = frame.payload.request;
+      setImmediate(async () => {
+        await handleRemoteBrokerPayload({
+          kind: "remote_session_result",
+          action_id: frame.payload.action_id,
+          action: "send_message",
+          ok: true,
+          snapshot: {
+            active_thread_id: "codex-thread-1",
+            active_turn_id: "codex-turn-1",
+            current_cwd: "/tmp/project",
+            current_status: "active",
+            pending_approvals: [],
+            pending_ask_user_questions: [],
+            transcript: [],
+            transcript_truncated: false,
+          },
+        });
+      });
+    },
+  };
+
+  const skill = { name: "probe", path: "/tmp/project/.codex/skills/probe/SKILL.md" };
+  assert.equal(await sendMessage("  ", "medium", "", skill), true, "no words are needed");
+  assert.equal(request.input.text, "");
+  assert.equal(request.input.thread_id, "codex-thread-1");
+  assert.deepEqual(request.skill, skill);
+
+  assert.equal(await sendMessage("  ", "medium", ""), false, "without a skill it is still empty");
+
+  clearSessionRuntime();
+  state.socket = null;
+  state.pendingActions.clear();
+});

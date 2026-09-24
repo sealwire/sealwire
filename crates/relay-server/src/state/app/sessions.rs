@@ -584,15 +584,6 @@ impl AppState {
         self.send_message_inner_with_images(input, &[]).await
     }
 
-    pub async fn send_message_with_images(
-        &self,
-        input: SendMessageInput,
-        images: Vec<ProviderImage>,
-    ) -> Result<SessionSnapshot, String> {
-        let _slot = self.acquire_session_slot()?;
-        self.send_message_inner_with_images(input, &images).await
-    }
-
     pub(super) async fn send_message_inner(
         &self,
         input: SendMessageInput,
@@ -600,16 +591,38 @@ impl AppState {
         self.send_message_inner_with_images(input, &[]).await
     }
 
+    /// A send carrying a skill picked from the composer's "/" menu.
+    pub async fn send_message_with_skill(
+        &self,
+        input: SendMessageInput,
+        images: Vec<ProviderImage>,
+        skill: Option<crate::protocol::SkillInvocationInput>,
+    ) -> Result<SessionSnapshot, String> {
+        let _slot = self.acquire_session_slot()?;
+        self.send_message_inner_with_turn(input, &images, skill.as_ref())
+            .await
+    }
+
     pub(super) async fn send_message_inner_with_images(
         &self,
         input: SendMessageInput,
         images: &[ProviderImage],
     ) -> Result<SessionSnapshot, String> {
+        self.send_message_inner_with_turn(input, images, None).await
+    }
+
+    async fn send_message_inner_with_turn(
+        &self,
+        input: SendMessageInput,
+        images: &[ProviderImage],
+        skill: Option<&crate::protocol::SkillInvocationInput>,
+    ) -> Result<SessionSnapshot, String> {
         let device_id = require_device_id(input.device_id)?;
         self.expire_stale_controller_if_needed().await;
         let defaults = self.defaults().await;
         let text = input.text.trim().to_string();
-        if text.is_empty() && images.is_empty() {
+        // A picked skill is a complete message on its own: `/review` needs no words.
+        if text.is_empty() && images.is_empty() && skill.is_none() {
             return Err("message text or an image attachment is required".to_string());
         }
         let requested_model = non_empty(input.model);
@@ -787,6 +800,15 @@ impl AppState {
                 return Err(WORKFLOW_LOCKED_THREAD_MSG.to_string());
             }
         }
+        // Resolved against the TARGET's provider and folder, before any gate is held: a
+        // Claude probe can take seconds, and nothing it answers depends on the gates.
+        let (turn_text, skill_inputs) = match skill {
+            Some(pick) => {
+                self.prepare_skill_turn(&target, &target_cwd, pick, &text)
+                    .await?
+            }
+            None => (text.clone(), Vec::new()),
+        };
 
         // Hold the team drive gate across the rest of the send when the target
         // belongs to a task. Only under it is "the team lead of a paused run" a
@@ -869,7 +891,9 @@ impl AppState {
         }
 
         let turn_base_sha = self.session_turn_base_sha(&target_cwd).await;
-        let turn_id = target.start_turn(&text, &model, &effort, images).await?;
+        let turn_id = target
+            .start_turn_with_skills(&turn_text, &model, &effort, images, &skill_inputs)
+            .await?;
         // The provider may have materialized its binding while this call was in
         // flight; the relay session id it was resolved from is unaffected.
         let effective_thread_id = target.session_id.clone();

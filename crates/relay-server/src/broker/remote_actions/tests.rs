@@ -483,6 +483,7 @@ fn plain_remote_action_result_payload_splits_control_results_from_session_result
         workspace_git_context: None,
         thread_workspace: None,
         thread_settings: None,
+        thread_skills: None,
         reviews: None,
         workflows: None,
         devices: None,
@@ -522,6 +523,7 @@ fn plain_remote_action_result_payload_splits_control_results_from_session_result
         workspace_git_context: None,
         thread_workspace: None,
         thread_settings: None,
+        thread_skills: None,
         reviews: None,
         workflows: None,
         devices: None,
@@ -620,6 +622,8 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
         None,
         // thread_settings
         None,
+        // thread_skills
+        None,
         // reviews
         None,
         // workflows
@@ -684,6 +688,7 @@ fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
         workspace_git_context: None,
         thread_workspace: None,
         thread_settings: None,
+        thread_skills: None,
         reviews: None,
         workflows: None,
         devices: None,
@@ -716,6 +721,7 @@ fn make_large_ask_user_detail_plaintext() -> RemoteActionResultPlaintext {
         workspace_git_context: None,
         thread_workspace: None,
         thread_settings: None,
+        thread_skills: None,
         reviews: None,
         workflows: None,
         devices: None,
@@ -1122,6 +1128,7 @@ fn plain_fetch_reviews_result_carries_the_reviews_payload_to_the_device() {
         workspace_git_context: None,
         thread_workspace: None,
         thread_settings: None,
+        thread_skills: None,
         reviews: Some(reviews),
         workflows: None,
         devices: None,
@@ -1188,6 +1195,7 @@ fn plain_fetch_ask_result_carries_the_ask_detail_payload_to_the_device() {
         workspace_git_context: None,
         thread_workspace: None,
         thread_settings: None,
+        thread_skills: None,
         reviews: None,
         workflows: None,
         devices: None,
@@ -1236,6 +1244,7 @@ fn plain_dedicated_workflows_and_devices_payloads_reach_the_device() {
         workspace_git_context: None,
         thread_workspace: None,
         thread_settings: None,
+        thread_skills: None,
         reviews: None,
         workflows: Some(crate::protocol::WorkflowsResponse {
             workflows_revision: 4,
@@ -1298,6 +1307,7 @@ fn plain_fetch_projects_result_carries_the_projects_payload_to_the_device() {
         workspace_git_context: None,
         thread_workspace: None,
         thread_settings: None,
+        thread_skills: None,
         reviews: None,
         workflows: None,
         devices: None,
@@ -1350,6 +1360,7 @@ fn plain_fetch_workspace_git_context_result_reaches_the_device() {
         workspace_diff: None,
         thread_workspace: None,
         thread_settings: None,
+        thread_skills: None,
         workspace_git_context: Some(crate::protocol::WorkspaceGitContextView {
             cwd: "/repo/checkout".to_string(),
             is_repo: true,
@@ -2219,5 +2230,99 @@ async fn a_claim_challenge_from_a_closed_connection_does_not_take_the_device_bac
             .as_deref(),
         Some("surface-new"),
         "a challenge queued by the closed connection bound the device back to it"
+    );
+}
+
+#[test]
+fn fetch_thread_skills_binds_the_asking_device_and_needs_no_session_claim() {
+    // The device id decides which folders may be listed, so the client's own must lose.
+    let request: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "fetch_thread_skills",
+        "device_id": "spoofed",
+        "thread_id": "thread-7"
+    }))
+    .expect("fetch_thread_skills should parse");
+    assert_eq!(request.kind(), RemoteActionKind::FetchThreadSkills);
+    assert_eq!(
+        RemoteActionKind::FetchThreadSkills.as_str(),
+        "fetch_thread_skills"
+    );
+    match request.bind_device("device-9".to_string(), "surface-test", test_origin()) {
+        RemoteActionRequest::FetchThreadSkills {
+            device_id,
+            thread_id,
+        } => {
+            assert_eq!(device_id.as_deref(), Some("device-9"));
+            assert_eq!(thread_id, "thread-7");
+        }
+        other => panic!("unexpected bound request: {other:?}"),
+    }
+    assert!(!super::requires_session_claim(
+        RemoteActionKind::FetchThreadSkills
+    ));
+    assert!(!super::remote_action_emits_info_log(
+        RemoteActionKind::FetchThreadSkills
+    ));
+}
+
+#[test]
+fn plain_fetch_thread_skills_result_reaches_the_device() {
+    let result = RemoteActionResultPlaintext {
+        kind: remote_action_result_kind(RemoteActionKind::FetchThreadSkills),
+        action: RemoteActionKind::FetchThreadSkills,
+        ok: true,
+        snapshot: None,
+        receipt: None,
+        ask_user_answer_receipt: None,
+        providers: None,
+        models: None,
+        threads: None,
+        thread_entry_detail: None,
+        thread_transcript: None,
+        workspace_diff: None,
+        workspace_git_context: None,
+        thread_workspace: None,
+        thread_settings: None,
+        thread_skills: Some(crate::protocol::ThreadSkillsView {
+            thread_id: "thread-7".to_string(),
+            provider: "codex".to_string(),
+            cwd: "/repo".to_string(),
+            source: "runtime".to_string(),
+            invocation: "skill_input".to_string(),
+            note: None,
+            skills: vec![crate::protocol::ProviderSkillView {
+                name: "probe".to_string(),
+                description: "the .codex copy".to_string(),
+                scope: "repo".to_string(),
+                origin: None,
+                path: Some("/repo/.codex/skills/probe/SKILL.md".to_string()),
+                argument_hint: None,
+            }],
+        }),
+        reviews: None,
+        workflows: None,
+        devices: None,
+        projects: None,
+        ask_user_question_detail: None,
+        ask_detail: None,
+        session_claim: None,
+        session_claim_expires_at: None,
+        claim_challenge_id: None,
+        claim_challenge: None,
+        claim_challenge_expires_at: None,
+        error: None,
+    };
+    let payload = build_plain_remote_action_result_payload("action-skills", "surface-1", &result)
+        .expect("skills payload");
+    let json = serde_json::to_value(&payload).expect("serialize skills payload");
+    let carried = &json["thread_skills"];
+    assert_eq!(
+        carried["provider"], "codex",
+        "plaintext must carry thread_skills: {json}"
+    );
+    assert_eq!(carried["cwd"], "/repo");
+    assert_eq!(
+        carried["skills"][0]["path"],
+        "/repo/.codex/skills/probe/SKILL.md"
     );
 }

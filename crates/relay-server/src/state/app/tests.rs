@@ -6005,6 +6005,14 @@ tree; got {}",
         // with this id BEFORE returning the error — models a newer turn that
         // started while stop was in flight.
         interrupt_replace_turn: Arc<Mutex<Option<String>>>,
+        /// What `list_skills` answers, per folder. A folder with no entry answers
+        /// `None`, which is the relay's cue to read the disk instead.
+        skills: Arc<Mutex<HashMap<String, Vec<crate::protocol::ProviderSkillView>>>>,
+        /// What one SESSION announced, the way ACP does. Wins over `skills` for it.
+        session_skills: Arc<Mutex<HashMap<String, Vec<crate::protocol::ProviderSkillView>>>>,
+        list_skills_calls: Arc<AtomicUsize>,
+        /// The skill inputs each turn was started with, in order.
+        turn_skills: Arc<Mutex<Vec<Vec<crate::provider::SkillInputRef>>>>,
     }
 
     impl RecordingProvider {
@@ -6046,6 +6054,10 @@ tree; got {}",
                 advance_runtime_during_thread_read_call: Arc::new(AtomicUsize::new(0)),
                 interrupt_error: Arc::new(Mutex::new(None)),
                 interrupt_replace_turn: Arc::new(Mutex::new(None)),
+                skills: Arc::new(Mutex::new(HashMap::new())),
+                session_skills: Arc::new(Mutex::new(HashMap::new())),
+                list_skills_calls: Arc::new(AtomicUsize::new(0)),
+                turn_skills: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -6070,6 +6082,48 @@ tree; got {}",
 
     #[async_trait::async_trait]
     impl ProviderBridge for RecordingProvider {
+        /// Named like the bridges it stands in for: only Codex takes a skill by path.
+        fn skill_invocation(&self) -> crate::provider::SkillInvocation {
+            if self.name == "codex" {
+                crate::provider::SkillInvocation::SkillInput
+            } else {
+                crate::provider::SkillInvocation::Slash
+            }
+        }
+
+        fn skills_are_per_session(&self) -> bool {
+            self.name == "cursor"
+        }
+
+        async fn list_skills(
+            &self,
+            _thread_id: &str,
+            cwd: &str,
+        ) -> Result<Option<Vec<crate::protocol::ProviderSkillView>>, String> {
+            self.list_skills_calls.fetch_add(1, Ordering::Relaxed);
+            if let Some(announced) = self.session_skills.lock().await.get(_thread_id) {
+                return Ok(Some(announced.clone()));
+            }
+            Ok(self.skills.lock().await.get(cwd).cloned())
+        }
+
+        async fn start_turn_with_skills(
+            &self,
+            thread_id: &str,
+            text: &str,
+            model: &str,
+            effort: &str,
+            images: &[ProviderImage],
+            skills: &[crate::provider::SkillInputRef],
+        ) -> Result<Option<String>, String> {
+            if !skills.is_empty() && self.name != "codex" {
+                return Err(format!("{} cannot take a skill by path", self.name));
+            }
+            self.turn_skills.lock().await.push(skills.to_vec());
+            self.start_turn(thread_id, text, model, effort, images)
+                .await
+        }
+
         async fn release_thread(&self, thread_id: &str) -> Result<(), String> {
             self.release_thread_ids
                 .lock()
@@ -6909,6 +6963,506 @@ tree; got {}",
         assert_eq!(*codex.turn_images.lock().await, vec![vec![image]]);
     }
 
+    fn skill_row(
+        name: &str,
+        scope: &str,
+        path: Option<&str>,
+    ) -> crate::protocol::ProviderSkillView {
+        crate::protocol::ProviderSkillView {
+            name: name.to_string(),
+            description: format!("{name} ({scope})"),
+            scope: scope.to_string(),
+            origin: None,
+            path: path.map(str::to_string),
+            argument_hint: None,
+        }
+    }
+
+    fn pick(name: &str, path: Option<&str>) -> Option<crate::protocol::SkillInvocationInput> {
+        Some(crate::protocol::SkillInvocationInput {
+            name: name.to_string(),
+            path: path.map(str::to_string),
+        })
+    }
+
+    fn skill_send(thread_id: &str, text: &str) -> SendMessageInput {
+        SendMessageInput {
+            text: text.to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            thread_id: thread_id.to_string(),
+        }
+    }
+
+    /// A Codex thread in `repo_a` and a Claude thread in `repo_b`, each provider holding
+    /// skills for BOTH folders — so any leak across provider or folder is visible.
+    struct SkillFixture {
+        app: AppState,
+        codex: RecordingProvider,
+        claude: RecordingProvider,
+        repo_a: TempDir,
+        repo_b: TempDir,
+    }
+
+    impl SkillFixture {
+        fn a(&self) -> &str {
+            self.repo_a.path().to_str().unwrap()
+        }
+        fn b(&self) -> &str {
+            self.repo_b.path().to_str().unwrap()
+        }
+        fn a_path(&self, dir: &str) -> String {
+            format!("{}/{dir}/skills/probe/SKILL.md", self.a())
+        }
+    }
+
+    async fn skill_fixture() -> SkillFixture {
+        let repo_a = TempDir::new().expect("repo a");
+        let repo_b = TempDir::new().expect("repo b");
+        let a = repo_a.path().to_str().unwrap().to_string();
+        let b = repo_b.path().to_str().unwrap().to_string();
+        let (app, codex, claude) = build_recording_provider_app(&a).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let codex_thread = codex.thread_summary("codex-skills", &a);
+        let claude_thread = claude.thread_summary("claude-skills", &b);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(codex_thread.id.clone(), codex_thread.clone());
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(claude_thread.id.clone(), claude_thread.clone());
+        app.relay.write().await.threads = vec![codex_thread, claude_thread];
+
+        codex.skills.lock().await.extend([
+            (
+                a.clone(),
+                vec![
+                    skill_row(
+                        "probe",
+                        "repo",
+                        Some(&format!("{a}/.agents/skills/probe/SKILL.md")),
+                    ),
+                    skill_row(
+                        "probe",
+                        "repo",
+                        Some(&format!("{a}/.codex/skills/probe/SKILL.md")),
+                    ),
+                ],
+            ),
+            (
+                b.clone(),
+                vec![skill_row(
+                    "elsewhere",
+                    "repo",
+                    Some(&format!("{b}/.agents/skills/e/SKILL.md")),
+                )],
+            ),
+        ]);
+        claude.skills.lock().await.extend([
+            (b.clone(), vec![skill_row("review", "repo", None)]),
+            (a.clone(), vec![skill_row("only-in-a", "repo", None)]),
+        ]);
+        SkillFixture {
+            app,
+            codex,
+            claude,
+            repo_a,
+            repo_b,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_threads_skills_come_from_its_own_provider_and_its_own_folder() {
+        let fixture = skill_fixture().await;
+
+        let codex = fixture
+            .app
+            .thread_skills(None, "codex-skills")
+            .await
+            .expect("codex thread skills");
+        assert_eq!(
+            (codex.provider.as_str(), codex.cwd.as_str()),
+            ("codex", fixture.a())
+        );
+        assert_eq!(
+            (codex.source.as_str(), codex.invocation.as_str()),
+            ("runtime", "skill_input")
+        );
+        assert_eq!(
+            codex
+                .skills
+                .iter()
+                .map(|s| s.path.clone().unwrap())
+                .collect::<Vec<_>>(),
+            vec![fixture.a_path(".agents"), fixture.a_path(".codex")],
+            "same-name skills stay two rows, and the other folder's skill is absent"
+        );
+
+        let claude = fixture
+            .app
+            .thread_skills(None, "claude-skills")
+            .await
+            .expect("claude thread skills");
+        assert_eq!(
+            (claude.provider.as_str(), claude.cwd.as_str()),
+            ("claude_code", fixture.b())
+        );
+        assert_eq!(claude.invocation, "slash");
+        assert_eq!(
+            claude
+                .skills
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["review"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_picked_slash_skill_reaches_the_provider_as_its_own_command_even_on_a_sealwire_name()
+    {
+        let fixture = skill_fixture().await;
+        fixture
+            .app
+            .send_message_with_skill(
+                skill_send("claude-skills", "  the parser "),
+                Vec::new(),
+                pick("review", None),
+            )
+            .await
+            .expect("a listed skill sends");
+        assert_eq!(
+            *fixture.claude.turn_texts.lock().await,
+            vec!["/review the parser"]
+        );
+        assert_eq!(
+            *fixture.claude.turn_skills.lock().await,
+            vec![Vec::<crate::provider::SkillInputRef>::new()],
+            "a slash provider is never handed a path"
+        );
+        assert!(
+            fixture.app.relay.read().await.review_jobs.is_empty(),
+            "the provider's /review is not Sealwire's review"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_picked_skill_alone_is_a_complete_message() {
+        let fixture = skill_fixture().await;
+        fixture
+            .app
+            .send_message_with_skill(
+                skill_send("claude-skills", ""),
+                Vec::new(),
+                pick("review", None),
+            )
+            .await
+            .expect("no words are needed to run a skill");
+        assert_eq!(*fixture.claude.turn_texts.lock().await, vec!["/review"]);
+    }
+
+    #[tokio::test]
+    async fn a_picked_codex_skill_names_the_exact_file_among_same_name_skills() {
+        let fixture = skill_fixture().await;
+        let chosen = fixture.a_path(".codex");
+        fixture
+            .app
+            .send_message_with_skill(
+                skill_send("codex-skills", "tidy"),
+                Vec::new(),
+                pick("probe", Some(&chosen)),
+            )
+            .await
+            .expect("a listed codex skill sends");
+        assert_eq!(*fixture.codex.turn_texts.lock().await, vec!["$probe tidy"]);
+        assert_eq!(
+            *fixture.codex.turn_skills.lock().await,
+            vec![vec![crate::provider::SkillInputRef {
+                name: "probe".to_string(),
+                path: chosen,
+            }]]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_skill_from_another_folder_or_provider_is_refused_before_the_provider_sees_anything()
+    {
+        let fixture = skill_fixture().await;
+        let foreign_path = format!("{}/.agents/skills/e/SKILL.md", fixture.b());
+        let refusals = [
+            // Codex's own skill, but listed for the other folder.
+            ("codex-skills", pick("elsewhere", Some(&foreign_path))),
+            // A same-name pick with no path cannot say which file it means.
+            ("codex-skills", pick("probe", None)),
+            // Claude's skill, sent to the Codex thread.
+            ("codex-skills", pick("review", None)),
+            // Claude's own provider, but a skill it only lists for the other folder.
+            ("claude-skills", pick("only-in-a", None)),
+            // A Codex skill sent to the Claude thread.
+            (
+                "claude-skills",
+                pick("probe", Some(&fixture.a_path(".codex"))),
+            ),
+        ];
+        for (thread, skill) in refusals {
+            let error = fixture
+                .app
+                .send_message_with_skill(skill_send(thread, "go"), Vec::new(), skill.clone())
+                .await
+                .expect_err("an unlisted skill must be refused");
+            assert!(
+                error.contains("pick it again"),
+                "{thread} {skill:?}: {error}"
+            );
+        }
+        assert!(fixture.codex.turn_texts.lock().await.is_empty());
+        assert!(fixture.claude.turn_texts.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_menus_list_is_reused_and_a_newer_skill_is_looked_up_rather_than_refused() {
+        let fixture = skill_fixture().await;
+        fixture
+            .app
+            .thread_skills(None, "claude-skills")
+            .await
+            .unwrap();
+        fixture
+            .app
+            .thread_skills(None, "claude-skills")
+            .await
+            .unwrap();
+        assert_eq!(fixture.claude.list_skills_calls.load(Ordering::Relaxed), 1);
+
+        // Added on disk after the menu was read: the send must ask again, not refuse.
+        fixture
+            .claude
+            .skills
+            .lock()
+            .await
+            .get_mut(fixture.b())
+            .unwrap()
+            .push(skill_row("fresh", "repo", None));
+        fixture
+            .app
+            .send_message_with_skill(
+                skill_send("claude-skills", ""),
+                Vec::new(),
+                pick("fresh", None),
+            )
+            .await
+            .expect("a skill newer than the cached list still sends");
+        assert_eq!(fixture.claude.list_skills_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(*fixture.claude.turn_texts.lock().await, vec!["/fresh"]);
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_cannot_list_falls_back_to_disk_and_says_so() {
+        let fixture = skill_fixture().await;
+        fixture.codex.skills.lock().await.remove(fixture.a());
+        let local = fixture.repo_a.path().join(".agents/skills/on-disk");
+        std::fs::create_dir_all(fixture.repo_a.path().join(".git")).unwrap();
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::write(
+            local.join("SKILL.md"),
+            "---\nname: on-disk\ndescription: found by scanning\n---\n",
+        )
+        .unwrap();
+
+        let view = fixture
+            .app
+            .thread_skills(None, "codex-skills")
+            .await
+            .unwrap();
+        assert_eq!(view.source, "filesystem");
+        assert!(
+            view.note
+                .as_deref()
+                .unwrap_or_default()
+                .contains("read from disk"),
+            "{:?}",
+            view.note
+        );
+        let found = view
+            .skills
+            .iter()
+            .find(|skill| skill.name == "on-disk")
+            .expect("the repo's own skill is still offered");
+        assert_eq!(found.scope, "repo");
+        assert!(found
+            .path
+            .as_deref()
+            .unwrap()
+            .ends_with(".agents/skills/on-disk/SKILL.md"));
+    }
+
+    #[tokio::test]
+    async fn two_cursor_sessions_in_one_folder_never_share_what_each_announced() {
+        let repo = TempDir::new().expect("repo");
+        let cwd = repo.path().to_str().unwrap().to_string();
+        let (change_tx, _) = watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            cwd.clone(),
+            change_tx.clone(),
+            SecurityProfile::private(),
+        )));
+        let cursor = RecordingProvider::new("cursor", relay.clone());
+        let mut providers: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::new();
+        providers.insert("cursor".to_string(), Arc::new(cursor.clone()));
+        let app = AppState::from_parts(relay, providers, change_tx);
+        pair_device(&app, "device-1", Vec::new()).await;
+        let first = cursor.thread_summary("cursor-one", &cwd);
+        let second = cursor.thread_summary("cursor-two", &cwd);
+        for thread in [&first, &second] {
+            cursor
+                .threads
+                .lock()
+                .await
+                .insert(thread.id.clone(), thread.clone());
+        }
+        app.relay.write().await.threads = vec![first, second];
+        cursor.session_skills.lock().await.extend([
+            (
+                "cursor-one".to_string(),
+                vec![skill_row("only-one", "session", None)],
+            ),
+            (
+                "cursor-two".to_string(),
+                vec![skill_row("only-two", "session", None)],
+            ),
+        ]);
+
+        let one = app.thread_skills(None, "cursor-one").await.unwrap();
+        let two = app.thread_skills(None, "cursor-two").await.unwrap();
+        assert_eq!(
+            one.skills
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["only-one"]
+        );
+        assert_eq!(
+            two.skills
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["only-two"],
+            "the second session must not inherit the first one's list from the cache"
+        );
+
+        let error = app
+            .send_message_with_skill(
+                skill_send("cursor-two", ""),
+                Vec::new(),
+                pick("only-one", None),
+            )
+            .await
+            .expect_err("a command only the other session announced is not this one's");
+        assert!(error.contains("pick it again"), "{error}");
+        app.send_message_with_skill(
+            skill_send("cursor-two", "go"),
+            Vec::new(),
+            pick("only-two", None),
+        )
+        .await
+        .expect("its own command sends");
+        assert_eq!(*cursor.turn_texts.lock().await, vec!["/only-two go"]);
+    }
+
+    #[tokio::test]
+    async fn same_name_slash_skills_read_off_disk_are_one_honest_row_and_send_by_name() {
+        let home = TempDir::new().expect("home");
+        let repo = TempDir::new().expect("repo");
+        let cwd = repo.path().to_str().unwrap().to_string();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        let write = |path: std::path::PathBuf, description: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                format!("---\nname: review\ndescription: {description}\n---\n"),
+            )
+            .unwrap();
+        };
+        let global = home.path().join(".claude/skills/review/SKILL.md");
+        write(global.clone(), "the global review");
+        write(
+            repo.path().join(".claude/skills/review/SKILL.md"),
+            "the repo review",
+        );
+
+        let (app, _codex, claude) = build_recording_provider_app(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        app.override_skill_roots_for_test(crate::skills::SkillRoots {
+            home: Some(home.path().to_path_buf()),
+            codex_home: Some(home.path().join(".codex")),
+            claude_home: Some(home.path().join(".claude")),
+        });
+        let thread = claude.thread_summary("claude-twins", &cwd);
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        app.relay.write().await.threads = vec![thread];
+
+        let view = app.thread_skills(None, "claude-twins").await.unwrap();
+        assert_eq!(view.source, "filesystem");
+        let rows = view
+            .skills
+            .iter()
+            .filter(|skill| skill.name == "review")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows.len(),
+            1,
+            "`/review` runs one command, so it is one row, not a choice: {rows:?}"
+        );
+        assert_eq!(
+            rows[0].scope, "ambiguous",
+            "which file runs is Claude's call, unproven here"
+        );
+        assert_eq!(rows[0].origin.as_deref(), Some("repo,global"));
+        assert_eq!(rows[0].path, None, "no single file stands behind the row");
+        assert_eq!(
+            rows[0].description, "",
+            "neither file's words describe what will run"
+        );
+
+        // A pick naming the global file still sends the one thing a slash provider has.
+        let global = global.to_str().unwrap().to_string();
+        app.send_message_with_skill(
+            skill_send("claude-twins", "go"),
+            Vec::new(),
+            pick("review", Some(&global)),
+        )
+        .await
+        .expect("sends by name");
+        assert_eq!(*claude.turn_texts.lock().await, vec!["/review go"]);
+    }
+
+    #[tokio::test]
+    async fn a_device_cannot_list_skills_outside_its_folders() {
+        let fixture = skill_fixture().await;
+        let b = fixture.b().to_string();
+        pair_device(&fixture.app, "phone", vec![b]).await;
+        assert!(fixture
+            .app
+            .thread_skills(Some("phone".to_string()), "codex-skills")
+            .await
+            .is_err());
+        assert!(fixture
+            .app
+            .thread_skills(Some("phone".to_string()), "claude-skills")
+            .await
+            .is_ok());
+    }
+
     #[tokio::test]
     async fn image_only_message_is_accepted_and_forwarded_to_the_provider() {
         let project = TempDir::new().expect("project tempdir");
@@ -6933,7 +7487,7 @@ tree; got {}",
             data: "iVBORw0KGgo=".to_string(),
         };
 
-        app.send_message_with_images(
+        app.send_message_with_skill(
             SendMessageInput {
                 text: String::new(),
                 model: None,
@@ -6942,6 +7496,7 @@ tree; got {}",
                 thread_id: thread.id,
             },
             vec![image.clone()],
+            None,
         )
         .await
         .expect("an image-only message should start a provider turn");
@@ -6957,7 +7512,7 @@ tree; got {}",
         pair_device(&app, "device-1", Vec::new()).await;
 
         let error = app
-            .send_message_with_images(
+            .send_message_with_skill(
                 SendMessageInput {
                     text: "  ".to_string(),
                     model: None,
@@ -6966,6 +7521,7 @@ tree; got {}",
                     thread_id: "unused".to_string(),
                 },
                 Vec::new(),
+                None,
             )
             .await
             .expect_err("a message with no text or images must be rejected");

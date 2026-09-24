@@ -5820,3 +5820,146 @@ mod session_binding_boundary_tests {
         );
     }
 }
+
+#[tokio::test]
+async fn codex_lists_the_folders_skills_with_their_own_scope_and_path() {
+    let (bridge, _state) = spawn_fake_codex_bridge().await;
+    let skills = ProviderBridge::list_skills(&bridge, "thread-1", "/work/repo")
+        .await
+        .expect("skills/list answers")
+        .expect("codex reports skills at runtime");
+
+    let rows = skills
+        .iter()
+        .map(|skill| {
+            (
+                skill.name.as_str(),
+                skill.scope.as_str(),
+                skill.path.as_deref().unwrap_or_default(),
+                skill.origin.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "probe",
+                "repo",
+                "/work/repo/.agents/skills/probe/SKILL.md",
+                None
+            ),
+            (
+                "probe",
+                "repo",
+                "/work/repo/.codex/skills/probe/SKILL.md",
+                None
+            ),
+            (
+                "imagegen",
+                "system",
+                "/home/.codex/skills/.system/imagegen/SKILL.md",
+                None
+            ),
+            (
+                "pdf:pdf",
+                "plugin",
+                "/home/.codex/plugins/pdf/skills/pdf/SKILL.md",
+                Some("pdf@openai-primary-runtime")
+            ),
+        ],
+        "a disabled skill is not offered, and same-name skills stay two rows"
+    );
+    assert_eq!(skills[1].description, "the .codex copy");
+}
+
+#[tokio::test]
+async fn a_picked_codex_skill_rides_as_a_structured_input_naming_its_path() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let thread = bridge
+        .start_thread(
+            "/work/repo",
+            "gpt-5.6-sol",
+            "never",
+            "read-only",
+            &Default::default(),
+        )
+        .await
+        .expect("start a loaded thread");
+
+    let skill = crate::provider::SkillInputRef {
+        name: "probe".to_string(),
+        path: "/work/repo/.codex/skills/probe/SKILL.md".to_string(),
+    };
+    ProviderBridge::start_turn_with_skills(
+        &bridge,
+        &thread.id,
+        "$probe tidy the parser",
+        "gpt-5.6-sol",
+        "low",
+        &[],
+        std::slice::from_ref(&skill),
+    )
+    .await
+    .expect("turn/start with a skill input");
+
+    let turn = codex_recv_payloads(&state)
+        .await
+        .into_iter()
+        .rfind(|payload| payload.get("method").and_then(Value::as_str) == Some("turn/start"))
+        .expect("turn/start was sent");
+    assert_eq!(
+        turn["params"]["input"],
+        json!([
+            { "type": "text", "text": "$probe tidy the parser" },
+            {
+                "type": "skill",
+                "name": "probe",
+                "path": "/work/repo/.codex/skills/probe/SKILL.md"
+            }
+        ]),
+        "the path is what picks the .codex copy over the .agents one: {turn}"
+    );
+}
+
+#[tokio::test]
+async fn codex_skills_answered_for_another_folder_are_refused_not_shown() {
+    let (bridge, _state) = spawn_fake_codex_bridge().await;
+    bridge
+        .send_request(
+            "fake/configure",
+            json!({ "skillsAnswerCwd": "/work/other" }),
+        )
+        .await
+        .expect("configure fake Codex");
+    let answer = ProviderBridge::list_skills(&bridge, "thread-1", "/work/repo").await;
+    assert!(
+        answer.is_err(),
+        "a row for /work/other must never stand in for /work/repo: {answer:?}"
+    );
+}
+
+#[test]
+fn codex_skills_rows_are_only_read_from_the_asked_folder() {
+    let result = json!({ "data": [
+        { "cwd": "/work/other", "skills": [
+            { "name": "elsewhere", "path": "/work/other/.agents/skills/e/SKILL.md", "scope": "repo", "enabled": true }
+        ]},
+        { "cwd": "/work/repo/", "skills": [
+            { "name": "here", "path": "/work/repo/.agents/skills/h/SKILL.md", "scope": "repo", "enabled": true }
+        ]}
+    ]});
+    let here = parse_codex_skills(&result, "/work/repo").expect("the asked folder has a row");
+    assert_eq!(
+        here.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        vec!["here"],
+        "a trailing slash is the same folder; another folder is not"
+    );
+    let only_other = json!({ "data": [result["data"][0].clone()] });
+    assert!(parse_codex_skills(&only_other, "/work/repo").is_none());
+    // Trimming slashes must not make the root and "no folder" the same place.
+    let blank = json!({ "data": [{ "cwd": "", "skills": [] }] });
+    assert!(parse_codex_skills(&blank, "/").is_none());
+    let root = json!({ "data": [{ "cwd": "/", "skills": [] }] });
+    assert!(parse_codex_skills(&root, "/").is_some());
+}

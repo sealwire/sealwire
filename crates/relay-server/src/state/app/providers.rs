@@ -605,6 +605,26 @@ impl SessionTarget {
             .await
     }
 
+    pub(crate) async fn start_turn_with_skills(
+        &self,
+        text: &str,
+        model: &str,
+        effort: &str,
+        images: &[ProviderImage],
+        skills: &[crate::provider::SkillInputRef],
+    ) -> Result<Option<String>, String> {
+        self.bridge
+            .start_turn_with_skills(&self.provider_handle, text, model, effort, images, skills)
+            .await
+    }
+
+    pub(crate) async fn list_skills(
+        &self,
+        cwd: &str,
+    ) -> Result<Option<Vec<crate::protocol::ProviderSkillView>>, String> {
+        self.bridge.list_skills(&self.provider_handle, cwd).await
+    }
+
     pub(crate) async fn request_turn_stop(&self, turn_id: Option<&str>) -> Result<(), String> {
         self.bridge
             .request_turn_stop(&self.provider_handle, turn_id)

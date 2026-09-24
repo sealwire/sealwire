@@ -8,6 +8,7 @@ import {
   mapModelInfos,
   mapSdkMessage,
   mapSessionMessages,
+  mapSkillCommands,
   mcpStatusLogLines,
 } from "./sdk-mapping.mjs";
 
@@ -1367,4 +1368,46 @@ test("absent accounting fields are omitted rather than sent as undefined", () =>
   assert.deepEqual(Object.keys(mapped).sort(), ["type", "usage"]);
   assert.equal("model_usage" in mapped, false);
   assert.equal("total_cost_usd" in mapped, false);
+});
+
+test("mapSkillCommands turns Claude Code's description tags into scopes", () => {
+  const rows = mapSkillCommands([
+    { name: "probe", description: "Repo probe (project)", argumentHint: "" },
+    { name: "mine", description: "Mine (user)", argumentHint: "<x>" },
+    { name: "docs", description: "Synced doc skill (claude.ai sync)", argumentHint: "" },
+    {
+      name: "frontend-design:frontend-design",
+      description: "(frontend-design) Distinctive UI",
+      argumentHint: "",
+    },
+    { name: "code-review", description: "Review the diff (fast)", argumentHint: "", builtin: true },
+    { name: "probe", description: "A second row with the same name (user)", argumentHint: "" },
+    { name: "odd", description: "Unknown provenance", argumentHint: "" },
+  ]);
+  assert.deepEqual(rows, [
+    { name: "probe", description: "Repo probe", scope: "repo", origin: null, argument_hint: null },
+    { name: "mine", description: "Mine", scope: "global", origin: null, argument_hint: "<x>" },
+    {
+      name: "docs",
+      description: "Synced doc skill",
+      scope: "global",
+      origin: "claude.ai",
+      argument_hint: null,
+    },
+    {
+      name: "frontend-design:frontend-design",
+      description: "Distinctive UI",
+      scope: "plugin",
+      origin: "frontend-design",
+      argument_hint: null,
+    },
+    {
+      name: "code-review",
+      description: "Review the diff (fast)",
+      scope: "builtin",
+      origin: null,
+      argument_hint: null,
+    },
+    { name: "odd", description: "Unknown provenance", scope: "session", origin: null, argument_hint: null },
+  ]);
 });

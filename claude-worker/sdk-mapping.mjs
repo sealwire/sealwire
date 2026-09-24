@@ -307,6 +307,57 @@ function withExtraModels(modelInfos) {
   return list;
 }
 
+// Claude Code has no scope field; it tags a custom command's description instead:
+// "… (project)", "… (user)", "… (claude.ai sync)", or "(plugin) …" before a
+// plugin-qualified name. The tag becomes the menu's label and leaves the text.
+function classifySkillCommand(name, command) {
+  const text = String(command?.description || "").trim();
+  if (command?.builtin) return { description: text, scope: "builtin", origin: null };
+  const tail = /\s*\(([^()]+)\)\s*$/.exec(text);
+  const rest = tail ? text.slice(0, tail.index).trim() : text;
+  switch (tail?.[1]?.trim()) {
+    case "project":
+      return { description: rest, scope: "repo", origin: null };
+    case "user":
+      return { description: rest, scope: "global", origin: null };
+    case "claude.ai sync":
+      return { description: rest, scope: "global", origin: "claude.ai" };
+    default:
+      break;
+  }
+  const plugin = name.includes(":") ? name.slice(0, name.indexOf(":")) : null;
+  const head = /^\(([^()]+)\)\s*/.exec(text);
+  if (plugin) {
+    return {
+      description: head ? text.slice(head[0].length) : text,
+      scope: "plugin",
+      origin: head?.[1]?.trim() || plugin,
+    };
+  }
+  return { description: text, scope: "session", origin: null };
+}
+
+// SDK slash commands → the relay's skill rows. One row per name: `/name` runs one
+// command whatever its source, so a second row would offer a choice that is not one.
+export function mapSkillCommands(commands) {
+  const out = [];
+  const seen = new Set();
+  for (const command of commands || []) {
+    const name = String(command?.name || "").trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const { description, scope, origin } = classifySkillCommand(name, command);
+    out.push({
+      name,
+      description,
+      scope,
+      origin,
+      argument_hint: String(command?.argumentHint || "").trim() || null,
+    });
+  }
+  return out;
+}
+
 export function mapModelInfos(modelInfos) {
   const models = withExtraModels(modelInfos)
     .map((modelInfo) => mapModelInfo(modelInfo, { isDefault: false }));

@@ -605,6 +605,25 @@ impl ProviderBridge for ClaudeCodeBridge {
         parse_thread_array(value_at(&result, &["threads"]))
     }
 
+    /// The worker's idle SDK probe for `cwd`; the relay caches it per folder.
+    async fn list_skills(
+        &self,
+        _thread_id: &str,
+        cwd: &str,
+    ) -> Result<Option<Vec<crate::protocol::ProviderSkillView>>, String> {
+        let result = self
+            .send_request("skills/list", json!({ "cwd": cwd }))
+            .await?;
+        let rows = value_at(&result, &["skills"])
+            .and_then(Value::as_array)
+            .ok_or_else(|| "skills/list did not return a skills array".to_string())?;
+        Ok(Some(
+            rows.iter()
+                .filter_map(|row| serde_json::from_value(row.clone()).ok())
+                .collect(),
+        ))
+    }
+
     async fn list_models(&self) -> Result<Vec<ModelOptionView>, String> {
         // Serve the prewarmed catalog if we have it, so the client's
         // post-handshake pull doesn't race the cold worker round-trip.
@@ -3218,6 +3237,31 @@ for await (const line of rl) {
                 None
             }
         }
+    }
+
+    #[tokio::test]
+    async fn claude_lists_skills_for_the_folder_it_is_asked_about() {
+        let Some((bridge, _state)) = spawn_fake_bridge().await else {
+            return;
+        };
+        let skills = ProviderBridge::list_skills(&bridge, "any-thread", "/work/repo")
+            .await
+            .expect("skills/list answers")
+            .expect("the worker reports skills at runtime");
+        assert_eq!(
+            skills
+                .iter()
+                .map(|skill| (skill.name.as_str(), skill.scope.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("review", "repo"), ("mine", "global")]
+        );
+        assert_eq!(skills[0].description, "repo review for /work/repo");
+        assert_eq!(skills[0].argument_hint.as_deref(), Some("<focus>"));
+        assert_eq!(
+            bridge.skill_invocation(),
+            crate::provider::SkillInvocation::Slash,
+            "Claude dispatches its own `/name`, so it never takes a skill by path"
+        );
     }
 
     #[tokio::test]

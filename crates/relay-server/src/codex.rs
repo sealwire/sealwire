@@ -21,11 +21,13 @@ use crate::{
     },
     protocol::{
         truncate_with_ellipsis, ApprovalDecisionInput, FileChangeDiffView, ModelOptionView,
-        ThreadSummaryView, ToolCallView, TranscriptEntryKind, TranscriptEntryView,
+        ProviderSkillView, ThreadSummaryView, ToolCallView, TranscriptEntryKind,
+        TranscriptEntryView,
     },
     provider::{
         user_message_transcript_text, ProviderBridge, ProviderForkCapability, ProviderForkRequest,
-        ProviderImage, StartThreadRequest, StartThreadResult, ThreadSyncData,
+        ProviderImage, SkillInputRef, SkillInvocation, StartThreadRequest, StartThreadResult,
+        ThreadSyncData,
     },
     state::{ApprovalKind, PendingApproval, RelayState, TurnFailureKind},
 };
@@ -207,6 +209,37 @@ impl ProviderBridge for CodexBridge {
             self.start_turn_with_images(thread_id, text, model, effort, images)
                 .await
         }
+    }
+
+    fn skill_invocation(&self) -> SkillInvocation {
+        SkillInvocation::SkillInput
+    }
+
+    /// Codex's own `skills/list` for the folder, so the menu matches what a turn loads.
+    async fn list_skills(
+        &self,
+        _thread_id: &str,
+        cwd: &str,
+    ) -> Result<Option<Vec<ProviderSkillView>>, String> {
+        let result = self
+            .send_request("skills/list", json!({ "cwds": [cwd] }))
+            .await?;
+        parse_codex_skills(&result, cwd)
+            .map(Some)
+            .ok_or_else(|| format!("Codex answered skills/list about another folder than {cwd}"))
+    }
+
+    async fn start_turn_with_skills(
+        &self,
+        thread_id: &str,
+        text: &str,
+        model: &str,
+        effort: &str,
+        images: &[ProviderImage],
+        skills: &[SkillInputRef],
+    ) -> Result<Option<String>, String> {
+        self.start_turn_with_inputs(thread_id, text, model, effort, images, skills)
+            .await
     }
 
     async fn request_turn_stop(
@@ -846,6 +879,19 @@ impl CodexBridge {
         effort: &str,
         images: &[ProviderImage],
     ) -> Result<Option<String>, String> {
+        self.start_turn_with_inputs(thread_id, text, model, effort, images, &[])
+            .await
+    }
+
+    pub async fn start_turn_with_inputs(
+        &self,
+        thread_id: &str,
+        text: &str,
+        model: &str,
+        effort: &str,
+        images: &[ProviderImage],
+        skills: &[SkillInputRef],
+    ) -> Result<Option<String>, String> {
         // Re-read the thread's CURRENT settings so every turn re-asserts its
         // approval policy + sandbox (see `codex_turn_start_params`). Fall back to
         // no override only when the relay has no record — codex then keeps
@@ -882,11 +928,9 @@ impl CodexBridge {
             }
         };
 
-        let params = if images.is_empty() {
-            codex_turn_start_params(thread_id, text, model, effort, policy)
-        } else {
-            codex_turn_start_params_with_images(thread_id, text, model, effort, images, policy)
-        };
+        let params = codex_turn_start_params_with_inputs(
+            thread_id, text, model, effort, images, skills, policy,
+        );
         let result = match self.send_request("turn/start", params.clone()).await {
             Ok(result) => result,
             // The thread exists on disk but was never materialized in the
@@ -967,13 +1011,9 @@ read-only with approvals required. Change File access if this turn needs to writ
                 // default — the exact silent widening this path exists to avoid.
                 let params = if invented {
                     let policy = Some((approval_policy, sandbox));
-                    if images.is_empty() {
-                        codex_turn_start_params(thread_id, text, model, effort, policy)
-                    } else {
-                        codex_turn_start_params_with_images(
-                            thread_id, text, model, effort, images, policy,
-                        )
-                    }
+                    codex_turn_start_params_with_inputs(
+                        thread_id, text, model, effort, images, skills, policy,
+                    )
                 } else {
                     params
                 };
@@ -1103,6 +1143,7 @@ fn resolve_codex_policy<'a>(approval_policy: &'a str, sandbox: &'a str) -> (&'a 
 /// relay restart, on a background thread, or via a plain `send` that skips the
 /// resume — otherwise falls back to codex's own config default and starts
 /// prompting, defeating YOLO. Mirrors Claude's per-turn `permissionMode`.
+#[cfg(test)]
 fn codex_turn_start_params(
     thread_id: &str,
     text: &str,
@@ -1113,12 +1154,25 @@ fn codex_turn_start_params(
     codex_turn_start_params_with_images(thread_id, text, model, effort, &[], policy)
 }
 
+#[cfg(test)]
 fn codex_turn_start_params_with_images(
     thread_id: &str,
     text: &str,
     model: &str,
     effort: &str,
     images: &[ProviderImage],
+    policy: Option<(&str, &str)>,
+) -> Value {
+    codex_turn_start_params_with_inputs(thread_id, text, model, effort, images, &[], policy)
+}
+
+fn codex_turn_start_params_with_inputs(
+    thread_id: &str,
+    text: &str,
+    model: &str,
+    effort: &str,
+    images: &[ProviderImage],
+    skills: &[SkillInputRef],
     policy: Option<(&str, &str)>,
 ) -> Value {
     let mut input = images
@@ -1134,6 +1188,14 @@ fn codex_turn_start_params_with_images(
         input.push(json!({
             "type": "text",
             "text": text,
+        }));
+    }
+    // By path: the `$name` in the text cannot say which of two same-name skills was meant.
+    for skill in skills {
+        input.push(json!({
+            "type": "skill",
+            "name": skill.name,
+            "path": skill.path,
         }));
     }
 
@@ -1182,6 +1244,75 @@ fn codex_turn_start_params_with_images(
     }
 
     params
+}
+
+/// `skills/list` rows for `cwd`, minus the ones the person switched off. `None` when no
+/// row answers for `cwd`: another folder's skills are never a stand-in for this one's.
+fn parse_codex_skills(result: &Value, cwd: &str) -> Option<Vec<ProviderSkillView>> {
+    let entries = value_at(result, &["data"])
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let entry = entries.iter().find(|entry| {
+        string_at(entry, &["cwd"]).is_some_and(|answered| same_folder(&answered, cwd))
+    })?;
+    let Some(skills) = value_at(entry, &["skills"]).and_then(Value::as_array) else {
+        return Some(Vec::new());
+    };
+    let rows = skills
+        .iter()
+        .filter(|skill| skill.get("enabled").and_then(Value::as_bool) != Some(false))
+        .filter_map(|skill| {
+            let name = non_empty_string(string_at(skill, &["name"]))?;
+            let path = non_empty_string(string_at(skill, &["path"]))?;
+            let plugin = non_empty_string(string_at(skill, &["pluginId"]));
+            let scope = match (plugin.is_some(), string_at(skill, &["scope"]).as_deref()) {
+                (true, _) => "plugin",
+                (false, Some("repo")) => "repo",
+                (false, Some("user")) => "global",
+                (false, Some("system")) => "system",
+                (false, Some("admin")) => "admin",
+                _ => "global",
+            };
+            let description =
+                non_empty_string(string_at(skill, &["interface", "shortDescription"]))
+                    .or_else(|| non_empty_string(string_at(skill, &["shortDescription"])))
+                    .or_else(|| non_empty_string(string_at(skill, &["description"])))
+                    .unwrap_or_default();
+            Some(ProviderSkillView {
+                name,
+                description,
+                scope: scope.to_string(),
+                origin: plugin,
+                path: Some(path),
+                argument_hint: None,
+            })
+        })
+        .collect();
+    Some(rows)
+}
+
+/// Codex echoes the folder it was asked about, but may spell it with a trailing slash or
+/// through a symlink (`/tmp` is `/private/tmp` on macOS).
+fn same_folder(answered: &str, asked: &str) -> bool {
+    // No folder is never a match, not even for the root that trimming would empty.
+    if answered.is_empty() || asked.is_empty() {
+        return false;
+    }
+    let trimmed = |path: &str| match path.trim_end_matches('/') {
+        "" => "/".to_string(),
+        kept => kept.to_string(),
+    };
+    if trimmed(answered) == trimmed(asked) {
+        return true;
+    }
+    match (
+        std::fs::canonicalize(answered),
+        std::fs::canonicalize(asked),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 fn parse_thread_summary(thread: &Value) -> Result<ThreadSummaryView, String> {

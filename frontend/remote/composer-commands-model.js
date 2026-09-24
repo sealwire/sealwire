@@ -11,9 +11,12 @@ export function createComposerCommandsModel({
   hold,
   clearError,
   log,
+  // Thread, agent and folder in one string: when it changes the host repaints the menu.
+  contextKey = "",
   actions = {},
 } = {}) {
   return {
+    contextKey,
     getCatalog,
     getContext,
     // Never absent: without a scope the controller files every thread's pills in one

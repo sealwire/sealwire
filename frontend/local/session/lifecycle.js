@@ -576,13 +576,14 @@ export function createLifecycleController(ctx) {
    *   the relay forwards an explicitly named model without validating it.
    */
   async function sendMessage(textOverride, threadId, images = [], options = {}) {
-    const { inheritComposerSettings = true } = options || {};
+    const { inheritComposerSettings = true, skill = null } = options || {};
     // Accept an explicit, already-captured message (the composer captures the draft
     // at submit time so a later edit can't change what is sent). Fall back to the
     // live input value for the normal path.
     const text = (typeof textOverride === "string" ? textOverride : messageInput.value).trim();
 
-    if (!text && images.length === 0) {
+    // A picked skill is a whole message: `/review` alone asks for a review.
+    if (!text && images.length === 0 && !skill) {
       logLine("Message is empty.");
       return false;
     }
@@ -636,6 +637,7 @@ export function createLifecycleController(ctx) {
           // directly there, so a concurrent navigation cannot redirect the message.
           thread_id: threadId,
           images,
+          ...(skill ? { skill } : {}),
         }),
       });
       const payload = await response.json();

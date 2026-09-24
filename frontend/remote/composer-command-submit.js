@@ -20,9 +20,12 @@ export function createCommandSubmit({
     if (isPending(scope)) return;
     // Null means the draft is an ordinary message — including a "/word" the menu
     // does not own, which reaches the agent verbatim.
-    const running = getController()?.submit();
+    const controller = getController();
+    // Read BEFORE submit: a staged provider skill rides the ordinary send.
+    const skill = controller?.stagedSkill?.() || null;
+    const running = controller?.submit();
     if (!running) {
-      sendMessage();
+      sendMessage({ skill });
       return;
     }
     setPending(scope, true);

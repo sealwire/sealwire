@@ -60,6 +60,7 @@ import {
   mapSdkMessage,
   mapSessionInfo,
   mapSessionMessages,
+  mapSkillCommands,
   mcpStatusLogLines,
   userMessageTranscriptText,
 } from "./sdk-mapping.mjs";
@@ -530,6 +531,50 @@ async function readSupportedModels(sdk, cmd) {
 
   try {
     return await query.supportedModels();
+  } finally {
+    releasePrompt();
+    if (typeof query.close === "function") {
+      query.close();
+    }
+  }
+}
+
+// The skills a session in `cmd.cwd` would load, from an idle probe that never takes a
+// turn. Same setting sources as a real session, or user and project skills vanish.
+async function readSkillCommands(sdk, cmd) {
+  let releasePrompt = () => {};
+  async function* idlePrompt() {
+    await new Promise((resolve) => {
+      releasePrompt = resolve;
+    });
+  }
+
+  ensureClaudeBinaryHealthy();
+  await ensureWorkspaceCwdUsable(cmd.cwd);
+  const query = sdk.query({
+    prompt: idlePrompt(),
+    options: { cwd: cmd.cwd || process.cwd(), settingSources: DEFAULT_SETTING_SOURCES },
+  });
+
+  try {
+    const init =
+      typeof query.initializationResult === "function"
+        ? await query.initializationResult()
+        : null;
+    // `reloadSkills` answers with skills alone; the full command list also holds
+    // terminal-only built-ins (`/clear`, `/color`) that do nothing over the SDK.
+    let rows = null;
+    if (typeof query.reloadSkills === "function") {
+      rows = await query.reloadSkills().then(
+        (answer) => answer?.skills ?? null,
+        () => null,
+      );
+    }
+    if (!rows) {
+      const commands = init?.commands ?? (await query.supportedCommands());
+      rows = commands.filter((command) => !command?.builtin);
+    }
+    return mapSkillCommands(rows);
   } finally {
     releasePrompt();
     if (typeof query.close === "function") {
@@ -1604,6 +1649,16 @@ async function main() {
         } catch (err) {
           emitErrorResponse(cmd.id, String(err));
         }
+        break;
+      }
+
+      case "skills/list": {
+        // Detached: the probe spawns a CLI and takes seconds, and every live session's
+        // sends and stops are queued behind this loop.
+        void readSkillCommands(sdk, cmd).then(
+          (skills) => emitResponse(cmd.id, { skills }),
+          (err) => emitErrorResponse(cmd.id, String(err)),
+        );
         break;
       }
 

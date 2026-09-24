@@ -139,3 +139,19 @@ test("a second press on a DIFFERENT session is a send, not a swallowed press", (
 
   assert.equal(ui.state.sent, 1);
 });
+
+test("a staged provider skill rides the ordinary send instead of taking the command path", () => {
+  const skill = { key: "codex:/repo/.codex/skills/probe/SKILL.md", name: "probe", path: "/repo/.codex/skills/probe/SKILL.md" };
+  const sends = [];
+  const run = createCommandSubmit({
+    getScope: () => "relay-1::thread-a",
+    getController: () => ({ submit: () => null, stagedSkill: () => skill }),
+    isPending: () => false,
+    setPending: () => {},
+    sendMessage: (options) => sends.push(options),
+  });
+
+  run();
+
+  assert.deepEqual(sends, [{ skill }]);
+});

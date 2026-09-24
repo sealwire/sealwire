@@ -6,19 +6,26 @@
 // resolves to nothing once the thread is deleted — which is the difference between
 // finishing the right conversation, leaving the real one frozen forever, and writing a
 // ghost under an id nobody can reach.
+import { withoutSentSkill } from "../shared/thread-skills.js";
+
 export function createRemoteComposerSend({ workspaces, getScope, send }) {
-  return async () => {
+  return async ({ skill = null } = {}) => {
     const scope = getScope();
     if (workspaces.isPending(scope)) return false;
     const draft = workspaces.read(scope).text;
     const operationId = workspaces.beginOperation(scope);
     try {
-      const sent = await send(draft);
+      const sent = await send(draft, { skill });
       const target = workspaces.operationScope(operationId);
-      // Only if the box still holds exactly what went: a draft the user replaced
-      // mid-flight is not this send's to throw away.
-      if (sent && target && workspaces.read(target).text === draft) {
-        workspaces.write(target, { text: "" });
+      if (sent && target) {
+        const now = workspaces.read(target);
+        // Only if the box still holds exactly what went: a draft the user replaced
+        // mid-flight is not this send's to throw away. The same for the skill.
+        const pills = withoutSentSkill(now.commandPills || [], skill);
+        workspaces.write(target, {
+          ...(now.text === draft ? { text: "" } : {}),
+          ...(pills !== now.commandPills ? { commandPills: pills } : {}),
+        });
       }
       return sent;
     } finally {

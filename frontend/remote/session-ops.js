@@ -1944,12 +1944,13 @@ function maybeRefreshRemoteViewedThread(realSession) {
   });
 }
 
-export async function sendMessage(messageDraft, effort, model = "") {
+export async function sendMessage(messageDraft, effort, model = "", skill = null) {
   if (typeof messageDraft !== "string" || typeof effort !== "string") {
     throw new Error("sendMessage requires a draft and effort");
   }
   const text = messageDraft.trim();
-  if (!text) {
+  // A picked skill is a whole message on its own.
+  if (!text && !skill) {
     renderLog("Message is empty.");
     return false;
   }
@@ -1982,6 +1983,7 @@ export async function sendMessage(messageDraft, effort, model = "") {
         effort: outgoingEffort,
         thread_id: threadId,
       },
+      ...(skill ? { skill } : {}),
     });
     return true;
   } catch (error) {

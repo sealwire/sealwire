@@ -110,6 +110,7 @@ export function query({ prompt, options = {} }) {
     resume: options.resume ?? null,
     allowDangerouslySkipPermissions: options.allowDangerouslySkipPermissions ?? false,
     cwd: options.cwd ?? null,
+    settingSources: options.settingSources ?? null,
     session_id: sessionId,
   });
 
@@ -384,6 +385,30 @@ export function query({ prompt, options = {} }) {
           supportedEffortLevels: ["low", "medium", "high"],
         },
       ];
+    },
+    // The real SDK's command list mixes skills with terminal-only built-ins, which
+    // is why the worker asks `reloadSkills` first.
+    async initializationResult() {
+      return {
+        commands: [
+          { name: "clear", description: "Start over", argumentHint: "", builtin: true },
+          { name: "fallback-skill", description: "From the list (project)", argumentHint: "" },
+        ],
+      };
+    },
+    async reloadSkills() {
+      const delay = Number.parseInt(process.env.CLAUDE_FAKE_SKILLS_DELAY_MS || "0", 10);
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      if (process.env.CLAUDE_FAKE_NO_RELOAD_SKILLS === "1") {
+        throw new Error("reload_skills is not supported by this CLI");
+      }
+      return {
+        skills: [
+          { name: "review", description: `Repo review in ${options.cwd} (project)`, argumentHint: "<focus>" },
+          { name: "mine", description: "Mine (user)", argumentHint: "" },
+          { name: "code-review", description: "Bundled", argumentHint: "", builtin: true },
+        ],
+      };
     },
   };
 }

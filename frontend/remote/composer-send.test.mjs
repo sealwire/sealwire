@@ -124,3 +124,36 @@ test("a sent draft leaves no slot behind, dismissal included", () => {
     assert.deepEqual(ui.workspaces.keys(), []);
   });
 });
+
+test("a sent skill leaves with its own thread's draft, and reaches the send", async () => {
+  const workspaces = createComposerWorkspaceStore();
+  const calls = [];
+  const submit = createRemoteComposerSend({
+    workspaces,
+    getScope: () => A,
+    send: async (draft, options) => {
+      calls.push([draft, options]);
+      return true;
+    },
+  });
+  const pill = { kind: "skill", value: "claude_code:review", label: "/review" };
+  workspaces.write(A, { text: "the parser", commandPills: [pill] });
+  const skill = { key: "claude_code:review", name: "review" };
+
+  assert.equal(await submit({ skill }), true);
+
+  assert.deepEqual(calls, [["the parser", { skill }]]);
+  assert.equal(workspaces.read(A).text, "");
+  assert.deepEqual(workspaces.read(A).commandPills, [], "the skill went, so its pill goes");
+});
+
+test("an ordinary send leaves a staged skill pill alone", async () => {
+  const workspaces = createComposerWorkspaceStore();
+  const submit = createRemoteComposerSend({ workspaces, getScope: () => A, send: async () => true });
+  const pill = { kind: "skill", value: "claude_code:review", label: "/review" };
+  workspaces.write(A, { text: "hello", commandPills: [pill] });
+
+  await submit();
+
+  assert.deepEqual(workspaces.read(A).commandPills, [pill]);
+});

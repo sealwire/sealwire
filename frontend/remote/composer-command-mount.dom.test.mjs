@@ -93,3 +93,38 @@ test("a replaced surface hands over its new textarea, and the old controller is 
   );
   assert.ok(second.input(), "the new field is handed over");
 });
+
+test("the host tells the controller when the session under the box moves, and only then", async () => {
+  const { ComposerCommandHost } = await import("./composer-command-host.js");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const input = document.createElement("textarea");
+  const controllerRef = { current: null };
+  const calls = { refresh: 0, sync: 0 };
+  const renderHost = (contextKey, scope = "relay::thread-a") =>
+    act(() => {
+      root.render(
+        h(ComposerCommandHost, { controllerRef, input, options: { contextKey }, scope })
+      );
+    });
+
+  renderHost("thread-a|codex|/work/a");
+  // Stand in for the private controller the public checkout does not ship.
+  controllerRef.current = {
+    refreshContext: () => (calls.refresh += 1),
+    syncScope: () => (calls.sync += 1),
+  };
+
+  renderHost("thread-a|codex|/work/b");
+  assert.equal(calls.refresh, 1, "a folder change under the same thread repaints the menu");
+  renderHost("thread-a|codex|/work/b");
+  assert.equal(calls.refresh, 1, "an unrelated re-render is not a reason to repaint");
+  renderHost("thread-a|claude_code|/work/b");
+  assert.equal(calls.refresh, 2, "nor is a provider change missed");
+  renderHost("thread-a|claude_code|/work/b", "relay::thread-b");
+  assert.equal(calls.sync, 1, "a thread change still goes through the scope");
+  assert.equal(calls.refresh, 2);
+
+  act(() => root.unmount());
+});

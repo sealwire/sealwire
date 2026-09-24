@@ -43,6 +43,8 @@ let threadListMode = "normal";
 let threadListDelayMs = 0;
 let rejectTurnStart = false;
 let dropTurnStart = false;
+// Answer skills/list about this folder instead of the one asked for.
+let skillsAnswerCwd = null;
 
 function send(obj) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
@@ -90,6 +92,7 @@ function handle(payload) {
       threadListDelayMs = Math.max(0, Number(params?.threadListDelayMs) || 0);
       rejectTurnStart = Boolean(params?.rejectTurnStart);
       dropTurnStart = Boolean(params?.dropTurnStart);
+      skillsAnswerCwd = params?.skillsAnswerCwd ?? null;
       return ok(id, {});
 
     case "thread/start": {
@@ -202,6 +205,43 @@ function handle(payload) {
 
     case "turn/interrupt":
       return ok(id, {});
+
+    // Shaped like the real answer, including what the relay must not flatten: two
+    // repo skills sharing a name (distinct only by path), a disabled one, and a
+    // plugin skill. Paths are built from the asked cwd so a test can tell folders apart.
+    case "skills/list": {
+      const cwd = skillsAnswerCwd || params?.cwds?.[0] || "/tmp/project";
+      const skill = (name, path, scope, extra = {}) => ({
+        name,
+        description: `${name} long description`,
+        path,
+        scope,
+        enabled: true,
+        pluginId: null,
+        ...extra,
+      });
+      return ok(id, {
+        data: [
+          {
+            cwd,
+            errors: [],
+            skills: [
+              skill("probe", `${cwd}/.agents/skills/probe/SKILL.md`, "repo"),
+              skill("probe", `${cwd}/.codex/skills/probe/SKILL.md`, "repo", {
+                interface: { shortDescription: "the .codex copy" },
+              }),
+              skill("switched-off", `${cwd}/.agents/skills/off/SKILL.md`, "repo", {
+                enabled: false,
+              }),
+              skill("imagegen", "/home/.codex/skills/.system/imagegen/SKILL.md", "system"),
+              skill("pdf:pdf", "/home/.codex/plugins/pdf/skills/pdf/SKILL.md", "user", {
+                pluginId: "pdf@openai-primary-runtime",
+              }),
+            ],
+          },
+        ],
+      });
+    }
 
     default:
       if (id !== undefined) {

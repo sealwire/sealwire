@@ -278,8 +278,8 @@ export function createRemoteAppHandlers() {
     onSelectRelay(relayId) {
       return switchRemoteRelay(relayId);
     },
-    onSendMessage(messageDraft, effort, model) {
-      return sendMessage(messageDraft, effort, model);
+    onSendMessage(messageDraft, effort, model, skill = null) {
+      return sendMessage(messageDraft, effort, model, skill);
     },
     onStopTurn() {
       return stopActiveTurn();

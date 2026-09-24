@@ -49,6 +49,19 @@ function resultFor(cmd, sessionId) {
       return { thread: makeThread(sessionId, cmd.cwd) };
     case "list_sessions":
       return { threads: [] };
+    case "skills/list":
+      return {
+        skills: [
+          {
+            name: "review",
+            description: `repo review for ${cmd.cwd}`,
+            scope: "repo",
+            origin: null,
+            argument_hint: "<focus>",
+          },
+          { name: "mine", description: "mine", scope: "global", origin: null, argument_hint: null },
+        ],
+      };
     case "model/list":
       return {
         models: [

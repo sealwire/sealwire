@@ -139,6 +139,8 @@ pub(super) enum OutboundBrokerPayload {
         /// Same plaintext-vs-sealed asymmetry as the fields above: absent here and
         /// the fork dialog's settings arrive only on sealed transport.
         thread_settings: Option<crate::protocol::ThreadSettingsView>,
+        /// The "/" menu's provider skills. Same plaintext-drop trap as the fields above.
+        thread_skills: Option<crate::protocol::ThreadSkillsView>,
         /// The `fetch_reviews` payload (review cards + reviewer threads). Without this the
         /// PLAINTEXT path silently dropped it — the sealed path serializes
         /// `RemoteActionResultPlaintext` wholesale and always carried it — so a phone's

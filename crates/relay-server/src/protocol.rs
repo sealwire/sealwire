@@ -2746,6 +2746,49 @@ pub struct ThreadSettingsView {
     pub remembered: bool,
 }
 
+/// One skill as a thread's OWN provider reported it for the thread's own folder.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderSkillView {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// `repo`, `global`, `plugin`, `system`, `builtin`, `admin` or `session`.
+    pub scope: String,
+    /// The plugin, or where a synced skill came from, when scope alone does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// What Codex dispatches by: two skills may share a name, never a path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+}
+
+/// A thread's skills, stamped with the provider and folder they were listed for so a
+/// client can refuse to show them against anything else.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadSkillsView {
+    pub thread_id: String,
+    pub provider: String,
+    pub cwd: String,
+    /// `runtime` when the provider answered, `filesystem` when the relay scanned disk.
+    pub source: String,
+    /// How a picked skill is sent: `slash` (`/name` text) or `skill_input` (Codex).
+    pub invocation: String,
+    /// Why the list is a fallback, in words a person can act on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub skills: Vec<ProviderSkillView>,
+}
+
+/// The skill a person picked, riding next to a message rather than inside its text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillInvocationInput {
+    pub name: String,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartSessionInput {
     pub cwd: Option<String>,

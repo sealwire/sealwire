@@ -77,5 +77,12 @@ export function ComposerCommandHost({ controllerRef, input, options, scope = "" 
     controllerRef?.current?.syncScope?.(scope);
   }, [controllerRef, scope]);
 
+  // The thread's agent or folder can change under the same scope, with the menu open
+  // and nothing typed. Keyed on a string, so an unrelated re-render does not repaint.
+  const contextKey = options?.contextKey || "";
+  useEffect(() => {
+    controllerRef?.current?.refreshContext?.();
+  }, [controllerRef, contextKey]);
+
   return h("div", { className: "composer-command-host", ref: mountRef });
 }
