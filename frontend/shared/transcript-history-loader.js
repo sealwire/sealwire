@@ -19,6 +19,9 @@ export const DEFAULT_TRANSCRIPT_HISTORY_ROOT_MARGIN = "600px 0px 0px 0px";
 // go. Eight ~20KB pages is plenty to fill the band above the fold.
 const MAX_PREFETCH_PAGES_PER_BURST = 8;
 
+// Past the browser's touch slop, so a tap's jitter is not read as a pull.
+const TOUCH_PULL_PX = 10;
+
 export function createTranscriptHistoryLoader({
   scrollElement,
   sentinelElement,
@@ -41,13 +44,8 @@ export function createTranscriptHistoryLoader({
 
   const rootMarginTopPx = parseTopMarginPx(rootMargin);
   let pending = false;
-  // Set once a real page load reports there are no older pages left. A genuine
-  // top is permanent for this sentinel, so we stop scheduling entirely.
-  let reachedTop = false;
-  // Set when a burst loaded nothing (cursor not ready yet, stale page, error).
-  // We stop auto-rescheduling to avoid spinning; the next *external* signal — an
-  // IntersectionObserver transition or a sync() poke after a re-render — clears
-  // it, so a cursor that only appears after hydration still starts a burst.
+  // Set when a burst loaded nothing or hit the oldest page, so we stop instead of
+  // spinning. Not permanent: a read-only pin can collapse back to its live tail.
   let awaitingExternalPoke = false;
   // `disconnect()` alone doesn't stop a burst: it can be queued as a microtask
   // or awaiting `onLoad()` when `dispose()` runs (sentinel removed/replaced, or
@@ -75,7 +73,7 @@ export function createTranscriptHistoryLoader({
   );
 
   function scheduleBurst({ trusted = false } = {}) {
-    if (disposed || pending || reachedTop) {
+    if (disposed || pending) {
       return;
     }
     if (!trusted && !stillWithinPrefetchBand()) {
@@ -97,7 +95,7 @@ export function createTranscriptHistoryLoader({
         // to pull and room above the fold. This is what removes the "scroll to
         // the top, nothing loads until you wiggle" stall after the per-burst
         // cap or a band that short/collapsed pages did not fill.
-        if (!disposed && !reachedTop && !awaitingExternalPoke && stillWithinPrefetchBand()) {
+        if (!disposed && !awaitingExternalPoke && stillWithinPrefetchBand()) {
           scheduleBurst();
         }
       });
@@ -127,8 +125,8 @@ export function createTranscriptHistoryLoader({
         return;
       }
       if (result === false) {
-        // A real page load reported no older pages remain — stop for good.
-        reachedTop = true;
+        // No older pages remain for now.
+        awaitingExternalPoke = true;
         return;
       }
       if (result !== true) {
@@ -168,11 +166,43 @@ export function createTranscriptHistoryLoader({
     return typeof scrollTop === "number" ? scrollTop : null;
   }
 
+  // At a scroller clamped to 0 the observer and scroll events both stay silent,
+  // so the reader's upward gesture is the only signal left.
+  function retryFromGesture() {
+    if (disposed || pending || !stillWithinPrefetchBand()) {
+      return;
+    }
+    awaitingExternalPoke = false;
+    scheduleBurst();
+  }
+  let touchStartY = null;
+  const onWheel = (event) => {
+    if (!event?.ctrlKey && (event?.deltaY || 0) < 0) {
+      retryFromGesture();
+    }
+  };
+  const onTouchStart = (event) => {
+    touchStartY = touchClientY(event);
+  };
+  const onTouchMove = (event) => {
+    const y = touchClientY(event);
+    if (touchStartY != null && y != null && y - touchStartY >= TOUCH_PULL_PX) {
+      touchStartY = null; // once per pull
+      retryFromGesture();
+    }
+  };
+  scrollElement.addEventListener?.("wheel", onWheel, { passive: true });
+  scrollElement.addEventListener?.("touchstart", onTouchStart, { passive: true });
+  scrollElement.addEventListener?.("touchmove", onTouchMove, { passive: true });
+
   observer.observe(sentinelElement);
 
   const dispose = () => {
     disposed = true;
     observer.disconnect();
+    scrollElement.removeEventListener?.("wheel", onWheel);
+    scrollElement.removeEventListener?.("touchstart", onTouchStart);
+    scrollElement.removeEventListener?.("touchmove", onTouchMove);
   };
   // Re-check after a render even when no IO transition occurs — used by the
   // lifecycle wrapper's sync(). Only resumes a burst that previously backed off
@@ -186,6 +216,11 @@ export function createTranscriptHistoryLoader({
     scheduleBurst();
   };
   return dispose;
+}
+
+function touchClientY(event) {
+  const y = event?.touches?.[0]?.clientY;
+  return typeof y === "number" ? y : null;
 }
 
 function parseTopMarginPx(rootMargin) {
@@ -270,8 +305,10 @@ function noopDisposer() {
 // themselves. The transcript React tree owns the sentinel node — it appears
 // only when entries are rendered, disappears for empty/ready states, and may
 // be replaced when the active branch swaps. This wrapper keeps the IO
-// attached to whichever sentinel is currently live; call `sync()` after each
-// render and call the returned disposer when the scroller is unmounted.
+// attached to whichever sentinel is currently live; call `sync(historyKey)`
+// after each render and call the returned disposer when the scroller is
+// unmounted. A new `historyKey` gets a fresh loader: React keeps the sentinel
+// across thread switches.
 export function attachTranscriptHistoryLoader({
   scrollElement,
   sentinelSelector = "[data-transcript-history-sentinel]",
@@ -282,14 +319,15 @@ export function attachTranscriptHistoryLoader({
     : null,
 }) {
   let currentSentinel = null;
+  let currentKey;
   let dispose = noopDisposer();
 
-  function sync() {
+  function sync(historyKey) {
     if (!scrollElement) {
       return;
     }
     const sentinel = scrollElement.querySelector?.(sentinelSelector) || null;
-    if (sentinel === currentSentinel) {
+    if (sentinel === currentSentinel && historyKey === currentKey) {
       // Same sentinel node, but a re-render may have exposed an older cursor
       // (post-hydration) without producing an IO transition. Poke so a burst
       // that backed off can resume. No-op unless the loader is awaiting one.
@@ -298,6 +336,7 @@ export function attachTranscriptHistoryLoader({
     }
     dispose();
     currentSentinel = sentinel;
+    currentKey = historyKey;
     if (!sentinel) {
       dispose = noopDisposer();
       return;
@@ -315,6 +354,7 @@ export function attachTranscriptHistoryLoader({
     dispose();
     dispose = noopDisposer();
     currentSentinel = null;
+    currentKey = undefined;
   }
 
   return { detach, sync };

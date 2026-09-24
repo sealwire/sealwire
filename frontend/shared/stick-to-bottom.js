@@ -22,6 +22,14 @@ export const RESTICK_AT_BOTTOM_PX = TRANSCRIPT_BOTTOM_FOLLOW_THRESHOLD_PX;
 const READER_INTENT_MS = 300;
 const now = () => Date.now();
 
+// Movement at or under this is jitter (fractional offsets, clamps). It neither
+// escapes nor re-sticks; it accumulates until a real move shows its direction.
+const SCROLL_JITTER_PX = 1;
+
+// A finger pulled this far down asks for older content, whether or not the
+// browser has reported the scroll yet. Past a tap's jitter, near the touch slop.
+const TOUCH_ESCAPE_PX = 10;
+
 // Programmatic transcript actions carry semantic intent. In particular,
 // `restore-thread` means the cached state explicitly recorded a reader who was
 // NOT following the bottom, so the follower must not reinterpret a nearby
@@ -57,8 +65,11 @@ export function classifyTranscriptScrollAction({ kind } = {}) {
 //     bottom" is NOT evidence the reader put it there: the virtualizer corrects
 //     scrollTop on every row re-measure and those writes carry no tag, so they used
 //     to re-arm the follow behind a reader who had just escaped.
+//   scrolledDown = only a move TOWARD the bottom re-sticks. Jitter, or a reader's
+//     small upward step, can also land inside the band and must not pin them back.
 export function classifyScrollIntent({
   scrolledUp,
+  scrolledDown = !scrolledUp,
   distance,
   interacting,
   stuck,
@@ -67,12 +78,21 @@ export function classifyScrollIntent({
 }) {
   if (interacting) {
     if (scrolledUp) return "unstick";
-    if (distance <= restickPx) return "stick";
+    if (scrolledDown && distance <= restickPx) return "stick";
     return "none";
   }
   if (stuck) return "pin";
-  if (readerDriven && distance <= restickPx) return "stick";
+  if (readerDriven && scrolledDown && distance <= restickPx) return "stick";
   return "none";
+}
+
+function nestedScrollerCanScrollUp(target, scroller) {
+  for (let node = target; node && node !== scroller; node = node.parentElement) {
+    if (node.scrollTop > 0 && node.scrollHeight > node.clientHeight) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // Live "stick to bottom" follower for the transcript (element scroller).
@@ -134,6 +154,14 @@ export function StickToBottomFollower() {
     let touchActive = false;
     let mouseActive = false;
     const interacting = () => touchActive || mouseActive;
+    // The current touch/mouse gesture already released the follow. Its scroll can
+    // still be unreported when the finger lifts, so lifting must not re-glue it.
+    let gestureEscaped = false;
+    // Topmost finger position this touch; pulling down from it asks for history.
+    let touchAnchor = null;
+    // The touch began in a nested box that scrolls up first, so the transcript
+    // itself only moves (and reports it) once that box is exhausted.
+    let touchInNestedScroller = false;
     // When the reader last wheeled/keyed on the scroller. Untagged scrolls outside this
     // window are someone else's writes (virtualizer size corrections, snapshot churn)
     // and must not re-arm the follow.
@@ -200,29 +228,71 @@ export function StickToBottomFollower() {
         return;
       }
       selfScrollTop = -1;
-      const scrolledUp = sp < lastScrollTop - 1;
-      lastScrollTop = sp;
+      const scrolledUp = sp < lastScrollTop - SCROLL_JITTER_PX;
+      const scrolledDown = sp > lastScrollTop + SCROLL_JITTER_PX;
+      // Kept on jitter, so a drag of one pixel per frame still adds up to a move.
+      if (scrolledUp || scrolledDown) {
+        lastScrollTop = sp;
+      }
       const action = classifyScrollIntent({
         scrolledUp,
+        scrolledDown,
         distance: distance(),
         interacting: interacting(),
         stuck,
         readerDriven: readerDriven(),
       });
-      if (action === "unstick") unstick();
-      else if (action === "stick") stick();
+      if (action === "unstick") {
+        unstick();
+        if (interacting()) gestureEscaped = true;
+      } else if (action === "stick") stick();
       else if (action === "pin") pin();
     };
-    // touchstart AND touchmove keep the flag hot: Chromium can fire touchcancel
-    // when a touch turns into a scroll, so refreshing on every move (which
-    // interleaves just before each scroll event) keeps `interacting` true through
-    // the whole drag regardless of a spurious cancel.
-    const onTouchActive = () => { touchActive = true; };
+    const touchPoint = (event) => {
+      const point = event?.touches?.[0];
+      return typeof point?.clientY === "number"
+        ? { x: Number(point.clientX) || 0, y: point.clientY }
+        : null;
+    };
+    const onTouchStart = (event) => {
+      touchActive = true;
+      gestureEscaped = false;
+      touchAnchor = touchPoint(event);
+      touchInNestedScroller = nestedScrollerCanScrollUp(event?.target, scroller);
+    };
+    // touchmove also keeps the flag hot: Chromium can fire touchcancel when a
+    // touch turns into a scroll, so refreshing on every move keeps `interacting`
+    // true through the whole drag regardless of a spurious cancel.
+    const onTouchMove = (event) => {
+      touchActive = true;
+      const point = touchPoint(event);
+      if (!point) return;
+      if (!touchAnchor || point.y < touchAnchor.y) {
+        touchAnchor = point;
+        return;
+      }
+      // Escape on the finger, not the scroll: a flick's scroll events can all land
+      // after touchend, and by then lifting has already re-pinned the bottom.
+      const pulled = point.y - touchAnchor.y;
+      if (
+        !touchInNestedScroller
+        && pulled >= TOUCH_ESCAPE_PX
+        && pulled > Math.abs(point.x - touchAnchor.x)
+        && scroller.scrollTop > 0
+      ) {
+        unstick();
+        gestureEscaped = true;
+      }
+    };
     const onTouchEnd = () => {
       touchActive = false;
+      touchAnchor = null;
       endInteract();
     };
-    const onMouseDown = () => { mouseActive = true; };
+    const onMouseDown = () => {
+      mouseActive = true;
+      gestureEscaped = false;
+    };
     const onMouseUp = () => {
       mouseActive = false;
       endInteract();
@@ -233,7 +303,7 @@ export function StickToBottomFollower() {
     const endInteract = () => {
       if (interacting()) return;
       if (stuck) pin();
-      else if (distance() <= RESTICK_AT_BOTTOM_PX) stick();
+      else if (!gestureEscaped && distance() <= RESTICK_AT_BOTTOM_PX) stick();
     };
     const onAction = (event) => {
       const action = classifyTranscriptScrollAction({
@@ -247,8 +317,8 @@ export function StickToBottomFollower() {
     scroller.addEventListener("wheel", onWheel, { passive: true });
     scroller.addEventListener("keydown", onKeyDown, { passive: true });
     scroller.addEventListener("scroll", onScroll, { passive: true });
-    scroller.addEventListener("touchstart", onTouchActive, { passive: true });
-    scroller.addEventListener("touchmove", onTouchActive, { passive: true });
+    scroller.addEventListener("touchstart", onTouchStart, { passive: true });
+    scroller.addEventListener("touchmove", onTouchMove, { passive: true });
     scroller.addEventListener("touchend", onTouchEnd, { passive: true });
     scroller.addEventListener("touchcancel", onTouchEnd, { passive: true });
     scroller.addEventListener("mousedown", onMouseDown, { passive: true });
@@ -263,8 +333,8 @@ export function StickToBottomFollower() {
       scroller.removeEventListener("wheel", onWheel);
       scroller.removeEventListener("keydown", onKeyDown);
       scroller.removeEventListener("scroll", onScroll);
-      scroller.removeEventListener("touchstart", onTouchActive);
-      scroller.removeEventListener("touchmove", onTouchActive);
+      scroller.removeEventListener("touchstart", onTouchStart);
+      scroller.removeEventListener("touchmove", onTouchMove);
       scroller.removeEventListener("touchend", onTouchEnd);
       scroller.removeEventListener("touchcancel", onTouchEnd);
       scroller.removeEventListener("mousedown", onMouseDown);

@@ -136,6 +136,48 @@ test("NOT interacting + not stuck: an untagged scroll landing at the bottom must
   );
 });
 
+// Jitter or a small upward step can land inside the 4px band too; re-sticking
+// there pinned the reader back before they could get any further.
+test("landing near the bottom re-sticks only when the scroll moved down", () => {
+  for (const interacting of [true, false]) {
+    assert.equal(
+      classifyScrollIntent({
+        scrolledUp: false,
+        scrolledDown: false,
+        distance: 1,
+        interacting,
+        stuck: false,
+        readerDriven: true,
+      }),
+      "none",
+      `jitter must not re-stick (interacting=${interacting})`
+    );
+  }
+  assert.equal(
+    classifyScrollIntent({
+      scrolledUp: true,
+      scrolledDown: false,
+      distance: 2,
+      interacting: false,
+      stuck: false,
+      readerDriven: true,
+    }),
+    "none",
+    "a reader's upward step that stays within the band is still an escape"
+  );
+  assert.equal(
+    classifyScrollIntent({
+      scrolledUp: false,
+      scrolledDown: true,
+      distance: 0,
+      interacting: false,
+      stuck: false,
+      readerDriven: true,
+    }),
+    "stick"
+  );
+});
+
 test("event name contract stays stable (follower listens by this literal)", () => {
   assert.equal(TRANSCRIPT_SCROLL_ACTION_EVENT, "transcript-scroll-action");
 });

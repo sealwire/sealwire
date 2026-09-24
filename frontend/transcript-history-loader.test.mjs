@@ -448,6 +448,147 @@ test("attachTranscriptHistoryLoader observes whichever sentinel is currently in 
   assert.equal(instances[1].disconnected, true);
 });
 
+test("the same sentinel loads history after switching from an exhausted thread", async () => {
+  const { FakeObserver, instances } = makeFakeObserverFactory();
+  const scrollEl = makeScrollEl({ scrollTop: 0 });
+  const sentinel = { id: "same-react-node" };
+  scrollEl.setSentinel(sentinel);
+  const loaded = [];
+  let threadId = "finished";
+  const { sync, detach } = attachTranscriptHistoryLoader({
+    ObserverCtor: FakeObserver,
+    onLoad: () => {
+      loaded.push(threadId);
+      return threadId === "finished" ? false : true;
+    },
+    scrollElement: scrollEl,
+  });
+
+  sync(threadId);
+  await instances[0].trigger(true);
+  await flushBurst();
+  assert.deepEqual(loaded, ["finished"]);
+
+  // React reuses the top sentinel across transcript tabs. The old loader has
+  // reachedTop=true, and a later cursor on this different thread must get a
+  // fresh observer even though the DOM node did not change.
+  threadId = "has-history";
+  sync(threadId);
+  assert.equal(instances.length, 2);
+  assert.equal(instances[0].disconnected, true);
+  await instances[1].trigger(true);
+  await flushBurst();
+  assert.ok(loaded.includes("has-history"));
+  detach();
+});
+
+test("an upward gesture at the top retries when the observer misses a transition", async () => {
+  const { FakeObserver } = makeFakeObserverFactory();
+  const listeners = new Map();
+  const scrollEl = {
+    scrollTop: 0,
+    addEventListener(type, listener) { listeners.set(type, listener); },
+    removeEventListener(type) { listeners.delete(type); },
+  };
+  let calls = 0;
+  const dispose = createTranscriptHistoryLoader({
+    ObserverCtor: FakeObserver,
+    onLoad: () => { calls += 1; return false; },
+    scrollElement: scrollEl,
+    sentinelElement: {},
+  });
+
+  // A zero-height sentinel or a clamped scroller need not emit a fresh IO or
+  // scroll event. The gesture itself is still a request to see older history.
+  listeners.get("wheel")?.({ deltaY: -120, ctrlKey: false });
+  await flushBurst();
+  assert.equal(calls, 1);
+  dispose();
+});
+
+function makeGestureScrollEl({ scrollTop = 0 } = {}) {
+  const listeners = new Map();
+  return {
+    listeners,
+    scrollTop,
+    addEventListener(type, listener) { listeners.set(type, listener); },
+    removeEventListener(type) { listeners.delete(type); },
+    fire(type, event) { listeners.get(type)?.(event); },
+  };
+}
+
+test("a finger pulling down at the top retries a loader the observer left idle", async () => {
+  const { FakeObserver } = makeFakeObserverFactory();
+  const scrollEl = makeGestureScrollEl({ scrollTop: 0 });
+  let calls = 0;
+  const dispose = createTranscriptHistoryLoader({
+    ObserverCtor: FakeObserver,
+    onLoad: () => { calls += 1; return false; },
+    scrollElement: scrollEl,
+    sentinelElement: {},
+  });
+
+  scrollEl.fire("touchstart", { touches: [{ clientY: 100 }] });
+  scrollEl.fire("touchmove", { touches: [{ clientY: 140 }] });
+  await flushBurst();
+  assert.equal(calls, 1, "a pull at the clamped top is a request for older history");
+  dispose();
+});
+
+test("gestures that do not ask for older history leave the loader alone", async () => {
+  const { FakeObserver } = makeFakeObserverFactory();
+  const nearTop = makeGestureScrollEl({ scrollTop: 0 });
+  const farDown = makeGestureScrollEl({ scrollTop: 5000 });
+  let calls = 0;
+  const onLoad = () => { calls += 1; return false; };
+  const disposeNear = createTranscriptHistoryLoader({
+    ObserverCtor: FakeObserver, onLoad, scrollElement: nearTop, sentinelElement: {},
+  });
+  const disposeFar = createTranscriptHistoryLoader({
+    ObserverCtor: FakeObserver, onLoad, scrollElement: farDown, sentinelElement: {},
+  });
+
+  nearTop.fire("wheel", { deltaY: 120, ctrlKey: false });
+  nearTop.fire("wheel", { deltaY: -120, ctrlKey: true });
+  nearTop.fire("touchstart", { touches: [{ clientY: 140 }] });
+  nearTop.fire("touchmove", { touches: [{ clientY: 100 }] });
+  farDown.fire("wheel", { deltaY: -120, ctrlKey: false });
+  await flushBurst();
+  assert.equal(calls, 0, "scrolling down, pinch-zoom, and reading mid-history must not page");
+  disposeNear();
+  disposeFar();
+});
+
+test("a thread that reported no older pages still loads once history appears on it", async () => {
+  // A read-only pin can collapse back to its live tail (with a cursor) after the
+  // reader already reached its top, and a relay restart rebuilds the same thread.
+  const { FakeObserver, instances } = makeFakeObserverFactory();
+  const scrollEl = makeScrollEl({ scrollTop: 0 });
+  scrollEl.setSentinel({ id: "sentinel" });
+  let hasOlder = false;
+  let calls = 0;
+  const { sync, detach } = attachTranscriptHistoryLoader({
+    ObserverCtor: FakeObserver,
+    onLoad: () => {
+      calls += 1;
+      return hasOlder ? true : false;
+    },
+    scrollElement: scrollEl,
+  });
+
+  sync("thread-a");
+  await instances[0].trigger(true);
+  await flushBurst();
+  assert.equal(calls, 1);
+
+  hasOlder = true;
+  sync("thread-a");
+  await flushBurst();
+  assert.ok(calls > 1, "the re-render that exposed a cursor must resume paging");
+  assert.equal(instances.length, 1, "same thread, same sentinel: no new observer");
+  detach();
+});
+
 test("attachTranscriptHistoryLoader tears down when the sentinel disappears", () => {
   const { FakeObserver, instances } = makeFakeObserverFactory();
   const scrollEl = makeScrollEl();

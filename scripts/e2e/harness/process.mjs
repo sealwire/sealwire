@@ -12,11 +12,16 @@ process.on("exit", () => {
   }
 });
 
-export function spawnManagedProcess(name, command, args, extraEnv = {}) {
+// `stripInherited(name)` drops a variable inherited from this process; `extraEnv`
+// is applied afterwards, so a value the caller passes explicitly always survives.
+export function spawnManagedProcess(name, command, args, extraEnv = {}, { stripInherited } = {}) {
+  const inherited = stripInherited
+    ? Object.fromEntries(Object.entries(process.env).filter(([key]) => !stripInherited(key)))
+    : process.env;
   const child = spawn(command, args, {
     cwd: ROOT,
     env: {
-      ...process.env,
+      ...inherited,
       ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],

@@ -925,6 +925,92 @@ test("a synchronous older-page fetch failure releases its owned loading gate", a
   assert.equal(state.transcriptHydrationStatus, "idle");
 });
 
+test("an older-page request made during a streaming tail refresh pages once the refresh settles", async () => {
+  // A streaming reply keeps the slot busy with tail refreshes; handing back the
+  // tail's `undefined` made the loader back off as if nothing could load.
+  const shellEntry = {
+    item_id: "item-2",
+    kind: "agent_text",
+    text: "streaming...",
+    status: "running",
+    turn_id: "turn-2",
+    tool: null,
+    content_state: "omitted",
+  };
+  // A full window, so the refresh does not also backfill older pages itself.
+  const loaded = Array.from({ length: 12 }, (_, index) => ({
+    item_id: `loaded-${index}`,
+    kind: "agent_text",
+    text: `loaded ${index}`,
+    status: "completed",
+    turn_id: "turn-1",
+    tool: null,
+    content_state: "full",
+  }));
+  const state = createState({
+    session: { active_thread_id: "thread-1", active_turn_id: "turn-2" },
+    transcriptHydrationThreadId: "thread-1",
+    transcriptHydrationEntries: new Map(
+      [...loaded, shellEntry].map((entry) => [entry.item_id, entry])
+    ),
+    transcriptHydrationOrder: [...loaded.map((entry) => entry.item_id), "item-2"],
+    transcriptHydrationOlderCursor: "cursor-older",
+    transcriptHydrationSignature: "thread-1|prior",
+    transcriptHydrationTailReady: true,
+  });
+  const snapshot = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-2",
+    transcript_truncated: true,
+    transcript: [...loaded, shellEntry],
+  };
+  let releaseTail;
+  const tailSettled = hydrateLocalTranscript(state, snapshot, {
+    fetchPage: () => new Promise((resolve) => {
+      releaseTail = () => resolve({
+        thread_id: "thread-1",
+        prev_cursor: "cursor-older",
+        entries: [...loaded, { ...shellEntry, text: "streaming body so far", content_state: "full" }],
+      });
+    }),
+    onProgress(nextSnapshot) {
+      state.session = nextSnapshot;
+    },
+  });
+  assert.equal(state.transcriptHydrationStatus, "loading", "precondition: the tail refresh holds the slot");
+
+  const olderRequests = [];
+  const older = loadOlderLocalTranscript(state, {
+    async fetchPage({ threadId, before }) {
+      olderRequests.push(before);
+      return {
+        thread_id: threadId,
+        prev_cursor: "cursor-oldest",
+        entries: [{
+          item_id: "item-1",
+          kind: "user_text",
+          text: "older question",
+          status: "completed",
+          turn_id: "turn-1",
+          tool: null,
+        }],
+      };
+    },
+    onProgress(nextSnapshot) {
+      state.session = nextSnapshot;
+    },
+  });
+  releaseTail();
+  await tailSettled;
+
+  assert.equal(await older, true, "the older page loads after the tail refresh instead of reporting no progress");
+  assert.deepEqual(olderRequests, ["cursor-older"]);
+  assert.deepEqual(
+    state.session.transcript.map((entry) => entry.item_id),
+    ["item-1", ...loaded.map((entry) => entry.item_id), "item-2"]
+  );
+});
+
 test("clearTranscriptHydration resets local hydration state", () => {
   const state = createState({
     transcriptHydrationBaseSnapshot: { active_thread_id: "thread-1" },

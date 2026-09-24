@@ -457,6 +457,72 @@ test("sync() resumes a loader that backed off awaiting an external poke, on a sa
   }
 });
 
+test("switching to another thread gives the history loader a fresh start on the same sentinel node", async () => {
+  // React keeps the sentinel across this switch; a loader that exhausted the
+  // previous thread must not stay parked until a tab switch rebuilds it.
+  const { instances } = installFakeIntersectionObserver();
+  const view = mount();
+  const loads = [];
+  let shownThread = "thread-a";
+  const onLoadOlderTranscript = () => {
+    loads.push(shownThread);
+    return Promise.resolve(shownThread === "thread-a" ? false : true);
+  };
+  try {
+    view.render({
+      activeThreadId: "thread-a",
+      entries: entriesFor(3, "a"),
+      onLoadOlderTranscript,
+      session: { active_thread_id: "thread-a" },
+    });
+    const sentinel = view.host.querySelector("[data-transcript-history-sentinel]");
+    instances[0].callback([{ isIntersecting: true }]);
+    await flushMicrotasks();
+    assert.deepEqual(loads, ["thread-a"]);
+
+    shownThread = "thread-b";
+    view.render({
+      activeThreadId: "thread-b",
+      entries: entriesFor(3, "b"),
+      onLoadOlderTranscript,
+      session: { active_thread_id: "thread-b", view_only: true },
+      viewOnly: true,
+    });
+    assert.equal(
+      view.host.querySelector("[data-transcript-history-sentinel]"),
+      sentinel,
+      "precondition: React reused the sentinel node across the switch"
+    );
+    assert.equal(instances.length, 2, "the new thread gets its own observer");
+    instances[1].callback([{ isIntersecting: true }]);
+    await flushMicrotasks();
+    assert.ok(loads.includes("thread-b"), "the newly shown thread pages its own history");
+  } finally {
+    view.unmount();
+    delete global.IntersectionObserver;
+  }
+});
+
+test("the same thread turning read-only for a beat keeps its history loader", () => {
+  // A fresh loader prefetched into that transient view, so the position saved on
+  // the way out became "top of history" instead of "following".
+  const { instances } = installFakeIntersectionObserver();
+  const view = mount();
+  try {
+    view.render({ activeThreadId: "thread-a", entries: entriesFor(3, "a"), session: { active_thread_id: "thread-a" } });
+    view.render({
+      activeThreadId: "thread-a",
+      entries: entriesFor(3, "a"),
+      session: { active_thread_id: "thread-a", view_only: true },
+      viewOnly: true,
+    });
+    assert.equal(instances.length, 1, "no new observer for the same thread's history");
+  } finally {
+    view.unmount();
+    delete global.IntersectionObserver;
+  }
+});
+
 test("unmounting while a load is pending does not leak a duplicate onLoad call", async () => {
   // AC2: disconnecting the observer on unmount is not enough — the loader's
   // own in-flight burst (awaiting onLoad()) survives disconnect(), and a

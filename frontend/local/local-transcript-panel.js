@@ -163,9 +163,15 @@ export function LocalTranscriptPanel({
 
   // Effect 3 (sync): re-attach to whichever sentinel is live. The entries
   // branch is the only one with a sentinel, and branches can swap on any
-  // commit, so this also runs unconditionally, after every commit.
+  // commit, so this also runs unconditionally, after every commit. Not keyed by
+  // live/read-only: a new session re-renders this thread read-only for a beat.
+  const historyKey = [
+    activeThreadId || "",
+    session?.transcript_generation || "",
+    resetEpoch ?? 0,
+  ].join("|");
   useLayoutEffect(() => {
-    loaderRef.current?.sync();
+    loaderRef.current?.sync(historyKey);
   });
 
   return content;

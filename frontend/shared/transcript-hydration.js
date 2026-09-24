@@ -168,6 +168,14 @@ export async function hydrateTranscript(
   return hydrationPromise;
 }
 
+// Older-page requests, so a caller can tell one apart from a tail refresh
+// holding the same hydration slot.
+const olderPageRequests = new WeakSet();
+
+// A streaming reply re-fetches the tail on most revisions, so the slot is busy
+// most of the time; a small bound keeps a caller from queueing behind it forever.
+const MAX_TAIL_REFRESH_WAITS = 2;
+
 export async function loadOlderTranscript(
   state,
   store,
@@ -179,15 +187,28 @@ export async function loadOlderTranscript(
   }
 ) {
   const threadId = state.session?.active_thread_id;
-  const before = store.getTranscriptHydrationCursor(state);
-  if (!threadId || before == null) {
-    // No cursor yet (e.g. still hydrating). `null` (not `false`) tells the
-    // history loader this is transient — retry on the next poke — rather than
-    // a genuine "reached the oldest page" stop.
-    return null;
-  }
-  if (state.transcriptHydrationPromise || state.transcriptHydrationStatus === "loading") {
-    return state.transcriptHydrationPromise;
+  let before = store.getTranscriptHydrationCursor(state);
+  for (let waits = 0; ; waits += 1) {
+    if (!threadId || before == null) {
+      // No cursor yet (e.g. still hydrating). `null` (not `false`) tells the
+      // history loader this is transient — retry on the next poke — rather than
+      // a genuine "reached the oldest page" stop.
+      return null;
+    }
+    const inFlight = state.transcriptHydrationPromise;
+    if (!inFlight && state.transcriptHydrationStatus !== "loading") {
+      break;
+    }
+    if (!inFlight || olderPageRequests.has(inFlight) || waits >= MAX_TAIL_REFRESH_WAITS) {
+      return inFlight;
+    }
+    // Page after the tail refresh instead of returning its `undefined`, which the
+    // history loader reads as "nothing loaded" and parks until some later render.
+    await Promise.resolve(inFlight).catch(() => {});
+    if (state.session?.active_thread_id !== threadId) {
+      return null;
+    }
+    before = store.getTranscriptHydrationCursor(state);
   }
 
   store.beginTranscriptHydration(state, "loading");
@@ -212,7 +233,7 @@ export async function loadOlderTranscript(
       // createTranscriptHistoryLoader), which avoids the "scroll to the top,
       // nothing loads until you wiggle" stall:
       //   true  → a page loaded and `prev_cursor` says more remain → keep going
-      //   false → just prepended the oldest page → stop for good (reached top)
+      //   false → just prepended the oldest page → stop until something changes
       const hasMore = page.prev_cursor != null;
       if (hasMore) {
         store.setTranscriptHydrationIdle(state, loadPromise);
@@ -234,6 +255,7 @@ export async function loadOlderTranscript(
     }
   });
 
+  olderPageRequests.add(loadPromise);
   store.setTranscriptHydrationPromise(state, loadPromise);
   startLoad();
   return loadPromise;

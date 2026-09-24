@@ -186,6 +186,15 @@ export function RemoteTranscriptPanel({
   // surface). The transcript scroll container is owned by this component, so
   // we can scope the loader's lifetime to the effect rather than the page.
   const historyLoaderRef = useRef(null);
+  // React keeps the sentinel across thread and relay switches; a new history
+  // must not inherit the previous one's loader state.
+  const historyKey = [
+    currentState.activeRelayId || "",
+    session?.active_thread_id || "",
+    session?.transcript_generation || "",
+  ].join("|");
+  const historyKeyRef = useRef(historyKey);
+  historyKeyRef.current = historyKey;
   useEffect(() => {
     const transcript = transcriptRef.current;
     if (!transcript) {
@@ -196,7 +205,7 @@ export function RemoteTranscriptPanel({
       scrollElement: transcript,
     });
     historyLoaderRef.current = loader;
-    loader.sync();
+    loader.sync(historyKeyRef.current);
     return () => {
       historyLoaderRef.current = null;
       loader.detach();
@@ -207,7 +216,7 @@ export function RemoteTranscriptPanel({
   // (entries ↔ empty ↔ ready). Re-sync after every render so the observer
   // stays attached to whichever sentinel is currently live.
   useLayoutEffect(() => {
-    historyLoaderRef.current?.sync();
+    historyLoaderRef.current?.sync(historyKey);
   });
 
   return h(

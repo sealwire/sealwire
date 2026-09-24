@@ -138,6 +138,33 @@ export function didPrependOlderTranscript(previousEntries, nextEntries) {
   });
 }
 
+// Paged-in history lands above the previous window's top; a message just sent
+// lands below it, even when it settles after its own reply started.
+export function entryArrivedAbovePreviousWindow(previousEntries, nextEntries, entryId) {
+  if (!entryId || !previousEntries?.length || !nextEntries?.length) {
+    return false;
+  }
+  const nextIndexById = new Map();
+  nextEntries.forEach((entry, index) => {
+    const id = transcriptRowKey(entry);
+    if (id) nextIndexById.set(id, index);
+  });
+  const entryIndex = nextIndexById.get(entryId);
+  if (entryIndex === undefined) {
+    return false;
+  }
+  for (const entry of previousEntries) {
+    const id = transcriptRowKey(entry);
+    if (id === entryId) {
+      return false;
+    }
+    if (id && nextIndexById.has(id)) {
+      return entryIndex < nextIndexById.get(id);
+    }
+  }
+  return false;
+}
+
 export function decideTranscriptScrollAction(options = {}) {
   const action = decideTranscriptScrollPosition(options);
   const pendingInputRequestIds = options.pendingInputRequestIds || [];
@@ -222,15 +249,32 @@ function decideTranscriptScrollPosition({
     };
   }
 
+  const previousEntries = previousSnapshot?.entries || [];
+  const latestUserUnhandled = Boolean(
+    nextLatestUserId
+    && !(alreadyAnchoredUserIds && alreadyAnchoredUserIds.has(nextLatestUserId))
+  );
+  // A long turn's prompt can first arrive with an older page; unclaimed, the next
+  // streamed row reads it as a send. Any distance off the bottom counts as reading.
+  const readingHistory =
+    liveScrollHeight - clientHeight - liveScrollTop > TRANSCRIPT_BOTTOM_FOLLOW_THRESHOLD_PX;
+  const revealedUserEntry =
+    latestUserUnhandled
+    && readingHistory
+    && entryArrivedAbovePreviousWindow(previousEntries, nextEntries, nextLatestUserId)
+      ? { userEntryId: nextLatestUserId }
+      : {};
+
   // Older transcript prepended at the top: don't lose the reader's place.
-  if (didPrependOlderTranscript(previousSnapshot?.entries || [], nextEntries)) {
+  if (didPrependOlderTranscript(previousEntries, nextEntries)) {
     if (liveScrollTop <= TOP_SCROLL_PRESERVE_THRESHOLD_PX) {
-      return { kind: "preserve" };
+      return { kind: "preserve", ...revealedUserEntry };
     }
     const prevScrollHeight = previousSnapshot?.scrollHeight || 0;
     return {
       kind: "anchor-prepend",
       scrollTop: Math.max(0, liveScrollHeight - prevScrollHeight + liveScrollTop),
+      ...revealedUserEntry,
     };
   }
 
@@ -246,10 +290,7 @@ function decideTranscriptScrollPosition({
   // latestUserEntryId because intermediate renders can momentarily show a subset
   // of entries (e.g. mid-hydration), causing the snapshot's latestUserEntryId to
   // regress. The Set is monotonic per thread so we only fire once.
-  if (
-    nextLatestUserId
-    && !(alreadyAnchoredUserIds && alreadyAnchoredUserIds.has(nextLatestUserId))
-  ) {
+  if (latestUserUnhandled && !revealedUserEntry.userEntryId) {
     return {
       kind: "jump-bottom",
       scrollTop: Math.max(0, liveScrollHeight - clientHeight),
@@ -277,10 +318,11 @@ function decideTranscriptScrollPosition({
       kind: "input-required",
       scrollTop: Math.max(0, liveScrollHeight - clientHeight),
       inputRequestIds: [...pendingInputRequestIds],
+      ...revealedUserEntry,
     };
   }
 
-  return { kind: "preserve" };
+  return { kind: "preserve", ...revealedUserEntry };
 }
 
 // Broadcast an applied scroll action to the stick-to-bottom follower. Fired

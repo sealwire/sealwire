@@ -181,6 +181,100 @@ test("older transcript prepended in the same thread anchors the viewport so the 
   assert.equal(action.scrollTop, 3500 - 2000 + 500);
 });
 
+// A long turn can outgrow the first window (remote's compact snapshot most of
+// all), so its prompt is first seen when the reader pages up: history, not a send.
+test("a prompt paged in above the window does not pull a history reader back to the bottom", () => {
+  const engine = createTranscriptScrollBookkeeping();
+  const view = (entries, geometry) => render(engine, {
+    key: "thread-1",
+    threadId: "thread-1",
+    entries,
+    scrollElement: makeScrollElement({ clientHeight: 400, ...geometry }),
+  });
+  view([agentEntry("a5"), agentEntry("a6")], { scrollHeight: 2000 });
+
+  const paged = view(
+    [userEntry("u1"), agentEntry("a4"), agentEntry("a5"), agentEntry("a6")],
+    { scrollHeight: 3000, scrollTop: 300 }
+  );
+  assert.equal(paged.kind, "anchor-prepend");
+
+  const streamed = view(
+    [userEntry("u1"), agentEntry("a4"), agentEntry("a5"), agentEntry("a6"), agentEntry("a7")],
+    { scrollHeight: 3200, scrollTop: 1300 }
+  );
+  assert.equal(streamed.kind, "preserve", "the next streamed row must leave the reader where they are");
+
+  const sent = view(
+    [userEntry("u1"), agentEntry("a4"), agentEntry("a5"), agentEntry("a6"), agentEntry("a7"), userEntry("u2")],
+    { scrollHeight: 3400, scrollTop: 1300 }
+  );
+  assert.equal(sent.kind, "jump-bottom", "a message sent after the window still lands at the bottom");
+  assert.equal(sent.userEntryId, "u2");
+});
+
+test("a prompt revealed above the window in the same render as a streamed row is not a send", () => {
+  const engine = createTranscriptScrollBookkeeping();
+  const view = (entries, geometry) => render(engine, {
+    key: "thread-1",
+    threadId: "thread-1",
+    entries,
+    scrollElement: makeScrollElement({ clientHeight: 400, ...geometry }),
+  });
+  view([agentEntry("a5"), agentEntry("a6")], { scrollHeight: 2000 });
+
+  const action = view(
+    [userEntry("u1"), agentEntry("a4"), agentEntry("a5"), agentEntry("a6"), agentEntry("a7")],
+    { scrollHeight: 3200, scrollTop: 700 }
+  );
+  assert.equal(action.kind, "preserve");
+});
+
+// A flick escapes by less than a screen, which is already inside the prefetch
+// band, so the prompt's page can land while the reader is only a little way up.
+test("a prompt paged in while the reader sits less than a screen up does not yank them", () => {
+  const engine = createTranscriptScrollBookkeeping();
+  const view = (entries, geometry) => render(engine, {
+    key: "thread-1",
+    threadId: "thread-1",
+    entries,
+    scrollElement: makeScrollElement({ clientHeight: 400, ...geometry }),
+  });
+  view([agentEntry("a5"), agentEntry("a6")], { scrollHeight: 2000, scrollTop: 1600 });
+  const action = view(
+    [userEntry("u1"), agentEntry("a4"), agentEntry("a5"), agentEntry("a6"), agentEntry("a7")],
+    { scrollHeight: 2800, scrollTop: 2100 }
+  );
+  assert.equal(action.kind, "preserve", "300px up is still a reader who left the bottom");
+});
+
+// The reply's delta can beat the snapshot carrying its message, which then
+// settles ABOVE the reply's first row — still the send the reader is watching.
+test("a first message that settles above its own reply still lands the reader at the bottom", () => {
+  const engine = createTranscriptScrollBookkeeping();
+  engine.commitSnapshot({
+    key: "thread-1",
+    threadId: "thread-1",
+    entries: [],
+    scrollElement: makeScrollElement({ scrollHeight: 400, clientHeight: 400 }),
+  });
+  const view = (entries, geometry) => render(engine, {
+    key: "thread-1",
+    threadId: "thread-1",
+    entries,
+    scrollElement: makeScrollElement({ clientHeight: 400, ...geometry }),
+  });
+  view([agentEntry("r1")], { scrollHeight: 400 });
+  const actions = [
+    view([userEntry("u1"), agentEntry("r1")], { scrollHeight: 1200, scrollTop: 800 }),
+    view([userEntry("u1"), agentEntry("r1"), agentEntry("r2")], { scrollHeight: 1400, scrollTop: 800 }),
+  ];
+  assert.ok(
+    actions.some((action) => action.kind === "jump-bottom" && action.userEntryId === "u1"),
+    `expected the send to jump to the bottom, got ${actions.map((action) => action.kind).join(", ")}`
+  );
+});
+
 // --- first message from an empty thread -------------------------------------
 
 test("a first message on a thread whose empty snapshot is already committed is a new message, not a restore", () => {

@@ -7,6 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import { deleteThreadsForCwdAndWait, fetchSession } from "./e2e-thread-cleanup.mjs";
 import { prepareSeededCodexHome } from "./e2e-codex-home.mjs";
+import { createFakeProviderScenarioHarness } from "./e2e/harness/fake-provider.mjs";
 import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
 import {
   attachPageDebugLogging,
@@ -56,6 +57,19 @@ const RELAY_ID = process.env.BROWSER_E2E_PUBLIC_RELAY_ID || "browser-e2e-relay-1
 const BROKER_ROOM_ID =
   process.env.BROWSER_E2E_PUBLIC_REMOTE_FOLLOW_ROOM_ID || "browser-public-remote-follow-room";
 const USE_FAKE_PROVIDER = process.env.AGENT_PROVIDERS === "fake";
+const STREAM_SCROLL_PROMPT = `remote-scroll-stream ${"A long user message keeps earlier context above the live reply. ".repeat(14)}`;
+const STREAM_SCROLL_CHUNKS = Array.from(
+  { length: 38 },
+  (_, index) => `Remote streaming paragraph ${index + 1}.\n\n`
+);
+
+// A turn long enough that the phone's first window starts below its prompt.
+const LONG_TURN_PROMPT = "remote-long-turn";
+const LONG_TURN_PAD = "This sentence pads the paragraph so it wraps across a couple of lines. ".repeat(2);
+const LONG_TURN_CHUNKS = Array.from(
+  { length: 70 },
+  (_, index) => `Remote long paragraph ${index + 1}. ${LONG_TURN_PAD}\n\n`
+);
 
 function logStep(message, details) {
   const suffix = details ? ` ${JSON.stringify(details)}` : "";
@@ -77,6 +91,26 @@ async function main() {
   const workspaceDir = await fs.realpath(
     await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-public-remote-follow-workspace-"))
   );
+  const scenario = USE_FAKE_PROVIDER
+    ? await createFakeProviderScenarioHarness(relayStateDir, {
+        matchers: [{
+          contains: ["remote-scroll-stream"],
+          scenario: {
+            chunks: STREAM_SCROLL_CHUNKS,
+            chunk_delay_ms: 260,
+          },
+        }, {
+          contains: [LONG_TURN_PROMPT],
+          scenario: {
+            tool_calls: 40,
+            reasoning_between_tools: true,
+            tool_call_delay_ms: 20,
+            chunks: LONG_TURN_CHUNKS,
+            chunk_delay_ms: 300,
+          },
+        }],
+      })
+    : null;
 
   const broker = startPublicBroker({
     brokerPort,
@@ -100,7 +134,9 @@ async function main() {
     relayRefreshToken: RELAY_REFRESH_TOKEN,
     codexHomeDir,
     peerId: "browser-public-remote-follow-relay",
-    extraEnv: USE_FAKE_PROVIDER ? { AGENT_PROVIDERS: "fake" } : {},
+    extraEnv: USE_FAKE_PROVIDER
+      ? { AGENT_PROVIDERS: "fake", ...scenario.env }
+      : {},
   });
   logStep("relay started", { relayPort, workspaceDir });
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
@@ -266,6 +302,160 @@ async function main() {
       "remote transcript should update after the local Codex reply"
     );
 
+    if (USE_FAKE_PROVIDER) {
+      // Exercise the actual remote pane while a broker stream is still active.
+      // Its compact snapshot has a smaller transcript budget than LocalWeb, so
+      // this is the surface where a stuck bottom follower is easiest to feel.
+      await remotePage.setViewportSize({ width: 390, height: 740 });
+      await messageInput.fill(STREAM_SCROLL_PROMPT);
+      await localPage.click("#send-button");
+      await remotePage.waitForFunction(
+        () => (document.querySelector("#remote-transcript")?.textContent || "")
+          .includes("Remote streaming paragraph 5."),
+        null,
+        { timeout: TIMEOUT_MS }
+      );
+      const transcriptBox = await remotePage.locator("#remote-transcript").boundingBox();
+      assert.ok(transcriptBox, "remote transcript must be visible during streaming");
+      await remotePage.mouse.move(
+        transcriptBox.x + transcriptBox.width / 2,
+        transcriptBox.y + transcriptBox.height / 2
+      );
+      await remotePage.mouse.wheel(0, -850);
+      await remotePage.waitForFunction(() => {
+        const pane = document.querySelector("#remote-transcript");
+        return pane && pane.scrollHeight - pane.clientHeight - pane.scrollTop > 120;
+      }, null, { timeout: 3000 });
+      const escaped = await remotePage.evaluate(() => {
+        const pane = document.querySelector("#remote-transcript");
+        return {
+          distance: pane.scrollHeight - pane.clientHeight - pane.scrollTop,
+          height: pane.scrollHeight,
+          top: pane.scrollTop,
+        };
+      });
+      await delay(900);
+      const held = await remotePage.evaluate(() => {
+        const pane = document.querySelector("#remote-transcript");
+        return {
+          distance: pane.scrollHeight - pane.clientHeight - pane.scrollTop,
+          height: pane.scrollHeight,
+          top: pane.scrollTop,
+        };
+      });
+      assert.ok(
+        held.distance > 120,
+        `remote reader must stay above the streaming tail (${JSON.stringify({ escaped, held })})`
+      );
+      assert.ok(
+        held.height >= escaped.height,
+        `remote transcript should keep streaming after the escape (${JSON.stringify({ escaped, held })})`
+      );
+      logStep("remote streaming scroll escaped", { escaped, held });
+
+      await remotePage.locator(".scroll-to-bottom-button").click();
+      await remotePage.waitForFunction(() => {
+        const pane = document.querySelector("#remote-transcript");
+        return pane && pane.scrollHeight - pane.clientHeight - pane.scrollTop <= 4;
+      }, null, { timeout: 3000 });
+      assert.ok((await fetchSession(relayPort)).active_turn_id, "touch drag must happen mid-stream");
+      const touchBox = await remotePage.locator("#remote-transcript").boundingBox();
+      const client = await remotePage.context().newCDPSession(remotePage);
+      try {
+        const x = Math.round(touchBox.x + touchBox.width / 2);
+        let y = Math.round(touchBox.y + touchBox.height * 0.3);
+        await client.send("Input.dispatchTouchEvent", {
+          type: "touchStart",
+          touchPoints: [{ x, y }],
+        });
+        for (let step = 0; step < 35; step += 1) {
+          y += 5;
+          await client.send("Input.dispatchTouchEvent", {
+            type: "touchMove",
+            touchPoints: [{ x, y }],
+          });
+          await delay(16);
+        }
+        await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      } finally {
+        await client.detach();
+      }
+      await delay(600);
+      const touchDistance = await remotePage.evaluate(() => {
+        const pane = document.querySelector("#remote-transcript");
+        return pane.scrollHeight - pane.clientHeight - pane.scrollTop;
+      });
+      assert.ok(
+        touchDistance > 80,
+        `remote touch pull must escape bottom follow while streaming (distance=${touchDistance})`
+      );
+      logStep("remote streaming touch escaped", { touchDistance });
+
+      await waitForTurnSettled(relayPort);
+      await messageInput.fill(LONG_TURN_PROMPT);
+      await localPage.click("#send-button");
+      await waitForStreamedChars(relayPort, threadId, 5000);
+      // The phone reopens mid-turn (a backgrounded web app reloads): its first
+      // window is the compact tail, which starts below this turn's prompt.
+      const remoteAppUrl = new URL(remotePage.url());
+      remoteAppUrl.hash = "";
+      await remotePage.goto(remoteAppUrl.toString(), { waitUntil: "domcontentloaded" });
+      await remotePage.waitForFunction(
+        () => (document.querySelector("#remote-transcript")?.textContent || "")
+          .includes("Remote long paragraph 3."),
+        null,
+        { timeout: TIMEOUT_MS }
+      );
+      await delay(1000);
+      const promptShown = () => [...document.querySelectorAll("#remote-transcript .chat-message-user")]
+        .some((node) => (node.textContent || "").includes("remote-long-turn"));
+      assert.equal(
+        await remotePage.evaluate(promptShown),
+        false,
+        "precondition: the reopened phone's first window starts below the turn's prompt"
+      );
+      const pullClient = await remotePage.context().newCDPSession(remotePage);
+      let pulls = 0;
+      try {
+        const box = await remotePage.locator("#remote-transcript").boundingBox();
+        const x = Math.round(box.x + box.width / 2);
+        while (!(await remotePage.evaluate(promptShown)) && pulls < 40) {
+          pulls += 1;
+          let y = Math.round(box.y + box.height * 0.25);
+          await pullClient.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+          for (let step = 0; step < 12; step += 1) {
+            y += 25;
+            await pullClient.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y }] });
+            await delay(16);
+          }
+          await pullClient.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+          await delay(300);
+        }
+      } finally {
+        await pullClient.detach();
+      }
+      assert.ok(await remotePage.evaluate(promptShown), `pulling down never paged in the prompt (${pulls} pulls)`);
+      const revealRevision = (await fetchSession(relayPort)).transcript_revision;
+      const revealDistances = [];
+      for (let index = 0; index < 14; index += 1) {
+        await delay(150);
+        revealDistances.push(await remotePage.evaluate(() => {
+          const pane = document.querySelector("#remote-transcript");
+          return Math.round(pane.scrollHeight - pane.clientHeight - pane.scrollTop);
+        }));
+      }
+      const afterReveal = await fetchSession(relayPort);
+      assert.ok(
+        afterReveal.active_turn_id && afterReveal.transcript_revision > revealRevision,
+        "the long turn must still be streaming while the phone reads its history"
+      );
+      assert.ok(
+        Math.min(...revealDistances) > 150,
+        `paging in the prompt must not pull the phone reader back to the bottom (${revealDistances.join(", ")})`
+      );
+      logStep("remote prompt paged in without a yank", { pulls, revealDistances });
+    }
+
     console.log(
       JSON.stringify(
         {
@@ -343,6 +533,30 @@ async function installRemoteObserverHooks(page) {
 
     window.WebSocket = InstrumentedWebSocket;
   });
+}
+
+async function waitForTurnSettled(relayPort, timeoutMs = TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!(await fetchSession(relayPort)).active_turn_id) return;
+    await delay(200);
+  }
+  throw new Error("timed out waiting for the turn to settle");
+}
+
+// The snapshot caps live text, so read the reply's progress from the page API.
+async function waitForStreamedChars(relayPort, threadId, minChars, timeoutMs = TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const response = await fetch(
+      `http://127.0.0.1:${relayPort}/api/threads/${encodeURIComponent(threadId)}/transcript`,
+      { headers: { "X-Agent-Relay-CSRF": "1" } }
+    );
+    const last = (await response.json())?.data?.entries?.at(-1);
+    if (last?.kind === "agent_text" && (last.text || "").length >= minChars) return;
+    await delay(200);
+  }
+  throw new Error(`timed out waiting for ${minChars} streamed chars`);
 }
 
 async function waitForActiveThread(relayPort, cwd, timeoutMs = TIMEOUT_MS) {
