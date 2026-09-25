@@ -1,9 +1,5 @@
-// Keep the right-rail's top header band (the Changes/Reviewer tabs row —
-// `.right-panel-tabs-header`) AND the sidebar's Sealwire logo row
-// (`.sidebar-top-bar`) the same height as the chat-header so those three top
-// bands share one bottom edge across the app. The chat-header's content (title +
-// optional subtitle / path) varies, so we measure it instead of hard-coding a
-// pixel value.
+// The chat-header's height varies with its subtitle, so it is measured: the sidebar logo
+// row and the right rail's title row size to it so all three top bands share one edge.
 
 export function setupHeaderBandSync({
   chatHeader,

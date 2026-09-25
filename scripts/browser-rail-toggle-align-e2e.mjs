@@ -1,9 +1,5 @@
-// Regression: the right-rail's "hide panel" toggle (#rail-top-toggle) must line up
-// with the Changes/Agents segmented tabs in the header band — same vertical
-// center, and sitting in its own space to the right of the pill rather than
-// overlapping it. The toggle was pinned to a fixed `top: 12px` calibrated for an
-// older, shorter header; once the tabbed header band grew to --header-band-height
-// the toggle rode up ~9px above the pill's center and overlapped its right end.
+// Regression: Changes/Agents belongs on the session tab line like the sidebar's Sessions
+// row, leaving the rail's title row to the hide toggle, which must not scroll away.
 //
 //   npm run test:browser:rail-toggle-align
 import assert from "node:assert/strict";
@@ -61,11 +57,12 @@ async function main() {
 
     await page.waitForSelector("#workspace-changes-rail", { state: "visible" });
     await page.waitForSelector("#rail-top-toggle", { state: "visible" });
-
-    // Switch the rail's right panel to the Agents tab (where the screenshot was taken);
-    // the header band + toggle are identical on the Changes tab, but this mirrors the report.
-    await page.locator("#review-panel-rail-tabs button", { hasText: "Agents" }).click();
-    await page.waitForTimeout(150);
+    await page.waitForSelector(".session-tab", { state: "visible", timeout: TIMEOUT_MS });
+    await page.waitForFunction(() =>
+      Boolean(
+        getComputedStyle(document.documentElement).getPropertyValue("--header-band-height").trim()
+      )
+    );
 
     const measure = () =>
       page.evaluate(() => {
@@ -85,27 +82,35 @@ async function main() {
         return {
           toggle: rect("#rail-top-toggle"),
           seg: rect("#review-panel-rail-tabs"),
+          tab: rect(".session-tab"),
+          chatHeader: rect(".chat-shell > .chat-header"),
           rail: rect("#workspace-changes-rail"),
         };
       });
 
-    const assertAligned = (metrics, at) => {
+    const assertLayout = (metrics, at) => {
+      const detail = JSON.stringify(metrics);
       assert.ok(metrics.toggle, `[${at}] expected #rail-top-toggle to be present`);
       assert.ok(metrics.seg, `[${at}] expected the Changes/Agents segmented control`);
+      assert.ok(metrics.tab, `[${at}] expected a session tab`);
+      assert.ok(metrics.chatHeader, `[${at}] expected the chat-header`);
 
-      const verticalDiff = Math.abs(metrics.toggle.cy - metrics.seg.cy);
+      const tabLine = Math.abs(metrics.seg.cy - metrics.tab.cy);
       assert.ok(
-        verticalDiff <= 1.5,
-        `[${at}] toggle should be vertically centered with the tabs (|Δcenter| = ` +
-          `${verticalDiff.toFixed(1)}px, toggle.cy=${metrics.toggle.cy}, seg.cy=${metrics.seg.cy})`
+        tabLine <= 1.5,
+        `[${at}] Changes/Agents must sit on the session tab line (|Δcenter| = ` +
+          `${tabLine.toFixed(1)}px) — ${detail}`
       );
-      // The toggle must sit in its own space to the RIGHT of the pill, not overlap it.
+      const titleRow = Math.abs(metrics.toggle.cy - metrics.chatHeader.cy);
       assert.ok(
-        metrics.toggle.left >= metrics.seg.right,
-        `[${at}] toggle should not overlap the segmented tabs (toggle.left=` +
-          `${metrics.toggle.left}, seg.right=${metrics.seg.right})`
+        titleRow <= 1.5,
+        `[${at}] the rail toggle must stay on the chat-header's title row (|Δcenter| = ` +
+          `${titleRow.toFixed(1)}px) — ${detail}`
       );
-      return verticalDiff;
+      assert.ok(
+        metrics.toggle.bottom <= metrics.seg.top,
+        `[${at}] the toggle must not overlap the Changes/Agents switch — ${detail}`
+      );
     };
 
     // 1) Default rail width. Let any launch-time width transition settle first.
@@ -114,12 +119,10 @@ async function main() {
       return rail && Math.abs(rail.getBoundingClientRect().width - 320) <= 2;
     });
     const defaultMetrics = await measure();
-    const defaultDiff = assertAligned(defaultMetrics, "default-width");
+    assertLayout(defaultMetrics, "default-width");
 
-    // 2) Minimum rail width (createPanelControl clamps --right-rail-width to 260px).
-    //    Alignment/overlap must hold when the pill is squeezed narrow too. The grid
-    //    column animates over 220ms, so WAIT for the rail to actually reach 260px —
-    //    measuring mid-transition would silently assert a wider width.
+    // 2) Minimum rail width (createPanelControl clamps --right-rail-width to 260px). The
+    //    grid column animates over 220ms, so wait for the rail to actually get there.
     await page.evaluate(() => {
       document.documentElement.style.setProperty("--right-rail-width", "260px");
     });
@@ -128,16 +131,33 @@ async function main() {
       return rail && Math.abs(rail.getBoundingClientRect().width - 260) <= 2;
     });
     const narrowMetrics = await measure();
+    assertLayout(narrowMetrics, "min-width-260");
+
+    // 3) Scrolled, by a real wheel. CSSOM because the CSP refuses inline <style>; two
+    //    frames because the compositor routes the wheel by the last committed scroll tree.
+    await page.evaluate(async () => {
+      document.querySelector("#workspace-changes-rail .right-panel-tabs").style.minHeight =
+        "3000px";
+      for (let i = 0; i < 2; i += 1) await new Promise((r) => requestAnimationFrame(r));
+    });
+    await page.mouse.move(narrowMetrics.rail.left + narrowMetrics.rail.width / 2, 400);
+    await page.mouse.wheel(0, 600);
+    await page.waitForFunction(() => {
+      const rail = document.querySelector("#workspace-changes-rail");
+      return [rail, ...rail.querySelectorAll("*")].some((el) => el.scrollTop > 0);
+    });
+    await page.waitForTimeout(150);
+    const scrolledMetrics = await measure();
+    assertLayout(scrolledMetrics, "scrolled");
+    const toggleDrift = Math.abs(scrolledMetrics.toggle.top - narrowMetrics.toggle.top);
     assert.ok(
-      Math.abs(narrowMetrics.rail.width - 260) <= 2,
-      `[min-width-260] rail should have settled at 260px (got ${narrowMetrics.rail.width})`
+      toggleDrift <= 0.5,
+      `[scrolled] the rail toggle must not scroll away (moved ${toggleDrift.toFixed(1)}px)`
     );
-    const narrowDiff = assertAligned(narrowMetrics, "min-width-260");
 
     console.log(
       JSON.stringify(
-        { ok: true, default: { metrics: defaultMetrics, verticalDiff: defaultDiff },
-          narrow: { metrics: narrowMetrics, verticalDiff: narrowDiff } },
+        { ok: true, default: defaultMetrics, narrow: narrowMetrics, scrolled: scrolledMetrics },
         null,
         2
       )
