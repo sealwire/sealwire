@@ -235,6 +235,23 @@ impl AppState {
         }
     }
 
+    /// A static spec cannot know which providers this relay runs, so without the enum
+    /// an agent is left guessing names like "claude" for `claude_code`.
+    fn tool_view(&self, spec: &orchestrator_tools::ToolSpec) -> OrchestratorToolView {
+        let mut input_schema = spec.input_schema();
+        let providers = self.available_providers();
+        if let Some(provider) = input_schema["properties"].get_mut("provider") {
+            if !providers.is_empty() {
+                provider["enum"] = json!(providers);
+            }
+        }
+        OrchestratorToolView {
+            name: spec.name.to_string(),
+            description: spec.summary.to_string(),
+            input_schema,
+        }
+    }
+
     /// Every tool, ready to hand to a model.
     ///
     /// Deliberately not gated on workspace state. The model fetches this once
@@ -250,11 +267,7 @@ impl AppState {
         }
         orchestrator_tools::available_tools()
             .into_iter()
-            .map(|spec| OrchestratorToolView {
-                name: spec.name.to_string(),
-                description: spec.summary.to_string(),
-                input_schema: spec.input_schema(),
-            })
+            .map(|spec| self.tool_view(spec))
             .collect()
     }
 
@@ -293,11 +306,7 @@ impl AppState {
     pub async fn list_team_seat_tools(&self) -> Vec<OrchestratorToolView> {
         orchestrator_tools::seat_tools()
             .into_iter()
-            .map(|spec| OrchestratorToolView {
-                name: spec.name.to_string(),
-                description: spec.summary.to_string(),
-                input_schema: spec.input_schema(),
-            })
+            .map(|spec| self.tool_view(spec))
             .collect()
     }
 
@@ -358,11 +367,7 @@ impl AppState {
     pub async fn list_peer_tools(&self) -> Vec<OrchestratorToolView> {
         orchestrator_tools::peer_tools()
             .into_iter()
-            .map(|spec| OrchestratorToolView {
-                name: spec.name.to_string(),
-                description: spec.summary.to_string(),
-                input_schema: spec.input_schema(),
-            })
+            .map(|spec| self.tool_view(spec))
             .collect()
     }
 

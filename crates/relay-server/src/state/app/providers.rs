@@ -209,6 +209,19 @@ impl AppState {
             .ok_or_else(|| "no agent provider available".to_string())
     }
 
+    /// Names the alternatives: the caller is usually an agent that guessed the name.
+    fn unknown_provider_error(&self, name: &str) -> String {
+        let available = self.available_providers();
+        format!(
+            "agent provider '{name}' is not available (have: {})",
+            if available.is_empty() {
+                "none".to_string()
+            } else {
+                available.join(", ")
+            }
+        )
+    }
+
     pub(super) fn resolve_provider(
         &self,
         provider_name: Option<&str>,
@@ -218,7 +231,7 @@ impl AppState {
                 .providers
                 .get_key_value(name)
                 .map(|(k, v)| (k.as_str(), v))
-                .ok_or_else(|| format!("agent provider '{name}' is not available")),
+                .ok_or_else(|| self.unknown_provider_error(name)),
             None => self.require_active_provider(),
         }
     }
@@ -389,7 +402,7 @@ impl AppState {
         let (provider, bridge) = self
             .providers
             .get_key_value(provider)
-            .ok_or_else(|| format!("agent provider '{provider}' is not available"))?;
+            .ok_or_else(|| self.unknown_provider_error(provider))?;
         let provider_handle = {
             let relay = self.relay.read().await;
             relay

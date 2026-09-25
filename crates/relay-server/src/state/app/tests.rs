@@ -30935,6 +30935,41 @@ watchdog settle this Blocked",
         );
     }
 
+    // An agent guessed "claude" and "anthropic" before landing on "claude_code":
+    // the listing named no choices and the refusal named none either.
+    #[tokio::test]
+    async fn ask_agent_names_the_providers_it_accepts() {
+        let project = TempDir::new().expect("tmpdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        let token = app.ask_token_for_thread(&thread).await;
+
+        let tools = app.list_peer_tools_for(&token).await;
+        let ask = tools
+            .iter()
+            .find(|tool| tool.name == "ask_agent")
+            .expect("ask_agent is offered");
+        assert_eq!(
+            ask.input_schema["properties"]["provider"]["enum"],
+            serde_json::json!(["fake"]),
+            "the provider param must list what this relay runs"
+        );
+
+        let err = app
+            .call_peer_tool(
+                "ask_agent",
+                &serde_json::json!({ "message": "look", "provider": "claude" }),
+                &token,
+            )
+            .await
+            .expect_err("an unknown provider is refused");
+        assert!(
+            err.contains("'claude'") && err.contains("fake"),
+            "the refusal must name the providers that would work, got: {err}"
+        );
+    }
+
     #[tokio::test]
     async fn a_session_something_else_drives_is_refused_the_tools_for_driving_yourself() {
         let project = TempDir::new().expect("tempdir");
