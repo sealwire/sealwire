@@ -202,6 +202,31 @@ impl AppState {
             .iter()
             .map(String::as_str)
             .collect::<std::collections::HashSet<_>>();
+        let sibling_worktree_mains = {
+            let (allowed_roots, candidates) = {
+                let relay = self.relay.read().await;
+                // The cache too: the locked section below may serve or fill rows from it.
+                let candidates = all_threads
+                    .iter()
+                    .chain(relay.threads.iter())
+                    .map(|thread| thread.cwd.clone())
+                    .chain(
+                        all_threads
+                            .iter()
+                            .filter(|thread| thread.cwd.is_empty())
+                            .filter_map(|thread| relay.thread_cwd(&thread.id)),
+                    )
+                    .collect::<Vec<_>>();
+                (relay.allowed_roots.clone(), candidates)
+            };
+            sibling_worktree_mains(candidates, &allowed_roots).await
+        };
+        #[cfg(test)]
+        {
+            self.thread_list_scope_arrivals
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(self.thread_list_scope_barrier.lock().await);
+        }
         let mut relay = self.relay.write().await;
         // `all_threads` is canonical here. Provider-native rows crossed the adoption
         // seam under their authoritative configured provider key before this lock and
@@ -231,6 +256,15 @@ impl AppState {
             .as_deref()
             .map(|id| relay.device_path_scope(id))
             .unwrap_or_default();
+        // A sibling's repo is re-checked against the roots as they are NOW, not as they
+        // were when it was verified off the lock.
+        let in_scope = |cwd: &str| {
+            path_within_device_scope(cwd, &device_scope, &allowed_roots)
+                || (device_scope.is_empty()
+                    && sibling_worktree_mains.get(cwd).is_some_and(|main| {
+                        path_within_allowed_roots(&main.to_string_lossy(), &allowed_roots)
+                    }))
+        };
         for thread in &mut all_threads {
             if thread.cwd.is_empty() {
                 if let Some(cwd) = relay.thread_cwd(&thread.id) {
@@ -244,10 +278,16 @@ impl AppState {
         // reviewers are first-class seats in the task worktree, so they stay visible
         // alongside the TL and Dev sessions.
         let (reviewer_ids, hidden_reviewer_ids) = relay.reviewer_thread_ids_and_navigation_hidden();
-        let mut threads = relay
+        let (scoped, out_of_scope): (Vec<_>, Vec<_>) = relay
             .filter_deleted_threads(all_threads)
             .into_iter()
-            .filter(|thread| path_within_device_scope(&thread.cwd, &device_scope, &allowed_roots))
+            .partition(|thread| in_scope(&thread.cwd));
+        let out_of_scope_ids = out_of_scope
+            .into_iter()
+            .map(|thread| thread.id)
+            .collect::<HashSet<_>>();
+        let mut threads = scoped
+            .into_iter()
             .filter(|thread| !hidden_reviewer_ids.contains(&thread.id))
             .collect::<Vec<_>>();
 
@@ -261,17 +301,17 @@ impl AppState {
         // ...but never re-add a nav-hidden reviewer thread: it must stay hidden even
         // when it is the active thread mid-review. A task-team reviewer is not in this
         // narrower set and can therefore be restored like any other visible session.
+        // A row the provider DID return from outside scope is an answer, not a gap to fill.
         if let Some(active_id) = relay.active_thread_id.clone() {
             if !hidden_reviewer_ids.contains(&active_id)
+                && !out_of_scope_ids.contains(&active_id)
                 && !threads.iter().any(|thread| thread.id == active_id)
             {
                 if let Some(active_thread) = relay
                     .threads
                     .iter()
                     .find(|thread| thread.id == active_id)
-                    .filter(|thread| {
-                        path_within_device_scope(&thread.cwd, &device_scope, &allowed_roots)
-                    })
+                    .filter(|thread| in_scope(&thread.cwd))
                     .cloned()
                 {
                     threads.push(active_thread);
@@ -394,6 +434,17 @@ impl AppState {
             threads: response_threads,
             unavailable_providers,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn hold_thread_list_scope_barrier(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.thread_list_scope_barrier.clone().lock_owned().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn thread_list_scope_arrivals(&self) -> u64 {
+        self.thread_list_scope_arrivals
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Grant or withdraw trust for one directory.
@@ -1190,4 +1241,34 @@ impl AppState {
             },
         })
     }
+}
+
+/// The main repo of each cwd outside the relay roots that is a linked worktree of an
+/// allowed repo — the trees the workspace panel already offers as preview-only.
+async fn sibling_worktree_mains(
+    candidates: Vec<String>,
+    allowed_roots: &[String],
+) -> HashMap<String, std::path::PathBuf> {
+    let mut mains = HashMap::new();
+    if allowed_roots.is_empty() {
+        return mains;
+    }
+    let mut checked = HashSet::new();
+    for cwd in candidates {
+        if cwd.is_empty()
+            || !checked.insert(cwd.clone())
+            || path_within_allowed_roots(&cwd, allowed_roots)
+        {
+            continue;
+        }
+        let normalized = normalize_cwd(&cwd);
+        if let Some(main) =
+            super::workspace_trust::repository_root(std::path::Path::new(&normalized)).await
+        {
+            if path_within_allowed_roots(&main.to_string_lossy(), allowed_roots) {
+                mains.insert(cwd, main);
+            }
+        }
+    }
+    mains
 }

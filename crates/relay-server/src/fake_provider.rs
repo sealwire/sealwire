@@ -525,6 +525,7 @@ pub struct FakeProviderBridge {
     /// One-shot: the next `archive_thread` fails, so a test can stand in the state
     /// where the provider refused and the relay must keep the session.
     refuse_next_archive: Arc<AtomicBool>,
+    fail_lists: Arc<AtomicBool>,
 }
 
 impl FakeProviderBridge {
@@ -634,6 +635,17 @@ impl FakeProviderBridge {
         self.native_fork.store(true, Ordering::Relaxed);
     }
 
+    /// Report every thread from `cwd`, the way Claude lists a session after it moved itself.
+    pub(crate) async fn relocate_threads(&self, cwd: &str) {
+        for thread in self.threads.lock().await.values_mut() {
+            thread.summary.cwd = cwd.to_string();
+        }
+    }
+
+    pub(crate) fn fail_lists(&self, fail: bool) {
+        self.fail_lists.store(fail, Ordering::Relaxed);
+    }
+
     pub(crate) fn refuse_next_archive(&self) {
         self.refuse_next_archive.store(true, Ordering::Relaxed);
     }
@@ -710,6 +722,7 @@ impl FakeProviderBridge {
             transcript_paging: Arc::new(AtomicBool::new(false)),
             native_fork: Arc::new(AtomicBool::new(false)),
             refuse_next_archive: Arc::new(AtomicBool::new(false)),
+            fail_lists: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -736,6 +749,9 @@ impl FakeProviderBridge {
 #[async_trait]
 impl ProviderBridge for FakeProviderBridge {
     async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String> {
+        if self.fail_lists.load(Ordering::Relaxed) {
+            return Err("fake list failure".to_string());
+        }
         let mut threads = self
             .threads
             .lock()

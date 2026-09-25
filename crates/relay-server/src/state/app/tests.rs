@@ -2723,6 +2723,157 @@ is also what keeps the refusal from confirming it exists: {error}"
         }
     }
 
+    struct RelocatedFixture {
+        app: AppState,
+        bridge: Arc<FakeProviderBridge>,
+        main: String,
+        sibling: String,
+        thread_id: String,
+        _dirs: (TempDir, TempDir, TempDir),
+    }
+
+    impl RelocatedFixture {
+        async fn listed(&self, device_id: Option<&str>) -> bool {
+            self.app
+                .list_threads(50, device_id.map(str::to_string))
+                .await
+                .expect("list")
+                .threads
+                .iter()
+                .any(|thread| thread.id == self.thread_id)
+        }
+    }
+
+    /// A session started in an allowed repo, then reported by its provider from `../linkedwt`.
+    async fn relocated_fixture() -> RelocatedFixture {
+        let tmp = TempDir::new().expect("tmp");
+        let (main, sibling) = init_repo_with_worktree(tmp.path()).await;
+        let (app, bridge, project, outside) = build_app_with_bridge(&main).await;
+        grant_workspace(&app, &main).await;
+        allow_only(&app, &[&main]).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let started = app
+            .start_session(crate::protocol::StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(main.clone()),
+                model: Some("fake-echo".to_string()),
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("fake".to_string()),
+                initial_prompt: Some("go to the worktree".to_string()),
+                project_id: None,
+            })
+            .await
+            .expect("start");
+        let thread_id = started.active_thread_id.clone().expect("thread id");
+        wait_for_completed_agent_text(&app).await;
+        wait_for_idle_active_thread(&app).await;
+        app.relay.write().await.active_thread_id = None;
+        let fx = RelocatedFixture {
+            app,
+            bridge,
+            main,
+            sibling,
+            thread_id,
+            _dirs: (tmp, project, outside),
+        };
+        assert!(fx.listed(None).await, "listed before it moves");
+        fx.bridge.relocate_threads(&fx.sibling).await;
+        fx
+    }
+
+    // An agent that moves itself into `../repo-ci` is still the user's session; dropping it
+    // from the sidebar while it keeps running reads as "the session vanished".
+    #[tokio::test]
+    async fn a_session_that_relocated_into_a_sibling_worktree_stays_listed() {
+        let fx = relocated_fixture().await;
+        assert!(fx.listed(None).await);
+
+        let outside = TempDir::new().expect("outside");
+        fx.bridge
+            .relocate_threads(outside.path().to_str().unwrap())
+            .await;
+        assert!(
+            !fx.listed(None).await,
+            "an unrelated directory stays out of scope"
+        );
+
+        fx.bridge.relocate_threads(&fx.sibling).await;
+        pair_device(&fx.app, "device-narrow", vec![fx.main.clone()]).await;
+        assert!(
+            !fx.listed(Some("device-narrow")).await,
+            "a device the operator narrowed stays narrow"
+        );
+    }
+
+    // The failure path serves the cached row, and the empty-cwd path fills from it; both
+    // must be judged like a fresh row or one flaky list hides the session again.
+    #[tokio::test]
+    async fn a_relocated_session_survives_a_failed_or_cwd_less_provider_list() {
+        let fx = relocated_fixture().await;
+        assert!(fx.listed(None).await);
+
+        fx.bridge.fail_lists(true);
+        assert!(fx.listed(None).await, "served from cache on a failed list");
+        fx.bridge.fail_lists(false);
+
+        fx.app.relay.write().await.runtimes.remove(&fx.thread_id);
+        fx.bridge.relocate_threads("").await;
+        assert!(fx.listed(None).await, "cwd filled from the cached row");
+    }
+
+    // The active-thread re-add is for a session the provider cannot list yet; one it DID
+    // list from an unrelated directory must not come back from the cache.
+    #[tokio::test]
+    async fn an_active_session_that_moved_out_of_scope_is_not_restored_from_cache() {
+        let fx = relocated_fixture().await;
+        fx.app.relay.write().await.active_thread_id = Some(fx.thread_id.clone());
+        assert!(fx.listed(None).await);
+
+        fx.bridge.fail_lists(true);
+        assert!(fx.listed(None).await, "served from cache on a failed list");
+        fx.bridge.fail_lists(false);
+
+        let unrelated = TempDir::new().expect("unrelated");
+        fx.bridge
+            .relocate_threads(unrelated.path().to_str().unwrap())
+            .await;
+        assert!(!fx.listed(None).await);
+    }
+
+    // Verification runs off the lock; a root withdrawn in that window must still hide the
+    // row, or the list leaks a repo the operator just removed.
+    #[tokio::test]
+    async fn withdrawing_the_repo_during_a_list_hides_its_sibling_rows() {
+        let fx = relocated_fixture().await;
+        let unrelated = TempDir::new().expect("unrelated");
+
+        let hold = fx.app.hold_thread_list_scope_barrier().await;
+        let arrivals_before = fx.app.thread_list_scope_arrivals();
+        let app = fx.app.clone();
+        let list = tokio::spawn(async move { app.list_threads(50, None).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while fx.app.thread_list_scope_arrivals() == arrivals_before {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("list should reach the scope latch");
+        allow_only(&fx.app, &[unrelated.path().to_str().unwrap()]).await;
+        drop(hold);
+
+        let listed = list.await.expect("list task").expect("list");
+        assert!(
+            !listed
+                .threads
+                .iter()
+                .any(|thread| thread.id == fx.thread_id),
+            "got {:?}",
+            listed.threads
+        );
+    }
+
     // Only the relay-wide roots are relaxed; a device the operator narrowed stays narrow.
     #[tokio::test]
     async fn a_narrow_device_scope_still_hides_a_sibling_worktree() {

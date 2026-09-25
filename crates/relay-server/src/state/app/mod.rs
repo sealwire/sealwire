@@ -248,6 +248,12 @@ pub struct AppState {
     team_seat_ownership_arrivals: Arc<std::sync::atomic::AtomicU64>,
     /// Test-only latch after git listing and before workspace write-back, so a cwd
     /// observation can land in that window deterministically.
+    /// Test-only latch after sibling-worktree verification and before the list's write
+    /// lock, so the allowed roots can change in that window deterministically.
+    #[cfg(test)]
+    thread_list_scope_barrier: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(test)]
+    thread_list_scope_arrivals: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(test)]
     workspace_resolve_barrier: Arc<tokio::sync::Mutex<()>>,
     #[cfg(test)]
@@ -475,6 +481,10 @@ impl AppState {
             #[cfg(test)]
             team_seat_ownership_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(test)]
+            thread_list_scope_barrier: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            thread_list_scope_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
             workspace_resolve_barrier: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(test)]
             workspace_resolve_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -666,6 +676,10 @@ impl AppState {
             team_seat_ownership_barrier: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(test)]
             team_seat_ownership_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            thread_list_scope_barrier: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            thread_list_scope_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(test)]
             workspace_resolve_barrier: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(test)]
