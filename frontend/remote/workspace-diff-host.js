@@ -125,12 +125,16 @@ export function RemoteWorkspaceChangesRail({ reviewer = {} } = {}) {
       },
       h(RemoteRailToggleIcon)
     ),
-    h(RightPanelTabs, {
-      store,
-      panelId: "review-panel-remote-rail",
-      reviewer,
-      changes: h(WorkspaceChangesPanel, { store }),
-    })
+    h(
+      "div",
+      { className: "right-rail-body" },
+      h(RightPanelTabs, {
+        store,
+        panelId: "review-panel-remote-rail",
+        reviewer,
+        changes: h(WorkspaceChangesPanel, { store }),
+      })
+    )
   );
 }
 

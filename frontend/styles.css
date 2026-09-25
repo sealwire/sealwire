@@ -5852,7 +5852,7 @@ body.sidebar-collapsed .app-shell[data-view="tasks"] #tasks-sidebar-toggle {
   position: relative;
   display: flex;
   align-items: center;
-  /* Same top band as `.chat-header` and `.right-panel-tabs-header`: measured live
+  /* Same top band as `.chat-header` and the right rail's title row: measured live
      into --header-band-height by header-band-sync.js. Without this the logo row is
      shorter than the project title row and Sessions drifts off the tab strip. */
   min-height: var(--header-band-height, 67px);
@@ -6024,10 +6024,8 @@ body.sidebar-collapsed .sidebar-top-toggle {
  * still bring the rail back. */
 .rail-top-toggle {
   position: absolute;
-  /* Center in the header band — its height is measured live from the chat-header by
-     header-band-sync.js — so the toggle lines up with the Changes/Reviewer tabs. A
-     fixed `top` was calibrated for the older, shorter header and rode up above the
-     pill's center once the band grew to --header-band-height. */
+  /* Centred in the title band (the rail's padding-top), level with the chat-header. A
+     fixed `top` drifted once the measured band height changed. */
   top: calc(var(--header-band-height, 67px) / 2);
   right: 12px;
   transform: translateY(-50%);
@@ -6184,8 +6182,18 @@ body.is-resizing-panel {
 .right-rail {
   background: var(--surface-0);
   min-height: 0;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  /* The title row holds only the hide toggle, so Changes/Agents lands on the tab line.
+     It must not scroll: the toggle is positioned against the rail. */
+  padding-top: var(--header-band-height, 67px);
+  overflow: hidden;
+}
+.right-rail-body {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-x: hidden;
+  overflow-y: auto;
 }
 .workspace-changes-panel {
   display: flex;
@@ -6537,21 +6545,15 @@ body.is-resizing-panel {
   padding: 10px 12px;
   /* Matches the rail it leads, for the same sticky-opacity reason as .chat-header. */
   background: var(--surface-0);
-  /* This is the TOP band of the right rail, so it — not the inner ENVIRONMENT header —
-     matches the chat-header's height. The bottom borders it used to line up WITH are both
-     gone; the height sync still earns its place, because the two bands now meet as
-     adjacent colour fields and a mismatched height would show up as a step in the seam
-     rather than as two offset lines. The var is measured live from the chat-header by
-     header-band-sync.js; the segmented control stays vertically centered in the band. */
+  /* Only the phone sheet keeps this; in the rail the header is the second row. */
   min-height: var(--header-band-height, 67px);
   box-sizing: border-box;
 }
-/* In the rail (only), reserve room on the right for the absolutely-positioned
-   .rail-top-toggle so the Changes/Reviewer pill sits BESIDE it, not underneath it.
-   The mobile sheet reuses this header but has no toggle, so it keeps the symmetric
-   padding above. (Toggle is ~30px wide at right:12px; leave a small gap.) */
+/* In the rail this is the second row, not the title band. 2px top centres the 32px pill
+   on the tab strip's 28px tabs (which sit under a 4px inset). */
 .right-rail .right-panel-tabs-header {
-  padding-right: 50px;
+  min-height: 0;
+  padding-top: 2px;
 }
 .right-panel-tabs-header .settings-segmented {
   width: 100%;

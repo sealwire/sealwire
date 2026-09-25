@@ -566,7 +566,7 @@ function WorkspaceChangesRail() {
       },
       h(ToggleRightPanelIcon)
     ),
-    h("div", { id: "workspace-changes-mount" })
+    h("div", { className: "right-rail-body", id: "workspace-changes-mount" })
   );
 }
 
