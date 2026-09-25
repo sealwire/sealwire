@@ -2584,15 +2584,32 @@ is also what keeps the refusal from confirming it exists: {error}"
         assert!(preview.diff.contains("CHANGED-IN-RELATIVE-SIBLING"));
     }
 
-    // Where the session's tree resolves is where reviewers run, so that stays inside allowed_roots.
+    // Review must offer the same trees as Changes, so an explicit pick may land on a sibling.
     #[tokio::test]
-    async fn a_preview_only_sibling_never_becomes_the_sessions_tree() {
+    async fn a_preview_only_sibling_can_be_pinned_for_review() {
         let fx = sibling_fixture(true).await;
 
-        let error = pin(&fx.app, "thread-a", Some(&fx.sibling))
+        let pinned = pin(&fx.app, "thread-a", Some(&fx.sibling))
             .await
-            .expect_err("pinning outside allowed_roots must be refused");
-        assert!(error.contains("allowed roots"), "{error}");
+            .expect("a listed sibling worktree must be pinnable");
+        assert!(same_path(&pinned.cwd, &fx.sibling), "got {}", pinned.cwd);
+        assert!(matches!(pinned.origin, WorkspaceOrigin::Pinned));
+
+        let review = fx
+            .app
+            .resolve_review_workspace("thread-a", "device-a")
+            .await
+            .expect("the review follows the pin");
+        assert!(same_path(&review.cwd, &fx.sibling), "got {}", review.cwd);
+
+        let unpinned = pin(&fx.app, "thread-a", None).await.expect("unpin");
+        assert!(same_path(&unpinned.cwd, &fx.main), "got {}", unpinned.cwd);
+    }
+
+    // Auto-follow treats a sibling like any in-root worktree, so Review and Changes agree.
+    #[tokio::test]
+    async fn writes_in_a_preview_only_sibling_move_the_sessions_tree_there() {
+        let fx = sibling_fixture(true).await;
 
         {
             let mut relay = fx.app.relay.write().await;
@@ -2601,11 +2618,185 @@ is also what keeps the refusal from confirming it exists: {error}"
         }
         let resolved = resolve(&fx.app, "thread-a").await;
         assert!(
-            same_path(&resolved.cwd, &fx.main),
-            "writes in a preview-only tree must not relocate the session; got {}",
+            same_path(&resolved.cwd, &fx.sibling),
+            "got {}",
             resolved.cwd
         );
-        assert!(find_root(&resolved.roots, &fx.sibling).is_some());
+        assert!(matches!(resolved.origin, WorkspaceOrigin::Proven));
+
+        let again = resolve(&fx.app, "thread-a").await;
+        assert!(
+            same_path(&again.cwd, &fx.sibling),
+            "remembered; got {}",
+            again.cwd
+        );
+
+        let review = fx
+            .app
+            .resolve_review_workspace("thread-a", "device-a")
+            .await
+            .expect("the review follows the writes");
+        assert!(same_path(&review.cwd, &fx.sibling), "got {}", review.cwd);
+    }
+
+    // Reviewing the main checkout instead would review commits the chosen tree never had.
+    #[tokio::test]
+    async fn a_review_refuses_when_its_chosen_tree_was_deleted() {
+        let fx = sibling_fixture(true).await;
+        pin(&fx.app, "thread-a", Some(&fx.sibling))
+            .await
+            .expect("pin");
+        std::fs::remove_dir_all(&fx.sibling).unwrap();
+
+        let error = fx
+            .app
+            .resolve_review_workspace("thread-a", "device-a")
+            .await
+            .err()
+            .expect("a deleted chosen tree must not fall back to the main checkout");
+        assert!(error.contains("pick another one"), "{error}");
+
+        pin(&fx.app, "thread-a", Some(&fx.main))
+            .await
+            .expect("re-pick");
+        let review = fx
+            .app
+            .resolve_review_workspace("thread-a", "device-a")
+            .await
+            .expect("choosing another tree recovers");
+        assert!(same_path(&review.cwd, &fx.main), "got {}", review.cwd);
+    }
+
+    #[tokio::test]
+    async fn a_review_refuses_when_its_followed_tree_was_deleted() {
+        let fx = sibling_fixture(true).await;
+        {
+            let mut relay = fx.app.relay.write().await;
+            let edited = format!("{}/seed.txt", fx.sibling);
+            seed_transcript(&mut relay, "thread-a", vec![file_tool(&[&edited])]);
+        }
+        let followed = resolve(&fx.app, "thread-a").await;
+        assert!(
+            same_path(&followed.cwd, &fx.sibling),
+            "got {}",
+            followed.cwd
+        );
+        std::fs::remove_dir_all(&fx.sibling).unwrap();
+
+        let error = fx
+            .app
+            .resolve_review_workspace("thread-a", "device-a")
+            .await
+            .err()
+            .expect("a deleted followed tree must not fall back to the main checkout");
+        assert!(error.contains("pick another one"), "{error}");
+    }
+
+    // Still on disk but not offered this time (scope, or a failed `git worktree list`).
+    #[tokio::test]
+    async fn a_review_refuses_when_its_chosen_tree_is_no_longer_offered() {
+        let fx = sibling_fixture(true).await;
+        pair_device(&fx.app, "phone", vec![fx.main.clone(), fx.sibling.clone()]).await;
+        fx.app
+            .pin_thread_workspace(ThreadWorkspaceInput {
+                thread_id: "thread-a".to_string(),
+                cwd: Some(fx.sibling.clone()),
+                device_id: Some("phone".to_string()),
+            })
+            .await
+            .expect("pin");
+        pair_device(&fx.app, "phone", vec![fx.main.clone()]).await;
+
+        let error = fx
+            .app
+            .resolve_review_workspace("thread-a", "phone")
+            .await
+            .err()
+            .expect("an existing but unoffered chosen tree must not fall back to main");
+        assert!(error.contains(&fx.sibling), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_review_follows_the_tree_when_an_observed_subdirectory_is_deleted() {
+        let fx = sibling_fixture(true).await;
+        let nested = format!("{}/src", fx.main);
+        std::fs::create_dir_all(&nested).unwrap();
+        fx.app
+            .relay
+            .write()
+            .await
+            .observe_thread_cwd("thread-a", &nested);
+        resolve(&fx.app, "thread-a").await;
+        std::fs::remove_dir_all(&nested).unwrap();
+
+        let review = fx
+            .app
+            .resolve_review_workspace("thread-a", "device-a")
+            .await
+            .expect("a renamed subdirectory is not a lost tree");
+        assert!(same_path(&review.cwd, &fx.main), "got {}", review.cwd);
+    }
+
+    #[tokio::test]
+    async fn a_review_ignores_an_observed_directory_outside_the_repository() {
+        let fx = sibling_fixture(true).await;
+        let scratch = fx.outside.path().to_string_lossy().to_string();
+        fx.app
+            .relay
+            .write()
+            .await
+            .observe_thread_cwd("thread-a", &scratch);
+
+        let review = fx
+            .app
+            .resolve_review_workspace("thread-a", "device-a")
+            .await
+            .expect("an unrelated directory was never the tree under review");
+        assert!(same_path(&review.cwd, &fx.main), "got {}", review.cwd);
+    }
+
+    // The resolve inside `pin` saw the old, wider scope; the pin itself must use the current one.
+    #[tokio::test]
+    async fn pinning_a_sibling_rechecks_a_device_scope_narrowed_mid_request() {
+        let fx = sibling_fixture(true).await;
+        pair_device(&fx.app, "phone", vec![fx.main.clone(), fx.sibling.clone()]).await;
+
+        let hold = fx.app.hold_workspace_resolve_barrier().await;
+        let arrivals_before = fx.app.workspace_resolve_arrivals();
+        let app = fx.app.clone();
+        let sibling = fx.sibling.clone();
+        let pin_task = tokio::spawn(async move {
+            app.pin_thread_workspace(ThreadWorkspaceInput {
+                thread_id: "thread-a".to_string(),
+                cwd: Some(sibling),
+                device_id: Some("phone".to_string()),
+            })
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while fx.app.workspace_resolve_arrivals() == arrivals_before {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pin should reach the resolve gate");
+        pair_device(&fx.app, "phone", vec![fx.main.clone()]).await;
+        drop(hold);
+
+        let result = pin_task.await.expect("pin task");
+        assert!(
+            result.is_err(),
+            "pinned outside the narrowed scope: {result:?}"
+        );
+        assert_eq!(
+            fx.app
+                .relay
+                .read()
+                .await
+                .thread_workspace("thread-a")
+                .pinned,
+            None
+        );
     }
 
     // A grant on a literal subdirectory (pre repo-keyed grants) runs git there but not in the

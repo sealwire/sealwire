@@ -1694,8 +1694,8 @@ pub struct WorkspaceRootView {
     /// full of unignored build output can produce megabytes of `git status`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub changed_files_capped: bool,
-    /// Outside the caller's allowed roots, offered only because it is a verified worktree of
-    /// an allowed repository: it may be previewed, never pinned or inferred as the session's tree.
+    /// Outside the caller's allowed roots, offered because it is a verified worktree of an
+    /// allowed repository. Treated like any other root; the name predates that.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub preview_only: bool,
 }
@@ -1757,7 +1757,7 @@ pub struct ResolvedWorkspace {
     pub origin: WorkspaceOrigin,
     /// Live git standing of `cwd`, never stored.
     pub git: WorkspaceGitContextView,
-    /// Trees of this repo the caller may see; `cwd` is a non-`preview_only` one unless enumeration was empty.
+    /// Trees of this repo the caller may see; `cwd` is one of them unless enumeration was empty.
     pub roots: Vec<WorkspaceRootView>,
     /// Birth cwd (provider identity); distinct from `cwd`.
     pub birth_cwd: String,

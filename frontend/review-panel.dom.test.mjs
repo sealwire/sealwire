@@ -118,6 +118,33 @@ test("the working tree to review sits in the context bar", () => {
   view.cleanup();
 });
 
+// Same list as the Changes panel's picker: a sibling worktree outside allowed_roots is still pinnable.
+test("the working tree picker offers the same trees as the Changes panel, preview-only ones included", () => {
+  const pinned = [];
+  const view = mount({
+    onPinWorkspace: (path) => pinned.push(path),
+    workspace: {
+      ...WORKSPACE,
+      roots: [
+        { path: "/Users/luchi/git/agent-relay", branch: "main", is_main: true },
+        { path: "/Users/luchi/git/agent-relay-sibling", branch: "feat/x", preview_only: true },
+      ],
+    },
+  });
+  try {
+    click(view.host.querySelector(".workspace-picker-trigger"));
+    const rows = [...view.host.querySelectorAll(".workspace-picker-row")];
+    assert.deepEqual(
+      rows.map((row) => row.querySelector(".workspace-picker-row-primary").textContent),
+      ["main", "feat/x"]
+    );
+    click(rows[1]);
+    assert.deepEqual(pinned, ["/Users/luchi/git/agent-relay-sibling"]);
+  } finally {
+    view.cleanup();
+  }
+});
+
 test("instructions are the prompt card, and Cmd+Enter there starts the review", async () => {
   const view = mount();
   const prompt = view.host.querySelector(".session-prompt-card textarea#test-review-instructions");

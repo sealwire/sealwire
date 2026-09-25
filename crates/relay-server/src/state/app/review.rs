@@ -1863,6 +1863,31 @@ started ({error}); finishing with round {round}'s findings."
 tree would review commits this thread never made"
             ));
         }
+        // A chosen or followed tree that did not resolve falls back to the birth checkout,
+        // whose HEAD is not the work under review.
+        let recorded = self.relay.read().await.thread_workspace(parent_thread_id);
+        let lost = match (recorded.pinned, recorded.proven) {
+            (Some(pinned), _) => (!paths_equivalent(&resolved.cwd, &pinned)).then_some(pinned),
+            (None, Some(proven)) if !matches!(resolved.origin, WorkspaceOrigin::Proven) => {
+                // An unrelated directory the agent once ran in was never the tree under review.
+                let lost = !dir_exists(&proven) || {
+                    let repo =
+                        workspace_trust::repository_root(std::path::Path::new(&proven)).await;
+                    repo.is_some()
+                        && repo
+                            == workspace_trust::repository_root(std::path::Path::new(&resolved.cwd))
+                                .await
+                };
+                lost.then_some(proven)
+            }
+            _ => None,
+        };
+        if let Some(lost) = lost {
+            return Err(format!(
+                "the working tree this review was following ({lost}) is gone or no longer \
+available; pick another one under Working tree to review"
+            ));
+        }
         Ok(ReviewWorkspace {
             cwd: resolved.cwd,
             recorded_cwd: resolved.birth_cwd,

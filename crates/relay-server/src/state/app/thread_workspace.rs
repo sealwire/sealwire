@@ -62,12 +62,9 @@ no workspace related to it is available instead"
             }
             None => Vec::new(),
         };
-        // The session's tree is where reviewers run, so it never resolves into a preview-only one.
-        let roots: Vec<WorkspaceRootView> = offered
-            .iter()
-            .filter(|root| !root.preview_only)
-            .cloned()
-            .collect();
+        // Preview-only siblings count as the session's tree too, pinned or inferred alike:
+        // `reachable_roots` already proved them this repo's worktrees and device-scoped them.
+        let roots: &[WorkspaceRootView] = &offered;
 
         #[cfg(test)]
         {
@@ -99,7 +96,10 @@ no workspace related to it is available instead"
             roots
                 .iter()
                 .find(|root| paths_equivalent(&root.path, candidate))
-                .filter(|root| path_within_device_scope(&root.path, &device_scope, &allowed_roots))
+                .filter(|root| {
+                    root.preview_only
+                        || path_within_device_scope(&root.path, &device_scope, &allowed_roots)
+                })
                 .map(|root| root.path.clone())
         };
         let proven_root = |candidate: &str| -> Option<String> {
@@ -314,7 +314,17 @@ of the trees the relay listed for it"
                         relay.allowed_roots.clone(),
                     )
                 };
-                ensure_path_within_device_scope(&matched.path, &device_scope, &allowed_roots)?;
+                // Re-read scope: the resolve above may have run under a wider one.
+                if !matched.preview_only {
+                    ensure_path_within_device_scope(&matched.path, &device_scope, &allowed_roots)?;
+                } else if !device_scope.is_empty()
+                    && !path_within_allowed_roots(&matched.path, &device_scope)
+                {
+                    return Err(format!(
+                        "workspace {} is outside this device's allowed paths",
+                        matched.path
+                    ));
+                }
                 Some(matched.path.clone())
             }
         };
