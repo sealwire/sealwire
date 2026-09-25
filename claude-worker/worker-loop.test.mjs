@@ -509,6 +509,43 @@ test("read_session refuses to synthesize a thread with an empty cwd", async () =
   }
 });
 
+test("read_session_page uses its requested cwd when the SDK omits session cwd", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_SESSION_INFO_OMIT_CWD: "1" });
+  try {
+    worker.send({
+      type: "read_session_page",
+      id: "read-page-cwd",
+      provider_session_id: "sess-1",
+      cwd: "/work/fork-target",
+    });
+    const response = await worker.waitFor(isResponse("read-page-cwd"), {
+      label: "read_session_page response",
+    });
+    assert.equal(response.ok, true);
+    assert.equal(response.result.thread.cwd, "/work/fork-target");
+  } finally {
+    await worker.close();
+  }
+});
+
+test("read_session_page refuses to synthesize a thread with an empty cwd", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_SESSION_INFO_OMIT_CWD: "1" });
+  try {
+    worker.send({
+      type: "read_session_page",
+      id: "read-page-no-cwd",
+      provider_session_id: "sess-1",
+    });
+    const response = await worker.waitFor(isResponse("read-page-no-cwd"), {
+      label: "read_session_page response",
+    });
+    assert.equal(response.ok, false);
+    assert.match(String(response.error?.message), /did not report a workspace/);
+  } finally {
+    await worker.close();
+  }
+});
+
 test("list_sessions fills missing cwd from the local session jsonl", async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), "sealwire-worker-home-"));
   const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";

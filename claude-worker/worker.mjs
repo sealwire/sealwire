@@ -88,10 +88,21 @@ const configuredCancelDrainTimeout = Number.parseInt(
   process.env.CLAUDE_WORKER_CANCEL_DRAIN_TIMEOUT_MS || "",
   10,
 );
+
 const CANCEL_DRAIN_TIMEOUT_MS =
   Number.isFinite(configuredCancelDrainTimeout) && configuredCancelDrainTimeout > 0
     ? configuredCancelDrainTimeout
     : DEFAULT_CANCEL_DRAIN_TIMEOUT_MS;
+
+function sessionInfoWithRecordedCwd(sessionId, info, requestedCwd) {
+  const sessionCwd = info?.cwd || requestedCwd || "";
+  if (!info || !sessionCwd) {
+    throw new Error(
+      `Claude session ${sessionId} did not report a workspace; read it with its recorded cwd`,
+    );
+  }
+  return { ...info, cwd: sessionCwd };
+}
 
 // Diagnostic instrumentation for the "turn ended but UI still shows streaming"
 // investigation. Gated by SEALWIRE_STREAM_DIAG=1 so it is silent by default.
@@ -1688,13 +1699,7 @@ async function main() {
               includeSystemMessages: false,
             }),
           ]);
-          const sessionCwd = info?.cwd || cmd.cwd || "";
-          if (!info || !sessionCwd) {
-            throw new Error(
-              `Claude session ${sessionId} did not report a workspace; read it with its recorded cwd`,
-            );
-          }
-          const thread = mapSessionInfo({ ...info, cwd: sessionCwd });
+          const thread = mapSessionInfo(sessionInfoWithRecordedCwd(sessionId, info, cmd.cwd));
           // Prefer the last real message time over the session-file mtime: a
           // resume appends a session-init line that bumps mtime without being
           // genuine activity. Falls back to the mtime for empty sessions.
@@ -1724,12 +1729,9 @@ async function main() {
               dir: cmd.cwd || undefined,
               includeSystemMessages: false,
             });
-            const thread = mapSessionInfo(info ?? {
-              sessionId,
-              summary: "",
-              lastModified: Date.now(),
-              cwd: cmd.cwd || "",
-            });
+            const thread = mapSessionInfo(
+              sessionInfoWithRecordedCwd(sessionId, info, cmd.cwd),
+            );
             const lastActivity = lastMessageActivitySeconds(messages);
             if (lastActivity) thread.updated_at = lastActivity;
             emitResponse(cmd.id, {
