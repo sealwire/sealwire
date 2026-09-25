@@ -6556,11 +6556,21 @@ body.is-resizing-panel {
   padding-block: 0;
 }
 /* The branch picker rides the session tab line, so it copies the strip's box: a 4px
-   inset and a 28px tab. */
+   inset and a 28px tab. The "Viewing" label sits beside it; everything else wraps below. */
 .right-rail .workspace-changes-panel > .thread-workspace-field {
   padding-top: 4px;
+  flex-flow: row wrap;
+  align-items: center;
+  column-gap: 6px;
+}
+.right-rail .workspace-changes-panel > .thread-workspace-field > * {
+  flex: 1 0 100%;
+}
+.right-rail .workspace-changes-panel > .thread-workspace-field > .thread-workspace-label {
+  flex: 0 0 auto;
 }
 .right-rail .workspace-changes-panel > .thread-workspace-field > .thread-workspace-row {
+  flex: 1 1 0;
   height: 28px;
 }
 .right-panel-tabs-header .settings-segmented {

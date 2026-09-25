@@ -1,12 +1,14 @@
 // Regression: Changes/Agents shares the rail's title row with the hide toggle, and the
-// branch picker under it sits on the session tab line; neither title-row control scrolls.
+// branch picker under it sits on the session tab line, previewing another tree or not.
 //
 //   npm run test:browser:rail-toggle-align
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { promisify } from "node:util";
 
 import { launchBrowser } from "./e2e/harness/browser.mjs";
 import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
@@ -14,8 +16,24 @@ import { startLocalSession } from "./e2e/harness/local-session.mjs";
 import { getFreePort } from "./e2e/harness/ports.mjs";
 import { stopManagedProcess, waitForHealth } from "./e2e/harness/process.mjs";
 
-const ROOT = process.cwd();
 const TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
+const execFileAsync = promisify(execFile);
+
+// A linked worktree gives the picker a second tree to preview.
+async function initRepoWithWorktree(base) {
+  const main = path.join(base, "mainwt");
+  const linked = path.join(base, "linkedwt");
+  const git = (cwd, args) => execFileAsync("git", args, { cwd });
+  await fs.mkdir(main, { recursive: true });
+  await git(main, ["init", "-q", "-b", "main"]);
+  await git(main, ["config", "user.email", "e2e@example.com"]);
+  await git(main, ["config", "user.name", "E2E"]);
+  await fs.writeFile(path.join(main, "seed.txt"), "line1\n", "utf8");
+  await git(main, ["add", "seed.txt"]);
+  await git(main, ["commit", "-q", "-m", "seed"]);
+  await git(main, ["worktree", "add", "-q", "-b", "feature", linked]);
+  return { mainCwd: main, linkedCwd: linked };
+}
 
 function toTildePath(absolutePath) {
   const home = os.homedir();
@@ -28,8 +46,12 @@ function toTildePath(absolutePath) {
 
 async function main() {
   const relayPort = await getFreePort();
-  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-rail-toggle-"));
+  // realpath: macOS tmp is a symlink, and the picker lists trees by their real path.
+  const stateDir = await fs.realpath(
+    await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-rail-toggle-"))
+  );
   const statePath = path.join(stateDir, "session.json");
+  const { mainCwd } = await initRepoWithWorktree(stateDir);
 
   const relay = startLocalRelay({
     relayPort,
@@ -37,6 +59,13 @@ async function main() {
     extraEnv: { AGENT_PROVIDERS: "fake" },
   });
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
+  // Untrusted, the relay runs no git there, so the picker would have no worktrees to offer.
+  const trusted = await fetch(`http://127.0.0.1:${relayPort}/api/workspace/trust`, {
+    body: JSON.stringify({ cwd: mainCwd }),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  }).then((response) => response.json());
+  assert.ok(trusted.ok, `workspace trust failed: ${JSON.stringify(trusted.error)}`);
 
   const { browser, context } = await launchBrowser();
   const page = await context.newPage();
@@ -44,7 +73,7 @@ async function main() {
     await page.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
     await page.waitForSelector("#open-start-session-dialog");
     await startLocalSession(page, {
-      cwd: toTildePath(ROOT),
+      cwd: toTildePath(mainCwd),
       provider: "fake",
       approvalPolicy: "never",
       timeoutMs: TIMEOUT_MS,
@@ -142,7 +171,23 @@ async function main() {
     const narrowMetrics = await measure();
     assertLayout(narrowMetrics, "min-width-260");
 
-    // 3) Scrolled, by a real wheel. CSSOM because the CSP refuses inline <style>; two
+    // 3) Previewing another tree: the "Viewing" label must not push the picker off the line.
+    await page.click("#workspace-changes-rail .workspace-picker-trigger");
+    await page
+      .locator("#workspace-changes-rail .workspace-picker-row", { hasText: "linkedwt" })
+      .click({ timeout: TIMEOUT_MS });
+    await page.waitForFunction(
+      () =>
+        document.querySelector("#workspace-changes-rail .thread-workspace-label")?.textContent ===
+        "Viewing",
+      null,
+      { timeout: TIMEOUT_MS }
+    );
+    await page.waitForTimeout(150);
+    const previewMetrics = await measure();
+    assertLayout(previewMetrics, "previewing");
+
+    // 4) Scrolled, by a real wheel. CSSOM because the CSP refuses inline <style>; two
     //    frames because the compositor routes the wheel by the last committed scroll tree.
     await page.evaluate(async () => {
       document.querySelector("#workspace-changes-rail .right-panel-tabs").style.minHeight =
@@ -167,7 +212,13 @@ async function main() {
 
     console.log(
       JSON.stringify(
-        { ok: true, default: defaultMetrics, narrow: narrowMetrics, scrolled: scrolledMetrics },
+        {
+          ok: true,
+          default: defaultMetrics,
+          narrow: narrowMetrics,
+          previewing: previewMetrics,
+          scrolled: scrolledMetrics,
+        },
         null,
         2
       )
