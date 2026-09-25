@@ -319,7 +319,7 @@ impl AppState {
             relay.transcript_clock()
         };
         let thread_data = self
-            .read_adopted_provider_thread(&start.identity, &target_bridge)
+            .read_adopted_provider_thread(&start.identity, &target_bridge, &start.result.thread.cwd)
             .await?;
         {
             let mut relay = self.relay.write().await;

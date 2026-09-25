@@ -476,6 +476,39 @@ test("send streams a user id that a later history read reproduces", async () => 
   }
 });
 
+test("read_session uses its requested cwd when the SDK omits session cwd", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_SESSION_INFO_OMIT_CWD: "1" });
+  try {
+    worker.send({
+      type: "read_session",
+      id: "read-cwd",
+      provider_session_id: "sess-1",
+      cwd: "/work/fork-target",
+    });
+    const response = await worker.waitFor(isResponse("read-cwd"), {
+      label: "read_session response",
+    });
+    assert.equal(response.ok, true);
+    assert.equal(response.result.thread.cwd, "/work/fork-target");
+  } finally {
+    await worker.close();
+  }
+});
+
+test("read_session refuses to synthesize a thread with an empty cwd", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_SESSION_INFO_OMIT_CWD: "1" });
+  try {
+    worker.send({ type: "read_session", id: "read-no-cwd", provider_session_id: "sess-1" });
+    const response = await worker.waitFor(isResponse("read-no-cwd"), {
+      label: "read_session response",
+    });
+    assert.equal(response.ok, false);
+    assert.match(String(response.error?.message), /did not report a workspace/);
+  } finally {
+    await worker.close();
+  }
+});
+
 test("list_sessions fills missing cwd from the local session jsonl", async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), "sealwire-worker-home-"));
   const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";

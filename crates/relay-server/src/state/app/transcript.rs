@@ -108,17 +108,26 @@ impl AppState {
         // Sampled together, BEFORE the provider await below: the floor is what
         // lets the merge afterwards tell a row a live event created during the
         // read from history the read itself covered.
-        let (runtime_missing, read_started_at_revision) = {
+        let (runtime_missing, read_started_at_revision, recorded_cwd) = {
             let relay = self.relay.read().await;
+            let recorded_cwd = relay.thread_cwd(&input.thread_id).or_else(|| {
+                let workspace = relay.thread_workspace(&input.thread_id);
+                workspace.pinned.or(workspace.proven)
+            });
             (
                 relay.runtime_for_thread(&input.thread_id).is_none(),
                 relay.transcript_revision_floor(),
+                recorded_cwd,
             )
         };
         if runtime_missing {
             let target = self.resolve_session_target(&input.thread_id).await?;
             let (provider_name, bridge) = (target.provider.clone(), target.bridge().clone());
-            if let Some(page) = target.read_thread_transcript_page(None).await? {
+            let page = match recorded_cwd.as_deref() {
+                Some(cwd) => target.read_thread_transcript_page_in_cwd(None, cwd).await?,
+                None => target.read_thread_transcript_page(None).await?,
+            };
+            if let Some(page) = page {
                 {
                     let relay = self.relay.read().await;
                     let device_scope = relay.device_path_scope(device_id);
@@ -220,7 +229,7 @@ impl AppState {
     ) -> Result<(), TranscriptReadError> {
         let mut read_positions = std::collections::HashSet::new();
         for _ in 0..MAX_PROVIDER_HISTORY_PAGES_PER_REQUEST {
-            let provider_cursor = {
+            let (provider_cursor, cwd) = {
                 let relay = self.relay.read().await;
                 let runtime = relay
                     .runtime_in_key_space(thread_id, key_space)
@@ -231,7 +240,7 @@ impl AppState {
                 let Some(provider_cursor) = runtime.unread_provider_history() else {
                     return Ok(());
                 };
-                provider_cursor
+                (provider_cursor, runtime.current_cwd.clone())
             };
             if !read_positions.insert(provider_cursor) {
                 return Err(TranscriptReadError::Failed(format!(
@@ -240,7 +249,7 @@ impl AppState {
             }
             let target = self.resolve_session_target(thread_id).await?;
             let Some(page) = target
-                .read_thread_transcript_page(Some(provider_cursor))
+                .read_thread_transcript_page_in_cwd(Some(provider_cursor), &cwd)
                 .await?
             else {
                 return Err(TranscriptReadError::Failed(format!(

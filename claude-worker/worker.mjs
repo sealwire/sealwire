@@ -1688,12 +1688,13 @@ async function main() {
               includeSystemMessages: false,
             }),
           ]);
-          const thread = mapSessionInfo(info ?? {
-            sessionId,
-            summary: "",
-            lastModified: Date.now(),
-            cwd: cmd.cwd || "",
-          });
+          const sessionCwd = info?.cwd || cmd.cwd || "";
+          if (!info || !sessionCwd) {
+            throw new Error(
+              `Claude session ${sessionId} did not report a workspace; read it with its recorded cwd`,
+            );
+          }
+          const thread = mapSessionInfo({ ...info, cwd: sessionCwd });
           // Prefer the last real message time over the session-file mtime: a
           // resume appends a session-init line that bumps mtime without being
           // genuine activity. Falls back to the mtime for empty sessions.

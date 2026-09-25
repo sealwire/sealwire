@@ -121,8 +121,11 @@ impl AppState {
         &self,
         identity: &AdoptedProviderSession,
         bridge: &Arc<dyn ProviderBridge>,
+        cwd: &str,
     ) -> Result<ThreadSyncData, String> {
-        let mut data = bridge.read_thread(&identity.provider_handle).await?;
+        let mut data = bridge
+            .read_thread_in_cwd(&identity.provider_handle, cwd)
+            .await?;
         identity.canonicalize_sync(&mut data);
         Ok(data)
     }
@@ -575,6 +578,15 @@ impl SessionTarget {
         Ok(data)
     }
 
+    pub(crate) async fn read_thread_in_cwd(&self, cwd: &str) -> Result<ThreadSyncData, String> {
+        let mut data = self
+            .bridge
+            .read_thread_in_cwd(&self.provider_handle, cwd)
+            .await?;
+        self.result_identity().canonicalize_sync(&mut data);
+        Ok(data)
+    }
+
     pub(crate) fn result_identity(&self) -> AdoptedProviderSession {
         AdoptedProviderSession {
             provider: self.provider.clone(),
@@ -635,9 +647,17 @@ impl SessionTarget {
         &self,
         before: Option<usize>,
     ) -> Result<Option<crate::provider::ThreadTranscriptPageData>, String> {
+        self.read_thread_transcript_page_in_cwd(before, "").await
+    }
+
+    pub(crate) async fn read_thread_transcript_page_in_cwd(
+        &self,
+        before: Option<usize>,
+        cwd: &str,
+    ) -> Result<Option<crate::provider::ThreadTranscriptPageData>, String> {
         let page = self
             .bridge
-            .read_thread_transcript_page(&self.provider_handle, before)
+            .read_thread_transcript_page_in_cwd(&self.provider_handle, before, cwd)
             .await?;
         Ok(page.map(|mut page| {
             self.result_identity().canonicalize_sync(&mut page.sync);

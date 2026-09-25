@@ -442,6 +442,7 @@ export function createLifecycleController(ctx) {
     const agentName = providerLabel(provider) || "agent";
     logLine(`Forking session ${sourceThreadId} into ${agentName}.`);
 
+    let payload;
     try {
       const response = await apiFetch("/api/session/fork", {
         method: "POST",
@@ -462,29 +463,42 @@ export function createLifecycleController(ctx) {
           ...(images.length ? { images } : {}),
         }),
       });
-      const payload = await response.json();
+      payload = await response.json();
 
       if (!response.ok || !payload.ok) {
         throw new Error(payload?.error?.message || "Failed to fork session");
       }
-
-      state.defaultsSeeded = false;
-      await runViewTransition(async () => {
-        setSelectedCwd(payload.data.current_cwd || cwd);
-        await setThreadRoute(payload.data.active_thread_id || null);
-        seedDefaults(payload.data);
-        applySessionSnapshot(payload.data);
-      });
-      if (canCurrentDeviceWrite(payload.data)) {
-        messageInput.focus();
-      }
-      await loadThreads("post-fork refresh");
-      logLine(`Forked session ${sourceThreadId}`);
-      return { ok: true };
     } catch (error) {
       logLine(`Fork failed: ${error.message}`);
       return { ok: false, error: error.message };
     }
+
+    // The relay has already created the fork. Navigation and list refresh are
+    // follow-up UI work: if either fails, reporting the whole operation as
+    // failed leaves the dialog open and invites another click that creates a
+    // second fork.
+    const snapshot = payload?.data || {};
+    logLine(`Forked session ${sourceThreadId}`);
+    state.defaultsSeeded = false;
+    try {
+      await runViewTransition(async () => {
+        setSelectedCwd(snapshot.current_cwd || cwd);
+        await setThreadRoute(snapshot.active_thread_id || null);
+        seedDefaults(snapshot);
+        applySessionSnapshot(snapshot);
+      });
+      if (canCurrentDeviceWrite(snapshot)) {
+        messageInput.focus();
+      }
+    } catch (error) {
+      logLine(`Fork succeeded, but opening it failed: ${error.message}`);
+    }
+    try {
+      await loadThreads("post-fork refresh");
+    } catch (error) {
+      logLine(`Fork succeeded, but refreshing sessions failed: ${error.message}`);
+    }
+    return { ok: true };
   }
 
   async function updateSessionSettings({ approval_policy, sandbox, effort, model } = {}) {

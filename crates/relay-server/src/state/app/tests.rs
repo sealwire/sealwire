@@ -14307,6 +14307,65 @@ tree; got {}",
     }
 
     #[tokio::test]
+    async fn transcript_read_repairs_an_empty_runtime_cwd_from_the_remembered_workspace() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _p, _o) = build_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let started = app
+            .start_session(crate::protocol::StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("fake".to_string()),
+                initial_prompt: None,
+                project_id: None,
+            })
+            .await
+            .expect("start session");
+        let thread_id = started.active_thread_id.expect("thread id");
+        {
+            let mut relay = app.relay.write().await;
+            relay.record_proven_thread_workspace(&thread_id, cwd);
+            relay.threads.retain(|thread| thread.id != thread_id);
+            relay
+                .ensure_runtime_for_thread(&thread_id)
+                .current_cwd
+                .clear();
+        }
+
+        let page = app
+            .read_thread_transcript(ReadThreadTranscriptInput {
+                thread_id: thread_id.clone(),
+                before: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("a remembered valid cwd should repair the poisoned runtime");
+
+        assert!(same_path(
+            &page.thread_state.expect("thread state").current_cwd,
+            cwd,
+        ));
+        assert!(
+            same_path(
+                &app.relay
+                    .read()
+                    .await
+                    .runtime_for_thread(&thread_id)
+                    .expect("runtime")
+                    .current_cwd,
+                cwd,
+            ),
+            "the remembered workspace should be copied back into the runtime",
+        );
+    }
+
+    #[tokio::test]
     async fn resume_session_rejects_when_thread_cwd_outside_device_scope() {
         let project = TempDir::new().expect("project tempdir");
         let scoped = project.path().join("scoped");

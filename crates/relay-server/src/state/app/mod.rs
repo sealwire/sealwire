@@ -1236,12 +1236,29 @@ in thread {thread_id}: {error}"
         thread_id: &str,
         device_id: &str,
     ) -> Result<(), String> {
-        {
+        let recorded_cwd = {
             let mut relay = self.relay.write().await;
             if relay.active_thread_id.as_deref() == Some(thread_id)
                 && relay.runtime_for_thread(thread_id).is_none()
             {
                 relay.materialize_selected_runtime_from_fields();
+            }
+            let recorded_cwd = relay.thread_cwd(thread_id).or_else(|| {
+                let workspace = relay.thread_workspace(thread_id);
+                workspace.pinned.or(workspace.proven)
+            });
+            let runtime_cwd_is_empty = relay
+                .runtime_for_thread(thread_id)
+                .is_some_and(|runtime| runtime.current_cwd.is_empty());
+            if runtime_cwd_is_empty {
+                // Older Claude native forks could be activated from a provider
+                // read that found the session but reported no cwd. The provider
+                // list or the persisted workspace record still has the fork's
+                // real destination, so repair that poisoned runtime before
+                // applying the path-scope gate.
+                if let Some(cwd) = recorded_cwd.as_deref() {
+                    relay.ensure_runtime_for_thread(thread_id).current_cwd = cwd.to_string();
+                }
             }
             if let Some(runtime) = relay.runtime_for_thread(thread_id) {
                 let device_scope = relay.device_path_scope(device_id);
@@ -1252,7 +1269,8 @@ in thread {thread_id}: {error}"
                 )?;
                 return Ok(());
             }
-        }
+            recorded_cwd
+        };
 
         let defaults = self.defaults().await;
         let settings = {
@@ -1277,7 +1295,10 @@ in thread {thread_id}: {error}"
             .filter(|value| !value.is_empty());
         let target = self.resolve_session_target(thread_id).await?;
         let (provider_name, bridge) = (target.provider.clone(), target.bridge().clone());
-        let data = target.read_thread().await?;
+        let data = match recorded_cwd.as_deref() {
+            Some(cwd) => target.read_thread_in_cwd(cwd).await?,
+            None => target.read_thread().await?,
+        };
         let model = self
             .resolve_model_for_provider(
                 &provider_name,

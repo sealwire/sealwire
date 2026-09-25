@@ -873,9 +873,21 @@ impl ProviderBridge for ClaudeCodeBridge {
     }
 
     async fn read_thread(&self, thread_id: &str) -> Result<ThreadSyncData, String> {
+        self.read_thread_in_cwd(thread_id, "").await
+    }
+
+    async fn read_thread_in_cwd(
+        &self,
+        thread_id: &str,
+        fork_cwd: &str,
+    ) -> Result<ThreadSyncData, String> {
         let Some(real_session_id) = self.resolve_real_session_id(thread_id) else {
             // Pending thread: nothing to read from the SDK yet.
-            let cwd = self.cwd_for_thread(thread_id).await.unwrap_or_default();
+            let cwd = if fork_cwd.is_empty() {
+                self.cwd_for_thread(thread_id).await.unwrap_or_default()
+            } else {
+                fork_cwd.to_string()
+            };
             return Ok(ThreadSyncData {
                 thread: ThreadSummaryView {
                     workspace_trusted: false,
@@ -899,7 +911,14 @@ impl ProviderBridge for ClaudeCodeBridge {
                 transcript_complete: true,
             });
         };
-        let cwd = self.cwd_for_thread(thread_id).await;
+        // A native fork is read before it has a relay thread row. Its destination
+        // came from the provider start result, so do not let the SDK search the
+        // worker's process cwd and return a missing session with an empty cwd.
+        let cwd = if fork_cwd.is_empty() {
+            self.cwd_for_thread(thread_id).await
+        } else {
+            Some(fork_cwd.to_string())
+        };
         let mut cmd = json!({
             "provider_session_id": real_session_id,
         });
@@ -942,10 +961,24 @@ impl ProviderBridge for ClaudeCodeBridge {
         thread_id: &str,
         before: Option<usize>,
     ) -> Result<Option<ThreadTranscriptPageData>, String> {
+        self.read_thread_transcript_page_in_cwd(thread_id, before, "")
+            .await
+    }
+
+    async fn read_thread_transcript_page_in_cwd(
+        &self,
+        thread_id: &str,
+        before: Option<usize>,
+        read_cwd: &str,
+    ) -> Result<Option<ThreadTranscriptPageData>, String> {
         let Some(real_session_id) = self.resolve_real_session_id(thread_id) else {
             return Ok(None);
         };
-        let cwd = self.cwd_for_thread(thread_id).await;
+        let cwd = if read_cwd.is_empty() {
+            self.cwd_for_thread(thread_id).await
+        } else {
+            Some(read_cwd.to_string())
+        };
         let mut cmd = json!({
             "provider_session_id": real_session_id,
         });
@@ -4466,6 +4499,54 @@ for await (const line of rl) {
         assert!(
             wait_for_log(&state, "sourceCwd=/repo/.claude/worktrees/gone", 5).await,
             "the source must be looked up in its own folder",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_fork_is_read_from_its_destination_before_it_has_a_relay_row() {
+        let Some((bridge, state)) = spawn_fake_bridge().await else {
+            return;
+        };
+
+        let started = bridge
+            .fork_thread(ProviderForkRequest {
+                source_thread_id: "sess-gone".to_string(),
+                up_to_item_id: None,
+                cwd: "/repo/fork-target".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
+                approval_policy: "default".to_string(),
+                sandbox: "workspace-write".to_string(),
+            })
+            .await
+            .expect("fork request")
+            .expect("native fork");
+
+        bridge
+            .read_thread_in_cwd(&started.thread.id, &started.thread.cwd)
+            .await
+            .expect("the destination-scoped read should find the new fork");
+        bridge
+            .read_thread_transcript_page_in_cwd(&started.thread.id, None, &started.thread.cwd)
+            .await
+            .expect("the destination-scoped page read should find the new fork");
+
+        assert!(
+            wait_for_log(
+                &state,
+                "type=read_session permissionMode=- model=- effort=- session=sess-gone-fork prompt=no cwd=/repo/fork-target",
+                5,
+            )
+            .await,
+            "the first read must carry the fork destination even though no relay row exists yet",
+        );
+        assert!(
+            wait_for_log(
+                &state,
+                "type=read_session_page permissionMode=- model=- effort=- session=sess-gone-fork prompt=no cwd=/repo/fork-target",
+                5,
+            )
+            .await,
+            "the first paged read must also carry the fork destination",
         );
     }
 

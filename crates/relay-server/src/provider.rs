@@ -488,6 +488,15 @@ pub trait ProviderBridge: Send + Sync {
     /// through `ThreadSyncData::transcript_complete` rather than return a short vec,
     /// because a short vec is indistinguishable from a shorter thread.
     async fn read_thread(&self, thread_id: &str) -> Result<ThreadSyncData, String>;
+    /// Read a newly created thread before it has a relay row. Providers that
+    /// locate sessions by folder can use the start/fork result's destination.
+    async fn read_thread_in_cwd(
+        &self,
+        thread_id: &str,
+        _cwd: &str,
+    ) -> Result<ThreadSyncData, String> {
+        self.read_thread(thread_id).await
+    }
     /// Whether a recorded session can still be given a turn.
     ///
     /// Reading the history back is the general test but a stricter one: an agent
@@ -501,6 +510,16 @@ pub trait ProviderBridge: Send + Sync {
         _before: Option<usize>,
     ) -> Result<Option<ThreadTranscriptPageData>, String> {
         Ok(None)
+    }
+    /// Read transcript history from a known workspace before provider discovery
+    /// has populated its own thread-to-folder cache.
+    async fn read_thread_transcript_page_in_cwd(
+        &self,
+        thread_id: &str,
+        before: Option<usize>,
+        _cwd: &str,
+    ) -> Result<Option<ThreadTranscriptPageData>, String> {
+        self.read_thread_transcript_page(thread_id, before).await
     }
     async fn read_thread_entry_detail(
         &self,

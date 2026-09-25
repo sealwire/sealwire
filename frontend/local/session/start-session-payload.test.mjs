@@ -66,7 +66,7 @@ function defaultDraft() {
   };
 }
 
-function buildController({ draft = defaultDraft(), respond } = {}) {
+function buildController({ draft = defaultDraft(), respond, runViewTransition = async () => {} } = {}) {
   const requests = [];
   const requestedIds = [];
   const logged = [];
@@ -120,7 +120,7 @@ function buildController({ draft = defaultDraft(), respond } = {}) {
     renderThreads: () => {},
     renderAuthRequiredState: () => {},
     // Seam: skipping the DOM swap keeps these on the request contract.
-    runViewTransition: async () => {},
+    runViewTransition,
     setStartControlsBusy: () => {},
     isViewingConversation: () => true,
     queryClient: null,
@@ -188,6 +188,30 @@ test("the start request carries exactly the fields the dialog collects", async (
     project_id: null,
     images: [],
   });
+});
+
+test("an accepted fork stays successful when opening the new session fails", async () => {
+  const { controller, requests, logged } = buildController({
+    respond: () => acceptance({ active_thread_id: "thread-fork" }),
+    runViewTransition: async () => {
+      throw new Error("transcript load failed");
+    },
+  });
+
+  const result = await controller.forkSession({
+    ...defaultDraft(),
+    sourceThreadId: "thread-source",
+  });
+
+  assert.deepEqual(result, { ok: true });
+  assert.equal(
+    requests.filter((request) => request.url === "/api/session/fork").length,
+    1,
+    "the accepted request must not be presented as retryable",
+  );
+  assert.ok(logged.some((line) => line.includes("Forked session thread-source")));
+  assert.ok(logged.some((line) => line.includes("opening it failed")));
+  assert.ok(!logged.some((line) => line.startsWith("Fork failed:")));
 });
 
 test("submit reads the draft, never the DOM", async () => {
