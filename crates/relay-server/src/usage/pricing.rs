@@ -61,6 +61,9 @@ struct RateCard {
 #[derive(Debug, Deserialize)]
 struct PriceTable {
     as_of: String,
+    /// Family → key, picked by rule in `update-model-prices.mjs`. Required, so a
+    /// table without it fails to parse instead of silently pricing nothing new.
+    fallbacks: HashMap<String, String>,
     models: HashMap<String, RateCard>,
 }
 
@@ -86,7 +89,7 @@ pub(crate) fn prices_as_of() -> &'static str {
 ///   1. The exact key. Providers report the same ids the table is keyed by, so
 ///      this is the case that should almost always hit.
 ///   2. The LONGEST key that the model id starts with. Ids gain suffixes —
-///      `claude-sonnet-4` becomes `claude-sonnet-4-20250514` — and longest-wins
+///      `claude-sonnet-4-5` becomes `claude-sonnet-4-5-20250929` — and longest-wins
 ///      keeps `claude-3-5-sonnet` from being served by a bare `claude-3` entry.
 ///   3. A family fallback, so a model released after this table still prices.
 ///
@@ -124,7 +127,9 @@ fn card_for(provider: &str, model: Option<&str>) -> Option<RateCard> {
         return Some(card);
     }
 
-    family_fallback(provider, &id).and_then(|key| models.get(key).copied())
+    family_of(provider, &id)
+        .and_then(|family| table().fallbacks.get(family))
+        .and_then(|key| models.get(key).copied())
 }
 
 /// Last resort: price an unrecognised model as its family's mid tier.
@@ -134,8 +139,8 @@ fn card_for(provider: &str, model: Option<&str>) -> Option<RateCard> {
 /// is reported at up to five times its real cost until someone notices, which
 /// trains people to disbelieve the column. A mid tier is wrong in a smaller way
 /// in both directions, and `cost_source: "estimated"` already says not to bank
-/// on it.
-fn family_fallback(provider: &str, model: &str) -> Option<&'static str> {
+/// on it. Which model that is lives in the table's `fallbacks`, not here.
+fn family_of(provider: &str, model: &str) -> Option<&'static str> {
     let provider = provider.to_ascii_lowercase();
     let claude = provider.contains("claude") || model.contains("claude");
     let openai = provider.contains("codex")
@@ -143,10 +148,10 @@ fn family_fallback(provider: &str, model: &str) -> Option<&'static str> {
         || model.contains("gpt")
         || model.starts_with('o');
     if claude {
-        return Some("claude-sonnet-4-20250514");
+        return Some("claude");
     }
     if openai {
-        return Some("gpt-5");
+        return Some("openai");
     }
     None
 }
@@ -200,13 +205,13 @@ mod tests {
     fn claude_opus_is_priced() {
         let cost = estimate_cost(
             "claude_code",
-            Some("claude-opus-4-20250514"),
+            Some("claude-opus-4-5-20251101"),
             1_000_000,
             0,
             0,
             0,
         );
-        assert!((cost.unwrap() - 15.0).abs() < 1e-6, "got {cost:?}");
+        assert!((cost.unwrap() - 5.0).abs() < 1e-6, "got {cost:?}");
     }
 
     /// The asymmetry the report's cache line depends on. If this ever inverts,
@@ -215,7 +220,7 @@ mod tests {
     fn cache_reads_are_cheaper_than_input() {
         let fresh = estimate_cost(
             "claude_code",
-            Some("claude-sonnet-4-20250514"),
+            Some("claude-sonnet-4-5-20250929"),
             1_000_000,
             0,
             0,
@@ -224,7 +229,7 @@ mod tests {
         .unwrap();
         let cached = estimate_cost(
             "claude_code",
-            Some("claude-sonnet-4-20250514"),
+            Some("claude-sonnet-4-5-20250929"),
             0,
             1_000_000,
             0,
@@ -237,7 +242,7 @@ mod tests {
     /// The gap the old four-field rate card could not express at all.
     #[test]
     fn a_prompt_over_200k_is_priced_at_the_long_context_tier() {
-        let model = Some("claude-sonnet-4-20250514");
+        let model = Some("claude-sonnet-4-5-20250929");
         // Same token count either side of the line, so only the tier differs.
         let under = estimate_cost("claude_code", model, 200_000, 0, 0, 0).unwrap();
         let over = estimate_cost("claude_code", model, 200_001, 0, 0, 0).unwrap();
@@ -251,7 +256,7 @@ mod tests {
     /// long answer is not a long-context request.
     #[test]
     fn a_long_answer_does_not_trigger_the_long_context_tier() {
-        let model = Some("claude-sonnet-4-20250514");
+        let model = Some("claude-sonnet-4-5-20250929");
         let cheap = estimate_cost("claude_code", model, 10, 0, 0, 300_000).unwrap();
         let card = card_for("claude_code", model).unwrap();
         let expected = 10.0 * card.base.input + 300_000.0 * card.base.output;
@@ -261,15 +266,15 @@ mod tests {
     /// Ids gain date suffixes; the table should still find them.
     #[test]
     fn a_suffixed_or_prefixed_id_still_prices() {
-        assert!(rates_for("claude_code", Some("claude-opus-4-20250514-v9")).is_some());
-        assert!(rates_for("claude_code", Some("us.anthropic.claude-opus-4-20250514")).is_some());
+        assert!(rates_for("claude_code", Some("claude-opus-4-5-20251101-v9")).is_some());
+        assert!(rates_for("claude_code", Some("us.anthropic.claude-opus-4-5-20251101")).is_some());
     }
 
     /// Longest-prefix, so a broad key cannot shadow a specific one.
     #[test]
     fn the_longest_matching_key_wins() {
         let table = table();
-        let specific = "claude-sonnet-4-20250514";
+        let specific = "claude-sonnet-4-5-20250929";
         if table.models.contains_key(specific) {
             let picked = card_for("claude_code", Some(specific)).unwrap();
             let exact = table.models[specific];
@@ -285,7 +290,7 @@ mod tests {
         let unknown = estimate_cost(
             "claude_code",
             Some("claude-something-new"),
-            1_000_000,
+            100_000,
             0,
             0,
             0,
@@ -293,14 +298,28 @@ mod tests {
         .expect("a known family should still price");
         let opus = estimate_cost(
             "claude_code",
-            Some("claude-opus-4-20250514"),
-            1_000_000,
+            Some("claude-opus-4-5-20251101"),
+            100_000,
             0,
             0,
             0,
         )
         .unwrap();
         assert!(unknown < opus, "{unknown} should be under opus {opus}");
+    }
+
+    /// A fallback naming a key the table lacks would silently un-price every new
+    /// model in that family.
+    #[test]
+    fn every_family_has_a_fallback_the_table_can_price() {
+        for (provider, model) in [("claude_code", "claude-x"), ("codex", "gpt-x")] {
+            let family = family_of(provider, model).unwrap();
+            let key = table().fallbacks[family].as_str();
+            assert!(
+                table().models.contains_key(key),
+                "{key} is not in the table"
+            );
+        }
     }
 
     /// The one that matters: an unknown FAMILY gets no price, not a guess.

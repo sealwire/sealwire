@@ -17,6 +17,7 @@
 // tell you the snapshot is stale without letting the build reach the network.
 
 import { readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SOURCE =
@@ -48,6 +49,34 @@ const TIER_FIELDS = {
   cache_read_input_token_cost_above_200k_tokens: "cache_read",
   cache_creation_input_token_cost_above_200k_tokens: "cache_write",
 };
+
+// An unrecognised model is newer than everything here, so it prices as the newest
+// mid-tier one. Picked by rule, not by name: upstream retires names.
+const FALLBACK_RULES = {
+  claude: /^claude-sonnet-(\d{1,2})(?:-(\d{1,2}))?$/,
+  openai: /^gpt-(\d{1,2})(?:\.(\d{1,2}))?$/,
+};
+
+export function pickFallbacks(models) {
+  const picked = {};
+  for (const [family, rule] of Object.entries(FALLBACK_RULES)) {
+    let best = null;
+    for (const key of Object.keys(models)) {
+      const match = rule.exec(key);
+      if (!match) continue;
+      const major = Number(match[1]);
+      const minor = Number(match[2] ?? 0);
+      if (!best || major > best.major || (major === best.major && minor > best.minor)) {
+        best = { key, major, minor };
+      }
+    }
+    if (!best) {
+      throw new Error(`no ${family} model matches ${rule}; update FALLBACK_RULES`);
+    }
+    picked[family] = best.key;
+  }
+  return picked;
+}
 
 function pick(entry, fields) {
   const out = {};
@@ -92,6 +121,7 @@ function serialise(models, asOf) {
         "Costs are USD per token. List prices only: no negotiated rates, no discounts, no free tier.",
       source: SOURCE,
       as_of: asOf,
+      fallbacks: pickFallbacks(models),
       models: sorted,
     },
     null,
@@ -99,38 +129,43 @@ function serialise(models, asOf) {
   )}\n`;
 }
 
-const check = process.argv.includes("--check");
+async function main() {
+  const check = process.argv.includes("--check");
 
-const response = await fetch(SOURCE);
-if (!response.ok) {
-  console.error(`update-model-prices: ${SOURCE} returned ${response.status}`);
-  process.exit(1);
-}
-const models = distil(await response.json());
-const count = Object.keys(models).length;
-if (count < 50) {
-  // The upstream file is thousands of entries. Landing under fifty means the
-  // shape changed and the filter silently stopped matching — writing that would
-  // replace a working table with an empty one.
-  console.error(`update-model-prices: only ${count} models survived the filter; refusing to write`);
-  process.exit(1);
-}
-
-if (check) {
-  const current = readFileSync(OUT, "utf8");
-  // Compare prices, not the date: the stamp moves every run and would report
-  // every table as stale.
-  const a = JSON.stringify(JSON.parse(current).models);
-  const b = JSON.stringify(JSON.parse(serialise(models, "x")).models);
-  if (a !== b) {
-    console.error("update-model-prices: vendored prices are out of date; run without --check");
+  const response = await fetch(SOURCE);
+  if (!response.ok) {
+    console.error(`update-model-prices: ${SOURCE} returned ${response.status}`);
     process.exit(1);
   }
-  console.log(`update-model-prices: up to date (${count} models)`);
-  process.exit(0);
+  const models = distil(await response.json());
+  const count = Object.keys(models).length;
+  if (count < 50) {
+    // The upstream file is thousands of entries. Landing under fifty means the
+    // shape changed and the filter silently stopped matching — writing that would
+    // replace a working table with an empty one.
+    console.error(`update-model-prices: only ${count} models survived the filter; refusing to write`);
+    process.exit(1);
+  }
+
+  if (check) {
+    // Compare prices, not the date: the stamp moves every run and would report
+    // every table as stale.
+    const priced = ({ fallbacks, models }) => JSON.stringify({ fallbacks, models });
+    const current = priced(JSON.parse(readFileSync(OUT, "utf8")));
+    if (current !== priced(JSON.parse(serialise(models, "x")))) {
+      console.error("update-model-prices: vendored prices are out of date; run without --check");
+      process.exit(1);
+    }
+    console.log(`update-model-prices: up to date (${count} models)`);
+    process.exit(0);
+  }
+
+  const asOf = new Date().toISOString().slice(0, 10);
+  writeFileSync(OUT, serialise(models, asOf));
+  const tiered = Object.values(models).filter((m) => m.above_200k).length;
+  console.log(`update-model-prices: wrote ${count} models (${tiered} with a 200k tier), as_of ${asOf}`);
 }
 
-const asOf = new Date().toISOString().slice(0, 10);
-writeFileSync(OUT, serialise(models, asOf));
-const tiered = Object.values(models).filter((m) => m.above_200k).length;
-console.log(`update-model-prices: wrote ${count} models (${tiered} with a 200k tier), as_of ${asOf}`);
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await main();
+}

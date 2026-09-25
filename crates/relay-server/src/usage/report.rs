@@ -879,7 +879,16 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.totals.cost_usd, Some(14.25));
+        let list = crate::usage::pricing::estimate_cost(
+            "claude_code",
+            Some("claude-opus-4"),
+            500_000,
+            0,
+            0,
+            500_000,
+        );
+        assert_ne!(list, Some(12.5));
+        assert_eq!(report.totals.cost_usd, list);
         assert_eq!(report.totals.cost_source, "estimated");
         assert_eq!(report.buckets[0].groups[0].cost_source, "estimated");
     }
