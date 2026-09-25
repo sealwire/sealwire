@@ -285,7 +285,12 @@ function installFakeRelay({ relayId, threadActive, threadB, threadC, threadD, ta
         },
       });
     }
-    #emit(frame) {
+    #emit(rawFrame) {
+      // The surface drops a payload not stamped as the relay's, as a real broker does.
+      const frame =
+        rawFrame.type === "message"
+          ? { from_role: "relay", from_peer_id: "relay-peer-e2e", ...rawFrame }
+          : rawFrame;
       this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(frame) }));
     }
   }

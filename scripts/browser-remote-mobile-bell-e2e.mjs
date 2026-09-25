@@ -385,7 +385,12 @@ async function main() {
               payload: { protocol_version: RELAY_PROTOCOL_VERSION, kind: "remote_action_result", action_id: actionId, ...result },
             });
           }
-          #emit(frame) {
+          #emit(rawFrame) {
+            // The surface drops a payload not stamped as the relay's, as a real broker does.
+            const frame =
+              rawFrame.type === "message"
+                ? { from_role: "relay", from_peer_id: "relay-peer-e2e", ...rawFrame }
+                : rawFrame;
             this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(frame) }));
           }
         }
