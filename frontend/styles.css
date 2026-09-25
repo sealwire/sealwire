@@ -6907,13 +6907,15 @@ body.is-resizing-panel {
   padding: 0;
   border-color: var(--border-subtle);
   background: var(--surface-1);
-  overflow: hidden;
 }
+/* Rounded itself rather than clipped by the card: menu placement treats a clipping
+   ancestor as the menu's room, and the card left the "···" menu too short for its rows. */
 .reviewer-review-banner {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 9px 12px;
+  border-radius: calc(var(--r-md) - 1px) calc(var(--r-md) - 1px) 0 0;
   background: var(--status-neutral-bg);
 }
 .reviewer-review-banner-dot {
