@@ -18207,7 +18207,7 @@ resurrected into a turn that never completes: {:?}",
         }
 
         let err = app
-            .ask_agent(
+            .delegate(
                 &parent.id,
                 relay_api::delegation::AskRequest {
                     started_by: relay_api::delegation::StartedBy::Person,
@@ -27944,7 +27944,7 @@ mod beta_gate_tests {
     }
 }
 
-/// `ask_agent`: one session bringing in another.
+/// `delegate`: one session bringing in another.
 #[cfg(test)]
 mod ask_tests {
     use super::path_scope_tests::{build_app, build_app_with_bridge, grant_workspace, pair_device};
@@ -28002,7 +28002,7 @@ mod ask_tests {
         // An existing session IS fair game: it may already hold context that a
         // fresh agent would take an hour to rebuild.
         let reached = app
-            .ask_agent(
+            .delegate(
                 &asker_id,
                 AskRequest {
                     device_id: None,
@@ -28022,7 +28022,7 @@ mod ask_tests {
 
         // One that does not exist still is not.
         let refused = app
-            .ask_agent(
+            .delegate(
                 &asker_id,
                 AskRequest {
                     device_id: None,
@@ -28042,7 +28042,7 @@ mod ask_tests {
 
         // Nor is yourself.
         let self_ask = app
-            .ask_agent(
+            .delegate(
                 &asker_id,
                 AskRequest {
                     device_id: None,
@@ -28071,7 +28071,7 @@ mod ask_tests {
             relay.insert_team_run(run);
         }
         let seat_ask = app
-            .ask_agent(
+            .delegate(
                 &asker_id,
                 AskRequest {
                     device_id: None,
@@ -28145,7 +28145,7 @@ mod ask_tests {
             let app = app.clone();
             let asker = asker.clone();
             async move {
-                app.ask_agent(
+                app.delegate(
                     &asker,
                     AskRequest {
                         device_id: None,
@@ -28280,7 +28280,7 @@ mod ask_tests {
         let narrow = start("untrusted", "read-only").await;
 
         let refused = app
-            .ask_agent(
+            .delegate(
                 &narrow,
                 AskRequest {
                     device_id: None,
@@ -28300,7 +28300,7 @@ mod ask_tests {
 
         // The other direction is fine: handing work DOWN is always safe.
         let allowed = app
-            .ask_agent(
+            .delegate(
                 &wide,
                 AskRequest {
                     device_id: None,
@@ -28348,7 +28348,7 @@ mod ask_tests {
             .expect("thread");
 
         // The agent door: what it wrote is what is sent, untouched.
-        app.ask_agent(
+        app.delegate(
             &asker,
             AskRequest {
                 device_id: None,
@@ -28365,7 +28365,7 @@ mod ask_tests {
 
         // The human door: the asking agent is driven for a brief first, so what
         // the peer receives is NOT what was typed.
-        app.ask_agent(
+        app.delegate(
             &asker,
             AskRequest {
                 device_id: None,
@@ -28426,7 +28426,7 @@ mod ask_tests {
             .expect("thread");
 
         let peer = app
-            .ask_agent(
+            .delegate(
                 &asker,
                 AskRequest {
                     device_id: None,
@@ -28443,17 +28443,17 @@ mod ask_tests {
 
         // A thread nobody asked has nothing to answer.
         assert!(
-            app.answer_ask(&asker, "not mine to give".to_string())
+            app.report_back(&asker, "not mine to give".to_string())
                 .await
                 .is_err(),
             "only the agent that was asked may answer",
         );
         assert!(
-            app.answer_ask(&peer, "   ".to_string()).await.is_err(),
+            app.report_back(&peer, "   ".to_string()).await.is_err(),
             "an empty answer tells the other agent nothing",
         );
 
-        app.answer_ask(
+        app.report_back(
             &peer,
             "Fixed it; you still need to pick the cap.".to_string(),
         )
@@ -28473,7 +28473,7 @@ mod ask_tests {
         // And a second answer cannot overwrite the first.
         drop(relay);
         assert!(
-            app.answer_ask(&peer, "actually, something else".to_string())
+            app.report_back(&peer, "actually, something else".to_string())
                 .await
                 .is_err(),
             "a settled ask is not still waiting",
@@ -28508,7 +28508,7 @@ mod ask_tests {
             .clone()
             .expect("thread");
 
-        app.ask_agent(
+        app.delegate(
             &asker,
             AskRequest {
                 device_id: None,
@@ -28584,7 +28584,7 @@ mod ask_tests {
         app.set_goal(&session_id, "ship the mobile door", None, false, None)
             .await
             .expect("the user sets it");
-        app.ask_agent(
+        app.delegate(
             &session_id,
             AskRequest {
                 device_id: None,
@@ -28647,7 +28647,7 @@ watchdog settle this Blocked",
         let thread = goal_session(&app, &cwd).await;
 
         let peer = app
-            .ask_agent(
+            .delegate(
                 &thread,
                 AskRequest {
                     device_id: None,
@@ -28709,7 +28709,7 @@ watchdog settle this Blocked",
         let thread = goal_session(&app, &cwd).await;
 
         let peer = app
-            .ask_agent(
+            .delegate(
                 &thread,
                 AskRequest {
                     device_id: None,
@@ -29118,7 +29118,7 @@ watchdog settle this Blocked",
             .expect("the user sets one");
 
         provider.finish_turns_before_start_returns();
-        app.ask_agent(
+        app.delegate(
             &thread,
             AskRequest {
                 device_id: None,
@@ -29460,7 +29460,7 @@ watchdog settle this Blocked",
 
         let accepted = tokio::time::timeout(
             std::time::Duration::from_millis(500),
-            app.ask_agent_detached(
+            app.delegate_detached(
                 &thread,
                 AskRequest {
                     device_id: None,
@@ -29497,7 +29497,7 @@ watchdog settle this Blocked",
         let asker = goal_session(&app, &cwd).await;
 
         let ask_id = app
-            .ask_agent_detached(
+            .delegate_detached(
                 &asker,
                 AskRequest {
                     device_id: None,
@@ -29540,7 +29540,7 @@ watchdog settle this Blocked",
         let asker = goal_session(&app, &cwd).await;
 
         let ask_id = app
-            .ask_agent_detached(
+            .delegate_detached(
                 &asker,
                 AskRequest {
                     device_id: None,
@@ -29597,7 +29597,7 @@ watchdog settle this Blocked",
         let asker = goal_session(&app, &cwd).await;
 
         let ask_id = app
-            .ask_agent_detached(
+            .delegate_detached(
                 &asker,
                 AskRequest {
                     device_id: None,
@@ -29769,7 +29769,7 @@ watchdog settle this Blocked",
         }
 
         let ask_id = app
-            .ask_agent_detached(
+            .delegate_detached(
                 &asker,
                 AskRequest {
                     device_id: None,
@@ -29839,7 +29839,7 @@ watchdog settle this Blocked",
         }
 
         let ask_id = app
-            .ask_agent_detached(
+            .delegate_detached(
                 &asker,
                 AskRequest {
                     device_id: None,
@@ -29909,7 +29909,7 @@ watchdog settle this Blocked",
         }
 
         let refused = app
-            .ask_agent_detached(
+            .delegate_detached(
                 &asker,
                 AskRequest {
                     device_id: None,
@@ -29973,7 +29973,7 @@ watchdog settle this Blocked",
                 .expect("the person's own turn is running")
         };
 
-        app.ask_agent_detached(
+        app.delegate_detached(
             &asker,
             AskRequest {
                 device_id: None,
@@ -30035,7 +30035,7 @@ watchdog settle this Blocked",
 
         let accepted = tokio::time::timeout(
             std::time::Duration::from_millis(2000),
-            app.ask_agent(
+            app.delegate(
                 &asker,
                 AskRequest {
                     device_id: None,
@@ -30138,7 +30138,7 @@ watchdog settle this Blocked",
         grant_workspace(&app, &cwd).await;
         let (stable, real) = deferred_start_asker(&app, &bridge, &cwd).await;
 
-        app.ask_agent(
+        app.delegate(
             &stable,
             AskRequest {
                 device_id: None,
@@ -30198,7 +30198,7 @@ watchdog settle this Blocked",
         let (stable, real) = deferred_start_asker(&app, &bridge, &cwd).await;
 
         let ask_id = app
-            .ask_agent_detached(
+            .delegate_detached(
                 &stable,
                 AskRequest {
                     device_id: None,
@@ -30248,7 +30248,7 @@ watchdog settle this Blocked",
         let (stable, real) = deferred_start_asker(&app, &bridge, &cwd).await;
 
         let ask_id = app
-            .ask_agent_detached(
+            .delegate_detached(
                 &stable,
                 AskRequest {
                     device_id: None,
@@ -30309,7 +30309,7 @@ watchdog settle this Blocked",
             let app = app.clone();
             let asker = asker.clone();
             tokio::spawn(async move {
-                app.ask_agent(
+                app.delegate(
                     &asker,
                     AskRequest {
                         device_id: None,
@@ -30391,7 +30391,7 @@ watchdog settle this Blocked",
             let app = app.clone();
             let asker = asker.clone();
             tokio::spawn(async move {
-                app.ask_agent(
+                app.delegate(
                     &asker,
                     AskRequest {
                         device_id: None,
@@ -30444,7 +30444,7 @@ watchdog settle this Blocked",
             let app = app.clone();
             let asker = asker.clone();
             tokio::spawn(async move {
-                app.ask_agent(
+                app.delegate(
                     &asker,
                     AskRequest {
                         device_id: None,
@@ -30579,7 +30579,7 @@ watchdog settle this Blocked",
             let app = app.clone();
             let asker = asker.clone();
             tokio::spawn(async move {
-                app.ask_agent(
+                app.delegate(
                     &asker,
                     AskRequest {
                         device_id: None,
@@ -30645,7 +30645,7 @@ watchdog settle this Blocked",
         let thread = goal_session(&app, &cwd).await;
 
         let refused = app
-            .ask_agent_detached(
+            .delegate_detached(
                 &thread,
                 AskRequest {
                     device_id: None,
@@ -30676,7 +30676,7 @@ watchdog settle this Blocked",
         let a = goal_session(&app, &cwd).await;
 
         let b = app
-            .ask_agent(
+            .delegate(
                 &a,
                 AskRequest {
                     device_id: None,
@@ -30723,7 +30723,7 @@ watchdog settle this Blocked",
         assert!(idle, "B's turn should end");
 
         let _c = app
-            .ask_agent(
+            .delegate(
                 &b,
                 AskRequest {
                     device_id: None,
@@ -30770,7 +30770,7 @@ watchdog settle this Blocked",
         let thread = goal_session(&app, &cwd).await;
 
         let peer = app
-            .ask_agent(
+            .delegate(
                 &thread,
                 AskRequest {
                     device_id: None,
@@ -30854,7 +30854,7 @@ watchdog settle this Blocked",
         app.set_goal(&thread, "ship the mobile door", None, false, None)
             .await
             .expect("the user sets it");
-        app.ask_agent(
+        app.delegate(
             &thread,
             AskRequest {
                 device_id: None,
@@ -30907,7 +30907,7 @@ watchdog settle this Blocked",
     // decides its own turns, so neither gets the tools for deciding them — and permissions
     // cannot answer that, because a reviewer inherits the wide ones it needs to read.
     #[tokio::test]
-    async fn ask_agent_reply_tells_the_asker_to_end_its_turn() {
+    async fn delegate_reply_tells_the_asker_to_end_its_turn() {
         // The observed failure was a peer writing a `sleep 10` curl loop to watch its
         // own delegation, so the reply has to instruct rather than merely describe.
         let project = TempDir::new().expect("tmpdir");
@@ -30918,7 +30918,7 @@ watchdog settle this Blocked",
 
         let reply = app
             .call_peer_tool(
-                "ask_agent",
+                "delegate",
                 &serde_json::json!({ "message": "take a look at this" }),
                 &token,
             )
@@ -30938,7 +30938,7 @@ watchdog settle this Blocked",
     // An agent guessed "claude" and "anthropic" before landing on "claude_code":
     // the listing named no choices and the refusal named none either.
     #[tokio::test]
-    async fn ask_agent_names_the_providers_it_accepts() {
+    async fn delegate_names_the_providers_it_accepts() {
         let project = TempDir::new().expect("tmpdir");
         let cwd = project.path().to_string_lossy().to_string();
         let (app, _p, _o) = build_app(&cwd).await;
@@ -30948,8 +30948,8 @@ watchdog settle this Blocked",
         let tools = app.list_peer_tools_for(&token).await;
         let ask = tools
             .iter()
-            .find(|tool| tool.name == "ask_agent")
-            .expect("ask_agent is offered");
+            .find(|tool| tool.name == "delegate")
+            .expect("delegate is offered");
         assert_eq!(
             ask.input_schema["properties"]["provider"]["enum"],
             serde_json::json!(["fake"]),
@@ -30958,7 +30958,7 @@ watchdog settle this Blocked",
 
         let err = app
             .call_peer_tool(
-                "ask_agent",
+                "delegate",
                 &serde_json::json!({ "message": "look", "provider": "claude" }),
                 &token,
             )
@@ -31281,7 +31281,7 @@ watchdog settle this Blocked",
             .await
             .expect("the user sets it");
 
-        app.ask_agent(
+        app.delegate(
             &thread,
             AskRequest {
                 device_id: None,
@@ -31343,7 +31343,7 @@ watchdog settle this Blocked",
         };
         assert_eq!(spent().await, 0);
 
-        app.ask_agent(
+        app.delegate(
             &thread,
             AskRequest {
                 device_id: None,
@@ -31610,7 +31610,7 @@ watchdog settle this Blocked",
 
     #[tokio::test]
     async fn a_session_that_cannot_end_a_goal_is_not_given_one() {
-        // The three stopping tools ride the same token as `ask_agent`, which only
+        // The three stopping tools ride the same token as `delegate`, which only
         // an unrestricted session is handed. Driving a restricted one would hand
         // it the objective twenty times over while telling it to stop by calling
         // tools it does not have.
@@ -32276,13 +32276,11 @@ watchdog settle this Blocked",
 
         // The thread id itself is not a credential.
         assert!(
-            app.call_peer_tool("ask_agent", &args, &asker)
-                .await
-                .is_err(),
+            app.call_peer_tool("delegate", &args, &asker).await.is_err(),
             "a thread id must not work as a token",
         );
         assert!(
-            app.call_peer_tool("ask_agent", &args, "ask_madeup")
+            app.call_peer_tool("delegate", &args, "ask_madeup")
                 .await
                 .is_err(),
             "nor must a guess",
@@ -32291,7 +32289,7 @@ watchdog settle this Blocked",
         // The real one does, and it names the session it was issued for.
         let token = app.ask_token_for_thread(&asker).await;
         assert!(
-            app.call_peer_tool("ask_agent", &args, &token).await.is_ok(),
+            app.call_peer_tool("delegate", &args, &token).await.is_ok(),
             "the issued token acts as its session",
         );
         let relay = app.relay.read().await;
@@ -32330,7 +32328,7 @@ watchdog settle this Blocked",
             .expect("thread");
 
         let peer = app
-            .ask_agent(
+            .delegate(
                 &asker,
                 AskRequest {
                     device_id: None,
@@ -32385,7 +32383,7 @@ watchdog settle this Blocked",
         let asker_id = asker.active_thread_id.clone().expect("asker thread");
 
         let peer_id = app
-            .ask_agent(
+            .delegate(
                 &asker_id,
                 AskRequest {
                     device_id: None,
@@ -32460,7 +32458,7 @@ watchdog settle this Blocked",
 
         // A asks B; B is now working for A.
         let b_id = app
-            .ask_agent(
+            .delegate(
                 &a_id,
                 AskRequest {
                     device_id: None,
@@ -32476,7 +32474,7 @@ watchdog settle this Blocked",
             .expect("a can ask");
 
         let back = app
-            .ask_agent(
+            .delegate(
                 &b_id,
                 AskRequest {
                     device_id: None,
@@ -32523,7 +32521,7 @@ watchdog settle this Blocked",
         let asker_id = asker.active_thread_id.clone().expect("asker has a thread");
 
         let peer_id = app
-            .ask_agent(
+            .delegate(
                 &asker_id,
                 AskRequest {
                     device_id: None,
@@ -34373,7 +34371,7 @@ mod handover_tests {
             "the target must be told to carry on: {message}"
         );
         assert!(
-            !message.contains("answer_ask"),
+            !message.contains("report_back"),
             "a handover is one-way; nobody is waiting: {message}"
         );
     }

@@ -19,13 +19,13 @@ const MAX_PEERS_PER_ASKER: usize = 5;
 /// Appended to every task handed to a peer.
 ///
 /// Two versions, because only an unrestricted session is given tools. Telling a
-/// peer to call `answer_ask` when it has no such tool produced the worst of both
+/// peer to call `report_back` when it has no such tool produced the worst of both
 /// worlds: a useful first reply, then a nudge it could not obey, then "I don't
 /// have that tool" REPLACING the useful reply.
 fn answer_instruction(has_tools: bool) -> &'static str {
     if has_tools {
         "\n\n---\nAnother agent asked for this and cannot see your session. When \
-you are done, call the `answer_ask` tool with what it needs to know. That is \
+you are done, call the `report_back` tool with what it needs to know. That is \
 what it will be shown."
     } else {
         "\n\n---\nAnother agent asked for this and cannot see your session. End \
@@ -36,7 +36,7 @@ you could not do. Your last message is what it will be shown."
 
 /// Sent once if a peer that HAS the tool finishes without using it.
 fn answer_nudge() -> &'static str {
-    "You finished without calling `answer_ask`. Call it now with what the agent \
+    "You finished without calling `report_back`. Call it now with what the agent \
 that asked you needs to know — it is still waiting."
 }
 
@@ -91,7 +91,7 @@ pub(super) enum PeerLiveness {
     LiveTurnOnly,
 }
 
-/// What `precheck_ask` established, so `ask_agent` does not read it all again.
+/// What `precheck_ask` established, so `delegate` does not read it all again.
 struct PrecheckedAsk {
     /// The asker, canonicalized — what every later write must name.
     asker_thread_id: String,
@@ -118,7 +118,7 @@ impl AppState {
     ///
     /// The ask is found from the CALLER, never named by it: a peer that could
     /// name an ask could answer on another peer's behalf.
-    pub(crate) async fn answer_ask(
+    pub(crate) async fn report_back(
         &self,
         peer_thread_id: &str,
         answer: String,
@@ -159,7 +159,7 @@ impl AppState {
     /// same agent, and it is the only handle it ever gets.
     /// Accept a delegate now and do the slow half in the background: the broker handles
     /// remote actions one at a time, so awaiting one there stops every other device too.
-    pub(crate) async fn ask_agent_detached(
+    pub(crate) async fn delegate_detached(
         &self,
         asker_thread_id: &str,
         mut request: AskRequest,
@@ -208,7 +208,7 @@ impl AppState {
         let background_ask_id = ask_id.clone();
         tokio::spawn(async move {
             if let Err(error) = app
-                .ask_agent_filling(&asker, request, Some(background_ask_id.clone()))
+                .delegate_filling(&asker, request, Some(background_ask_id.clone()))
                 .await
             {
                 app.fail_detached_ask(&background_ask_id, error.message())
@@ -221,7 +221,7 @@ impl AppState {
     /// Report an accepted delegate's failure on the record the panel is showing, rather
     /// than in a log the phone never renders — that card is all the caller ever gets.
     ///
-    /// The record already exists and already names its asker: `ask_agent_detached`
+    /// The record already exists and already names its asker: `delegate_detached`
     /// writes it before answering the caller, precisely so a failure in the minutes
     /// that follow has somewhere to land.
     pub(super) async fn fail_detached_ask(&self, ask_id: &str, reason: String) {
@@ -335,7 +335,7 @@ Carry on with one of those instead of bringing in another."
         })
     }
 
-    pub(crate) async fn ask_agent(
+    pub(crate) async fn delegate(
         &self,
         asker_thread_id: &str,
         mut request: AskRequest,
@@ -351,13 +351,12 @@ Carry on with one of those instead of bringing in another."
                     .map_err(AskError::Failed)?,
             );
         }
-        self.ask_agent_filling(&asker_thread_id, request, None)
-            .await
+        self.delegate_filling(&asker_thread_id, request, None).await
     }
 
     /// `existing_ask_id` fills in a record written before the caller was answered, so an
     /// accepted delegate survives a restart of the slow half.
-    async fn ask_agent_filling(
+    async fn delegate_filling(
         &self,
         asker_thread_id: &str,
         request: AskRequest,
@@ -1042,7 +1041,7 @@ impl AppState {
             if !matches {
                 continue;
             }
-            // It finished its turn without calling `answer_ask`. Ask once; a peer
+            // It finished its turn without calling `report_back`. Ask once; a peer
             // that ignores it twice is not going to start, and waiting forever
             // would keep the asker asleep.
             let can_be_nudged = {

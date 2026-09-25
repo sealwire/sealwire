@@ -454,13 +454,13 @@ impl AppState {
                 )
                 .await
                 .map(|()| "Asked. Work resumes when they answer.".to_string()),
-            ToolCall::AnswerAsk { answer } => {
-                match self.answer_ask(caller_thread_id, answer).await {
+            ToolCall::ReportBack { answer } => {
+                match self.report_back(caller_thread_id, answer).await {
                     Ok(()) => Ok("Sent. The agent that asked will be given it.".to_string()),
                     Err(error) => Err(error.message()),
                 }
             }
-            ToolCall::AskAgent {
+            ToolCall::Delegate {
                 message,
                 agent,
                 provider,
@@ -471,16 +471,16 @@ impl AppState {
                     device_id: None,
                     started_by: relay_api::delegation::StartedBy::Agent,
                     peer_thread_id: agent,
-                    // Left unresolved on purpose: only `ask_agent` knows who is
+                    // Left unresolved on purpose: only `delegate` knows who is
                     // asking, and the default is "someone other than you".
                     provider,
                     model,
                     effort,
                     message,
                 };
-                match self.ask_agent(caller_thread_id, request).await {
+                match self.delegate(caller_thread_id, request).await {
                     Ok(peer) => Ok(format!(
-                        "Asked. That agent's id is {peer} — name it as `agent` to carry on \
+                        "Delegated. That agent's id is {peer} — name it as `agent` to carry on \
 with it.\n\nEnd your turn now if you have nothing else to do. Do NOT poll, sleep, \
 or check on it: the relay wakes you with the answers when everything you asked \
 for is done, and a turn spent waiting is a turn spent for nothing."
@@ -517,8 +517,8 @@ for is done, and a turn spent waiting is a turn spent for nothing."
         match orchestrator_tools::parse_call(name, args)? {
             // The Orchestrator drives tasks, not ad-hoc peers. Reached only if
             // someone calls the API directly without a caller thread id.
-            ToolCall::AskAgent { .. }
-            | ToolCall::AnswerAsk { .. }
+            ToolCall::Delegate { .. }
+            | ToolCall::ReportBack { .. }
             | ToolCall::GoalStatus
             | ToolCall::GoalComplete { .. }
             | ToolCall::GoalBlocked { .. }

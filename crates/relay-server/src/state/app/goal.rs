@@ -51,7 +51,7 @@ done in prose does not end it. Turn {next} of {max_turns}.",
 
 /// Whether this session would still be handed the tools that end a goal.
 ///
-/// They ride the same token as `ask_agent`, which only an unrestricted session
+/// They ride the same token as `delegate`, which only an unrestricted session
 /// gets — so this is checked again before every driven turn, not just when the
 /// goal is set. Settings can be changed on any idle thread, and a goal between
 /// turns is idle.

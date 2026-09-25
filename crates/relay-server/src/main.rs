@@ -907,7 +907,7 @@ async fn delegate_to_agent(
     authorize_api(&context, &headers, &uri)?;
     let outcome = context
         .app
-        .ask_agent(
+        .delegate(
             &input.thread_id,
             relay_api::delegation::AskRequest {
                 peer_thread_id: input.agent,
@@ -924,7 +924,7 @@ async fn delegate_to_agent(
         .await
         .map(|peer| {
             format!(
-                "Asked. That agent's id is {peer}; you will be sent its answer when it is done."
+                "Delegated. That agent's id is {peer}; you will be sent its answer when it is done."
             )
         })
         .map_err(|error| error.message());

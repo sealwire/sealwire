@@ -42,8 +42,8 @@ pub(crate) fn seat_tools() -> Vec<&'static ToolSpec> {
 /// driver. Same non-enforcement caveat as `SEAT_TOOLS` — it narrows what the
 /// bridge advertises, it does not authenticate anyone.
 pub(crate) const PEER_TOOLS: &[&str] = &[
-    "ask_agent",
-    "answer_ask",
+    "delegate",
+    "report_back",
     // Read it, and three ways to stop. Note what is NOT here and never should
     // be: anything that writes the objective. An agent that can edit its own
     // goal will edit it to one it can finish.
@@ -147,7 +147,7 @@ pub(crate) enum Effect {
 const ACTING_TOOLS: &[&str] = &[
     // Answering the agent that asked you is not an action on the world; it is
     // the reply. A confirmation card here would strand the asker.
-    "answer_ask",
+    "report_back",
     // Reporting how a goal ended is likewise a report, not an act. Requiring a
     // card to say "I am stuck" would leave the user waiting on a goal that has
     // already given up.
@@ -159,7 +159,7 @@ const ACTING_TOOLS: &[&str] = &[
     // break the whole point — the asking agent runs its own loop and decides
     // when to ask again. What keeps this safe is not a card but that both
     // threads stay visible and open, so a person can read either and take over.
-    "ask_agent",
+    "delegate",
     "control_run",
     "respond_to_agent",
     "widen_scope",
@@ -442,7 +442,7 @@ resumes when they answer.",
         }],
     },
     ToolSpec {
-        name: "answer_ask",
+        name: "report_back",
         summary: "Send your answer to the agent that asked you for this. Call it \
 when you are done; what you write here is all it will see.",
         effect: Effect::Acts,
@@ -455,7 +455,7 @@ could not do. It cannot see your session.",
         }],
     },
     ToolSpec {
-        name: "ask_agent",
+        name: "delegate",
         summary: "Hand work to another agent. Returns at once and you are woken with the answers — do not poll or wait. Ask one again to continue, or several at once.",
         effect: Effect::Acts,
         params: &[
@@ -752,12 +752,12 @@ pub(crate) enum ToolCall {
     },
     /// Reply to whoever asked you. The relay finds the ask from the caller's own
     /// token, so a peer cannot answer on somebody else's behalf.
-    AnswerAsk {
+    ReportBack {
         answer: String,
     },
     /// Hand work to another agent. Nothing here says "worker" or "reviewer":
     /// the direction lives in `message`, which the relay never reads.
-    AskAgent {
+    Delegate {
         message: String,
         /// An agent already asked, to carry on with. `None` brings in a new one.
         agent: Option<String>,
@@ -1064,10 +1064,10 @@ pub(crate) fn parse_call(name: &str, args: &Value) -> Result<ToolCall, String> {
         "goal_needs_you" => Ok(ToolCall::GoalNeedsYou {
             question: get("question")?.expect("required param yields Some"),
         }),
-        "answer_ask" => Ok(ToolCall::AnswerAsk {
+        "report_back" => Ok(ToolCall::ReportBack {
             answer: get("answer")?.expect("required param yields Some"),
         }),
-        "ask_agent" => Ok(ToolCall::AskAgent {
+        "delegate" => Ok(ToolCall::Delegate {
             message: get("message")?.expect("required param yields Some"),
             agent: get("agent")?,
             provider: get("provider")?,
@@ -1737,17 +1737,17 @@ it failed",
     }
 
     #[test]
-    fn ask_agent_tells_the_caller_not_to_wait_on_the_answer() {
+    fn delegate_tells_the_caller_not_to_wait_on_the_answer() {
         // A peer that polls burns a turn per check and can sit in a sleep loop for
         // hours; the push model only works if the tool says so out loud.
         let tool = TOOLS
             .iter()
-            .find(|tool| tool.name == "ask_agent")
-            .expect("ask_agent should be registered");
+            .find(|tool| tool.name == "delegate")
+            .expect("delegate should be registered");
         let summary = tool.summary.to_lowercase();
         assert!(
             summary.contains("do not poll"),
-            "ask_agent's summary must forbid polling, got: {}",
+            "delegate's summary must forbid polling, got: {}",
             tool.summary
         );
     }

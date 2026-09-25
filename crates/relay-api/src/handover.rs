@@ -10,7 +10,7 @@
 /// What a person asked for when they typed `/handover`.
 ///
 /// Only a person ever sends one. There is no agent-facing tool: an agent that
-/// wants another agent to do something is asking, and `ask_agent` is that.
+/// wants another agent to do something delegates, and `delegate` is that.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HandoverRequest {
     /// Hand to this existing session, or start one when absent.

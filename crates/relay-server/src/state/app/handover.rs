@@ -20,9 +20,9 @@ use crate::state::AppState;
 
 /// Appended to the summary the target is given.
 ///
-/// Deliberately NOT `answer_instruction`: naming `answer_ask` here would tell an
+/// Deliberately NOT `answer_instruction`: naming `report_back` here would tell an
 /// agent to report back to a session that is not waiting and will never be
-/// woken — and, worse, `answer_ask` finds its ask from the caller, so it would
+/// woken — and, worse, `report_back` finds its ask from the caller, so it would
 /// answer some unrelated delegate that happened to be open on that thread.
 fn continue_instruction() -> &'static str {
     "\n\n---\nThat work is now yours. Nobody is waiting on a reply and there is \
@@ -863,11 +863,11 @@ mod prompt_tests {
 
     #[test]
     fn the_target_is_never_told_to_answer_anybody() {
-        // A handover is one-way. `answer_ask` finds its ask FROM THE CALLER, so an
+        // A handover is one-way. `report_back` finds its ask FROM THE CALLER, so an
         // instruction to call it would answer whatever unrelated delegate happened to
         // be open on that thread — and the source is never woken either way.
         let instruction = continue_instruction();
-        assert!(!instruction.contains("answer_ask"), "{instruction}");
+        assert!(!instruction.contains("report_back"), "{instruction}");
         assert!(instruction.contains("Nobody is waiting on a reply"));
         assert!(instruction.contains("carry on"));
     }
