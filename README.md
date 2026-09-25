@@ -16,202 +16,179 @@
   </a>
 </p>
 
-<p align="center">A software agent team on your own machine. Building and managing from anywhere.</p>
+<p align="center">Your coding agents, working together on your own machine — and in your pocket wherever you go.</p>
 
 <p align="center">
-  <img src="docs/images/desktop-session.png" alt="sealwire desktop: session list, live transcript, workspace diff" width="100%">
+  <img src="docs/images/desktop-home.png" alt="Sealwire on the desktop: Claude Code, Codex and Cursor sessions in the sidebar and tabs, the conversation, and the exact lines it changed" width="100%">
 </p>
 
-- **Cross-agent review:** ask a *different* agent to review the current changes
-  in its own session. Claude Code reviews Codex, Codex reviews Claude. Findings
-  and a verdict land back in your thread — optionally looping reviewer ↔ author
-  until it approves.
-- **No registration required:** you don't need an account, and everything still
-  stays safe and private.
-- **Follows you across devices:** one session, many surfaces. Move between
-  laptop, browser, and phone without losing the flow. Web push tells you when it needs a decision.
-- **Privacy-first:** your code never leaves your machine. `private` mode is the
-  default and treats the broker as blind transport — it relays encrypted
-  traffic, and nobody can read your session or your code.
-- **Two providers, one interface:** Codex via the official `codex app-server`
-  protocol, Claude Code via the official `@anthropic-ai/claude-agent-sdk`.
-- **Self-hosted broker:** if you're extra tech-savvy, you can deploy your own
-  broker — as long as it's for your own use.
+Sealwire puts Claude Code, Codex and Cursor behind one simple screen. Start
+work at your desk, check on it from your phone, approve the next step from the
+couch. The agents run on your computer, next to your code — Sealwire itself never
+sees it.
 
-## Getting started
+- **All your agents in one place.** Claude Code, Codex and Cursor side by side,
+  in the same window, with the same controls. Use whichever one you like for
+  each job, or switch mid-project.
+- **Agents that check each other's work.** Ask a *different* agent to review
+  what was just written — Claude reviews Codex, Codex reviews Claude — and let
+  them go back and forth until the reviewer is happy.
+- **Agents that work as a team.** Set a goal and let an agent run until it's
+  done, pass a side job to another agent, or hand the whole thing over — each
+  one a single slash command.
+- **Pick up anywhere.** The same session follows you from laptop to browser to
+  phone. You get a notification when an agent needs you, and can approve it
+  right there.
+- **Private by default.** Sealwire has no copy of your code or your
+  conversations. When your phone connects from outside, everything is end-to-end encrypted — even the server
+  in the middle can't read it.
+- **Free on your own machine.** No account and nothing to deploy — one command
+  and you're running. Reaching it from your phone goes through SealWire Cloud,
+  which needs an access key.
 
-sealwire runs a local **relay-server** next to your workspace. The web UI, your
-phone, and any other browser are clients that connect to it.
+## Get started
 
-### Prerequisites
+You need at least one of these installed and logged in:
 
-At least one agent CLI, authenticated:
+- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — a Claude
+  login or an `ANTHROPIC_API_KEY`. Everything else it needs comes bundled.
+- **[Codex](https://github.com/openai/codex)** — the `codex` command-line tool.
+- **[Cursor](https://cursor.com/cli)** — the `cursor-agent` command-line tool.
 
-- **[Codex](https://github.com/openai/codex)** — the `codex` CLI installed and
-  logged in.
-- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — Claude auth
-  only: an `ANTHROPIC_API_KEY` or an existing Claude Code login. The worker (and
-  its bundled Claude Code CLI) ships inside the package, so `claude` does **not**
-  need to be on your PATH.
-
-### npx (recommended)
+Then, in the folder you want to work on:
 
 ```bash
 npx sealwire
 ```
 
-That starts a **localhost-only** relay on <http://localhost:8787> and opens the
-web UI as soon as it's ready.
+Sealwire opens in your browser at <http://localhost:8787>. It only listens on
+your own machine until you decide otherwise.
 
-sealwire treats the directory you launched it from as the default workspace for
-new sessions. Its own state, including sessions, projects and paired devices, lives in
-`~/.agent-relay/`, one set per machine.
+**Tip:** run it on a computer that's always on — a desktop, a home server — and
+long jobs keep going even with your laptop closed.
 
-Run that same command on whatever machine is already always-on — a desktop, a
-home server, the VM that holds the repo — and long work keeps going with your
-laptop shut, reachable from anywhere you've paired. There is nothing to deploy:
-the relay wants to sit next to the workspace and the logged-in CLI, so a box you
-already own beats a container.
-
-### Pair a phone
+### Connect your phone
 
 ```bash
-sealwire cloud
+npx sealwire cloud
 ```
 
-Attaches to the hosted SealWire Cloud broker (`wss://app.sealwire.dev`) so
-remote devices can pair — no infrastructure to deploy. You can point `--broker`
-at a self-hosted `relay-broker` instead, or use `sealwire local` to guarantee the
-relay never dials out.
+The first time, it asks for your SealWire Cloud access key. Then scan the QR
+code with your phone and the same sessions show up there. Add
+it to your home screen and it works like an app, notifications included.
 
-## Cross-agent review
+## Let agents review each other
 
-A single model marking its own homework is weak. sealwire makes review a
-first-class action: pick the reviewer's provider and model, brief it, and let it
-run in its own session against the current workspace diff.
-
-<p align="center">
-  <img src="docs/images/desktop-request-review.png" alt="The Request review dialog: reviewer provider, model, effort, reuse an existing reviewer session, instructions, briefing mode, and maximum rounds" width="100%">
-</p>
-
-It posts its findings — and a machine-readable `VERDICT:` — straight back into
-the thread you were working in. Set **maximum rounds** above 1 and the reviewer
-and author keep iterating until the reviewer approves or the rounds run out.
+One model checking its own homework isn't much of a check. In Sealwire, review
+is one click: pick who should review, which model, and how many rounds of back
+and forth you'll allow.
 
 <p align="center">
-  <img src="docs/images/desktop-review.png" alt="A reviewer agent's findings posted back into the author's thread, ending with VERDICT: NEEDS_CHANGES" width="100%">
+  <img src="docs/images/desktop-review-dialog.png" alt="The Request review dialog: choose the reviewer agent, model, instructions and number of rounds" width="100%">
 </p>
 
-## Control from anywhere
-
-Blocked work shouldn't wait for you to walk back to the terminal. Pair a phone
-and the same session shows up there — the approval in full, and a **Take over**
-button that moves control to the device in your hand.
+The reviewer works in its own session, looks at the actual changes, and posts
+its findings — and a clear verdict — back into your conversation. Allow more
+than one round and the two agents keep going until the reviewer approves.
 
 <p align="center">
-  <img src="docs/images/phone-approval.png" alt="The remote surface on a phone: an approval request with the full command and inline Approve and Deny, after claiming control of the session from this device" width="400">
+  <img src="docs/images/desktop-review-result.png" alt="A Codex review posted back into the conversation; beside it, the Agents panel with the goal, three review rounds, and questions handed to other agents" width="100%">
 </p>
 
-The remote surface is an installable PWA, so it can live on your home screen and
-get **web push** — a notification when a session needs input, finishes, or
-errors. The relay is the control layer around your agent team, and the broker
-just moves encrypted traffic.
+## Four commands that do the heavy lifting
 
-## Also in the box
+Type `/` in the message box. Each command reads plain words for who and how
+— `codex`, `opus 5`, `high` — and whatever you write after that is the
+instruction.
 
-- **Projects and workspaces** — group sessions by repo, with a per-workspace
-  diff panel and one-click apply for individual file changes.
-- **Session tabs, pinning, and rename** — several live sessions side by side.
-- **Fork a thread** from any message to explore an alternative without losing
-  the original.
-- **Server-side search and an activity bell** across sessions, so a backgrounded
-  agent that needs you doesn't get lost.
-- **Code Flow** — chain execute → review → revise across two agents, looped up to
-  a round limit.
-- **Takeover** — claim a session from another device mid-flight, with the
-  handover made explicit rather than silent.
-- **Permission modes** per session, from bypass to approve-everything.
+<p align="center">
+  <img src="docs/images/desktop-slash-commands.png" alt="Typing / opens one menu: Sealwire's /review, /goal, /delegate and /handover, and below them the Claude Code skills for this project" width="100%">
+</p>
 
-## CLI
-
-```bash
-sealwire                    # localhost-only relay, opens the web UI
-sealwire local              # never attach to a broker; remote pairing disabled
-sealwire cloud              # attach to the hosted SealWire Cloud broker so a phone can pair
-sealwire --broker https://broker.example.com   # use your own broker
-sealwire --port 8788 --host 127.0.0.1          # bind address / port
-sealwire --no-open          # don't open a browser
-sealwire --beta             # unlock in-development features (currently: Tasks)
-```
-
-`sealwire --help` has the full list, including binary resolution and env vars.
-
-Unfinished features are off by default and show a blurred *in development*
-preview rather than being hidden; `--beta` (or `SEALWIRE_BETA=1`) turns them on
-and combines with any other flag.
-
-## Development
-
-| Package | What it is |
+| Command | What it does |
 |---|---|
-| `crates/relay-server` | The core. Relay state machine and provider bridges (`codex.rs`, `claude.rs`, `fake_provider.rs`). |
-| `crates/relay-broker` | The public broker: blind transport for remote pairing. |
-| `crates/relay-http`, `crates/relay-util` | Shared HTTP and utilities. |
-| `claude-worker/` | Node worker wrapping `@anthropic-ai/claude-agent-sdk`, speaking NDJSON with Rust. |
-| `frontend/`, `web/` | Vite web UI — local and remote surfaces. |
-| `src-tauri/` | macOS desktop app (preview). |
+| `/goal` | Give the agent a finish line and let it keep going on its own until it gets there. It stops only to say *done* (with proof), *stuck* (and why), or *I need you to decide something*. |
+| `/review` | Have a different agent check the work so far. `/review codex high focus on the error paths` |
+| `/delegate` | Pass a side job to another agent and get the answer back — say, Codex chases a flaky test while Claude keeps going. Both conversations stay open, so you can read along or step in. |
+| `/handover` | The current agent writes up where things stand and hands the whole job to another one to finish. Handy when you've run out of quota, or want a fresh pair of eyes. |
+
+With `/delegate` and `/handover` you can also type `@` to pick a session that's
+already open, instead of starting a fresh one. Your agents' own commands and
+skills show up in the same menu, right beside these.
+
+## Stay in control from anywhere
+
+Long work shouldn't need you at your desk. Every session is on your phone —
+which agent is on what, which goal is still running and how far along it is,
+and what the agents you brought in came back with.
+
+<p align="center">
+  <img src="docs/images/phone-sessions.png" alt="Sealwire on a phone: the session list, with Claude Code, Codex and Cursor sessions side by side" width="320">
+  &nbsp;&nbsp;
+  <img src="docs/images/phone-goal.png" alt="Sealwire on a phone: the Agents panel, with a goal on turn 3 of 20 and an answered question from Codex" width="320">
+</p>
+
+When an agent wants to run a command or change something important, you see
+exactly what it's asking for and approve or deny it right there. Push
+notifications tell you when a session needs you, finishes, or runs into trouble,
+and **Take over** moves control to the device in your hand.
+
+## And a lot more
+
+- **Projects and worktrees** — sessions grouped by repo and branch, with a
+  panel showing exactly what changed.
+- **Tabs and pins** — keep several sessions open side by side.
+- **Fork a conversation** from any message to try another idea without losing
+  the original — even into a different folder.
+- **Search and a notification bell** across every session, so an agent that
+  needs you in the background never gets lost.
+- **Approval modes** per session, from "ask me about everything" to "just go".
+- **Desktop app for macOS** (preview), with a menu-bar icon.
+
+## Commands
 
 ```bash
-cargo fmt --check && cargo check -p relay-server && cargo test -p relay-server
-node --check claude-worker/worker.mjs && node --test claude-worker/*.test.mjs
-npm test                       # frontend unit tests + vite build
-npm run test:browser:install   # chromium, once
+npx sealwire                 # start on this machine only, and open the browser
+npx sealwire cloud           # also let your phone connect from anywhere (access key)
+npx sealwire local           # guarantee it never talks to the internet
+npx sealwire --port 8788     # use a different port
+npx sealwire --no-open       # don't open a browser
+npx sealwire --beta          # try features still in development (Tasks, Usage)
+npx sealwire --help          # everything else
 ```
 
-[`AGENTS.md`](AGENTS.md) has the code map and the commands to run after a
-change; [`docs/testing-matrix.md`](docs/testing-matrix.md) covers what each
-suite actually exercises. The task-team orchestration privacy boundary is
-documented in
-[`docs/content-blind-orchestration.md`](docs/content-blind-orchestration.md).
+Features still in development show up as a blurred preview until you turn them
+on with `--beta`. Prefer to run your own connection server instead of Sealwire
+Cloud? Point `--broker` at a self-hosted one.
 
-## Current focus
+## What's coming
 
-**Long, persistent task lists.** Give the agent an ordered list of tasks and let
-it work through them autonomously over hours: each task is one Code Flow (author
-executes, reviewer reviews, author revises), git-committed on approval so the
-next task starts from a clean tree. The data model and the serial driver are in;
-persistence and restart recovery, the git checkpoint after each approved task,
-the HTTP/broker surface, and the UI are the work in progress.
-
-Also in focus:
-
-- cross-agent review: single-shot and multi-round reviewer ↔ author loops
-- single owner, many devices; approval-first remote control that follows you
-- web first: the remote surface is an installable PWA with push; the macOS
-  desktop app is a preview and there is no native mobile app
-- local-first runtime, with the hosted SealWire Cloud broker as the default remote
-  transport and a self-hosted broker as an option
-
-## Roadmap
-
-- a formal append-only event log with replay cursors. Today there are
-  duplicate-safe remote actions and self-healing transcript deltas, which is
-  weaker than real delivery guarantees
-- audit logging for `managed` mode — the mode is selectable, the audit trail
-  behind it is not written yet
-- providers beyond Codex and Claude Code
-- native mobile, only where the web hits real limits
-- later: team workflows
-
-Not on the roadmap today: multi-user hosted collaboration, untrusted tenants
-sharing one control plane, or org policy controls.
+- **Tasks and task teams** — give Sealwire a goal, and a coordinator agent
+  plans it, splits it across several agents, and has their work reviewed before
+  it lands. You approve the plan; it does the rest. Try it early with `--beta`.
+- **Usage and cost** — how many tokens, and how much money, each agent and
+  project is using, week by week. Also behind `--beta`.
+- More agents beyond Claude Code, Codex and Cursor.
+- A native mobile app, where the web version hits its limits.
 
 ## Security
 
-`private` mode is the default: broker-mediated traffic is end-to-end encrypted
-and the broker is treated as blind transport. `managed` mode exists for
-deployments that explicitly want broker or org services to read content. Details
-in [`docs/security-model.md`](docs/security-model.md).
+Private mode is the default: anything that travels between your devices is
+end-to-end encrypted, and the connection server only ever passes along data it
+can't read. The details are in [`docs/security-model.md`](docs/security-model.md).
+
+## Development
+
+Sealwire is a Rust server, a small Node worker for Claude Code, and a Vite web
+app. [`AGENTS.md`](AGENTS.md) has the code map and the checks to run after a
+change, and [`docs/testing-matrix.md`](docs/testing-matrix.md) explains what
+each test suite covers.
+
+```bash
+cargo test -p relay-server
+node --test claude-worker/*.test.mjs
+npm test
+```
 
 ## License
 
