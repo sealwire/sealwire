@@ -1,11 +1,13 @@
 use std::{
     collections::{BTreeSet, HashMap},
+    future::Future,
     net::IpAddr,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -19,7 +21,7 @@ use sqlx::{
 };
 use tokio::{
     fs,
-    sync::{Mutex, MutexGuard},
+    sync::{Mutex, MutexGuard, Semaphore},
 };
 use tracing::{info, warn};
 
@@ -34,6 +36,10 @@ pub const PUBLIC_POSTGRES_URL_ENV: &str = "RELAY_BROKER_PUBLIC_POSTGRES_URL";
 /// database; a single broker (the default) keeps the in-memory state as the
 /// source of truth and skips the per-op reload for much lower latency.
 pub const PUBLIC_POSTGRES_RELOAD_ENV: &str = "RELAY_BROKER_PUBLIC_POSTGRES_RELOAD_BEFORE_USE";
+const PUBLIC_DB_MAX_CONNECTIONS_ENV: &str = "RELAY_BROKER_PUBLIC_DB_MAX_CONNECTIONS";
+const PUBLIC_DB_ACQUIRE_TIMEOUT_ENV: &str = "RELAY_BROKER_PUBLIC_DB_ACQUIRE_TIMEOUT_MS";
+const PUBLIC_DB_QUERY_TIMEOUT_ENV: &str = "RELAY_BROKER_PUBLIC_DB_QUERY_TIMEOUT_MS";
+const PUBLIC_DB_CONCURRENCY_ENV: &str = "RELAY_BROKER_PUBLIC_DB_CONCURRENCY";
 pub const PUBLIC_RELAY_WS_TTL_SECS_ENV: &str = "RELAY_BROKER_PUBLIC_RELAY_WS_TTL_SECS";
 pub const PUBLIC_DEVICE_WS_TTL_SECS_ENV: &str = "RELAY_BROKER_PUBLIC_DEVICE_WS_TTL_SECS";
 /// Grace window during which a rotated-away client/device refresh token keeps
@@ -55,11 +61,197 @@ const DEFAULT_RELAY_ENROLLMENT_CHALLENGE_TTL_SECS: u64 = 300;
 /// hop is machine-to-machine (relay -> sealed pairing result -> device), so this
 /// only has to cover transport, not a human deciding anything.
 const DEFAULT_CLIENT_CLAIM_TTL_SECS: u64 = 300;
+const DEFAULT_PUBLIC_DB_MAX_CONNECTIONS: u32 = 5;
+const DEFAULT_PUBLIC_DB_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
+const DEFAULT_PUBLIC_DB_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
+const DEFAULT_PUBLIC_DB_CONCURRENCY: usize = 8;
 /// Ceiling on unclaimed attestations. Unlike the enrollment challenge map this
 /// one is writable by any authenticated relay, so it needs a bound: without it
 /// a hostile relay can grow it without limit inside the TTL window.
 const MAX_PENDING_CLIENT_CLAIMS: usize = 512;
 const PUBLIC_CONTROL_STATE_VERSION: u32 = 2;
+
+#[derive(Clone, Debug)]
+struct PublicControlDbConfig {
+    max_connections: u32,
+    acquire_timeout: Duration,
+    query_timeout: Duration,
+    concurrency: usize,
+}
+
+impl Default for PublicControlDbConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: DEFAULT_PUBLIC_DB_MAX_CONNECTIONS,
+            acquire_timeout: DEFAULT_PUBLIC_DB_ACQUIRE_TIMEOUT,
+            query_timeout: DEFAULT_PUBLIC_DB_QUERY_TIMEOUT,
+            concurrency: DEFAULT_PUBLIC_DB_CONCURRENCY,
+        }
+    }
+}
+
+impl PublicControlDbConfig {
+    fn validate(self) -> Result<Self, String> {
+        if self.max_connections == 0 || self.max_connections > 64 {
+            return Err("public db max_connections must be in 1..=64".to_string());
+        }
+        if self.acquire_timeout.is_zero() || self.acquire_timeout > Duration::from_secs(60) {
+            return Err("public db acquire_timeout must be in (0, 60]s".to_string());
+        }
+        if self.query_timeout.is_zero() || self.query_timeout > Duration::from_secs(60) {
+            return Err("public db query_timeout must be in (0, 60]s".to_string());
+        }
+        if self.concurrency == 0 || self.concurrency > 128 {
+            return Err("public db concurrency must be in 1..=128".to_string());
+        }
+        Ok(self)
+    }
+
+    fn from_env() -> Result<Self, String> {
+        let mut cfg = Self::default();
+        if let Ok(value) = std::env::var(PUBLIC_DB_MAX_CONNECTIONS_ENV) {
+            cfg.max_connections = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{PUBLIC_DB_MAX_CONNECTIONS_ENV} must be an integer"))?;
+        }
+        if let Ok(value) = std::env::var(PUBLIC_DB_ACQUIRE_TIMEOUT_ENV) {
+            let millis: u64 = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{PUBLIC_DB_ACQUIRE_TIMEOUT_ENV} must be an integer"))?;
+            cfg.acquire_timeout = Duration::from_millis(millis);
+        }
+        if let Ok(value) = std::env::var(PUBLIC_DB_QUERY_TIMEOUT_ENV) {
+            let millis: u64 = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{PUBLIC_DB_QUERY_TIMEOUT_ENV} must be an integer"))?;
+            cfg.query_timeout = Duration::from_millis(millis);
+        }
+        if let Ok(value) = std::env::var(PUBLIC_DB_CONCURRENCY_ENV) {
+            cfg.concurrency = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{PUBLIC_DB_CONCURRENCY_ENV} must be an integer"))?;
+        }
+        cfg.validate()
+    }
+}
+
+#[derive(Clone)]
+struct PublicControlDbGate {
+    permits: Arc<Semaphore>,
+    query_timeout: Duration,
+}
+
+#[derive(Debug)]
+enum PublicControlDbGateError {
+    Busy,
+    Timeout,
+    Operation(String),
+}
+
+impl PublicControlDbGateError {
+    fn into_message(self) -> String {
+        match self {
+            Self::Busy => "public control-plane database busy".to_string(),
+            Self::Timeout => "public control-plane database query timed out".to_string(),
+            Self::Operation(message) => message,
+        }
+    }
+}
+
+impl PublicControlDbGate {
+    fn new(concurrency: usize, query_timeout: Duration) -> Result<Self, String> {
+        if concurrency == 0 || concurrency > 128 {
+            return Err("public db concurrency must be in 1..=128".to_string());
+        }
+        if query_timeout.is_zero() || query_timeout > Duration::from_secs(60) {
+            return Err("public db query_timeout must be in (0, 60]s".to_string());
+        }
+        Ok(Self {
+            permits: Arc::new(Semaphore::new(concurrency)),
+            query_timeout,
+        })
+    }
+
+    async fn run<T, F>(&self, operation: F) -> Result<T, PublicControlDbGateError>
+    where
+        F: Future<Output = Result<T, String>>,
+    {
+        let _permit = self
+            .permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| PublicControlDbGateError::Busy)?;
+        match tokio::time::timeout(self.query_timeout, operation).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(PublicControlDbGateError::Operation(error)),
+            Err(_) => Err(PublicControlDbGateError::Timeout),
+        }
+    }
+}
+
+impl Default for PublicControlDbGate {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_PUBLIC_DB_CONCURRENCY,
+            DEFAULT_PUBLIC_DB_QUERY_TIMEOUT,
+        )
+        .expect("default public control-plane database gate is valid")
+    }
+}
+
+#[cfg(test)]
+mod public_control_db_gate_tests {
+    use super::*;
+
+    #[test]
+    fn public_db_config_rejects_unbounded_values() {
+        let invalid_connections = PublicControlDbConfig {
+            max_connections: 0,
+            ..PublicControlDbConfig::default()
+        };
+        assert!(invalid_connections.validate().is_err());
+
+        let invalid_concurrency = PublicControlDbConfig {
+            concurrency: 129,
+            ..PublicControlDbConfig::default()
+        };
+        assert!(invalid_concurrency.validate().is_err());
+
+        let invalid_timeout = PublicControlDbConfig {
+            query_timeout: Duration::ZERO,
+            ..PublicControlDbConfig::default()
+        };
+        assert!(invalid_timeout.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn public_db_gate_refuses_when_full_without_queueing() {
+        let gate = PublicControlDbGate::new(1, Duration::from_secs(1)).expect("valid gate");
+        let _held = gate
+            .permits
+            .clone()
+            .try_acquire_owned()
+            .expect("first permit");
+        let result = gate.run(async { Ok::<_, String>(()) }).await;
+        assert!(matches!(result, Err(PublicControlDbGateError::Busy)));
+    }
+
+    #[tokio::test]
+    async fn public_db_gate_bounds_operation_time() {
+        let gate = PublicControlDbGate::new(1, Duration::from_millis(5)).expect("valid gate");
+        let result = gate
+            .run(async {
+                std::future::pending::<()>().await;
+                Ok::<_, String>(())
+            })
+            .await;
+        assert!(matches!(result, Err(PublicControlDbGateError::Timeout)));
+    }
+}
 
 /// Stable prefix on the per-relay device-cap error, so the HTTP layer can map
 /// it to a machine-readable `device_limit_reached` code (and callers/UI can match
@@ -404,6 +596,7 @@ enum PublicControlPersistence {
     Json(PathBuf),
     Postgres {
         pool: PgPool,
+        gate: PublicControlDbGate,
         /// Reload the whole state from Postgres before every operation. Only
         /// needed when multiple broker instances share this database (so each
         /// sees the others' writes). Defaults to `false`: with a single instance
@@ -1886,13 +2079,24 @@ impl PublicControlPersistence {
                 Ok(Self::Json(path))
             }
             (None, Some(url)) => {
+                let db_cfg = PublicControlDbConfig::from_env()?;
                 info!(
                     backend = "postgres",
                     target = %redact_postgres_url(&url),
                     "public control-plane persistence: Postgres (connecting)"
                 );
+                let query_timeout_ms = db_cfg.query_timeout.as_millis();
                 let pool = PgPoolOptions::new()
-                    .max_connections(5)
+                    .max_connections(db_cfg.max_connections)
+                    .acquire_timeout(db_cfg.acquire_timeout)
+                    .after_connect(move |connection, _metadata| {
+                        Box::pin(async move {
+                            sqlx::query(&format!("SET statement_timeout = {query_timeout_ms}"))
+                                .execute(connection)
+                                .await?;
+                            Ok(())
+                        })
+                    })
                     .connect(&url)
                     .await
                     .map_err(|error| {
@@ -1914,8 +2118,10 @@ impl PublicControlPersistence {
                 if reload_before_use {
                     info!("public control-plane: reload-before-use ON (multi-instance mode)");
                 }
+                let gate = PublicControlDbGate::new(db_cfg.concurrency, db_cfg.query_timeout)?;
                 Ok(Self::Postgres {
                     pool,
+                    gate,
                     reload_before_use,
                     last_saved: Arc::new(Mutex::new(PublicControlStateStore::default())),
                     needs_reload: Arc::new(AtomicBool::new(false)),
@@ -1940,11 +2146,15 @@ impl PublicControlPersistence {
             Self::Json(path) => load_public_control_json(path).await,
             Self::Postgres {
                 pool,
+                gate,
                 last_saved,
                 needs_reload,
                 ..
             } => {
-                let store = load_public_control_postgres(pool).await?;
+                let store = gate
+                    .run(load_public_control_postgres(pool))
+                    .await
+                    .map_err(PublicControlDbGateError::into_message)?;
                 // Snapshot mirrors exactly what is in the DB right now, so the
                 // next save() diffs against reality (not an empty baseline).
                 *last_saved.lock().await = store.clone();
@@ -1974,6 +2184,7 @@ impl PublicControlPersistence {
             Self::Json(path) => save_public_control_json(path, state).await,
             Self::Postgres {
                 pool,
+                gate,
                 last_saved,
                 needs_reload,
                 ..
@@ -1982,55 +2193,69 @@ impl PublicControlPersistence {
                 // only the rows that changed. Hold the snapshot lock across the
                 // write so it advances atomically with the DB.
                 let mut snapshot = last_saved.lock().await;
-                match save_public_control_postgres(pool, &snapshot, state).await {
+                match gate
+                    .run(save_public_control_postgres(pool, &snapshot, state))
+                    .await
+                {
                     Ok(()) => {
                         *snapshot = state.clone();
                         Ok(())
                     }
-                    Err(error) => match load_public_control_postgres(pool).await {
-                        Ok(reconciled) => {
-                            match classify_save_reconciliation(&reconciled, &snapshot, state) {
-                                SaveReconciliation::Committed => {
-                                    // The intended write is durably in the DB — the
-                                    // commit actually landed despite the error. Treat
-                                    // as success so the caller returns the credential
-                                    // instead of stranding it. `state` already == next.
-                                    *snapshot = reconciled;
-                                    Ok(())
-                                }
-                                SaveReconciliation::RolledBack => {
-                                    // Definite rollback: the DB still holds `prev`.
-                                    // Restore memory and surface the error; the old
-                                    // credential stays valid and the op can be retried.
-                                    *state = reconciled;
-                                    Err(error)
-                                }
-                                SaveReconciliation::Indeterminate => {
-                                    // The DB matches neither `prev` nor `next` (e.g. an
-                                    // external writer). Reconcile memory to the DB truth
-                                    // and surface the error; don't claim issuance won.
-                                    *state = reconciled.clone();
-                                    *snapshot = reconciled;
-                                    Err(error)
+                    // Admission failed before a DB operation began, so the durable
+                    // state is still the last snapshot and no reconciliation query
+                    // is necessary. Restore memory immediately and fail fast.
+                    Err(PublicControlDbGateError::Busy) => {
+                        *state = snapshot.clone();
+                        Err(PublicControlDbGateError::Busy.into_message())
+                    }
+                    Err(gate_error) => {
+                        let error = gate_error.into_message();
+                        match gate.run(load_public_control_postgres(pool)).await {
+                            Ok(reconciled) => {
+                                match classify_save_reconciliation(&reconciled, &snapshot, state) {
+                                    SaveReconciliation::Committed => {
+                                        // The intended write is durably in the DB — the
+                                        // commit actually landed despite the error. Treat
+                                        // as success so the caller returns the credential
+                                        // instead of stranding it. `state` already == next.
+                                        *snapshot = reconciled;
+                                        Ok(())
+                                    }
+                                    SaveReconciliation::RolledBack => {
+                                        // Definite rollback: the DB still holds `prev`.
+                                        // Restore memory and surface the error; the old
+                                        // credential stays valid and the op can be retried.
+                                        *state = reconciled;
+                                        Err(error)
+                                    }
+                                    SaveReconciliation::Indeterminate => {
+                                        // The DB matches neither `prev` nor `next` (e.g. an
+                                        // external writer). Reconcile memory to the DB truth
+                                        // and surface the error; don't claim issuance won.
+                                        *state = reconciled.clone();
+                                        *snapshot = reconciled;
+                                        Err(error)
+                                    }
                                 }
                             }
+                            Err(reload_error) => {
+                                let reload_error = reload_error.into_message();
+                                // Can't reach the DB to determine the outcome. Force the
+                                // next operation to reload (repairing state once the DB is
+                                // reachable) and surface both errors — never silently claim
+                                // success or a specific state here.
+                                needs_reload.store(true, Ordering::SeqCst);
+                                warn!(
+                                    %error,
+                                    %reload_error,
+                                    "public control-plane save failed and the reconciling \
+                                     reload also failed; forcing a reload on the next \
+                                     operation (state indeterminate until then)"
+                                );
+                                Err(error)
+                            }
                         }
-                        Err(reload_error) => {
-                            // Can't reach the DB to determine the outcome. Force the
-                            // next operation to reload (repairing state once the DB is
-                            // reachable) and surface both errors — never silently claim
-                            // success or a specific state here.
-                            needs_reload.store(true, Ordering::SeqCst);
-                            warn!(
-                                %error,
-                                %reload_error,
-                                "public control-plane save failed and the reconciling \
-                                 reload also failed; forcing a reload on the next \
-                                 operation (state indeterminate until then)"
-                            );
-                            Err(error)
-                        }
-                    },
+                    }
                 }
             }
         }
@@ -2077,16 +2302,20 @@ impl PublicControlPersistence {
     ) -> Result<(), String> {
         match self {
             Self::InMemory | Self::Json(_) => Ok(()),
-            Self::Postgres { pool, .. } => {
-                sqlx::query(
-                    "UPDATE public_device_grants SET last_seen = $1 WHERE refresh_token_hash = $2",
-                )
-                .bind(u64_to_i64(last_seen, "last_seen")?)
-                .bind(refresh_token_hash)
-                .execute(pool)
+            Self::Postgres { pool, gate, .. } => {
+                gate.run(async {
+                    sqlx::query(
+                        "UPDATE public_device_grants SET last_seen = $1 WHERE refresh_token_hash = $2",
+                    )
+                    .bind(u64_to_i64(last_seen, "last_seen")?)
+                    .bind(refresh_token_hash)
+                    .execute(pool)
+                    .await
+                    .map_err(|error| format!("failed to update device last_seen: {error}"))?;
+                    Ok(())
+                })
                 .await
-                .map_err(|error| format!("failed to update device last_seen: {error}"))?;
-                Ok(())
+                .map_err(PublicControlDbGateError::into_message)
             }
         }
     }
@@ -4936,6 +5165,7 @@ mod postgres_persistence_opt_tests {
 
         let persistence = PublicControlPersistence::Postgres {
             pool: pool.clone(),
+            gate: PublicControlDbGate::default(),
             reload_before_use: false,
             last_saved: std::sync::Arc::new(tokio::sync::Mutex::new(
                 PublicControlStateStore::default(),
@@ -4991,6 +5221,7 @@ mod postgres_persistence_opt_tests {
 
         let persistence = PublicControlPersistence::Postgres {
             pool: pool.clone(),
+            gate: PublicControlDbGate::default(),
             reload_before_use: false,
             last_saved: std::sync::Arc::new(tokio::sync::Mutex::new(
                 PublicControlStateStore::default(),
@@ -5079,6 +5310,7 @@ mod postgres_persistence_opt_tests {
 
         let persistence = PublicControlPersistence::Postgres {
             pool: pool.clone(),
+            gate: PublicControlDbGate::default(),
             reload_before_use: false,
             last_saved: std::sync::Arc::new(tokio::sync::Mutex::new(
                 PublicControlStateStore::default(),
@@ -5140,6 +5372,7 @@ mod postgres_persistence_opt_tests {
                 rotation_grace_secs: DEFAULT_PUBLIC_ROTATION_GRACE_SECS,
                 persistence: PublicControlPersistence::Postgres {
                     pool,
+                    gate: PublicControlDbGate::default(),
                     reload_before_use,
                     last_saved: Arc::new(Mutex::new(PublicControlStateStore::default())),
                     needs_reload: Arc::new(AtomicBool::new(false)),

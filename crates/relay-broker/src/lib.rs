@@ -73,6 +73,9 @@ use tracing::{debug, warn};
 
 const RATE_LIMIT_WINDOW_SECS: u64 = 60;
 const DEFAULT_PUBLIC_API_RATE_LIMIT_PER_MINUTE: usize = 120;
+/// Cross-client ceiling for public control-plane HTTP requests. Per-IP limits
+/// provide fairness; this cap bounds aggregate work during a distributed flood.
+const DEFAULT_PUBLIC_API_GLOBAL_RATE_LIMIT_PER_MINUTE: usize = 600;
 const DEFAULT_JOIN_RATE_LIMIT_PER_MINUTE: usize = 40;
 /// Publish allowance for a surface peer: a browser tab sending user-driven actions.
 const DEFAULT_PUBLISH_RATE_LIMIT_PER_MINUTE: usize = 240;
@@ -206,6 +209,8 @@ const DEVICE_SESSION_ROOM_MAX_BYTES: usize = 512;
 const CLIENT_SESSION_COOKIE_NAME: &str = "agent_relay_client_session";
 const DEVICE_SESSION_COOKIE_MAX_AGE_SECS: u64 = 60 * 60 * 24 * 400;
 const PUBLIC_API_RATE_LIMIT_ENV: &str = "RELAY_BROKER_PUBLIC_API_RATE_LIMIT_PER_MINUTE";
+const PUBLIC_API_GLOBAL_RATE_LIMIT_ENV: &str =
+    "RELAY_BROKER_PUBLIC_API_GLOBAL_RATE_LIMIT_PER_MINUTE";
 const JOIN_RATE_LIMIT_ENV: &str = "RELAY_BROKER_JOIN_RATE_LIMIT_PER_MINUTE";
 const PUBLISH_RATE_LIMIT_ENV: &str = "RELAY_BROKER_PUBLISH_RATE_LIMIT_PER_MINUTE";
 const RELAY_PUBLISH_RATE_LIMIT_ENV: &str = "RELAY_BROKER_RELAY_PUBLISH_RATE_LIMIT_PER_MINUTE";
@@ -639,6 +644,7 @@ struct BrokerHardeningState {
 #[derive(Clone, Debug)]
 struct BrokerHardeningConfig {
     public_api_rate_limit_per_minute: usize,
+    public_api_global_rate_limit_per_minute: usize,
     join_rate_limit_per_minute: usize,
     publish_rate_limit_per_minute: usize,
     relay_publish_rate_limit_per_minute: usize,
@@ -785,6 +791,8 @@ impl Default for BrokerHardeningConfig {
     fn default() -> Self {
         Self {
             public_api_rate_limit_per_minute: DEFAULT_PUBLIC_API_RATE_LIMIT_PER_MINUTE,
+            public_api_global_rate_limit_per_minute:
+                DEFAULT_PUBLIC_API_GLOBAL_RATE_LIMIT_PER_MINUTE,
             join_rate_limit_per_minute: DEFAULT_JOIN_RATE_LIMIT_PER_MINUTE,
             publish_rate_limit_per_minute: DEFAULT_PUBLISH_RATE_LIMIT_PER_MINUTE,
             relay_publish_rate_limit_per_minute: DEFAULT_RELAY_PUBLISH_RATE_LIMIT_PER_MINUTE,
@@ -805,6 +813,10 @@ impl BrokerHardeningConfig {
             public_api_rate_limit_per_minute: parse_usize_env(
                 PUBLIC_API_RATE_LIMIT_ENV,
                 DEFAULT_PUBLIC_API_RATE_LIMIT_PER_MINUTE,
+            )?,
+            public_api_global_rate_limit_per_minute: parse_usize_env(
+                PUBLIC_API_GLOBAL_RATE_LIMIT_ENV,
+                DEFAULT_PUBLIC_API_GLOBAL_RATE_LIMIT_PER_MINUTE,
             )?,
             join_rate_limit_per_minute: parse_usize_env(
                 JOIN_RATE_LIMIT_ENV,
@@ -3434,25 +3446,46 @@ async fn enforce_public_api_rate_limit(
     remote_addr: SocketAddr,
     route_name: &str,
 ) -> Result<(), (StatusCode, Json<ApiErrorBody>)> {
-    if state
+    let per_ip_allowed = state
         .hardening
         .rate_limiter
         .allow(
             format!("public-api:{}:{route_name}", remote_addr.ip()),
             state.hardening.config.public_api_rate_limit_per_minute,
         )
-        .await
-    {
-        return Ok(());
+        .await;
+    if !per_ip_allowed {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ApiErrorBody::new(
+                "rate_limited",
+                "public broker control-plane rate limit exceeded".to_string(),
+            )),
+        ));
     }
 
-    Err((
-        StatusCode::TOO_MANY_REQUESTS,
-        Json(ApiErrorBody::new(
-            "rate_limited",
-            "public broker control-plane rate limit exceeded".to_string(),
-        )),
-    ))
+    if state
+        .hardening
+        .rate_limiter
+        .allow(
+            "public-api:global".to_string(),
+            state
+                .hardening
+                .config
+                .public_api_global_rate_limit_per_minute,
+        )
+        .await
+    {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ApiErrorBody::new(
+                "rate_limited",
+                "public broker control-plane rate limit exceeded".to_string(),
+            )),
+        ))
+    }
 }
 
 fn scrub_sensitive_message(message: &str) -> String {

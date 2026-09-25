@@ -3059,6 +3059,50 @@ async fn public_api_rate_limit_is_enforced() {
 }
 
 #[tokio::test]
+async fn public_api_global_rate_limit_bounds_distinct_client_ips() {
+    let guard = BanGuard {
+        blocklist: Blocklist::disabled(),
+        trusted_ip_header: Some("x-forwarded-for".parse().unwrap()),
+    };
+    let address = spawn_app_with_guard_and_hardening(
+        guard,
+        BrokerHardeningConfig {
+            public_api_rate_limit_per_minute: 100,
+            public_api_global_rate_limit_per_minute: 1,
+            ..BrokerHardeningConfig::default()
+        },
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{address}/api/public/relay/ws-token");
+    let body = RelayWsTokenRequest {
+        relay_id: "relay-1".to_string(),
+        broker_room_id: "room-a".to_string(),
+        relay_peer_id: "relay-1".to_string(),
+    };
+    let first = client
+        .post(&url)
+        .header("x-forwarded-for", "203.0.113.10")
+        .json(&body)
+        .send()
+        .await
+        .expect("first request")
+        .status();
+    assert_ne!(first, reqwest::StatusCode::TOO_MANY_REQUESTS);
+
+    let second = client
+        .post(&url)
+        .header("x-forwarded-for", "203.0.113.11")
+        .json(&body)
+        .send()
+        .await
+        .expect("second request")
+        .status();
+    assert_eq!(second, reqwest::StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
 async fn websocket_join_rate_limit_is_enforced() {
     let address = spawn_app_with(
         BrokerJoinVerifier::SelfHosted(test_join_ticket_key()),
