@@ -28,6 +28,7 @@ function spawnWorker(extraEnv = {}) {
   const child = spawn(process.execPath, [WORKER], {
     env: {
       ...process.env,
+      CLAUDE_CONFIG_DIR: "",
       CLAUDE_WORKER_SDK_MODULE: FAKE_SDK,
       ...extraEnv,
     },
@@ -566,7 +567,11 @@ test("read_session_page recovers cwd from a discovered local session file", asyn
     })}\n`,
   );
 
-  const worker = spawnWorker({ CLAUDE_CONFIG_DIR: configDir, HOME: home });
+  const worker = spawnWorker({
+    CLAUDE_CONFIG_DIR: configDir,
+    CLAUDE_FAKE_SESSION_INFO_MISSING: "1",
+    HOME: home,
+  });
   try {
     worker.send({
       type: "read_session_page",
@@ -579,6 +584,50 @@ test("read_session_page recovers cwd from a discovered local session file", asyn
     assert.equal(response.ok, true);
     assert.equal(response.result.paged, true);
     assert.equal(response.result.thread.cwd, sessionCwd);
+  } finally {
+    await worker.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("read_session_page uses the SDK's relocated cwd instead of the file's initial cwd", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "sealwire-page-relocated-home-"));
+  const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const initialCwd = "/A/main";
+  const relocatedCwd = "/A/main/.claude/worktrees/wt";
+  const projectDir = path.join(home, ".claude", "projects", "-A-main");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(
+    path.join(projectDir, `${sessionId}.jsonl`),
+    [
+      JSON.stringify({
+        cwd: initialCwd,
+        message: { role: "user", content: "hello" },
+        parentUuid: null,
+        sessionId,
+        timestamp: "2026-01-01T00:00:00.000Z",
+        type: "user",
+        uuid: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      }),
+      JSON.stringify({ relocatedCwd, sessionId, type: "relocated" }),
+    ].join("\n") + "\n",
+  );
+
+  const worker = spawnWorker({
+    CLAUDE_FAKE_SESSION_INFO_CWD: relocatedCwd,
+    HOME: home,
+  });
+  try {
+    worker.send({
+      type: "read_session_page",
+      id: "read-page-relocated-cwd",
+      provider_session_id: sessionId,
+    });
+    const response = await worker.waitFor(isResponse("read-page-relocated-cwd"), {
+      label: "relocated read_session_page response",
+    });
+    assert.equal(response.ok, true);
+    assert.equal(response.result.thread.cwd, relocatedCwd);
   } finally {
     await worker.close();
     await rm(home, { recursive: true, force: true });

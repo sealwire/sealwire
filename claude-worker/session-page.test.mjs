@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -114,6 +114,33 @@ test("session cwd can be recovered from a local jsonl record when SDK list omits
     await readSessionCwdFromFile({ filePath }),
     "/Users/luchi/git/agent-relay",
   );
+});
+
+test("session cwd recovery prefers the last relocation over the initial cwd", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "sealwire-claude-relocated-cwd-"));
+  const filePath = path.join(dir, "session.jsonl");
+  await writeFile(
+    filePath,
+    [
+      JSON.stringify({ cwd: "/A/main", sessionId: "session-1", type: "user" }),
+      JSON.stringify({
+        relocatedCwd: "/A/main/.claude/worktrees/old",
+        sessionId: "session-1",
+        type: "relocated",
+      }),
+      JSON.stringify({
+        relocatedCwd: "/A/main/.claude/worktrees/current",
+        sessionId: "session-1",
+        type: "relocated",
+      }),
+    ].join("\n") + "\n",
+  );
+
+  assert.equal(
+    await readSessionCwdFromFile({ filePath }),
+    "/A/main/.claude/worktrees/current",
+  );
+  await rm(dir, { recursive: true, force: true });
 });
 
 function message(uuid, parentUuid) {

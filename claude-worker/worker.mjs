@@ -1760,7 +1760,19 @@ async function main() {
             filePath,
           });
           const fileInfo = await stat(filePath);
-          const sessionCwd = cmd.cwd || (await readSessionCwdFromFile({ filePath })) || "";
+          let sessionCwd = cmd.cwd || "";
+          if (!sessionCwd) {
+            try {
+              sessionCwd =
+                (await sdk.getSessionInfo(sessionId, { dir: undefined }))?.cwd || "";
+            } catch {
+              // A local record can still identify the session when the SDK
+              // cannot summarize it (sidechains and summary parse failures).
+            }
+          }
+          if (!sessionCwd) {
+            sessionCwd = (await readSessionCwdFromFile({ filePath })) || "";
+          }
           const thread = mapSessionInfo(
             sessionInfoWithRecordedCwd(
               sessionId,
