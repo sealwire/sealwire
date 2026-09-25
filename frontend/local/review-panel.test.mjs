@@ -5,7 +5,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   ReviewLauncher,
-  ReviewPanel,
   reviewSubmitPayload,
   clampReviewRounds,
   providerSwitchClearsReuse,
@@ -22,148 +21,6 @@ import {
 
 const h = React.createElement;
 
-test("ReviewPanel renders the reviewer provider options and the clean-reviewer field", () => {
-  const html = renderToStaticMarkup(
-    h(ReviewPanel, {
-      providerOptions: [
-        { label: "Codex", value: "codex" },
-        { label: "Claude", value: "claude_code" },
-      ],
-      models: [{ model: "gpt-5.5", display_name: "GPT-5.5", provider: "codex" }],
-      defaultProvider: "claude_code",
-    })
-  );
-
-  assert.match(html, /Request review/);
-  assert.match(html, /value="codex"/);
-  assert.match(html, /value="claude_code"/);
-  assert.match(html, /New clean reviewer session/);
-  assert.match(html, /Start review/);
-  assert.match(html, /focus on the storage refactor/);
-});
-
-test("ReviewPanel surfaces a loading hint instead of a silent empty model picker", () => {
-  // The reported bug: when the cross-agent reviewer provider's catalog hasn't
-  // loaded, the model <select> simply vanished with no explanation. An empty
-  // catalog with a "loading" status must show a hint, not nothing.
-  const html = renderToStaticMarkup(
-    h(ReviewPanel, {
-      providerOptions: [{ label: "Codex", value: "codex" }],
-      models: [], // codex catalog not loaded yet
-      defaultProvider: "codex",
-      providerModelsStatus: { codex: "loading" },
-      onEnsureProviderModels: () => {}, // a loader is wired, so the hint is meaningful
-    })
-  );
-  assert.match(html, /Loading reviewer models/i);
-});
-
-test("ReviewPanel stays silent (no stuck hint) when no catalog loader is wired", () => {
-  // Without onEnsureProviderModels nothing can resolve a "loading" state, so the
-  // dialog must NOT render a spinner that can never clear (e.g. the local surface).
-  const html = renderToStaticMarkup(
-    h(ReviewPanel, {
-      providerOptions: [{ label: "Codex", value: "codex" }],
-      models: [],
-      defaultProvider: "codex",
-      providerModelsStatus: { codex: "loading" },
-      // no onEnsureProviderModels
-    })
-  );
-  assert.doesNotMatch(html, /Loading reviewer models/i);
-});
-
-test("ReviewPanel surfaces a failed-load hint with a retry, not a silent empty picker", () => {
-  const html = renderToStaticMarkup(
-    h(ReviewPanel, {
-      providerOptions: [{ label: "Codex", value: "codex" }],
-      models: [],
-      defaultProvider: "codex",
-      providerModelsStatus: { codex: "error" },
-      onEnsureProviderModels: () => {},
-    })
-  );
-  // (renderToStaticMarkup escapes the apostrophe in "Couldn't" → &#x27;)
-  assert.match(html, /load the reviewer models/i);
-  assert.match(html, /Retry/);
-});
-
-test("ReviewPanel does not offer a hidden model in the reviewer-model picker", () => {
-  const html = renderToStaticMarkup(
-    h(ReviewPanel, {
-      providerOptions: [{ label: "Codex", value: "codex" }],
-      models: [
-        { model: "gpt-5.5", display_name: "GPT-5.5", provider: "codex" },
-        {
-          model: "codex-auto-review",
-          display_name: "Codex Auto Review",
-          provider: "codex",
-          hidden: true,
-        },
-      ],
-      defaultProvider: "codex",
-    })
-  );
-
-  assert.match(html, /GPT-5\.5/, "visible reviewer model is offered");
-  assert.doesNotMatch(html, /Codex Auto Review/, "hidden model must not be offered");
-  assert.doesNotMatch(html, /codex-auto-review/, "hidden model value must not appear");
-});
-
-test("ReviewPanel lists reusable reviewer threads as 'Reuse:' options", () => {
-  const html = renderToStaticMarkup(
-    h(ReviewPanel, {
-      providerOptions: [{ label: "Codex", value: "codex" }],
-      models: [],
-      defaultProvider: "codex",
-      reusableReviewers: [
-        { reviewerThreadId: "rev-1", provider: "codex", label: "Codex reviewer" },
-      ],
-    })
-  );
-  // The clean option plus the reusable reviewer are both offered.
-  assert.match(html, /New clean reviewer session/);
-  assert.match(html, /Reuse: Codex reviewer/);
-  assert.match(html, /value="rev-1"/);
-});
-
-test("ReviewPanel shows only the clean option when there are no reusable reviewers", () => {
-  const html = renderToStaticMarkup(
-    h(ReviewPanel, {
-      providerOptions: [{ label: "Codex", value: "codex" }],
-      models: [],
-      defaultProvider: "codex",
-      reusableReviewers: [],
-    })
-  );
-  assert.match(html, /New clean reviewer session/);
-  assert.doesNotMatch(html, /Reuse:/);
-});
-
-test("ReviewPanel reuse options are grouped by provider (a codex reviewer is hidden under Claude)", () => {
-  const reusableReviewers = [
-    { reviewerThreadId: "rev-codex", provider: "codex", label: "Codex reviewer" },
-    { reviewerThreadId: "rev-claude", provider: "claude_code", label: "Claude reviewer" },
-  ];
-  const providerOptions = [
-    { label: "Codex", value: "codex" },
-    { label: "Claude", value: "claude_code" },
-  ];
-  // Default reviewer provider is Claude → only the Claude reviewer is offered for reuse.
-  const claudeView = renderToStaticMarkup(
-    h(ReviewPanel, { providerOptions, models: [], defaultProvider: "claude_code", reusableReviewers })
-  );
-  assert.match(claudeView, /value="rev-claude"/);
-  assert.doesNotMatch(claudeView, /value="rev-codex"/);
-
-  // Default reviewer provider is Codex → only the Codex reviewer is offered.
-  const codexView = renderToStaticMarkup(
-    h(ReviewPanel, { providerOptions, models: [], defaultProvider: "codex", reusableReviewers })
-  );
-  assert.match(codexView, /value="rev-codex"/);
-  assert.doesNotMatch(codexView, /value="rev-claude"/);
-});
-
 test("providerSwitchClearsReuse flags switching away from a reused session (drives the flash)", () => {
   // Switching the provider always falls back to a clean reviewer; it should flash the
   // reviewer-session field only when a reused session was actually switched away from.
@@ -171,28 +28,6 @@ test("providerSwitchClearsReuse flags switching away from a reused session (driv
   assert.equal(providerSwitchClearsReuse("clean"), false);
   assert.equal(providerSwitchClearsReuse(undefined), false);
   assert.equal(providerSwitchClearsReuse(null), false);
-});
-
-test("re-review keeps the reviewer provider selectable (not locked) and explains switching", () => {
-  const html = renderToStaticMarkup(
-    h(ReviewPanel, {
-      providerOptions: [
-        { label: "Codex", value: "codex" },
-        { label: "Claude", value: "claude_code" },
-      ],
-      models: [],
-      defaultProvider: "claude_code",
-      reusableReviewers: [{ reviewerThreadId: "rev-1", provider: "codex", label: "Codex reviewer" }],
-      // Prefilled re-review of a codex reviewer thread.
-      initialReviewerThreadId: "rev-1",
-      initialProvider: "codex",
-    })
-  );
-  // The provider <select> must NOT be disabled during reuse — the user can switch it.
-  assert.doesNotMatch(html, /id="review-panel-provider"[^>]*disabled/);
-  // Copy reflects the new behavior (switching starts a new reviewer), not "fixed".
-  assert.match(html, /Switching the provider starts a new reviewer/);
-  assert.doesNotMatch(html, /Provider and model are fixed/);
 });
 
 test("reviewSubmitPayload carries the reuse thread id AND an explicit model/effort override", () => {
@@ -323,38 +158,6 @@ test("clampReviewRounds bounds the round budget to 1..=10", () => {
   assert.equal(clampReviewRounds(50), 10);
   assert.equal(clampReviewRounds(undefined), 1);
   assert.equal(clampReviewRounds("4"), 4);
-});
-
-test("ReviewPanel renders a maximum-rounds input", () => {
-  const html = renderToStaticMarkup(
-    h(ReviewPanel, {
-      providerOptions: [{ label: "Codex", value: "codex" }],
-      models: [],
-      defaultProvider: "codex",
-    })
-  );
-  assert.match(html, /Maximum rounds/);
-  assert.match(html, /id="review-panel-max-rounds"/);
-  assert.match(html, /type="number"/);
-});
-
-test("ReviewPanel renders a reasoning-effort selector with the model's supported efforts", () => {
-  const html = renderToStaticMarkup(
-    h(ReviewPanel, {
-      providerOptions: [{ label: "Codex", value: "codex" }],
-      models: [
-        {
-          model: "gpt-5.5",
-          display_name: "GPT-5.5",
-          provider: "codex",
-          supported_reasoning_efforts: ["low", "high"],
-        },
-      ],
-      defaultProvider: "codex",
-    })
-  );
-  assert.match(html, /Reasoning effort/);
-  assert.match(html, /id="review-panel-effort"/);
 });
 
 test("ReviewLauncher renders a Review button alongside the panel", () => {

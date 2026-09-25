@@ -1,7 +1,16 @@
 import React from "react";
 
-import { providerMarkSlot } from "./provider-mark.js";
+import { buildModelPickerGroups, selectedModelChip } from "./model-picker-model.js";
+import { providerLabel } from "./provider-labels.js";
 import { selectReviewerCatalogState } from "./review-state.js";
+import {
+  PromptCard,
+  SessionContextBar,
+  SessionDialogShell,
+  SettingPillRow,
+  SubmitShortcutHint,
+} from "./session-dialog-chrome.js";
+import { SettingPill } from "./setting-pill.js";
 import { ThreadWorkspaceField } from "./workspace-picker.js";
 
 export {
@@ -121,11 +130,8 @@ export function ReviewPanel({
   // How to brief the reviewer: "last_message" (default — pass the author's last
   // message, skipping the recap turn) or "recap" (drive a fresh recap turn).
   const [recapSource, setRecapSource] = React.useState("last_message");
-  // Round budget for the iterative review loop (1 = single review). Kept as a RAW
-  // string while editing so the field can be cleared / typed freely; it's clamped to
-  // 1..=10 on blur and at submit (clampReviewRounds). Storing a clamped number here
-  // made deleting the digit snap back to "1", so you could never type a new value.
-  const [maxRounds, setMaxRounds] = React.useState("1");
+  // Round budget for the iterative review loop (1 = single review).
+  const [maxRounds, setMaxRounds] = React.useState(1);
   // In-flight + error state for the submit itself. Previously the modal closed
   // optimistically and any backend rejection (e.g. "another thread is running in
   // this workspace", provider unavailable, "a review is already running") only
@@ -271,276 +277,306 @@ export function ReviewPanel({
     }
   };
 
-  const providerSelectOptions = (providerOptions || []).map((option) => {
-    const value = typeof option === "string" ? option : option.value;
-    const label = typeof option === "string" ? option : option.label || option.value;
-    return h("option", { key: value, value }, label);
+  const modelChip = selectedModelChip({
+    providerModels: { [reviewerProvider]: providerModels },
+    selectedModel: reviewerModel,
+    selectedProvider: reviewerProvider,
   });
+  const reviewerChip = !reviewerProvider
+    ? "Choose a provider"
+    : isReuse && !reviewerModel
+      ? `${providerLabel(reviewerProvider)} · current`
+      : modelChip.value;
+
+  const sessionOptions = [
+    { value: "clean", label: "New clean reviewer session", chip: "New reviewer" },
+    ...reusableForProvider.map((entry) => ({
+      value: entry.reviewerThreadId,
+      label: `Reuse: ${entry.label}`,
+    })),
+  ];
+  const session = sessionOptions.find((option) => option.value === selectedReviewerThreadId);
+  const rounds = clampReviewRounds(maxRounds);
+  const briefing = BRIEFING_OPTIONS.find((option) => option.value === recapSource);
+  const catalogNote = catalogStatusNote({
+    catalog,
+    onEnsureProviderModels,
+    reviewerProvider,
+  });
+  const markSelected = (options, current) =>
+    options.map((option) => ({ ...option, selected: option.value === current }));
 
   return h(
-    "dialog",
+    SessionDialogShell,
     {
-      className: "panel-modal",
-      id,
-      onClose: () => onRequestClose?.(),
-      onClick: (event) => {
-        if (event.target === event.currentTarget) {
-          close();
-        }
-      },
-    },
-    h(
-      "div",
-      { className: "modal-header" },
-      h("h2", null, "Request review"),
-      h(
-        "button",
-        { className: "header-button close-modal-btn", onClick: close, type: "button" },
-        "×"
-      )
-    ),
-    h(
-      "section",
-      { className: "panel-modal-body" },
-      h(
-        "p",
-        { className: "panel-modal-copy" },
-        "Ask another agent to review the current changes. The reviewer runs in its own session and posts its findings back into this conversation."
-      ),
-      // Which tree is reviewed; a mid-session worktree move is otherwise invisible.
-      workspace || onPinWorkspace
-        ? h(
-            React.Fragment,
-            null,
-            h(
-              "label",
-              { className: "sidebar-label", htmlFor: `${id}-workspace` },
-              "Working tree to review"
-            ),
-            h(ThreadWorkspaceField, {
-              busy: busy || workspaceBusy,
-              error: workspaceError,
-              id: `${id}-workspace`,
-              onClose: onCloseWorkspace,
-              onOpen: onOpenWorkspace,
-              onPin: onPinWorkspace,
-              onTrustWorkspace,
-              workspace,
-            })
-          )
-        : null,
-      h("label", { className: "sidebar-label", htmlFor: `${id}-provider` }, "Reviewer provider"),
-      h(
-        "div",
-        { className: "select-with-mark" },
-        providerMarkSlot(reviewerProvider, { className: "select-mark" }),
+      actions: [
         h(
-          "select",
+          "button",
+          { className: "session-dialog-cancel", key: "cancel", onClick: close, type: "button" },
+          "Cancel"
+        ),
+        h(
+          "button",
           {
-            id: `${id}-provider`,
-            className: "control-input",
-            value: reviewerProvider,
-            // Always changeable: switching the provider off a reused session falls back to a
-            // clean reviewer of the new provider (highlighted on the reviewer-session field).
-            onChange: (event) => selectProvider(event.target.value),
+            className: "session-dialog-submit",
+            disabled: busy || !reviewerProvider,
+            id: `${id}-submit`,
+            key: "submit",
+            onClick: submit,
+            type: "button",
           },
-          h("option", { value: "" }, "Select a provider…"),
-          ...providerSelectOptions
-        )
-      ),
-      // Model + effort are selectable for clean AND reused reviewers. On reuse the
-      // empty option keeps the reviewer thread's own model/effort; picking a value
-      // overrides it for this run (the backend honors both).
-      providerModels.length
-        ? h(
-            React.Fragment,
-            null,
-            h(
-              "label",
-              { className: "sidebar-label", htmlFor: `${id}-model` },
-              "Reviewer model (optional)"
-            ),
-            h(
-              "select",
-              {
-                id: `${id}-model`,
-                className: "control-input",
-                value: reviewerModel,
-                onChange: (event) => {
-                  setReviewerModel(event.target.value);
-                  // A new model may not support the previously-picked effort.
-                  setReviewerEffort("");
-                },
-              },
-              h("option", { value: "" }, isReuse ? "Keep current model" : "Provider default"),
-              ...providerModels.map((model) =>
-                h(
-                  "option",
-                  { key: model.model, value: model.model },
-                  model.display_name || model.model
-                )
-              )
-            )
-          )
-        : // Only surface a load status when a loader is wired to resolve it —
-          // otherwise an empty catalog would show a spinner that can never clear.
-          typeof onEnsureProviderModels !== "function"
-          ? null
-          : catalog.modelsStatus === "error"
-            ? h(
-                "p",
-                { className: "panel-modal-copy" },
-                "Couldn't load the reviewer models — the review will use the provider default. ",
-                h(
-                  "button",
-                  {
-                    type: "button",
-                    className: "link-button",
-                    onClick: () => onEnsureProviderModels?.(reviewerProvider),
-                  },
-                  "Retry"
-                )
-              )
-            : catalog.modelsStatus === "loading"
-              ? h("p", { className: "panel-modal-copy" }, "Loading reviewer models…")
-              : null,
-      h(
-        "label",
-        { className: "sidebar-label", htmlFor: `${id}-effort` },
-        "Reasoning effort (optional)"
-      ),
-      h(
-        "select",
-        {
-          id: `${id}-effort`,
-          className: "control-input",
-          value: reviewerEffort,
-          onChange: (event) => setReviewerEffort(event.target.value),
-        },
-        h("option", { value: "" }, isReuse ? "Keep current effort" : "Model default"),
-        ...effortOptions.map((effort) =>
-          h("option", { key: effort, value: effort }, effort)
-        )
-      ),
-      h(
-        "label",
-        { className: "sidebar-label", htmlFor: `${id}-reviewer-session` },
-        "Reviewer session"
-      ),
-      h(
-        "select",
-        {
-          id: `${id}-reviewer-session`,
-          className: sessionAutoSwitched
-            ? "control-input reviewer-session-autoswitched"
-            : "control-input",
-          value: selectedReviewerThreadId,
-          onChange: (event) => selectReviewerSession(event.target.value),
-        },
-        h("option", { value: "clean" }, "New clean reviewer session"),
-        ...reusableForProvider.map((entry) =>
-          h(
-            "option",
-            { key: entry.reviewerThreadId, value: entry.reviewerThreadId },
-            `Reuse: ${entry.label}`
-          )
-        )
-      ),
-      droppedReuse
-        ? h(
-            "p",
-            { className: "panel-modal-copy" },
-            "That reviewer session can't review this working tree — a reviewer stays in the tree it was created in — so this review starts a clean one."
-          )
-        : null,
-      isReuse
-        ? h(
-            "p",
-            { className: "panel-modal-copy" },
-            "Reusing this reviewer session — it keeps its earlier review context. Switching the provider starts a new reviewer instead."
-          )
-        : null,
-      h(
-        "label",
-        { className: "sidebar-label", htmlFor: `${id}-instructions` },
-        "Instructions (optional)"
-      ),
-      h("textarea", {
-        id: `${id}-instructions`,
-        className: "control-input",
-        rows: 3,
-        placeholder: "e.g. focus on the storage refactor and its tests",
-        value: instructions,
-        onChange: (event) => setInstructions(event.target.value),
-      }),
-      h(
-        "label",
-        { className: "sidebar-label", htmlFor: `${id}-recap-source` },
-        "Briefing"
-      ),
-      h(
-        "select",
-        {
-          id: `${id}-recap-source`,
-          className: "control-input",
-          value: recapSource,
-          onChange: (event) => setRecapSource(event.target.value),
-        },
-        h("option", { value: "last_message" }, "Use the author's last message (faster)"),
-        h("option", { value: "recap" }, "Ask the author to recap the changes")
-      ),
-      h(
-        "p",
-        { className: "panel-modal-copy" },
-        recapSource === "recap"
-          ? "The author runs a turn to summarize its changes before the reviewer looks — most context, but costs an extra turn."
-          : "The reviewer is briefed with the author's latest message (plus the diff) — no extra turn, saves tokens. Falls back to a recap if there's no message yet."
-      ),
-      h(
-        "label",
-        { className: "sidebar-label", htmlFor: `${id}-max-rounds` },
-        "Maximum rounds"
-      ),
-      h("input", {
-        id: `${id}-max-rounds`,
-        type: "number",
-        className: "control-input",
-        min: 1,
-        max: 10,
-        value: maxRounds,
-        // Keep the raw string while typing (so the field can be cleared); normalize
-        // to a clamped integer on blur. Submit clamps again via reviewSubmitPayload.
-        onChange: (event) => setMaxRounds(event.target.value),
-        onBlur: () => setMaxRounds(String(clampReviewRounds(maxRounds))),
-      }),
-      clampReviewRounds(maxRounds) > 1
-        ? h(
-            "p",
-            { className: "panel-modal-copy" },
-            "The reviewer and the author iterate until the reviewer approves or the rounds run out (then it's handed back to you). The author session must be able to edit without approval prompts."
-          )
-        : null,
-      // A rejected request stays here (the modal no longer closes optimistically),
-      // so the user sees the relay's reason instead of a silent no-op.
-      error
-        ? h("p", { className: "panel-modal-error", role: "alert" }, error)
-        : null
-    ),
+          busy ? "Starting…" : "Start review",
+          h(SubmitShortcutHint)
+        ),
+      ],
+      footerHint: "Runs in its own session, posts findings here",
+      id,
+      onRequestClose: () => {
+        setError(null);
+        onRequestClose?.();
+      },
+      title: "Request review",
+    },
+    // Which tree is reviewed; a mid-session worktree move is otherwise invisible.
+    workspace || onPinWorkspace
+      ? h(SessionContextBar, {
+          key: "context",
+          workspace: h(ThreadWorkspaceField, {
+            busy: busy || workspaceBusy,
+            error: workspaceError,
+            id: `${id}-workspace`,
+            label: "Working tree to review",
+            onClose: onCloseWorkspace,
+            onOpen: onOpenWorkspace,
+            onPin: onPinWorkspace,
+            onTrustWorkspace,
+            workspace,
+          }),
+        })
+      : null,
+    h(PromptCard, {
+      hint: "Optional",
+      id: `${id}-instructions`,
+      key: "instructions",
+      onChange: setInstructions,
+      onSubmit: submit,
+      placeholder: "e.g. focus on the storage refactor and its tests",
+      value: instructions,
+    }),
     h(
-      "div",
-      { className: "modal-actions" },
+      SettingPillRow,
+      { key: "pills" },
+      h(SettingPill, {
+        groups: reviewerModelGroups({
+          activeProvider,
+          isReuse,
+          models,
+          providerModelsStatus,
+          providerOptions,
+          reviewerModel,
+          reviewerProvider,
+        }),
+        id: `${id}-model`,
+        key: "model",
+        label: "Reviewer",
+        // The menu lists every provider, so fetch the catalogues it is about to show.
+        onOpen: () => {
+          for (const provider of providerValues(providerOptions)) {
+            const state = selectReviewerCatalogState({
+              reviewerProvider: provider,
+              models,
+              providerModelsStatus,
+              session: { provider: activeProvider },
+            });
+            if (state.needsLoad) onEnsureProviderModels?.(provider);
+          }
+        },
+        onSelect: (value, option) => {
+          const provider = option.provider || reviewerProvider;
+          if (provider !== reviewerProvider) selectProvider(provider);
+          setReviewerModel(value);
+          // A new model may not support the previously-picked effort.
+          setReviewerEffort("");
+        },
+        tag: isReuse && !reviewerModel ? null : modelChip.tag,
+        value: reviewerChip,
+      }),
+      h(SettingPill, {
+        id: `${id}-effort`,
+        key: "effort",
+        label: "Effort",
+        onSelect: setReviewerEffort,
+        options: markSelected(
+          [
+            { value: "", label: isReuse ? "Keep current effort" : "Model default" },
+            ...effortOptions.map((effort) => ({ value: effort, label: effort })),
+          ],
+          reviewerEffort
+        ),
+        value: reviewerEffort || (isReuse ? "current" : "default"),
+      }),
+      h(SettingPill, {
+        className: sessionAutoSwitched ? "reviewer-session-autoswitched" : "",
+        id: `${id}-reviewer-session`,
+        key: "session",
+        label: "Session",
+        onSelect: selectReviewerSession,
+        options: markSelected(sessionOptions, selectedReviewerThreadId),
+        value: session?.chip || session?.label,
+      }),
+      h(SettingPill, {
+        id: `${id}-recap-source`,
+        key: "briefing",
+        label: "Briefing",
+        onSelect: setRecapSource,
+        options: markSelected(BRIEFING_OPTIONS, recapSource),
+        value: briefing?.chip || recapSource,
+      }),
+      h(SettingPill, {
+        id: `${id}-max-rounds`,
+        key: "rounds",
+        label: "Rounds",
+        onSelect: (value) => setMaxRounds(clampReviewRounds(value)),
+        options: markSelected(ROUND_OPTIONS, String(rounds)),
+        value: String(rounds),
+      })
+    ),
+    catalogNote,
+    droppedReuse
+      ? h(
+          "p",
+          { className: "session-dialog-note", key: "dropped-reuse" },
+          "That reviewer session can't review this working tree — a reviewer stays in the tree it was created in — so this review starts a clean one."
+        )
+      : null,
+    isReuse
+      ? h(
+          "p",
+          { className: "session-dialog-note", key: "reuse" },
+          "Reusing this reviewer session — it keeps its earlier review context. Switching the provider starts a new reviewer instead."
+        )
+      : null,
+    rounds > 1
+      ? h(
+          "p",
+          { className: "session-dialog-note", key: "rounds" },
+          "The reviewer and the author iterate until the reviewer approves or the rounds run out (then it's handed back to you). The author session must be able to edit without approval prompts."
+        )
+      : null,
+    // A rejected request stays here (the modal no longer closes optimistically),
+    // so the user sees the relay's reason instead of a silent no-op.
+    error
+      ? h("p", { className: "session-dialog-note is-error", key: "error", role: "alert" }, error)
+      : null
+  );
+}
+
+const BRIEFING_OPTIONS = [
+  {
+    value: "last_message",
+    label: "Use the author's last message (faster)",
+    chip: "Last message",
+    subtitle: "The latest message plus the diff — no extra turn; recaps if there's none yet.",
+  },
+  {
+    value: "recap",
+    label: "Ask the author to recap the changes",
+    chip: "Recap",
+    subtitle: "The author summarizes its changes first — most context, but an extra turn.",
+  },
+];
+
+const ROUND_OPTIONS = Array.from({ length: 10 }, (_, index) => ({
+  value: String(index + 1),
+  label: String(index + 1),
+  subtitle: index === 0 ? "A single review" : null,
+}));
+
+function providerValues(providerOptions) {
+  return (providerOptions || []).map((option) =>
+    typeof option === "string" ? option : option.value
+  );
+}
+
+// Unlike a session's, a reviewer's model is optional, so every group leads with the
+// "no override" row the old model select offered.
+function reviewerModelGroups({
+  activeProvider,
+  isReuse,
+  models,
+  providerModelsStatus,
+  providerOptions,
+  reviewerModel,
+  reviewerProvider,
+}) {
+  const providers = providerValues(providerOptions);
+  const catalogs = Object.fromEntries(
+    providers.map((provider) => [
+      provider,
+      selectReviewerCatalogState({
+        reviewerProvider: provider,
+        models,
+        providerModelsStatus,
+        session: { provider: activeProvider },
+      }).models,
+    ])
+  );
+  return buildModelPickerGroups({
+    providerModels: catalogs,
+    providers,
+    selectedModel: reviewerModel,
+    selectedProvider: reviewerProvider,
+  }).map((group) => {
+    const named = (providerOptions || []).find(
+      (option) => typeof option !== "string" && option.value === group.provider
+    );
+    const current = group.provider === reviewerProvider;
+    return {
+      ...group,
+      label: named?.label || group.label,
+      options: [
+        {
+          label: isReuse && current ? "Keep current model" : "Provider default",
+          provider: group.provider,
+          selected: current && !reviewerModel,
+          tag: null,
+          value: "",
+        },
+        ...group.options.filter((option) => option.value !== ""),
+      ],
+    };
+  });
+}
+
+// Only when a loader is wired to resolve it: otherwise the hint could never clear.
+function catalogStatusNote({ catalog, onEnsureProviderModels, reviewerProvider }) {
+  if (catalog.models.length || typeof onEnsureProviderModels !== "function") {
+    return null;
+  }
+  if (catalog.modelsStatus === "error") {
+    return h(
+      "p",
+      { className: "session-dialog-note", "data-models-status": "error", key: "models" },
+      "Couldn't load the reviewer models — the review will use the provider default. ",
       h(
         "button",
         {
-          className: "start-session-button",
-          disabled: busy || !reviewerProvider,
-          onClick: submit,
+          className: "link-button",
+          onClick: () => onEnsureProviderModels(reviewerProvider),
           type: "button",
         },
-        busy ? "Starting…" : "Start review"
+        "Retry"
       )
-    )
-  );
+    );
+  }
+  if (catalog.modelsStatus === "loading") {
+    return h(
+      "p",
+      { className: "session-dialog-note", "data-models-status": "loading", key: "models" },
+      "Loading reviewer models…"
+    );
+  }
+  return null;
 }
 
 // A small "Review" button plus the (initially closed) ReviewPanel dialog,

@@ -522,6 +522,14 @@ test("earlier review attempts collapse to one line each instead of repeating as 
   assert.match(html, /reviewer-ledger-meta[^>]*>round 3 · Codex</, "and the heading counts them");
 });
 
+// What a review dialog's session pill reads, from SSR markup (its menu is closed).
+function sessionPillValue(html, dialogId) {
+  const start = html.indexOf(`id="${dialogId}-reviewer-session"`);
+  assert.ok(start > -1, `expected ${dialogId}'s session pill`);
+  const trigger = html.slice(start, html.indexOf("</button>", start));
+  return trigger.match(/class="setting-pill-value">([^<]*)</)?.[1] ?? "";
+}
+
 test("a terminal card carries a per-card Re-review launcher (prefilled, own modal id)", () => {
   const html = renderToStaticMarkup(
     h(ReviewerPanel, {
@@ -549,7 +557,7 @@ test("a terminal card carries a per-card Re-review launcher (prefilled, own moda
   assert.match(html, /Re-review/);
   assert.match(html, /id="review-panel-test-recard-r1"/);
   // The form is prefilled to reuse this card's reviewer thread.
-  assert.match(html, /value="rev-1"/);
+  assert.match(sessionPillValue(html, "review-panel-test-recard-r1"), /Reuse: Reviewer one/);
 });
 
 test("the per-card Re-review modal id is namespaced by the panel mount (rail vs sheet)", () => {
@@ -670,13 +678,13 @@ test("a Re-review prefill that is not on offer falls back to a clean reviewer, a
   const dialogStart = html.indexOf('id="review-panel-test-recard-r9"');
   assert.ok(dialogStart > -1, "the per-card dialog should render");
   const dialog = html.slice(dialogStart, html.indexOf("</dialog>", dialogStart));
-  // The reuse select must land on a real option, not a blank that still submits the refused id.
-  assert.match(
-    dialog,
-    /<option value="clean" selected="">/,
+  // The reuse pill must land on a real choice, not a blank that still submits the refused id.
+  assert.equal(
+    sessionPillValue(html, "review-panel-test-recard-r9"),
+    "New reviewer",
     "an unofferable prefill must resolve to the clean reviewer, not to no selection"
   );
-  assert.doesNotMatch(dialog, /value="rev-in-main"/, "and never to the cross-tree reviewer");
+  assert.doesNotMatch(dialog, /rev-in-main/, "and never to the cross-tree reviewer");
   // (the apostrophe arrives HTML-escaped, so match the half that carries the meaning)
   assert.match(html, /review this working tree/, "and the dialog says why it changed");
   assert.match(html, /starts a clean one/);

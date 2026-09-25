@@ -82,7 +82,7 @@ test("the reuse picker is scoped to the viewed thread, like the re-review cards"
   );
 });
 
-test("ReviewPanel prefilled for the viewed thread's codex reviewer renders its Reuse option", () => {
+test("ReviewPanel prefilled for the viewed thread's codex reviewer preselects its Reuse option", () => {
   const reusableReviewers = selectReusableReviewersForView(session, VIEWED_THREAD, null);
 
   const html = renderToStaticMarkup(
@@ -96,9 +96,13 @@ test("ReviewPanel prefilled for the viewed thread's codex reviewer renders its R
     })
   );
 
-  assert.match(
-    html,
-    new RegExp(`value="${CODEX_REVIEWER}"`),
-    "the codex reviewer must be offered as a Reuse option in the re-review dropdown"
+  const entry = reusableReviewers.find((item) => item.reviewerThreadId === CODEX_REVIEWER);
+  assert.ok(entry, "the codex reviewer must be offered for reuse");
+  // A prefill the dialog could not offer falls back to a clean session, so the session
+  // pill naming it is what proves the re-review really lands on that reviewer.
+  const sessionPill = html.match(/id="review-panel-reviewer-session"[\s\S]*?<\/button>/)?.[0] || "";
+  assert.ok(
+    sessionPill.includes(`Reuse: ${entry.label}`),
+    `the re-review must preselect the codex reviewer (session pill: ${sessionPill})`
   );
 });

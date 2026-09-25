@@ -9,6 +9,7 @@ import { useDismissableMenu } from "./use-dismissable-menu.js";
 const h = React.createElement;
 
 export function SettingPill({
+  className = "",
   // Either `options` (flat) or `groups` (sectioned, for the model picker).
   // Groups win when both are supplied.
   disabled = false,
@@ -82,7 +83,11 @@ export function SettingPill({
 
   return h(
     "div",
-    { className: "setting-pill" + (inherited ? " is-inherited" : ""), ref: rootRef },
+    {
+      className:
+        "setting-pill" + (inherited ? " is-inherited" : "") + (className ? ` ${className}` : ""),
+      ref: rootRef,
+    },
     h(
       "button",
       {
