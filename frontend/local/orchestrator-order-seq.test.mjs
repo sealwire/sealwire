@@ -85,11 +85,11 @@ test("an older Orchestrator page interleaves by number and keeps generation owne
     thread_id: "orch",
     transcript_generation: "gen-a",
     entries: [row("a", -2 * S), row("c", 0)],
-    prev_cursor: 4,
+    prev_cursor: "c4",
   });
 
   assert.deepEqual(merged.entries.map((entry) => entry.item_id), ["a", "b", "c", "d"]);
-  assert.equal(state.orchestratorOlderCursor, 4);
+  assert.equal(state.orchestratorOlderCursor, "c4");
 
   // A page from another run must still be refused outright, ordering or not.
   const foreign = applyOlderOrchestratorPage(
@@ -103,19 +103,19 @@ test("an older Orchestrator page interleaves by number and keeps generation owne
 test("a refreshed Orchestrator tail keeps the reader's history and stamps the generation", () => {
   const state = orchestratorState([row("a", 0), row("live", 2 * S)], {
     orchestratorHistoryExtended: true,
-    orchestratorOlderCursor: 3,
+    orchestratorOlderCursor: "c3",
   });
   const prior = {
     threadId: "orch",
     entries: state.orchestratorEntries,
-    olderCursor: 3,
+    olderCursor: "c3",
     historyExtended: true,
   };
 
   const refreshed = applyRefreshedOrchestratorPage(state, prior, {
     thread_id: "orch",
     entries: [row("b", S), row("c", 3 * S)],
-    prev_cursor: 9,
+    prev_cursor: "c9",
   }, "orch");
 
   assert.deepEqual(

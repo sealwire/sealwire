@@ -6,8 +6,8 @@
 //
 // Only append-stable older pages (before != null) are stored here — the live
 // tail is never cached (see ./caching-transcript-fetcher.js). Pages are keyed by
-// (scope, threadId, before); `before` is a from-oldest index cursor, so under the
-// common tail-append case an older page's content is stable for a given cursor.
+// (scope, threadId, before); `before` is the relay's opaque cursor, which names rows
+// by order key and changes whenever the relay rebuilds the thread's transcript.
 //
 // At rest the page JSON is encrypted with AES-GCM under a per-browser,
 // NON-EXTRACTABLE key (same hardening as remote/secret-store.js): copying the
@@ -329,6 +329,7 @@ async function evictUntilUnderQuota(pages, total, quotaBytes, protectKey) {
  *
  * 2: Codex user rows keep the relay's own item id instead of being renamed to the
  *    provider's, so a page cached before that can hold both ids for one send.
+ * 3: `before` became the relay's opaque cursor; pages keyed by row index are dead.
  *
  * This is a one-time migration guard, NOT a per-restart discriminator. A relay
  * rebuilds a thread from provider history on restart, and that history renumbers item
@@ -336,7 +337,7 @@ async function evictUntilUnderQuota(pages, total, quotaBytes, protectKey) {
  * under different ids than the next one serves. That predates this constant and
  * applies to agent rows too; fixing it needs a server-supplied generation in `scope`.
  */
-const CACHE_EPOCH = "2";
+const CACHE_EPOCH = "3";
 
 /**
  * `generation` names the relay process that minted the item ids in the page.

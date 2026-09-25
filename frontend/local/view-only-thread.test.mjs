@@ -6,7 +6,9 @@ import {
   mergeOlderViewOnlyPage,
   mergeRefreshedViewOnlyPage,
   projectViewOnlySession,
+  resyncViewOnlyPin,
   viewOnlyEligible,
+  viewOnlyPinBehindResync,
   viewOnlyPinNextAction,
 } from "./view-only-thread.js";
 
@@ -38,7 +40,7 @@ function pinFor(threadId, overrides = {}) {
   return {
     threadId,
     entries: [{ item_id: `${threadId}-tail` }],
-    olderCursor: 7,
+    olderCursor: "c7",
     generation: 1,
     review: false,
     reviewSig: null,
@@ -58,7 +60,7 @@ test("REGRESSION #2: a non-active, NON-review thread projects read-only with pag
   // review-locked, so viewing a saved thread shows an empty state and history
   // can never paginate.
   const real = realSession();
-  const pin = pinFor("A", { olderCursor: 7 });
+  const pin = pinFor("A", { olderCursor: "c7" });
 
   const projected = projectViewOnlySession(real, { viewThreadId: "A", viewOnlyThread: pin });
 
@@ -235,23 +237,23 @@ test("review-locked threads still project read-only (existing behavior preserved
 test("merging an older page prepends entries and advances the cursor", () => {
   const pin = pinFor("A", {
     entries: [{ item_id: "e3" }, { item_id: "e4" }],
-    olderCursor: 2,
+    olderCursor: "c2",
   });
   const merged = mergeOlderViewOnlyPage(pin, {
     thread_id: "A",
     entries: [{ item_id: "e1" }, { item_id: "e2" }],
-    prev_cursor: 0,
+    prev_cursor: "c0",
   });
   assert.deepEqual(
     merged.entries.map((entry) => entry.item_id),
     ["e1", "e2", "e3", "e4"]
   );
   assert.equal(merged.historyExtended, true);
-  assert.equal(merged.olderCursor, 0);
+  assert.equal(merged.olderCursor, "c0");
 });
 
 test("merging the final page clears the cursor so truncation turns off", () => {
-  const merged = mergeOlderViewOnlyPage(pinFor("A", { olderCursor: 2 }), {
+  const merged = mergeOlderViewOnlyPage(pinFor("A", { olderCursor: "c2" }), {
     thread_id: "A",
     entries: [{ item_id: "first" }],
     prev_cursor: null,
@@ -260,7 +262,7 @@ test("merging the final page clears the cursor so truncation turns off", () => {
 });
 
 test("merge dedupes overlapping item_ids and ignores wrong-thread pages", () => {
-  const pin = pinFor("A", { entries: [{ item_id: "e2" }], olderCursor: 1 });
+  const pin = pinFor("A", { entries: [{ item_id: "e2" }], olderCursor: "c1" });
   const merged = mergeOlderViewOnlyPage(pin, {
     thread_id: "A",
     entries: [{ item_id: "e1" }, { item_id: "e2" }],
@@ -290,7 +292,7 @@ test("working-tail refresh preserves a prefix loaded by pagination", () => {
         { item_id: "tail-2", status: "running" },
       ],
       historyExtended: true,
-      olderCursor: 5,
+      olderCursor: "c5",
     }),
     {
       thread_id: "A",
@@ -299,7 +301,7 @@ test("working-tail refresh preserves a prefix loaded by pagination", () => {
         { item_id: "tail-2", status: "completed" },
         { item_id: "tail-3", status: "running" },
       ],
-      prev_cursor: 7,
+      prev_cursor: "c7",
     }
   );
   assert.deepEqual(
@@ -312,7 +314,7 @@ test("working-tail refresh preserves a prefix loaded by pagination", () => {
       "tail-3:running",
     ]
   );
-  assert.equal(refreshed.olderCursor, 5, "the retained prefix keeps its older cursor");
+  assert.equal(refreshed.olderCursor, "c5", "the retained prefix keeps its older cursor");
   assert.equal(refreshed.historyExtended, true);
 });
 
@@ -323,16 +325,16 @@ test("working-tail refresh preserves the current pin for a wrong-thread page", (
       { item_id: "tail-a", status: "running" },
     ],
     historyExtended: true,
-    olderCursor: 5,
+    olderCursor: "c5",
   });
   const refreshed = mergeRefreshedViewOnlyPage(pin, {
     thread_id: "B",
     entries: [{ item_id: "private-b", status: "completed" }],
-    prev_cursor: 99,
+    prev_cursor: "c99",
   });
 
   assert.deepEqual(refreshed.entries, pin.entries);
-  assert.equal(refreshed.olderCursor, 5);
+  assert.equal(refreshed.olderCursor, "c5");
   assert.equal(refreshed.historyExtended, true);
   assert.equal(
     refreshed.entries.some((entry) => entry.item_id === "private-b"),
@@ -349,7 +351,7 @@ test("one overlapping item bridges an append-only tail when its cursor advances"
         { item_id: "shared", status: "running" },
       ],
       historyExtended: true,
-      olderCursor: 5,
+      olderCursor: "c5",
     }),
     {
       thread_id: "A",
@@ -357,7 +359,7 @@ test("one overlapping item bridges an append-only tail when its cursor advances"
         { item_id: "shared", status: "completed" },
         { item_id: "new-tail", status: "running" },
       ],
-      prev_cursor: 9,
+      prev_cursor: "c9",
     }
   );
 
@@ -367,7 +369,7 @@ test("one overlapping item bridges an append-only tail when its cursor advances"
   );
   assert.equal(
     refreshed.olderCursor,
-    5,
+    "c5",
     "cursor movement is expected for byte-sized tails; the shared item proves continuity"
   );
   assert.equal(refreshed.historyExtended, true);
@@ -378,19 +380,19 @@ test("working-tail refresh stays bounded until history was explicitly extended",
     pinFor("A", {
       entries: [{ item_id: "old-tail" }, { item_id: "shared" }],
       historyExtended: false,
-      olderCursor: 8,
+      olderCursor: "c8",
     }),
     {
       thread_id: "A",
       entries: [{ item_id: "shared" }, { item_id: "new-tail" }],
-      prev_cursor: 9,
+      prev_cursor: "c9",
     }
   );
   assert.deepEqual(
     refreshed.entries.map((entry) => entry.item_id),
     ["shared", "new-tail"]
   );
-  assert.equal(refreshed.olderCursor, 9);
+  assert.equal(refreshed.olderCursor, "c9");
   assert.equal(refreshed.historyExtended, false);
 });
 
@@ -404,14 +406,14 @@ test("working-tail refresh falls back safely when the provider tail no longer ov
     {
       thread_id: "A",
       entries: [{ item_id: "rewritten-tail" }],
-      prev_cursor: 22,
+      prev_cursor: "c22",
     }
   );
   assert.deepEqual(
     refreshed.entries.map((entry) => entry.item_id),
     ["rewritten-tail"]
   );
-  assert.equal(refreshed.olderCursor, 22);
+  assert.equal(refreshed.olderCursor, "c22");
   assert.equal(refreshed.historyExtended, false);
 });
 
@@ -531,7 +533,7 @@ test("buildViewOnlyPin captures entries, older cursor, and the viewed thread cwd
     page: {
       thread_id: "A",
       entries: [{ item_id: "e9" }],
-      prev_cursor: 4,
+      prev_cursor: "c4",
     },
     generation: 3,
     review: false,
@@ -540,9 +542,42 @@ test("buildViewOnlyPin captures entries, older cursor, and the viewed thread cwd
   });
   assert.equal(pin.threadId, "A");
   assert.deepEqual(pin.entries.map((entry) => entry.item_id), ["e9"]);
-  assert.equal(pin.olderCursor, 4);
+  assert.equal(pin.olderCursor, "c4");
   assert.equal(pin.generation, 3);
   assert.equal(pin.cwd, "/saved/workspace");
   assert.equal(pin.provider, "saved-provider");
   assert.equal(pin.loading, false);
+});
+
+test("a resync marks the pin for a re-read only when its tail is older than the notice", () => {
+  const pin = pinFor("A", { pageRevision: 10 });
+
+  assert.equal(resyncViewOnlyPin(pin, "A", 10), pin, "holding that revision already");
+  assert.equal(resyncViewOnlyPin(pin, "A", 9), pin);
+  assert.equal(resyncViewOnlyPin(pin, "B", 99), pin, "another thread's notice");
+  assert.equal(resyncViewOnlyPin(pin, "A", 11).tailGap, true);
+  assert.equal(
+    resyncViewOnlyPin(pinFor("A"), "A", 1).tailGap,
+    true,
+    "a pin that never learned its revision cannot rule the notice out"
+  );
+  assert.equal(resyncViewOnlyPin(pin, "A", null).tailGap, true, "a notice without a revision");
+});
+
+test("a resync during a load is judged by the page that load returns", () => {
+  const loading = resyncViewOnlyPin(pinFor("A", { pageRevision: 10, loading: true }), "A", 12);
+  assert.notEqual(loading.tailGap, true, "the page in flight may already hold it");
+
+  const built = (revision) => buildViewOnlyPin({
+    threadId: "A",
+    page: { thread_id: "A", entries: [], prev_cursor: null, revision },
+  });
+  assert.equal(built(12).pageRevision, 12);
+  assert.equal(viewOnlyPinBehindResync(loading, built(12)), false);
+  assert.equal(viewOnlyPinBehindResync(loading, built(11)), true, "the page predates the notice");
+  assert.equal(
+    viewOnlyPinBehindResync(pinFor("A", { loading: true }), built(1)),
+    false,
+    "no notice arrived during the load"
+  );
 });

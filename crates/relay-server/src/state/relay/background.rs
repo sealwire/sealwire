@@ -1,4 +1,6 @@
-use crate::protocol::{ToolCallView, TranscriptEntryKind};
+use crate::protocol::{
+    ToolCallView, TranscriptEntryKind, TranscriptResyncEvent, TranscriptResyncReason,
+};
 
 use super::device::{BrokerPendingMessage, PendingTranscriptDelta, TranscriptDeltaKind};
 use super::transcript::TranscriptMutationMeta;
@@ -159,7 +161,34 @@ impl RelayState {
             return;
         }
         self.upsert_user_message_for_thread(thread_id, item_id, text, turn_id);
+        // A user row has no text stream, so no delta ever carries it to a watcher.
+        self.queue_transcript_resync(thread_id, TranscriptResyncReason::RowsNotStreamed);
         self.touch_bg_progress_at(thread_id, now);
+    }
+
+    /// Carries the THREAD's own revision: watchers compare it with their copy of this thread,
+    /// never with the active thread they may also hold.
+    fn queue_transcript_resync(&mut self, thread_id: &str, reason: TranscriptResyncReason) {
+        if !self.any_device_watches_thread(thread_id) {
+            return;
+        }
+        let Some(revision) = self
+            .runtime_for_thread(thread_id)
+            .map(|runtime| runtime.transcript_revision)
+        else {
+            return;
+        };
+        self.queue_broker_message(BrokerPendingMessage::TranscriptResync(
+            TranscriptResyncEvent::new(thread_id, revision, reason),
+        ));
+    }
+
+    /// A new watcher may have read this thread's tail before rows it was never sent were
+    /// written. The active thread rides on snapshots instead.
+    pub(super) fn resync_new_watcher(&mut self, thread_id: &str) {
+        if self.active_thread_id.as_deref() != Some(thread_id) {
+            self.queue_transcript_resync(thread_id, TranscriptResyncReason::WatchStarted);
+        }
     }
 
     pub fn bg_append_command_delta(

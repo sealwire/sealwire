@@ -516,7 +516,7 @@ fn summarize_published_payload(payload: &serde_json::Value) -> String {
                 })
                 .unwrap_or(0);
             format!(
-                "kind=remote_action_result action={} ok={} entries={} parts={} next_cursor={} prev_cursor={}",
+                "kind=remote_action_result action={} ok={} entries={} parts={} prev_cursor={}",
                 payload
                     .get("action")
                     .and_then(serde_json::Value::as_str)
@@ -530,16 +530,9 @@ fn summarize_published_payload(payload: &serde_json::Value) -> String {
                 part_count,
                 payload
                     .get("thread_transcript")
-                    .and_then(|page| page.get("next_cursor"))
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|cursor| cursor.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                payload
-                    .get("thread_transcript")
                     .and_then(|page| page.get("prev_cursor"))
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|cursor| cursor.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("-"),
             )
         }
         "encrypted_session_snapshot" => format!(

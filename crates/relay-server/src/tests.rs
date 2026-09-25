@@ -907,6 +907,68 @@ async fn rename_thread_accepts_an_explicit_null_name_as_a_reset() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+// A client tells a stale cursor from any other failure by this code alone: its answer
+// is to reload the latest page, which no other error calls for.
+#[tokio::test]
+async fn a_rejected_transcript_cursor_is_answered_with_its_own_code() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let project = tempfile::TempDir::new().expect("project tempdir");
+    let (change_tx, _rx) = tokio::sync::watch::channel(0_u64);
+    let relay = std::sync::Arc::new(tokio::sync::RwLock::new(crate::state::RelayState::new(
+        project.path().display().to_string(),
+        change_tx.clone(),
+        crate::state::SecurityProfile::private(),
+    )));
+    relay
+        .write()
+        .await
+        .ensure_runtime_for_thread("t1")
+        .current_cwd = project.path().display().to_string();
+    let context = AppContext {
+        app: crate::state::AppState::from_parts(relay, std::collections::HashMap::new(), change_tx),
+        auth: test_auth(),
+        launch_id: None,
+        security_headers: SecurityHeadersConfig::default(),
+        host_policy: HostPolicy::loopback_only(),
+    };
+    let router = build_router(context, WebAssets::Embedded);
+
+    for before in ["123", "tc1.another-runtime.0"] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/threads/t1/transcript?before={before}"))
+                    .header(header::HOST, "127.0.0.1:8787")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(response.status(), StatusCode::GONE, "{before}");
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(
+            body["error"]["code"], "transcript_cursor_rejected",
+            "{before}"
+        );
+    }
+}
+
+#[test]
+fn a_transcript_read_to_retry_is_told_apart_from_a_failure() {
+    let (status, body) = transcript_read_error(crate::state::TranscriptReadError::HistoryPending);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body.0.error.code, "transcript_history_pending");
+}
+
 // The FIRST frame on `/api/stream` must be built point-in-time, never served from the
 // notify fan-out cache.
 //

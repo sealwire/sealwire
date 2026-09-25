@@ -57,6 +57,7 @@ import {
   withGoalErrorCleared,
 } from "../shared/goal-errors.js";
 import { createCachingTranscriptPageFetcher } from "../shared/caching-transcript-fetcher.js";
+import { TRANSCRIPT_RESYNC_EVENT } from "../shared/transcript-protocol.js";
 import { providerLabel } from "../shared/provider-labels.js";
 import {
   createThreadListQueryOptions,
@@ -851,6 +852,19 @@ function syncTranscriptWindowWithRepairedEntries(state, threadId, repairedEntrie
   }
 }
 
+/// The revision of the copy of `threadId` this surface holds: the pinned view's for a
+/// background thread. Never the live thread's, which moves on its own clock.
+function heldTranscriptRevision(threadId) {
+  if (!threadId) {
+    return null;
+  }
+  if (viewOnlyThreadId === threadId && state.session?.view_only) {
+    return numericRevision(state.session.transcript_revision);
+  }
+  const live = currentLiveSession();
+  return live?.active_thread_id === threadId ? numericRevision(live.transcript_revision) : null;
+}
+
 export function applyTranscriptEvent(event) {
   const eventKind = event?.kind || event?.type || "";
   if (!state.session) {
@@ -866,19 +880,17 @@ export function applyTranscriptEvent(event) {
     return;
   }
 
-  if (eventKind === "transcript_stream_lagged") {
-    // Mirrors local's handling (frontend/local/session/stream.js): we may have
-    // missed delta frames, so the cached text can no longer be trusted — pull
-    // the authoritative tail rather than trust it. Whatever text is already
-    // pending must not sit out the coalescing window behind a signal that
-    // says the current view may already be stale.
-    const laggedThreadId = event.thread_id || currentLiveSession()?.active_thread_id || null;
-    scheduleTranscriptGapRepair(
-      laggedThreadId,
-      "transcript_stream_lagged",
-      numericRevision(event.revision ?? event.transcript_revision)
-    );
-    transcriptFlushScheduler.flushNow("transcript_stream_lagged");
+  if (eventKind === TRANSCRIPT_RESYNC_EVENT) {
+    // Judged against our copy of THAT thread; pending text must not sit out the
+    // coalescing window behind a notice that says the view may be stale.
+    const threadId = event.thread_id || null;
+    const revision = numericRevision(event.revision);
+    const held = heldTranscriptRevision(threadId);
+    if (!threadId || (revision != null && held != null && held >= revision)) {
+      return;
+    }
+    scheduleTranscriptGapRepair(threadId, `${TRANSCRIPT_RESYNC_EVENT}:${event.reason}`, revision);
+    transcriptFlushScheduler.flushNow(TRANSCRIPT_RESYNC_EVENT);
     return;
   }
 
@@ -1841,6 +1853,7 @@ export async function viewRemoteThread(threadId) {
     viewOnlyLastRefreshAt = Date.now();
     seedViewOnlyWasWorking(threadId);
     applyRenderedSession(state.realSession);
+    declareWatchedThreads();
     return true;
   }
 
@@ -1909,6 +1922,9 @@ export async function viewRemoteThread(threadId) {
         hydrateTranscript: true,
       }
     );
+    // Not left to the next snapshot: a row written before the relay knows this
+    // thread is on screen is never streamed here.
+    declareWatchedThreads();
     return true;
   } catch (error) {
     renderLog(`Remote session view failed: ${error.message}`);
@@ -2545,7 +2561,16 @@ async function hydrateActiveTranscript(snapshot) {
     onError(error) {
       renderLog(`Remote full transcript sync failed: ${error.message}`);
     },
+    onCursorRejected: rebuildTranscriptWindowFromLatestPage,
   });
+}
+
+// The relay can no longer read the window's cursor; only the latest page mints one it can.
+function rebuildTranscriptWindowFromLatestPage() {
+  clearTranscriptHydration(state);
+  if (state.session) {
+    applyRenderedSession(state.session);
+  }
 }
 
 export async function maybeLoadOlderTranscriptHistory() {
@@ -2567,6 +2592,7 @@ export async function maybeLoadOlderTranscriptHistory() {
     onError(error) {
       renderLog(`Remote older transcript sync failed: ${error.message}`);
     },
+    onCursorRejected: rebuildTranscriptWindowFromLatestPage,
   });
 }
 

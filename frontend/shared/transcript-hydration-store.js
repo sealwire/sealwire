@@ -999,7 +999,7 @@ function toTranscriptEntry(entry) {
   return {
     item_id: entry.item_id,
     kind: entry.kind,
-    text: entry.text ?? collapseEntryParts(entry.parts),
+    text: entry.text ?? null,
     status: entry.status,
     turn_id: entry.turn_id || null,
     tool: entry.tool || null,
@@ -1493,15 +1493,4 @@ function mergeFileChanges(existingChanges, incomingChanges) {
   }
 
   return order.map((key) => changesByPath.get(key)).filter(Boolean);
-}
-
-function collapseEntryParts(parts) {
-  if (!Array.isArray(parts) || !parts.length) {
-    return null;
-  }
-
-  return [...parts]
-    .sort((left, right) => (left?.part_index ?? 0) - (right?.part_index ?? 0))
-    .map((part) => part?.text || "")
-    .join("") || null;
 }

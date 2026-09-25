@@ -1,4 +1,50 @@
 use super::*;
+use crate::protocol::{ClientErrorCode, TranscriptCursorToken};
+use crate::state::relay::{TranscriptCursor, TranscriptCursorRejection, TranscriptKeySpace};
+
+/// Provider pages one older-page request may read through when they add no rows.
+const MAX_PROVIDER_HISTORY_PAGES_PER_REQUEST: usize = 32;
+
+const CURSOR_EXPIRED: TranscriptReadError =
+    TranscriptReadError::CursorRejected(TranscriptCursorRejection::Expired);
+
+/// A rejected cursor is its own case: the client's answer is to reload the latest page.
+#[derive(Debug)]
+pub(crate) enum TranscriptReadError {
+    CursorRejected(TranscriptCursorRejection),
+    /// The per-request provider budget ran out before a row turned up; the provider
+    /// position advanced, so the same request made again gets further.
+    HistoryPending,
+    Failed(String),
+}
+
+impl TranscriptReadError {
+    pub(crate) fn client_code(&self) -> Option<ClientErrorCode> {
+        match self {
+            Self::CursorRejected(_) => Some(ClientErrorCode::TranscriptCursorRejected),
+            Self::HistoryPending => Some(ClientErrorCode::TranscriptHistoryPending),
+            Self::Failed(_) => None,
+        }
+    }
+}
+
+impl From<String> for TranscriptReadError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl std::fmt::Display for TranscriptReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CursorRejected(rejection) => rejection.fmt(f),
+            Self::HistoryPending => {
+                f.write_str("older history is still being read; ask again with the same cursor")
+            }
+            Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
 
 impl AppState {
     /// Stamps the generation on every page, whichever branch below produced it.
@@ -6,57 +52,58 @@ impl AppState {
     /// A wrapper rather than four call sites: the point of the field is that a client
     /// can always tell which run of the relay a page came from, and a branch that
     /// forgot to set it would silently look like "same run as whatever you have".
-    pub async fn read_thread_transcript(
+    pub(crate) async fn read_thread_transcript(
         &self,
         mut input: ReadThreadTranscriptInput,
-    ) -> Result<ThreadTranscriptResponse, String> {
+    ) -> Result<ThreadTranscriptResponse, TranscriptReadError> {
         input.thread_id = self.canonical_session_id(&input.thread_id).await?;
         let generation = self.relay.read().await.transcript_generation.clone();
-        self.read_thread_transcript_page_unstamped(input)
-            .await
-            .map(|page| page.stamp_generation(generation))
+        let page = match input.before.take() {
+            Some(token) => self.read_older_transcript_page(input, &token).await?,
+            None => self.read_latest_transcript_page(input).await?,
+        };
+        Ok(page.stamp_generation(generation))
     }
 
-    async fn read_thread_transcript_page_unstamped(
+    async fn read_older_transcript_page(
+        &self,
+        input: ReadThreadTranscriptInput,
+        token: &TranscriptCursorToken,
+    ) -> Result<ThreadTranscriptResponse, TranscriptReadError> {
+        let device_id = input.device_id.as_deref().unwrap_or_default();
+        // Pinned to the runtime that minted the cursor: every step below, the merge
+        // included, refuses to touch a runtime rebuilt while this request awaited.
+        let (key_space, cursor) = {
+            let relay = self.relay.read().await;
+            let runtime = relay
+                .runtime_for_thread(&input.thread_id)
+                .ok_or(CURSOR_EXPIRED)?;
+            let cursor = runtime
+                .transcript_key_space
+                .decode(token)
+                .map_err(TranscriptReadError::CursorRejected)?;
+            (runtime.transcript_key_space.clone(), cursor)
+        };
+        self.read_provider_history_below(&input.thread_id, device_id, &key_space, cursor)
+            .await?;
+        let relay = self.relay.read().await;
+        let runtime = relay
+            .runtime_in_key_space(&input.thread_id, &key_space)
+            .ok_or(CURSOR_EXPIRED)?;
+        let device_scope = input
+            .device_id
+            .as_deref()
+            .map(|id| relay.device_path_scope(id))
+            .unwrap_or_default();
+        ensure_path_within_device_scope(&runtime.current_cwd, &device_scope, &relay.allowed_roots)?;
+        Ok(runtime.transcript_page(&input.thread_id, Some(cursor)))
+    }
+
+    async fn read_latest_transcript_page(
         &self,
         input: ReadThreadTranscriptInput,
     ) -> Result<ThreadTranscriptResponse, String> {
         let device_id = input.device_id.as_deref().unwrap_or_default();
-
-        let provider_history_paged = {
-            let relay = self.relay.read().await;
-            relay
-                .runtime_for_thread(&input.thread_id)
-                .is_some_and(|runtime| runtime.provider_history_paged)
-        };
-        if input.before.is_some() && provider_history_paged {
-            let target = self.resolve_session_target(&input.thread_id).await?;
-            if let Some(page) = target.read_thread_transcript_page(input.before).await? {
-                {
-                    let relay = self.relay.read().await;
-                    let device_scope = relay.device_path_scope(device_id);
-                    ensure_path_within_device_scope(
-                        &page.sync.thread.cwd,
-                        &device_scope,
-                        &relay.allowed_roots,
-                    )?;
-                }
-                let entries = page.sync.transcript;
-                let mut relay = self.relay.write().await;
-                let runtime = relay.ensure_runtime_for_thread(&input.thread_id);
-                // The MERGED records, never the raw page: a page holding only a tool's
-                // request would let the client overwrite the settled entry it already
-                // has, and an id-less raw row would bypass id and order-key assignment.
-                let entries =
-                    runtime.prepend_provider_history(entries, input.before, page.prev_cursor);
-                return Ok(ThreadTranscriptResponse::from_provider_page(
-                    input.thread_id,
-                    entries,
-                    page.prev_cursor,
-                    runtime.transcript_revision,
-                ));
-            }
-        }
 
         // Sampled together, BEFORE the provider await below: the floor is what
         // lets the merge afterwards tell a row a live event created during the
@@ -68,7 +115,7 @@ impl AppState {
                 relay.transcript_revision_floor(),
             )
         };
-        if runtime_missing && input.before.is_none() {
+        if runtime_missing {
             let target = self.resolve_session_target(&input.thread_id).await?;
             let (provider_name, bridge) = (target.provider.clone(), target.bridge().clone());
             if let Some(page) = target.read_thread_transcript_page(None).await? {
@@ -112,14 +159,10 @@ impl AppState {
                     .await;
                 let paged = page.paged;
                 let prev_cursor = page.prev_cursor;
-                // A page has to carry the revision of the runtime it was built from,
-                // or the client cannot chain the deltas that follow it.
-                let hydrated_revision;
-                // Materialized under the SAME lock that captured the revision, from the
-                // runtime hydration just built — so ids and order keys are the numbered
-                // ones, never the raw provider parse (which carries neither).
-                let materialized;
-                {
+                // Built under the SAME lock as the hydration, from the runtime it just
+                // built: that holds the fetched history AND anything born during the
+                // read, so ids, order keys and the revision all describe one state.
+                let mut response = {
                     let mut relay = self.relay.write().await;
                     // `runtime_missing` was decided before the provider await, so a
                     // stream event may have built the runtime in the meantime. That
@@ -140,35 +183,7 @@ impl AppState {
                     let runtime = relay.ensure_runtime_for_thread(&input.thread_id);
                     runtime.provider_history_paged = paged;
                     runtime.provider_history_cursor = prev_cursor;
-                    hydrated_revision = runtime.transcript_revision;
-                    // Always from the runtime now: after the merge it holds the
-                    // fetched history AND anything born during the read, so there is
-                    // no longer a state the page could describe that it does not.
-                    materialized = paged.then(|| {
-                        runtime
-                            .transcript
-                            .iter()
-                            .map(super::super::relay::TranscriptRecord::to_view)
-                            .collect::<Vec<_>>()
-                    });
-                }
-                let mut response = if let Some(entries) = materialized {
-                    ThreadTranscriptResponse::from_provider_page(
-                        input.thread_id.clone(),
-                        entries,
-                        prev_cursor,
-                        hydrated_revision,
-                    )
-                } else {
-                    // Either the provider returned a whole history, or we lost the
-                    // race and these entries no longer describe `hydrated_revision`.
-                    // Serve the runtime instead, so the entries and the revision that
-                    // stamps them come from one state.
-                    let relay = self.relay.read().await;
-                    relay
-                        .runtime_for_thread(&input.thread_id)
-                        .ok_or_else(|| format!("thread `{}` is not loaded", input.thread_id))?
-                        .transcript_page(&input.thread_id, None)
+                    runtime.transcript_page(&input.thread_id, None)
                 };
                 response.thread_state =
                     Some(self.read_loaded_thread_state(&input.thread_id).await?);
@@ -178,12 +193,7 @@ impl AppState {
 
         self.ensure_thread_runtime_loaded(&input.thread_id, device_id)
             .await?;
-
-        let thread_state = if input.before.is_none() {
-            Some(self.read_loaded_thread_state(&input.thread_id).await?)
-        } else {
-            None
-        };
+        let thread_state = self.read_loaded_thread_state(&input.thread_id).await?;
         let relay = self.relay.read().await;
         let runtime = relay
             .runtime_for_thread(&input.thread_id)
@@ -194,9 +204,69 @@ impl AppState {
             .map(|id| relay.device_path_scope(id))
             .unwrap_or_default();
         ensure_path_within_device_scope(&runtime.current_cwd, &device_scope, &relay.allowed_roots)?;
-        let mut response = runtime.transcript_page(&input.thread_id, input.before);
-        response.thread_state = thread_state;
+        let mut response = runtime.transcript_page(&input.thread_id, None);
+        response.thread_state = Some(thread_state);
         Ok(response)
+    }
+
+    /// Reads until a row older than `cursor` is held or history ends, so a successful older
+    /// page never repeats its cursor empty; a spent budget ends in `HistoryPending`.
+    async fn read_provider_history_below(
+        &self,
+        thread_id: &str,
+        device_id: &str,
+        key_space: &TranscriptKeySpace,
+        cursor: TranscriptCursor,
+    ) -> Result<(), TranscriptReadError> {
+        let mut read_positions = std::collections::HashSet::new();
+        for _ in 0..MAX_PROVIDER_HISTORY_PAGES_PER_REQUEST {
+            let provider_cursor = {
+                let relay = self.relay.read().await;
+                let runtime = relay
+                    .runtime_in_key_space(thread_id, key_space)
+                    .ok_or(CURSOR_EXPIRED)?;
+                if runtime.holds_rows_older_than(cursor) {
+                    return Ok(());
+                }
+                let Some(provider_cursor) = runtime.unread_provider_history() else {
+                    return Ok(());
+                };
+                provider_cursor
+            };
+            if !read_positions.insert(provider_cursor) {
+                return Err(TranscriptReadError::Failed(format!(
+                    "thread `{thread_id}` provider history repeated position {provider_cursor}"
+                )));
+            }
+            let target = self.resolve_session_target(thread_id).await?;
+            let Some(page) = target
+                .read_thread_transcript_page(Some(provider_cursor))
+                .await?
+            else {
+                return Err(TranscriptReadError::Failed(format!(
+                    "thread `{thread_id}` provider history can no longer be paged"
+                )));
+            };
+            let mut relay = self.relay.write().await;
+            let device_scope = relay.device_path_scope(device_id);
+            ensure_path_within_device_scope(
+                &page.sync.thread.cwd,
+                &device_scope,
+                &relay.allowed_roots,
+            )?;
+            let runtime = relay
+                .runtime_in_key_space_mut(thread_id, key_space)
+                .ok_or(CURSOR_EXPIRED)?;
+            // Another request read this page first; its prepend already covered it.
+            if runtime.unread_provider_history() == Some(provider_cursor) {
+                let _ = runtime.prepend_provider_history(
+                    page.sync.transcript,
+                    Some(provider_cursor),
+                    page.prev_cursor,
+                );
+            }
+        }
+        Err(TranscriptReadError::HistoryPending)
     }
 
     async fn read_loaded_thread_state(&self, thread_id: &str) -> Result<ThreadStateView, String> {

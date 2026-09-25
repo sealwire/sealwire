@@ -496,6 +496,7 @@ fn plain_remote_action_result_payload_splits_control_results_from_session_result
         claim_challenge: None,
         claim_challenge_expires_at: None,
         error: None,
+        error_code: None,
     };
 
     let payload = build_plain_remote_action_result_payload("action-1", "surface-1", &control)
@@ -536,6 +537,7 @@ fn plain_remote_action_result_payload_splits_control_results_from_session_result
         claim_challenge: None,
         claim_challenge_expires_at: None,
         error: None,
+        error_code: None,
     };
 
     let payload = build_plain_remote_action_result_payload("action-2", "surface-1", &session)
@@ -586,8 +588,6 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
         thread_id: "thread-1".to_string(),
         revision: 9,
         server_time: 12,
-        entry_seq_start: Some(4),
-        entry_seq_end: Some(4),
         entries: vec![TranscriptEntryView {
             row_id: None,
             order_seq: None,
@@ -600,8 +600,9 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
         }],
-        next_cursor: None,
-        prev_cursor: Some(1),
+        prev_cursor: Some(crate::protocol::TranscriptCursorToken::new(
+            "tc1.test.1".to_string(),
+        )),
         thread_state: None,
     };
     let breakdown = measure_remote_action_result_sizes(
@@ -642,6 +643,8 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
         None,
         None,
         None,
+        // error_code
+        None,
     );
 
     assert_eq!(breakdown.snapshot_bytes, 0);
@@ -666,8 +669,6 @@ fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
             thread_id: "thread-1".to_string(),
             revision: 9,
             server_time: 12,
-            entry_seq_start: Some(4),
-            entry_seq_end: Some(4),
             entries: vec![TranscriptEntryView {
                 row_id: None,
                 order_seq: None,
@@ -680,8 +681,9 @@ fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
             }],
-            next_cursor: None,
-            prev_cursor: Some(1),
+            prev_cursor: Some(crate::protocol::TranscriptCursorToken::new(
+                "tc1.test.1".to_string(),
+            )),
             thread_state: None,
         }),
         workspace_diff: None,
@@ -701,6 +703,7 @@ fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
         claim_challenge: None,
         claim_challenge_expires_at: None,
         error: None,
+        error_code: None,
     }
 }
 
@@ -756,6 +759,7 @@ fn make_large_ask_user_detail_plaintext() -> RemoteActionResultPlaintext {
         claim_challenge: None,
         claim_challenge_expires_at: None,
         error: None,
+        error_code: None,
     }
 }
 
@@ -1141,6 +1145,7 @@ fn plain_fetch_reviews_result_carries_the_reviews_payload_to_the_device() {
         claim_challenge: None,
         claim_challenge_expires_at: None,
         error: None,
+        error_code: None,
     };
 
     let payload = build_plain_remote_action_result_payload("action-reviews", "surface-1", &result)
@@ -1208,6 +1213,7 @@ fn plain_fetch_ask_result_carries_the_ask_detail_payload_to_the_device() {
         claim_challenge: None,
         claim_challenge_expires_at: None,
         error: None,
+        error_code: None,
     };
 
     let payload = build_plain_remote_action_result_payload("action-ask", "surface-1", &result)
@@ -1265,6 +1271,7 @@ fn plain_dedicated_workflows_and_devices_payloads_reach_the_device() {
         claim_challenge: None,
         claim_challenge_expires_at: None,
         error: None,
+        error_code: None,
     };
 
     let payload = build_plain_remote_action_result_payload("action-data", "surface-1", &result)
@@ -1320,6 +1327,7 @@ fn plain_fetch_projects_result_carries_the_projects_payload_to_the_device() {
         claim_challenge: None,
         claim_challenge_expires_at: None,
         error: None,
+        error_code: None,
     };
 
     let payload = build_plain_remote_action_result_payload("action-projects", "surface-1", &result)
@@ -1382,6 +1390,7 @@ fn plain_fetch_workspace_git_context_result_reaches_the_device() {
         claim_challenge: None,
         claim_challenge_expires_at: None,
         error: None,
+        error_code: None,
     };
 
     let payload = build_plain_remote_action_result_payload("action-git", "surface-1", &result)
@@ -2311,6 +2320,7 @@ fn plain_fetch_thread_skills_result_reaches_the_device() {
         claim_challenge: None,
         claim_challenge_expires_at: None,
         error: None,
+        error_code: None,
     };
     let payload = build_plain_remote_action_result_payload("action-skills", "surface-1", &result)
         .expect("skills payload");
@@ -2325,4 +2335,64 @@ fn plain_fetch_thread_skills_result_reaches_the_device() {
         carried["skills"][0]["path"],
         "/repo/.codex/skills/probe/SKILL.md"
     );
+}
+
+// The phone reloads the latest page on this code alone, so it must survive every way a
+// result travels: sealed, plaintext, and replayed from the cache.
+#[tokio::test]
+async fn a_rejected_transcript_cursor_reaches_the_device_as_its_code() {
+    use crate::state::{RelayState, SecurityProfile};
+    use std::sync::Arc;
+    use tokio::sync::{watch, RwLock};
+
+    let dir = tempfile::TempDir::new().expect("tmpdir");
+    let cwd = dir.path().to_string_lossy().to_string();
+    let (change_tx, _rx) = watch::channel(0_u64);
+    let relay = Arc::new(RwLock::new(RelayState::new(
+        cwd.clone(),
+        change_tx.clone(),
+        SecurityProfile::private(),
+    )));
+    relay
+        .write()
+        .await
+        .ensure_runtime_for_thread("t1")
+        .current_cwd = cwd;
+    let state = AppState::from_parts(relay, std::collections::HashMap::new(), change_tx);
+    let request: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "fetch_thread_transcript",
+        "input": { "thread_id": "t1", "before": "tc1.another-runtime.0" },
+    }))
+    .expect("the request the phone sends");
+
+    let failure = execute_remote_action(&state, request, 0)
+        .await
+        .expect_err("a cursor from another runtime");
+    let (outcome, error) = failure.into_refusal();
+    let cached = cached_remote_action_result(
+        RemoteActionKind::FetchThreadTranscript,
+        state.snapshot().await,
+        outcome,
+        Some(error),
+        false,
+        None,
+    );
+    assert_eq!(
+        cached.error_code,
+        Some(ClientErrorCode::TranscriptCursorRejected)
+    );
+
+    let mut result = make_large_thread_transcript_plaintext();
+    result.ok = false;
+    result.thread_transcript = None;
+    result.error = cached.error.clone();
+    result.error_code = cached.error_code;
+    let sealed = serde_json::to_value(&result).expect("sealed result");
+    assert_eq!(sealed["error_code"], "transcript_cursor_rejected");
+    let plain = serde_json::to_value(
+        build_plain_remote_action_result_payload("action-1", "surface-1", &result)
+            .expect("plaintext payload"),
+    )
+    .expect("plaintext json");
+    assert_eq!(plain["error_code"], "transcript_cursor_rejected");
 }

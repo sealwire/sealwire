@@ -46,7 +46,7 @@ test("thread list query options forward the limit to the requester", async () =>
 test("transcript page query keys include cursor and thread identity", () => {
   assert.deepEqual(
     threadTranscriptPageQueryKey({
-      before: 42,
+      before: "c42",
       generation: "gen-a",
       scope: "relay-1",
       surface: "remote",
@@ -58,7 +58,7 @@ test("transcript page query keys include cursor and thread identity", () => {
       "relay-1",
       "gen-a",
       "thread-1",
-      42,
+      "c42",
     ]
   );
 });
@@ -68,7 +68,7 @@ test("transcript page query keys include cursor and thread identity", () => {
 test("transcript page query keys separate two relay generations", () => {
   const forGeneration = (generation) =>
     threadTranscriptPageQueryKey({
-      before: 42,
+      before: "c42",
       generation,
       scope: "relay-1",
       surface: "remote",
@@ -268,9 +268,9 @@ test("a refresh arriving after a fresh fetch cannot join the pre-mutation reques
 test("switching generation drops the previous run's transcript queries", () => {
   const removed = [];
   const queries = [
-    { queryKey: ["thread-transcript", "local", "s", "gen-a", "t1", 10] },
-    { queryKey: ["thread-transcript", "local", "s", "gen-a", "t1", 20] },
-    { queryKey: ["thread-transcript", "local", "s", "gen-b", "t1", 10] },
+    { queryKey: ["thread-transcript", "local", "s", "gen-a", "t1", "c10"] },
+    { queryKey: ["thread-transcript", "local", "s", "gen-a", "t1", "c20"] },
+    { queryKey: ["thread-transcript", "local", "s", "gen-b", "t1", "c10"] },
   ];
   const queryClient = {
     getQueryCache: () => ({ findAll: () => queries }),

@@ -43,7 +43,7 @@ function hydratedThreadState(threadId, ids, { olderCursor = 7, tailReady = true 
 }
 
 test("leaving a thread stashes its window; returning restores it instantly", () => {
-  const state = hydratedThreadState("thread-A", ["a1", "a2", "a3"], { olderCursor: 12 });
+  const state = hydratedThreadState("thread-A", ["a1", "a2", "a3"], { olderCursor: "c12" });
 
   // Leave A (stash) then switch to B (cleared slot).
   stashTranscriptHydrationForThread(state);
@@ -57,7 +57,7 @@ test("leaving a thread stashes its window; returning restores it instantly", () 
 
   assert.equal(state.transcriptHydrationThreadId, "thread-A");
   assert.deepEqual(state.transcriptHydrationOrder, ["a1", "a2", "a3"]);
-  assert.equal(state.transcriptHydrationOlderCursor, 12);
+  assert.equal(state.transcriptHydrationOlderCursor, "c12");
   assert.equal(state.transcriptHydrationTailReady, true);
   assert.equal(state.transcriptHydrationEntries.get("a2").text, "body-a2");
 });

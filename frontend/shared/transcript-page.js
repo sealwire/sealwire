@@ -1,76 +1,18 @@
+/** The fields both surfaces read off a relay transcript page, with absent ones nulled. */
 export function normalizeThreadTranscriptPage(page) {
-  if (!page) {
+  if (!page || !Array.isArray(page.entries)) {
     return page;
   }
-
-  if (
-    Array.isArray(page.entries)
-    && page.entries.every((entry) => !Array.isArray(entry?.parts))
-  ) {
-    return {
-      entry_seq_end: page.entry_seq_end ?? null,
-      entry_seq_start: page.entry_seq_start ?? null,
-      entries: page.entries,
-      prev_cursor: page.prev_cursor ?? page.next_cursor ?? null,
-      revision: page.revision ?? null,
-      server_time: page.server_time ?? null,
-      thread_state: page.thread_state ?? null,
-      thread_id: page.thread_id,
-      // Both branches must carry this. Dropped on one of them, every page down that
-      // path looks like it came from a relay that cannot name its run — which the
-      // merge guards then (correctly) refuse, and nothing renders at all.
-      transcript_generation: page.transcript_generation ?? "",
-    };
-  }
-
-  if (!Array.isArray(page.chunks)) {
-    return page;
-  }
-
-  const entriesByIndex = new Map();
-  for (const chunk of page.chunks) {
-    const entryIndex = chunk.entry_index ?? 0;
-    let entry = entriesByIndex.get(entryIndex);
-    if (!entry) {
-      entry = {
-        entry_index: entryIndex,
-        // The relay's row key, when it sends one. Reconstructing an entry from
-        // chunks is an explicit field list, so anything unnamed here is lost.
-        // Spread conditionally: a relay too old to send one must still produce
-        // the exact legacy shape, which is what its cached pages hold.
-        ...(typeof chunk.row_id === "string" && chunk.row_id ? { row_id: chunk.row_id } : {}),
-        item_id: chunk.item_id || null,
-        kind: chunk.kind || null,
-        part_count: chunk.chunk_count || 1,
-        parts: [],
-        status: chunk.status || null,
-        tool: chunk.tool || null,
-        turn_id: chunk.turn_id || null,
-      };
-      entriesByIndex.set(entryIndex, entry);
-    }
-
-    if (chunk.chunk_count > entry.part_count) {
-      entry.part_count = chunk.chunk_count;
-    }
-
-    entry.parts.push({
-      part_index: chunk.chunk_index ?? 0,
-      text: chunk.text || "",
-    });
-  }
-
   return {
-    entry_seq_end: page.entry_seq_end ?? null,
-    entry_seq_start: page.entry_seq_start ?? null,
-    entries: [...entriesByIndex.values()].sort((left, right) => left.entry_index - right.entry_index),
-    prev_cursor: page.prev_cursor ?? page.next_cursor ?? null,
+    entries: page.entries,
+    // Opaque: handed back as `before`, never parsed.
+    prev_cursor: page.prev_cursor ?? null,
     revision: page.revision ?? null,
     server_time: page.server_time ?? null,
+    thread_state: page.thread_state ?? null,
+    thread_id: page.thread_id,
     // Which run of the relay minted these item ids. Carried so a page that was in
     // flight across a restart can be recognised and dropped rather than merged.
     transcript_generation: page.transcript_generation ?? "",
-    thread_state: page.thread_state ?? null,
-    thread_id: page.thread_id,
   };
 }

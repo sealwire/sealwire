@@ -49,23 +49,25 @@ use protocol::{
     AllowedRootsInput, AllowedRootsReceipt, ApiEnvelope, ApiError, ApplyFileChangeInput,
     ApplyFileChangeReceipt, ApprovalDecisionInput, ApprovalReceipt, AskDetailResponse,
     AskUserAnswerReceipt, AuthSessionInput, AuthSessionView, BulkRevokeDevicesReceipt,
-    CommentHandBackInput, CommentMutationReceipt, CommentResolveInput, CreateCommentInput,
-    DeleteThreadInput, DevicesResponse, ForkSessionInput, HealthResponse, HeartbeatInput,
-    ListCommentsQuery, ListCommentsResponse, ListReviewTicksQuery, ListReviewTicksResponse,
-    ModelOptionView, PairingDecisionInput, PairingDecisionReceipt, PairingStartInput,
-    PairingTicketView, ProjectActionInput, ProjectActionReceipt, ProjectsResponse,
-    ReadThreadEntryDetailInput, ReadThreadTranscriptInput, RenameThreadInput, RepairWorkspaceInput,
-    RequestReviewInput, RequestReviewReceipt, ResolvedWorkspace, ResumeSessionInput,
-    ReviewActionInput, ReviewDeleteReceipt, ReviewsResponse, RevokeDeviceReceipt, SendMessageInput,
-    SessionSnapshot, SessionSnapshotCompactProfile, SetThreadFlagInput, SkillInvocationInput,
-    StartSessionInput, StartTeamInput, StartTeamReceipt, StartWorkflowInput, StartWorkflowReceipt,
-    StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput, TeamActionInput, TeamActionReceipt,
-    TeamFileResponse, TeamMarkInput, TeamsResponse, ThreadArchiveReceipt, ThreadDeleteReceipt,
-    ThreadEntryDetailResponse, ThreadFlagReceipt, ThreadRenameReceipt, ThreadSettingsView,
-    ThreadSkillsView, ThreadTranscriptResponse, ThreadWorkspaceInput, ThreadsQuery,
-    ThreadsResponse, TickReviewFileInput, TranscriptDeltaEvent, UpdateSessionSettingsInput,
-    WatchThreadsInput, WorkflowActionInput, WorkflowActionReceipt, WorkflowsResponse,
-    WorkspaceDiffResponse, WorkspaceGitContextView, WorkspaceTrustInput, WorkspaceTrustReceipt,
+    ClientErrorCode, CommentHandBackInput, CommentMutationReceipt, CommentResolveInput,
+    CreateCommentInput, DeleteThreadInput, DevicesResponse, ForkSessionInput, HealthResponse,
+    HeartbeatInput, ListCommentsQuery, ListCommentsResponse, ListReviewTicksQuery,
+    ListReviewTicksResponse, LocalTranscriptEvent, ModelOptionView, PairingDecisionInput,
+    PairingDecisionReceipt, PairingStartInput, PairingTicketView, ProjectActionInput,
+    ProjectActionReceipt, ProjectsResponse, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
+    RenameThreadInput, RepairWorkspaceInput, RequestReviewInput, RequestReviewReceipt,
+    ResolvedWorkspace, ResumeSessionInput, ReviewActionInput, ReviewDeleteReceipt, ReviewsResponse,
+    RevokeDeviceReceipt, SendMessageInput, SessionSnapshot, SessionSnapshotCompactProfile,
+    SetThreadFlagInput, SkillInvocationInput, StartSessionInput, StartTeamInput, StartTeamReceipt,
+    StartWorkflowInput, StartWorkflowReceipt, StopTurnInput, SubmitAskUserAnswerInput,
+    TakeOverInput, TeamActionInput, TeamActionReceipt, TeamFileResponse, TeamMarkInput,
+    TeamsResponse, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse,
+    ThreadFlagReceipt, ThreadRenameReceipt, ThreadSettingsView, ThreadSkillsView,
+    ThreadTranscriptResponse, ThreadWorkspaceInput, ThreadsQuery, ThreadsResponse,
+    TickReviewFileInput, TranscriptCursorToken, TranscriptDeltaEvent, TranscriptResyncEvent,
+    UpdateSessionSettingsInput, WatchThreadsInput, WorkflowActionInput, WorkflowActionReceipt,
+    WorkflowsResponse, WorkspaceDiffResponse, WorkspaceGitContextView, WorkspaceTrustInput,
+    WorkspaceTrustReceipt, TRANSCRIPT_RESYNC_EVENT_KIND, TRANSCRIPT_STREAM_LAGGED_EVENT_KIND,
 };
 use provider::ProviderImage;
 use relay_http::{
@@ -73,7 +75,7 @@ use relay_http::{
     SecurityHeadersConfig,
 };
 use serde::Deserialize;
-use state::{AppState, ApprovalError, AskUserAnswerError, TeamAction2};
+use state::{AppState, ApprovalError, AskUserAnswerError, TeamAction2, TranscriptReadError};
 use tower_http::{
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
@@ -120,8 +122,7 @@ struct AppContext {
 
 #[derive(Debug, Deserialize)]
 struct ThreadTranscriptQuery {
-    cursor: Option<usize>,
-    before: Option<usize>,
+    before: Option<TranscriptCursorToken>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1313,7 +1314,7 @@ async fn session_stream(
     let updates_state = context.app.clone();
     let delta_state = context.app.clone();
     let receiver = context.app.subscribe();
-    let delta_receiver = context.app.subscribe_transcript_deltas().await;
+    let delta_receiver = context.app.subscribe_transcript_events().await;
     let surface_id = query
         .surface_id
         .or(query.device_id)
@@ -1378,8 +1379,8 @@ async fn session_stream(
             // delta just to discard it.
             let watcher = surface_id.clone()?;
             loop {
-                let delta = match receiver.recv().await {
-                    Ok(delta) => delta,
+                let event = match receiver.recv().await {
+                    Ok(event) => event,
                     // Lagged: this connection fell behind and frames were DROPPED. The
                     // next snapshot alone does not repair it — a compacted snapshot is a
                     // preview, and a longer stale local body beats it in the merge, so
@@ -1394,13 +1395,17 @@ async fn session_stream(
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
                 };
                 if !state
-                    .surface_watches_thread(&watcher, &delta.thread_id)
+                    .surface_watches_thread(&watcher, event.thread_id())
                     .await
                 {
                     continue;
                 }
+                let frame = match &event {
+                    LocalTranscriptEvent::Delta(delta) => transcript_delta_event(delta),
+                    LocalTranscriptEvent::Resync(resync) => transcript_resync_event(resync),
+                };
                 return Some((
-                    Ok::<Event, Infallible>(transcript_delta_event(&delta)),
+                    Ok::<Event, Infallible>(frame),
                     (state, receiver, surface_id, cleanup),
                 ));
             }
@@ -1444,13 +1449,26 @@ async fn thread_transcript(
         .app
         .read_thread_transcript(ReadThreadTranscriptInput {
             thread_id,
-            cursor: query.cursor,
             before: query.before,
             device_id: None,
         })
         .await
         .map(|transcript| Json(ApiEnvelope::ok(transcript)))
-        .map_err(|error| classify_session_error(error))
+        .map_err(transcript_read_error)
+}
+
+fn transcript_read_error(error: TranscriptReadError) -> (StatusCode, Json<ApiError>) {
+    let Some(code) = error.client_code() else {
+        return classify_session_error(error.to_string());
+    };
+    let status = match code {
+        ClientErrorCode::TranscriptCursorRejected => StatusCode::GONE,
+        ClientErrorCode::TranscriptHistoryPending => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    (
+        status,
+        Json(ApiError::new(code.as_str(), error.to_string())),
+    )
 }
 
 async fn thread_entry_detail(
@@ -2627,17 +2645,29 @@ impl Drop for SurfaceWatchGuard {
     }
 }
 
-/// Tells the client it missed delta frames, so it must refetch rather than trust its
-/// local tail. Snapshots cannot cover this on their own: they are compacted previews,
-/// and the merge deliberately keeps a longer local body over a shorter preview.
+/// THIS connection dropped delta frames, so it must refetch rather than trust its tail.
+/// Snapshots cannot cover it: they are compacted previews, and the merge keeps a longer
+/// local body.
 fn transcript_lagged_event(dropped: u64) -> Event {
     Event::default()
-        .event("transcript_stream_lagged")
+        .event(TRANSCRIPT_STREAM_LAGGED_EVENT_KIND)
         .json_data(serde_json::json!({ "dropped": dropped }))
         .unwrap_or_else(|_| {
             Event::default()
-                .event("transcript_stream_lagged")
+                .event(TRANSCRIPT_STREAM_LAGGED_EVENT_KIND)
                 .data("{\"dropped\":0}")
+        })
+}
+
+/// SSE frame for a thread-scoped resync notice; see `TranscriptResyncEvent`.
+fn transcript_resync_event(resync: &TranscriptResyncEvent) -> Event {
+    Event::default()
+        .event(TRANSCRIPT_RESYNC_EVENT_KIND)
+        .json_data(resync)
+        .unwrap_or_else(|_| {
+            Event::default()
+                .event(TRANSCRIPT_RESYNC_EVENT_KIND)
+                .data("{}")
         })
 }
 

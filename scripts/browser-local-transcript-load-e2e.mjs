@@ -9,7 +9,7 @@
 //   3. content-visibility: `auto` is applied to chat messages so off-screen
 //      entries don't repaint on every render.
 //   4. Behavior: with a truncated transcript, scrolling up triggers a
-//      `/api/threads/:thread_id/transcript?before=N` fetch and the older
+//      `/api/threads/:thread_id/transcript?before=<cursor>` fetch and the older
 //      entries land in the DOM. The scroll position should not regress.
 //
 // We force truncation by sending enough turns (>8) past the LocalWeb compact
@@ -207,7 +207,7 @@ async function main() {
     );
 
     // (4) The IntersectionObserver-driven loader should have already issued
-    // at least one `GET /api/threads/:thread_id/transcript?before=N` to fill
+    // at least one `GET /api/threads/:thread_id/transcript?before=<cursor>` to fill
     // the truncated tail snapshot (this is how the loader runs at first
     // paint when the sentinel is on-screen). If we miss the initial wave,
     // wait briefly for it to land.

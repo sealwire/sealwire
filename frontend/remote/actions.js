@@ -22,6 +22,7 @@ import {
   createClaimLifecyclePatch,
 } from "./surface-state.js";
 import { sendBrokerFrame } from "./broker-client.js";
+import { relayError, TRANSCRIPT_RESYNC_EVENT } from "../shared/transcript-protocol.js";
 
 // One deadline for every action. Not because they are all quick — the relay still
 // awaits list_threads and send_message in its single receive loop, and a cold Codex
@@ -479,7 +480,7 @@ function isTranscriptEventKind(kind) {
     || kind === "transcript_entry_patched"
     || kind === "approval_added"
     || kind === "approval_resolved"
-    || kind === "transcript_stream_lagged";
+    || kind === TRANSCRIPT_RESYNC_EVENT;
 }
 
 function isVerboseBrokerLoggingEnabled() {
@@ -962,7 +963,7 @@ function settlePendingAction(actionId, result) {
     return;
   }
 
-  pending.reject(new Error(result.error || `${pending.actionType} failed`));
+  pending.reject(relayError(result.error || `${pending.actionType} failed`, result.error_code));
 }
 
 function cancelClaimRefresh() {

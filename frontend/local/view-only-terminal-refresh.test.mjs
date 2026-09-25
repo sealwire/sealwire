@@ -444,3 +444,27 @@ test("a delta during a terminal fetch preserves wasWorking for a second idle ref
 
   assert.equal(h.loads.length, 2, "the second idle edge must arm another terminal fetch");
 });
+
+test("a resync that lands mid-fetch re-reads only if the fetched page predates it", async () => {
+  for (const [pageRevision, expectedLoads] of [[6, 2], [7, 1]]) {
+    const h = createHarness();
+    h.ops.maybeRefreshViewOnly(h.state.session);
+    await h.flush();
+    assert.equal(h.loads.length, 1);
+
+    h.stream.applySessionStreamEvent("transcript_resync", {
+      thread_id: BG_THREAD,
+      revision: 7,
+      reason: "rows_not_streamed",
+    });
+    h.completePendingFetch({
+      thread_id: BG_THREAD,
+      entries: [{ item_id: "item-1", kind: "agent_text", text: "Hello", status: "done" }],
+      prev_cursor: null,
+      revision: pageRevision,
+    });
+    await h.flush();
+
+    assert.equal(h.loads.length, expectedLoads, `page at revision ${pageRevision}`);
+  }
+});

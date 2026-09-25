@@ -62,7 +62,7 @@ test("tail page (before == null) always hits network and never touches the cache
 
 test("older page cache hit returns cached page without calling the network", async () => {
   const cachedPage = makePage("t1", 10, [{ item_id: "cached" }]);
-  const cache = makeCache([{ scope: "s", threadId: "t1", before: 10, page: cachedPage }]);
+  const cache = makeCache([{ scope: "s", threadId: "t1", before: "c10", page: cachedPage }]);
   let calls = 0;
   const fetchPage = async () => {
     calls += 1;
@@ -74,7 +74,7 @@ test("older page cache hit returns cached page without calling the network", asy
     getScope: () => "s",
   });
 
-  const page = await fetcher({ threadId: "t1", before: 10 });
+  const page = await fetcher({ threadId: "t1", before: "c10" });
 
   assert.equal(calls, 0, "cache hit must skip the network");
   assert.equal(page.entries[0].item_id, "cached");
@@ -89,13 +89,13 @@ test("older page cache miss fetches from network and writes through", async () =
     getScope: () => "s",
   });
 
-  const page = await fetcher({ threadId: "t1", before: 10 });
+  const page = await fetcher({ threadId: "t1", before: "c10" });
 
   assert.equal(page.thread_id, "t1");
   assert.equal(cache.writes.length, 1);
   assert.deepEqual(
     { scope: cache.writes[0].scope, threadId: cache.writes[0].threadId, before: cache.writes[0].before },
-    { scope: "s", threadId: "t1", before: 10 }
+    { scope: "s", threadId: "t1", before: "c10" }
   );
 });
 
@@ -104,14 +104,14 @@ test("empty network pages are not written to the cache", async () => {
   const fetchPage = async ({ threadId }) => ({ thread_id: threadId, entries: [], prev_cursor: null });
   const fetcher = createCachingTranscriptPageFetcher({ fetchPage, cache, getScope: () => "s" });
 
-  await fetcher({ threadId: "t1", before: 10 });
+  await fetcher({ threadId: "t1", before: "c10" });
 
   assert.equal(cache.writes.length, 0);
 });
 
 test("a wrong-thread cached page is ignored and the network is used", async () => {
   const cache = makeCache([
-    { scope: "s", threadId: "t1", before: 10, page: makePage("OTHER", 10) },
+    { scope: "s", threadId: "t1", before: "c10", page: makePage("OTHER", 10) },
   ]);
   let calls = 0;
   const fetchPage = async ({ threadId, before }) => {
@@ -120,7 +120,7 @@ test("a wrong-thread cached page is ignored and the network is used", async () =
   };
   const fetcher = createCachingTranscriptPageFetcher({ fetchPage, cache, getScope: () => "s" });
 
-  const page = await fetcher({ threadId: "t1", before: 10 });
+  const page = await fetcher({ threadId: "t1", before: "c10" });
 
   assert.equal(calls, 1, "mismatched cache entry must fall back to network");
   assert.equal(page.thread_id, "t1");
@@ -140,7 +140,7 @@ test("a cache read error falls back to the network", async () => {
   };
   const fetcher = createCachingTranscriptPageFetcher({ fetchPage, cache, getScope: () => "s" });
 
-  const page = await fetcher({ threadId: "t1", before: 10 });
+  const page = await fetcher({ threadId: "t1", before: "c10" });
 
   assert.equal(calls, 1);
   assert.equal(page.thread_id, "t1");
@@ -158,7 +158,7 @@ test("a cache write error never breaks the returned page", async () => {
   const fetchPage = async ({ threadId, before }) => makePage(threadId, before);
   const fetcher = createCachingTranscriptPageFetcher({ fetchPage, cache, getScope: () => "s" });
 
-  const page = await fetcher({ threadId: "t1", before: 10 });
+  const page = await fetcher({ threadId: "t1", before: "c10" });
   assert.equal(page.thread_id, "t1");
 });
 
@@ -177,7 +177,7 @@ test("an older page containing a still-running entry is NOT written through", as
     ]);
   const fetcher = createCachingTranscriptPageFetcher({ fetchPage, cache, getScope: () => "s" });
 
-  const page = await fetcher({ threadId: "t1", before: 10 });
+  const page = await fetcher({ threadId: "t1", before: "c10" });
 
   assert.equal(page.thread_id, "t1");
   assert.equal(cache.writes.length, 0, "a page with a volatile entry must not be cached");
@@ -192,7 +192,7 @@ test("an older page whose entries are all settled IS written through", async () 
     ]);
   const fetcher = createCachingTranscriptPageFetcher({ fetchPage, cache, getScope: () => "s" });
 
-  await fetcher({ threadId: "t1", before: 10 });
+  await fetcher({ threadId: "t1", before: "c10" });
 
   assert.equal(cache.writes.length, 1);
 });

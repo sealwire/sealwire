@@ -1,4 +1,8 @@
 import { transcriptPageIsFromAnotherGeneration } from "../shared/transcript-generation.js";
+import {
+  fetchOlderPageUntilRead,
+  isTranscriptCursorRejected,
+} from "../shared/transcript-protocol.js";
 import { refreshedPinPage } from "./pin-page.js";
 import {
   buildViewOnlyPin,
@@ -6,6 +10,7 @@ import {
   resolveViewOnlyPinWasWorking,
   resolveViewOnlyPinWasWorkingAfterFetch,
   viewOnlyEligible,
+  viewOnlyPinBehindResync,
   viewOnlyPinNextAction,
   viewOnlySelfHealThreadId,
   viewOnlyThreadIsWorking,
@@ -34,6 +39,7 @@ export function createViewOnlyRefreshOps({
   getOrchestratorWatchIds = () => [],
   isReviewInProgressForThread = () => false,
   isWorkflowInProgressForThread = () => false,
+  waitBeforeHistoryRetry,
 }) {
   let viewOnlyOlderLoading = false;
   const viewOnlyRefreshLatch = createViewedThreadRefreshLatch();
@@ -92,6 +98,7 @@ export function createViewOnlyRefreshOps({
       wasWorking: resolveViewOnlyPinWasWorking({ prior, isWorking }),
       priorEntries: prior?.entries || [],
       priorOlderCursor: prior?.olderCursor ?? null,
+      priorPageRevision: prior?.pageRevision ?? null,
       historyExtended: Boolean(prior?.historyExtended),
       loading: true,
     });
@@ -157,7 +164,7 @@ export function createViewOnlyRefreshOps({
         historyExtended: refreshed.historyExtended,
       });
       state.viewOnlyThread =
-        livePin?.tailGap && livePin?.deltaDuringFetch
+        (livePin?.tailGap && livePin?.deltaDuringFetch) || viewOnlyPinBehindResync(livePin, built)
           ? { ...built, tailGap: true }
           : built;
     } catch (error) {
@@ -192,6 +199,7 @@ export function createViewOnlyRefreshOps({
         }),
         priorEntries: livePin?.entries || [],
         priorOlderCursor: livePin?.olderCursor ?? null,
+        priorPageRevision: livePin?.pageRevision ?? null,
         historyExtended: Boolean(livePin?.historyExtended),
         error: true,
       });
@@ -273,7 +281,15 @@ export function createViewOnlyRefreshOps({
     const generation = pin.generation;
     viewOnlyOlderLoading = true;
     try {
-      const page = await fetchTranscriptPage(pin.threadId, { before: pin.olderCursor });
+      const page = await fetchOlderPageUntilRead(
+        () => fetchTranscriptPage(pin.threadId, { before: pin.olderCursor }),
+        {
+          isCurrent: () =>
+            state.viewThreadId === pin.threadId
+            && pinForGeneration(state, pin.threadId, generation) != null,
+          wait: waitBeforeHistoryRetry,
+        }
+      );
       const current = state.viewOnlyThread;
       if (!current || current.generation !== generation || current.threadId !== pin.threadId) {
         return null;
@@ -294,6 +310,17 @@ export function createViewOnlyRefreshOps({
       if (state.session) renderSession(state.session);
       return state.viewOnlyThread?.olderCursor != null;
     } catch (error) {
+      const current = state.viewOnlyThread;
+      if (
+        isTranscriptCursorRejected(error)
+        && current?.generation === generation
+        && current.threadId === pin.threadId
+      ) {
+        // Unextended, the reload answers with the latest page and its own cursor.
+        state.viewOnlyThread = { ...current, olderCursor: null, historyExtended: false };
+        void loadViewOnlyTranscript(pin.threadId);
+        return null;
+      }
       logLine(`Couldn't load older messages for the read-only view: ${error.message}`);
       return null;
     } finally {

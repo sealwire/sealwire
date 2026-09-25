@@ -10,7 +10,7 @@ use crate::{
 
 use super::{
     thread_status_is_working, PendingApproval, PendingAskUserQuestion, ThreadSessionSettings,
-    ThreadTranscript, TranscriptRecord,
+    ThreadTranscript, TranscriptCursor, TranscriptKeySpace, TranscriptRecord,
 };
 
 /// A terminal, sanitized record of the last failed turn on this thread — never
@@ -206,6 +206,8 @@ pub(crate) struct ThreadRuntime {
     pub(crate) next_tail_order_seq: i64,
     pub(crate) next_head_order_seq: i64,
     pub(crate) transcript: ThreadTranscript,
+    /// What the cursors this runtime hands out are minted in.
+    pub(crate) transcript_key_space: TranscriptKeySpace,
     pub(crate) provider_history_cursor: Option<usize>,
     pub(crate) provider_history_paged: bool,
     pub(crate) apply_states: HashMap<String, FileChangeApplyState>,
@@ -281,6 +283,7 @@ impl ThreadRuntime {
             transcript: ThreadTranscript::new(),
             provider_history_cursor: None,
             provider_history_paged: false,
+            transcript_key_space: TranscriptKeySpace::mint(),
             apply_states: HashMap::new(),
             pending_approvals: HashMap::new(),
             pending_ask_user_questions: HashMap::new(),
@@ -326,6 +329,7 @@ impl ThreadRuntime {
             transcript: ThreadTranscript::new(),
             provider_history_cursor: None,
             provider_history_paged: false,
+            transcript_key_space: TranscriptKeySpace::mint(),
             apply_states: HashMap::new(),
             pending_approvals: HashMap::new(),
             pending_ask_user_questions: HashMap::new(),
@@ -426,6 +430,7 @@ impl ThreadRuntime {
             transcript: ThreadTranscript::from_rows(transcript),
             provider_history_cursor: None,
             provider_history_paged: false,
+            transcript_key_space: TranscriptKeySpace::mint(),
             apply_states: HashMap::new(),
             pending_approvals: HashMap::new(),
             pending_ask_user_questions: HashMap::new(),
@@ -524,15 +529,31 @@ impl ThreadRuntime {
             .collect()
     }
 
+    /// The provider continuation below the oldest row held, while history remains unread.
+    pub(crate) fn unread_provider_history(&self) -> Option<usize> {
+        self.provider_history_cursor
+            .filter(|_| self.provider_history_paged)
+    }
+
+    /// Whether memory already holds a row older than `cursor`.
+    pub(crate) fn holds_rows_older_than(&self, cursor: TranscriptCursor) -> bool {
+        self.transcript
+            .first()
+            .is_some_and(|row| row.order_seq < cursor.order_key())
+    }
+
     pub(crate) fn transcript_page(
         &self,
         thread_id: &str,
-        before: Option<usize>,
+        before: Option<TranscriptCursor>,
     ) -> ThreadTranscriptResponse {
-        let mut page = ThreadTranscriptResponse::from_transcript_source(
+        let upper_bound = before.map_or(self.transcript.len(), |cursor| {
+            self.transcript
+                .partition_point(|row| row.order_seq < cursor.order_key())
+        });
+        let window = ThreadTranscriptResponse::window_ending_at(
             thread_id.to_string(),
-            self.transcript.len(),
-            before,
+            upper_bound,
             self.transcript_revision,
             |index| {
                 let record = &self.transcript[index];
@@ -541,9 +562,24 @@ impl ThreadRuntime {
                 view
             },
         );
-        if before.is_none() && self.provider_history_paged {
-            page.prev_cursor = self.provider_history_cursor;
-        }
+        let mut page = window.page;
+        let next_older_key = match self.transcript.get(window.start) {
+            Some(first) if window.start > 0 => Some(first.order_seq),
+            // Memory is exhausted but the provider is not: the relay reads its next
+            // page when this cursor comes back.
+            _ if self.unread_provider_history().is_some() => Some(
+                before
+                    .map(TranscriptCursor::order_key)
+                    .into_iter()
+                    .chain(self.transcript.first().map(|row| row.order_seq))
+                    .min()
+                    .unwrap_or(i64::MAX),
+            ),
+            _ => None,
+        };
+        page.prev_cursor =
+            next_older_key.map(|key| self.transcript_key_space.cursor_older_than(key));
+        page.debug_assert_within_budget();
         page
     }
 

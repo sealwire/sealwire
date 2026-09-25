@@ -6,6 +6,7 @@ mod push;
 mod runtime;
 mod session_binding;
 mod transcript;
+mod transcript_cursor;
 mod transcript_store;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -15,9 +16,10 @@ use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::{
     protocol::{
-        ApprovalReceipt, FileChangeApplyState, LogEntryView, ModelOptionView, SessionSnapshot,
-        ThreadActivityView, ThreadEntryDetailResponse, ThreadSummaryView, ThreadTranscriptResponse,
-        ThreadsResponse, TranscriptDeltaEvent,
+        ApprovalReceipt, FileChangeApplyState, LocalTranscriptEvent, LogEntryView, ModelOptionView,
+        SessionSnapshot, ThreadActivityView, ThreadEntryDetailResponse, ThreadSummaryView,
+        ThreadTranscriptResponse, ThreadsResponse, TranscriptDeltaEvent, TranscriptResyncEvent,
+        TranscriptResyncReason,
     },
     provider::ThreadSyncData,
 };
@@ -48,8 +50,13 @@ pub(crate) use self::session_binding::{
     SessionBindingError, SessionBindingRegistry,
 };
 pub(crate) use self::transcript::TranscriptRecord;
+pub(crate) use self::transcript_cursor::{
+    TranscriptCursor, TranscriptCursorRejection, TranscriptKeySpace,
+};
 pub(crate) use self::transcript_store::{IdSpace, ThreadTranscript};
 
+/// Transcript frames (deltas and resyncs) the broker may hold undelivered.
+const MAX_PENDING_TRANSCRIPT_FRAMES: usize = 4096;
 const REMOTE_ACTION_REPLAY_TTL_SECS: u64 = 600;
 const MAX_REMOTE_ACTION_REPLAY_ENTRIES: usize = 512;
 /// Backstop on remembered search routing hints. This grows with how much a user
@@ -253,6 +260,7 @@ pub(crate) struct CachedRemoteActionResult {
     pub(crate) claim_challenge_expires_at: Option<u64>,
     pub(crate) response_secret: Option<String>,
     pub(crate) error: Option<String>,
+    pub(crate) error_code: Option<crate::protocol::ClientErrorCode>,
 }
 
 #[derive(Debug, Clone)]
@@ -333,7 +341,7 @@ pub struct RelayState {
     /// from it. A broadcast channel instead lets every open `/api/stream` connection
     /// see every delta, and a lagging subscriber drops old frames rather than
     /// stalling the relay — the snapshot that follows repairs any gap.
-    delta_tx: broadcast::Sender<TranscriptDeltaEvent>,
+    delta_tx: broadcast::Sender<LocalTranscriptEvent>,
     revision: u64,
     /// The one clock every transcript revision is drawn from, via
     /// `next_transcript_revision`. Relay-global and persisted, so a revision is
@@ -812,15 +820,19 @@ impl RelayState {
         let _ = self.change_tx.send_replace(self.revision);
     }
 
-    /// Subscribe to live transcript appends (local SSE surfaces).
-    pub fn subscribe_transcript_deltas(&self) -> broadcast::Receiver<TranscriptDeltaEvent> {
+    /// Subscribe to live transcript deltas and resync notices (local SSE surfaces).
+    pub fn subscribe_transcript_events(&self) -> broadcast::Receiver<LocalTranscriptEvent> {
         self.delta_tx.subscribe()
     }
 
-    /// Fan a delta out to local SSE subscribers. `send` fails only when nobody is
+    /// Fan an event out to local SSE subscribers. `send` fails only when nobody is
     /// subscribed, which is the common case for a headless relay — not an error.
-    fn emit_local_transcript_delta(&self, delta: &PendingTranscriptDelta) {
-        let _ = self.delta_tx.send(TranscriptDeltaEvent {
+    fn emit_local_transcript_event(&self, event: LocalTranscriptEvent) {
+        let _ = self.delta_tx.send(event);
+    }
+
+    fn local_transcript_delta(delta: &PendingTranscriptDelta) -> TranscriptDeltaEvent {
+        TranscriptDeltaEvent {
             thread_id: delta.thread_id.clone(),
             // Deltas were the one payload that carried no generation, so a delta in
             // flight across a restart could be applied to a transcript that had
@@ -841,7 +853,7 @@ impl RelayState {
                 TranscriptDeltaKind::CommandOutput => "command_output".to_string(),
             },
             text_offset: delta.text_offset,
-        });
+        }
     }
 
     // --- Web Push --------------------------------------------------------
@@ -1081,6 +1093,28 @@ impl RelayState {
 
     pub(crate) fn runtime_for_thread(&self, thread_id: &str) -> Option<&ThreadRuntime> {
         self.runtimes.get(thread_id)
+    }
+
+    /// The thread's runtime only while it is the one `key_space` belongs to: a rebuilt
+    /// runtime keys its rows anew, so nothing read for its predecessor may reach it.
+    pub(crate) fn runtime_in_key_space(
+        &self,
+        thread_id: &str,
+        key_space: &TranscriptKeySpace,
+    ) -> Option<&ThreadRuntime> {
+        self.runtimes
+            .get(thread_id)
+            .filter(|runtime| runtime.transcript_key_space == *key_space)
+    }
+
+    pub(crate) fn runtime_in_key_space_mut(
+        &mut self,
+        thread_id: &str,
+        key_space: &TranscriptKeySpace,
+    ) -> Option<&mut ThreadRuntime> {
+        self.runtimes
+            .get_mut(thread_id)
+            .filter(|runtime| runtime.transcript_key_space == *key_space)
     }
 
     /// Record a bridge's sanitized classification of a turn that ended failed.
@@ -5928,6 +5962,16 @@ so {} never got it — hand over again when you are ready.",
                     .get(surface_id)
                     .copied()
                     .unwrap_or(0);
+                let newly_watched = next
+                    .iter()
+                    .filter(|thread_id| {
+                        !self
+                            .watched_threads
+                            .get(surface_id)
+                            .is_some_and(|current| current.thread_ids.contains(*thread_id))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
                 self.watched_threads.insert(
                     surface_id.to_string(),
                     WatchedSurface {
@@ -5936,6 +5980,11 @@ so {} never got it — hand over again when you are ready.",
                         generation,
                     },
                 );
+                // The client read the tail and declared this watch as two requests; a
+                // row written in between was in neither.
+                for thread_id in newly_watched {
+                    self.resync_new_watcher(&thread_id);
+                }
                 true
             }
         }
@@ -6131,51 +6180,102 @@ so {} never got it — hand over again when you are ready.",
     }
 
     pub fn queue_broker_message(&mut self, mut message: BrokerPendingMessage) {
-        if let BrokerPendingMessage::TranscriptDelta(delta) = &mut message {
-            // Stamped HERE, not at the producers: this is the single funnel, so the
-            // local tee below and the broker payload downstream cannot disagree
-            // about which run the row id belongs to.
-            delta
+        // Stamped HERE, not at the producers: this is the single funnel, so the local
+        // tee below and the broker payload downstream cannot disagree about which run
+        // a row id or revision belongs to.
+        match &mut message {
+            BrokerPendingMessage::TranscriptDelta(delta) => delta
                 .transcript_generation
-                .clone_from(&self.transcript_generation);
+                .clone_from(&self.transcript_generation),
+            BrokerPendingMessage::TranscriptResync(resync) => resync
+                .transcript_generation
+                .clone_from(&self.transcript_generation),
+            BrokerPendingMessage::PairingResult(_) => {}
         }
-        if let BrokerPendingMessage::TranscriptDelta(delta) = &message {
-            // Tee to the local SSE subscribers FIRST — before the broker-only guard
-            // below. A relay with no broker still has a local surface, and that
-            // surface still wants a live tail. Every provider funnels its deltas
-            // through here, so this is the one place that has to be right.
-            self.emit_local_transcript_delta(delta);
+        // Tee to the local SSE subscribers FIRST — before the broker-only guard below.
+        // A relay with no broker still has a local surface, and that surface still wants
+        // a live tail. Every provider funnels through here, so this is the one place
+        // that has to be right.
+        let local = match &message {
+            BrokerPendingMessage::TranscriptDelta(delta) => Some(LocalTranscriptEvent::Delta(
+                Self::local_transcript_delta(delta),
+            )),
+            BrokerPendingMessage::TranscriptResync(resync) => {
+                Some(LocalTranscriptEvent::Resync(resync.clone()))
+            }
+            BrokerPendingMessage::PairingResult(_) => None,
+        };
+        if let Some(event) = local {
+            self.emit_local_transcript_event(event);
             if !self.broker_configured {
                 return;
             }
         }
+        if let BrokerPendingMessage::TranscriptResync(resync) = &message {
+            if self.merge_into_queued_resync(resync) {
+                return;
+            }
+        }
         self.pending_broker_messages.push(message);
-        self.bound_pending_transcript_deltas();
+        self.bound_pending_transcript_frames();
     }
 
-    /// Cap the number of queued transcript deltas, dropping the oldest beyond the
-    /// bound. Pairing results are never dropped.
-    fn bound_pending_transcript_deltas(&mut self) {
-        const MAX_PENDING_DELTAS: usize = 4096;
-        let delta_count = self
+    /// Absorbs `resync` into a queued one that is its thread's latest frame: with nothing
+    /// for that thread between them, one notice at the newer revision says both.
+    fn merge_into_queued_resync(&mut self, resync: &TranscriptResyncEvent) -> bool {
+        let latest = self
+            .pending_broker_messages
+            .iter_mut()
+            .rev()
+            .find(|message| message.transcript_thread_id() == Some(resync.thread_id.as_str()));
+        let Some(BrokerPendingMessage::TranscriptResync(queued)) = latest else {
+            return false;
+        };
+        queued.revision = queued.revision.max(resync.revision);
+        queued.reason = resync.reason;
+        true
+    }
+
+    /// Past the cap, the transcript backlog becomes one resync per thread it held: a
+    /// watcher that lost frames re-reads the tail they would have built.
+    fn bound_pending_transcript_frames(&mut self) {
+        let frames = self
             .pending_broker_messages
             .iter()
-            .filter(|m| matches!(m, BrokerPendingMessage::TranscriptDelta(_)))
+            .filter(|message| message.transcript_thread_id().is_some())
             .count();
-        let Some(mut to_drop) = delta_count.checked_sub(MAX_PENDING_DELTAS) else {
-            return;
-        };
-        if to_drop == 0 {
+        if frames <= MAX_PENDING_TRANSCRIPT_FRAMES {
             return;
         }
-        self.pending_broker_messages.retain(|m| {
-            if to_drop > 0 && matches!(m, BrokerPendingMessage::TranscriptDelta(_)) {
-                to_drop -= 1;
-                false
-            } else {
-                true
+        let mut seen = HashSet::new();
+        let mut dropped_threads = Vec::new();
+        self.pending_broker_messages.retain(|message| {
+            let Some(thread_id) = message.transcript_thread_id() else {
+                return true;
+            };
+            if seen.insert(thread_id.to_string()) {
+                dropped_threads.push(thread_id.to_string());
             }
+            false
         });
+        for thread_id in dropped_threads {
+            let Some(revision) = self
+                .runtime_for_thread(&thread_id)
+                .map(|runtime| runtime.transcript_revision)
+            else {
+                continue;
+            };
+            let mut resync = TranscriptResyncEvent::new(
+                &thread_id,
+                revision,
+                TranscriptResyncReason::FramesDropped,
+            );
+            resync
+                .transcript_generation
+                .clone_from(&self.transcript_generation);
+            self.pending_broker_messages
+                .push(BrokerPendingMessage::TranscriptResync(resync));
+        }
     }
 
     pub fn drain_pending_broker_messages(&mut self) -> Vec<BrokerPendingMessage> {
@@ -6845,7 +6945,8 @@ mod tests {
     use super::{
         BrokerPendingMessage, PendingPairingResult, PendingTranscriptDelta, PersistedRelayState,
         RelayState, ReviewJob, SecurityProfile, SessionBinding, TeamRun, TeamRunStatus,
-        TeamThreadGate, TranscriptDeltaKind, WorkflowRun, MAX_WORKFLOW_RUNS,
+        TeamThreadGate, TranscriptDeltaKind, WorkflowRun, MAX_PENDING_TRANSCRIPT_FRAMES,
+        MAX_WORKFLOW_RUNS,
     };
     use crate::protocol::ThreadSummaryView;
     use crate::state::{ReviewMode, RunStatus};
@@ -6912,20 +7013,50 @@ mod tests {
         );
     }
 
-    // With a broker configured, deltas are retained for the publisher, but the
-    // backlog is capped so a long broker outage can't grow memory without bound.
-    #[test]
-    fn configured_relay_retains_but_bounds_transcript_deltas() {
+    fn delta_for(thread_id: &str) -> BrokerPendingMessage {
+        let BrokerPendingMessage::TranscriptDelta(mut delta) = dummy_delta() else {
+            unreachable!()
+        };
+        delta.thread_id = thread_id.to_string();
+        BrokerPendingMessage::TranscriptDelta(delta)
+    }
+
+    fn resync_for(
+        thread_id: &str,
+        revision: u64,
+        reason: crate::protocol::TranscriptResyncReason,
+    ) -> BrokerPendingMessage {
+        BrokerPendingMessage::TranscriptResync(crate::protocol::TranscriptResyncEvent::new(
+            thread_id, revision, reason,
+        ))
+    }
+
+    fn queued(relay: &RelayState) -> Vec<String> {
+        relay
+            .pending_broker_messages
+            .iter()
+            .map(|message| match message {
+                BrokerPendingMessage::PairingResult(_) => "pairing".to_string(),
+                BrokerPendingMessage::TranscriptDelta(delta) => {
+                    format!("delta {}", delta.thread_id)
+                }
+                BrokerPendingMessage::TranscriptResync(resync) => format!(
+                    "resync {}@{} {:?}",
+                    resync.thread_id, resync.revision, resync.reason
+                ),
+            })
+            .collect()
+    }
+
+    fn broker_relay_with_threads(threads: &[(&str, u64)]) -> RelayState {
         let mut relay = test_relay();
         relay.broker_configured = true;
-        for _ in 0..5000 {
-            relay.queue_broker_message(dummy_delta());
+        for (thread_id, revision) in threads {
+            relay
+                .ensure_runtime_for_thread(thread_id)
+                .transcript_revision = *revision;
         }
-        assert_eq!(
-            relay.pending_broker_messages.len(),
-            4096,
-            "a configured broker retains deltas but caps the backlog"
-        );
+        relay
     }
 
     // Pairing results have their own retention semantics and are never dropped,
@@ -6942,28 +7073,75 @@ mod tests {
         );
     }
 
-    // When the delta cap evicts the oldest deltas, an interleaved pairing result
-    // must survive — eviction only removes TranscriptDelta entries.
+    // Resyncs are queued frames too: a long outage with busy background threads must not
+    // grow the backlog past the cap through them.
     #[test]
-    fn delta_eviction_preserves_interleaved_pairing_results() {
-        let mut relay = test_relay();
-        relay.broker_configured = true;
-        relay.queue_broker_message(dummy_pairing());
-        for _ in 0..5000 {
-            relay.queue_broker_message(dummy_delta());
+    fn resyncs_count_toward_the_transcript_backlog_cap() {
+        use crate::protocol::TranscriptResyncReason::RowsNotStreamed;
+        let mut relay = broker_relay_with_threads(&[("t1", 1)]);
+        for revision in 0..3000 {
+            relay.queue_broker_message(delta_for("t1"));
+            relay.queue_broker_message(resync_for("t1", revision, RowsNotStreamed));
+            assert!(
+                relay.pending_broker_messages.len() <= MAX_PENDING_TRANSCRIPT_FRAMES,
+                "{} frames queued",
+                relay.pending_broker_messages.len()
+            );
         }
-        let pairings = relay
-            .pending_broker_messages
-            .iter()
-            .filter(|m| matches!(m, BrokerPendingMessage::PairingResult(_)))
-            .count();
-        let deltas = relay
-            .pending_broker_messages
-            .iter()
-            .filter(|m| matches!(m, BrokerPendingMessage::TranscriptDelta(_)))
-            .count();
-        assert_eq!(pairings, 1, "pairing result must survive delta eviction");
-        assert_eq!(deltas, 4096, "deltas are capped at the bound");
+    }
+
+    // Frames a watcher never got leave its copy behind by an unknown amount; one resync at
+    // the thread's current revision makes it re-read the tail those frames would have built.
+    #[test]
+    fn an_overflowing_backlog_collapses_to_one_resync_per_thread() {
+        let mut relay = broker_relay_with_threads(&[("t1", 7), ("t2", 9)]);
+        relay.queue_broker_message(dummy_pairing());
+        for index in 0..=MAX_PENDING_TRANSCRIPT_FRAMES {
+            relay.queue_broker_message(delta_for(if index % 2 == 0 { "t1" } else { "t2" }));
+        }
+        assert_eq!(
+            queued(&relay),
+            vec![
+                "pairing",
+                "resync t1@7 FramesDropped",
+                "resync t2@9 FramesDropped"
+            ]
+        );
+        for message in &relay.pending_broker_messages {
+            if let BrokerPendingMessage::TranscriptResync(resync) = message {
+                assert_eq!(resync.transcript_generation, relay.transcript_generation);
+            }
+        }
+
+        relay.queue_broker_message(delta_for("t1"));
+        assert_eq!(queued(&relay).last().map(String::as_str), Some("delta t1"));
+    }
+
+    // Two notices with nothing for their thread between them say one thing: re-read up to
+    // the newer revision. With a delta between them each still guards its own position.
+    #[test]
+    fn a_resync_merges_only_into_its_threads_latest_frame() {
+        use crate::protocol::TranscriptResyncReason::{RowsNotStreamed, WatchStarted};
+        let mut relay = broker_relay_with_threads(&[("t1", 1), ("t2", 1)]);
+        relay.queue_broker_message(resync_for("t1", 3, WatchStarted));
+        relay.queue_broker_message(delta_for("t2"));
+        relay.queue_broker_message(resync_for("t1", 5, RowsNotStreamed));
+        assert_eq!(
+            queued(&relay),
+            vec!["resync t1@5 RowsNotStreamed", "delta t2"]
+        );
+
+        relay.queue_broker_message(delta_for("t1"));
+        relay.queue_broker_message(resync_for("t1", 6, RowsNotStreamed));
+        assert_eq!(
+            queued(&relay),
+            vec![
+                "resync t1@5 RowsNotStreamed",
+                "delta t2",
+                "delta t1",
+                "resync t1@6 RowsNotStreamed"
+            ]
+        );
     }
 
     #[test]

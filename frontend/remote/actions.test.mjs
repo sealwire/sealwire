@@ -455,7 +455,7 @@ test("encrypted remote action result chunks reassemble before resolving", async 
               },
             ],
             next_cursor: null,
-            prev_cursor: 10,
+            prev_cursor: "c10",
           },
         };
         // Text slices, not byte slices: chunks travel as JSON text now, so reassembly is
@@ -724,7 +724,7 @@ test("handleRemoteBrokerPayload routes typed transcript events", async () => {
   assert.equal(received[0].item_id, "item-1");
 });
 
-test("handleRemoteBrokerPayload routes transcript_stream_lagged as a typed transcript event", async () => {
+test("handleRemoteBrokerPayload routes transcript_resync as a typed transcript event", async () => {
   installBrowserStubs();
 
   const { configureRemoteActions, handleRemoteBrokerPayload } = await import("./actions.js");
@@ -735,14 +735,66 @@ test("handleRemoteBrokerPayload routes transcript_stream_lagged as a typed trans
   });
 
   await handleRemoteBrokerPayload({
-    kind: "transcript_stream_lagged",
+    kind: "transcript_resync",
     thread_id: "thread-1",
-    dropped: 3,
+    transcript_generation: "gen-1",
+    revision: 3,
+    reason: "rows_not_streamed",
   });
 
   assert.equal(received.length, 1);
-  assert.equal(received[0].kind, "transcript_stream_lagged");
-  assert.equal(received[0].dropped, 3);
+  assert.equal(received[0].kind, "transcript_resync");
+  assert.equal(received[0].revision, 3);
+});
+
+// A page loader reloads the latest page on this code alone; a bare message would leave
+// it retrying a cursor the relay will never read again.
+test("a refused action rejects with the relay's error code", async () => {
+  installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketPeerId: "surface-mine" });
+  state.pendingActions.clear();
+  let rejected = null;
+  state.pendingActions.set("action-page", {
+    actionType: "fetch_thread_transcript",
+    timeoutId: 0,
+    reject: (error) => {
+      rejected = error;
+    },
+    resolve: () => {},
+  });
+
+  await handleRemoteBrokerPayload({
+    kind: "remote_transcript_result",
+    action_id: "action-page",
+    target_peer_id: "surface-mine",
+    action: "fetch_thread_transcript",
+    ok: false,
+    error: "transcript cursor has expired; reload the latest page",
+    error_code: "transcript_cursor_rejected",
+  });
+
+  assert.ok(rejected, "the action must settle");
+  assert.equal(rejected.code, "transcript_cursor_rejected");
 });
 
 test("handleRemoteBrokerPayload decrypts encrypted typed transcript events", async () => {

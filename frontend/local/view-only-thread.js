@@ -192,6 +192,33 @@ export function applyDeltaToViewOnlyPin(pin, event) {
   };
 }
 
+/**
+ * Judged by the revision of the tail the pin read. Mid-load the page in flight decides,
+ * so the revision waits for it (viewOnlyPinBehindResync).
+ */
+export function resyncViewOnlyPin(pin, threadId, revision) {
+  if (!pin || !threadId || pin.threadId !== threadId) {
+    return pin;
+  }
+  const wanted = Number.isSafeInteger(revision) ? revision : Number.MAX_SAFE_INTEGER;
+  if (pin.loading) {
+    return (pin.resyncRevision ?? -1) >= wanted ? pin : { ...pin, resyncRevision: wanted };
+  }
+  if (Number.isSafeInteger(pin.pageRevision) && pin.pageRevision >= wanted) {
+    return pin;
+  }
+  return { ...pin, tailGap: true };
+}
+
+/** After a load lands: did a resync that arrived during it want a newer tail? */
+export function viewOnlyPinBehindResync(loadingPin, builtPin) {
+  const wanted = loadingPin?.resyncRevision;
+  if (!Number.isSafeInteger(wanted)) {
+    return false;
+  }
+  return !(Number.isSafeInteger(builtPin?.pageRevision) && builtPin.pageRevision >= wanted);
+}
+
 export function buildViewOnlyPin({
   threadId,
   page = null,
@@ -217,6 +244,7 @@ export function buildViewOnlyPin({
   reviewerThreads = undefined,
   priorEntries = [],
   priorOlderCursor = null,
+  priorPageRevision = null,
   historyExtended = false,
   loading = false,
   error = false,
@@ -226,6 +254,10 @@ export function buildViewOnlyPin({
     threadId,
     entries: page ? page.entries || [] : priorEntries,
     olderCursor: page ? page.prev_cursor ?? null : priorOlderCursor,
+    // The revision of the tail this pin last read; a resync notice is judged by it.
+    pageRevision: page
+      ? (Number.isSafeInteger(page.revision) ? page.revision : null)
+      : priorPageRevision,
     generation,
     // Which RUN of the relay these item ids came from — distinct from `generation`
     // above, which counts this client's own navigations. A restart renumbers ids, so

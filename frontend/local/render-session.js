@@ -199,10 +199,10 @@ import {
 import { ThreadGroupList } from "../shared/thread-list-react.js";
 import { buildThreadActivityMap, threadActivityFor } from "../shared/thread-activity.js";
 import {
-  applyOlderOrchestratorPage,
   applyOrchestratorLoadFinally,
   applyRefreshedOrchestratorPage,
   beginOrchestratorLoad,
+  loadOlderOrchestratorPage,
   nextOrchestratorRefreshObservations,
   nextOrchestratorWasWorking,
   orchestratorRefreshPin,
@@ -2649,25 +2649,17 @@ export function createSessionRenderer({
     if (state.orchestratorEntriesLoading || state.orchestratorOlderLoading) {
       return null;
     }
-    const generation = state.orchestratorLoadGeneration || 0;
     state.orchestratorOlderLoading = true;
     try {
-      const page = await fetchTranscriptPage(threadId, {
-        before: state.orchestratorOlderCursor,
-      });
-      // A refresh or a restart landed while this was in flight; its entries are
-      // the current ones and prepending to them would splice in a stale prefix.
-      if (
-        (state.orchestratorLoadGeneration || 0) !== generation
-        || state.orchestratorEntriesThreadId !== threadId
-      ) {
-        return null;
-      }
-      applyOlderOrchestratorPage(state, threadId, page);
-      if (state.session) {
+      const { changed, result } = await loadOlderOrchestratorPage(
+        state,
+        threadId,
+        fetchTranscriptPage
+      );
+      if (changed && state.session) {
         renderTaskTeam(state.session);
       }
-      return state.orchestratorOlderCursor != null;
+      return result;
     } catch (error) {
       logLine(`Couldn't load older Orchestrator messages: ${error.message}`);
       return null;

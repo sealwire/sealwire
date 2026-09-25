@@ -69,7 +69,7 @@ test("mergeOlderViewOnlyPage has no idea about generations — the caller must g
   const { mergeOlderViewOnlyPage } = await import("./view-only-thread.js");
 
   const merged = mergeOlderViewOnlyPage(
-    { threadId: "t1", entries: [{ item_id: "b-new" }], olderCursor: 5, relayGeneration: "gen-b" },
+    { threadId: "t1", entries: [{ item_id: "b-new" }], olderCursor: "c5", relayGeneration: "gen-b" },
     { thread_id: "t1", transcript_generation: "gen-a", entries: [{ item_id: "a-old" }], prev_cursor: null }
   );
 

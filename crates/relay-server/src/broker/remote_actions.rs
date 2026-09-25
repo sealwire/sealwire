@@ -6,8 +6,8 @@ use tracing::{info, warn};
 use crate::{
     protocol::{
         ApplyFileChangeInput, ApprovalDecisionInput, ApprovalReceipt, AskDetailResponse,
-        AskUserAnswerReceipt, AskUserQuestionDetailResponse, DevicesResponse, ForkSessionInput,
-        HeartbeatInput, ModelOptionView, ProjectActionInput, ProjectsResponse,
+        AskUserAnswerReceipt, AskUserQuestionDetailResponse, ClientErrorCode, DevicesResponse,
+        ForkSessionInput, HeartbeatInput, ModelOptionView, ProjectActionInput, ProjectsResponse,
         ReadThreadEntryDetailInput, ReadThreadTranscriptInput, RenameThreadInput,
         RepairWorkspaceInput, RequestReviewInput, ResolvedWorkspace, ResumeSessionInput,
         ReviewsResponse, SendMessageInput, SessionSnapshot, SetThreadFlagInput,
@@ -20,6 +20,7 @@ use crate::{
     state::{
         AppState, ApprovalError, AskUserAnswerError, CachedRemoteActionResult,
         PushSubscriptionInput, RemoteActionReplayDecision, RemoteActionWait, ThreadWorkspaceError,
+        TranscriptReadError,
     },
 };
 
@@ -777,6 +778,8 @@ struct RemoteActionResultPlaintext {
     claim_challenge: Option<String>,
     claim_challenge_expires_at: Option<u64>,
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<ClientErrorCode>,
 }
 
 /// What a client is told when its reply cannot be queued.
@@ -820,6 +823,7 @@ fn busy_remote_action_result(
         claim_challenge: None,
         claim_challenge_expires_at: None,
         error: Some(REMOTE_ACTION_BUSY_ERROR.to_string()),
+        error_code: None,
     }
 }
 
@@ -897,6 +901,52 @@ pub(super) struct RemoteActionOutcome {
     pub(super) claim_challenge_id: Option<String>,
     pub(super) claim_challenge: Option<String>,
     pub(super) claim_challenge_expires_at: Option<u64>,
+    /// Set only on a refusal a client acts on; see `RemoteActionFailure`.
+    pub(super) error_code: Option<ClientErrorCode>,
+}
+
+/// A refused action: the message a person reads, and a code a client acts on.
+#[derive(Debug)]
+pub(super) struct RemoteActionFailure {
+    message: String,
+    code: Option<ClientErrorCode>,
+}
+
+impl From<String> for RemoteActionFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            code: None,
+        }
+    }
+}
+
+impl From<TranscriptReadError> for RemoteActionFailure {
+    fn from(error: TranscriptReadError) -> Self {
+        Self {
+            code: error.client_code(),
+            message: error.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for RemoteActionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl RemoteActionFailure {
+    /// What goes back to the device: no payload, the reason, and its code.
+    fn into_refusal(self) -> (RemoteActionOutcome, String) {
+        (
+            RemoteActionOutcome {
+                error_code: self.code,
+                ..RemoteActionOutcome::default()
+            },
+            self.message,
+        )
+    }
 }
 
 pub(super) async fn handle_remote_action(
@@ -1062,25 +1112,25 @@ pub(super) async fn handle_remote_action(
         }
     }
 
-    let result = match request {
+    let result: Result<RemoteActionOutcome, RemoteActionFailure> = match request {
         RemoteActionRequest::ClaimChallenge { .. } => {
             issue_claim_challenge_outcome(state, &resolved_device_id, &from_peer_id, origin.lease)
                 .await
+                .map_err(RemoteActionFailure::from)
         }
         RemoteActionRequest::ClaimDevice {
             challenge_id,
             proof,
-        } => {
-            issue_claim_outcome(
-                state,
-                &resolved_device_id,
-                &from_peer_id,
-                &challenge_id,
-                &proof,
-                origin.lease,
-            )
-            .await
-        }
+        } => issue_claim_outcome(
+            state,
+            &resolved_device_id,
+            &from_peer_id,
+            &challenge_id,
+            &proof,
+            origin.lease,
+        )
+        .await
+        .map_err(RemoteActionFailure::from),
         request => {
             match state
                 .mark_remote_device_seen(&resolved_device_id, &from_peer_id, Some(origin.lease))
@@ -1098,10 +1148,11 @@ pub(super) async fn handle_remote_action(
                         &resolved_device_id,
                         &from_peer_id,
                         outcome,
-                    ),
-                    Err(error) => Err(error),
+                    )
+                    .map_err(RemoteActionFailure::from),
+                    Err(failure) => Err(failure),
                 },
-                Err(error) => Err(error),
+                Err(error) => Err(RemoteActionFailure::from(error)),
             }
         }
     };
@@ -1118,7 +1169,8 @@ pub(super) async fn handle_remote_action(
 
     let (ok, outcome, error) = match result {
         Ok(outcome) => (true, outcome, None),
-        Err(error) => {
+        Err(failure) => {
+            let (outcome, error) = failure.into_refusal();
             state
                 .push_runtime_log(
                     "warn",
@@ -1129,7 +1181,7 @@ pub(super) async fn handle_remote_action(
                     ),
                 )
                 .await;
-            (false, RemoteActionOutcome::default(), Some(error))
+            (false, outcome, Some(error))
         }
     };
     let cached = cached_remote_action_result(action_kind, snapshot, outcome, error, ok, None);
@@ -1350,24 +1402,25 @@ pub(super) async fn handle_encrypted_remote_action(
         }
     }
 
-    let result = match request {
+    let result: Result<RemoteActionOutcome, RemoteActionFailure> = match request {
         RemoteActionRequest::ClaimChallenge { .. } => {
-            issue_claim_challenge_outcome(state, &device_id, &from_peer_id, origin.lease).await
+            issue_claim_challenge_outcome(state, &device_id, &from_peer_id, origin.lease)
+                .await
+                .map_err(RemoteActionFailure::from)
         }
         RemoteActionRequest::ClaimDevice {
             challenge_id,
             proof,
-        } => {
-            issue_claim_outcome(
-                state,
-                &device_id,
-                &from_peer_id,
-                &challenge_id,
-                &proof,
-                origin.lease,
-            )
-            .await
-        }
+        } => issue_claim_outcome(
+            state,
+            &device_id,
+            &from_peer_id,
+            &challenge_id,
+            &proof,
+            origin.lease,
+        )
+        .await
+        .map_err(RemoteActionFailure::from),
         request => {
             match state
                 .mark_remote_device_seen(&device_id, &from_peer_id, Some(origin.lease))
@@ -1386,11 +1439,12 @@ pub(super) async fn handle_encrypted_remote_action(
                             &device_id,
                             &from_peer_id,
                             outcome,
-                        ),
-                        Err(error) => Err(error),
+                        )
+                        .map_err(RemoteActionFailure::from),
+                        Err(failure) => Err(failure),
                     }
                 }
-                Err(error) => Err(error),
+                Err(error) => Err(RemoteActionFailure::from(error)),
             }
         }
     };
@@ -1407,7 +1461,8 @@ pub(super) async fn handle_encrypted_remote_action(
     );
     let (ok, outcome, error) = match result {
         Ok(outcome) => (true, outcome, None),
-        Err(error) => {
+        Err(failure) => {
+            let (outcome, error) = failure.into_refusal();
             state
                 .push_runtime_log(
                     "warn",
@@ -1418,7 +1473,7 @@ pub(super) async fn handle_encrypted_remote_action(
                     ),
                 )
                 .await;
-            (false, RemoteActionOutcome::default(), Some(error))
+            (false, outcome, Some(error))
         }
     };
     let cached = cached_remote_action_result(
@@ -1491,7 +1546,7 @@ async fn run_remote_action(
     state: &AppState,
     request: RemoteActionRequest,
     ingress: u64,
-) -> Result<RemoteActionOutcome, String> {
+) -> Result<RemoteActionOutcome, RemoteActionFailure> {
     match futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
         execute_remote_action(state, request, ingress),
     ))
@@ -1500,7 +1555,9 @@ async fn run_remote_action(
         Ok(result) => result,
         // Deliberately not "it failed": a provider that fell over mid-write may well have
         // written. Saying so is what stops a retry being sent under a fresh id.
-        Err(_) => Err("the relay fell over running this; check before trying again".to_string()),
+        Err(_) => Err(RemoteActionFailure::from(
+            "the relay fell over running this; check before trying again".to_string(),
+        )),
     }
 }
 
@@ -1508,8 +1565,8 @@ async fn execute_remote_action(
     state: &AppState,
     request: RemoteActionRequest,
     ingress: u64,
-) -> Result<RemoteActionOutcome, String> {
-    match request {
+) -> Result<RemoteActionOutcome, RemoteActionFailure> {
+    let result = match request {
         RemoteActionRequest::ClaimChallenge { .. } | RemoteActionRequest::ClaimDevice { .. } => {
             Err("claim actions must be handled before generic action execution".to_string())
         }
@@ -1642,22 +1699,17 @@ async fn execute_remote_action(
         RemoteActionRequest::FetchThreadTranscript { input } => {
             info!(
                 thread_id = %input.thread_id,
-                cursor = ?input.cursor,
                 before = ?input.before,
                 "executing remote transcript fetch"
             );
-            state
+            return state
                 .read_thread_transcript(input)
                 .await
                 .map(|thread_transcript| RemoteActionOutcome {
-                    receipt: None,
-                    threads: None,
-                    thread_entry_detail: None,
                     thread_transcript: Some(thread_transcript),
-                    session_claim: None,
-                    session_claim_expires_at: None,
                     ..RemoteActionOutcome::default()
                 })
+                .map_err(RemoteActionFailure::from);
         }
         RemoteActionRequest::DecideApproval { request_id, input } => state
             .decide_approval(&request_id, input)
@@ -1919,7 +1971,8 @@ async fn execute_remote_action(
                 .await
                 .map(|_| RemoteActionOutcome::default())
         }
-    }
+    };
+    result.map_err(RemoteActionFailure::from)
 }
 
 fn requires_session_claim(action: RemoteActionKind) -> bool {
@@ -2290,6 +2343,7 @@ async fn publish_plain_remote_action_result(
         claim_challenge_id,
         claim_challenge,
         claim_challenge_expires_at,
+        error_code,
         ..
     } = outcome;
     let size_breakdown = measure_remote_action_result_sizes(
@@ -2319,6 +2373,7 @@ async fn publish_plain_remote_action_result(
         claim_challenge.as_ref(),
         claim_challenge_expires_at,
         error.as_ref(),
+        error_code,
     );
     let plaintext = RemoteActionResultPlaintext {
         kind: remote_action_result_kind(action),
@@ -2349,6 +2404,7 @@ async fn publish_plain_remote_action_result(
         claim_challenge,
         claim_challenge_expires_at,
         error,
+        error_code,
     };
     let payload =
         build_plain_remote_action_result_payload(&action_id, &target_peer_id, &plaintext)?;
@@ -2530,6 +2586,7 @@ fn build_plain_remote_action_result_payload(
                 ask_user_question_detail: result.ask_user_question_detail.clone(),
                 ask_detail: result.ask_detail.clone(),
                 error: result.error.clone(),
+                error_code: result.error_code,
             }
         }
     })
@@ -2643,6 +2700,7 @@ async fn replay_plain_remote_action_result(
             claim_challenge_id: cached.claim_challenge_id,
             claim_challenge: cached.claim_challenge,
             claim_challenge_expires_at: cached.claim_challenge_expires_at,
+            error_code: cached.error_code,
         },
         cached.error,
         cached.ok,
@@ -2717,6 +2775,7 @@ async fn publish_remote_action_result_private(
         claim_challenge_id,
         claim_challenge,
         claim_challenge_expires_at,
+        error_code,
         ..
     } = outcome;
     let secret = match response_secret {
@@ -2750,6 +2809,7 @@ async fn publish_remote_action_result_private(
         claim_challenge.as_ref(),
         claim_challenge_expires_at,
         error.as_ref(),
+        error_code,
     );
     let plaintext = RemoteActionResultPlaintext {
         kind: remote_action_result_kind(action),
@@ -2780,6 +2840,7 @@ async fn publish_remote_action_result_private(
         claim_challenge,
         claim_challenge_expires_at,
         error,
+        error_code,
     };
     let envelope = encrypt_json(&secret, &plaintext)?;
     let envelope_bytes = serialized_json_bytes(&envelope);
@@ -2888,6 +2949,7 @@ async fn replay_encrypted_remote_action_result(
             claim_challenge_id: cached.claim_challenge_id,
             claim_challenge: cached.claim_challenge,
             claim_challenge_expires_at: cached.claim_challenge_expires_at,
+            error_code: cached.error_code,
         },
         cached.error,
         cached.ok,
@@ -3120,6 +3182,7 @@ fn cached_remote_action_result(
         claim_challenge_expires_at: outcome.claim_challenge_expires_at,
         response_secret,
         error,
+        error_code: outcome.error_code,
     }
 }
 
@@ -3150,6 +3213,7 @@ fn measure_remote_action_result_sizes(
     claim_challenge: Option<&String>,
     claim_challenge_expires_at: Option<u64>,
     error: Option<&String>,
+    error_code: Option<ClientErrorCode>,
 ) -> RemoteActionResultSizeBreakdown {
     let plaintext = RemoteActionResultPlaintextRef {
         kind: remote_action_result_kind(action),
@@ -3179,6 +3243,7 @@ fn measure_remote_action_result_sizes(
         claim_challenge,
         claim_challenge_expires_at,
         error,
+        error_code,
     };
     RemoteActionResultSizeBreakdown {
         snapshot_bytes: maybe_serialized_json_bytes(snapshot),
@@ -3337,6 +3402,8 @@ struct RemoteActionResultPlaintextRef<'a> {
     claim_challenge: Option<&'a String>,
     claim_challenge_expires_at: Option<u64>,
     error: Option<&'a String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<ClientErrorCode>,
 }
 
 fn remote_action_result_snapshot(

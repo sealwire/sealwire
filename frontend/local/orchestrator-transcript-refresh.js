@@ -1,4 +1,8 @@
 import { transcriptPageIsFromAnotherGeneration } from "../shared/transcript-generation.js";
+import {
+  fetchOlderPageUntilRead,
+  isTranscriptCursorRejected,
+} from "../shared/transcript-protocol.js";
 import { threadActivityFor } from "../shared/thread-activity.js";
 import { shouldRefreshViewedThread } from "../shared/viewed-thread-refresh.js";
 import { refreshedPinPage } from "./pin-page.js";
@@ -163,6 +167,50 @@ export function orchestratorRefreshPin(state, threadId) {
     // tail page alone, discarding the history the reader just paged in.
     historyExtended: Boolean(state.orchestratorHistoryExtended),
   };
+}
+
+// The relay can no longer read the pane's cursor. Unextended, the tail repair this
+// asks for answers with the latest page and a cursor minted for it.
+export function restartOrchestratorFromLatestPage(state) {
+  state.orchestratorOlderCursor = null;
+  state.orchestratorHistoryExtended = false;
+  state.orchestratorTailGap = true;
+}
+
+/**
+ * Fetch and apply the pane's next older page. `result` is the history loader's answer
+ * (more / none / try later); `changed` says the pane needs a repaint. Failures rethrow.
+ */
+export async function loadOlderOrchestratorPage(
+  state,
+  threadId,
+  fetchTranscriptPage,
+  { waitBeforeRetry } = {}
+) {
+  const generation = state.orchestratorLoadGeneration || 0;
+  const before = state.orchestratorOlderCursor;
+  // A refresh or a restart landing meanwhile owns the entries; prepending to them would
+  // splice in a stale prefix.
+  const stillCurrent = () =>
+    (state.orchestratorLoadGeneration || 0) === generation
+    && state.orchestratorEntriesThreadId === threadId;
+  try {
+    const page = await fetchOlderPageUntilRead(
+      () => fetchTranscriptPage(threadId, { before }),
+      { isCurrent: stillCurrent, wait: waitBeforeRetry }
+    );
+    if (!stillCurrent()) {
+      return { changed: false, result: null };
+    }
+    applyOlderOrchestratorPage(state, threadId, page);
+    return { changed: true, result: state.orchestratorOlderCursor != null };
+  } catch (error) {
+    if (isTranscriptCursorRejected(error) && stillCurrent()) {
+      restartOrchestratorFromLatestPage(state);
+      return { changed: true, result: null };
+    }
+    throw error;
+  }
 }
 
 // Split from the pin above because the caller takes the pin before its fetch and
