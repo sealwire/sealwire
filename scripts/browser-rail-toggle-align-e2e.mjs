@@ -1,5 +1,5 @@
-// Regression: Changes/Agents belongs on the session tab line like the sidebar's Sessions
-// row, leaving the rail's title row to the hide toggle, which must not scroll away.
+// Regression: Changes/Agents shares the rail's title row with the hide toggle, and the
+// branch picker under it sits on the session tab line; neither title-row control scrolls.
 //
 //   npm run test:browser:rail-toggle-align
 import assert from "node:assert/strict";
@@ -58,6 +58,10 @@ async function main() {
     await page.waitForSelector("#workspace-changes-rail", { state: "visible" });
     await page.waitForSelector("#rail-top-toggle", { state: "visible" });
     await page.waitForSelector(".session-tab", { state: "visible", timeout: TIMEOUT_MS });
+    await page.waitForSelector("#workspace-changes-rail .workspace-picker-trigger", {
+      state: "visible",
+      timeout: TIMEOUT_MS,
+    });
     await page.waitForFunction(() =>
       Boolean(
         getComputedStyle(document.documentElement).getPropertyValue("--header-band-height").trim()
@@ -82,6 +86,7 @@ async function main() {
         return {
           toggle: rect("#rail-top-toggle"),
           seg: rect("#review-panel-rail-tabs"),
+          tree: rect("#workspace-changes-rail .workspace-picker-trigger"),
           tab: rect(".session-tab"),
           chatHeader: rect(".chat-shell > .chat-header"),
           rail: rect("#workspace-changes-rail"),
@@ -90,26 +95,30 @@ async function main() {
 
     const assertLayout = (metrics, at) => {
       const detail = JSON.stringify(metrics);
-      assert.ok(metrics.toggle, `[${at}] expected #rail-top-toggle to be present`);
-      assert.ok(metrics.seg, `[${at}] expected the Changes/Agents segmented control`);
-      assert.ok(metrics.tab, `[${at}] expected a session tab`);
-      assert.ok(metrics.chatHeader, `[${at}] expected the chat-header`);
-
-      const tabLine = Math.abs(metrics.seg.cy - metrics.tab.cy);
-      assert.ok(
-        tabLine <= 1.5,
-        `[${at}] Changes/Agents must sit on the session tab line (|Δcenter| = ` +
-          `${tabLine.toFixed(1)}px) — ${detail}`
-      );
-      const titleRow = Math.abs(metrics.toggle.cy - metrics.chatHeader.cy);
+      for (const key of ["toggle", "seg", "tree", "tab", "chatHeader"]) {
+        assert.ok(metrics[key], `[${at}] expected ${key} to be present — ${detail}`);
+      }
+      const titleRow = Math.abs(metrics.seg.cy - metrics.chatHeader.cy);
       assert.ok(
         titleRow <= 1.5,
-        `[${at}] the rail toggle must stay on the chat-header's title row (|Δcenter| = ` +
+        `[${at}] Changes/Agents must sit on the chat-header's title row (|Δcenter| = ` +
           `${titleRow.toFixed(1)}px) — ${detail}`
       );
+      const toggleRow = Math.abs(metrics.toggle.cy - metrics.seg.cy);
       assert.ok(
-        metrics.toggle.bottom <= metrics.seg.top,
+        toggleRow <= 1.5,
+        `[${at}] the rail toggle must share the Changes/Agents row (|Δcenter| = ` +
+          `${toggleRow.toFixed(1)}px) — ${detail}`
+      );
+      assert.ok(
+        metrics.toggle.left >= metrics.seg.right,
         `[${at}] the toggle must not overlap the Changes/Agents switch — ${detail}`
+      );
+      const tabLine = Math.abs(metrics.tree.cy - metrics.tab.cy);
+      assert.ok(
+        tabLine <= 1.5,
+        `[${at}] the branch picker must sit on the session tab line (|Δcenter| = ` +
+          `${tabLine.toFixed(1)}px) — ${detail}`
       );
     };
 
@@ -148,12 +157,13 @@ async function main() {
     });
     await page.waitForTimeout(150);
     const scrolledMetrics = await measure();
-    assertLayout(scrolledMetrics, "scrolled");
-    const toggleDrift = Math.abs(scrolledMetrics.toggle.top - narrowMetrics.toggle.top);
-    assert.ok(
-      toggleDrift <= 0.5,
-      `[scrolled] the rail toggle must not scroll away (moved ${toggleDrift.toFixed(1)}px)`
-    );
+    for (const key of ["toggle", "seg"]) {
+      const drift = Math.abs(scrolledMetrics[key].top - narrowMetrics[key].top);
+      assert.ok(
+        drift <= 0.5,
+        `[scrolled] the rail's ${key} must not scroll away (moved ${drift.toFixed(1)}px)`
+      );
+    }
 
     console.log(
       JSON.stringify(

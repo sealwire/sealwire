@@ -6024,8 +6024,8 @@ body.sidebar-collapsed .sidebar-top-toggle {
  * still bring the rail back. */
 .rail-top-toggle {
   position: absolute;
-  /* Centred in the title band (the rail's padding-top), level with the chat-header. A
-     fixed `top` drifted once the measured band height changed. */
+  /* Centred in the title band, beside Changes/Agents. A fixed `top` drifted once the
+     measured band height changed. */
   top: calc(var(--header-band-height, 67px) / 2);
   right: 12px;
   transform: translateY(-50%);
@@ -6184,9 +6184,7 @@ body.is-resizing-panel {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  /* The title row holds only the hide toggle, so Changes/Agents lands on the tab line.
-     It must not scroll: the toggle is positioned against the rail. */
-  padding-top: var(--header-band-height, 67px);
+  /* The body scrolls, not the rail: the hide toggle is positioned against the rail. */
   overflow: hidden;
 }
 .right-rail-body {
@@ -6545,15 +6543,25 @@ body.is-resizing-panel {
   padding: 10px 12px;
   /* Matches the rail it leads, for the same sticky-opacity reason as .chat-header. */
   background: var(--surface-0);
-  /* Only the phone sheet keeps this; in the rail the header is the second row. */
+  /* The phone sheet's band; the rail pins its own to the exact height below. */
   min-height: var(--header-band-height, 67px);
   box-sizing: border-box;
 }
-/* In the rail this is the second row, not the title band. 2px top centres the 32px pill
-   on the tab strip's 28px tabs (which sit under a 4px inset). */
+/* Exactly the band, never taller, or the branch picker below slips off the tab line.
+   The right padding leaves room for the hide toggle. */
 .right-rail .right-panel-tabs-header {
+  padding-right: 50px;
+  height: var(--header-band-height, 67px);
   min-height: 0;
-  padding-top: 2px;
+  padding-block: 0;
+}
+/* The branch picker rides the session tab line, so it copies the strip's box: a 4px
+   inset and a 28px tab. */
+.right-rail .workspace-changes-panel > .thread-workspace-field {
+  padding-top: 4px;
+}
+.right-rail .workspace-changes-panel > .thread-workspace-field > .thread-workspace-row {
+  height: 28px;
 }
 .right-panel-tabs-header .settings-segmented {
   width: 100%;
