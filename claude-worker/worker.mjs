@@ -71,7 +71,7 @@ import {
 } from "./session-options.mjs";
 import { createProgressTracker } from "./progress-tracker.mjs";
 import { checkInstalledClaudeBinary } from "./native-binary-check.mjs";
-import { moveForkIntoFolder } from "./fork-folder.mjs";
+import { claudeProjectsDir, moveForkIntoFolder } from "./fork-folder.mjs";
 import {
   findLocalSessionFile,
   readSessionCwdFromFile,
@@ -96,12 +96,19 @@ const CANCEL_DRAIN_TIMEOUT_MS =
 
 function sessionInfoWithRecordedCwd(sessionId, info, requestedCwd) {
   const sessionCwd = info?.cwd || requestedCwd || "";
-  if (!info || !sessionCwd) {
+  if (!sessionCwd) {
     throw new Error(
       `Claude session ${sessionId} did not report a workspace; read it with its recorded cwd`,
     );
   }
-  return { ...info, cwd: sessionCwd };
+  return info
+    ? { ...info, cwd: sessionCwd }
+    : {
+        sessionId,
+        summary: "",
+        lastModified: Date.now(),
+        cwd: sessionCwd,
+      };
 }
 
 // Diagnostic instrumentation for the "turn ended but UI still shows streaming"
@@ -511,6 +518,7 @@ async function hydrateMissingSessionCwds(sessions) {
       }
       const filePath = await findLocalSessionFile({
         cwd: "",
+        projectsDir: claudeProjectsDir(),
         sessionId: session.sessionId,
       });
       if (!filePath) {
@@ -1707,7 +1715,7 @@ async function main() {
           if (lastActivity) thread.updated_at = lastActivity;
           emitResponse(cmd.id, {
             thread,
-            transcript: mapSessionMessages(messages, cmd.cwd || undefined),
+            transcript: mapSessionMessages(messages, thread.cwd || undefined),
           });
         } catch (err) {
           emitErrorResponse(cmd.id, String(err));
@@ -1721,6 +1729,7 @@ async function main() {
           if (!sessionId) throw new Error("read_session_page requires provider_session_id");
           const filePath = await findLocalSessionFile({
             cwd: cmd.cwd || "",
+            projectsDir: claudeProjectsDir(),
             sessionId,
           });
           if (!filePath) {
@@ -1738,7 +1747,7 @@ async function main() {
               paged: false,
               prev_cursor: null,
               thread,
-              transcript: mapSessionMessages(messages, cmd.cwd || undefined),
+              transcript: mapSessionMessages(messages, thread.cwd || undefined),
             });
             break;
           }
@@ -1751,19 +1760,21 @@ async function main() {
             filePath,
           });
           const fileInfo = await stat(filePath);
-          const thread = mapSessionInfo({
-            sessionId,
-            summary: "",
-            lastModified: fileInfo.mtimeMs,
-            cwd: cmd.cwd || "",
-          });
+          const sessionCwd = cmd.cwd || (await readSessionCwdFromFile({ filePath })) || "";
+          const thread = mapSessionInfo(
+            sessionInfoWithRecordedCwd(
+              sessionId,
+              { sessionId, summary: "", lastModified: fileInfo.mtimeMs },
+              sessionCwd,
+            ),
+          );
           const lastActivity = lastMessageActivitySeconds(page.messages);
           if (lastActivity) thread.updated_at = lastActivity;
           emitResponse(cmd.id, {
             paged: true,
             prev_cursor: page.nextCursor,
             thread,
-            transcript: mapSessionMessages(page.messages, cmd.cwd || undefined),
+            transcript: mapSessionMessages(page.messages, thread.cwd || undefined),
           });
         } catch (err) {
           emitErrorResponse(cmd.id, String(err));

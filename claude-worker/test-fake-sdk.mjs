@@ -414,6 +414,9 @@ export function query({ prompt, options = {} }) {
 }
 
 export async function getSessionInfo(sessionId, options) {
+  if (process.env.CLAUDE_FAKE_SESSION_INFO_MISSING === "1") {
+    return undefined;
+  }
   if (process.env.CLAUDE_FAKE_SESSION_INFO_OMIT_CWD === "1") {
     return { sessionId };
   }

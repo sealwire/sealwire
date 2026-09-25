@@ -546,6 +546,83 @@ test("read_session_page refuses to synthesize a thread with an empty cwd", async
   }
 });
 
+test("read_session_page recovers cwd from a discovered local session file", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "sealwire-page-cwd-home-"));
+  const configDir = path.join(home, "custom-claude-config");
+  const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const sessionCwd = "/Users/x/proj";
+  const projectDir = path.join(configDir, "projects", "-Users-x-proj");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(
+    path.join(projectDir, `${sessionId}.jsonl`),
+    `${JSON.stringify({
+      cwd: sessionCwd,
+      message: { role: "user", content: "hello" },
+      parentUuid: null,
+      sessionId,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      type: "user",
+      uuid: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    })}\n`,
+  );
+
+  const worker = spawnWorker({ CLAUDE_CONFIG_DIR: configDir, HOME: home });
+  try {
+    worker.send({
+      type: "read_session_page",
+      id: "read-page-file-cwd",
+      provider_session_id: sessionId,
+    });
+    const response = await worker.waitFor(isResponse("read-page-file-cwd"), {
+      label: "local read_session_page response",
+    });
+    assert.equal(response.ok, true);
+    assert.equal(response.result.paged, true);
+    assert.equal(response.result.thread.cwd, sessionCwd);
+  } finally {
+    await worker.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("read_session uses requested cwd when session info is unavailable", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_SESSION_INFO_MISSING: "1" });
+  try {
+    worker.send({
+      type: "read_session",
+      id: "read-missing-info",
+      provider_session_id: "sess-1",
+      cwd: "/work/fork-target",
+    });
+    const response = await worker.waitFor(isResponse("read-missing-info"), {
+      label: "read_session response without info",
+    });
+    assert.equal(response.ok, true);
+    assert.equal(response.result.thread.cwd, "/work/fork-target");
+  } finally {
+    await worker.close();
+  }
+});
+
+test("read_session_page uses requested cwd when session info is unavailable", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_SESSION_INFO_MISSING: "1" });
+  try {
+    worker.send({
+      type: "read_session_page",
+      id: "read-page-missing-info",
+      provider_session_id: "sess-1",
+      cwd: "/work/fork-target",
+    });
+    const response = await worker.waitFor(isResponse("read-page-missing-info"), {
+      label: "read_session_page response without info",
+    });
+    assert.equal(response.ok, true);
+    assert.equal(response.result.thread.cwd, "/work/fork-target");
+  } finally {
+    await worker.close();
+  }
+});
+
 test("list_sessions fills missing cwd from the local session jsonl", async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), "sealwire-worker-home-"));
   const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
