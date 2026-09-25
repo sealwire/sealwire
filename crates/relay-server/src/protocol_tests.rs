@@ -2666,6 +2666,45 @@ fn compact_for_broker_preserves_existing_transcript_truncated_flag() {
     assert_eq!(compacted.transcript.len(), 4);
 }
 
+/// A page as the relay sends it: a cursor of the longest real length when older rows
+/// remain, so budget checks count it. Returns the index the next older page ends at.
+fn page_as_sent(
+    transcript: &[TranscriptEntryView],
+    before: Option<usize>,
+    revision: u64,
+) -> (ThreadTranscriptResponse, Option<usize>) {
+    let window = ThreadTranscriptResponse::from_transcript_before(
+        "thread-1".to_string(),
+        transcript.to_vec(),
+        before,
+        revision,
+    );
+    let mut page = window.page;
+    let older = (window.start > 0).then_some(window.start);
+    page.prev_cursor = older.map(|_| {
+        crate::protocol::TranscriptCursorToken::new(format!("tc1.{}.{}", "0".repeat(36), i64::MIN))
+    });
+    (page.stamp_generation("0".repeat(36)), older)
+}
+
+/// Every page from the tail back to the start, newest first.
+fn pages_back_to_start(
+    transcript: &[TranscriptEntryView],
+    revision: u64,
+) -> Vec<ThreadTranscriptResponse> {
+    let mut before = None;
+    let mut pages = Vec::new();
+    loop {
+        let (page, older) = page_as_sent(transcript, before, revision);
+        assert!(!page.entries.is_empty());
+        pages.push(page);
+        match older {
+            Some(index) => before = Some(index),
+            None => return pages,
+        }
+    }
+}
+
 #[test]
 fn thread_transcript_response_preserves_oversized_single_entries() {
     let transcript = vec![
@@ -2695,51 +2734,26 @@ fn thread_transcript_response_preserves_oversized_single_entries() {
         },
     ];
 
-    let mut cursor = 0;
-    let mut pages = Vec::new();
-    loop {
-        let page = ThreadTranscriptResponse::from_transcript(
-            "thread-1".to_string(),
-            transcript.clone(),
-            cursor,
-        );
-        let page_bytes = serde_json::to_vec(&page).unwrap().len();
-        let single_entry_page = page.entries.len() == 1;
-        if !single_entry_page {
-            assert!(page_bytes <= THREADS_RESPONSE_TARGET_BYTES);
+    let pages = pages_back_to_start(&transcript, 0);
+    for page in &pages {
+        if page.entries.len() > 1 {
+            assert!(serde_json::to_vec(page).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
         }
-        assert!(!page.entries.is_empty());
-        cursor = match page.next_cursor {
-            Some(next_cursor) => {
-                pages.push(page);
-                next_cursor
-            }
-            None => {
-                pages.push(page);
-                break;
-            }
-        };
     }
 
     assert!(pages.len() >= 2);
-    assert_eq!(pages[0].entries.len(), 1);
-    assert_eq!(pages[0].entries[0].item_id.as_deref(), Some("item-1"));
-    assert!(serde_json::to_vec(&pages[0]).unwrap().len() > THREADS_RESPONSE_TARGET_BYTES);
+    let oversized = pages.last().unwrap();
+    assert_eq!(oversized.entries.len(), 1);
+    assert_eq!(oversized.entries[0].item_id.as_deref(), Some("item-1"));
+    assert!(serde_json::to_vec(oversized).unwrap().len() > THREADS_RESPONSE_TARGET_BYTES);
 
     let rebuilt = pages
         .into_iter()
+        .rev()
         .flat_map(|page| page.entries.into_iter())
-        .enumerate()
-        .fold(
-            std::collections::BTreeMap::new(),
-            |mut acc, (entry_index, entry)| {
-                acc.insert(entry_index, entry.text.unwrap_or_default());
-                acc
-            },
-        );
-
-    assert_eq!(rebuilt.get(&0).unwrap(), &"长".repeat(9_500));
-    assert_eq!(rebuilt.get(&1).unwrap(), "next");
+        .map(|entry| entry.text.unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(rebuilt, vec!["长".repeat(9_500), "next".to_string()]);
 }
 
 #[test]
@@ -2757,8 +2771,9 @@ fn thread_transcript_response_keeps_complete_entries_together() {
         content_state: crate::protocol::TranscriptContentState::Full,
     }];
 
-    let page = ThreadTranscriptResponse::from_transcript("thread-1".to_string(), transcript, 0);
+    let (page, older) = page_as_sent(&transcript, None, 0);
 
+    assert_eq!(older, None);
     assert_eq!(page.entries.len(), 1);
     assert_eq!(page.entries[0].item_id.as_deref(), Some("item-1"));
     assert_eq!(
@@ -2767,9 +2782,8 @@ fn thread_transcript_response_keeps_complete_entries_together() {
     );
 }
 
-#[test]
-fn thread_transcript_response_can_page_backwards_from_tail() {
-    let transcript = (0..12)
+fn large_entries(count: usize) -> Vec<TranscriptEntryView> {
+    (0..count)
         .map(|index| TranscriptEntryView {
             row_id: None,
             order_seq: None,
@@ -2782,47 +2796,29 @@ fn thread_transcript_response_can_page_backwards_from_tail() {
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
 
-    let mut before = None;
-    let mut pages = Vec::new();
+#[test]
+fn thread_transcript_response_can_page_backwards_from_tail() {
+    let transcript = large_entries(12);
 
-    loop {
-        let page = ThreadTranscriptResponse::from_transcript_before(
-            "thread-1".to_string(),
-            transcript.clone(),
-            before,
-            42,
-        );
-        assert!(!page.entries.is_empty());
+    let pages = pages_back_to_start(&transcript, 42);
+    for page in &pages {
         assert_eq!(page.revision, 42);
         assert!(page.server_time > 0);
-        assert!(page.entry_seq_start.is_some());
-        assert!(page.entry_seq_end.is_some());
-        assert!(serde_json::to_vec(&page).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
-        before = page.prev_cursor;
-        pages.push(page);
-        if before.is_none() {
-            break;
-        }
+        assert!(serde_json::to_vec(page).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
     }
 
     let rebuilt = pages
         .into_iter()
         .rev()
         .flat_map(|page| page.entries.into_iter())
-        .enumerate()
-        .fold(
-            std::collections::BTreeMap::new(),
-            |mut acc, (entry_index, entry)| {
-                acc.insert(entry_index, entry.text.unwrap_or_default());
-                acc
-            },
-        );
-
+        .map(|entry| entry.text.unwrap_or_default())
+        .collect::<Vec<_>>();
     assert_eq!(rebuilt.len(), transcript.len());
-    assert!(rebuilt.get(&0).unwrap().starts_with("entry-0-"));
-    assert!(rebuilt.get(&11).unwrap().starts_with("entry-11-"));
+    assert!(rebuilt[0].starts_with("entry-0-"));
+    assert!(rebuilt[11].starts_with("entry-11-"));
 }
 
 #[test]
@@ -2845,28 +2841,15 @@ fn thread_transcript_response_packs_many_small_entries_within_budget() {
         })
         .collect::<Vec<_>>();
 
-    let mut before = None;
-    let mut pages = Vec::new();
+    let pages = pages_back_to_start(&transcript, 7);
     let mut max_page_entries = 0usize;
-    loop {
-        let page = ThreadTranscriptResponse::from_transcript_before(
-            "thread-1".to_string(),
-            transcript.clone(),
-            before,
-            7,
-        );
-        assert!(!page.entries.is_empty());
-        let page_bytes = serde_json::to_vec(&page).unwrap().len();
+    for page in &pages {
+        let page_bytes = serde_json::to_vec(page).unwrap().len();
         assert!(
             page_bytes <= THREADS_RESPONSE_TARGET_BYTES,
             "page exceeded budget: {page_bytes} bytes"
         );
         max_page_entries = max_page_entries.max(page.entries.len());
-        before = page.prev_cursor;
-        pages.push(page);
-        if before.is_none() {
-            break;
-        }
     }
 
     // Packing works (not one-entry-per-page).
@@ -2893,10 +2876,9 @@ fn thread_transcript_page_materializes_only_entries_near_the_requested_cursor() 
 
     let materialized = Cell::new(0usize);
     let transcript_len = 50_000usize;
-    let page = ThreadTranscriptResponse::from_transcript_source(
+    let window = ThreadTranscriptResponse::window_ending_at(
         "thread-large".to_string(),
         transcript_len,
-        None,
         9,
         |index| {
             materialized.set(materialized.get() + 1);
@@ -2914,10 +2896,16 @@ fn thread_transcript_page_materializes_only_entries_near_the_requested_cursor() 
             }
         },
     );
+    let page = &window.page;
 
     assert!(!page.entries.is_empty());
-    assert!(page.prev_cursor.is_some());
-    assert_eq!(page.entry_seq_end, Some(transcript_len as u64));
+    assert!(window.start > 0);
+    assert_eq!(
+        page.entries
+            .last()
+            .and_then(|entry| entry.item_id.as_deref()),
+        Some("item-49999")
+    );
     assert!(
         materialized.get() <= page.entries.len() + 1,
         "page construction touched {} entries to return {}",
@@ -2929,44 +2917,23 @@ fn thread_transcript_page_materializes_only_entries_near_the_requested_cursor() 
         "page construction scaled with transcript length: {} entries materialized",
         materialized.get()
     );
-    assert!(serde_json::to_vec(&page).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
 }
 
 #[test]
 fn thread_transcript_response_tail_returns_latest_page_first() {
-    let transcript = (0..12)
-        .map(|index| TranscriptEntryView {
-            row_id: None,
-            order_seq: None,
-            withdrawn: false,
-            item_id: Some(format!("item-{index}")),
-            kind: TranscriptEntryKind::AgentText,
-            text: Some(format!("entry-{index}-{}", "z".repeat(4500))),
-            status: "completed".to_string(),
-            turn_id: Some(format!("turn-{index}")),
-            tool: None,
-            content_state: crate::protocol::TranscriptContentState::Full,
-        })
-        .collect::<Vec<_>>();
+    let transcript = large_entries(12);
 
-    let page = ThreadTranscriptResponse::from_transcript_tail(
-        "thread-1".to_string(),
-        transcript.clone(),
-        42,
-    );
+    let (page, older) = page_as_sent(&transcript, None, 42);
 
-    assert!(!page.entries.is_empty());
     assert_eq!(page.revision, 42);
-    assert_eq!(page.entry_seq_end, Some(12));
     assert!(serde_json::to_vec(&page).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
-    assert_eq!(page.next_cursor, None);
-    assert!(page.prev_cursor.is_some());
-    assert!(page
-        .entries
-        .first()
-        .and_then(|entry| entry.item_id.as_deref())
-        .map(|item_id| item_id != "item-0")
-        .unwrap_or(false));
+    assert!(older.is_some());
+    assert_ne!(
+        page.entries
+            .first()
+            .and_then(|entry| entry.item_id.as_deref()),
+        Some("item-0")
+    );
     assert_eq!(
         page.entries
             .last()
@@ -3016,12 +2983,7 @@ fn thread_transcript_history_externalizes_large_file_change_diffs() {
         content_state: crate::protocol::TranscriptContentState::Full,
     }];
 
-    let page = ThreadTranscriptResponse::from_transcript_before(
-        "thread-1".to_string(),
-        transcript,
-        None,
-        9,
-    );
+    let (page, _) = page_as_sent(&transcript, None, 9);
     let tool = page.entries[0].tool.as_ref().expect("tool summary");
     assert!(tool.file_changes_omitted);
     assert!(tool.diff.is_none());

@@ -754,7 +754,18 @@ fn transcript_delta_coalescing_merges_contiguous_item_updates() {
         ..first.clone()
     };
 
-    let coalesced = coalesce_transcript_deltas(vec![first, second, command]);
+    let coalesced = coalesce_transcript_deltas(
+        [first, second, command]
+            .into_iter()
+            .map(PendingTranscriptPublish::Delta)
+            .collect(),
+    )
+    .into_iter()
+    .map(|frame| match frame {
+        PendingTranscriptPublish::Delta(delta) => delta,
+        other => panic!("only deltas went in: {other:?}"),
+    })
+    .collect::<Vec<_>>();
 
     assert_eq!(coalesced.len(), 2);
     assert_eq!(coalesced[0].base_revision, 10);
@@ -765,6 +776,46 @@ fn transcript_delta_coalescing_merges_contiguous_item_updates() {
     // first chunk's text_offset (not the second's).
     assert_eq!(coalesced[0].text_offset, Some(0));
     assert_eq!(coalesced[1].delta, "!");
+}
+
+/// A resync is judged against the revision a surface holds when it arrives, so it may
+/// not be merged away or overtaken by the deltas queued after it.
+#[test]
+fn a_resync_keeps_its_place_between_deltas_it_separates() {
+    let delta = |base_revision, revision, text: &str| PendingTranscriptDelta {
+        thread_id: "thread-1".to_string(),
+        base_revision,
+        revision,
+        entry_seq: 4,
+        order_seq: 0,
+        server_time: 100,
+        row_id: "item-1".to_string(),
+        transcript_generation: String::new(),
+        turn_id: Some("turn-1".to_string()),
+        delta: text.to_string(),
+        kind: TranscriptDeltaKind::AgentText,
+        text_offset: None,
+    };
+    let resync = crate::protocol::TranscriptResyncEvent::new(
+        "thread-1",
+        11,
+        crate::protocol::TranscriptResyncReason::RowsNotStreamed,
+    );
+
+    let frames = coalesce_transcript_deltas(vec![
+        PendingTranscriptPublish::Delta(delta(10, 11, "a")),
+        PendingTranscriptPublish::Resync(resync.clone()),
+        PendingTranscriptPublish::Delta(delta(11, 12, "b")),
+    ]);
+
+    let shape = frames
+        .iter()
+        .map(|frame| match frame {
+            PendingTranscriptPublish::Delta(delta) => format!("delta:{}", delta.delta),
+            PendingTranscriptPublish::Resync(resync) => format!("resync:{}", resync.revision),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(shape, vec!["delta:a", "resync:11", "delta:b"]);
 }
 
 #[test]
@@ -1294,8 +1345,6 @@ fn summarize_thread_transcript_response_reports_entry_and_char_counts() {
         thread_id: "thread-1".to_string(),
         revision: 5,
         server_time: 6,
-        entry_seq_start: Some(1),
-        entry_seq_end: Some(2),
         entries: vec![
             TranscriptEntryView {
                 row_id: None,
@@ -1322,16 +1371,16 @@ fn summarize_thread_transcript_response_reports_entry_and_char_counts() {
                 content_state: crate::protocol::TranscriptContentState::Full,
             },
         ],
-        next_cursor: Some(8),
-        prev_cursor: Some(3),
+        prev_cursor: Some(crate::protocol::TranscriptCursorToken::new(
+            "tc1.test.3".to_string(),
+        )),
         thread_state: None,
     });
 
     assert!(summary.contains("thread_id=thread-1"));
     assert!(summary.contains("entries=2"));
     assert!(summary.contains("chars=14"));
-    assert!(summary.contains("next_cursor=8"));
-    assert!(summary.contains("prev_cursor=3"));
+    assert!(summary.contains("prev_cursor=tc1.test.3"));
 }
 
 // A workspace-write-sandboxed agent can't write outside the workspace on its
@@ -1605,6 +1654,79 @@ mod transcript_delta_delivery {
                     decrypt_json::<serde_json::Value>(SECRET_B, envelope).is_err(),
                     "another device's key must not open this envelope"
                 );
+            }
+            other => panic!("private mode must encrypt, got: {other:?}"),
+        }
+    }
+
+    fn resync(thread_id: &str) -> crate::protocol::TranscriptResyncEvent {
+        let mut resync = crate::protocol::TranscriptResyncEvent::new(
+            thread_id,
+            42,
+            crate::protocol::TranscriptResyncReason::WatchStarted,
+        );
+        resync.transcript_generation = "gen-1".to_string();
+        resync
+    }
+
+    /// Only the watcher gets it, with the thread and revision spelled out.
+    #[test]
+    fn a_readable_resync_reaches_only_the_watcher_under_the_resync_kind() {
+        let mut relay = relay_with_two_phones();
+        relay.set_watched_threads("peer-a", "phone-a", vec!["thread-x".to_string()]);
+        relay.set_watched_threads("peer-b", "phone-b", vec!["thread-other".to_string()]);
+
+        let messages = build_transcript_resync_messages(
+            targets_for(&relay, "thread-x"),
+            true,
+            &resync("thread-x"),
+        )
+        .expect("managed delivery should build");
+
+        assert_eq!(addressed_peers(&messages), vec!["peer-a".to_string()]);
+        let wire = serde_json::to_value(&*messages[0].payload).expect("serializes");
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "kind": "transcript_resync",
+                "thread_id": "thread-x",
+                "transcript_generation": "gen-1",
+                "revision": 42,
+                "reason": "watch_started",
+            })
+        );
+    }
+
+    #[test]
+    fn a_sealed_resync_opens_to_the_same_event_for_its_device_only() {
+        let mut relay = relay_with_two_phones();
+        relay.set_watched_threads("peer-a", "phone-a", vec!["thread-x".to_string()]);
+
+        let messages = build_transcript_resync_messages(
+            targets_for(&relay, "thread-x"),
+            false,
+            &resync("thread-x"),
+        )
+        .expect("e2ee delivery should build");
+
+        assert_eq!(addressed_peers(&messages), vec!["peer-a".to_string()]);
+        match &*messages[0].payload {
+            OutboundBrokerPayload::EncryptedTranscriptEvent {
+                target_peer_id,
+                device_id,
+                envelope,
+            } => {
+                assert_eq!(
+                    (target_peer_id.as_str(), device_id.as_str()),
+                    ("peer-a", "phone-a")
+                );
+                let opened: serde_json::Value =
+                    decrypt_json(SECRET_A, envelope).expect("the addressed device must decrypt");
+                assert_eq!(opened["kind"], "transcript_resync");
+                assert_eq!(opened["thread_id"], "thread-x");
+                assert_eq!(opened["revision"], 42);
+                assert_eq!(opened["reason"], "watch_started");
+                assert!(decrypt_json::<serde_json::Value>(SECRET_B, envelope).is_err());
             }
             other => panic!("private mode must encrypt, got: {other:?}"),
         }

@@ -31,6 +31,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, Web
 use tracing::{debug, info, warn};
 use url::Url;
 
+use crate::protocol::TranscriptResyncEvent;
 use crate::state::{
     AppState, BrokerPendingMessage, BrokerTarget, PendingTranscriptDelta, TranscriptDeltaKind,
 };
@@ -2246,21 +2247,44 @@ async fn publish_snapshot(writer: &BrokerWriter, state: &AppState) -> Result<(),
     Ok(())
 }
 
+/// Kept in queue order: a resync overtaken by the deltas behind it would look stale and
+/// be skipped.
+#[derive(Clone, Debug)]
+enum PendingTranscriptPublish {
+    Delta(PendingTranscriptDelta),
+    Resync(TranscriptResyncEvent),
+}
+
 async fn publish_pending_broker_messages(
     writer: &BrokerWriter,
     state: &AppState,
 ) -> Result<(), String> {
-    let deltas = drain_pending_broker_messages_for_publish(writer, state).await?;
-    for delta in coalesce_transcript_deltas(deltas) {
-        publish_transcript_delta(writer, state, delta).await?;
+    let frames = drain_pending_broker_messages_for_publish(writer, state).await?;
+    for frame in coalesce_transcript_deltas(frames) {
+        publish_transcript_frame(writer, state, frame).await?;
     }
     Ok(())
+}
+
+async fn publish_transcript_frame(
+    writer: &BrokerWriter,
+    state: &AppState,
+    frame: PendingTranscriptPublish,
+) -> Result<(), String> {
+    match frame {
+        PendingTranscriptPublish::Delta(delta) => {
+            publish_transcript_delta(writer, state, delta).await
+        }
+        PendingTranscriptPublish::Resync(resync) => {
+            publish_transcript_resync(writer, state, resync).await
+        }
+    }
 }
 
 async fn drain_pending_broker_messages_for_publish(
     writer: &BrokerWriter,
     state: &AppState,
-) -> Result<Vec<PendingTranscriptDelta>, String> {
+) -> Result<Vec<PendingTranscriptPublish>, String> {
     let messages = state.drain_pending_broker_messages().await;
     let mut transcript_deltas = Vec::new();
     if !messages.is_empty() {
@@ -2282,7 +2306,12 @@ async fn drain_pending_broker_messages_for_publish(
             BrokerPendingMessage::PairingResult(result) => {
                 publish_pairing_result(writer, result).await?;
             }
-            BrokerPendingMessage::TranscriptDelta(delta) => transcript_deltas.push(delta),
+            BrokerPendingMessage::TranscriptDelta(delta) => {
+                transcript_deltas.push(PendingTranscriptPublish::Delta(delta));
+            }
+            BrokerPendingMessage::TranscriptResync(resync) => {
+                transcript_deltas.push(PendingTranscriptPublish::Resync(resync));
+            }
         }
     }
     Ok(transcript_deltas)
@@ -2291,8 +2320,8 @@ async fn drain_pending_broker_messages_for_publish(
 async fn publish_transcript_delta_batch(
     writer: &BrokerWriter,
     state: &AppState,
-    deltas: Vec<PendingTranscriptDelta>,
-) -> Result<Vec<PendingTranscriptDelta>, String> {
+    deltas: Vec<PendingTranscriptPublish>,
+) -> Result<Vec<PendingTranscriptPublish>, String> {
     const MAX_DELTAS_PER_DRAIN: usize = 50;
     let mut deltas = coalesce_transcript_deltas(deltas);
     let remaining = if deltas.len() > MAX_DELTAS_PER_DRAIN {
@@ -2302,8 +2331,8 @@ async fn publish_transcript_delta_batch(
     };
 
     let mut delta_count = 0;
-    for delta in deltas {
-        publish_transcript_delta(writer, state, delta).await?;
+    for frame in deltas {
+        publish_transcript_frame(writer, state, frame).await?;
         delta_count += 1;
     }
     if delta_count > 0 {
@@ -2315,7 +2344,7 @@ async fn publish_transcript_delta_batch(
 async fn flush_pending_transcript_deltas(
     writer: &BrokerWriter,
     state: &AppState,
-    pending_transcript_deltas: &mut Vec<PendingTranscriptDelta>,
+    pending_transcript_deltas: &mut Vec<PendingTranscriptPublish>,
 ) -> Result<(), String> {
     let mut deltas = std::mem::take(pending_transcript_deltas);
     while !deltas.is_empty() {
@@ -2324,11 +2353,18 @@ async fn flush_pending_transcript_deltas(
     Ok(())
 }
 
-fn coalesce_transcript_deltas(deltas: Vec<PendingTranscriptDelta>) -> Vec<PendingTranscriptDelta> {
-    let mut coalesced: Vec<PendingTranscriptDelta> = Vec::new();
-    for delta in deltas {
-        if let Some(last) = coalesced.last_mut() {
-            if can_merge_transcript_delta(last, &delta) {
+/// Merges runs of deltas to one row; a resync stays where it was queued.
+fn coalesce_transcript_deltas(
+    frames: Vec<PendingTranscriptPublish>,
+) -> Vec<PendingTranscriptPublish> {
+    let mut coalesced: Vec<PendingTranscriptPublish> = Vec::new();
+    for frame in frames {
+        if let (
+            Some(PendingTranscriptPublish::Delta(last)),
+            PendingTranscriptPublish::Delta(delta),
+        ) = (coalesced.last_mut(), &frame)
+        {
+            if can_merge_transcript_delta(last, delta) {
                 last.delta.push_str(&delta.delta);
                 last.revision = delta.revision;
                 last.entry_seq = delta.entry_seq;
@@ -2337,7 +2373,7 @@ fn coalesce_transcript_deltas(deltas: Vec<PendingTranscriptDelta>) -> Vec<Pendin
                 continue;
             }
         }
-        coalesced.push(delta);
+        coalesced.push(frame);
     }
     coalesced
 }
@@ -2487,6 +2523,60 @@ async fn publish_transcript_delta(
     publish_targeted_messages(writer, messages).await?;
 
     Ok(())
+}
+
+async fn publish_transcript_resync(
+    writer: &BrokerWriter,
+    state: &AppState,
+    resync: TranscriptResyncEvent,
+) -> Result<(), String> {
+    let targets = state.broker_targets_for_thread(&resync.thread_id).await;
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let broker_can_read_content = state.broker_can_read_content().await;
+    info!(
+        scope = "transcript_resync",
+        target_count = targets.len(),
+        thread_id = %resync.thread_id,
+        revision = resync.revision,
+        reason = ?resync.reason,
+        "resolved broker surface targets"
+    );
+    let messages = build_transcript_resync_messages(targets, broker_can_read_content, &resync)?;
+    publish_targeted_messages(writer, messages).await
+}
+
+/// Addressed exactly like a delta: one frame per peer watching the thread, sealed per
+/// device unless the broker is allowed to read content.
+fn build_transcript_resync_messages(
+    targets: Vec<BrokerTarget>,
+    broker_can_read_content: bool,
+    resync: &TranscriptResyncEvent,
+) -> Result<Vec<TargetedBrokerMessage>, String> {
+    targets
+        .into_iter()
+        .map(|target| {
+            let payload = if broker_can_read_content {
+                OutboundBrokerPayload::TranscriptResync {
+                    thread_id: resync.thread_id.clone(),
+                    transcript_generation: resync.transcript_generation.clone(),
+                    revision: resync.revision,
+                    reason: resync.reason,
+                }
+            } else {
+                OutboundBrokerPayload::EncryptedTranscriptEvent {
+                    target_peer_id: target.peer_id.clone(),
+                    device_id: target.device_id.clone(),
+                    envelope: encrypt_json(&target.payload_secret, resync)?,
+                }
+            };
+            Ok(TargetedBrokerMessage {
+                target_peer_id: target.peer_id,
+                payload: Box::new(payload),
+            })
+        })
+        .collect()
 }
 
 /// Seal a pairing result for exactly one broker peer.

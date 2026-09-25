@@ -451,6 +451,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
         } else {
             Some("replayed failure".to_string())
         },
+        error_code: None,
     }
 }
 
@@ -5282,6 +5283,7 @@ mod paged_history_merge_tests {
 /// without fanning every thread's deltas out to every paired surface.
 mod watched_threads {
     use super::*;
+    use crate::protocol::{LocalTranscriptEvent, TranscriptResyncReason};
 
     /// Bring a paired device online as a broker target.
     fn online_paired_device(relay: &mut RelayState, device_id: &str, peer_id: &str) {
@@ -5602,6 +5604,190 @@ mod watched_threads {
         );
     }
 
+    fn queued_resyncs(relay: &RelayState) -> Vec<(String, u64, TranscriptResyncReason)> {
+        relay
+            .pending_broker_messages
+            .iter()
+            .filter_map(|message| match message {
+                BrokerPendingMessage::TranscriptResync(resync) => {
+                    Some((resync.thread_id.clone(), resync.revision, resync.reason))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn thread_revision(relay: &RelayState, thread_id: &str) -> u64 {
+        relay
+            .runtime_for_thread(thread_id)
+            .expect("runtime")
+            .transcript_revision
+    }
+
+    /// A user row has no text stream, so nothing told a watcher it existed: a question
+    /// delegated into a background thread stayed off screen until a refetch.
+    #[test]
+    fn a_watched_background_user_message_asks_watchers_to_resync() {
+        let mut relay = test_state();
+        relay.broker_configured = true;
+        activate(&mut relay, "thread-active", "device-a");
+        relay.set_watched_threads(
+            "device-a",
+            "device-a",
+            vec!["thread-background".to_string()],
+        );
+
+        relay.bg_upsert_user_message(
+            "thread-background",
+            "user-1".to_string(),
+            "delegated question".to_string(),
+            "turn-1".to_string(),
+            100,
+        );
+
+        assert_eq!(
+            queued_resyncs(&relay),
+            vec![(
+                "thread-background".to_string(),
+                thread_revision(&relay, "thread-background"),
+                TranscriptResyncReason::RowsNotStreamed,
+            )]
+        );
+        assert!(
+            queued_delta_thread_ids(&relay).is_empty(),
+            "a notice, not a fake delta"
+        );
+    }
+
+    /// Tail read and watch are separate requests, so rows written between were neither read
+    /// nor streamed. The revision is the WATCHED thread's own.
+    #[test]
+    fn starting_to_watch_a_background_thread_asks_for_a_resync_at_its_revision() {
+        let mut relay = test_state();
+        relay.broker_configured = true;
+        activate(&mut relay, "thread-active", "device-a");
+        relay.bg_upsert_user_message(
+            "thread-background",
+            "user-1".to_string(),
+            "written before the watch".to_string(),
+            "turn-1".to_string(),
+            100,
+        );
+        // The active thread moves on too; its revision must not stand in for the other's.
+        relay.upsert_user_message("user-2".to_string(), "hi".to_string(), "turn-2".to_string());
+        assert!(
+            queued_resyncs(&relay).is_empty(),
+            "precondition: nobody was watching"
+        );
+        assert_ne!(
+            thread_revision(&relay, "thread-background"),
+            thread_revision(&relay, "thread-active")
+        );
+
+        relay.set_watched_threads(
+            "device-a",
+            "device-a",
+            vec!["thread-background".to_string()],
+        );
+
+        assert_eq!(
+            queued_resyncs(&relay),
+            vec![(
+                "thread-background".to_string(),
+                thread_revision(&relay, "thread-background"),
+                TranscriptResyncReason::WatchStarted,
+            )]
+        );
+
+        relay.pending_broker_messages.clear();
+        relay.set_watched_threads(
+            "device-a",
+            "device-a",
+            vec!["thread-background".to_string()],
+        );
+        assert!(
+            queued_resyncs(&relay).is_empty(),
+            "an unchanged watch set asks for nothing"
+        );
+    }
+
+    #[test]
+    fn watching_the_active_thread_asks_for_no_resync() {
+        let mut relay = test_state();
+        relay.broker_configured = true;
+        activate(&mut relay, "thread-active", "device-a");
+        relay.upsert_user_message(
+            "user-1".to_string(),
+            "hello".to_string(),
+            "turn-1".to_string(),
+        );
+        relay.pending_broker_messages.clear();
+
+        relay.set_watched_threads("device-a", "device-a", vec!["thread-active".to_string()]);
+
+        assert!(
+            queued_resyncs(&relay).is_empty(),
+            "the active thread rides on snapshots"
+        );
+    }
+
+    #[test]
+    fn an_unwatched_background_user_message_queues_nothing() {
+        let mut relay = test_state();
+        relay.broker_configured = true;
+        activate(&mut relay, "thread-active", "device-a");
+
+        relay.bg_upsert_user_message(
+            "thread-background",
+            "user-1".to_string(),
+            "question".to_string(),
+            "turn-1".to_string(),
+            100,
+        );
+
+        assert!(relay.pending_broker_messages.is_empty());
+    }
+
+    /// Judged against the revision a surface holds when it arrives, so it must reach the
+    /// local stream before the deltas written after it.
+    #[test]
+    fn a_local_subscriber_receives_a_resync_before_the_deltas_that_follow_it() {
+        let mut relay = test_state();
+        activate(&mut relay, "thread-active", "device-a");
+        relay.set_watched_threads(
+            "device-a",
+            "device-a",
+            vec!["thread-background".to_string()],
+        );
+        let mut events = relay.subscribe_transcript_events();
+
+        relay.bg_upsert_user_message(
+            "thread-background",
+            "user-1".to_string(),
+            "question".to_string(),
+            "turn-1".to_string(),
+            100,
+        );
+        relay.bg_append_agent_delta("thread-background", "item-1", "answer", "turn-1", 101);
+
+        match events.try_recv().expect("the resync first") {
+            LocalTranscriptEvent::Resync(resync) => {
+                assert_eq!(resync.thread_id, "thread-background");
+                assert_eq!(resync.reason, TranscriptResyncReason::RowsNotStreamed);
+                assert_eq!(resync.kind, "transcript_resync");
+            }
+            other => panic!("expected the resync first, got {other:?}"),
+        }
+        assert_eq!(
+            events
+                .try_recv()
+                .expect("then the delta")
+                .into_delta()
+                .delta,
+            "answer"
+        );
+    }
+
     /// The LOCAL surface gets deltas over its own broadcast channel, not the broker
     /// queue (the broker publisher drains that with `mem::take`, so sharing it would
     /// mean whichever consumer ran first stole the frame).
@@ -5632,11 +5818,14 @@ mod watched_threads {
     fn a_local_subscriber_receives_active_thread_deltas() {
         let mut relay = test_state();
         activate(&mut relay, "thread-active", "device-a");
-        let mut deltas = relay.subscribe_transcript_deltas();
+        let mut deltas = relay.subscribe_transcript_events();
 
         provider_enqueues_active_delta(&mut relay, "item-1", "hello");
 
-        let event = deltas.try_recv().expect("a local delta must be broadcast");
+        let event = deltas
+            .try_recv()
+            .expect("a local delta must be broadcast")
+            .into_delta();
         assert_eq!(event.thread_id, "thread-active");
         assert_eq!(event.delta, "hello");
         assert_eq!(event.delta_kind, "agent_text");
@@ -5654,13 +5843,14 @@ mod watched_threads {
             "this test is about the broker-less path"
         );
         activate(&mut relay, "thread-active", "device-a");
-        let mut deltas = relay.subscribe_transcript_deltas();
+        let mut deltas = relay.subscribe_transcript_events();
 
         provider_enqueues_active_delta(&mut relay, "item-1", "hello");
 
         let event = deltas
             .try_recv()
-            .expect("local deltas must not depend on a broker being configured");
+            .expect("local deltas must not depend on a broker being configured")
+            .into_delta();
         assert_eq!(event.delta, "hello");
         assert!(
             relay.pending_broker_messages.is_empty(),
@@ -5679,13 +5869,14 @@ mod watched_threads {
             "device-a",
             vec!["thread-background".to_string()],
         );
-        let mut deltas = relay.subscribe_transcript_deltas();
+        let mut deltas = relay.subscribe_transcript_events();
 
         relay.bg_append_agent_delta("thread-background", "item-1", "bg text", "turn-9", 100);
 
         let event = deltas
             .try_recv()
-            .expect("a watched background thread must reach local subscribers");
+            .expect("a watched background thread must reach local subscribers")
+            .into_delta();
         assert_eq!(event.thread_id, "thread-background");
         assert_eq!(event.delta, "bg text");
     }

@@ -1391,11 +1391,11 @@ test("remote hydration backfills a compact user-only tail until agent text is vi
             tool: null,
           },
         ],
-        prev_cursor: 345,
+        prev_cursor: "c345",
       },
     ],
     [
-      345,
+      "c345",
       {
         entries: [
           {
@@ -1407,11 +1407,11 @@ test("remote hydration backfills a compact user-only tail until agent text is vi
             tool: null,
           },
         ],
-        prev_cursor: 344,
+        prev_cursor: "c344",
       },
     ],
     [
-      344,
+      "c344",
       {
         entries: [
           {
@@ -1423,11 +1423,11 @@ test("remote hydration backfills a compact user-only tail until agent text is vi
             tool: null,
           },
         ],
-        prev_cursor: 343,
+        prev_cursor: "c343",
       },
     ],
     [
-      343,
+      "c343",
       {
         entries: [
           {
@@ -1532,7 +1532,7 @@ test("remote hydration backfills a compact user-only tail until agent text is vi
 
   assert.deepEqual(
     sentPayloads.map((payload) => payload.request?.input?.before ?? null),
-    [null, 345, 344, 343]
+    [null, "c345", "c344", "c343"]
   );
   assert.deepEqual(
     state.session.transcript.map((entry) => entry.item_id),
@@ -1786,6 +1786,60 @@ test("hydration stops automatically once the tail entries are complete", async (
   );
 });
 
+function olderHistorySnapshot() {
+  return {
+    active_thread_id: "thread-1",
+    active_controller_device_id: null,
+    active_controller_last_seen_at: null,
+    active_flags: [],
+    active_turn_id: "turn-3",
+    allowed_roots: [],
+    approval_policy: "untrusted",
+    audit_enabled: false,
+    available_models: [],
+    broker_can_read_content: true,
+    broker_channel_id: "room-a",
+    broker_connected: true,
+    broker_peer_id: "relay-1",
+    codex_connected: true,
+    controller_lease_expires_at: null,
+    controller_lease_seconds: 15,
+    current_cwd: "/tmp/project",
+    current_status: "idle",
+    device_records: [],
+    e2ee_enabled: false,
+    logs: [],
+    model: "gpt-5.4",
+    paired_devices: [],
+    pending_approvals: [],
+    pending_pairing_requests: [],
+    provider: "codex",
+    reasoning_effort: "medium",
+    sandbox: "workspace-write",
+    security_mode: "managed",
+    service_ready: true,
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-2",
+        kind: "agent_text",
+        text: "latest...",
+        status: "completed",
+        turn_id: "turn-2",
+        tool: null,
+      },
+      {
+        item_id: "item-3",
+        kind: "user_text",
+        text: "thanks",
+        status: "completed",
+        turn_id: "turn-3",
+        tool: null,
+      },
+    ],
+  };
+}
+
 test("maybeLoadOlderTranscriptHistory prepends older complete transcript pages", async () => {
   activeBrowser || installBrowserStubs();
 
@@ -1857,7 +1911,7 @@ test("maybeLoadOlderTranscriptHistory prepends older complete transcript pages",
                     tool: null,
                   },
                 ],
-                prev_cursor: 1,
+                prev_cursor: "tc1.space.1",
               }
             : {
                 thread_id: "thread-1",
@@ -1882,60 +1936,10 @@ test("maybeLoadOlderTranscriptHistory prepends older complete transcript pages",
     scrollTop: 0,
   });
 
-  applySessionSnapshot({
-    active_thread_id: "thread-1",
-    active_controller_device_id: null,
-    active_controller_last_seen_at: null,
-    active_flags: [],
-    active_turn_id: "turn-3",
-    allowed_roots: [],
-    approval_policy: "untrusted",
-    audit_enabled: false,
-    available_models: [],
-    broker_can_read_content: true,
-    broker_channel_id: "room-a",
-    broker_connected: true,
-    broker_peer_id: "relay-1",
-    codex_connected: true,
-    controller_lease_expires_at: null,
-    controller_lease_seconds: 15,
-    current_cwd: "/tmp/project",
-    current_status: "idle",
-    device_records: [],
-    e2ee_enabled: false,
-    logs: [],
-    model: "gpt-5.4",
-    paired_devices: [],
-    pending_approvals: [],
-    pending_pairing_requests: [],
-    provider: "codex",
-    reasoning_effort: "medium",
-    sandbox: "workspace-write",
-    security_mode: "managed",
-    service_ready: true,
-    transcript_truncated: true,
-    transcript: [
-      {
-        item_id: "item-2",
-        kind: "agent_text",
-        text: "latest...",
-        status: "completed",
-        turn_id: "turn-2",
-        tool: null,
-      },
-      {
-        item_id: "item-3",
-        kind: "user_text",
-        text: "thanks",
-        status: "completed",
-        turn_id: "turn-3",
-        tool: null,
-      },
-    ],
-  });
+  applySessionSnapshot(olderHistorySnapshot());
 
   await waitFor(() => state.transcriptHydrationTailReady === true);
-  await waitFor(() => state.transcriptHydrationOlderCursor === 1);
+  await waitFor(() => state.transcriptHydrationOlderCursor === "tc1.space.1");
   assert.equal(state.session.transcript_truncated, true);
 
   await maybeLoadOlderTranscriptHistory();
@@ -1949,8 +1953,215 @@ test("maybeLoadOlderTranscriptHistory prepends older complete transcript pages",
   assert.equal(state.session.transcript_truncated, false);
   assert.deepEqual(
     sentPayloads.map((payload) => payload.request?.input?.before ?? null),
-    [null, 1]
+    [null, "tc1.space.1"]
   );
+});
+
+// The relay rebuilt this thread's transcript: the window's cursor names rows that no
+// longer exist. Retrying it would fail forever; the latest page mints one that works.
+test("maybeLoadOlderTranscriptHistory rebuilds the window when the relay rejects its cursor", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const sentPayloads = [];
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const {
+    applySessionSnapshot,
+    maybeLoadOlderTranscriptHistory,
+  } = await import("./session-ops.js");
+  const { setRemoteTranscriptElement } = await import("./ui-refs.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
+  state.pendingActions.clear();
+  seedTranscriptHydrationState(state);
+
+  // Twelve rows: enough that hydration does not backfill, so the older-page load is
+  // the only request that carries a cursor.
+  const tailPage = (prevCursor) => ({
+    thread_id: "thread-1",
+    entries: Array.from({ length: 12 }, (_, index) => ({
+      item_id: `item-${index + 2}`,
+      kind: "agent_text",
+      text: `reply ${index + 2}`,
+      status: "completed",
+      turn_id: `turn-${index + 2}`,
+      tool: null,
+    })),
+    prev_cursor: prevCursor,
+  });
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      sentPayloads.push(frame.payload);
+      const before = frame.payload.request?.input?.before ?? null;
+      setImmediate(async () => {
+        const rejected = before === "tc1.rebuilt-away.1";
+        await handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: !rejected,
+          snapshot: {},
+          thread_transcript: rejected
+            ? null
+            : tailPage(sentPayloads.length === 1 ? "tc1.rebuilt-away.1" : "tc1.fresh.1"),
+          ...(rejected
+            ? {
+                error: "transcript cursor has expired; reload the latest page",
+                error_code: "transcript_cursor_rejected",
+              }
+            : {}),
+        });
+      });
+    },
+  };
+
+  setRemoteTranscriptElement({
+    scrollTop: 0,
+  });
+
+  applySessionSnapshot(olderHistorySnapshot());
+  await waitFor(() => state.transcriptHydrationOlderCursor === "tc1.rebuilt-away.1");
+
+  await maybeLoadOlderTranscriptHistory();
+  await waitFor(() => state.transcriptHydrationOlderCursor === "tc1.fresh.1");
+
+  assert.deepEqual(
+    sentPayloads.map((payload) => payload.request?.input?.before ?? null),
+    [null, "tc1.rebuilt-away.1", null]
+  );
+  assert.equal(state.session.transcript.length, 12);
+});
+
+test("maybeLoadOlderTranscriptHistory asks again, unprompted, while the relay is still reading", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const sentPayloads = [];
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const {
+    applySessionSnapshot,
+    maybeLoadOlderTranscriptHistory,
+  } = await import("./session-ops.js");
+  const { setRemoteTranscriptElement } = await import("./ui-refs.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
+  state.pendingActions.clear();
+  seedTranscriptHydrationState(state);
+
+  // Twelve rows: enough that hydration does not backfill, so the older-page load is
+  // the only request that carries a cursor.
+  const tailPage = (prevCursor) => ({
+    thread_id: "thread-1",
+    entries: Array.from({ length: 12 }, (_, index) => ({
+      item_id: `item-${index + 2}`,
+      kind: "agent_text",
+      text: `reply ${index + 2}`,
+      status: "completed",
+      turn_id: `turn-${index + 2}`,
+      tool: null,
+    })),
+    prev_cursor: prevCursor,
+  });
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      sentPayloads.push(frame.payload);
+      const before = frame.payload.request?.input?.before ?? null;
+      const olderRequests = sentPayloads.filter((payload) => payload.request?.input?.before);
+      setImmediate(async () => {
+        const stillReading = before != null && olderRequests.length === 1;
+        await handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: !stillReading,
+          snapshot: {},
+          thread_transcript: stillReading
+            ? null
+            : before == null
+              ? tailPage("tc1.held.1")
+              : {
+                  thread_id: "thread-1",
+                  entries: [
+                    {
+                      item_id: "item-1",
+                      kind: "user_text",
+                      text: "older question",
+                      status: "completed",
+                      turn_id: "turn-1",
+                      tool: null,
+                    },
+                  ],
+                  prev_cursor: null,
+                },
+          ...(stillReading
+            ? {
+                error: "older history is still being read; ask again with the same cursor",
+                error_code: "transcript_history_pending",
+              }
+            : {}),
+        });
+      });
+    },
+  };
+
+  setRemoteTranscriptElement({
+    scrollTop: 0,
+  });
+
+  applySessionSnapshot(olderHistorySnapshot());
+  await waitFor(() => state.transcriptHydrationOlderCursor === "tc1.held.1");
+
+  assert.equal(await maybeLoadOlderTranscriptHistory(), false, "the oldest page arrived");
+
+  assert.deepEqual(
+    sentPayloads.map((payload) => payload.request?.input?.before ?? null),
+    [null, "tc1.held.1", "tc1.held.1"]
+  );
+  assert.equal(state.session.transcript[0].item_id, "item-1");
 });
 
 test("startRemoteSession re-enables the start button when the relay does not reply", async () => {
@@ -5104,7 +5315,7 @@ test("applyTranscriptEvent updates approvals as metadata only", async () => {
   assert.equal(state.session.transcript[0].text, "visible history");
 });
 
-test("applyTranscriptEvent flushes immediately and schedules repair on transcript_stream_lagged", async () => {
+test("applyTranscriptEvent flushes immediately and schedules repair on a resync ahead of it", async () => {
   const browser = activeBrowser || installBrowserStubs();
 
   const { state, subscribeRemoteState } = await import("./state.js");
@@ -5152,17 +5363,18 @@ test("applyTranscriptEvent flushes immediately and schedules repair on transcrip
   assert.equal(notifications.length, 0, "the ordinary delta must still coalesce");
 
   applyTranscriptEvent({
-    kind: "transcript_stream_lagged",
+    kind: "transcript_resync",
     thread_id: "thread-1",
-    dropped: 2,
+    revision: 5,
+    reason: "rows_not_streamed",
   });
 
   assert.equal(
     window.__transcriptGapRepairCount,
     1,
-    "a lagged stream must schedule an authoritative tail repair"
+    "a resync past what we hold must schedule an authoritative tail repair"
   );
-  assert.equal(notifications.length, 1, "the lagged signal must flush immediately");
+  assert.equal(notifications.length, 1, "the resync must flush immediately");
   assert.equal(notifications[0].transcript[0].text, "partial");
 
   browser.runNextTimer();
@@ -7879,6 +8091,189 @@ test("a relay that left makes the phone declare its watch set again", async () =
   );
 
   state.socket = null;
+});
+
+// The watch set was only declared from the snapshot path, so a thread opened read-only
+// went unwatched until the next snapshot: a question delegated into it in that window
+// was never streamed, and nothing re-read the pin.
+// The live thread's revision moves on its own clock and must never excuse a pinned
+// view that is behind.
+test("a resync for the pinned thread re-reads it only when the pin is behind", async () => {
+  activeBrowser = installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { applyTranscriptEvent, clearSessionRuntime, viewRemoteThread } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-resync-gate",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-resync-gate" });
+  state.pendingActions.clear();
+  seedTranscriptHydrationState(state);
+  const live = {
+    active_thread_id: "live-thread",
+    active_turn_id: null,
+    transcript: [],
+    transcript_revision: 900,
+    transcript_truncated: false,
+    pending_approvals: [],
+    pending_ask_user_questions: [],
+  };
+  state.session = live;
+  state.realSession = live;
+
+  const fetched = [];
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      const request = frame.payload?.request;
+      if (request?.type !== "fetch_thread_transcript") {
+        return;
+      }
+      fetched.push(request.input.thread_id);
+      setImmediate(() => {
+        void handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: true,
+          snapshot: {},
+          thread_transcript: {
+            thread_id: "bg-thread",
+            revision: fetched.length === 1 ? 10 : 11,
+            entries: [
+              { item_id: "bg-1", kind: "agent_text", text: "earlier", status: "completed", turn_id: "t", tool: null },
+            ],
+            prev_cursor: null,
+          },
+        });
+      });
+    },
+  };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(await viewRemoteThread("bg-thread"), true);
+  assert.deepEqual(fetched, ["bg-thread"], "precondition: the pin read its tail at revision 10");
+
+  applyTranscriptEvent({
+    kind: "transcript_resync",
+    thread_id: "bg-thread",
+    revision: 10,
+    reason: "watch_started",
+  });
+  await settle();
+  assert.deepEqual(fetched, ["bg-thread"], "the pin already holds revision 10");
+
+  applyTranscriptEvent({
+    kind: "transcript_resync",
+    thread_id: "bg-thread",
+    revision: 11,
+    reason: "rows_not_streamed",
+  });
+  await settle();
+  assert.deepEqual(
+    fetched,
+    ["bg-thread", "bg-thread"],
+    "revision 11 is past the pin's 10, whatever the live thread's 900 says"
+  );
+
+  clearSessionRuntime();
+  state.socket = null;
+  state.pendingActions.clear();
+});
+
+test("viewing a background thread declares the watch without waiting for a snapshot", async () => {
+  activeBrowser = installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { clearSessionRuntime, viewRemoteThread } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-view-declares",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-view-declares" });
+  state.pendingActions.clear();
+  seedTranscriptHydrationState(state);
+  const live = {
+    active_thread_id: "live-thread",
+    active_turn_id: null,
+    transcript: [],
+    transcript_truncated: false,
+    pending_approvals: [],
+    pending_ask_user_questions: [],
+  };
+  state.session = live;
+  state.realSession = live;
+
+  const declared = [];
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      const request = frame.payload?.request;
+      if (request?.type === "watch_threads") {
+        declared.push(request.input.thread_ids);
+        return;
+      }
+      if (request?.type === "fetch_thread_transcript") {
+        setImmediate(() => {
+          void handleRemoteBrokerPayload({
+            kind: "remote_action_result",
+            action_id: frame.payload.action_id,
+            action: "fetch_thread_transcript",
+            ok: true,
+            snapshot: {},
+            thread_transcript: {
+              thread_id: "background-thread",
+              entries: [
+                { item_id: "bg-1", kind: "agent_text", text: "earlier", status: "completed", turn_id: "t", tool: null },
+              ],
+              prev_cursor: null,
+            },
+          });
+        });
+      }
+    },
+  };
+
+  assert.equal(await viewRemoteThread("background-thread"), true);
+  assert.ok(
+    declared.some((threadIds) => threadIds.includes("background-thread")),
+    `the viewed thread must be watched as soon as it is pinned, got ${JSON.stringify(declared)}`
+  );
+
+  clearSessionRuntime();
+  state.socket = null;
+  state.pendingActions.clear();
 });
 
 // The handler above is only worth anything if the runtime installs it. Deleting the

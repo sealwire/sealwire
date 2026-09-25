@@ -28,8 +28,8 @@ use crate::{
         SubmitAskUserAnswerInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
         ThreadEntryDetailResponse, ThreadFlagReceipt, ThreadRenameReceipt, ThreadSettingsView,
         ThreadStateView, ThreadTranscriptResponse, ThreadWorkspaceInput, ThreadsResponse,
-        ToolCallView, TranscriptDeltaEvent, UpdateSessionSettingsInput, WatchThreadsInput,
-        WorkspaceDiffResponse, WorkspaceGitContextView, WorkspaceOrigin, WorkspaceRootView,
+        ToolCallView, UpdateSessionSettingsInput, WatchThreadsInput, WorkspaceDiffResponse,
+        WorkspaceGitContextView, WorkspaceOrigin, WorkspaceRootView,
     },
     provider::{
         spawn_providers, AdoptedProviderSession, AdoptedStartThreadResult, ProviderBridge,
@@ -328,6 +328,7 @@ mod thread_workspace;
 mod threads;
 mod transcript;
 pub(crate) use thread_workspace::ThreadWorkspaceError;
+pub(crate) use transcript::TranscriptReadError;
 mod workflow;
 mod workspace_trust;
 mod worktree;
@@ -1101,12 +1102,12 @@ in thread {thread_id}: {error}"
         self.change_tx.subscribe()
     }
 
-    /// Subscribe to live transcript appends for a local SSE connection.
-    pub async fn subscribe_transcript_deltas(
+    /// Subscribe to live transcript deltas and resync notices for a local SSE connection.
+    pub async fn subscribe_transcript_events(
         &self,
-    ) -> tokio::sync::broadcast::Receiver<TranscriptDeltaEvent> {
+    ) -> tokio::sync::broadcast::Receiver<crate::protocol::LocalTranscriptEvent> {
         let relay = self.relay.read().await;
-        relay.subscribe_transcript_deltas()
+        relay.subscribe_transcript_events()
     }
 
     /// Whether a local surface should be sent deltas for `thread_id`. Mirrors the

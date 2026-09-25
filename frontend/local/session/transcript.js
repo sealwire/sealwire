@@ -3,6 +3,7 @@ import { transcript } from "../dom.js";
 import { displayedEntriesFrom, displayedThreadIdFrom } from "../displayed-thread.js";
 import { fetchTranscriptEntryDetailViaRequester } from "../../shared/transcript-entry-detail.js";
 import { normalizeThreadTranscriptPage } from "../../shared/transcript-page.js";
+import { relayError } from "../../shared/transcript-protocol.js";
 import {
   createThreadTranscriptPageQueryOptions,
   dropTranscriptPageQueriesFromOtherGenerations,
@@ -71,14 +72,17 @@ export function createTranscriptController(ctx) {
       window.location.origin
     );
     if (before != null) {
-      url.searchParams.set("before", String(before));
+      url.searchParams.set("before", before);
     }
 
     const response = await apiFetch(url);
     const payload = await response.json();
 
     if (!response.ok || !payload.ok) {
-      throw new Error(payload?.error?.message || "Failed to load transcript history");
+      throw relayError(
+        payload?.error?.message || "Failed to load transcript history",
+        payload?.error?.code
+      );
     }
 
     return normalizeThreadTranscriptPage(payload.data);
@@ -166,7 +170,14 @@ export function createTranscriptController(ctx) {
         }
         logLine(`Transcript sync failed: ${error.message}`);
       },
+      onCursorRejected: rebuildTranscriptWindowFromLatestPage,
     });
+  }
+
+  // The relay can no longer read the window's cursor; only the latest page mints one it can.
+  function rebuildTranscriptWindowFromLatestPage() {
+    resetTranscriptHydrationState();
+    void ensureConversationTranscript(state.session);
   }
 
   async function maybeLoadOlderTranscript() {
@@ -199,6 +210,7 @@ export function createTranscriptController(ctx) {
         }
         logLine(`Older transcript load failed: ${error.message}`);
       },
+      onCursorRejected: rebuildTranscriptWindowFromLatestPage,
     });
   }
 

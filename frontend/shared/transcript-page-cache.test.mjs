@@ -184,8 +184,8 @@ function olderPage(threadId, before, bytesPad = 0) {
 test("encrypted round-trip: an older page reads back equal", async () => {
   const cache = makeCache();
   const page = olderPage("t1", 10);
-  await cache.writePage({ scope: "relayA", threadId: "t1", before: 10, page });
-  const read = await cache.readPage({ scope: "relayA", threadId: "t1", before: 10 });
+  await cache.writePage({ scope: "relayA", threadId: "t1", before: "c10", page });
+  const read = await cache.readPage({ scope: "relayA", threadId: "t1", before: "c10" });
   assert.deepEqual(read, page);
 });
 
@@ -203,10 +203,10 @@ test("the tail (before == null) is never stored or served", async () => {
 
 test("overwriting a key returns the latest value", async () => {
   const cache = makeCache();
-  await cache.writePage({ scope: "relayA", threadId: "t1", before: 10, page: olderPage("t1", 10, 5) });
+  await cache.writePage({ scope: "relayA", threadId: "t1", before: "c10", page: olderPage("t1", 10, 5) });
   const updated = olderPage("t1", 10, 50);
-  await cache.writePage({ scope: "relayA", threadId: "t1", before: 10, page: updated });
-  const read = await cache.readPage({ scope: "relayA", threadId: "t1", before: 10 });
+  await cache.writePage({ scope: "relayA", threadId: "t1", before: "c10", page: updated });
+  const read = await cache.readPage({ scope: "relayA", threadId: "t1", before: "c10" });
   assert.deepEqual(read, updated);
 });
 
@@ -217,13 +217,13 @@ test("eviction drops least-recently-written pages once over quota, protecting th
   const cache = makeCache({ quotaBytes: 2 * pageBytes + 10 });
 
   for (let n = 0; n < pages.length; n += 1) {
-    await cache.writePage({ scope: "relayA", threadId: "t1", before: 10 + n, page: pages[n] });
+    await cache.writePage({ scope: "relayA", threadId: "t1", before: `c${10 + n}`, page: pages[n] });
   }
 
   // Oldest (before=10) evicted; the two newest remain.
-  assert.equal(await cache.readPage({ scope: "relayA", threadId: "t1", before: 10 }), null);
-  assert.ok(await cache.readPage({ scope: "relayA", threadId: "t1", before: 11 }));
-  assert.ok(await cache.readPage({ scope: "relayA", threadId: "t1", before: 12 }));
+  assert.equal(await cache.readPage({ scope: "relayA", threadId: "t1", before: "c10" }), null);
+  assert.ok(await cache.readPage({ scope: "relayA", threadId: "t1", before: "c11" }));
+  assert.ok(await cache.readPage({ scope: "relayA", threadId: "t1", before: "c12" }));
 });
 
 test("a read refreshes recency so the touched page survives eviction", async () => {
@@ -231,36 +231,36 @@ test("a read refreshes recency so the touched page survives eviction", async () 
   const pageBytes = Math.max(...pages.map((page) => JSON.stringify(page).length));
   const cache = makeCache({ quotaBytes: 2 * pageBytes + 10 });
 
-  await cache.writePage({ scope: "relayA", threadId: "t1", before: 10, page: pages[0] });
-  await cache.writePage({ scope: "relayA", threadId: "t1", before: 11, page: pages[1] });
+  await cache.writePage({ scope: "relayA", threadId: "t1", before: "c10", page: pages[0] });
+  await cache.writePage({ scope: "relayA", threadId: "t1", before: "c11", page: pages[1] });
 
   // Touch the OLDER page so it becomes most-recently-accessed...
-  assert.ok(await cache.readPage({ scope: "relayA", threadId: "t1", before: 10 }));
+  assert.ok(await cache.readPage({ scope: "relayA", threadId: "t1", before: "c10" }));
   // ...and let the fire-and-forget lastAccess write settle before evicting.
   await new Promise((resolve) => setTimeout(resolve, 25));
 
   // Third write exceeds quota -> the now-least-recently-accessed page (before=11) goes.
-  await cache.writePage({ scope: "relayA", threadId: "t1", before: 12, page: olderPage("t1", 12, 60) });
+  await cache.writePage({ scope: "relayA", threadId: "t1", before: "c12", page: olderPage("t1", 12, 60) });
 
   assert.ok(
-    await cache.readPage({ scope: "relayA", threadId: "t1", before: 10 }),
+    await cache.readPage({ scope: "relayA", threadId: "t1", before: "c10" }),
     "the read-touched page should survive"
   );
   assert.equal(
-    await cache.readPage({ scope: "relayA", threadId: "t1", before: 11 }),
+    await cache.readPage({ scope: "relayA", threadId: "t1", before: "c11" }),
     null,
     "the untouched page should be evicted"
   );
-  assert.ok(await cache.readPage({ scope: "relayA", threadId: "t1", before: 12 }));
+  assert.ok(await cache.readPage({ scope: "relayA", threadId: "t1", before: "c12" }));
 });
 
 test("clearScope removes only that relay's pages", async () => {
   const cache = makeCache();
-  await cache.writePage({ scope: "relayA", threadId: "t1", before: 10, page: olderPage("t1", 10) });
-  await cache.writePage({ scope: "relayB", threadId: "t2", before: 10, page: olderPage("t2", 10) });
+  await cache.writePage({ scope: "relayA", threadId: "t1", before: "c10", page: olderPage("t1", 10) });
+  await cache.writePage({ scope: "relayB", threadId: "t2", before: "c10", page: olderPage("t2", 10) });
   await cache.clearScope("relayA");
-  assert.equal(await cache.readPage({ scope: "relayA", threadId: "t1", before: 10 }), null);
-  assert.ok(await cache.readPage({ scope: "relayB", threadId: "t2", before: 10 }));
+  assert.equal(await cache.readPage({ scope: "relayA", threadId: "t1", before: "c10" }), null);
+  assert.ok(await cache.readPage({ scope: "relayB", threadId: "t2", before: "c10" }));
 });
 
 test("an undecryptable record reads back as a miss (not a throw)", async () => {
@@ -268,7 +268,7 @@ test("an undecryptable record reads back as a miss (not a throw)", async () => {
   // whose subtle.decrypt always fails -> readPage must resolve null.
   const idb = createFakeIndexedDB();
   const good = createTranscriptPageCache({ indexedDb: idb, webCrypto });
-  await good.writePage({ scope: "relayA", threadId: "t1", before: 10, page: olderPage("t1", 10) });
+  await good.writePage({ scope: "relayA", threadId: "t1", before: "c10", page: olderPage("t1", 10) });
 
   const brokenCrypto = {
     getRandomValues: (a) => webCrypto.getRandomValues(a),
@@ -281,15 +281,15 @@ test("an undecryptable record reads back as a miss (not a throw)", async () => {
     },
   };
   const broken = createTranscriptPageCache({ indexedDb: idb, webCrypto: brokenCrypto });
-  const read = await broken.readPage({ scope: "relayA", threadId: "t1", before: 10 });
+  const read = await broken.readPage({ scope: "relayA", threadId: "t1", before: "c10" });
   assert.equal(read, null);
 });
 
 test("plaintext fallback round-trips when WebCrypto.subtle is unavailable", async () => {
   const cache = makeCache({ webCrypto: { getRandomValues: () => {} } }); // no subtle
   const page = olderPage("t1", 10);
-  await cache.writePage({ scope: "relayA", threadId: "t1", before: 10, page });
-  const read = await cache.readPage({ scope: "relayA", threadId: "t1", before: 10 });
+  await cache.writePage({ scope: "relayA", threadId: "t1", before: "c10", page });
+  const read = await cache.readPage({ scope: "relayA", threadId: "t1", before: "c10" });
   assert.deepEqual(read, page);
 });
 
@@ -298,8 +298,8 @@ test("a non-IDBFactory (no cmp) disables the cache entirely", async () => {
     indexedDb: { open() {} }, // looks like IDB but lacks cmp
     webCrypto,
   });
-  await cache.writePage({ scope: "relayA", threadId: "t1", before: 10, page: olderPage("t1", 10) });
-  assert.equal(await cache.readPage({ scope: "relayA", threadId: "t1", before: 10 }), null);
+  await cache.writePage({ scope: "relayA", threadId: "t1", before: "c10", page: olderPage("t1", 10) });
+  assert.equal(await cache.readPage({ scope: "relayA", threadId: "t1", before: "c10" }), null);
 });
 
 // A relay restart rebuilds every thread from provider history, which renumbers item
@@ -308,14 +308,14 @@ test("a non-IDBFactory (no cmp) disables the cache entirely", async () => {
 test("a page cached by one relay generation is not served to the next", async () => {
   const cache = makeCache();
   const page = olderPage("t1", 10);
-  await cache.writePage({ scope: "relayA", threadId: "t1", before: 10, page, generation: "gen-a" });
+  await cache.writePage({ scope: "relayA", threadId: "t1", before: "c10", page, generation: "gen-a" });
 
   assert.equal(
-    await cache.readPage({ scope: "relayA", threadId: "t1", before: 10, generation: "gen-b" }),
+    await cache.readPage({ scope: "relayA", threadId: "t1", before: "c10", generation: "gen-b" }),
     null
   );
   assert.deepEqual(
-    await cache.readPage({ scope: "relayA", threadId: "t1", before: 10, generation: "gen-a" }),
+    await cache.readPage({ scope: "relayA", threadId: "t1", before: "c10", generation: "gen-a" }),
     page,
     "the run that wrote it still reads it"
   );
@@ -326,27 +326,27 @@ test("a page cached by one relay generation is not served to the next", async ()
 test("forgetting a relay clears every generation of its cached history", async () => {
   const cache = makeCache();
   await cache.writePage({
-    scope: "relayA", threadId: "t1", before: 10, page: olderPage("t1", 10), generation: "gen-a",
+    scope: "relayA", threadId: "t1", before: "c10", page: olderPage("t1", 10), generation: "gen-a",
   });
   await cache.writePage({
-    scope: "relayA", threadId: "t1", before: 20, page: olderPage("t1", 20), generation: "gen-b",
+    scope: "relayA", threadId: "t1", before: "c20", page: olderPage("t1", 20), generation: "gen-b",
   });
   await cache.writePage({
-    scope: "relayB", threadId: "t1", before: 30, page: olderPage("t1", 30), generation: "gen-b",
+    scope: "relayB", threadId: "t1", before: "c30", page: olderPage("t1", 30), generation: "gen-b",
   });
 
   await cache.clearScope("relayA");
 
   assert.equal(
-    await cache.readPage({ scope: "relayA", threadId: "t1", before: 10, generation: "gen-a" }),
+    await cache.readPage({ scope: "relayA", threadId: "t1", before: "c10", generation: "gen-a" }),
     null
   );
   assert.equal(
-    await cache.readPage({ scope: "relayA", threadId: "t1", before: 20, generation: "gen-b" }),
+    await cache.readPage({ scope: "relayA", threadId: "t1", before: "c20", generation: "gen-b" }),
     null
   );
   assert.ok(
-    await cache.readPage({ scope: "relayB", threadId: "t1", before: 30, generation: "gen-b" }),
+    await cache.readPage({ scope: "relayB", threadId: "t1", before: "c30", generation: "gen-b" }),
     "another relay's history is untouched"
   );
 });

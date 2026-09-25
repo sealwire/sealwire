@@ -189,6 +189,18 @@ pub(crate) struct CompletedPairing {
 pub(crate) enum BrokerPendingMessage {
     PairingResult(PendingPairingResult),
     TranscriptDelta(PendingTranscriptDelta),
+    TranscriptResync(crate::protocol::TranscriptResyncEvent),
+}
+
+impl BrokerPendingMessage {
+    /// The thread a transcript frame belongs to; `None` for anything else.
+    pub(crate) fn transcript_thread_id(&self) -> Option<&str> {
+        match self {
+            Self::TranscriptDelta(delta) => Some(&delta.thread_id),
+            Self::TranscriptResync(resync) => Some(&resync.thread_id),
+            Self::PairingResult(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

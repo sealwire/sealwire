@@ -6,12 +6,16 @@ import { settleTranscriptProjection } from "../transcript/store.js";
 import { createViewedThreadRefreshLatch } from "../../shared/viewed-thread-refresh.js";
 import {
   applyOrchestratorLoadFinally,
+  applyRefreshedOrchestratorPage,
   beginOrchestratorLoad,
+  loadOlderOrchestratorPage,
   nextOrchestratorRefreshObservations,
   nextOrchestratorWasWorking,
+  orchestratorRefreshPin,
   orchestratorTranscriptRefreshDecision,
   takeDeferredOrchestratorRefresh,
 } from "../orchestrator-transcript-refresh.js";
+import { relayError } from "../../shared/transcript-protocol.js";
 
 // Both review rounds found bugs my earlier tests missed because they only exercised the
 // hydration STORE. The defect lived in the reducer that sits on top of it: it reconciled
@@ -301,6 +305,62 @@ test("a lagged stream starts an authoritative fetch, not just a dirty flag", () 
   );
 });
 
+// The relay's resync notice names the thread it is about. For a thread shown beside
+// the live one, only that thread's copy is re-read, and only if it is older.
+test("a resync for the viewed thread re-reads its pin only when the pin is behind", () => {
+  const h = harness({ text: "a".repeat(1700) });
+  const pin = { threadId: "thread-bg", entries: [], pageRevision: 10, loading: false };
+  h.state.viewOnlyThread = pin;
+
+  h.controller.applySessionStreamEvent("transcript_resync", {
+    thread_id: "thread-bg",
+    revision: 10,
+    reason: "watch_started",
+  });
+  assert.equal(h.state.viewOnlyThread, pin, "the pin already holds that revision");
+
+  h.controller.applySessionStreamEvent("transcript_resync", {
+    thread_id: "thread-bg",
+    revision: 11,
+    reason: "rows_not_streamed",
+  });
+  assert.equal(h.state.viewOnlyThread.tailGap, true);
+  assert.equal(h.hydrationCalls.length, 0, "the live thread's window is not refetched");
+  assert.equal(h.state.transcriptHydrationEntries.get("item-1").content_state, "full");
+});
+
+test("a resync naming the live thread repairs the live window only when it is behind", () => {
+  const h = harness({ text: "a".repeat(1700) });
+
+  h.controller.applySessionStreamEvent("transcript_resync", {
+    thread_id: "thread-1",
+    revision: 1,
+    reason: "watch_started",
+  });
+  assert.equal(h.hydrationCalls.length, 0, "the window already holds revision 1");
+
+  h.controller.applySessionStreamEvent("transcript_resync", {
+    thread_id: "thread-1",
+    revision: 5,
+    reason: "rows_not_streamed",
+  });
+  assert.equal(h.hydrationCalls.length, 1);
+});
+
+// Dropped frames could have been for any thread the connection streams, so every
+// shown copy is re-read, not just the live window.
+test("a lagged connection re-reads the live window, the pin and the Orchestrator", () => {
+  const h = harness({ text: "a".repeat(1700) });
+  h.state.viewOnlyThread = { threadId: "thread-bg", entries: [], pageRevision: 10, loading: false };
+  h.state.orchestratorEntriesThreadId = "orch-1";
+
+  h.controller.applySessionStreamEvent("transcript_stream_lagged", { dropped: 4 });
+
+  assert.equal(h.hydrationCalls.length, 1);
+  assert.equal(h.state.viewOnlyThread.tailGap, true);
+  assert.equal(h.state.orchestratorTailGap, true);
+});
+
 // REVIEW P2: a delta already covered by the initial snapshot legitimately arrives after
 // it (the stream subscribes before the snapshot renders). Taking its revision verbatim
 // walked the cursor BACKWARDS, making later snapshots look stale.
@@ -437,7 +497,7 @@ function orchHarness({ orchThreadId = "orch-1", entries = null } = {}) {
     });
   const orchText = () =>
     state.orchestratorEntries.find((entry) => entry.item_id === "orch-item-1")?.text;
-  return { state, deliver, orchText, rendered };
+  return { state, deliver, orchText, rendered, controller };
 }
 
 test("a delta for the Orchestrator extends its entries and repaints", () => {
@@ -983,4 +1043,99 @@ test("an offsetless empty delta with NO number still revokes the keyed proof", (
     false,
     "an unnumbered row must not sit in a window still claiming to be keyed"
   );
+});
+
+test("a resync for the Orchestrator re-reads its pane, not the conversation", () => {
+  const h = orchHarness();
+  const pin = { threadId: "thread-bg", entries: [], pageRevision: 1, loading: false };
+  h.state.viewOnlyThread = pin;
+
+  h.controller.applySessionStreamEvent("transcript_resync", {
+    thread_id: "orch-1",
+    revision: 4,
+    reason: "rows_not_streamed",
+  });
+
+  assert.equal(h.state.orchestratorTailGap, true);
+  assert.equal(h.state.viewOnlyThread, pin);
+});
+
+// Retrying a cursor the relay can no longer read sends the same dead cursor forever.
+test("a rejected Orchestrator cursor is answered with the pane's latest page", async () => {
+  const h = orchHarness({
+    entries: [{ item_id: "orch-old", kind: "agent_text", text: "Old", status: "done", order_seq: 0 }],
+  });
+  h.state.orchestratorOlderCursor = "tc1.gone.0";
+  h.state.orchestratorHistoryExtended = true;
+
+  const outcome = await loadOlderOrchestratorPage(h.state, ORCH_THREAD, async () => {
+    throw relayError("transcript cursor has expired", "transcript_cursor_rejected");
+  });
+  assert.deepEqual(outcome, { changed: true, result: null });
+
+  const loads = [];
+  maybeRefreshOrchestrator(h.state, orchSession(), loads);
+  assert.equal(loads.length, 1);
+  assert.equal(loads[0].repair, true);
+
+  applyRefreshedOrchestratorPage(
+    h.state,
+    orchestratorRefreshPin(h.state, ORCH_THREAD),
+    {
+      thread_id: ORCH_THREAD,
+      entries: [
+        { item_id: "orch-tail", kind: "agent_text", text: "Tail", status: "done", order_seq: 1048576 },
+      ],
+      prev_cursor: "tc1.fresh.0",
+    },
+    ORCH_THREAD
+  );
+  assert.equal(h.state.orchestratorOlderCursor, "tc1.fresh.0");
+  assert.deepEqual(h.state.orchestratorEntries.map((entry) => entry.item_id), ["orch-tail"]);
+});
+
+test("an Orchestrator page the relay is still reading is asked for again, until the pane moves on", async () => {
+  const h = orchHarness({
+    entries: [{ item_id: "orch-new", kind: "agent_text", text: "New", status: "done", order_seq: 0 }],
+  });
+  h.state.orchestratorOlderCursor = "tc1.held.0";
+  h.state.orchestratorEntriesGeneration = "";
+  const requested = [];
+  const stillReadingThen = (page) => async (_threadId, { before }) => {
+    requested.push(before);
+    if (requested.length === 1) {
+      throw relayError("still reading", "transcript_history_pending");
+    }
+    return page;
+  };
+
+  const outcome = await loadOlderOrchestratorPage(
+    h.state,
+    ORCH_THREAD,
+    stillReadingThen({
+      thread_id: ORCH_THREAD,
+      entries: [
+        { item_id: "orch-older", kind: "agent_text", text: "Older", status: "done", order_seq: -1048576 },
+      ],
+      prev_cursor: null,
+    }),
+    { waitBeforeRetry: async () => {} }
+  );
+  assert.deepEqual(outcome, { changed: true, result: false });
+  assert.deepEqual(requested, ["tc1.held.0", "tc1.held.0"]);
+  assert.deepEqual(
+    h.state.orchestratorEntries.map((entry) => entry.item_id),
+    ["orch-older", "orch-new"]
+  );
+
+  requested.length = 0;
+  h.state.orchestratorOlderCursor = "tc1.held.1";
+  await assert.rejects(
+    loadOlderOrchestratorPage(h.state, ORCH_THREAD, stillReadingThen(null), {
+      waitBeforeRetry: async () => {
+        h.state.orchestratorLoadGeneration = (h.state.orchestratorLoadGeneration || 0) + 1;
+      },
+    })
+  );
+  assert.deepEqual(requested, ["tc1.held.1"], "a reloaded pane is not asked for again");
 });

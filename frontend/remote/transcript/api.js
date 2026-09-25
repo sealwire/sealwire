@@ -8,7 +8,6 @@ export function createTranscriptPageFetcher(dispatchOrRecover) {
     const result = await dispatchOrRecover("fetch_thread_transcript", {
       input: {
         before,
-        cursor: before,
         thread_id: threadId,
       },
     });

@@ -5,7 +5,11 @@ import {
 } from "../../shared/transcript-generation.js";
 import { transcriptRowKey } from "../../shared/transcript-row-key.js";
 import { openSessionStream, sessionStreamUrl } from "../../session-stream.js";
-import { applyDeltaToViewOnlyPin } from "../view-only-thread.js";
+import { applyDeltaToViewOnlyPin, resyncViewOnlyPin } from "../view-only-thread.js";
+import {
+  TRANSCRIPT_RESYNC_EVENT,
+  TRANSCRIPT_STREAM_LAGGED_EVENT,
+} from "../../shared/transcript-protocol.js";
 import {
   appendTranscriptDelta,
   applyEntryPatchToWindow,
@@ -248,35 +252,85 @@ export function createStreamController(ctx) {
     state.sessionStream = stream;
   }
 
+  // Whichever view holds `thread_id` re-reads its tail, and only if it is behind.
+  function applyTranscriptResync(event) {
+    const threadId = event?.thread_id || null;
+    if (!threadId) {
+      return;
+    }
+    const revision = Number.isSafeInteger(event.revision) ? event.revision : null;
+    if (threadId === (state.session?.active_thread_id || null)) {
+      const held = state.session?.transcript_revision;
+      if (revision == null || !Number.isSafeInteger(held) || held < revision) {
+        repairLiveWindow(TRANSCRIPT_RESYNC_EVENT);
+      }
+      return;
+    }
+    markShownThreadBehind(threadId, revision);
+  }
+
+  // The connection dropped frames: every view it streams into may be short.
+  function applyTranscriptStreamLagged() {
+    repairLiveWindow(TRANSCRIPT_STREAM_LAGGED_EVENT);
+    for (const threadId of [state.viewOnlyThread?.threadId, state.orchestratorEntriesThreadId]) {
+      if (threadId) {
+        markShownThreadBehind(threadId, null);
+      }
+    }
+  }
+
+  function markShownThreadBehind(threadId, revision) {
+    let changed = false;
+    const pin = state.viewOnlyThread;
+    const nextPin = resyncViewOnlyPin(pin, threadId, revision);
+    if (nextPin !== pin) {
+      state.viewOnlyThread = nextPin;
+      changed = true;
+    }
+    if (threadId === state.orchestratorEntriesThreadId) {
+      state.orchestratorTailGap = true;
+      if (state.orchestratorEntriesLoading) {
+        state.orchestratorDeltaDuringFetch = true;
+      }
+      changed = true;
+    }
+    if (changed) {
+      queueTranscriptRender(state.session, 0);
+    }
+  }
+
+  function repairLiveWindow(reason) {
+    // Marking the window dirty is NOT enough: the re-hydration gate only fires on a
+    // later render whose snapshot still says truncated, and snapshot/delta frames are
+    // merged with `stream::select` — so the newest snapshot can arrive BEFORE this
+    // notice. With no further state change afterwards, nothing would ever refetch.
+    // Drive the fetch directly instead.
+    //
+    // Settle FIRST: renderedTranscriptFromWindow treats a non-"full" entry as
+    // untrusted and falls back to the array's copy, which for a still-pending
+    // delta is the stale pre-delta text — invalidating before that delta
+    // settles paints a rollback. Mirrors remote's scheduleTranscriptGapRepair.
+    settleTranscriptProjection(state);
+    invalidateTranscriptWindowForRepair(state);
+    void ensureConversationTranscript?.(state.session);
+    // Whatever text is already pending must not sit out the coalescing
+    // window behind a signal that says the current view may already be
+    // stale — bring it forward now, same as the plan's other immediate
+    // classes.
+    transcriptFlushScheduler.flushNow(reason);
+  }
+
   function applySessionStreamEvent(type, event) {
     if (!state.session) {
       return;
     }
     const kind = event?.kind || type;
-    if (kind === "transcript_stream_lagged") {
-      // We missed delta frames. Our cached bodies may be short, and a compacted
-      // snapshot cannot fix that on its own (the merge keeps the longer local body
-      // over a shorter preview).
-      //
-      // Marking the window dirty is NOT enough: the re-hydration gate only fires on a
-      // later render whose snapshot still says truncated, and snapshot/delta frames are
-      // merged with `stream::select` — so the newest snapshot can arrive BEFORE this
-      // notice. With no further state change afterwards, nothing would ever refetch.
-      // Drive the fetch directly instead.
-      //
-      // Settle FIRST: renderedTranscriptFromWindow treats a non-"full" entry as
-      // untrusted and falls back to the array's copy, which for a still-pending
-      // delta is the stale pre-delta text — invalidating before that delta
-      // settles paints a rollback. Mirrors remote's scheduleTranscriptGapRepair
-      // (session-ops.js:619-630).
-      settleTranscriptProjection(state);
-      invalidateTranscriptWindowForRepair(state);
-      void ensureConversationTranscript?.(state.session);
-      // Whatever text is already pending must not sit out the coalescing
-      // window behind a signal that says the current view may already be
-      // stale — bring it forward now, same as the plan's other immediate
-      // classes.
-      transcriptFlushScheduler.flushNow("transcript_stream_lagged");
+    if (kind === TRANSCRIPT_RESYNC_EVENT) {
+      applyTranscriptResync(event);
+      return;
+    }
+    if (kind === TRANSCRIPT_STREAM_LAGGED_EVENT) {
+      applyTranscriptStreamLagged();
       return;
     }
     if (kind === "session_meta_updated") {

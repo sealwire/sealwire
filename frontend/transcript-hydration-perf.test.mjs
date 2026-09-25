@@ -42,7 +42,7 @@ function hydratedState(n) {
     session: { active_thread_id: "t1", transcript_revision: n },
     transcriptHydrationEntries: new Map(ids.map((id, i) => [id, entry(i)])),
     transcriptHydrationOrder: [...ids],
-    transcriptHydrationOlderCursor: 1,
+    transcriptHydrationOlderCursor: "c1",
     transcriptHydrationSignature: "t1|sig",
     transcriptHydrationStatus: "complete",
     transcriptHydrationTailReady: true,

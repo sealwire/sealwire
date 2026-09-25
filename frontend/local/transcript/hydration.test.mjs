@@ -11,6 +11,7 @@ import {
   restoreHydratedTranscript,
   switchTranscriptHydrationThread,
 } from "./store.js";
+import { relayError } from "../../shared/transcript-protocol.js";
 
 function createState(overrides = {}) {
   return {
@@ -82,6 +83,63 @@ test("hydrateLocalTranscript replaces a truncated tail with the full tail page",
   );
 });
 
+// The relay rebuilt the thread between the tail read and the backfill that followed it.
+test("a backfill whose cursor is rejected asks for a reload rather than reporting a failure", async () => {
+  const state = createState();
+  const snapshot = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-2",
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-2",
+        kind: "agent_text",
+        text: "hello...",
+        status: "completed",
+        turn_id: "turn-2",
+        tool: null,
+      },
+    ],
+  };
+  const errors = [];
+  const rejected = [];
+
+  await hydrateLocalTranscript(state, snapshot, {
+    async fetchPage({ before }) {
+      if (before != null) {
+        throw relayError("transcript cursor has expired", "transcript_cursor_rejected");
+      }
+      return {
+        thread_id: "thread-1",
+        prev_cursor: "tc1.rebuilt-away.0",
+        entries: [
+          {
+            item_id: "item-2",
+            kind: "agent_text",
+            text: "hello world",
+            status: "completed",
+            turn_id: "turn-2",
+            tool: null,
+          },
+        ],
+      };
+    },
+    onError(error) {
+      errors.push(error.message);
+    },
+    onCursorRejected(error) {
+      rejected.push(error.code);
+    },
+    onProgress(nextSnapshot) {
+      state.session = nextSnapshot;
+    },
+  });
+
+  assert.deepEqual(errors, []);
+  assert.deepEqual(rejected, ["transcript_cursor_rejected"]);
+  assert.equal(state.transcriptHydrationPromise, null);
+});
+
 test("hydrateLocalTranscript backfills sparse oversized tail pages", async () => {
   const state = createState();
   const snapshot = {
@@ -106,7 +164,7 @@ test("hydrateLocalTranscript backfills sparse oversized tail pages", async () =>
   const pages = [
     {
       thread_id: "thread-1",
-      prev_cursor: 8,
+      prev_cursor: "c8",
       entries: [
         {
           item_id: "item-12",
@@ -123,7 +181,7 @@ test("hydrateLocalTranscript backfills sparse oversized tail pages", async () =>
     },
     {
       thread_id: "thread-1",
-      prev_cursor: 4,
+      prev_cursor: "c4",
       entries: Array.from({ length: 4 }, (_, index) => ({
         item_id: `item-${index + 8}`,
         kind: "agent_text",
@@ -135,7 +193,7 @@ test("hydrateLocalTranscript backfills sparse oversized tail pages", async () =>
     },
     {
       thread_id: "thread-1",
-      prev_cursor: 1,
+      prev_cursor: "c1",
       entries: Array.from({ length: 4 }, (_, index) => ({
         item_id: `item-${index + 4}`,
         kind: "user_text",
@@ -159,7 +217,7 @@ test("hydrateLocalTranscript backfills sparse oversized tail pages", async () =>
     },
   });
 
-  assert.deepEqual(requestedBefore, [null, 8, 4]);
+  assert.deepEqual(requestedBefore, [null, "c8", "c4"]);
   assert.deepEqual(
     state.session.transcript.map((entry) => entry.item_id),
     [
@@ -174,7 +232,7 @@ test("hydrateLocalTranscript backfills sparse oversized tail pages", async () =>
       "item-12",
     ]
   );
-  assert.equal(state.transcriptHydrationOlderCursor, 1);
+  assert.equal(state.transcriptHydrationOlderCursor, "c1");
   assert.equal(state.session.transcript_truncated, true);
   assert.deepEqual(
     progress.at(-1)?.transcript?.map((entry) => entry.item_id),
@@ -862,7 +920,7 @@ test("loadOlderLocalTranscript prepends older hydrated entries", async () => {
       }],
     ]),
     transcriptHydrationOrder: ["item-2", "item-3"],
-    transcriptHydrationOlderCursor: 1,
+    transcriptHydrationOlderCursor: "c1",
     transcriptHydrationSignature: "signature-1",
     transcriptHydrationTailReady: true,
     transcriptHydrationThreadId: "thread-1",
@@ -872,7 +930,7 @@ test("loadOlderLocalTranscript prepends older hydrated entries", async () => {
   await loadOlderLocalTranscript(state, {
     async fetchPage({ threadId, before }) {
       assert.equal(threadId, "thread-1");
-      assert.equal(before, 1);
+      assert.equal(before, "c1");
       return {
         thread_id: "thread-1",
         prev_cursor: null,
@@ -923,6 +981,127 @@ test("a synchronous older-page fetch failure releases its owned loading gate", a
   assert.deepEqual(errors, ["synchronous older-page setup failure"]);
   assert.equal(state.transcriptHydrationPromise, null);
   assert.equal(state.transcriptHydrationStatus, "idle");
+});
+
+// A cursor the relay can no longer read is not a failure to retry: retrying sends the
+// same dead cursor. The surface rebuilds the window from the latest page instead.
+test("a rejected older-page cursor asks for a reload rather than reporting a failure", async () => {
+  const state = createState({
+    transcriptHydrationOlderCursor: "tc1.gone.0",
+    transcriptHydrationStatus: "idle",
+  });
+  const errors = [];
+  const rejected = [];
+
+  const result = await loadOlderLocalTranscript(state, {
+    async fetchPage() {
+      throw relayError("transcript cursor has expired", "transcript_cursor_rejected");
+    },
+    onError(error) {
+      errors.push(error.message);
+    },
+    onCursorRejected(error) {
+      rejected.push(error.code);
+    },
+    onProgress() {},
+  });
+
+  assert.equal(result, null);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(rejected, ["transcript_cursor_rejected"]);
+  assert.equal(state.transcriptHydrationPromise, null);
+  assert.equal(state.transcriptHydrationStatus, "idle");
+});
+
+function windowWithOlderHistory() {
+  const tail = {
+    item_id: "item-2",
+    kind: "agent_text",
+    text: "latest reply",
+    status: "completed",
+    turn_id: "turn-2",
+    tool: null,
+  };
+  return createState({
+    session: { active_thread_id: "thread-1", transcript: [tail], transcript_truncated: true },
+    transcriptHydrationBaseSnapshot: {
+      active_thread_id: "thread-1",
+      transcript: [tail],
+      transcript_truncated: true,
+    },
+    transcriptHydrationEntries: new Map([["item-2", tail]]),
+    transcriptHydrationOrder: ["item-2"],
+    transcriptHydrationOlderCursor: "c1",
+    transcriptHydrationSignature: "signature-1",
+    transcriptHydrationTailReady: true,
+    transcriptHydrationThreadId: "thread-1",
+  });
+}
+
+const olderQuestionPage = {
+  thread_id: "thread-1",
+  prev_cursor: null,
+  entries: [
+    {
+      item_id: "item-1",
+      kind: "user_text",
+      text: "older question",
+      status: "completed",
+      turn_id: "turn-1",
+      tool: null,
+    },
+  ],
+};
+
+// The relay spent its provider budget on pages with no rows. Waiting for the reader to
+// scroll again is the stall this answer exists to avoid: the loader asks again itself.
+test("an older page the relay is still reading is asked for again without a new gesture", async () => {
+  const state = windowWithOlderHistory();
+  const requested = [];
+  const errors = [];
+
+  const result = await loadOlderLocalTranscript(state, {
+    async fetchPage({ before }) {
+      requested.push(before);
+      if (requested.length === 1) {
+        throw relayError("still reading", "transcript_history_pending");
+      }
+      return olderQuestionPage;
+    },
+    waitBeforeRetry: async () => {},
+    onError(error) {
+      errors.push(error.message);
+    },
+    onProgress(nextSnapshot) {
+      state.session = nextSnapshot;
+    },
+  });
+
+  assert.equal(result, false, "the oldest page arrived");
+  assert.deepEqual(requested, ["c1", "c1"]);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(state.transcriptHydrationOrder, ["item-1", "item-2"]);
+});
+
+test("a thread switch during the wait stops asking for the page it left", async () => {
+  const state = windowWithOlderHistory();
+  const requested = [];
+
+  const result = await loadOlderLocalTranscript(state, {
+    async fetchPage({ before }) {
+      requested.push(before);
+      throw relayError("still reading", "transcript_history_pending");
+    },
+    waitBeforeRetry: async () => {
+      state.session = { ...state.session, active_thread_id: "thread-2" };
+    },
+    onError() {},
+    onProgress() {},
+  });
+
+  assert.equal(result, null);
+  assert.deepEqual(requested, ["c1"]);
+  assert.deepEqual(state.transcriptHydrationOrder, ["item-2"]);
 });
 
 test("an older-page request made during a streaming tail refresh pages once the refresh settles", async () => {
@@ -1016,7 +1195,7 @@ test("clearTranscriptHydration resets local hydration state", () => {
     transcriptHydrationBaseSnapshot: { active_thread_id: "thread-1" },
     transcriptHydrationEntries: new Map([["item-1", { item_id: "item-1" }]]),
     transcriptHydrationOrder: ["item-1"],
-    transcriptHydrationOlderCursor: 5,
+    transcriptHydrationOlderCursor: "c5",
     transcriptHydrationPromise: Promise.resolve(),
     transcriptHydrationSignature: "signature-1",
     transcriptHydrationStatus: "loading",
@@ -1056,7 +1235,7 @@ test("switching local threads retains the loaded window and restores it on switc
       ["a3", olderEntry("a3")],
     ]),
     transcriptHydrationOrder: ["a1", "a2", "a3"],
-    transcriptHydrationOlderCursor: 5,
+    transcriptHydrationOlderCursor: "c5",
     transcriptHydrationSignature: "thread-A|sig",
     transcriptHydrationStatus: "complete",
     transcriptHydrationTailReady: true,
@@ -1076,7 +1255,7 @@ test("switching local threads retains the loaded window and restores it on switc
   // Switch back to A: the older window is restored without a refetch.
   switchTranscriptHydrationThread(state, "thread-A");
   assert.deepEqual(state.transcriptHydrationOrder, ["a1", "a2", "a3"]);
-  assert.equal(state.transcriptHydrationOlderCursor, 5);
+  assert.equal(state.transcriptHydrationOlderCursor, "c5");
   assert.equal(state.transcriptHydrationTailReady, true);
 
   // A fresh compact snapshot for A merges its live tail onto the restored window

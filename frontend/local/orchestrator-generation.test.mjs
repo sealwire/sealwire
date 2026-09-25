@@ -17,7 +17,7 @@ function stateHolding(generation, entries) {
     orchestratorEntries: entries,
     orchestratorEntriesThreadId: THREAD,
     orchestratorEntriesGeneration: generation,
-    orchestratorOlderCursor: 5,
+    orchestratorOlderCursor: "c5",
     orchestratorHistoryExtended: true,
   };
 }

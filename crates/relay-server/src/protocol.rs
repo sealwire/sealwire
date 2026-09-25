@@ -41,6 +41,27 @@ pub struct ErrorBody {
     pub message: String,
 }
 
+/// Failures a client acts on rather than only shows: `error.code` over HTTP and
+/// `error_code` on a remote action result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientErrorCode {
+    /// The `before` cursor can no longer be read; start again from the latest page.
+    TranscriptCursorRejected,
+    /// The relay read provider history on and found nothing yet; ask again with the same
+    /// cursor, which resumes where that read stopped.
+    TranscriptHistoryPending,
+}
+
+impl ClientErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TranscriptCursorRejected => "transcript_cursor_rejected",
+            Self::TranscriptHistoryPending => "transcript_history_pending",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HealthResponse {
     pub status: &'static str,
@@ -2103,10 +2124,27 @@ pub struct TranscriptEntryView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadThreadTranscriptInput {
     pub thread_id: String,
-    pub cursor: Option<usize>,
-    pub before: Option<usize>,
+    /// The page of rows older than this position; `None` reads the latest page.
+    #[serde(default)]
+    pub before: Option<TranscriptCursorToken>,
     #[serde(default)]
     pub device_id: Option<String>,
+}
+
+/// A transcript position the relay minted (see `state::relay::transcript_cursor`).
+/// Clients hand it back as `before` and never parse or compare it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TranscriptCursorToken(String);
+
+impl TranscriptCursorToken {
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2133,13 +2171,18 @@ pub struct ThreadTranscriptResponse {
     pub transcript_generation: String,
     pub revision: u64,
     pub server_time: u64,
-    pub entry_seq_start: Option<u64>,
-    pub entry_seq_end: Option<u64>,
     pub entries: Vec<TranscriptEntryView>,
-    pub next_cursor: Option<usize>,
-    pub prev_cursor: Option<usize>,
+    /// Where the next older page starts; `None` once history is exhausted.
+    pub prev_cursor: Option<TranscriptCursorToken>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_state: Option<ThreadStateView>,
+}
+
+/// One page's rows, packed newest-first under the byte budget, and the index of its
+/// first row: the caller owns the rows' order keys, so it mints the cursor.
+pub(crate) struct TranscriptPageWindow {
+    pub(crate) page: ThreadTranscriptResponse,
+    pub(crate) start: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3128,6 +3171,76 @@ pub struct TranscriptDeltaEvent {
     pub text_offset: Option<u64>,
 }
 
+/// SSE event name and payload `kind` of [`TranscriptResyncEvent`].
+pub const TRANSCRIPT_RESYNC_EVENT_KIND: &str = "transcript_resync";
+
+/// Local SSE only, and about the connection, not a thread: it fell behind and frames
+/// for any thread it watches were dropped.
+pub const TRANSCRIPT_STREAM_LAGGED_EVENT_KIND: &str = "transcript_stream_lagged";
+
+/// "Re-read `thread_id`'s tail if what you hold predates `revision`": for row changes no
+/// delta carries. A surface already at `revision` ignores it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TranscriptResyncEvent {
+    /// Always [`TRANSCRIPT_RESYNC_EVENT_KIND`]: an encrypted payload has to name itself.
+    pub kind: &'static str,
+    pub thread_id: String,
+    /// Which run the revision belongs to; stamped by `queue_broker_message`.
+    pub transcript_generation: String,
+    pub revision: u64,
+    pub reason: TranscriptResyncReason,
+}
+
+impl TranscriptResyncEvent {
+    pub fn new(thread_id: &str, revision: u64, reason: TranscriptResyncReason) -> Self {
+        Self {
+            kind: TRANSCRIPT_RESYNC_EVENT_KIND,
+            thread_id: thread_id.to_string(),
+            transcript_generation: String::new(),
+            revision,
+            reason,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptResyncReason {
+    /// A row no delta carries was written: a user message on a background thread.
+    RowsNotStreamed,
+    /// The surface just started watching; rows written before its watch took effect
+    /// were never streamed to it, though it may have read the tail before they were.
+    WatchStarted,
+    /// The broker backlog overflowed while undelivered, and this thread's frames in it
+    /// were discarded.
+    FramesDropped,
+}
+
+/// One channel on purpose: a resync overtaken by the deltas behind it would look stale
+/// and be skipped.
+#[derive(Debug, Clone)]
+pub enum LocalTranscriptEvent {
+    Delta(TranscriptDeltaEvent),
+    Resync(TranscriptResyncEvent),
+}
+
+impl LocalTranscriptEvent {
+    pub fn thread_id(&self) -> &str {
+        match self {
+            Self::Delta(delta) => &delta.thread_id,
+            Self::Resync(resync) => &resync.thread_id,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn into_delta(self) -> TranscriptDeltaEvent {
+        match self {
+            Self::Delta(delta) => delta,
+            Self::Resync(resync) => panic!("expected a delta, got {resync:?}"),
+        }
+    }
+}
+
 /// A surface declaring which threads it currently has on screen, so the relay only
 /// streams transcript deltas that the surface can actually render. An empty list
 /// clears the declaration, which restores the "just the active thread" default rather
@@ -3740,15 +3853,11 @@ pub struct ApplyFileChangeReceipt {
 
 const THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES: usize = 20_000;
 
-// Upper bound on the serialized bytes of a ThreadTranscriptResponse *envelope*
-// (every field except the entries-array content), used for incremental page
-// sizing in `build_reverse_thread_transcript_page`. It must be >= the real
-// envelope for any cursor/seq values so the running estimate never under-counts
-// and a page can never exceed the byte budget. The real worst case is ~242 bytes
-// (all u64/usize fields at 20 digits, both cursors present) plus
-// `"transcript_generation":"<uuid>",` at 62 — the pages sized here are built
-// UNSTAMPED, so that field is empty while sizing and paid for after. `thread_id`
-// length is added on top at the call site.
+// Upper bound on the serialized bytes of a ThreadTranscriptResponse *envelope* (every
+// field but the entries), so incremental page sizing never under-counts. The real worst
+// case is ~220 bytes: u64 fields at 20 digits, a cursor token, and the
+// `"transcript_generation":"<uuid>",` the page is stamped with after sizing.
+// `thread_id` length is added at the call site.
 const THREAD_TRANSCRIPT_ENVELOPE_UPPER_BOUND_BYTES: usize = 384;
 
 impl ThreadTranscriptResponse {
@@ -3759,82 +3868,30 @@ impl ThreadTranscriptResponse {
         self
     }
 
-    pub(crate) fn from_provider_page(
+    /// The page of rows ending just below `upper_bound`, from `entry_at(index)`.
+    pub(crate) fn window_ending_at<F>(
         thread_id: String,
-        mut entries: Vec<TranscriptEntryView>,
-        prev_cursor: Option<usize>,
+        upper_bound: usize,
         revision: u64,
-    ) -> Self {
-        strip_file_change_diffs_for_transport(&mut entries);
-        ThreadTranscriptResponse {
-            thread_id,
-            // Stamped by the caller that holds the relay (see `stamp_generation`).
-            transcript_generation: String::new(),
-            revision,
-            server_time: unix_now_secs(),
-            entry_seq_start: None,
-            entry_seq_end: None,
-            entries,
-            next_cursor: None,
-            prev_cursor,
-            thread_state: None,
-        }
+        entry_at: F,
+    ) -> TranscriptPageWindow
+    where
+        F: FnMut(usize) -> TranscriptEntryView,
+    {
+        build_reverse_thread_transcript_window(&thread_id, upper_bound, revision, entry_at)
     }
 
-    #[cfg(test)]
-    pub fn from_transcript(
-        thread_id: String,
-        mut transcript: Vec<TranscriptEntryView>,
-        cursor: usize,
-    ) -> Self {
-        strip_file_change_diffs_for_transport(&mut transcript);
-        let mut selected = Vec::new();
-        let mut index = cursor.min(transcript.len());
-
-        while index < transcript.len() {
-            selected.push(transcript[index].clone());
-            let candidate = build_thread_transcript_page(
-                &thread_id,
-                &selected,
-                None,
-                None,
-                0,
-                cursor.min(transcript.len()),
-            );
-            if serialized_len(&candidate) > THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES
-                && selected.len() > 1
-            {
-                selected.pop();
-                break;
-            }
-            index += 1;
-        }
-
-        if selected.is_empty() && index < transcript.len() {
-            selected.push(transcript[index].clone());
-            index += 1;
-        }
-
-        build_thread_transcript_page(
-            &thread_id,
-            &selected,
-            (index < transcript.len()).then_some(index),
-            None,
-            0,
-            cursor.min(transcript.len()),
-        )
-    }
-
-    #[cfg(test)]
-    pub fn from_transcript_tail(
-        thread_id: String,
-        transcript: Vec<TranscriptEntryView>,
-        revision: u64,
-    ) -> Self {
-        let transcript_len = transcript.len();
-        Self::from_transcript_source(thread_id, transcript_len, None, revision, |index| {
-            transcript[index].clone()
-        })
+    /// Pins `THREAD_TRANSCRIPT_ENVELOPE_UPPER_BOUND_BYTES`: measured as sent, once the
+    /// caller has set the cursor and before the generation stamp, which is simulated.
+    pub(crate) fn debug_assert_within_budget(&self) {
+        debug_assert!(
+            self.entries.len() <= 1
+                || serialized_len(&self.clone().stamp_generation("0".repeat(36)))
+                    <= THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES,
+            "multi-entry transcript page exceeded budget ({} bytes); \
+             THREAD_TRANSCRIPT_ENVELOPE_UPPER_BOUND_BYTES may be too small",
+            serialized_len(&self.clone().stamp_generation("0".repeat(36))),
+        );
     }
 
     #[cfg(test)]
@@ -3843,31 +3900,11 @@ impl ThreadTranscriptResponse {
         transcript: Vec<TranscriptEntryView>,
         before: Option<usize>,
         revision: u64,
-    ) -> Self {
-        let transcript_len = transcript.len();
-        Self::from_transcript_source(thread_id, transcript_len, before, revision, |index| {
+    ) -> TranscriptPageWindow {
+        let upper_bound = before.unwrap_or(transcript.len()).min(transcript.len());
+        Self::window_ending_at(thread_id, upper_bound, revision, |index| {
             transcript[index].clone()
         })
-    }
-
-    pub(crate) fn from_transcript_source<F>(
-        thread_id: String,
-        transcript_len: usize,
-        before: Option<usize>,
-        revision: u64,
-        entry_at: F,
-    ) -> Self
-    where
-        F: FnMut(usize) -> TranscriptEntryView,
-    {
-        let upper_bound = before.unwrap_or(transcript_len).min(transcript_len);
-        build_reverse_thread_transcript_page_from_source(
-            &thread_id,
-            transcript_len,
-            upper_bound,
-            revision,
-            entry_at,
-        )
     }
 }
 
@@ -3970,33 +4007,26 @@ impl ThreadEntryDetailResponse {
 
 fn build_thread_transcript_page(
     thread_id: &str,
-    entries: &[TranscriptEntryView],
-    next_cursor: Option<usize>,
-    prev_cursor: Option<usize>,
+    entries: Vec<TranscriptEntryView>,
     revision: u64,
-    start_index: usize,
 ) -> ThreadTranscriptResponse {
     ThreadTranscriptResponse {
         thread_id: thread_id.to_string(),
         transcript_generation: String::new(),
         revision,
         server_time: unix_now_secs(),
-        entry_seq_start: (!entries.is_empty()).then_some(start_index as u64 + 1),
-        entry_seq_end: (!entries.is_empty()).then_some(start_index as u64 + entries.len() as u64),
-        entries: entries.to_vec(),
-        next_cursor,
-        prev_cursor,
+        entries,
+        prev_cursor: None,
         thread_state: None,
     }
 }
 
-fn build_reverse_thread_transcript_page_from_source<F>(
+fn build_reverse_thread_transcript_window<F>(
     thread_id: &str,
-    transcript_len: usize,
     upper_bound: usize,
     revision: u64,
     mut entry_at: F,
-) -> ThreadTranscriptResponse
+) -> TranscriptPageWindow
 where
     F: FnMut(usize) -> TranscriptEntryView,
 {
@@ -4019,7 +4049,7 @@ where
         // For the tentative (count + 1) entries that is `+ count` commas.
         // Saturating: `serialized_len` returns usize::MAX on a (here impossible)
         // serialize failure; saturating keeps such an entry "oversized" instead
-        // of overflow-panicking, matching the old code's graceful handling.
+        // of overflow-panicking.
         let estimated = envelope_upper_bound
             .saturating_add(entry_bytes_sum)
             .saturating_add(entry_len)
@@ -4032,43 +4062,11 @@ where
         index -= 1;
     }
 
-    // Always emit at least one entry: an oversized single entry is allowed to
-    // exceed the budget because splitting it would corrupt the transcript.
-    // (Defensive — the loop above already includes the first entry unconditionally
-    // whenever `upper_bound > 0`.)
-    if selected_reversed.is_empty() && upper_bound > 0 {
-        let mut entry = entry_at(upper_bound - 1);
-        strip_file_change_diffs_for_transport(std::slice::from_mut(&mut entry));
-        selected_reversed.push(entry);
-        index = upper_bound - 1;
-    }
-
     selected_reversed.reverse();
-    let page = build_thread_transcript_page(
-        thread_id,
-        &selected_reversed,
-        (upper_bound < transcript_len).then_some(upper_bound),
-        (index > 0).then_some(index),
-        revision,
-        index,
-    );
-    // Pin the hand-derived envelope upper bound: a page with more than one entry
-    // must never exceed the budget. If a future field added to
-    // ThreadTranscriptResponse pushes the real envelope past the constant, this
-    // fires in tests (debug builds) rather than silently shipping over-budget
-    // pages. Compiled out of release builds.
-    // Measured AS SENT. Pages are built here unstamped and given their generation at
-    // the API boundary, so measuring `page` as-is would under-count by exactly the
-    // field that is added afterwards.
-    debug_assert!(
-        page.entries.len() <= 1
-            || serialized_len(&page.clone().stamp_generation("0".repeat(36)))
-                <= THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES,
-        "multi-entry transcript page exceeded budget ({} bytes); \
-         THREAD_TRANSCRIPT_ENVELOPE_UPPER_BOUND_BYTES may be too small",
-        serialized_len(&page.clone().stamp_generation("0".repeat(36))),
-    );
-    page
+    TranscriptPageWindow {
+        page: build_thread_transcript_page(thread_id, selected_reversed, revision),
+        start: index,
+    }
 }
 
 fn unix_now_secs() -> u64 {

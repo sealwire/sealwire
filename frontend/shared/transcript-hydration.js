@@ -1,4 +1,5 @@
 import { transcriptPageIsFromAnotherGeneration } from "./transcript-generation.js";
+import { fetchOlderPageUntilRead, isTranscriptCursorRejected } from "./transcript-protocol.js";
 
 function createStartableRequest(run) {
   let start;
@@ -21,6 +22,9 @@ export async function hydrateTranscript(
     missingTailError,
     onError = () => {},
     onProgress = () => {},
+    // The backfill's cursor was rejected: the relay rebuilt the thread mid-read.
+    onCursorRejected,
+    waitBeforeRetry,
     progressBeforeFetch = false,
     minInitialEntries = 0,
     maxInitialPages = 1,
@@ -112,10 +116,16 @@ export async function hydrateTranscript(
         loadedPages < maxInitialPages
       ) {
         const capturedOlderPageRefusalEpoch = state.transcriptRefusalEpoch;
-        const olderPage = await fetchPage({
-          threadId: snapshot.active_thread_id,
-          before: state.transcriptHydrationOlderCursor,
-        });
+        const before = state.transcriptHydrationOlderCursor;
+        const olderPage = await fetchOlderPageUntilRead(
+          () => fetchPage({ threadId: snapshot.active_thread_id, before }),
+          {
+            isCurrent: () =>
+              store.getTranscriptHydrationThreadId(state) === snapshot.active_thread_id
+              && store.getTranscriptHydrationCursor(state) === before,
+            wait: waitBeforeRetry,
+          }
+        );
         if (!olderPage || olderPage.thread_id !== snapshot.active_thread_id) {
           throw new Error(incompletePageError);
         }
@@ -151,6 +161,10 @@ export async function hydrateTranscript(
       applyTranscriptHydrationProgress(state, store, onProgress);
     } catch (error) {
       store.setTranscriptHydrationIdle(state, hydrationPromise);
+      if (isTranscriptCursorRejected(error) && onCursorRejected) {
+        onCursorRejected(error);
+        return;
+      }
       onError(error);
     } finally {
       // Clear by promise identity, not signature: a new entry joining mid-fetch
@@ -184,6 +198,9 @@ export async function loadOlderTranscript(
     incompletePageError,
     onError = () => {},
     onProgress = () => {},
+    // The relay can no longer read the window's cursor: rebuild it from the latest page.
+    onCursorRejected,
+    waitBeforeRetry,
   }
 ) {
   const threadId = state.session?.active_thread_id;
@@ -215,7 +232,12 @@ export async function loadOlderTranscript(
   const { promise: loadPromise, start: startLoad } = createStartableRequest(async () => {
     try {
       const capturedRefusalEpoch = state.transcriptRefusalEpoch;
-      const page = await fetchPage({ threadId, before });
+      const page = await fetchOlderPageUntilRead(() => fetchPage({ threadId, before }), {
+        isCurrent: () =>
+          state.session?.active_thread_id === threadId
+          && store.getTranscriptHydrationCursor(state) === before,
+        wait: waitBeforeRetry,
+      });
       if (!page || page.thread_id !== threadId) {
         throw new Error(incompletePageError);
       }
@@ -247,6 +269,10 @@ export async function loadOlderTranscript(
       return hasMore;
     } catch (error) {
       store.setTranscriptHydrationIdle(state, loadPromise);
+      if (isTranscriptCursorRejected(error) && onCursorRejected) {
+        onCursorRejected(error);
+        return null;
+      }
       onError(error);
       // Transient failure — `null` lets a later poke retry instead of wedging.
       return null;

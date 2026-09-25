@@ -70,6 +70,19 @@ pub(super) enum OutboundBrokerPayload {
         device_id: String,
         envelope: EncryptedEnvelope,
     },
+    /// A `TranscriptResyncEvent` a broker may read.
+    TranscriptResync {
+        thread_id: String,
+        transcript_generation: String,
+        revision: u64,
+        reason: crate::protocol::TranscriptResyncReason,
+    },
+    /// A sealed transcript event; the envelope holds a `TranscriptResyncEvent`.
+    EncryptedTranscriptEvent {
+        target_peer_id: String,
+        device_id: String,
+        envelope: EncryptedEnvelope,
+    },
     RemoteActionAck {
         action_id: String,
         target_peer_id: String,
@@ -157,6 +170,8 @@ pub(super) enum OutboundBrokerPayload {
         /// `reviews` / `ask_user_question_detail` — must be copied on this path.
         ask_detail: Option<crate::protocol::AskDetailResponse>,
         error: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_code: Option<crate::protocol::ClientErrorCode>,
     },
     RemoteActionResultChunk {
         action_id: String,
@@ -265,16 +280,13 @@ pub(super) fn summarize_thread_transcript_response(page: &ThreadTranscriptRespon
         .map(|entry| entry.text.as_deref().map(str::len).unwrap_or(0))
         .sum::<usize>();
     format!(
-        "thread_id={} entries={} chars={} next_cursor={} prev_cursor={}",
+        "thread_id={} entries={} chars={} prev_cursor={}",
         page.thread_id,
         page.entries.len(),
         char_count,
-        page.next_cursor
-            .map(|cursor| cursor.to_string())
-            .unwrap_or_else(|| "-".to_string()),
         page.prev_cursor
-            .map(|cursor| cursor.to_string())
-            .unwrap_or_else(|| "-".to_string()),
+            .as_ref()
+            .map_or("-", |cursor| cursor.as_str()),
     )
 }
 
@@ -426,6 +438,21 @@ pub(super) fn summarize_outbound_payload(payload: &OutboundBrokerPayload) -> Str
         } => format!(
             "kind=encrypted_transcript_delta target_peer_id={} device_id={}",
             target_peer_id, device_id
+        ),
+        OutboundBrokerPayload::TranscriptResync {
+            thread_id,
+            revision,
+            reason,
+            ..
+        } => format!(
+            "kind=transcript_resync thread_id={thread_id} revision={revision} reason={reason:?}"
+        ),
+        OutboundBrokerPayload::EncryptedTranscriptEvent {
+            target_peer_id,
+            device_id,
+            ..
+        } => format!(
+            "kind=encrypted_transcript_event target_peer_id={target_peer_id} device_id={device_id}"
         ),
         OutboundBrokerPayload::EncryptedRemoteActionResult {
             action_id,

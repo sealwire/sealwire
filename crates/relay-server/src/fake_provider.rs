@@ -958,11 +958,18 @@ impl ProviderBridge for FakeProviderBridge {
         }
         self.record_thread_id_argument("read_thread_transcript_page", thread_id)
             .await;
-        let sync = ProviderBridge::read_thread(self, thread_id).await?;
-        let _ = before;
+        let mut sync = ProviderBridge::read_thread(self, thread_id).await?;
+        // The whole transcript is the tail page, and one empty page sits above it, so an
+        // older-page request has provider history to read.
+        let prev_cursor = if before.is_none() {
+            Some(0)
+        } else {
+            sync.transcript.clear();
+            None
+        };
         Ok(Some(ThreadTranscriptPageData {
             sync,
-            prev_cursor: None,
+            prev_cursor,
             paged: true,
         }))
     }

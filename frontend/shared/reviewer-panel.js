@@ -51,18 +51,7 @@ export function shouldOpenReviewerFromPointerEvent(event) {
 const REVIEWER_PREVIEW_POLL_MS = 6000;
 
 function entryText(entry) {
-  if (entry?.text && entry.text.trim()) return entry.text.trim();
-  // Chunked transcript pages carry text as ordered `parts` instead of a flat
-  // `.text`, so join them back together (see shared/transcript-page.js).
-  if (Array.isArray(entry?.parts)) {
-    const joined = entry.parts
-      .slice()
-      .sort((a, b) => (a.part_index ?? 0) - (b.part_index ?? 0))
-      .map((part) => part.text || "")
-      .join("");
-    if (joined.trim()) return joined.trim();
-  }
-  return null;
+  return entry?.text?.trim() || null;
 }
 
 function latestAgentText(entries) {

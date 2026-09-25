@@ -5,13 +5,10 @@
 // "is there anything new" check are therefore unchanged. Only older, append-
 // stable history pages (`before != null`) are cached and served cache-first.
 //
-// Why older pages are safe to cache by `before`: the relay's reverse pagination
-// (build_reverse_thread_transcript_page) uses indices counted from the OLDEST
-// entry (index 0), and `prev_cursor` is the page's lower-bound index. Appending
-// new messages at the tail only grows transcript.len() and never shifts older
-// indices, so a given `before` cursor maps to stable content under the common
-// tail-append case. A structural rewrite (compaction/branch switch) produces a
-// fresh tail with fresh cursors, so the chain naturally re-fetches.
+// Why older pages are safe to cache by `before`: the relay's cursor names "rows older
+// than this row's order key", and rows appended at the tail never take a key below an
+// existing one. A rebuilt transcript mints cursors the old ones never equal, so the
+// chain re-fetches rather than reading a page that no longer lines up.
 //
 // Every cache interaction is best-effort: any failure degrades to a cache
 // miss / no-op so history loading keeps working exactly as before.
@@ -64,10 +61,10 @@ export function createCachingTranscriptPageFetcher({
   };
 }
 
-// The relay mutates a transcript entry IN PLACE by item_id at its (stable) index
+// The relay mutates a transcript entry IN PLACE by item_id at its (stable) position
 // while its turn is in flight: status flips running -> completed, a tool gains a
 // late result/diff, agent text keeps streaming. Because the cache is keyed by the
-// fixed `before` index and reads do not revalidate, caching such a page would
+// fixed `before` cursor and reads do not revalidate, caching such a page would
 // persist a stale copy that never heals after reload. So a page is only written
 // through once EVERY entry in it has settled to a terminal status. (Residual: an
 // already-completed file-change entry can still have its apply_state badge flipped

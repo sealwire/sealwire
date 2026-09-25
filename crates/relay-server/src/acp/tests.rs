@@ -2990,7 +2990,7 @@ async fn a_foreground_agent_chunk_queues_a_transcript_delta() {
         let mut relay = state.write().await;
         relay.active_thread_id = Some("t1".to_string());
     }
-    let mut deltas = state.read().await.subscribe_transcript_deltas();
+    let mut deltas = state.read().await.subscribe_transcript_events();
 
     let mut runtime = session();
     let op = plan_update(&agent("hello"), &mut runtime);
@@ -3001,7 +3001,8 @@ async fn a_foreground_agent_chunk_queues_a_transcript_delta() {
 
     let event = deltas
         .try_recv()
-        .expect("a foreground AgentChunk must queue a local transcript delta");
+        .expect("a foreground AgentChunk must queue a local transcript delta")
+        .into_delta();
     assert_eq!(event.thread_id, "t1");
     assert_eq!(event.delta, "hello");
 }
@@ -3013,7 +3014,7 @@ async fn a_foreground_agent_chunks_second_delta_offset_follows_the_first() {
         let mut relay = state.write().await;
         relay.active_thread_id = Some("t1".to_string());
     }
-    let mut deltas = state.read().await.subscribe_transcript_deltas();
+    let mut deltas = state.read().await.subscribe_transcript_events();
     let mut runtime = session();
 
     {
@@ -3021,7 +3022,10 @@ async fn a_foreground_agent_chunks_second_delta_offset_follows_the_first() {
         let op = plan_update(&agent("hello "), &mut runtime);
         crate::acp::rpc::apply_op(&mut relay, "t1", Some("turn-1".to_string()), op, "cursor");
     }
-    let first = deltas.try_recv().expect("first chunk must queue a delta");
+    let first = deltas
+        .try_recv()
+        .expect("first chunk must queue a delta")
+        .into_delta();
     assert_eq!(first.text_offset, Some(0));
 
     {
@@ -3029,7 +3033,10 @@ async fn a_foreground_agent_chunks_second_delta_offset_follows_the_first() {
         let op = plan_update(&agent("world"), &mut runtime);
         crate::acp::rpc::apply_op(&mut relay, "t1", Some("turn-1".to_string()), op, "cursor");
     }
-    let second = deltas.try_recv().expect("second chunk must queue a delta");
+    let second = deltas
+        .try_recv()
+        .expect("second chunk must queue a delta")
+        .into_delta();
     assert_eq!(
         second.text_offset,
         Some("hello ".encode_utf16().count() as u64),

@@ -36,6 +36,11 @@ const A_REPLY = `${A_BEFORE}${A_AFTER}`;
 const B_PROMPT = "Reply with exactly: [public-beta-complete]";
 const B_REPLY = "[public-beta-complete]";
 const BARRIER = "public-thread-alpha";
+const DELEGATE_QUESTION = "[delegated-question-visibility-probe]";
+const DELEGATE_BARRIER = "delegated-question-stream";
+const DIRECT_QUESTION = "[direct-question-visibility-probe]";
+const DIRECT_BARRIER = "direct-question-stream";
+const PROBE_MESSAGE_VISIBILITY = process.env.PROBE_MESSAGE_VISIBILITY === "1";
 const ISSUER_SECRET = "browser-public-interleaving-issuer";
 const RELAY_REFRESH_TOKEN = "browser-public-interleaving-refresh";
 const RELAY_ID = "browser-public-interleaving-relay";
@@ -61,6 +66,29 @@ async function main() {
         barrier: BARRIER,
       },
     },
+    matchers: [{
+      contains: [DELEGATE_QUESTION, "Another agent asked for this"],
+      scenario: {
+        tool_calls: 12,
+        tool_call_delay_ms: 25,
+        reasoning_between_tools: true,
+        chunks: ["Delegated reply began. ", "Delegated reply still streaming."],
+        chunk_delay_ms: 100,
+        pause_after_chunks: 1,
+        barrier: DELEGATE_BARRIER,
+      },
+    }, {
+      contains: [DIRECT_QUESTION],
+      scenario: {
+        tool_calls: 18,
+        tool_call_delay_ms: 0,
+        reasoning_between_tools: true,
+        chunks: ["Direct reply began. ", "Direct reply still streaming."],
+        chunk_delay_ms: 100,
+        pause_after_chunks: 1,
+        barrier: DIRECT_BARRIER,
+      },
+    }],
   });
 
   const broker = startPublicBroker({
@@ -143,6 +171,11 @@ async function main() {
       timeoutMs: TIMEOUT_MS,
     });
     threadB = await waitForNewActiveThread(relayPort, threadA);
+    await localPage.waitForFunction(
+      (priorReply) => !(document.querySelector("#transcript")?.textContent || "").includes(priorReply),
+      A_BEFORE,
+      { timeout: TIMEOUT_MS }
+    );
     await sendLocalMessage(localPage, B_PROMPT);
     await waitForText(localPage, "#transcript", B_REPLY);
 
@@ -154,6 +187,25 @@ async function main() {
     await waitForText(remotePage, "#remote-transcript", B_REPLY);
     assertNoText(localPage, "#transcript", A_AFTER, "local B before release");
     assertNoText(remotePage, "#remote-transcript", A_AFTER, "remote B before release");
+
+    if (PROBE_MESSAGE_VISIBILITY) {
+      await remotePage.waitForFunction(() =>
+        !document.querySelector("#remote-message-input")?.disabled, null, { timeout: TIMEOUT_MS });
+      await remotePage.fill("#remote-message-input", DIRECT_QUESTION);
+      await remotePage.click("#remote-send-button");
+      await fakeHarness.waitForBarrier(DIRECT_BARRIER, TIMEOUT_MS);
+      const directBackend = await fetch(
+        `http://127.0.0.1:${relayPort}/api/threads/${encodeURIComponent(threadB)}/transcript`
+      ).then((response) => response.json());
+      assert.ok(directBackend.data?.entries?.some((entry) => (entry.text || "").includes(DIRECT_QUESTION)));
+      await delay(1500);
+      const directRemoteVisible = await remotePage.evaluate((marker) =>
+        [...document.querySelectorAll("#remote-transcript .chat-message-user")]
+          .some((node) => (node.textContent || "").includes(marker)), DIRECT_QUESTION);
+      console.log(JSON.stringify({ directQuestion: { whileStreaming: directRemoteVisible } }));
+      await fakeHarness.releaseBarrier(DIRECT_BARRIER);
+      await waitForThreadIdle(relayPort, threadB);
+    }
 
     await fakeHarness.releaseBarrier(BARRIER);
     await waitForThreadTranscript(relayPort, threadA, A_REPLY);
@@ -184,6 +236,55 @@ async function main() {
       threadB,
       "remote view-only navigation to A must not mutate relay control"
     );
+
+    if (PROBE_MESSAGE_VISIBILITY) {
+      // A person delegates from the active B into the background A. Sample the
+      // remote view before and after taking over and reloading.
+      const delegateResponse = await fetch(`http://127.0.0.1:${relayPort}/api/session/delegate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Agent-Relay-CSRF": "1" },
+        body: JSON.stringify({ thread_id: threadB, agent: threadA, message: DELEGATE_QUESTION }),
+      });
+      const delegateResult = await delegateResponse.json();
+      assert.equal(delegateResponse.ok, true, JSON.stringify(delegateResult));
+      assert.equal(delegateResult.isError, false, JSON.stringify(delegateResult));
+      await fakeHarness.waitForBarrier(DELEGATE_BARRIER, TIMEOUT_MS);
+      const backendQuestion = await fetch(
+        `http://127.0.0.1:${relayPort}/api/threads/${encodeURIComponent(threadA)}/transcript`
+      ).then((response) => response.json());
+      assert.ok(
+        backendQuestion.data?.entries?.some((entry) => (entry.text || "").includes(DELEGATE_QUESTION)),
+        "relay must hold the delegated question while the peer is streaming"
+      );
+      const questionVisible = async () => {
+        await remotePage.evaluate(() => {
+          const pane = document.querySelector("#remote-transcript");
+          if (pane) pane.scrollTop = 0;
+        });
+        await delay(1500);
+        return remotePage.evaluate((marker) =>
+          [...document.querySelectorAll("#remote-transcript .chat-message-user")]
+            .some((node) => (node.textContent || "").includes(marker)), DELEGATE_QUESTION);
+      };
+      const beforeTakeover = await questionVisible();
+      const canTakeOver = await remotePage.evaluate(() =>
+        Boolean(document.querySelector("#remote-take-over-button:not([disabled]):not([hidden])")));
+      let afterTakeover = null;
+      if (canTakeOver) {
+        await remotePage.click("#remote-take-over-button");
+        await remotePage.waitForTimeout(1000);
+        afterTakeover = await questionVisible();
+      }
+      const remoteUrl = remotePage.url();
+      await remotePage.goto(remoteUrl, { waitUntil: "domcontentloaded" });
+      await remotePage.waitForSelector("#remote-transcript", { timeout: TIMEOUT_MS });
+      const afterRefresh = await questionVisible();
+      console.log(JSON.stringify({
+        delegatedQuestion: { beforeTakeover, canTakeOver, afterTakeover, afterRefresh },
+      }));
+      assert.equal(afterRefresh, true, "a fresh remote page must show the delegated question");
+      assert.equal(beforeTakeover, true, "a remote observer should show the delegated question without refresh");
+    }
     assert.deepEqual(pageErrors, [], "the local + remote flow must not raise browser errors");
 
     console.log(
@@ -219,6 +320,8 @@ async function main() {
     throw error;
   } finally {
     await fakeHarness.releaseBarrier(BARRIER).catch(() => {});
+    await fakeHarness.releaseBarrier(DIRECT_BARRIER).catch(() => {});
+    await fakeHarness.releaseBarrier(DELEGATE_BARRIER).catch(() => {});
     await deleteThreadsForCwdAndWait(relayPort, workspaceDir).catch((error) => {
       console.error(`[cleanup] failed to delete public interleaving threads: ${error.message}`);
     });
@@ -247,6 +350,8 @@ async function sendLocalMessage(page, text) {
     timeout: TIMEOUT_MS,
   });
   await page.fill("#message-input", text);
+  await page.waitForFunction((expected) =>
+    document.querySelector("#message-input")?.value === expected, text, { timeout: TIMEOUT_MS });
   await page.click("#send-button");
 }
 

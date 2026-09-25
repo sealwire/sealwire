@@ -3319,8 +3319,7 @@ fn summarize_published_payload_reports_transcript_page_stats() {
                     ]
                 }
             ],
-            "next_cursor": 12,
-            "prev_cursor": 4
+            "prev_cursor": "tc1.space.4"
         }
     }));
 
@@ -3329,8 +3328,7 @@ fn summarize_published_payload_reports_transcript_page_stats() {
     assert!(summary.contains("ok=true"));
     assert!(summary.contains("entries=2"));
     assert!(summary.contains("parts=3"));
-    assert!(summary.contains("next_cursor=12"));
-    assert!(summary.contains("prev_cursor=4"));
+    assert!(summary.contains("prev_cursor=tc1.space.4"));
 }
 
 async fn spawn_app_with_guard(guard: BanGuard) -> SocketAddr {

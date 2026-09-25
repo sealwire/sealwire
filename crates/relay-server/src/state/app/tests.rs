@@ -1021,10 +1021,11 @@ pub(crate) mod path_scope_tests {
         ReadThreadTranscriptInput, ResumeSessionInput, SendMessageInput, StartSessionInput,
         SubmitAskUserAnswerInput, ThreadSummaryView, UpdateSessionSettingsInput,
     };
+    use crate::state::relay::TranscriptCursorRejection;
     use crate::state::security::SecurityProfile;
     use crate::state::{
-        ApprovalKind, PendingApproval, PendingAskUserQuestion, DEFAULT_APPROVAL_POLICY,
-        DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX,
+        ApprovalKind, PendingApproval, PendingAskUserQuestion, TranscriptReadError,
+        DEFAULT_APPROVAL_POLICY, DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX,
     };
     use std::collections::HashSet;
     use std::sync::{
@@ -6380,6 +6381,9 @@ tree; got {}",
         // runtime WHILE the relay is awaiting this provider's page read, so the
         // page the relay gets back is already stale by the time it is served.
         advance_runtime_during_page_read: Arc<AtomicBool>,
+        // The relay rebuilds the thread's runtime (same provider position, new key space)
+        // while an older-page read is parked on this provider.
+        rebuild_runtime_during_older_page_read: Arc<AtomicBool>,
         // Same race, but on full `read_thread` resume: a stream event lands while
         // the relay awaits the provider read that will later merge as stale history.
         advance_runtime_during_thread_read_call: Arc<AtomicUsize>,
@@ -6436,6 +6440,7 @@ tree; got {}",
                 start_turn_should_fail: Arc::new(AtomicBool::new(false)),
                 list_threads_should_fail: Arc::new(AtomicBool::new(false)),
                 advance_runtime_during_page_read: Arc::new(AtomicBool::new(false)),
+                rebuild_runtime_during_older_page_read: Arc::new(AtomicBool::new(false)),
                 advance_runtime_during_thread_read_call: Arc::new(AtomicUsize::new(0)),
                 interrupt_error: Arc::new(Mutex::new(None)),
                 interrupt_replace_turn: Arc::new(Mutex::new(None)),
@@ -6733,6 +6738,19 @@ tree; got {}",
                     Some("live-turn".to_string()),
                     None,
                 );
+            }
+            if before.is_some()
+                && self
+                    .rebuild_runtime_during_older_page_read
+                    .swap(false, Ordering::Relaxed)
+            {
+                let mut relay = self.state.write().await;
+                let mut rebuilt = relay
+                    .runtimes
+                    .remove(thread_id)
+                    .expect("a runtime to rebuild");
+                rebuilt.transcript_key_space = crate::state::relay::TranscriptKeySpace::mint();
+                relay.runtimes.insert(thread_id.to_string(), rebuilt);
             }
             Ok(self
                 .transcript_pages
@@ -8243,7 +8261,6 @@ tree; got {}",
         let page = app
             .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
                 thread_id: thread.id.clone(),
-                cursor: None,
                 before: None,
                 device_id: Some("device-1".to_string()),
             })
@@ -8329,7 +8346,6 @@ tree; got {}",
         let tail = app
             .read_thread_transcript(ReadThreadTranscriptInput {
                 thread_id: thread.id.clone(),
-                cursor: None,
                 before: None,
                 device_id: Some("device-1".to_string()),
             })
@@ -8350,8 +8366,7 @@ tree; got {}",
         let older = app
             .read_thread_transcript(ReadThreadTranscriptInput {
                 thread_id: thread.id.clone(),
-                cursor: None,
-                before: Some(7),
+                before: tail.prev_cursor,
                 device_id: Some("device-1".to_string()),
             })
             .await
@@ -8451,20 +8466,22 @@ tree; got {}",
         let tail = app
             .read_thread_transcript(ReadThreadTranscriptInput {
                 thread_id: thread.id.clone(),
-                cursor: None,
                 before: None,
                 device_id: Some("device-1".to_string()),
             })
             .await
             .expect("cold tail page");
-        assert_eq!(tail.prev_cursor, Some(123));
+        let cursor = tail.prev_cursor.clone().expect("older history is offered");
+        assert!(
+            minted_by_thread_runtime(&app, &thread.id, &cursor).await,
+            "older history is offered as a relay cursor, never the provider's own position: {cursor:?}"
+        );
         assert_eq!(tail.entries[0].item_id.as_deref(), Some("tail"));
 
         let older = app
             .read_thread_transcript(ReadThreadTranscriptInput {
                 thread_id: thread.id.clone(),
-                cursor: None,
-                before: Some(123),
+                before: tail.prev_cursor,
                 device_id: Some("device-1".to_string()),
             })
             .await
@@ -8540,19 +8557,19 @@ tree; got {}",
         let tail = app
             .read_thread_transcript(ReadThreadTranscriptInput {
                 thread_id: thread.id.clone(),
-                cursor: None,
                 before: None,
                 device_id: Some("device-1".to_string()),
             })
             .await
             .expect("cold tail page");
+        let relay = app.relay.read().await;
         assert_eq!(
-            tail.prev_cursor,
+            relay
+                .runtime_for_thread(&thread.id)
+                .and_then(|runtime| runtime.unread_provider_history()),
             Some(123),
             "precondition: took the paged branch"
         );
-
-        let relay = app.relay.read().await;
         let runtime_revision = relay
             .runtime_for_thread(&thread.id)
             .expect("paged runtime")
@@ -8626,7 +8643,6 @@ tree; got {}",
         let page = app
             .read_thread_transcript(ReadThreadTranscriptInput {
                 thread_id: thread.id.clone(),
-                cursor: None,
                 before: None,
                 device_id: Some("device-1".to_string()),
             })
@@ -8704,6 +8720,540 @@ tree; got {}",
         );
     }
 
+    /// Provider history of a tail row plus one older page, then 60 live rows (~1.2KB
+    /// each, several transport pages) landed after the first read.
+    async fn long_paged_thread(read_provider_history_first: bool) -> (AppState, String, TempDir) {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap().to_string();
+        let (app, _codex, claude) = build_recording_provider_app(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let thread = claude.thread_summary("claude-long-paged-thread", &cwd);
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        let entry = |item_id: &str, kind| crate::protocol::TranscriptEntryView {
+            row_id: None,
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some(item_id.to_string()),
+            kind,
+            text: Some(item_id.to_string()),
+            status: "completed".to_string(),
+            turn_id: Some(item_id.to_string()),
+            tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
+        };
+        let page = |entries, prev_cursor| crate::provider::ThreadTranscriptPageData {
+            sync: crate::provider::ThreadSyncData {
+                transcript_complete: true,
+                thread: thread.clone(),
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(entries),
+            },
+            prev_cursor,
+            paged: true,
+        };
+        {
+            let mut pages = claude.transcript_pages.lock().await;
+            pages.insert(
+                (thread.id.clone(), None),
+                page(
+                    vec![entry(
+                        "history-tail",
+                        crate::protocol::TranscriptEntryKind::AgentText,
+                    )],
+                    Some(123),
+                ),
+            );
+            pages.insert(
+                (thread.id.clone(), Some(123)),
+                page(
+                    vec![entry(
+                        "history-oldest",
+                        crate::protocol::TranscriptEntryKind::UserText,
+                    )],
+                    None,
+                ),
+            );
+        }
+        app.relay.write().await.threads = vec![thread.clone()];
+
+        let read = |before| {
+            app.read_thread_transcript(ReadThreadTranscriptInput {
+                thread_id: thread.id.clone(),
+                before,
+                device_id: Some("device-1".to_string()),
+            })
+        };
+        let tail = read(None).await.expect("cold tail page");
+        assert!(
+            tail.prev_cursor.is_some(),
+            "precondition: provider history remains"
+        );
+        if read_provider_history_first {
+            let oldest = read(tail.prev_cursor).await.expect("provider history page");
+            assert_eq!(
+                oldest.prev_cursor, None,
+                "precondition: provider history exhausted"
+            );
+        }
+        {
+            let mut relay = app.relay.write().await;
+            let runtime = relay.ensure_runtime_for_thread(&thread.id);
+            for index in 0..60 {
+                let order_seq = runtime.alloc_tail_order_seq();
+                runtime
+                    .transcript
+                    .push(crate::state::relay::TranscriptRecord {
+                        row_id: format!("live-{index:02}"),
+                        provider_item_id: None,
+                        relay_item_id: None,
+                        kind: crate::protocol::TranscriptEntryKind::AgentText,
+                        text: Some(format!("live {index} {}", "x".repeat(1200))),
+                        status: "completed".to_string(),
+                        turn_id: Some(format!("turn-{index}")),
+                        tool: None,
+                        order_seq,
+                        withdrawn: false,
+                        last_live_upsert_revision: None,
+                    });
+            }
+        }
+        (app, thread.id, project)
+    }
+
+    fn expected_long_paged_order() -> Vec<String> {
+        let mut rows = vec!["history-oldest".to_string(), "history-tail".to_string()];
+        rows.extend((0..60).map(|index| format!("live-{index:02}")));
+        rows
+    }
+
+    async fn minted_by_thread_runtime(
+        app: &AppState,
+        thread_id: &str,
+        cursor: &crate::protocol::TranscriptCursorToken,
+    ) -> bool {
+        app.relay
+            .read()
+            .await
+            .runtime_for_thread(thread_id)
+            .is_some_and(|runtime| runtime.transcript_key_space.decode(cursor).is_ok())
+    }
+
+    /// Reads from `before` back to the start of history; returns row ids oldest-first.
+    async fn read_back_to_start(
+        app: &AppState,
+        thread_id: &str,
+        mut before: Option<crate::protocol::TranscriptCursorToken>,
+    ) -> Vec<String> {
+        let mut pages = Vec::new();
+        let mut cursors = HashSet::new();
+        loop {
+            let page = app
+                .read_thread_transcript(ReadThreadTranscriptInput {
+                    thread_id: thread_id.to_string(),
+                    before,
+                    device_id: Some("device-1".to_string()),
+                })
+                .await
+                .expect("transcript page");
+            pages.push(
+                page.entries
+                    .iter()
+                    .map(|entry| entry.item_id.clone().unwrap_or_default())
+                    .collect::<Vec<_>>(),
+            );
+            let Some(cursor) = page.prev_cursor else {
+                break;
+            };
+            assert!(
+                minted_by_thread_runtime(app, thread_id, &cursor).await,
+                "only relay cursors leave the relay, got {cursor:?}"
+            );
+            assert!(
+                !page.entries.is_empty(),
+                "a page that offers older history must bring rows, or a reader stalls on it"
+            );
+            assert!(
+                cursors.insert(cursor.clone()),
+                "cursor {cursor:?} was handed out twice"
+            );
+            assert!(pages.len() < 50, "paging never reached the start");
+            before = Some(cursor);
+        }
+        pages.into_iter().rev().flatten().collect()
+    }
+
+    // Reaching the start of provider history once recorded "nothing older", and every
+    // later latest-page read reused that answer over the rows still held in memory.
+    #[tokio::test]
+    async fn a_fully_read_paged_thread_still_pages_the_rows_it_holds_in_memory() {
+        let (app, thread_id, _project) = long_paged_thread(true).await;
+
+        let latest = app
+            .read_thread_transcript(ReadThreadTranscriptInput {
+                thread_id: thread_id.clone(),
+                before: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("latest page");
+        assert!(
+            !latest
+                .entries
+                .iter()
+                .any(|e| e.item_id.as_deref() == Some("history-tail")),
+            "precondition: the latest page is bounded"
+        );
+        assert!(
+            latest.prev_cursor.is_some(),
+            "rows above the latest page are still in memory"
+        );
+        assert_eq!(
+            read_back_to_start(&app, &thread_id, None).await,
+            expected_long_paged_order()
+        );
+    }
+
+    // With provider history left, the latest page used to point straight at it,
+    // skipping every in-memory row between the first provider page and itself.
+    #[tokio::test]
+    async fn a_paged_thread_pages_its_memory_before_the_provider_history_it_has_not_read() {
+        let (app, thread_id, _project) = long_paged_thread(false).await;
+
+        assert_eq!(
+            read_back_to_start(&app, &thread_id, None).await,
+            expected_long_paged_order()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cursor_into_memory_survives_another_reader_pulling_older_history_in() {
+        let (app, thread_id, _project) = long_paged_thread(false).await;
+        let latest = app
+            .read_thread_transcript(ReadThreadTranscriptInput {
+                thread_id: thread_id.clone(),
+                before: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("latest page");
+        let held_cursor = latest.prev_cursor.expect("older rows exist");
+        let newest_rows = latest
+            .entries
+            .iter()
+            .map(|entry| entry.item_id.clone().unwrap_or_default())
+            .collect::<Vec<_>>();
+
+        // A second device reads to the start, which pulls provider history into memory.
+        assert_eq!(
+            read_back_to_start(&app, &thread_id, None).await,
+            expected_long_paged_order()
+        );
+
+        let mut resumed = read_back_to_start(&app, &thread_id, Some(held_cursor)).await;
+        resumed.extend(newest_rows);
+        assert_eq!(resumed, expected_long_paged_order());
+    }
+
+    /// A provider-paged thread built from `(position, rows, older position)` pages, the
+    /// tail page at position `None`, with its tail already read.
+    async fn thread_with_provider_pages(
+        pages: Vec<(Option<usize>, Vec<&str>, Option<usize>)>,
+    ) -> (
+        AppState,
+        String,
+        TempDir,
+        Option<crate::protocol::TranscriptCursorToken>,
+    ) {
+        let (app, thread_id, project, _provider, older) =
+            thread_with_provider_pages_and_provider(pages).await;
+        (app, thread_id, project, older)
+    }
+
+    async fn thread_with_provider_pages_and_provider(
+        pages: Vec<(Option<usize>, Vec<&str>, Option<usize>)>,
+    ) -> (
+        AppState,
+        String,
+        TempDir,
+        RecordingProvider,
+        Option<crate::protocol::TranscriptCursorToken>,
+    ) {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap().to_string();
+        let (app, _codex, claude) = build_recording_provider_app(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let thread = claude.thread_summary("claude-provider-pages", &cwd);
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        {
+            let mut stored = claude.transcript_pages.lock().await;
+            for (position, rows, older) in pages {
+                let entries = rows
+                    .into_iter()
+                    .map(|id| crate::protocol::TranscriptEntryView {
+                        row_id: None,
+                        order_seq: None,
+                        withdrawn: false,
+                        item_id: Some(id.to_string()),
+                        kind: crate::protocol::TranscriptEntryKind::AgentText,
+                        text: Some(id.to_string()),
+                        status: "completed".to_string(),
+                        turn_id: Some(id.to_string()),
+                        tool: None,
+                        content_state: crate::protocol::TranscriptContentState::Full,
+                    })
+                    .collect();
+                stored.insert(
+                    (thread.id.clone(), position),
+                    crate::provider::ThreadTranscriptPageData {
+                        sync: crate::provider::ThreadSyncData {
+                            transcript_complete: true,
+                            thread: thread.clone(),
+                            status: "idle".to_string(),
+                            active_flags: Vec::new(),
+                            transcript:
+                                crate::provider::ProviderTranscriptEntry::all_provider_named(
+                                    entries,
+                                ),
+                        },
+                        prev_cursor: older,
+                        paged: true,
+                    },
+                );
+            }
+        }
+        app.relay.write().await.threads = vec![thread.clone()];
+        let tail = read_page(&app, &thread.id, None)
+            .await
+            .expect("cold tail page");
+        (app, thread.id, project, claude, tail.prev_cursor)
+    }
+
+    async fn read_page(
+        app: &AppState,
+        thread_id: &str,
+        before: Option<crate::protocol::TranscriptCursorToken>,
+    ) -> Result<crate::protocol::ThreadTranscriptResponse, TranscriptReadError> {
+        app.read_thread_transcript(ReadThreadTranscriptInput {
+            thread_id: thread_id.to_string(),
+            before,
+            device_id: Some("device-1".to_string()),
+        })
+        .await
+    }
+
+    fn page_ids(page: &crate::protocol::ThreadTranscriptResponse) -> Vec<String> {
+        page.entries
+            .iter()
+            .map(|entry| entry.item_id.clone().unwrap_or_default())
+            .collect()
+    }
+
+    // An empty provider page used to come back as an empty transcript page pointing at
+    // the next provider position: a reader that sees no rows backs off and stays stuck.
+    #[tokio::test]
+    async fn an_older_page_reads_through_provider_pages_that_add_no_rows() {
+        let (app, thread_id, _project, older) = thread_with_provider_pages(vec![
+            (None, vec!["tail"], Some(1)),
+            (Some(1), vec![], Some(2)),
+            // Only rows the relay already holds: merged, nothing new.
+            (Some(2), vec!["tail"], Some(3)),
+            (Some(3), vec!["oldest"], None),
+        ])
+        .await;
+
+        let page = read_page(&app, &thread_id, older)
+            .await
+            .expect("older page");
+
+        assert_eq!(page_ids(&page), vec!["oldest"]);
+        assert_eq!(page.prev_cursor, None);
+    }
+
+    // Not a failure: the provider position advanced, so the same cursor asked again gets
+    // further, and the client retries it on this code without waiting for a gesture.
+    #[tokio::test]
+    async fn an_older_page_past_its_provider_budget_says_to_ask_again_and_the_retry_continues() {
+        let mut pages = vec![(None, vec!["tail"], Some(1))];
+        for position in 1..=40 {
+            pages.push((Some(position), vec![], Some(position + 1)));
+        }
+        pages.push((Some(41), vec!["oldest"], None));
+        let (app, thread_id, _project, older) = thread_with_provider_pages(pages).await;
+
+        let error = read_page(&app, &thread_id, older.clone())
+            .await
+            .expect_err("more empty pages than one request reads");
+        assert!(
+            matches!(error, TranscriptReadError::HistoryPending),
+            "{error}"
+        );
+        assert_eq!(
+            error.client_code(),
+            Some(crate::protocol::ClientErrorCode::TranscriptHistoryPending)
+        );
+
+        let page = read_page(&app, &thread_id, older)
+            .await
+            .expect("the retry resumes where the first request stopped");
+        assert_eq!(page_ids(&page), vec!["oldest"]);
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_repeats_a_position_is_refused_rather_than_looped_on() {
+        let (app, thread_id, _project, older) = thread_with_provider_pages(vec![
+            (None, vec!["tail"], Some(1)),
+            (Some(1), vec![], Some(1)),
+        ])
+        .await;
+
+        let error = read_page(&app, &thread_id, older)
+            .await
+            .expect_err("a repeated position cannot make progress");
+        assert!(
+            matches!(&error, TranscriptReadError::Failed(message) if message.contains("repeated position")),
+            "a retry keeps its cursor, so this is no cursor rejection: {error}"
+        );
+    }
+
+    /// Row indices and provider byte offsets are what clients held before; read as an
+    /// order key they would land the reader somewhere arbitrary.
+    #[tokio::test]
+    async fn a_cursor_the_relay_did_not_mint_is_rejected_as_such() {
+        let (app, thread_id, _project, _older) =
+            thread_with_provider_pages(vec![(None, vec!["tail"], Some(1))]).await;
+
+        for token in ["", "123", "tc1.not-a-cursor"] {
+            let error = read_page(
+                &app,
+                &thread_id,
+                Some(crate::protocol::TranscriptCursorToken::new(
+                    token.to_string(),
+                )),
+            )
+            .await
+            .expect_err("not a relay cursor");
+            assert!(
+                matches!(
+                    error,
+                    TranscriptReadError::CursorRejected(TranscriptCursorRejection::Malformed)
+                ),
+                "{token:?}: {error}"
+            );
+            assert_eq!(
+                error.client_code(),
+                Some(crate::protocol::ClientErrorCode::TranscriptCursorRejected)
+            );
+        }
+    }
+
+    // A rebuilt runtime keys its rows anew; reading an old key against them would land
+    // the reader at an arbitrary row.
+    #[tokio::test]
+    async fn a_cursor_outlives_neither_its_runtime_nor_its_thread() {
+        let (app, thread_id, _project, older) = thread_with_provider_pages(vec![
+            (None, vec!["tail"], Some(1)),
+            (Some(1), vec!["oldest"], None),
+        ])
+        .await;
+        let held = older.expect("older history");
+        let foreign = crate::state::relay::TranscriptKeySpace::mint().cursor_older_than(0);
+
+        let error = read_page(&app, &thread_id, Some(foreign))
+            .await
+            .expect_err("minted by another runtime");
+        assert!(matches!(
+            error,
+            TranscriptReadError::CursorRejected(TranscriptCursorRejection::Expired)
+        ));
+
+        app.relay.write().await.runtimes.remove(&thread_id);
+        let error = read_page(&app, &thread_id, Some(held.clone()))
+            .await
+            .expect_err("its runtime is gone");
+        assert!(matches!(
+            error,
+            TranscriptReadError::CursorRejected(TranscriptCursorRejection::Expired)
+        ));
+
+        let fresh = read_page(&app, &thread_id, None)
+            .await
+            .expect("the latest page rebuilds the runtime");
+        assert_eq!(page_ids(&fresh), vec!["tail"]);
+        assert!(read_page(&app, &thread_id, Some(held)).await.is_err());
+        let older = read_page(&app, &thread_id, fresh.prev_cursor)
+            .await
+            .expect("the rebuilt runtime's own cursor");
+        assert_eq!(page_ids(&older), vec!["oldest"]);
+    }
+
+    // The provider cursor alone cannot tell two runtimes apart: a rebuilt one can sit at
+    // the same position, and the page read for the old one must not land in it.
+    #[tokio::test]
+    async fn a_page_read_for_a_rebuilt_runtime_is_not_merged_into_its_successor() {
+        let (app, thread_id, _project, provider, older) =
+            thread_with_provider_pages_and_provider(vec![
+                (None, vec!["tail"], Some(1)),
+                (Some(1), vec!["oldest"], None),
+            ])
+            .await;
+        provider
+            .rebuild_runtime_during_older_page_read
+            .store(true, Ordering::Relaxed);
+
+        let error = read_page(&app, &thread_id, older)
+            .await
+            .expect_err("the runtime that minted the cursor is gone");
+        assert!(matches!(
+            error,
+            TranscriptReadError::CursorRejected(TranscriptCursorRejection::Expired)
+        ));
+        {
+            let relay = app.relay.read().await;
+            let rebuilt = relay
+                .runtime_for_thread(&thread_id)
+                .expect("rebuilt runtime");
+            let ids = rebuilt
+                .transcript_views()
+                .into_iter()
+                .filter_map(|view| view.item_id)
+                .collect::<Vec<_>>();
+            assert_eq!(ids, vec!["tail"], "nothing read for its predecessor");
+            assert_eq!(rebuilt.unread_provider_history(), Some(1));
+        }
+
+        let fresh = read_page(&app, &thread_id, None)
+            .await
+            .expect("latest page");
+        let older = read_page(&app, &thread_id, fresh.prev_cursor)
+            .await
+            .expect("the rebuilt runtime reads its own history");
+        assert_eq!(page_ids(&older), vec!["oldest"]);
+    }
+
+    #[tokio::test]
+    async fn the_oldest_page_offers_no_cursor_to_page_from() {
+        let (app, thread_id, _project, older) = thread_with_provider_pages(vec![
+            (None, vec!["tail"], Some(1)),
+            (Some(1), vec!["oldest"], None),
+        ])
+        .await;
+
+        let page = read_page(&app, &thread_id, older)
+            .await
+            .expect("oldest page");
+        assert_eq!(page_ids(&page), vec!["oldest"]);
+        assert_eq!(page.prev_cursor, None);
+    }
+
     #[tokio::test]
     async fn transcript_tail_serves_models_from_the_relay_cache_not_a_live_bridge_call() {
         // The transcript tail is polled ~3x/s for a working viewed thread. It
@@ -8740,7 +9290,6 @@ tree; got {}",
         let page = app
             .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
                 thread_id: thread.id.clone(),
-                cursor: None,
                 before: None,
                 device_id: Some("device-1".to_string()),
             })
@@ -8897,7 +9446,6 @@ tree; got {}",
         let page = app
             .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
                 thread_id: codex_thread.id.clone(),
-                cursor: None,
                 before: None,
                 device_id: Some("device-1".to_string()),
             })
@@ -8922,7 +9470,6 @@ tree; got {}",
 
         app.read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
             thread_id: codex_thread.id,
-            cursor: None,
             before: None,
             device_id: Some("device-1".to_string()),
         })
@@ -8973,7 +9520,6 @@ tree; got {}",
         let page = app
             .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
                 thread_id: codex_thread.id.clone(),
-                cursor: None,
                 before: None,
                 device_id: Some("device-1".to_string()),
             })
@@ -12715,7 +13261,6 @@ tree; got {}",
         let transcript = app
             .read_thread_transcript(ReadThreadTranscriptInput {
                 thread_id: beta_thread.clone(),
-                cursor: None,
                 before: None,
                 device_id: Some("device-1".to_string()),
             })
@@ -12826,7 +13371,6 @@ tree; got {}",
         let state = app
             .read_thread_transcript(ReadThreadTranscriptInput {
                 thread_id: beta_thread.clone(),
-                cursor: None,
                 before: None,
                 device_id: Some("device-1".to_string()),
             })
@@ -13741,7 +14285,6 @@ tree; got {}",
         // Wide device reads transcript: succeeds.
         app.read_thread_transcript(ReadThreadTranscriptInput {
             thread_id: thread_id.clone(),
-            cursor: None,
             before: None,
             device_id: Some("wide-device".to_string()),
         })
@@ -13752,14 +14295,13 @@ tree; got {}",
         let error = app
             .read_thread_transcript(ReadThreadTranscriptInput {
                 thread_id,
-                cursor: None,
                 before: None,
                 device_id: Some("scoped-device".to_string()),
             })
             .await
             .expect_err("scoped device should be rejected reading out-of-scope transcript");
         assert!(
-            error.contains("device's allowed paths"),
+            error.to_string().contains("device's allowed paths"),
             "expected device-scope rejection, got: {error}"
         );
     }
@@ -14826,7 +15368,6 @@ tree; got {}",
             .read_thread_transcript(ReadThreadTranscriptInput {
                 thread_id: thread.id.clone(),
                 before: None,
-                cursor: None,
                 device_id: Some("device-1".to_string()),
             })
             .await
@@ -32754,7 +33295,6 @@ mod provider_call_boundary_tests {
         let cold = app
             .read_thread_transcript(ReadThreadTranscriptInput {
                 thread_id: session_id.clone(),
-                cursor: None,
                 before: None,
                 device_id: Some("device-1".to_string()),
             })
@@ -32764,8 +33304,7 @@ mod provider_call_boundary_tests {
 
         app.read_thread_transcript(ReadThreadTranscriptInput {
             thread_id: session_id.clone(),
-            cursor: None,
-            before: Some(0),
+            before: cold.prev_cursor,
             device_id: Some("device-1".to_string()),
         })
         .await

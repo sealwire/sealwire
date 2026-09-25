@@ -32,12 +32,12 @@ test("an older view-only page interleaves by number", () => {
   const merged = mergeOlderViewOnlyPage(pin([row("b", -S), row("d", S)]), {
     thread_id: "A",
     entries: [row("a", -2 * S), row("c", 0)],
-    prev_cursor: 7,
+    prev_cursor: "c7",
   });
 
   assert.deepEqual(merged.entries.map((entry) => entry.item_id), ["a", "b", "c", "d"]);
   assert.equal(merged.historyExtended, true);
-  assert.equal(merged.olderCursor, 7, "cursor still comes from the page");
+  assert.equal(merged.olderCursor, "c7", "cursor still comes from the page");
 });
 
 test("a refresh that shares no id keeps the reader's rows instead of dropping them", () => {
@@ -46,8 +46,8 @@ test("a refresh that shares no id keeps the reader's rows instead of dropping th
   // reader's paged-in history and the live row below it both vanish. The birth
   // numbers say exactly where everything goes.
   const merged = mergeRefreshedViewOnlyPage(
-    pin([row("a", 0), row("live", 2 * S)], { historyExtended: true, olderCursor: 3 }),
-    { thread_id: "A", entries: [row("b", S), row("c", 3 * S)], prev_cursor: 9 }
+    pin([row("a", 0), row("live", 2 * S)], { historyExtended: true, olderCursor: "c3" }),
+    { thread_id: "A", entries: [row("b", S), row("c", 3 * S)], prev_cursor: "c9" }
   );
 
   assert.deepEqual(
@@ -55,7 +55,7 @@ test("a refresh that shares no id keeps the reader's rows instead of dropping th
     ["a", "b", "live", "c"],
     "the page is authoritative for its own rows, not for where everything else sits"
   );
-  assert.equal(merged.olderCursor, 3, "extended history keeps the pin's cursor");
+  assert.equal(merged.olderCursor, "c3", "extended history keeps the pin's cursor");
 });
 
 test("a keyed refresh still absorbs a tombstone the page predates", () => {
@@ -75,7 +75,7 @@ test("without extended history a keyed refresh still bounds the window", () => {
   // Placing rows by number must not quietly turn that bound off.
   const merged = mergeRefreshedViewOnlyPage(
     pin([row("old", -5 * S), row("live", 2 * S)], { historyExtended: false }),
-    { thread_id: "A", entries: [row("b", S), row("c", 3 * S)], prev_cursor: 9 }
+    { thread_id: "A", entries: [row("b", S), row("c", 3 * S)], prev_cursor: "c9" }
   );
 
   assert.deepEqual(
@@ -84,7 +84,7 @@ test("without extended history a keyed refresh still bounds the window", () => {
     "rows older than the page are not retained when history was never extended"
   );
   assert.equal(merged.historyExtended, false);
-  assert.equal(merged.olderCursor, 9, "and the cursor comes from the page");
+  assert.equal(merged.olderCursor, "c9", "and the cursor comes from the page");
 });
 
 test("unnumbered pins keep every legacy rule", () => {

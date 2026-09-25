@@ -19,6 +19,7 @@ use std::{
 
 pub(crate) use self::app::BrokerTarget;
 pub(crate) use self::app::ThreadWorkspaceError;
+pub(crate) use self::app::TranscriptReadError;
 pub(crate) use self::app::REVIEW_LOCKED_THREAD_MSG;
 pub use self::app::{AppState, ApprovalError, AskUserAnswerError};
 pub(crate) use self::relay::IdSpace;
