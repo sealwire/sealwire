@@ -86,6 +86,7 @@ async function main() {
       timeoutMs: TIMEOUT_MS,
     });
     threadA = await waitForNewActiveThread(relayPort, null);
+    await waitForViewedThread(page, threadA);
     await sendMessage(page, A_PROMPT);
 
     const paused = await fakeHarness.waitForBarrier(BARRIER, TIMEOUT_MS);
@@ -110,6 +111,8 @@ async function main() {
       timeoutMs: TIMEOUT_MS,
     });
     threadB = await waitForNewActiveThread(relayPort, threadA);
+    // Drafts are per thread: text typed before the page switches stays with the old one.
+    await waitForViewedThread(page, threadB);
     await sendMessage(page, B_PROMPT);
     await waitForTranscriptText(page, B_REPLY);
     assert.equal(

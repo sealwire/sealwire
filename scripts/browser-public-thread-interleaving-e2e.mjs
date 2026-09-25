@@ -158,6 +158,7 @@ async function main() {
       timeoutMs: TIMEOUT_MS,
     });
     threadA = await waitForNewActiveThread(relayPort, null);
+    await waitForLocalViewedThread(localPage, threadA);
     await sendLocalMessage(localPage, A_PROMPT);
     const paused = await fakeHarness.waitForBarrier(BARRIER, TIMEOUT_MS);
     assert.equal(paused.thread_id, threadA, "the paused public turn must belong to thread A");
@@ -171,6 +172,8 @@ async function main() {
       timeoutMs: TIMEOUT_MS,
     });
     threadB = await waitForNewActiveThread(relayPort, threadA);
+    // Drafts are per thread: text typed before the page switches stays with the old one.
+    await waitForLocalViewedThread(localPage, threadB);
     await localPage.waitForFunction(
       (priorReply) => !(document.querySelector("#transcript")?.textContent || "").includes(priorReply),
       A_BEFORE,
@@ -353,6 +356,12 @@ async function sendLocalMessage(page, text) {
   await page.waitForFunction((expected) =>
     document.querySelector("#message-input")?.value === expected, text, { timeout: TIMEOUT_MS });
   await page.click("#send-button");
+}
+
+async function waitForLocalViewedThread(page, threadId) {
+  await page.waitForSelector(`#threads-list [data-thread-id="${threadId}"].is-active`, {
+    timeout: TIMEOUT_MS,
+  });
 }
 
 function remoteThreadSelector(threadId) {

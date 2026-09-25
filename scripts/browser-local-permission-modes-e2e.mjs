@@ -60,7 +60,11 @@ async function waitForActiveSession(relayPort, { approvalPolicy, cwd }) {
   assert.fail(`timed out waiting for ${approvalPolicy} session: ${JSON.stringify(last)}`);
 }
 
-async function sendMessage(page) {
+async function sendMessage(page, threadId) {
+  // Drafts are per thread: text typed before the page switches stays with the old one.
+  await page.waitForSelector(`#threads-list [data-thread-id="${threadId}"].is-active`, {
+    timeout: TIMEOUT_MS,
+  });
   const input = page.locator("#message-input");
   await input.waitFor({ state: "visible", timeout: TIMEOUT_MS });
   await input.fill(PROMPT);
@@ -125,10 +129,13 @@ async function main() {
       model: "fake-echo",
       timeoutMs: TIMEOUT_MS,
     });
-    await waitForActiveSession(relayPort, { approvalPolicy: "bypass", cwd: bypassCwd });
+    const bypassThread = await waitForActiveSession(relayPort, {
+      approvalPolicy: "bypass",
+      cwd: bypassCwd,
+    });
     logStep("bypass session active");
 
-    await sendMessage(page);
+    await sendMessage(page, bypassThread);
     await waitForReply(page);
     assert.equal(
       await page.locator(APPROVAL_BANNER).count(),
@@ -145,10 +152,13 @@ async function main() {
       model: "fake-echo",
       timeoutMs: TIMEOUT_MS,
     });
-    await waitForActiveSession(relayPort, { approvalPolicy: "untrusted", cwd: askCwd });
+    const askThread = await waitForActiveSession(relayPort, {
+      approvalPolicy: "untrusted",
+      cwd: askCwd,
+    });
     logStep("untrusted session active");
 
-    await sendMessage(page);
+    await sendMessage(page, askThread);
     await page.waitForSelector(APPROVAL_BANNER, { timeout: TIMEOUT_MS });
     logStep("approval banner appeared for untrusted turn");
 
