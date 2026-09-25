@@ -4292,6 +4292,7 @@ async fn spawn_public_mode_app_with_access_hardening(
         SecurityHeadersConfig::default(),
         access,
         None,
+        OriginGuard::disabled(),
     );
     tokio::spawn(async move {
         axum::serve(
@@ -6936,5 +6937,390 @@ async fn a_frame_cap_below_the_relays_fixed_size_is_raised_to_it() {
         "a relay-sized frame was refused by a broker configured below the relay's fixed \
          64KiB fitting limit: {unexpected:?}. The relay cannot negotiate this cap, so the \
          reply is undeliverable and the reconnect replays the same failure."
+    );
+}
+
+// --- Origin auth: only requests that came through the edge (Cloudflare) are served. ---
+
+// Test-only value; shaped like a real one so it passes validation.
+const EDGE_SECRET: &str = "Test0nly-origin-secret-0123456789abcdefXYZ";
+
+fn enforced_origin_guard() -> OriginGuard {
+    OriginGuard::from_config(None, Some(EDGE_SECRET), false).expect("valid origin auth config")
+}
+
+fn public_router_with_origin_guard(
+    join_verifier: BrokerJoinVerifier,
+    origin_guard: OriginGuard,
+) -> Router {
+    app_with_access_strategy_parts(
+        BrokerState::default(),
+        test_web_root(),
+        join_verifier,
+        BrokerHardeningConfig::default(),
+        SecurityHeadersConfig::default(),
+        Arc::new(OpenAccessStrategy),
+        None,
+        origin_guard,
+    )
+}
+
+async fn serve_router(app: Router) -> SocketAddr {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener should bind");
+    let address = listener.local_addr().expect("listener should have address");
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .expect("broker should serve");
+    });
+    address
+}
+
+async fn spawn_app_with_origin_guard(origin_guard: OriginGuard) -> SocketAddr {
+    serve_router(public_router_with_origin_guard(
+        BrokerJoinVerifier::SelfHosted(test_join_ticket_key()),
+        origin_guard,
+    ))
+    .await
+}
+
+async fn get_with_edge_header(
+    address: SocketAddr,
+    path: &str,
+    edge_secret: Option<&str>,
+) -> reqwest::Response {
+    let mut request = reqwest::Client::new().get(format!("http://{address}{path}"));
+    if let Some(secret) = edge_secret {
+        request = request.header(DEFAULT_ORIGIN_AUTH_HEADER, secret);
+    }
+    request.send().await.expect("request should complete")
+}
+
+fn surface_ws_request(
+    address: SocketAddr,
+    pairing_id: &str,
+    edge_secret: Option<&str>,
+) -> tokio_tungstenite::tungstenite::handshake::client::Request {
+    let url = websocket_url(
+        address,
+        "room-a",
+        protocol::PeerRole::Surface,
+        None,
+        JoinTicketClaims::pairing_surface_join("room-a", pairing_id, u64::MAX),
+    );
+    let mut request = url
+        .into_client_request()
+        .expect("websocket request should build");
+    if let Some(secret) = edge_secret {
+        request.headers_mut().insert(
+            DEFAULT_ORIGIN_AUTH_HEADER,
+            HeaderValue::from_str(secret).expect("edge header should build"),
+        );
+    }
+    request
+}
+
+async fn ws_handshake_status(
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+) -> reqwest::StatusCode {
+    match connect_async(request).await {
+        Ok(_) => panic!("handshake should have been refused"),
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            reqwest::StatusCode::from_u16(response.status().as_u16()).expect("status")
+        }
+        Err(other) => panic!("unexpected websocket error: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn direct_origin_requests_without_the_edge_header_are_refused() {
+    let address = spawn_app_with_origin_guard(enforced_origin_guard()).await;
+    for path in [
+        "/",
+        "/static/assets/remote-test.js",
+        "/sw.js",
+        "/manifest.webmanifest",
+        "/api/public/relays",
+        "/no-such-path",
+    ] {
+        for presented in [None, Some("wrong-secret")] {
+            let response = get_with_edge_header(address, path, presented).await;
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::FORBIDDEN,
+                "{path} with {presented:?}"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store"),
+                "{path}: a refusal must never be cached"
+            );
+            let body = response.text().await.expect("body should read");
+            assert!(!body.contains(EDGE_SECRET), "{path}: {body}");
+            assert!(!body.contains(DEFAULT_ORIGIN_AUTH_HEADER), "{path}: {body}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn edge_requests_reach_the_frontend() {
+    let address = spawn_app_with_origin_guard(enforced_origin_guard()).await;
+    let html = get_with_edge_header(address, "/", Some(EDGE_SECRET)).await;
+    assert_eq!(html.status(), reqwest::StatusCode::OK);
+    assert!(html
+        .text()
+        .await
+        .expect("html should read")
+        .contains("Remote Broker Surface"));
+    let asset =
+        get_with_edge_header(address, "/static/assets/remote-test.js", Some(EDGE_SECRET)).await;
+    assert_eq!(asset.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn edge_requests_reach_the_public_control_plane() {
+    let address = serve_router(public_router_with_origin_guard(
+        BrokerJoinVerifier::PublicControlPlane(test_public_control_plane().await),
+        enforced_origin_guard(),
+    ))
+    .await;
+    let signing_key = SigningKey::from_bytes(&[23_u8; 32]);
+    let body = RelayEnrollmentChallengeRequest {
+        relay_verify_key: STANDARD.encode(signing_key.verifying_key().to_bytes()),
+        relay_label: None,
+    };
+    let url = format!("http://{address}/api/public/relay-enrollment/challenge");
+
+    let direct = reqwest::Client::new()
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .expect("request should complete");
+    assert_eq!(direct.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let via_edge = reqwest::Client::new()
+        .post(&url)
+        .header(DEFAULT_ORIGIN_AUTH_HEADER, EDGE_SECRET)
+        .json(&body)
+        .send()
+        .await
+        .expect("request should complete");
+    assert_eq!(via_edge.status(), reqwest::StatusCode::OK);
+    via_edge
+        .json::<RelayEnrollmentChallengeResponse>()
+        .await
+        .expect("challenge should decode");
+}
+
+#[tokio::test]
+async fn railway_readiness_stays_reachable_without_the_edge_header() {
+    let address = spawn_app_with_origin_guard(enforced_origin_guard()).await;
+    let health = broker_health(address).await;
+    assert_eq!(health.status, "ok");
+    assert!(health.join_auth_ready);
+}
+
+#[tokio::test]
+async fn duplicate_or_folded_edge_headers_are_refused() {
+    let address = spawn_app_with_origin_guard(enforced_origin_guard()).await;
+    let folded = format!("{EDGE_SECRET}, {EDGE_SECRET}");
+    for headers in [
+        vec![
+            (DEFAULT_ORIGIN_AUTH_HEADER, EDGE_SECRET),
+            (DEFAULT_ORIGIN_AUTH_HEADER, EDGE_SECRET),
+        ],
+        vec![
+            ("X-Relay-Origin-Auth", "attacker-guess"),
+            (DEFAULT_ORIGIN_AUTH_HEADER, EDGE_SECRET),
+        ],
+        vec![(DEFAULT_ORIGIN_AUTH_HEADER, folded.as_str())],
+    ] {
+        let response = http_get_with_headers(address, "/", &headers).await;
+        assert!(
+            response.starts_with("HTTP/1.1 403"),
+            "{headers:?} -> {}",
+            response.lines().next().unwrap_or_default()
+        );
+    }
+    let single =
+        http_get_with_headers(address, "/", &[(DEFAULT_ORIGIN_AUTH_HEADER, EDGE_SECRET)]).await;
+    assert!(single.starts_with("HTTP/1.1 200"), "{single}");
+}
+
+#[tokio::test]
+async fn websocket_upgrade_requires_the_edge_header() {
+    let address = spawn_app_with_origin_guard(enforced_origin_guard()).await;
+    for presented in [None, Some("wrong-secret")] {
+        assert_eq!(
+            ws_handshake_status(surface_ws_request(address, "pair-direct", presented)).await,
+            reqwest::StatusCode::FORBIDDEN,
+            "{presented:?}"
+        );
+    }
+
+    let (mut socket, _) =
+        connect_async(surface_ws_request(address, "pair-edge", Some(EDGE_SECRET)))
+            .await
+            .expect("edge websocket should connect");
+    match next_server_message(&mut socket).await {
+        ServerMessage::Welcome { peer_id, .. } => assert!(peer_id.starts_with("surface-")),
+        other => panic!("unexpected welcome frame: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn misconfigured_origin_auth_fails_closed_and_fails_readiness() {
+    let address = spawn_app_with_origin_guard(OriginGuard::fail_closed()).await;
+    assert_eq!(
+        get_with_edge_header(address, "/", Some(EDGE_SECRET))
+            .await
+            .status(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        ws_handshake_status(surface_ws_request(address, "pair-bad", Some(EDGE_SECRET))).await,
+        reqwest::StatusCode::SERVICE_UNAVAILABLE
+    );
+
+    let health = get_with_edge_header(address, "/api/health", None).await;
+    assert_eq!(health.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let health: HealthResponse = health.json().await.expect("health should decode");
+    assert_eq!(health.status, "misconfigured");
+    assert!(!health.join_auth_ready);
+}
+
+/// Mirrors how the hosted broker merges its own admin + readiness routes onto this router.
+#[tokio::test]
+async fn origin_auth_stays_scoped_to_the_public_router_when_merged() {
+    async fn private_handler(headers: HeaderMap) -> String {
+        format!(
+            "private route; access assertion present: {}",
+            headers.contains_key("cf-access-jwt-assertion")
+        )
+    }
+    let public = public_router_with_origin_guard(
+        BrokerJoinVerifier::SelfHosted(test_join_ticket_key()),
+        enforced_origin_guard(),
+    );
+    let private = Router::new()
+        .route("/api/private/ready", get(private_handler))
+        .route("/api/private/admin/licenses", get(private_handler));
+    let address = serve_router(public.merge(private)).await;
+
+    let ready = get_with_edge_header(address, "/api/private/ready", None).await;
+    assert_eq!(ready.status(), reqwest::StatusCode::OK);
+
+    let admin = reqwest::Client::new()
+        .get(format!("http://{address}/api/private/admin/licenses"))
+        .header("cf-access-jwt-assertion", "opaque-test-assertion")
+        .send()
+        .await
+        .expect("request should complete");
+    assert_eq!(admin.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        admin.text().await.expect("body"),
+        "private route; access assertion present: true"
+    );
+
+    assert_eq!(
+        get_with_edge_header(address, "/", None).await.status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+}
+
+/// With `cf-connecting-ip` trusted, a direct caller can put any address in it. The ban
+/// check runs first and sees that address, so this pins that the origin check still
+/// refuses the request before any per-IP state is touched.
+#[tokio::test]
+async fn a_spoofed_edge_ip_off_the_edge_cannot_dodge_a_ban_or_spend_a_victims_budget() {
+    const EDGE_IP_HEADER: &str = "cf-connecting-ip";
+    let ban_guard = BanGuard {
+        blocklist: Blocklist::from_entries(&["198.51.100.7"]),
+        trusted_ip_header: Some(EDGE_IP_HEADER.parse().unwrap()),
+    };
+    let app = app_with_access_strategy_parts(
+        BrokerState::default(),
+        test_web_root(),
+        BrokerJoinVerifier::SelfHosted(test_join_ticket_key()),
+        BrokerHardeningConfig {
+            public_api_rate_limit_per_minute: 1,
+            ..BrokerHardeningConfig::default()
+        },
+        SecurityHeadersConfig::default(),
+        Arc::new(OpenAccessStrategy),
+        None,
+        enforced_origin_guard(),
+    )
+    .layer(middleware::from_fn_with_state(ban_guard, reject_banned_ips));
+    let address = serve_router(app).await;
+    let client = reqwest::Client::new();
+    let get_root = |edge_ip: &'static str, secret: Option<&'static str>| {
+        let mut request = client
+            .get(format!("http://{address}/"))
+            .header(EDGE_IP_HEADER, edge_ip);
+        if let Some(secret) = secret {
+            request = request.header(DEFAULT_ORIGIN_AUTH_HEADER, secret);
+        }
+        async move {
+            let response = request.send().await.expect("request should complete");
+            let status = response.status();
+            (status, response.text().await.expect("body"))
+        }
+    };
+
+    let (status, body) = get_root("198.51.100.7", Some(EDGE_SECRET)).await;
+    assert_eq!(status, reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(
+        body, "forbidden",
+        "the ban, not origin auth, refused the edge request"
+    );
+    let (status, body) = get_root("203.0.113.9", None).await;
+    assert_eq!(status, reqwest::StatusCode::FORBIDDEN);
+    assert!(
+        body.contains("request failed"),
+        "origin auth refused the dodge: {body}"
+    );
+
+    let ws_token = |secret: Option<&'static str>| {
+        let mut request = client
+            .post(format!("http://{address}/api/public/relay/ws-token"))
+            .header(EDGE_IP_HEADER, "203.0.113.5")
+            .json(&RelayWsTokenRequest {
+                relay_id: "relay-1".to_string(),
+                broker_room_id: "room-a".to_string(),
+                relay_peer_id: "relay-1".to_string(),
+            });
+        if let Some(secret) = secret {
+            request = request.header(DEFAULT_ORIGIN_AUTH_HEADER, secret);
+        }
+        async move {
+            request
+                .send()
+                .await
+                .expect("request should complete")
+                .status()
+        }
+    };
+    for _ in 0..3 {
+        assert_eq!(ws_token(None).await, reqwest::StatusCode::FORBIDDEN);
+    }
+    assert_ne!(
+        ws_token(Some(EDGE_SECRET)).await,
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        "direct requests spoofing the victim's address must not spend its budget"
+    );
+    assert_eq!(
+        ws_token(Some(EDGE_SECRET)).await,
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        "the budget is live and keyed on the edge address"
     );
 }

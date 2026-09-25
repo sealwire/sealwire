@@ -3,6 +3,7 @@ pub mod auth;
 pub mod blocklist;
 pub mod events;
 pub mod join_ticket;
+pub mod origin_guard;
 pub mod protocol;
 pub mod public_control;
 mod state;
@@ -17,6 +18,10 @@ pub use blocklist::{Blocklist, BANNED_IPS_POSTGRES_URL_ENV};
 pub use events::{
     usage_event_sink_from_env, FileUsageEventSink, PostgresUsageEventSink, UsageEvent,
     UsageEventKind, UsageEventSink, USAGE_EVENTS_PATH_ENV, USAGE_EVENTS_POSTGRES_URL_ENV,
+};
+pub use origin_guard::{
+    origin_auth_exempt_path, OriginGuard, DEFAULT_ORIGIN_AUTH_HEADER, ORIGIN_AUTH_HEADER_ENV,
+    ORIGIN_AUTH_SECRET_ENV, REQUIRE_ORIGIN_AUTH_ENV,
 };
 pub use public_control::PUBLIC_ISSUER_SECRET_ENV;
 pub use state::BrokerState;
@@ -256,6 +261,7 @@ pub async fn app(state: BrokerState) -> Router {
         }),
         select_standard_public_access_strategy(),
         admin_token_from_env(),
+        OriginGuard::from_env_or_fail_closed(),
     )
     .layer(middleware::from_fn_with_state(ban_guard, reject_banned_ips))
 }
@@ -289,6 +295,7 @@ pub async fn app_with_access_strategy(
         }),
         access,
         admin_token_from_env(),
+        OriginGuard::from_env_or_fail_closed(),
     )
     .layer(middleware::from_fn_with_state(ban_guard, reject_banned_ips))
 }
@@ -317,6 +324,23 @@ pub async fn app_with_access_strategy_and_public_control(
     access: Arc<dyn BrokerAccessStrategy>,
     control_plane: PublicControlPlane,
 ) -> Router {
+    app_with_access_strategy_public_control_and_origin_guard(
+        state,
+        access,
+        control_plane,
+        OriginGuard::from_env_or_fail_closed(),
+    )
+    .await
+}
+
+/// [`app_with_access_strategy_and_public_control`] with an origin guard the caller
+/// already validated, so startup can refuse a bad config before binding.
+pub async fn app_with_access_strategy_public_control_and_origin_guard(
+    state: BrokerState,
+    access: Arc<dyn BrokerAccessStrategy>,
+    control_plane: PublicControlPlane,
+    origin_guard: OriginGuard,
+) -> Router {
     let ban_guard = BanGuard::from_env().await;
     app_with_access_strategy_parts(
         state,
@@ -332,6 +356,7 @@ pub async fn app_with_access_strategy_and_public_control(
         }),
         access,
         admin_token_from_env(),
+        origin_guard,
     )
     .layer(middleware::from_fn_with_state(ban_guard, reject_banned_ips))
 }
@@ -598,6 +623,7 @@ struct BrokerAppState {
     /// Operator token for `/api/admin/stats` (see [`ADMIN_TOKEN_ENV`]). `None` =
     /// the admin endpoint is disabled and returns 404 (never reveals it exists).
     admin_token: Option<Arc<str>>,
+    origin_guard: OriginGuard,
 }
 
 /// Operator bearer token that gates `/api/admin/stats`. Keep it independent of any
@@ -1340,6 +1366,7 @@ fn app_with_web_root_and_verifier_and_hardening(
         security_headers,
         Arc::new(OpenAccessStrategy),
         None, // no admin token → /api/admin/stats not mounted
+        OriginGuard::disabled(),
     )
 }
 
@@ -1366,9 +1393,11 @@ fn app_with_standard_public_access_for_test(
         security_headers,
         select_standard_public_access_strategy(),
         admin_token,
+        OriginGuard::disabled(),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn app_with_access_strategy_parts(
     state: BrokerState,
     web_root: PathBuf,
@@ -1377,6 +1406,7 @@ fn app_with_access_strategy_parts(
     security_headers: SecurityHeadersConfig,
     access: Arc<dyn BrokerAccessStrategy>,
     admin_token: Option<Arc<str>>,
+    origin_guard: OriginGuard,
 ) -> Router {
     if !web_root.join("remote.html").exists() {
         warn!(
@@ -1510,7 +1540,14 @@ fn app_with_access_strategy_parts(
             access,
             enrollment_locks: Arc::new(StdMutex::new(HashMap::new())),
             admin_token,
+            origin_guard: origin_guard.clone(),
         })
+        // Innermost, so refusals still get security + no-store headers; and applied here,
+        // not by callers, so routes merged on later (private admin, readiness) stay outside it.
+        .layer(middleware::from_fn_with_state(
+            origin_guard,
+            origin_guard::enforce_origin_auth,
+        ))
         .layer(middleware::from_fn_with_state(
             security_headers,
             with_security_headers,
@@ -1582,6 +1619,14 @@ async fn with_cache_headers(request: Request, next: Next) -> Response {
 }
 
 async fn health(State(state): State<BrokerAppState>) -> impl IntoResponse {
+    // Readiness must fail so a deploy with a broken origin-auth config never goes live.
+    if state.origin_guard.is_misconfigured() {
+        let (_, mut payload) = state.join_verifier.health_response(None);
+        payload.status = "misconfigured".to_string();
+        payload.join_auth_ready = false;
+        payload.message = Some("origin auth is misconfigured; see broker logs".to_string());
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(payload));
+    }
     let public_monitoring = if matches!(
         state.join_verifier,
         BrokerJoinVerifier::PublicControlPlane(_)
@@ -3612,16 +3657,23 @@ fn parse_usize_env(name: &str, default: usize) -> Result<usize, String> {
 
 fn parse_bool_env(name: &str, default: bool) -> Result<bool, String> {
     match std::env::var(name) {
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "" => Ok(default),
-            "1" | "true" | "yes" | "on" => Ok(true),
-            "0" | "false" | "no" | "off" => Ok(false),
-            _ => Err(format!(
-                "{name} must be one of: 1, true, yes, on, 0, false, no, off"
-            )),
-        },
+        Ok(value) => parse_bool_value(name, Some(&value), default),
         Err(std::env::VarError::NotPresent) => Ok(default),
         Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid utf-8")),
+    }
+}
+
+fn parse_bool_value(name: &str, value: Option<&str>, default: bool) -> Result<bool, String> {
+    match value
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        None | Some("") => Ok(default),
+        Some("1" | "true" | "yes" | "on") => Ok(true),
+        Some("0" | "false" | "no" | "off") => Ok(false),
+        Some(_) => Err(format!(
+            "{name} must be one of: 1, true, yes, on, 0, false, no, off"
+        )),
     }
 }
 

@@ -57,3 +57,21 @@ fn self_host_example_persists_vapid_key_on_the_volume() {
         "self-host example must not start the private commercial binary"
     );
 }
+
+#[test]
+fn self_host_healthcheck_survives_origin_auth() {
+    // Railway probes the origin directly, so its healthcheck never carries the edge header.
+    let toml = railway_toml();
+    let line = toml
+        .lines()
+        .find(|l| l.trim_start().starts_with("healthcheckPath"))
+        .expect("self-host railway.toml must define healthcheckPath");
+    let path = line
+        .split('"')
+        .nth(1)
+        .expect("healthcheckPath value must be quoted");
+    assert!(
+        relay_broker::origin_auth_exempt_path(path),
+        "healthcheckPath {path} would be refused once RELAY_BROKER_ORIGIN_AUTH_SECRET is set"
+    );
+}

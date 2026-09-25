@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() {
@@ -11,6 +11,12 @@ async fn main() {
                 .unwrap_or_else(|_| "relay_broker=debug,tower_http=info".into()),
         )
         .init();
+
+    // Before binding: a broker that cannot enforce its configured origin auth must not listen.
+    if let Err(error) = relay_broker::OriginGuard::from_env() {
+        error!(%error, "relay-broker refusing to start: invalid origin auth config");
+        std::process::exit(1);
+    }
 
     let port = std::env::var("PORT")
         .ok()

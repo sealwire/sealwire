@@ -489,3 +489,149 @@ still closes sockets; clients may retry with the same bearer when it remains
 valid. If an earlier authenticated release returned 503 and a later retry gets
 Unauthorized, the binding may already be gone (ambiguous durable outcome — treat
 as released).
+
+## Origin bypass protection (broker behind Cloudflare)
+
+Proxying the broker's hostname through Cloudflare does not hide the origin. On
+Railway, the CNAME target your custom domain points at (`<target>.up.railway.app`)
+routes by `Host`: anyone who connects to it with `Host: broker.example.com`
+reaches the service and skips Cloudflare's WAF, rate and bot rules, whether or
+not the service also has a generated public domain. With origin auth on, the
+broker refuses any request that lacks a secret header only Cloudflare adds.
+
+| Variable | Meaning |
+|---|---|
+| `RELAY_BROKER_ORIGIN_AUTH_SECRET` | Turns the check on. 32–512 characters from `A-Z a-z 0-9 - . _ ~ + / =`, at least 10 distinct. Generate with `openssl rand -base64 48`. |
+| `RELAY_BROKER_ORIGIN_AUTH_HEADER` | Optional header name, default `x-relay-origin-auth`. Lowercase `a-z 0-9 -`. Names the proxy or the app already use (`authorization`, `cookie`, `host`, `upgrade`, `cf-*`, `sec-*`, `x-forwarded-*`, …) are refused. |
+| `RELAY_BROKER_REQUIRE_ORIGIN_AUTH` | `1` means the secret must be present. Set it with the secret, so that deleting the secret later stops the broker instead of quietly reopening the origin. |
+
+**What is checked.** Every route on the broker's router: the web UI (`/`,
+`/static/*`, `/sw.js`, manifest, icons), `/api/public/*`, `/api/admin/stats`,
+the `/ws/:channel_id` WebSocket upgrade, and unknown paths. The only exception
+is `/api/health`, because Railway's deploy healthcheck calls the origin
+directly and cannot carry the header. Routes that a wrapping binary merges onto
+this router afterwards (the hosted build's own admin and readiness routes) are
+outside the check and keep their own authentication.
+
+**What passes.** Exactly one header line whose value matches the secret byte for
+byte. The comparison is between SHA-256 digests, in constant time. A missing
+header, a second copy of it, a comma-joined value, or a wrong value gets `403`
+`{"error":"forbidden","message":"request failed"}` with `Cache-Control:
+no-store`. The broker removes the header before any handler runs.
+
+**Bad config fails closed.** A secret that is present but empty (an unresolved
+platform variable reference expands to exactly that), too short, a placeholder,
+or contains other characters; a header name without a secret; a bad header name;
+`REQUIRE` without a secret; an unreadable `REQUIRE` value:
+
+- the `relay-broker` binary logs which variable is wrong (never its value) and
+  exits with status 1 before it binds;
+- a binary that embeds the router through `relay_broker::app*` answers `503` on
+  every route, and `/api/health` answers `503 {"status":"misconfigured"}` so a
+  healthcheck pointed at it fails the deploy. Embedders should call
+  `relay_broker::OriginGuard::from_env()` before binding so they refuse to
+  start instead, and hand the result to
+  `app_with_access_strategy_public_control_and_origin_guard`.
+
+### Cloudflare setup
+
+1. **SSL/TLS mode Full — not Full (strict) — for the broker hostname.** Railway
+   says proxied custom domains must use Full: Cloudflare reaches Railway with
+   Railway's `*.up.railway.app` certificate, so strict validation fails
+   (<https://docs.railway.com/networking/domains/working-with-domains>). Full
+   still encrypts the Cloudflare-to-origin hop the secret travels on; it does
+   not check the origin's certificate. Never use Flexible, which sends the
+   secret in plain text. To leave the zone's own mode alone, set it for this
+   hostname only: **Rules → Configuration Rules**, when
+   `http.host eq "broker.example.com"`, **SSL → Full**.
+2. **Network → WebSockets: on.**
+3. **Rules → Transform Rules → Modify Request Header → Create rule.** When
+   `http.host eq "broker.example.com"`, **Set static** header
+   `x-relay-origin-auth` to the secret. *Set static* overrides any copy the
+   client sent. Scope it to this hostname so the secret is not sent to other
+   origins on the zone. Anyone who can read the zone's rules can read the value;
+   treat that access like access to the secret.
+4. **Nothing that shows a challenge page on this hostname** (Bot Fight Mode,
+   "Under Attack", managed-challenge WAF rules). Relays and WebSocket
+   reconnects are not browsers and cannot solve one.
+
+### Rollout order
+
+Each step can be checked before the next, and nothing is refused until step 5.
+
+1. Deploy a build that has origin auth, with none of the variables set.
+   Behaviour is unchanged.
+2. Create the Configuration Rule and the Transform Rule. Neither has any effect
+   while the record is DNS-only.
+3. Switch the DNS record to **Proxied**. Pair a device, connect a relay, and
+   watch a live turn through Cloudflare. The origin ignores the header while no
+   secret is set.
+4. Wait longer than the old record's TTL (Cloudflare's Auto TTL for DNS-only
+   records is 5 minutes) so clients stop resolving straight to the origin.
+5. Set `RELAY_BROKER_ORIGIN_AUTH_SECRET` (the same value) and
+   `RELAY_BROKER_REQUIRE_ORIGIN_AUTH=1` on the service and redeploy. The restart
+   drops open sockets; they reconnect through Cloudflare.
+6. Verify (below). Only after that, if you want per-client limits back, set
+   `RELAY_BROKER_TRUSTED_CLIENT_IP_HEADER=cf-connecting-ip` and redeploy; see
+   *Client IP*. Never set it before step 5 is live.
+
+Nothing in the checks needs the secret on a command line. `O` is the Railway
+CNAME target (the value of your hostname's CNAME record). Railway routes it by
+`Host`, so every direct check names your hostname; a bare request gets
+Railway's own 404, which says nothing about the broker.
+
+```bash
+code() { curl -s -o /dev/null -w '%{http_code}\n' "$@"; }
+O=https://<target>.up.railway.app
+H=(-H 'Host: broker.example.com')
+code https://broker.example.com/api/health          # 200
+code https://broker.example.com/                    # 200 (Cloudflare added the header)
+code "${H[@]}" "$O/"                                # 403
+code "${H[@]}" "$O/api/public/relays"               # 403
+code "${H[@]}" "$O/api/health"                      # 200 (Railway readiness)
+code "${H[@]}" --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  "$O/ws/probe"                                     # 403
+code "$O/api/health"                                # 404 from Railway, not the broker
+```
+
+A direct `403` counts only if its body is the broker's
+`{"error":"forbidden","message":"request failed"}`; check one with
+`curl -s "${H[@]}" "$O/"`.
+
+Then pair a phone and run a turn end to end once more.
+
+**Rollback.** Undo in reverse order. First remove
+`RELAY_BROKER_TRUSTED_CLIENT_IP_HEADER` if you set it to `cf-connecting-ip`:
+without origin auth any direct caller can write that header. Then remove
+`RELAY_BROKER_REQUIRE_ORIGIN_AUTH` and `RELAY_BROKER_ORIGIN_AUTH_SECRET`
+together and redeploy; only after that, switch the record back to DNS-only if
+you want to. In the other order every
+direct request is refused until the redeploy. Removing only the secret while
+`REQUIRE=1` stays set makes the broker refuse to start.
+
+**Rotation.** Only one secret is accepted at a time, so rotating has a short
+window of `403`s between the Transform Rule change and the redeploy. Update both
+back to back at a quiet time.
+
+### Things that change once the hostname is proxied
+
+- **Client IP.** Per-IP connection and rate limits and the IP blocklist key on
+  the socket address unless `RELAY_BROKER_TRUSTED_CLIENT_IP_HEADER` names a
+  header. Behind Cloudflare the socket address and `X-Real-IP` belong to
+  Cloudflare or the platform's proxy, so many users share one limit.
+  `cf-connecting-ip` fixes that, and is safe **only while origin auth is
+  enforced**. The blocklist check wraps the origin check, so it reads the header
+  first — but a request that did not come through Cloudflare is then refused
+  before any handler, per-IP limit or connection count sees the address it
+  claimed. What a direct caller can still do is pick the address the blocklist
+  sees for its own already-refused request, and for `/api/health`, which has no
+  per-IP state. Cloudflare sets `cf-connecting-ip` itself, with one exception:
+  a Worker's subrequest to its own zone copies `x-real-ip`, which the caller
+  controls. Do not trust the header if a Worker on that zone forwards to the
+  broker. It only covers routes of this router; routes a wrapping binary adds
+  (the hosted build's admin namespace) keep their own IP policy.
+- **Idle WebSockets.** Cloudflare closes a WebSocket that carries nothing for
+  about 100 seconds. Relays ping every 20 seconds and are unaffected; an idle
+  browser tab may reconnect a little before the broker's own 120-second idle
+  timeout would have closed it.
