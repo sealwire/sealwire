@@ -16,6 +16,10 @@
   </a>
 </p>
 
+<p align="center">
+  <strong>English</strong> · <a href="./README.zh-CN.md">中文</a>
+</p>
+
 <p align="center">Your coding agents, working together on your own machine — and in your pocket wherever you go.</p>
 
 <p align="center">
