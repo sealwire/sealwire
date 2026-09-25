@@ -157,21 +157,19 @@ npx sealwire cloud           # also let your phone connect from anywhere (access
 npx sealwire local           # guarantee it never talks to the internet
 npx sealwire --port 8788     # use a different port
 npx sealwire --no-open       # don't open a browser
-npx sealwire --beta          # try features still in development (Tasks, Usage)
 npx sealwire --help          # everything else
 ```
 
-Features still in development show up as a blurred preview until you turn them
-on with `--beta`. Prefer to run your own connection server instead of Sealwire
-Cloud? Point `--broker` at a self-hosted one.
+Prefer to run your own connection server instead of Sealwire Cloud? Point
+`--broker` at a self-hosted one.
 
 ## What's coming
 
 - **Tasks and task teams** — give Sealwire a goal, and a coordinator agent
   plans it, splits it across several agents, and has their work reviewed before
-  it lands. You approve the plan; it does the rest. Try it early with `--beta`.
+  it lands. You approve the plan; it does the rest.
 - **Usage and cost** — how many tokens, and how much money, each agent and
-  project is using, week by week. Also behind `--beta`.
+  project is using, week by week.
 - More agents beyond Claude Code, Codex and Cursor.
 - A native mobile app, where the web version hits its limits.
 

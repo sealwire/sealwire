@@ -121,16 +121,15 @@ npx sealwire cloud           # 同时允许手机从任意地点连入（需要 
 npx sealwire local           # 保证它绝不连互联网
 npx sealwire --port 8788     # 换一个端口
 npx sealwire --no-open       # 不要打开浏览器
-npx sealwire --beta          # 试用仍在开发中的功能（Tasks、Usage）
 npx sealwire --help          # 其余全部选项
 ```
 
-仍在开发的功能在打开 `--beta` 之前会以模糊预览显示。想自己搭连接服务器、不用 Sealwire Cloud？把 `--broker` 指到自建实例即可。
+想自己搭连接服务器、不用 Sealwire Cloud？把 `--broker` 指到自建实例即可。
 
 ## 即将到来
 
-- **Tasks 与任务团队** —— 给 Sealwire 一个目标，协调智能体做计划、拆给多个智能体，落地前再审一遍。你批准计划，其余它来。可用 `--beta` 提前试用。
-- **用量与费用** —— 每个智能体、每个项目每周用了多少 token、花了多少钱。同样在 `--beta` 后面。
+- **Tasks 与任务团队** —— 给 Sealwire 一个目标，协调智能体做计划、拆给多个智能体，落地前再审一遍。你批准计划，其余它来。
+- **用量与费用** —— 每个智能体、每个项目每周用了多少 token、花了多少钱。
 - 不止 Claude Code、Codex、Cursor 的更多智能体。
 - 原生移动应用 —— 网页版触到天花板的那些地方。
 
