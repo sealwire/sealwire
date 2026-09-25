@@ -778,10 +778,12 @@ impl ProviderBridge for ClaudeCodeBridge {
             },
         };
 
+        let source_cwd = self
+            .cwd_for_thread(&request.source_thread_id)
+            .await
+            .unwrap_or_default();
         let cwd = if request.cwd.is_empty() {
-            self.cwd_for_thread(&request.source_thread_id)
-                .await
-                .unwrap_or_default()
+            source_cwd.clone()
         } else {
             request.cwd.clone()
         };
@@ -791,6 +793,11 @@ impl ProviderBridge for ClaudeCodeBridge {
         });
         if !cwd.is_empty() {
             cmd["cwd"] = Value::String(cwd.clone());
+        }
+        // The SDK finds a session only under the folder it was recorded in, which is
+        // not the fork's destination when the user branches somewhere else.
+        if !source_cwd.is_empty() {
+            cmd["source_cwd"] = Value::String(source_cwd);
         }
         // Omitted (not null) for a tip fork: the SDK takes the whole thread only
         // when `upToMessageId` is absent.
@@ -4419,6 +4426,46 @@ for await (const line of rl) {
             )
             .await,
             "a tip fork must omit the branch point entirely",
+        );
+    }
+
+    // The source's own folder may be gone (a worktree removed once merged), and the
+    // SDK only finds a session under the folder it was recorded in.
+    #[tokio::test]
+    async fn fork_thread_finds_the_source_by_its_own_folder_not_the_destination() {
+        let Some((bridge, state)) = spawn_fake_bridge().await else {
+            return;
+        };
+        state
+            .write()
+            .await
+            .upsert_thread(test_thread("sess-gone", "/repo/.claude/worktrees/gone"));
+
+        bridge
+            .fork_thread(ProviderForkRequest {
+                source_thread_id: "sess-gone".to_string(),
+                up_to_item_id: None,
+                cwd: "/repo".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
+                approval_policy: "default".to_string(),
+                sandbox: "workspace-write".to_string(),
+            })
+            .await
+            .expect("fork_thread should reach the worker")
+            .expect("a fork into another folder is still native");
+
+        assert!(
+            wait_for_log(
+                &state,
+                "session=sess-gone prompt=no cwd=/repo upTo=- upToKey=no",
+                5
+            )
+            .await,
+            "the destination must still ride as `cwd`",
+        );
+        assert!(
+            wait_for_log(&state, "sourceCwd=/repo/.claude/worktrees/gone", 5).await,
+            "the source must be looked up in its own folder",
         );
     }
 

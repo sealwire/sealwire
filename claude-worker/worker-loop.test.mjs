@@ -1095,6 +1095,7 @@ test("fork_session forwards up_to_message_id to the SDK as upToMessageId", async
       type: "fork_session",
       id: "fork-2",
       provider_session_id: "sess-1",
+      source_cwd: "/work/src",
       cwd: "/work/dir",
       up_to_message_id: "11111111-2222-4333-8444-555555555555",
     });
@@ -1108,7 +1109,11 @@ test("fork_session forwards up_to_message_id to the SDK as upToMessageId", async
       "11111111-2222-4333-8444-555555555555",
       "the branch point must reach the SDK, otherwise the fork silently takes the whole thread",
     );
-    assert.equal(forkCall.dir, "/work/dir", "the fork must be looked up in the session's cwd");
+    assert.equal(
+      forkCall.dir,
+      "/work/src",
+      "the source must be looked up in its own folder, not the fork's destination",
+    );
   } finally {
     await worker.close();
   }

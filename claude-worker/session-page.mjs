@@ -13,12 +13,12 @@ const SESSION_ID_PATTERN = /^[0-9a-f-]{16,}$/i;
 export async function findLocalSessionFile({
   cwd = "",
   homeDir = os.homedir(),
+  projectsDir = path.join(homeDir, ".claude", "projects"),
   sessionId,
 }) {
   if (!SESSION_ID_PATTERN.test(sessionId || "")) {
     return null;
   }
-  const projectsDir = path.join(homeDir, ".claude", "projects");
   if (cwd) {
     const projectKey = cwd.replaceAll(path.sep, "-");
     const candidate = path.join(projectsDir, projectKey, `${sessionId}.jsonl`);

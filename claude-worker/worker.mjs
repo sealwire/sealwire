@@ -11,7 +11,7 @@
  *   {"type":"read_session","id":"...","provider_session_id":"...","cwd":"..."}
  *   {"type":"read_session_page","id":"...","provider_session_id":"...","cwd":"...","before_cursor":123}
  *   {"type":"delete_session","id":"...","provider_session_id":"...","cwd":"..."}
- *   {"type":"fork_session","id":"...","provider_session_id":"...","cwd":"...","up_to_message_id":"<uuid>"}
+ *   {"type":"fork_session","id":"...","provider_session_id":"...","source_cwd":"...","cwd":"...","up_to_message_id":"<uuid>"}
  *   {"type":"send","provider_session_id":"...","prompt":"...","turn_id":"..."}
  *   {"type":"approval_decision","id":"...","approval_id":"...","decision":"approve|deny|cancel","scope":"once|session"}
  *   {"type":"ask_user_question_answer","id":"...","request_id":"...","answers":{"<question text>":"<chosen label>"}}
@@ -71,6 +71,7 @@ import {
 } from "./session-options.mjs";
 import { createProgressTracker } from "./progress-tracker.mjs";
 import { checkInstalledClaudeBinary } from "./native-binary-check.mjs";
+import { moveForkIntoFolder } from "./fork-folder.mjs";
 import {
   findLocalSessionFile,
   readSessionCwdFromFile,
@@ -770,7 +771,7 @@ function releaseSession(sessions, providerSessionId, context) {
 // The pinned SDK documents missing local sessions as an Error and currently
 // exposes no typed error code. Match only its two exact local-store messages;
 // unrelated filesystem/provider failures must remain hard errors.
-function isDeleteSessionNotFoundError(error, sessionId) {
+function isSessionNotFoundError(error, sessionId) {
   const message = error instanceof Error ? error.message : String(error).replace(/^Error:\s*/, "");
   return (
     message === `Session ${sessionId} not found in any project directory` ||
@@ -1791,7 +1792,7 @@ async function main() {
           try {
             await sdk.deleteSession(sessionId, { dir: cmd.cwd || undefined });
           } catch (err) {
-            if (cmd.allow_missing === true && isDeleteSessionNotFoundError(err, sessionId)) {
+            if (cmd.allow_missing === true && isSessionNotFoundError(err, sessionId)) {
               deleted = false;
             } else {
               throw err;
@@ -1816,16 +1817,26 @@ async function main() {
               "the installed @anthropic-ai/claude-agent-sdk does not support forkSession",
             );
           }
-          const options = { dir: cmd.cwd || undefined };
+          // `cwd` is where the fork is going; the source is only found under its own.
+          const options = { dir: cmd.source_cwd || undefined };
           // Omit the key entirely when unset — the SDK branches at the tip only
           // when `upToMessageId` is absent.
           if (cmd.up_to_message_id) options.upToMessageId = cmd.up_to_message_id;
 
-          const forked = await sdk.forkSession(sessionId, options);
+          let forked;
+          try {
+            forked = await sdk.forkSession(sessionId, options);
+          } catch (err) {
+            // The relay's record of that folder can be stale; without `dir` the SDK
+            // searches every folder.
+            if (!options.dir || !isSessionNotFoundError(err, sessionId)) throw err;
+            forked = await sdk.forkSession(sessionId, { ...options, dir: undefined });
+          }
           const forkedSessionId = forked?.sessionId;
           if (!forkedSessionId) {
             throw new Error("forkSession did not return a sessionId");
           }
+          await moveForkIntoFolder(sdk, forkedSessionId, cmd.cwd);
           emitResponse(cmd.id, {
             provider_session_id: forkedSessionId,
             source_provider_session_id: sessionId,
@@ -1854,7 +1865,7 @@ export {
   findSessionEntry,
   flushEvents,
   handleSessionEvent,
-  isDeleteSessionNotFoundError,
+  isSessionNotFoundError,
   promoteSessionEntry,
   releaseSession,
   SESSION_LIMIT,

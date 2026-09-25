@@ -14,7 +14,7 @@ import {
   evictSessionsIfNeeded,
   findSessionEntry,
   flushEvents,
-  isDeleteSessionNotFoundError,
+  isSessionNotFoundError,
   sessionOptionsChanged,
   SESSION_LIMIT,
   trackBackgroundTasks,
@@ -23,25 +23,25 @@ import {
 test("delete-session missing detection accepts only the pinned SDK's exact messages", () => {
   const sessionId = "11111111-2222-4333-8444-555555555555";
   assert.equal(
-    isDeleteSessionNotFoundError(
+    isSessionNotFoundError(
       new Error(`Session ${sessionId} not found in any project directory`),
       sessionId,
     ),
     true,
   );
   assert.equal(
-    isDeleteSessionNotFoundError(
+    isSessionNotFoundError(
       new Error(`Session ${sessionId} not found in project directory for /tmp/project`),
       sessionId,
     ),
     true,
   );
   assert.equal(
-    isDeleteSessionNotFoundError(new Error(`permission denied for ${sessionId}`), sessionId),
+    isSessionNotFoundError(new Error(`permission denied for ${sessionId}`), sessionId),
     false,
   );
   assert.equal(
-    isDeleteSessionNotFoundError(
+    isSessionNotFoundError(
       new Error("Session aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee not found in any project directory"),
       sessionId,
     ),

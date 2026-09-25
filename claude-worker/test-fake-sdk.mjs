@@ -413,8 +413,8 @@ export function query({ prompt, options = {} }) {
   };
 }
 
-export async function getSessionInfo(sessionId, _options) {
-  return { sessionId, cwd: process.cwd() };
+export async function getSessionInfo(sessionId, options) {
+  return { sessionId, cwd: options?.dir ?? process.cwd() };
 }
 
 export async function getSessionMessages(sessionId, _options) {
