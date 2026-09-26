@@ -32,6 +32,14 @@ fake) to web/mobile frontends. Rust workspace + Node worker + Vite frontend.
 - Browser e2e (`npm run test:browser:*`) is slow and needs playwright — **don't
   run by default, only when needed**.
 
+## Backward compatibility: not wanted unless asked
+
+Do not add code to keep older formats working — old response shapes, old
+protocol fields, old stored state — unless the user explicitly asks for it. When
+a change breaks an old shape, change it; do not write a shim or a fallback. A
+review finding that only bites an old shape is not a bug to fix. Existing
+compatibility code is not a reason to add more of it.
+
 ## Driving the relay from a script
 
 **Do not stop, kill, or restart the user's relay** (`relay-server` on port 8787

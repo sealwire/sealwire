@@ -75,9 +75,8 @@ test("and keeps it across a second refresh", () => {
 });
 
 // An older page the merge declines — a stale response from before a thread
-// switch, or the bare-array shape the endpoint also answers with — is meant to
-// leave the pane exactly as it was, so it must not cost the reader the history
-// they already loaded one refresh later.
+// switch — is meant to leave the pane exactly as it was, so it must not cost the
+// reader the history they already loaded one refresh later.
 test("an ignored older page leaves the paged-in history alone", () => {
   const state = scrolledUp();
 

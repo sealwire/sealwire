@@ -31,7 +31,7 @@ export function reviewerPreviewEntriesFromPage(session, page) {
   if (transcriptPageIsFromAnotherGeneration(session, page)) {
     throw new Error("reviewer preview page is from another relay run");
   }
-  return page?.entries || (Array.isArray(page) ? page : []);
+  return page?.entries || [];
 }
 
 /**

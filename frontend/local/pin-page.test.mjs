@@ -3,13 +3,6 @@ import assert from "node:assert/strict";
 
 import { normalizeTranscriptPage, refreshedPinPage } from "./pin-page.js";
 
-test("a bare array response is normalized to a page", () => {
-  const page = normalizeTranscriptPage([{ item_id: "a" }], "thread-1");
-  assert.equal(page.thread_id, "thread-1");
-  assert.deepEqual(page.entries.map((e) => e.item_id), ["a"]);
-  assert.equal(page.prev_cursor, null);
-});
-
 test("a null response is an empty page, not a crash", () => {
   assert.deepEqual(normalizeTranscriptPage(null, "thread-1").entries, []);
 });
