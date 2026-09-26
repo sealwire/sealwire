@@ -1,6 +1,7 @@
 import React from "react";
 import { TranscriptContent } from "./transcript-react.js";
 import { ScrollToBottomButton } from "./scroll-to-bottom.js";
+import { ApprovalFloatBar } from "./approval-float-bar.js";
 import { StickToBottomFollower } from "./stick-to-bottom.js";
 
 const h = React.createElement;
@@ -114,6 +115,8 @@ export function TranscriptState({
       hydrationLoading,
       options,
     }),
+    // Without an id the bar cannot find its card, so it would cover a visible one.
+    approval?.request_id ? h(ApprovalFloatBar, { approval, key: approval.request_id }) : null,
     h(ScrollToBottomButton, { entries }),
     h(StickToBottomFollower)
   );

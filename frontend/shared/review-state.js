@@ -1,5 +1,6 @@
 import { providerOptions } from "./provider-settings.js";
 import { isWorkingThreadStatus } from "./thread-status.js";
+import { pendingApprovalForThread } from "./session-view-model.js";
 
 const REVIEW_STATUS_LABELS = {
   pending_parent_recap: "Recapping changes",
@@ -290,10 +291,7 @@ export function canRequestReview(session, deviceId, viewedThreadId = null) {
   if (!target) return false;
   if (isWorkflowInProgress(session)) return false;
   if (isThreadBusy(session, target)) return false;
-  if (
-    Array.isArray(session?.pending_approvals) &&
-    session.pending_approvals.some((approval) => approval?.thread_id === target)
-  ) {
+  if (pendingApprovalForThread(session, target)) {
     return false;
   }
   // Per-thread, NOT workspace-global: a review running on some other thread leaves this

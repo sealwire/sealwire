@@ -1772,3 +1772,17 @@ test("skills/list falls back to the command list, minus built-ins, on a CLI with
     await worker.close();
   }
 });
+
+// Before this command existed the worker only logged it, so the relay's decline
+// never reached the SDK and the question's tool call waited forever.
+test("ask_user_question_decline is a command the worker answers", async (t) => {
+  const worker = spawnWorker();
+  t.after(() => worker.close());
+  worker.send({ type: "ask_user_question_decline", id: "decline-1", request_id: "ask:missing" });
+  const response = await worker.waitFor(
+    (event) => event.type === "response" && event.id === "decline-1",
+    { label: "decline response" },
+  );
+  assert.equal(response.ok, false);
+  assert.match(response.error?.message || "", /ask:missing is not pending/);
+});

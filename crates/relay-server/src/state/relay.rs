@@ -5376,34 +5376,51 @@ so {} never got it — hand over again when you are ready.",
         }
     }
 
+    /// Backstop: every provider declines a request it cannot attribute before it
+    /// gets here, so one without a session is refused rather than parked unseen.
     pub fn add_pending_approval(&mut self, pending: PendingApproval) {
-        if !pending.thread_id.is_empty() {
-            self.ensure_runtime_for_thread(&pending.thread_id)
-                .pending_approvals
-                .insert(pending.request_id.clone(), pending.clone());
+        if pending.thread_id.is_empty() {
+            self.push_log(
+                "error",
+                format!(
+                    "Refused approval {}: it has no session id.",
+                    pending.request_id
+                ),
+            );
+            return;
         }
+        self.ensure_runtime_for_thread(&pending.thread_id)
+            .pending_approvals
+            .insert(pending.request_id.clone(), pending.clone());
         self.pending_approvals
             .insert(pending.request_id.clone(), pending);
     }
 
     pub fn remove_pending_approval(&mut self, request_id: &str) -> Option<PendingApproval> {
         let pending = self.pending_approvals.remove(request_id)?;
-        if !pending.thread_id.is_empty() {
-            if let Some(runtime) = self.runtimes.get_mut(&pending.thread_id) {
-                runtime.pending_approvals.remove(request_id);
-            }
+        if let Some(runtime) = self.runtimes.get_mut(&pending.thread_id) {
+            runtime.pending_approvals.remove(request_id);
         }
         Some(pending)
     }
 
+    /// Same backstop as `add_pending_approval`.
     pub fn add_pending_ask_user_question(&mut self, mut pending: PendingAskUserQuestion) {
+        if pending.thread_id.is_empty() {
+            self.push_log(
+                "error",
+                format!(
+                    "Refused question {}: it has no session id.",
+                    pending.request_id
+                ),
+            );
+            return;
+        }
         self.next_ask_user_arrival_seq = self.next_ask_user_arrival_seq.saturating_add(1);
         pending.arrival_seq = self.next_ask_user_arrival_seq;
-        if !pending.thread_id.is_empty() {
-            self.ensure_runtime_for_thread(&pending.thread_id)
-                .pending_ask_user_questions
-                .insert(pending.request_id.clone(), pending.clone());
-        }
+        self.ensure_runtime_for_thread(&pending.thread_id)
+            .pending_ask_user_questions
+            .insert(pending.request_id.clone(), pending.clone());
         self.pending_ask_user_questions
             .insert(pending.request_id.clone(), pending);
     }
@@ -5413,10 +5430,8 @@ so {} never got it — hand over again when you are ready.",
         request_id: &str,
     ) -> Option<PendingAskUserQuestion> {
         let pending = self.pending_ask_user_questions.remove(request_id)?;
-        if !pending.thread_id.is_empty() {
-            if let Some(runtime) = self.runtimes.get_mut(&pending.thread_id) {
-                runtime.pending_ask_user_questions.remove(request_id);
-            }
+        if let Some(runtime) = self.runtimes.get_mut(&pending.thread_id) {
+            runtime.pending_ask_user_questions.remove(request_id);
         }
         Some(pending)
     }

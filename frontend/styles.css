@@ -786,8 +786,7 @@ button:disabled {
 /* PRIMARY — accent fill, used for the main CTA of a panel/dialog/form. */
 .start-session-button,
 .send-button,
-.approval-button-primary,
-.pending-action-btn-primary {
+.approval-button-primary {
   background: var(--accent);
   color: var(--accent-on);
   border-color: transparent;
@@ -795,8 +794,7 @@ button:disabled {
 
 .start-session-button:hover:not(:disabled),
 .send-button:hover:not(:disabled),
-.approval-button-primary:hover:not(:disabled),
-.pending-action-btn-primary:hover:not(:disabled) {
+.approval-button-primary:hover:not(:disabled) {
   background: var(--accent-hover-color);
   border-color: transparent;
 }
@@ -951,15 +949,13 @@ button:disabled {
 }
 
 /* DANGER — destructive / abort actions. */
-.stop-button,
-.pending-action-btn-danger {
+.stop-button {
   background: var(--err-bg);
   color: var(--err-fg);
   border: 1px solid color-mix(in srgb, var(--err-fg) 32%, transparent);
 }
 
-.stop-button:hover:not(:disabled),
-.pending-action-btn-danger:hover:not(:disabled) {
+.stop-button:hover:not(:disabled) {
   background: color-mix(in srgb, var(--err-fg) 18%, var(--surface-1));
   border-color: color-mix(in srgb, var(--err-fg) 48%, transparent);
 }

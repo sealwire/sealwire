@@ -33,8 +33,7 @@ function createActiveSessionThread(session) {
 // The thread filter is the other half of the same rule, and it has to be enforced
 // here rather than left to the transcript: a question whose row has not loaded is
 // rendered from the REQUEST, so there is no entry to imply which conversation it
-// belongs to. `activeThreadId` is optional only so the frozen check stays usable
-// before a session exists.
+// belongs to. With no `activeThreadId` there is no conversation to ask in.
 export function visiblePendingAskUserQuestions(
   sessionView,
   pendingAskUserQuestions,
@@ -45,11 +44,9 @@ export function visiblePendingAskUserQuestions(
   }
   const requests = Array.isArray(pendingAskUserQuestions) ? pendingAskUserQuestions : [];
   if (!activeThreadId) {
-    return pendingAskUserQuestions;
+    return [];
   }
-  return requests.filter(
-    (request) => (request?.thread_id || activeThreadId) === activeThreadId
-  );
+  return requests.filter((request) => request?.thread_id === activeThreadId);
 }
 
 export function selectSessionRenderModel({ session, previousSession, hasControllerLease }) {

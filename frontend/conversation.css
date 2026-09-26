@@ -546,7 +546,6 @@
 }
 
 .message-card-system,
-.message-card-approval,
 .message-card-error {
   width: 100%;
   max-width: 100%;
@@ -629,99 +628,423 @@
   color: var(--text-primary);
 }
 
-.message-card-reasoning {
-  border-color: var(--border-faint);
-  background: var(--surface-1);
-  border-left: 2px solid var(--warn-fg);
-}
-
-.message-card-reasoning-empty {
-  padding: 2px 0 0;
-  background: transparent;
-  border-color: transparent;
-  border-left: 0;
-}
-
-.message-card-reasoning-empty .message-meta {
-  margin-bottom: 0;
-  color: var(--text-faint);
-}
-
-.message-card-approval {
-  border-color: var(--border-faint);
-  background: var(--warn-bg);
-  border-left: 2px solid var(--warn-fg);
-}
-
 .message-card-command {
   border-left: 2px solid var(--text-3);
 }
 
+/* Reasoning (design 20a): process, not an answer. One grey line folded; opened,
+ * indented secondary text on a hairline — never a card. */
+.chat-message-reasoning {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.reasoning-toggle,
+.reasoning-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: var(--text-ui);
+  line-height: var(--leading-normal);
+  text-align: left;
+}
+
+.reasoning-toggle {
+  cursor: pointer;
+}
+
+.reasoning-toggle:hover {
+  color: var(--text-1);
+}
+
+.reasoning-toggle:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+.reasoning-chevron {
+  flex: none;
+  width: 10px;
+  font-size: var(--text-xs);
+}
+
+.reasoning-label {
+  flex: none;
+}
+
+.reasoning-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-faint);
+}
+
+.reasoning-preview::before {
+  content: "— ";
+}
+
+.reasoning-detail {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 6px 0 0 4px;
+  padding-left: 14px;
+  border-left: 1px solid var(--border-soft);
+}
+
+.reasoning-body {
+  font-size: var(--text-ui);
+  line-height: var(--leading-relaxed);
+  color: var(--text-3);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* six lines of body text */
+.reasoning-body.is-clamped {
+  max-height: calc(6 * 1.5em);
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, currentColor 70%, transparent);
+  mask-image: linear-gradient(to bottom, currentColor 70%, transparent);
+}
+
+.reasoning-show-all,
+.approval-raw-toggle,
+.approval-float-jump {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.reasoning-show-all:hover,
+.approval-raw-toggle:hover,
+.approval-float-jump:hover {
+  text-decoration: underline;
+}
+
+/* Approval (design 20a): the one thing in the conversation that needs you, so
+ * the only card. No severity colour — nothing on the wire ranks danger. */
+.message-card-approval {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--warn-border);
+  border-radius: 12px;
+  background: var(--surface-1);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--warn-fg) 8%, transparent);
+}
+
+.approval-main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px 12px;
+}
+
+.approval-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
 .approval-kind {
-  padding: 1px 7px;
-  border: 1px solid var(--border-faint);
-  border-radius: var(--r-pill);
-  background: var(--surface-2);
-  color: var(--text-2);
-  /* No tone, by decision: nothing on the wire ranks how dangerous a request
-   * is, and red already means "approvals are bypassed" on the composer gear. */
+  flex: none;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-strong);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--warn-fg);
 }
 
 .approval-title {
-  margin: 0 0 8px;
+  min-width: 0;
+  font-size: var(--text-ui);
   font-weight: var(--weight-strong);
+  color: var(--text-1);
+  overflow-wrap: anywhere;
 }
 
-/* Scope reads as a fact about blast radius, not as more prose. Mono, because
- * it is a path and the user is checking it character by character. */
-.approval-scope {
+.approval-copy {
+  margin: 0;
+  font-size: var(--text-ui);
+  line-height: var(--leading-relaxed);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.approval-subject {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 6px;
-  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-0);
+}
+
+.approval-subject .message-collapsible {
+  margin: 0;
+}
+
+.approval-command {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+  color: var(--text-1);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.approval-prompt {
+  color: var(--text-faint);
+  user-select: none;
+}
+
+.approval-subject-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  font-size: var(--text-xs);
+  color: var(--text-3);
 }
 
 .approval-scope-chip {
+  flex: 1 1 auto;
   display: inline-flex;
   align-items: baseline;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
-  padding: 3px 9px;
-  border: 1px solid var(--border-faint);
-  border-radius: var(--r-pill);
-  background: var(--surface-1);
 }
 
 .approval-scope-label {
   flex: none;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
   color: var(--text-faint);
 }
 
-/* Wraps rather than ellipsising. This is the blast radius of a decision the
- * user is about to authorise, and the old prose line wrapped — truncating it
- * behind a chip would have made the exact directory unrecoverable on a phone,
- * which is where approvals most often get answered. `anywhere` so a long
- * path segment breaks instead of forcing the card to scroll sideways. */
+/* Wraps rather than ellipsising: this is the blast radius being authorised, and
+ * a clipped path cannot be read back on a phone. */
 .approval-scope-path {
   font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  color: var(--text-2);
   min-width: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
 
-.approval-copy {
-  margin: 0 0 16px;
-  font-size: var(--text-body);
-  color: var(--text-secondary);
+.approval-subject-meta .approval-raw-toggle {
+  margin-left: auto;
+  font-size: var(--text-xs);
+}
+
+.approval-raw {
+  max-height: 240px;
+  margin: 2px 0 0;
+  padding-top: 8px;
+  overflow: auto;
+  border-top: 1px solid var(--border-faint);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--leading-relaxed);
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .approval-actions {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
+  padding: 10px 16px 12px;
+  border-top: 1px solid color-mix(in srgb, var(--warn-fg) 12%, var(--border-faint));
+}
+
+.approval-actions-spacer {
+  flex: 1 1 0;
+}
+
+.approval-actions .approval-button {
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 8px;
+  font-size: var(--text-ui);
+  font-weight: var(--weight-medium);
+}
+
+/* Ink, not accent: approving is the decision, not the page's call to action. */
+.approval-actions .approval-button-primary,
+.approval-float .approval-button-primary {
+  background: var(--text-1);
+  color: var(--surface-1);
+  border-color: transparent;
+  font-weight: var(--weight-strong);
+}
+
+.approval-actions .approval-button-primary:hover:not(:disabled),
+.approval-float .approval-button-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text-1) 86%, var(--surface-1));
+}
+
+.approval-actions .approval-button-deny {
+  padding: 0 12px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--err-fg);
+}
+
+.approval-actions .approval-button-deny:hover:not(:disabled) {
+  background: var(--err-bg);
+  border-color: transparent;
+}
+
+/* Phone: thumb-sized targets; Approve takes the row's slack. */
+@media (max-width: 640px) {
+  .approval-main {
+    padding: 12px 12px 10px;
+  }
+
+  .approval-actions {
+    padding: 10px 12px 12px;
+  }
+
+  .approval-actions .approval-button {
+    height: 40px;
+  }
+
+  .approval-actions .approval-button-primary {
+    flex: 1 1 auto;
+  }
+
+  .approval-actions-spacer {
+    display: none;
+  }
+}
+
+/* Stand-in for the approval card while it is scrolled out of view: a zero-height
+ * sticky strip, like `.scroll-to-bottom`, so it floats above the composer. */
+.approval-float {
+  position: sticky;
+  bottom: 0;
+  height: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.approval-float-bar {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(760px, calc(100% - 24px));
+  height: 44px;
+  padding: 0 8px 0 14px;
+  border: 1px solid var(--warn-border);
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-md);
+  opacity: 0;
+  transform: translateX(-50%) translateY(8px);
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+
+.approval-float[data-visible="true"] .approval-float-bar {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
+}
+
+.approval-float-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--warn-fg);
+}
+
+.approval-float-name {
+  flex: 0 1 auto;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-ui);
+  font-weight: var(--weight-strong);
+  color: var(--text-1);
+}
+
+.approval-float-subject {
+  flex: 1 1 auto;
+  min-width: 4em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.approval-float .approval-float-approve {
+  flex: none;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 7px;
+  font-size: var(--text-sm);
+}
+
+/* Both strips pin to the bottom; lift the round button clear of the bar. */
+.transcript-react-root:has(.approval-float[data-visible="true"]) .scroll-to-bottom-button {
+  bottom: 68px;
+}
+
+@media (max-width: 640px) {
+  .approval-float-bar {
+    height: 52px;
+  }
+
+  /* Too narrow for both; the command says more than the tool name. */
+  .approval-float-name {
+    display: none;
+  }
+
+  .approval-float .approval-float-approve {
+    height: 36px;
+    padding: 0 16px;
+  }
+
+  .transcript-react-root:has(.approval-float[data-visible="true"]) .scroll-to-bottom-button {
+    bottom: 76px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .approval-float-bar,
+  .approval-float[data-visible="true"] .approval-float-bar {
+    transition: opacity 140ms ease;
+    transform: translateX(-50%);
+  }
 }
 
 /* .approval-button-primary inherits the unified primary archetype from styles.css */
@@ -1762,12 +2085,6 @@
   to { opacity: 1; transform: translateY(0); }
 }
 
-.pending-action-banner-approval {
-  background: color-mix(in srgb, var(--status-alert-bg) 60%, var(--bg-elevated));
-  border: 1px solid var(--status-alert-text);
-  color: var(--status-alert-text);
-}
-
 .pending-action-banner-pairing {
   background: color-mix(in srgb, var(--accent-primary) 10%, var(--bg-elevated));
   border: 1px solid color-mix(in srgb, var(--accent-primary) 50%, var(--border-subtle));
@@ -1788,9 +2105,7 @@
 
 /* pending-action-btn variants inherit the unified system from styles.css.
    Override font-size to keep banner buttons compact. */
-.pending-action-btn,
-.pending-action-btn-primary,
-.pending-action-btn-danger {
+.pending-action-btn {
   padding: 5px 12px;
   font-size: var(--text-sm);
 }

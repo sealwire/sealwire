@@ -235,9 +235,24 @@ function remoteViewedThread(threadId = "viewed", overrides = {}) {
   };
 }
 
+// Live, not projected: the live session itself, or a copy that only drops other
+// threads' approvals (they must not surface in the conversation on screen).
+function isLiveView(session, live) {
+  if (session === live) return true;
+  const { pending_approvals: shown = [], ...rest } = session || {};
+  const { pending_approvals: all = [], ...liveRest } = live || {};
+  return (
+    Object.keys(rest).length === Object.keys(liveRest).length
+    && Object.keys(liveRest).every((key) => rest[key] === liveRest[key])
+    && shown.every(
+      (approval) => all.includes(approval) && approval.thread_id === live.active_thread_id
+    )
+  );
+}
+
 function normalizeDisplayedSession(session, live) {
   return {
-    identity: session === live ? "live" : "projected",
+    identity: isLiveView(session, live) ? "live" : "projected",
     activeThreadId: session?.active_thread_id ?? null,
     activeTurnId: session?.active_turn_id ?? null,
     controllerId: session?.active_controller_device_id ?? null,
@@ -272,7 +287,7 @@ function normalizedLiveSession() {
     truncated: false,
     viewOnly: false,
     transcriptIds: ["live-entry"],
-    approvals: ["approval-live", "approval-viewed"],
+    approvals: ["approval-live"],
     questions: ["ask-live", "ask-viewed"],
   };
 }
@@ -307,7 +322,7 @@ test("Local and Remote adapters share normalized displayed-session decisions", a
         viewedThreadId: null,
         viewedThread: null,
       });
-      assert.equal(noSelection, noSelectionLive, "no viewed thread selection keeps the live identity");
+      assert.ok(isLiveView(noSelection, noSelectionLive), "no viewed thread selection stays live");
       assert.deepEqual(normalizeDisplayedSession(noSelection, noSelectionLive), normalizedLiveSession());
 
       const stalePayloadAfterRelease = surface.project({
@@ -315,9 +330,8 @@ test("Local and Remote adapters share normalized displayed-session decisions", a
         viewedThreadId: null,
         viewedThread: surface.makeViewedThread("viewed"),
       });
-      assert.equal(
-        stalePayloadAfterRelease,
-        noSelectionLive,
+      assert.ok(
+        isLiveView(stalePayloadAfterRelease, noSelectionLive),
         "a stale viewed payload without an explicit viewed-thread id cannot project"
       );
 
@@ -334,9 +348,8 @@ test("Local and Remote adapters share normalized displayed-session decisions", a
           "Remote preserves its empty read-only projection while the viewed payload is missing"
         );
       } else {
-        assert.equal(
-          selectedWithoutPayload,
-          selectedWithoutPayloadLive,
+        assert.ok(
+          isLiveView(selectedWithoutPayload, selectedWithoutPayloadLive),
           "Local has no pin to project until its transcript fetch lands"
         );
       }
@@ -387,7 +400,7 @@ test("Local and Remote adapters share normalized displayed-session decisions", a
           "Remote keeps the requested thread read-only but drops the stale transcript"
         );
       } else {
-        assert.equal(wrongThread, matchingLive, "wrong-thread Local pin is a stale no-op");
+        assert.ok(isLiveView(wrongThread, matchingLive), "wrong-thread Local pin is a stale no-op");
       }
 
       const liveChanged = liveSession("live-2", {

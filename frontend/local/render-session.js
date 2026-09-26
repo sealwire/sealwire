@@ -1,3 +1,4 @@
+import { pendingApprovalForThread } from "../shared/session-view-model.js";
 import { transcriptPageIsFromAnotherGeneration } from "../shared/transcript-generation.js";
 import {
   appShell,
@@ -734,7 +735,7 @@ export function createSessionRenderer({
     renderSessionSettingsPanel(session);
     renderReviewSlice(session);
     renderReviewIdleNudge(session);
-    renderPendingActionBanner(approval, pendingPairings, session);
+    renderPendingActionBanner(pendingPairings, session);
     renderWorkspaceSuggestions(session);
     renderTranscript(session, approval);
     renderLogs(session.logs);
@@ -1405,48 +1406,13 @@ export function createSessionRenderer({
     );
   }
 
-  function renderPendingActionBanner(approval, pendingPairings, session = null) {
+  function renderPendingActionBanner(pendingPairings, session = null) {
     if (!pendingActionBanner) {
       return;
     }
 
-    if (approval) {
-      pendingActionBanner.hidden = false;
-      renderReactContent(
-        pendingActionBanner,
-        h(
-          "div",
-          { className: "pending-action-banner-inner pending-action-banner-approval" },
-          h("span", { className: "pending-action-banner-text" }, approval.summary || "Approval required"),
-          h(
-            "div",
-            { className: "pending-action-banner-actions" },
-            h(
-              "button",
-              {
-                className: "pending-action-btn pending-action-btn-primary",
-                "data-approval-decision": "approve",
-                "data-approval-scope": "once",
-                type: "button",
-              },
-              "Approve"
-            ),
-            h(
-              "button",
-              {
-                className: "pending-action-btn pending-action-btn-danger",
-                "data-approval-decision": "deny",
-                "data-approval-scope": "once",
-                type: "button",
-              },
-              "Deny"
-            )
-          )
-        )
-      );
-      return;
-    }
-
+    // An approval is answered from its card, or the float bar that stands in for
+    // it off screen (shared/approval-float-bar.js) — not from a second copy here.
     if (pendingPairings.length > 0) {
       const label = formatPendingPairingsBannerLabel(pendingPairings, shortId);
       pendingActionBanner.hidden = false;
@@ -2161,12 +2127,9 @@ export function createSessionRenderer({
     // local/displayed-thread.js); without this they would silently query the
     // session's active thread while you are looking at the Orchestrator.
     state.orchestratorOnScreenThreadId = locked ? null : orchId;
-    // The approval belonging to THIS thread. `pending_approvals[0]` is the
-    // conversation's pick and can easily be another thread's.
-    const orchApproval =
-      (session?.pending_approvals || []).find(
-        (request) => (request?.thread_id || session?.active_thread_id) === orchId
-      ) || null;
+    // From the full snapshot: `session` may be the conversation's projection,
+    // which only keeps the active thread's approvals.
+    const orchApproval = pendingApprovalForThread(state.session || session, orchId);
     const orchIsActive = Boolean(orchId && session?.active_thread_id === orchId);
     const orchActivity = threadActivityFor(session, orchId);
     // Shared map only — a separate orchestratorStopPending boolean used to
@@ -2319,8 +2282,9 @@ export function createSessionRenderer({
                 // Never unfiltered: with no Orchestrator thread yet the helper
                 // falls back to the ACTIVE session, and that question belongs to
                 // the session's composer, not to this pane.
+                // From the full snapshot, as for `orchApproval` above.
                 pendingAskUserQuestions: orchId
-                  ? pendingAskUserQuestionsForThread(session, orchId)
+                  ? pendingAskUserQuestionsForThread(state.session || session, orchId)
                   : [],
                 onSubmitAskUserAnswers: (requestId, answers) => {
                   void state.controller?.submitAskUserQuestionAnswer?.(requestId, answers);

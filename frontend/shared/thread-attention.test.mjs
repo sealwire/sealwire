@@ -79,11 +79,19 @@ test("computeThreadStates attributes approvals + ask-user by their own thread_id
   assert.equal(states.get("c").needsInput, true);
 });
 
-test("computeThreadStates falls back to active thread when approval lacks thread_id", () => {
+// The relay declines an approval it cannot attribute, so one without a thread
+// id is not guessed onto the active thread.
+test("computeThreadStates attributes no thread to an approval without thread_id", () => {
   const states = computeThreadStates(
     snapshot({ active_thread_id: "a", pending_approvals: [{ request_id: "r1" }] })
   );
-  assert.equal(states.get("a").needsInput, true);
+  assert.notEqual(states.get("a")?.needsInput, true);
+  assert.deepEqual(
+    findPendingInputRequestIds(
+      snapshot({ active_thread_id: "a", pending_approvals: [{ request_id: "r1" }] })
+    ),
+    []
+  );
 });
 
 test("computeThreadStates honors waiting flags without populated arrays", () => {
@@ -429,17 +437,18 @@ test("pendingAskUserQuestionsForThread keeps only the named thread's questions",
   );
 });
 
-// Same fallback findPendingInputRequestIds uses: older snapshots omit the id,
-// and the relay forces an awaited thread active, so those are the active
-// thread's.
-test("a question with no thread id belongs to the active thread", () => {
+// The relay declines a question it cannot attribute, so one without a thread id
+// is not guessed onto the active thread, the same rule as approvals.
+test("a question with no thread id belongs to no thread", () => {
   const snapshot = {
     active_thread_id: "thread-1",
     pending_ask_user_questions: [{ request_id: "a" }],
   };
 
-  assert.deepEqual(pendingAskUserQuestionsForThread(snapshot, "thread-1").length, 1);
+  assert.deepEqual(pendingAskUserQuestionsForThread(snapshot, "thread-1"), []);
   assert.deepEqual(pendingAskUserQuestionsForThread(snapshot, "orch-1"), []);
+  assert.deepEqual(findPendingInputRequestIds(snapshot, "thread-1"), []);
+  assert.notEqual(computeThreadStates(snapshot).get("thread-1")?.needsInput, true);
 });
 
 test("pendingAskUserQuestionsForThread tolerates a missing snapshot or list", () => {

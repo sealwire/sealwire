@@ -1,5 +1,6 @@
 import { providerOptions } from "./provider-settings.js";
 import { isReviewInProgress, isThreadBusy } from "./review-state.js";
+import { pendingApprovalForThread } from "./session-view-model.js";
 
 // Code Flow is hidden from the UI for now — it is not part of the maintainer's working
 // loop, and its cards were competing with review results for the same panel.
@@ -114,10 +115,7 @@ export function canStartWorkflow(session, viewedThreadId = null) {
   if (isThreadBusy(session, target)) return false;
   if (isReviewInProgress(session)) return false;
   if (activeWorkflowRunning(session)) return false;
-  if (
-    Array.isArray(session?.pending_approvals) &&
-    session.pending_approvals.some((approval) => approval?.thread_id === target)
-  ) {
+  if (pendingApprovalForThread(session, target)) {
     return false;
   }
   return true;

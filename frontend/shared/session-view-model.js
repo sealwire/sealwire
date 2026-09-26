@@ -28,7 +28,7 @@ export function selectDisplayedSessionModel({
     return {
       liveSession,
       viewedThread: null,
-      displayedSession: liveSession,
+      displayedSession: scopeApprovalsToActiveThread(liveSession),
       mode: "live",
     };
   }
@@ -158,6 +158,33 @@ function normalizeViewedThread(viewedThread, threadId) {
 
 function filterThreadItems(items, threadId) {
   return (items || []).filter((entry) => entry?.thread_id === threadId);
+}
+
+// No fallback for a missing thread id: the relay declines any approval it cannot
+// attribute, so guessing here could only put one in the wrong session.
+function approvalBelongsToThread(approval, threadId) {
+  return Boolean(threadId) && approval?.thread_id === threadId;
+}
+
+export function pendingApprovalForThread(session, threadId) {
+  return (
+    (session?.pending_approvals || []).find((approval) =>
+      approvalBelongsToThread(approval, threadId)
+    ) || null
+  );
+}
+
+// The snapshot lists every thread's approvals; a background thread's must not
+// land in the conversation on screen, where Approve would answer it blind.
+export function scopeApprovalsToActiveThread(session) {
+  const approvals = session?.pending_approvals;
+  if (!Array.isArray(approvals)) {
+    return session;
+  }
+  const activeThreadId = session.active_thread_id || null;
+  const own = approvals.filter((approval) => approvalBelongsToThread(approval, activeThreadId));
+  // Same object when nothing is hidden, so memoized consumers do not re-render.
+  return own.length === approvals.length ? session : { ...session, pending_approvals: own };
 }
 
 function stringId(value) {

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import * as askUserModule from "./ask-user-question.mjs";
 
 // emit() writes to stdout (the worker's NDJSON event stream). Tests run in
 // the same process so we replace the emit fn via the module exports' graph
@@ -237,4 +238,27 @@ test("rejectAllPendingAskUserQuestions clears the map and resolves every promise
   const [r1, r2] = await Promise.all([p1, p2]);
   assert.equal(r1.behavior, "deny");
   assert.equal(r2.behavior, "deny");
+});
+
+// The relay declines a question it cannot show (no session, or a session another
+// provider owns). The model is told plainly and carries on; the turn is not
+// interrupted the way a user's cancel does.
+test("declineAskUserQuestion answers one pending question with a non-interrupting deny", async () => {
+  const { declineAskUserQuestion } = askUserModule;
+  assert.equal(typeof declineAskUserQuestion, "function");
+  const pending = new Map();
+  const handler = createAskUserQuestionHandler(pending, () => 7);
+  const other = createAskUserQuestionHandler(pending, () => 8);
+  const { result: promise } = captureStdout(() =>
+    handler({ questions: [{ question: "Which?", options: [{ label: "A" }] }] }, { toolUseID: "toolu_d" })
+  );
+  captureStdout(() => other({ questions: [{ question: "Other?" }] }, { toolUseID: "toolu_e" }));
+
+  assert.equal(declineAskUserQuestion(pending, "ask:7"), true);
+  const resolved = await promise;
+  assert.equal(resolved.behavior, "deny");
+  assert.equal(resolved.interrupt, false);
+  assert.match(resolved.message, /not shown to the user/);
+  assert.deepEqual([...pending.keys()], ["ask:8"], "only that question is answered");
+  assert.equal(declineAskUserQuestion(pending, "ask:7"), false, "already answered");
 });

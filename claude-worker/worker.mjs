@@ -15,6 +15,7 @@
  *   {"type":"send","provider_session_id":"...","prompt":"...","turn_id":"..."}
  *   {"type":"approval_decision","id":"...","approval_id":"...","decision":"approve|deny|cancel","scope":"once|session"}
  *   {"type":"ask_user_question_answer","id":"...","request_id":"...","answers":{"<question text>":"<chosen label>"}}
+ *   {"type":"ask_user_question_decline","id":"...","request_id":"..."}
  *   {"type":"cancel"}
  *   {"type":"shutdown"}
  *
@@ -43,6 +44,7 @@ import {
   resolveApprovalDecision,
 } from "./permissions.mjs";
 import {
+  declineAskUserQuestion,
   rejectAllPendingAskUserQuestions,
   resolveAskUserAnswers,
 } from "./ask-user-question.mjs";
@@ -1658,6 +1660,16 @@ async function main() {
         pendingAskUserQuestions.delete(requestId);
         const answers = cmd.answers && typeof cmd.answers === "object" ? cmd.answers : {};
         pending.resolve(resolveAskUserAnswers(pending, answers));
+        emitResponse(cmd.id, { id: requestId });
+        break;
+      }
+
+      case "ask_user_question_decline": {
+        const requestId = cmd.request_id ?? cmd.id;
+        if (!declineAskUserQuestion(pendingAskUserQuestions, requestId)) {
+          emitErrorResponse(cmd.id, `ask_user_question ${requestId} is not pending`);
+          break;
+        }
         emitResponse(cmd.id, { id: requestId });
         break;
       }

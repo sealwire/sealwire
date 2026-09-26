@@ -96,12 +96,12 @@ fn only_the_reviewed_functions_read_a_raw_provider_thread_field() {
     );
     assert_eq!(
         functions_containing(CLAUDE, r#"["provider_session_id"]"#),
-        vec!["fork_thread", "handle_worker_event"],
+        vec!["apply_worker_event", "fork_thread"],
         "claude.rs: a new reader of a worker event's provider_session_id",
     );
     assert_eq!(
         functions_containing(CLAUDE, r#"["pending_thread_id"]"#),
-        vec!["handle_worker_event", "pending_session_id"],
+        vec!["apply_worker_event", "pending_session_id"],
         "claude.rs: a new reader of a deferred-start placeholder id",
     );
 }
@@ -119,8 +119,8 @@ fn every_known_ingress_point_translates_before_it_mutates() {
             function_body(CODEX_RPC, "handle_server_request_for_provider"),
         ),
         (
-            "claude handle_worker_event",
-            function_body(CLAUDE, "handle_worker_event"),
+            "claude apply_worker_event",
+            function_body(CLAUDE, "apply_worker_event"),
         ),
     ] {
         assert!(

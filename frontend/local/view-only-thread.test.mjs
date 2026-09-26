@@ -20,7 +20,7 @@ function realSession(overrides = {}) {
     active_thread_id: "LIVE",
     active_turn_id: "turn-9",
     active_controller_device_id: "device-1",
-    pending_approvals: [{ request_id: "appr-1" }],
+    pending_approvals: [{ request_id: "appr-1", thread_id: "LIVE" }],
     pending_ask_user_questions: [{ request_id: "ask-1" }],
     transcript: [{ item_id: "live-entry" }],
     transcript_truncated: false,

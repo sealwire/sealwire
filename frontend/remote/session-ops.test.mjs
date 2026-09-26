@@ -702,6 +702,56 @@ test("viewing the live thread stays pinned when another client moves live focus"
   assert.equal(state.session.transcript[0].text, "thread A");
 });
 
+// The snapshot lists every session's approvals. Viewing A while B waits must not
+// arm A's Approve with B's request, and must not drop B from the stored list.
+test("a background session's approval never becomes the live session's Approve target", async () => {
+  activeBrowser = installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { applySessionSnapshot, applyTranscriptEvent, clearSessionRuntime } = await import(
+    "./session-ops.js"
+  );
+
+  clearSessionRuntime();
+  state.session = null;
+  state.threads = [
+    { id: "thread-a", cwd: "/tmp/a", status: "active" },
+    { id: "thread-b", cwd: "/tmp/b", status: "active" },
+  ];
+  seedTranscriptHydrationState(state);
+
+  const approvalB = { request_id: "req-b", thread_id: "thread-b", kind: "command_execution", summary: "Bash", command: "rm -rf build" };
+  const approvalA = { request_id: "req-a", thread_id: "thread-a", kind: "command_execution", summary: "Bash", command: "ls" };
+
+  applySessionSnapshot({
+    active_thread_id: "thread-a",
+    active_turn_id: null,
+    current_cwd: "/tmp/a",
+    current_status: "idle",
+    pending_approvals: [approvalB],
+    pending_ask_user_questions: [],
+    transcript: [{ item_id: "a-1", text: "thread A" }],
+    transcript_truncated: false,
+  });
+  assert.equal(state.currentApprovalId, null, "A's Approve must not target B's request");
+  assert.deepEqual(
+    state.session.pending_approvals.map((approval) => approval.request_id),
+    ["req-b"],
+    "the stored list keeps B so its sidebar marker survives"
+  );
+
+  applyTranscriptEvent({ kind: "approval_added", approval: approvalA });
+  assert.equal(state.currentApprovalId, "req-a");
+  assert.deepEqual(
+    state.session.pending_approvals.map((approval) => approval.request_id).sort(),
+    ["req-a", "req-b"],
+    "merging A's approval must not drop B's"
+  );
+
+  applyTranscriptEvent({ kind: "approval_resolved", request_id: "req-a" });
+  assert.equal(state.currentApprovalId, null);
+});
+
 test("remote view of an idle saved Codex thread stays composable despite stale activity", async () => {
   activeBrowser = installBrowserStubs();
 

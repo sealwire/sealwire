@@ -100,26 +100,32 @@ impl CodexBridge {
     }
 
     pub(super) async fn send_json(&self, value: Value) -> Result<(), String> {
-        let mut stdin = self.stdin.lock().await;
-        let serialized = serde_json::to_string(&value)
-            .map_err(|error| format!("failed to encode JSON-RPC message: {error}"))?;
-        stdin
-            .write_all(serialized.as_bytes())
-            .await
-            .map_err(|error| format!("failed to write to codex app-server stdin: {error}"))?;
-        stdin
-            .write_all(b"\n")
-            .await
-            .map_err(|error| format!("failed to finalize codex app-server message: {error}"))?;
-        stdin
-            .flush()
-            .await
-            .map_err(|error| format!("failed to flush codex app-server stdin: {error}"))
+        write_json_line(&self.stdin, &value).await
     }
+}
+
+/// Shared by requests the bridge sends and replies the stdout reader owes Codex.
+async fn write_json_line(stdin: &Mutex<ChildStdin>, value: &Value) -> Result<(), String> {
+    let mut stdin = stdin.lock().await;
+    let serialized = serde_json::to_string(value)
+        .map_err(|error| format!("failed to encode JSON-RPC message: {error}"))?;
+    stdin
+        .write_all(serialized.as_bytes())
+        .await
+        .map_err(|error| format!("failed to write to codex app-server stdin: {error}"))?;
+    stdin
+        .write_all(b"\n")
+        .await
+        .map_err(|error| format!("failed to finalize codex app-server message: {error}"))?;
+    stdin
+        .flush()
+        .await
+        .map_err(|error| format!("failed to flush codex app-server stdin: {error}"))
 }
 
 pub(super) fn spawn_stdout_reader(
     stdout: ChildStdout,
+    stdin: Arc<Mutex<ChildStdin>>,
     pending_responses: PendingResponses,
     state: Arc<RwLock<RelayState>>,
     provider_key: &'static str,
@@ -130,7 +136,8 @@ pub(super) fn spawn_stdout_reader(
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
-                    handle_stdout_line(&line, &pending_responses, &state, provider_key).await;
+                    handle_stdout_line(&line, &stdin, &pending_responses, &state, provider_key)
+                        .await;
                 }
                 Ok(None) => {
                     let mut relay = state.write().await;
@@ -181,6 +188,7 @@ pub(super) fn spawn_stderr_reader(stderr: ChildStderr, state: Arc<RwLock<RelaySt
 
 async fn handle_stdout_line(
     line: &str,
+    stdin: &Mutex<ChildStdin>,
     pending_responses: &PendingResponses,
     state: &Arc<RwLock<RelayState>>,
     provider_key: &'static str,
@@ -196,7 +204,14 @@ async fn handle_stdout_line(
     };
 
     if payload.get("method").is_some() && payload.get("id").is_some() {
-        handle_server_request_for_provider(payload, state, provider_key).await;
+        if let Some(reply) = handle_server_request_for_provider(payload, state, provider_key).await
+        {
+            if let Err(error) = write_json_line(stdin, &reply).await {
+                let mut relay = state.write().await;
+                relay.push_log("error", error);
+                relay.notify();
+            }
+        }
         return;
     }
 
@@ -230,86 +245,106 @@ async fn handle_stdout_line(
 }
 
 #[cfg(test)]
-pub(super) async fn handle_server_request(payload: Value, state: &Arc<RwLock<RelayState>>) {
-    handle_server_request_for_provider(payload, state, "codex").await;
+pub(super) async fn handle_server_request(
+    payload: Value,
+    state: &Arc<RwLock<RelayState>>,
+) -> Option<Value> {
+    handle_server_request_for_provider(payload, state, "codex").await
 }
 
+/// Returns the reply the relay owes Codex itself, when it answers without asking
+/// anyone; `None` when the request was parked for the user.
 async fn handle_server_request_for_provider(
     payload: Value,
     state: &Arc<RwLock<RelayState>>,
     provider_key: &'static str,
-) {
+) -> Option<Value> {
+    type ParseApproval = fn(String, Value, String, &Value) -> PendingApproval;
     let method = payload
         .get("method")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let (kind, parse): (ApprovalKind, ParseApproval) = match method {
+        "item/commandExecution/requestApproval" => (ApprovalKind::Command, parse_command_approval),
+        "item/fileChange/requestApproval" => (ApprovalKind::FileChange, parse_file_change_approval),
+        "item/permissions/requestApproval" => {
+            (ApprovalKind::Permissions, parse_permissions_approval)
+        }
+        _ => return None,
+    };
     let params = payload.get("params").cloned().unwrap_or(Value::Null);
     let raw_request_id = payload.get("id").cloned().unwrap_or(Value::Null);
     let request_id = normalize_id(&raw_request_id);
 
-    let pending = match method {
-        "item/commandExecution/requestApproval" => Some(parse_command_approval(
-            request_id.clone(),
-            raw_request_id,
-            &params,
-        )),
-        "item/fileChange/requestApproval" => Some(parse_file_change_approval(
-            request_id.clone(),
-            raw_request_id,
-            &params,
-        )),
-        "item/permissions/requestApproval" => Some(parse_permissions_approval(
-            request_id.clone(),
-            raw_request_id,
-            &params,
-        )),
-        _ => None,
+    let mut relay = state.write().await;
+    // The request names a CODEX thread. The card the user answers is a relay
+    // record, so it has to carry the session id from the moment it is built.
+    let handle = notification_thread_id(&params).unwrap_or_default();
+    let thread_id = match relay.session_for_provider_event(provider_key, Some(handle.as_str())) {
+        ProviderEventSession::Session(session_id) => session_id,
+        // No session to ask in. Declining, not ignoring, is what keeps Codex from
+        // waiting forever on a card nobody will see.
+        ProviderEventSession::Unnamed => {
+            let reason = "it carried no session id".to_string();
+            return Some(decline_unaskable(&mut relay, raw_request_id, kind, reason));
+        }
+        ProviderEventSession::Refused => {
+            let reason = format!("session `{handle}` belongs to another provider");
+            return Some(decline_unaskable(&mut relay, raw_request_id, kind, reason));
+        }
     };
 
-    if let Some(mut pending) = pending {
-        let mut relay = state.write().await;
-        // The request names a CODEX thread. The card the user answers is a relay
-        // record, so it has to carry the session id from the moment it is built.
-        match relay.session_for_provider_event(provider_key, Some(pending.thread_id.as_str())) {
-            ProviderEventSession::Session(session_id) => pending.thread_id = session_id,
-            ProviderEventSession::Unnamed => {}
-            ProviderEventSession::Refused => return,
-        }
-        let route = if pending.thread_id.is_empty() {
-            ThreadRoute::Drop
-        } else {
-            thread_route(&relay, Some(&pending.thread_id), provider_key)
-        };
-        if !pending.thread_id.is_empty() {
-            relay.set_thread_status(
-                &pending.thread_id,
-                "active".to_string(),
-                vec!["waitingOnApproval".to_string()],
-            );
-        }
-        if let ThreadRoute::Background(thread_id) = route.clone() {
-            relay.bg_set_thread_status(
-                &thread_id,
-                "active".to_string(),
-                vec!["waitingOnApproval".to_string()],
-                crate::state::unix_now(),
-            );
-        }
-        relay.add_pending_approval(pending.clone());
-        if let Some(cwd) = pending.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
-            if !pending.thread_id.is_empty() {
-                relay.observe_thread_cwd(&pending.thread_id, cwd);
-            }
-        }
-        if matches!(route, ThreadRoute::Active) {
-            relay.touch_progress(Some("waiting_approval"), None);
-        }
-        relay.push_log(
-            "approval",
-            format!("Approval requested for {}.", pending.kind.as_str()),
+    let pending = parse(request_id, raw_request_id, thread_id, &params);
+    let route = thread_route(&relay, Some(&pending.thread_id), provider_key);
+    relay.set_thread_status(
+        &pending.thread_id,
+        "active".to_string(),
+        vec!["waitingOnApproval".to_string()],
+    );
+    if let ThreadRoute::Background(thread_id) = route.clone() {
+        relay.bg_set_thread_status(
+            &thread_id,
+            "active".to_string(),
+            vec!["waitingOnApproval".to_string()],
+            crate::state::unix_now(),
         );
-        relay.notify();
     }
+    relay.add_pending_approval(pending.clone());
+    if let Some(cwd) = pending.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
+        relay.observe_thread_cwd(&pending.thread_id, cwd);
+    }
+    if matches!(route, ThreadRoute::Active) {
+        relay.touch_progress(Some("waiting_approval"), None);
+    }
+    relay.push_log(
+        "approval",
+        format!("Approval requested for {}.", pending.kind.as_str()),
+    );
+    relay.notify();
+    None
+}
+
+/// Logs the refusal and returns the same answer a user's Deny would send
+/// (`PendingApproval::decision_payload`).
+fn decline_unaskable(
+    relay: &mut RelayState,
+    raw_request_id: Value,
+    kind: ApprovalKind,
+    reason: String,
+) -> Value {
+    relay.push_log(
+        "error",
+        format!(
+            "Declined a Codex {} approval request: {reason}.",
+            kind.as_str()
+        ),
+    );
+    relay.notify();
+    let result = match kind {
+        ApprovalKind::Permissions => json!({ "permissions": {}, "scope": "turn" }),
+        _ => json!({ "decision": "decline" }),
+    };
+    json!({ "id": raw_request_id, "result": result })
 }
 
 #[cfg(test)]
@@ -1331,12 +1366,14 @@ mod disconnect_tests {
 
         let mut child = Command::new("sh")
             .args(["-c", "true"])
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .expect("spawn short-lived stdout");
+        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("child stdin")));
         let stdout = child.stdout.take().expect("child stdout");
         let pending_responses = Arc::new(Mutex::new(HashMap::new()));
-        spawn_stdout_reader(stdout, pending_responses, state.clone(), "codex");
+        spawn_stdout_reader(stdout, stdin, pending_responses, state.clone(), "codex");
         child.wait().await.expect("child exits");
 
         timeout(Duration::from_secs(2), async {
@@ -1368,6 +1405,59 @@ mod disconnect_tests {
         assert!(
             placeholder.withdrawn,
             "the tombstone must be marked before admitting a retry"
+        );
+    }
+
+    // The handler tests only see the reply the relay DECIDES on. This proves the
+    // reader actually writes it back over the pipe; without that Codex waits forever.
+    #[tokio::test]
+    async fn the_reader_writes_a_relay_owned_decline_back_to_codex() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let out = dir.path().join("reply.json");
+        let request = json!({
+            "id": 41,
+            "method": "item/commandExecution/requestApproval",
+            "params": { "command": "ls" }
+        })
+        .to_string();
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                r#"printf '%s\n' "$REQ"; IFS= read -r reply; printf '%s' "$reply" > "$OUT""#,
+            ])
+            .env("REQ", request)
+            .env("OUT", &out)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn fake codex");
+        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("child stdin")));
+        let stdout = child.stdout.take().expect("child stdout");
+        let (change_tx, _) = watch::channel(0_u64);
+        let state = Arc::new(RwLock::new(RelayState::new(
+            "/tmp/project".to_string(),
+            change_tx,
+            SecurityProfile::private(),
+        )));
+        spawn_stdout_reader(
+            stdout,
+            stdin,
+            Arc::new(Mutex::new(HashMap::new())),
+            state,
+            "codex",
+        );
+
+        let exited = timeout(Duration::from_secs(5), child.wait()).await;
+        if exited.is_err() {
+            let _ = child.kill().await;
+            panic!("no reply reached the fake Codex; it is still blocked on its request");
+        }
+        let reply: Value =
+            serde_json::from_str(&std::fs::read_to_string(&out).expect("reply file"))
+                .expect("reply json");
+        assert_eq!(
+            reply,
+            json!({ "id": 41, "result": { "decision": "decline" } })
         );
     }
 }

@@ -576,9 +576,8 @@ test("renderEntryMarkup keeps empty reasoning entries on a single status line", 
     text: "",
   });
 
-  assert.match(markup, /Reasoning/);
-  assert.match(markup, /completed/);
-  assert.match(markup, /message-card-reasoning-empty/);
+  assert.match(markup, /class="reasoning-line"/);
+  assert.match(markup, />Thought</);
   assert.doesNotMatch(markup, /\(empty\)/);
   assert.doesNotMatch(markup, /message-body/);
 });
@@ -1317,9 +1316,10 @@ test("renderApprovalMarkup includes session-scope actions and escapes requested 
     supports_session_scope: true,
   });
 
-  assert.match(markup, /Approve Session/);
+  assert.match(markup, /Allow for this session/);
   assert.match(markup, /uv run migrate/);
-  assert.match(markup, /frontend\/shared\/transcript-react\.js/);
+  // No request id means no toggle to hide it behind, so the raw payload shows.
+  assert.match(markup, /class="approval-raw"/);
   assert.match(markup, /&lt;unsafe&gt;/);
   // Was /cwd: \/tmp\/project/ when the working directory was a line of prose.
   // Same intent — the cwd must reach the screen — against the scope chip it
@@ -1919,8 +1919,8 @@ test("TranscriptContent renders reasoning members when the work group is expande
     { expandedKeys: new Set(["group:r0"]) }
   );
   assert.match(markup, /work-group-chip-open/);
-  const bodyCount = (markup.match(/message-card-reasoning/g) || []).length;
-  assert.equal(bodyCount, 2);
+  const rowCount = (markup.match(/class="reasoning-toggle"/g) || []).length;
+  assert.equal(rowCount, 2);
 });
 
 test("TranscriptContent renders a lone text reasoning inline, with no chip", () => {
@@ -1944,7 +1944,7 @@ test("TranscriptContent keeps an empty running reasoning visible inline (not dro
     { item_id: "live", kind: "reasoning", status: "running", text: "" },
   ]);
   assert.doesNotMatch(markup, /work-group-chip/);
-  assert.match(markup, /message-card-reasoning-empty/);
+  assert.match(markup, />Thinking</);
 });
 
 test("TranscriptContent renders group members when the group is expanded", () => {
@@ -2218,8 +2218,8 @@ test("renderTranscriptContentMarkup combines typed entries and pending approval 
   assert.match(markup, /^<div class="thread-content"/);
   assert.match(markup, /Investigate this bug/);
   assert.match(markup, /Looking into it/);
-  assert.match(markup, /Approval required/);
-  assert.doesNotMatch(markup, /Approve Session/);
+  assert.match(markup, /aria-label="Approval required"/);
+  assert.doesNotMatch(markup, /Allow for this session/);
 });
 
 // --- top-of-transcript sentinel + skeleton (history-load UX) ---------------

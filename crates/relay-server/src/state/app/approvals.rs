@@ -72,39 +72,23 @@ impl AppState {
             pending
         };
 
-        // A thread-less approval predates any session (the provider asked before a
-        // thread existed), so there is nothing to resolve and the active provider is
-        // the only answer.
-        let target = if pending.thread_id.is_empty() {
-            None
-        } else {
-            Some(
-                self.resolve_session_target(&pending.thread_id)
-                    .await
-                    .map_err(ApprovalError::Bridge)?,
-            )
-        };
-        let provider_key = match target.as_ref() {
-            Some(target) => {
-                target
-                    .respond_to_approval(&pending, &input)
-                    .await
-                    .map_err(ApprovalError::Bridge)?;
-                target.bridge().provider_name().to_string()
-            }
-            None => {
-                let bridge = self
-                    .require_active_provider()
-                    .map_err(ApprovalError::Bridge)?
-                    .1
-                    .clone();
-                bridge
-                    .respond_to_approval(&pending, &input)
-                    .await
-                    .map_err(ApprovalError::Bridge)?;
-                bridge.provider_name().to_string()
-            }
-        };
+        // Never answered through the active provider as a guess: it may not be the
+        // one that asked. Nothing parks such a request any more; this is the backstop.
+        if pending.thread_id.is_empty() {
+            let message =
+                format!("Approval {request_id} has no session id; refusing to answer it.");
+            self.push_runtime_log("error", message.clone()).await;
+            return Err(ApprovalError::Bridge(message));
+        }
+        let target = self
+            .resolve_session_target(&pending.thread_id)
+            .await
+            .map_err(ApprovalError::Bridge)?;
+        target
+            .respond_to_approval(&pending, &input)
+            .await
+            .map_err(ApprovalError::Bridge)?;
+        let provider_key = target.bridge().provider_name().to_string();
 
         let mut relay = self.relay.write().await;
         relay.remove_pending_approval(request_id);
@@ -195,38 +179,37 @@ impl AppState {
             }
         }
 
-        // Same reasoning as `decide_approval`: a thread-less question has no session
-        // to resolve, so only then does the active provider answer for it.
+        // Same backstop as `decide_approval`.
         if pending.thread_id.is_empty() {
-            self.require_active_provider()
-                .map_err(AskUserAnswerError::Bridge)?
-                .1
-                .respond_to_ask_user_question(request_id, &input.answers)
-                .await
-                .map_err(AskUserAnswerError::Bridge)?;
-        } else {
-            self.resolve_session_target(&pending.thread_id)
-                .await
-                .map_err(AskUserAnswerError::Bridge)?
-                .respond_to_ask_user_question(request_id, &input.answers)
-                .await
-                .map_err(AskUserAnswerError::Bridge)?;
+            let message =
+                format!("Question {request_id} has no session id; refusing to answer it.");
+            self.push_runtime_log("error", message.clone()).await;
+            return Err(AskUserAnswerError::Bridge(message));
         }
+        self.resolve_session_target(&pending.thread_id)
+            .await
+            .map_err(AskUserAnswerError::Bridge)?
+            .respond_to_ask_user_question(request_id, &input.answers)
+            .await
+            .map_err(AskUserAnswerError::Bridge)?;
 
         let mut relay = self.relay.write().await;
         relay.remove_pending_ask_user_question(request_id);
-        if relay.pending_ask_user_questions.is_empty() {
-            let tid = pending.thread_id;
-            if !tid.is_empty() {
-                relay.set_thread_status(&tid, "active".to_string(), Vec::new());
-                if relay.active_thread_id.as_deref() != Some(tid.as_str()) {
-                    relay.bg_set_thread_status(
-                        &tid,
-                        "active".to_string(),
-                        Vec::new(),
-                        crate::state::unix_now(),
-                    );
-                }
+        // Per thread: another thread's open question says nothing about this one.
+        let tid = pending.thread_id;
+        let still_waiting = relay
+            .pending_ask_user_questions
+            .values()
+            .any(|question| question.thread_id == tid);
+        if !still_waiting {
+            relay.set_thread_status(&tid, "active".to_string(), Vec::new());
+            if relay.active_thread_id.as_deref() != Some(tid.as_str()) {
+                relay.bg_set_thread_status(
+                    &tid,
+                    "active".to_string(),
+                    Vec::new(),
+                    crate::state::unix_now(),
+                );
             }
         }
         relay.push_log(

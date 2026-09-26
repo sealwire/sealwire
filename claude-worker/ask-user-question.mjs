@@ -105,6 +105,20 @@ export function askUserQuestionAborted() {
   };
 }
 
+// For a question the relay could not show anyone. Unlike a user's cancel it does
+// not interrupt: the model is told there is no answer and carries on.
+export function declineAskUserQuestion(pendingAskUserQuestions, requestId) {
+  const pending = pendingAskUserQuestions.get(requestId);
+  if (!pending) return false;
+  pendingAskUserQuestions.delete(requestId);
+  pending.resolve({
+    behavior: "deny",
+    message: "This question was not shown to the user, so it has no answer. Continue without it.",
+    interrupt: false,
+  });
+  return true;
+}
+
 export function rejectAllPendingAskUserQuestions(
   pendingAskUserQuestions,
   predicate = () => true,

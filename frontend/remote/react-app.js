@@ -12,6 +12,7 @@ import React, {
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
 import { fetchBuildInfo } from "../shared/build-badge.js";
+import { scopeApprovalsToActiveThread } from "../shared/session-view-model.js";
 import {
   composerWorkspaceKey,
   getComposerWorkspaceStore,
@@ -642,7 +643,12 @@ function RemoteApp() {
     }
   }, [currentState.session?.available_models, currentState.session?.provider]);
 
-  const session = currentState.session;
+  // Scoped here, not in the store: approval events merge into the stored session,
+  // which must keep every session's approvals.
+  const session = useMemo(
+    () => scopeApprovalsToActiveThread(currentState.session),
+    [currentState.session]
+  );
   // The composer's unsent state is filed under the thread the box is pointing at, and
   // under the RELAY too: thread ids are only unique within one, so a bare id could
   // attach one relay's half-typed message to another relay's session.

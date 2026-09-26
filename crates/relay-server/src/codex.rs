@@ -459,8 +459,10 @@ impl CodexBridge {
         let child = Arc::new(Mutex::new(child));
         let pending_responses = Arc::new(Mutex::new(HashMap::new()));
 
+        let stdin = Arc::new(Mutex::new(stdin));
         spawn_stdout_reader(
             stdout,
+            stdin.clone(),
             pending_responses.clone(),
             state.clone(),
             provider_key,
@@ -469,7 +471,7 @@ impl CodexBridge {
 
         let bridge = Self {
             _child: child,
-            stdin: Arc::new(Mutex::new(stdin)),
+            stdin,
             pending_responses,
             next_request_id: AtomicU64::new(1),
             state,
@@ -2006,6 +2008,7 @@ fn full_json_field(item: &Value, key: &str) -> Option<String> {
 fn parse_command_approval(
     request_id: String,
     raw_request_id: Value,
+    thread_id: String,
     params: &Value,
 ) -> PendingApproval {
     let command = string_at(params, &["command"]);
@@ -2024,7 +2027,7 @@ fn parse_command_approval(
         request_id,
         raw_request_id,
         kind: ApprovalKind::Command,
-        thread_id: string_at(params, &["threadId"]).unwrap_or_default(),
+        thread_id,
         summary,
         detail: string_at(params, &["reason"]),
         command,
@@ -2043,6 +2046,7 @@ fn parse_command_approval(
 fn parse_file_change_approval(
     request_id: String,
     raw_request_id: Value,
+    thread_id: String,
     params: &Value,
 ) -> PendingApproval {
     let paths = collect_file_change_paths(params);
@@ -2054,7 +2058,7 @@ fn parse_file_change_approval(
         request_id,
         raw_request_id,
         kind: ApprovalKind::FileChange,
-        thread_id: string_at(params, &["threadId"]).unwrap_or_default(),
+        thread_id,
         summary,
         detail,
         command: None,
@@ -2069,6 +2073,7 @@ fn parse_file_change_approval(
 fn parse_permissions_approval(
     request_id: String,
     raw_request_id: Value,
+    thread_id: String,
     params: &Value,
 ) -> PendingApproval {
     let requested_permissions = params.get("permissions").cloned();
@@ -2081,7 +2086,7 @@ fn parse_permissions_approval(
         request_id,
         raw_request_id,
         kind: ApprovalKind::Permissions,
-        thread_id: string_at(params, &["threadId"]).unwrap_or_default(),
+        thread_id,
         summary,
         detail: string_at(params, &["reason"]),
         command: None,

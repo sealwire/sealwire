@@ -101,6 +101,7 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { StartSessionSplitButton } from "./shared/start-session-split-button.js";
 import { reviewerPreviewEntriesFromPage } from "./shared/reviewer-panel.js";
+import { pendingApprovalForThread } from "./shared/session-view-model.js";
 import {
   createApiFetch,
   createAuthSession,
@@ -1068,7 +1069,7 @@ function syncVerbTimer(session) {
 function refreshAgentWorkingIndicator() {
   const session = state.session;
   if (!agentWorkingIndicator) return;
-  const approval = session?.pending_approvals?.[0] || null;
+  const approval = pendingApprovalForThread(session, session?.active_thread_id || null);
   const phase = session?.current_phase ?? null;
   // The snapshot's phase describes only the active thread. Show the working
   // indicator solely when the thread being viewed IS that active thread —

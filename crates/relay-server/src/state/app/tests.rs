@@ -10383,6 +10383,198 @@ tree; got {}",
         );
     }
 
+    fn question_on(request_id: &str, thread_id: &str) -> PendingAskUserQuestion {
+        PendingAskUserQuestion {
+            arrival_seq: 0,
+            request_id: request_id.to_string(),
+            tool_use_id: format!("toolu-{request_id}"),
+            thread_id: thread_id.to_string(),
+            requested_at: 123,
+            questions: vec![AskUserQuestionView {
+                question: "Pick one".to_string(),
+                header: "Choice".to_string(),
+                multi_select: false,
+                options: vec![AskUserOptionView {
+                    label: "A".to_string(),
+                    description: String::new(),
+                }],
+            }],
+        }
+    }
+
+    fn approval_on(request_id: &str, thread_id: &str) -> PendingApproval {
+        PendingApproval {
+            request_id: request_id.to_string(),
+            raw_request_id: serde_json::json!(request_id),
+            kind: ApprovalKind::Command,
+            thread_id: thread_id.to_string(),
+            summary: "Run command".to_string(),
+            detail: None,
+            command: Some("true".to_string()),
+            cwd: None,
+            context_preview: None,
+            requested_permissions: None,
+            available_decisions: vec!["approve".to_string(), "deny".to_string()],
+            supports_session_scope: false,
+        }
+    }
+
+    fn pick_a() -> serde_json::Map<String, serde_json::Value> {
+        let mut answers = serde_json::Map::new();
+        answers.insert("Pick one".to_string(), serde_json::json!("A"));
+        answers
+    }
+
+    // Nothing may be parked without a session: the providers decline such a request
+    // before it gets here, and this is the backstop that keeps it off every screen.
+    #[tokio::test]
+    async fn a_request_without_a_session_id_is_refused_at_the_parking_boundary() {
+        let (change_tx, _) = watch::channel(0_u64);
+        let mut relay = RelayState::new(
+            "/tmp/project".to_string(),
+            change_tx,
+            SecurityProfile::private(),
+        );
+        relay.active_thread_id = Some("thread-a".to_string());
+
+        relay.add_pending_approval(approval_on("a-orphan", ""));
+        relay.add_pending_ask_user_question(question_on("q-orphan", ""));
+
+        assert!(relay.pending_approvals.is_empty());
+        assert!(relay.pending_ask_user_questions.is_empty());
+        let errors = relay
+            .snapshot()
+            .logs
+            .iter()
+            .filter(|log| log.kind == "error" && log.message.contains("no session id"))
+            .count();
+        assert_eq!(errors, 2, "each refusal is logged");
+    }
+
+    // Answering one blind would send the decision to whichever provider is active,
+    // which may not be the one that asked.
+    #[tokio::test]
+    async fn an_unattributed_approval_is_never_answered_by_the_active_provider() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some("codex-thread".to_string());
+            relay
+                .pending_approvals
+                .insert("a-orphan".to_string(), approval_on("a-orphan", ""));
+        }
+
+        let result = app
+            .decide_approval(
+                "a-orphan",
+                ApprovalDecisionInput {
+                    decision: ApprovalDecision::Approve,
+                    scope: Some(ApprovalScope::Once),
+                    device_id: Some("device-1".to_string()),
+                },
+            )
+            .await;
+
+        assert!(result.is_err(), "no session means no provider to answer");
+        assert!(codex.approval_thread_ids.lock().await.is_empty());
+        assert!(claude.approval_thread_ids.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unattributed_question_is_never_answered_by_the_active_provider() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some("codex-thread".to_string());
+            relay
+                .pending_ask_user_questions
+                .insert("q-orphan".to_string(), question_on("q-orphan", ""));
+        }
+
+        let result = app
+            .submit_ask_user_answer(
+                "q-orphan",
+                SubmitAskUserAnswerInput {
+                    answers: pick_a(),
+                    device_id: Some("device-1".to_string()),
+                },
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(codex.ask_request_ids.lock().await.is_empty());
+        assert!(claude.ask_request_ids.lock().await.is_empty());
+    }
+
+    // The waiting flag used to clear only once NO thread had a question left.
+    #[tokio::test]
+    async fn answering_one_threads_question_clears_only_that_threads_wait() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let codex_thread = codex.thread_summary("codex-thread", cwd);
+        let claude_thread = claude.thread_summary("claude-thread", cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(codex_thread.id.clone(), codex_thread.clone());
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(claude_thread.id.clone(), claude_thread.clone());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(codex_thread.id.clone());
+            relay.threads = vec![codex_thread, claude_thread];
+            for (request_id, thread_id) in
+                [("q-codex", "codex-thread"), ("q-claude", "claude-thread")]
+            {
+                relay.set_thread_status(
+                    thread_id,
+                    "active".to_string(),
+                    vec!["waitingOnAskUser".to_string()],
+                );
+                relay.add_pending_ask_user_question(question_on(request_id, thread_id));
+            }
+        }
+
+        app.submit_ask_user_answer(
+            "q-claude",
+            SubmitAskUserAnswerInput {
+                answers: pick_a(),
+                device_id: Some("device-1".to_string()),
+            },
+        )
+        .await
+        .expect("answer routes to claude");
+
+        let relay = app.relay.read().await;
+        let flags = |thread_id: &str| {
+            relay
+                .runtime_for_thread(thread_id)
+                .map(|runtime| runtime.active_flags.clone())
+                .unwrap_or_default()
+        };
+        assert!(
+            flags("claude-thread").is_empty(),
+            "the answered thread stops waiting"
+        );
+        assert_eq!(flags("codex-thread"), vec!["waitingOnAskUser".to_string()]);
+        assert!(relay.pending_ask_user_questions.contains_key("q-codex"));
+    }
+
     #[tokio::test]
     async fn send_message_routes_by_active_thread_provider_not_global_provider_name() {
         let project = TempDir::new().expect("project tempdir");
@@ -34280,13 +34472,6 @@ a session id doubles as a handle. Restore's bound route goes through SessionTarg
             "mod.rs",
             "read_thread",
             "the same identity probe, which reads back the thread it just resumed",
-        ),
-        (
-            "approvals.rs",
-            "respond_to_approval",
-            "an approval the provider raised before any thread existed carries an \
-empty thread id, so there is no session to resolve and the active provider is the \
-only thing that can answer for it",
         ),
     ];
 

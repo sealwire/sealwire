@@ -2471,6 +2471,67 @@ async fn command_approval_cwd_records_proven_without_clobbering_birth_cwd() {
     );
 }
 
+fn has_error_log(state: &RelayState, needle: &str) -> bool {
+    state
+        .snapshot()
+        .logs
+        .iter()
+        .any(|log| log.kind == "error" && log.message.contains(needle))
+}
+
+// Codex's protocol makes `threadId` required on every approval request. One without
+// it has no session to ask in, so the relay declines it at once and says so in the
+// log, rather than parking a card no session can claim.
+#[tokio::test]
+async fn an_approval_request_without_a_thread_id_is_declined_and_logged() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    for (id, method, decline) in [
+        (
+            21,
+            "item/commandExecution/requestApproval",
+            json!({ "decision": "decline" }),
+        ),
+        (
+            22,
+            "item/fileChange/requestApproval",
+            json!({ "decision": "decline" }),
+        ),
+        (
+            23,
+            "item/permissions/requestApproval",
+            json!({ "permissions": {}, "scope": "turn" }),
+        ),
+    ] {
+        let reply = handle_server_request(
+            json!({
+                "id": id,
+                "method": method,
+                "params": { "command": "ls", "cwd": "/tmp/project", "permissions": {} }
+            }),
+            &state,
+        )
+        .await;
+        assert_eq!(
+            reply,
+            Some(json!({ "id": id, "result": decline })),
+            "{method}"
+        );
+    }
+
+    let relay = state.read().await;
+    assert!(relay.pending_approvals.is_empty(), "nothing may be parked");
+    assert!(
+        has_error_log(&relay, "no session id"),
+        "the refusal must be visible"
+    );
+}
+
 #[tokio::test]
 async fn handle_server_request_enriches_command_approval_preview() {
     let (change_tx, _) = watch::channel(0_u64);
@@ -5671,11 +5732,46 @@ mod session_binding_boundary_tests {
 
     // A capability-bearing event: whoever answers this approval looks the thread up
     // by the id stored here, and a handle would send the answer to nothing.
+    // A handle bound to another provider's session has no Codex session to ask in.
+    // It used to be dropped without a reply, which left Codex blocked on it.
+    #[tokio::test]
+    async fn an_approval_request_for_another_providers_session_is_declined() {
+        let state = relay_bound_to_a_foreign_handle().await;
+        state.write().await.bind_session_to_foreign_handle(
+            "claude-session",
+            "claude_code",
+            "claude-handle",
+        );
+
+        let reply = handle_server_request(
+            json!({
+                "id": 31,
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "threadId": "claude-session",
+                    "itemId": "item-1",
+                    "command": "rm -rf /tmp/x",
+                    "cwd": "/tmp/project"
+                }
+            }),
+            &state,
+        )
+        .await;
+
+        assert_eq!(
+            reply,
+            Some(json!({ "id": 31, "result": { "decision": "decline" } }))
+        );
+        let relay = state.read().await;
+        assert!(relay.pending_approvals.is_empty());
+        assert!(super::has_error_log(&relay, "claude-session"));
+    }
+
     #[tokio::test]
     async fn an_approval_request_is_parked_under_the_session_id() {
         let state = relay_bound_to_a_foreign_handle().await;
 
-        handle_server_request(
+        let reply = handle_server_request(
             json!({
                 "id": 7,
                 "method": "item/commandExecution/requestApproval",
@@ -5689,6 +5785,7 @@ mod session_binding_boundary_tests {
             &state,
         )
         .await;
+        assert_eq!(reply, None, "a routable request waits for the user");
 
         let relay = state.read().await;
         let pending = relay

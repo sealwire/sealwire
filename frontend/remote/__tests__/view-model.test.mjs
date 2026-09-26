@@ -529,21 +529,21 @@ test("selectEmptyStateRenderModel exposes server disconnected state", () => {
 // it directly crashed the whole remote page on load ("Cannot read properties of
 // null (reading 'activeThreadFrozen')") and #remote-root never mounted.
 test("visiblePendingAskUserQuestions tolerates a null session view", () => {
-  const questions = [{ request_id: "req-1" }];
+  const questions = [{ request_id: "req-1", thread_id: "thread-1" }];
 
-  assert.deepEqual(visiblePendingAskUserQuestions(null, questions), questions);
-  assert.deepEqual(visiblePendingAskUserQuestions(undefined, questions), questions);
+  assert.deepEqual(visiblePendingAskUserQuestions(null, questions, "thread-1"), questions);
+  assert.deepEqual(visiblePendingAskUserQuestions(undefined, questions, "thread-1"), questions);
 });
 
 test("visiblePendingAskUserQuestions hides questions while the active thread is frozen", () => {
-  const questions = [{ request_id: "req-1" }];
+  const questions = [{ request_id: "req-1", thread_id: "thread-1" }];
 
   assert.deepEqual(
-    visiblePendingAskUserQuestions({ activeThreadFrozen: true }, questions),
+    visiblePendingAskUserQuestions({ activeThreadFrozen: true }, questions, "thread-1"),
     []
   );
   assert.deepEqual(
-    visiblePendingAskUserQuestions({ activeThreadFrozen: false }, questions),
+    visiblePendingAskUserQuestions({ activeThreadFrozen: false }, questions, "thread-1"),
     questions
   );
 });
@@ -556,15 +556,15 @@ test("visiblePendingAskUserQuestions keeps only the thread on screen", () => {
   const questions = [
     { request_id: "req-mine", thread_id: "thread-1" },
     { request_id: "req-other", thread_id: "thread-2" },
-    // No thread_id at all: the relay omits it for the active thread's own
-    // question, so this one belongs here.
-    { request_id: "req-implicit" },
+    // The relay always names the thread and declines a question it cannot
+    // attribute, so one without thread_id belongs to no conversation.
+    { request_id: "req-unattributed" },
   ];
 
   assert.deepEqual(
     visiblePendingAskUserQuestions({ activeThreadFrozen: false }, questions, "thread-1").map(
       (r) => r.request_id
     ),
-    ["req-mine", "req-implicit"]
+    ["req-mine"]
   );
 });

@@ -175,27 +175,20 @@ fn compute_thread_states(snapshot: &SessionSnapshot) -> HashMap<String, ThreadSt
         }
     }
 
-    // Approvals / ask-user questions are attributed to their own thread_id
-    // (fall back to the active thread for legacy/empty ids).
-    for approval in &snapshot.pending_approvals {
-        let id = if approval.thread_id.is_empty() {
-            active.clone()
-        } else {
-            Some(approval.thread_id.clone())
-        };
-        if let Some(id) = id {
-            states.entry(id).or_default().needs_input = true;
-        }
-    }
-    for question in &snapshot.pending_ask_user_questions {
-        let id = if question.thread_id.is_empty() {
-            active.clone()
-        } else {
-            Some(question.thread_id.clone())
-        };
-        if let Some(id) = id {
-            states.entry(id).or_default().needs_input = true;
-        }
+    // Approvals / ask-user questions belong to their own thread_id; one without
+    // it marks no thread (never guessed onto the active one).
+    let request_threads = snapshot
+        .pending_approvals
+        .iter()
+        .map(|approval| &approval.thread_id)
+        .chain(
+            snapshot
+                .pending_ask_user_questions
+                .iter()
+                .map(|question| &question.thread_id),
+        );
+    for thread_id in request_threads.filter(|id| !id.is_empty()) {
+        states.entry(thread_id.clone()).or_default().needs_input = true;
     }
 
     // Fallback: active thread's waiting flags, in case the request arrays were
@@ -859,6 +852,45 @@ mod tests {
         assert!(tracker
             .ingest_states(states(&[("t1", true, false)]))
             .is_empty());
+    }
+
+    // Mirrors thread-attention.js: a request without a thread id marks no thread,
+    // rather than being guessed onto the active one.
+    #[test]
+    fn an_unattributed_request_marks_no_thread() {
+        let (change_tx, _) = tokio::sync::watch::channel(0_u64);
+        let relay = crate::state::RelayState::new(
+            "/tmp/project".to_string(),
+            change_tx,
+            crate::state::SecurityProfile::private(),
+        );
+        let mut snapshot = relay.snapshot();
+        snapshot.active_thread_id = Some("t1".to_string());
+        snapshot.pending_approvals = vec![crate::protocol::ApprovalRequestView {
+            request_id: "a-orphan".to_string(),
+            thread_id: String::new(),
+            kind: "command_execution".to_string(),
+            summary: "Bash".to_string(),
+            detail: None,
+            command: None,
+            cwd: None,
+            context_preview: None,
+            requested_permissions: None,
+            available_decisions: Vec::new(),
+            supports_session_scope: false,
+        }];
+        snapshot.pending_ask_user_questions = vec![
+            crate::protocol::AskUserQuestionRequestView::with_inline_questions(
+                "q-orphan".to_string(),
+                "toolu-q".to_string(),
+                String::new(),
+                1,
+                Vec::new(),
+            ),
+        ];
+
+        let states = compute_thread_states(&snapshot);
+        assert!(!states.get("t1").is_some_and(|state| state.needs_input));
     }
 
     #[test]

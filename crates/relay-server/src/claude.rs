@@ -410,12 +410,18 @@ impl ClaudeCodeBridge {
         let child = Arc::new(Mutex::new(child));
         let pending_responses = Arc::new(Mutex::new(HashMap::new()));
 
-        spawn_stdout_reader(stdout, pending_responses.clone(), state.clone());
+        let stdin = Arc::new(Mutex::new(stdin));
+        spawn_stdout_reader(
+            stdout,
+            stdin.clone(),
+            pending_responses.clone(),
+            state.clone(),
+        );
         spawn_stderr_reader(stderr, state.clone());
 
         let bridge = Self {
             _child: child,
-            stdin: Arc::new(Mutex::new(stdin)),
+            stdin,
             pending_responses,
             next_request_id: AtomicU64::new(1),
             state,
@@ -436,21 +442,7 @@ impl ClaudeCodeBridge {
     }
 
     async fn send_command(&self, value: Value) -> Result<(), String> {
-        let mut stdin = self.stdin.lock().await;
-        let serialized = serde_json::to_string(&value)
-            .map_err(|error| format!("failed to encode claude command: {error}"))?;
-        stdin
-            .write_all(serialized.as_bytes())
-            .await
-            .map_err(|error| format!("failed to write to claude worker stdin: {error}"))?;
-        stdin
-            .write_all(b"\n")
-            .await
-            .map_err(|error| format!("failed to finalize claude worker command: {error}"))?;
-        stdin
-            .flush()
-            .await
-            .map_err(|error| format!("failed to flush claude worker stdin: {error}"))
+        write_worker_command(&self.stdin, &value).await
     }
 
     async fn send_request(&self, command_type: &str, mut value: Value) -> Result<Value, String> {
@@ -1320,8 +1312,28 @@ impl ProviderBridge for ClaudeCodeBridge {
 
 // --- stdout / stderr readers -----------------------------------------------
 
+/// Shared by commands the bridge sends and replies the stdout reader owes the worker.
+async fn write_worker_command(stdin: &Mutex<ChildStdin>, value: &Value) -> Result<(), String> {
+    let mut stdin = stdin.lock().await;
+    let serialized = serde_json::to_string(value)
+        .map_err(|error| format!("failed to encode claude command: {error}"))?;
+    stdin
+        .write_all(serialized.as_bytes())
+        .await
+        .map_err(|error| format!("failed to write to claude worker stdin: {error}"))?;
+    stdin
+        .write_all(b"\n")
+        .await
+        .map_err(|error| format!("failed to finalize claude worker command: {error}"))?;
+    stdin
+        .flush()
+        .await
+        .map_err(|error| format!("failed to flush claude worker stdin: {error}"))
+}
+
 fn spawn_stdout_reader(
     stdout: ChildStdout,
+    stdin: Arc<Mutex<ChildStdin>>,
     pending_responses: PendingResponses,
     state: Arc<RwLock<RelayState>>,
 ) {
@@ -1331,7 +1343,7 @@ fn spawn_stdout_reader(
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
-                    handle_worker_line(&line, &pending_responses, &state).await;
+                    handle_worker_line(&line, &stdin, &pending_responses, &state).await;
                 }
                 Ok(None) => {
                     let mut relay = state.write().await;
@@ -1418,6 +1430,7 @@ fn fork_point_message_uuid(item_id: &str) -> Option<String> {
 
 async fn handle_worker_line(
     line: &str,
+    stdin: &Mutex<ChildStdin>,
     pending_responses: &PendingResponses,
     state: &Arc<RwLock<RelayState>>,
 ) {
@@ -1442,7 +1455,13 @@ async fn handle_worker_line(
         return;
     }
 
-    handle_worker_event(payload, state).await;
+    if let Some(reply) = handle_worker_event(payload, state).await {
+        if let Err(error) = write_worker_command(stdin, &reply).await {
+            let mut relay = state.write().await;
+            relay.push_log("error", error);
+            relay.notify();
+        }
+    }
 }
 
 /// The relay session key for a handle the WORKER is addressed by.
@@ -1482,7 +1501,57 @@ fn pending_session_id(relay: &RelayState, payload: &Value) -> Option<String> {
     )
 }
 
-async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
+/// Logs the refusal and returns the same deny a user's click sends. `None` when the
+/// request has no id to answer.
+fn decline_unaskable_approval(
+    relay: &mut RelayState,
+    payload: &Value,
+    reason: &str,
+) -> Option<Value> {
+    relay.push_log(
+        "error",
+        format!("Declined a Claude approval request: {reason}."),
+    );
+    relay.notify();
+    let approval_id = string_at(payload, &["id"])?;
+    Some(json!({
+        "type": "approval_decision",
+        "id": format!("relay-decline:{approval_id}"),
+        "approval_id": approval_id,
+        "decision": "deny",
+        "scope": "once",
+    }))
+}
+
+/// The question counterpart of `decline_unaskable_approval`.
+fn decline_unaskable_question(
+    relay: &mut RelayState,
+    payload: &Value,
+    reason: &str,
+) -> Option<Value> {
+    relay.push_log("error", format!("Declined a Claude question: {reason}."));
+    relay.notify();
+    let request_id = string_at(payload, &["id"])?;
+    Some(json!({
+        "type": "ask_user_question_decline",
+        "id": format!("relay-decline:{request_id}"),
+        "request_id": request_id,
+    }))
+}
+
+/// Returns the command the relay owes the worker itself, when it answers a request
+/// without asking anyone (see `decline_unaskable_approval`).
+async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) -> Option<Value> {
+    let mut reply = None;
+    apply_worker_event(payload, state, &mut reply).await;
+    reply
+}
+
+async fn apply_worker_event(
+    payload: Value,
+    state: &Arc<RwLock<RelayState>>,
+    reply: &mut Option<Value>,
+) {
     let event_type = payload
         .get("type")
         .and_then(Value::as_str)
@@ -1549,7 +1618,21 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
         {
             ProviderEventSession::Session(session_id) => Some(session_id),
             ProviderEventSession::Unnamed => None,
-            ProviderEventSession::Refused => return,
+            ProviderEventSession::Refused => {
+                // Dropping a request without a reply leaves its tool call blocked.
+                let handle = provider_session_id.as_deref().unwrap_or_default();
+                let reason = format!("session `{handle}` belongs to another provider");
+                match event_type {
+                    "approval_requested" => {
+                        *reply = decline_unaskable_approval(&mut relay, &payload, &reason);
+                    }
+                    "ask_user_question_requested" => {
+                        *reply = decline_unaskable_question(&mut relay, &payload, &reason);
+                    }
+                    _ => {}
+                }
+                return;
+            }
         }
     };
 
@@ -1956,9 +2039,14 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
         }
 
         "approval_requested" => {
-            if let Some(pending) =
-                parse_claude_approval(&payload, &relay, event_thread_id.as_deref())
-            {
+            // The worker always stamps the session; without one there is no session
+            // to ask in, and guessing the active one could show it in the wrong place.
+            let Some(session_id) = event_thread_id.clone() else {
+                *reply =
+                    decline_unaskable_approval(&mut relay, &payload, "it carried no session id");
+                return;
+            };
+            if let Some(pending) = parse_claude_approval(&payload, &relay, session_id) {
                 let route = claude_thread_route(&relay, Some(&pending.thread_id));
                 relay.set_thread_status(
                     &pending.thread_id,
@@ -1994,11 +2082,13 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 relay.push_log("error", "ask_user_question_requested missing id");
                 return;
             };
+            // As for approvals: no session means no one to ask, never the active one.
+            let Some(thread_id) = event_thread_id.clone() else {
+                *reply =
+                    decline_unaskable_question(&mut relay, &payload, "it carried no session id");
+                return;
+            };
             let tool_use_id = string_at(&payload, &["tool_use_id"]).unwrap_or_default();
-            let thread_id = event_thread_id
-                .clone()
-                .or_else(|| relay.active_thread_id.clone())
-                .unwrap_or_default();
             let questions = crate::state::parse_ask_user_questions(payload.get("questions"));
             let pending = crate::state::PendingAskUserQuestion {
                 request_id: request_id.clone(),
@@ -2009,21 +2099,19 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 requested_at: crate::state::unix_now(),
                 questions,
             };
-            if !thread_id.is_empty() {
-                let route = claude_thread_route(&relay, Some(&thread_id));
-                relay.set_thread_status(
-                    &thread_id,
+            let route = claude_thread_route(&relay, Some(&thread_id));
+            relay.set_thread_status(
+                &thread_id,
+                "active".to_string(),
+                vec!["waitingOnAskUser".to_string()],
+            );
+            if let ClaudeThreadRoute::Background(bg_thread_id) = route {
+                relay.bg_set_thread_status(
+                    &bg_thread_id,
                     "active".to_string(),
                     vec!["waitingOnAskUser".to_string()],
+                    crate::state::unix_now(),
                 );
-                if let ClaudeThreadRoute::Background(bg_thread_id) = route {
-                    relay.bg_set_thread_status(
-                        &bg_thread_id,
-                        "active".to_string(),
-                        vec!["waitingOnAskUser".to_string()],
-                        crate::state::unix_now(),
-                    );
-                }
             }
             relay.add_pending_ask_user_question(pending);
             if matches!(
@@ -6992,7 +7080,7 @@ mod session_binding_boundary_tests {
     async fn an_ask_user_question_is_parked_under_the_session_id() {
         let state = bound_relay().await;
 
-        handle_worker_event(
+        let reply = handle_worker_event(
             json!({
                 "type": "ask_user_question_requested",
                 "provider_session_id": HANDLE,
@@ -7008,6 +7096,7 @@ mod session_binding_boundary_tests {
             &state,
         )
         .await;
+        assert_eq!(reply, None, "a routable question waits for the user");
 
         let relay = state.read().await;
         let pending = relay
@@ -7018,11 +7107,219 @@ mod session_binding_boundary_tests {
         assert!(relay.runtime_for_thread(HANDLE).is_none());
     }
 
+    fn has_error_log(relay: &RelayState, needle: &str) -> bool {
+        relay
+            .snapshot()
+            .logs
+            .iter()
+            .any(|log| log.kind == "error" && log.message.contains(needle))
+    }
+
+    fn worker_deny(approval_id: &str) -> Value {
+        json!({
+            "type": "approval_decision",
+            "id": format!("relay-decline:{approval_id}"),
+            "approval_id": approval_id,
+            "decision": "deny",
+            "scope": "once"
+        })
+    }
+
+    // The worker always stamps a session id; one without it has no session to ask
+    // in. It used to be parked on whatever session was active, which is the
+    // wrong-session approval this guards against. Deny it, and say so in the log.
+    #[tokio::test]
+    async fn an_approval_request_without_a_session_id_is_denied_and_logged() {
+        let state = bound_relay().await;
+
+        let reply = handle_worker_event(
+            json!({
+                "type": "approval_requested",
+                "id": "approval-orphan",
+                "tool_name": "Bash",
+                "action": "Claude wants to run a command.",
+                "input": { "command": "rm -rf /tmp/x" }
+            }),
+            &state,
+        )
+        .await;
+
+        assert_eq!(reply, Some(worker_deny("approval-orphan")));
+        let relay = state.read().await;
+        assert!(
+            relay.pending_approvals.is_empty(),
+            "never parked on the active session"
+        );
+        assert!(has_error_log(&relay, "no session id"));
+    }
+
+    // It used to be dropped without a reply, which left the worker's tool call
+    // waiting forever.
+    #[tokio::test]
+    async fn an_approval_request_for_another_providers_session_is_denied() {
+        let state = bound_relay().await;
+        state.write().await.bind_session_to_foreign_handle(
+            "codex-session",
+            "codex",
+            "codex-handle",
+        );
+
+        let reply = handle_worker_event(
+            json!({
+                "type": "approval_requested",
+                "provider_session_id": "codex-session",
+                "id": "approval-foreign",
+                "tool_name": "Bash",
+                "input": { "command": "ls" }
+            }),
+            &state,
+        )
+        .await;
+
+        assert_eq!(reply, Some(worker_deny("approval-foreign")));
+        let relay = state.read().await;
+        assert!(relay.pending_approvals.is_empty());
+        assert!(has_error_log(&relay, "codex-session"));
+    }
+
+    // The card's cwd is the blast radius being authorised. It used to fall back to
+    // the ACTIVE session's cwd, so a background session's request could show
+    // another session's directory.
+    #[tokio::test]
+    async fn an_approval_never_borrows_the_active_sessions_cwd() {
+        let state = bound_relay().await;
+
+        let reply = handle_worker_event(
+            json!({
+                "type": "approval_requested",
+                "provider_session_id": "sdk-unlisted",
+                "id": "approval-unlisted",
+                "tool_name": "Bash",
+                "input": { "command": "ls" }
+            }),
+            &state,
+        )
+        .await;
+
+        assert_eq!(reply, None);
+        let relay = state.read().await;
+        let pending = relay
+            .pending_approvals
+            .get("approval-unlisted")
+            .expect("the approval must be parked");
+        assert_eq!(pending.thread_id, "sdk-unlisted");
+        assert_eq!(pending.cwd, None, "not /tmp/b, the active session's cwd");
+    }
+
+    fn worker_decline_question(request_id: &str) -> Value {
+        json!({
+            "type": "ask_user_question_decline",
+            "id": format!("relay-decline:{request_id}"),
+            "request_id": request_id
+        })
+    }
+
+    fn question(extra: Value) -> Value {
+        let mut event = json!({
+            "type": "ask_user_question_requested",
+            "id": "ask-x",
+            "tool_use_id": "toolu_x",
+            "questions": [{ "question": "Which one?", "header": "Pick", "multiSelect": false,
+                "options": [{ "label": "A", "description": "a" }] }]
+        });
+        for (key, value) in extra.as_object().expect("object") {
+            event[key] = value.clone();
+        }
+        event
+    }
+
+    // The handler tests only see the reply the relay DECIDES on. This proves the
+    // reader writes it back to the worker; without that the tool call waits forever.
+    #[tokio::test]
+    async fn the_reader_writes_a_relay_owned_deny_back_to_the_worker() {
+        use std::process::Stdio;
+        use tokio::{
+            process::Command,
+            sync::Mutex,
+            time::{timeout, Duration},
+        };
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let out = dir.path().join("reply.json");
+        let request = json!({
+            "type": "approval_requested",
+            "id": "approval-pipe",
+            "tool_name": "Bash",
+            "input": { "command": "ls" }
+        })
+        .to_string();
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                r#"printf '%s\n' "$REQ"; IFS= read -r reply; printf '%s' "$reply" > "$OUT""#,
+            ])
+            .env("REQ", request)
+            .env("OUT", &out)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn fake worker");
+        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("child stdin")));
+        let stdout = child.stdout.take().expect("child stdout");
+        let state = bound_relay().await;
+        spawn_stdout_reader(stdout, stdin, Arc::new(Mutex::new(HashMap::new())), state);
+
+        let exited = timeout(Duration::from_secs(5), child.wait()).await;
+        if exited.is_err() {
+            let _ = child.kill().await;
+            panic!("no reply reached the fake worker; it is still blocked on its request");
+        }
+        let reply: Value =
+            serde_json::from_str(&std::fs::read_to_string(&out).expect("reply file"))
+                .expect("reply json");
+        assert_eq!(reply, worker_deny("approval-pipe"));
+    }
+
+    // Same contract as an approval: never parked on whatever session is active.
+    #[tokio::test]
+    async fn a_question_without_a_session_id_is_declined_and_logged() {
+        let state = bound_relay().await;
+
+        let reply = handle_worker_event(question(json!({})), &state).await;
+
+        assert_eq!(reply, Some(worker_decline_question("ask-x")));
+        let relay = state.read().await;
+        assert!(relay.pending_ask_user_questions.is_empty());
+        assert!(has_error_log(&relay, "no session id"));
+    }
+
+    // It used to be dropped without a reply, so the question's tool call waited forever.
+    #[tokio::test]
+    async fn a_question_for_another_providers_session_is_declined() {
+        let state = bound_relay().await;
+        state.write().await.bind_session_to_foreign_handle(
+            "codex-session",
+            "codex",
+            "codex-handle",
+        );
+
+        let reply = handle_worker_event(
+            question(json!({ "provider_session_id": "codex-session" })),
+            &state,
+        )
+        .await;
+
+        assert_eq!(reply, Some(worker_decline_question("ask-x")));
+        let relay = state.read().await;
+        assert!(relay.pending_ask_user_questions.is_empty());
+        assert!(has_error_log(&relay, "codex-session"));
+    }
+
     #[tokio::test]
     async fn an_approval_request_is_parked_under_the_session_id() {
         let state = bound_relay().await;
 
-        handle_worker_event(
+        let reply = handle_worker_event(
             json!({
                 "type": "approval_requested",
                 "provider_session_id": HANDLE,
@@ -7034,6 +7331,7 @@ mod session_binding_boundary_tests {
             &state,
         )
         .await;
+        assert_eq!(reply, None, "a routable request waits for the user");
 
         let relay = state.read().await;
         let pending = relay

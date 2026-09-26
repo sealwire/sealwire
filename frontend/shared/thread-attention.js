@@ -94,13 +94,12 @@ export function computeThreadStates(snapshot) {
     }
   }
 
-  // Approvals and ask-user questions each carry their own thread_id, so a
-  // backgrounded thread's request is attributed to *that* thread rather than the
-  // active one. (Older snapshots without thread_id fall back to the active
-  // thread, matching the relay's "force the awaited thread active" behavior.)
+  // Each request carries its own thread_id, so a backgrounded thread's request
+  // lands on that thread. One without it is never guessed onto the active
+  // thread: the relay declines any request it cannot attribute.
   if (Array.isArray(snapshot.pending_approvals)) {
     for (const approval of snapshot.pending_approvals) {
-      const entry = ensure(approval?.thread_id || activeThreadId);
+      const entry = approval?.thread_id ? ensure(approval.thread_id) : null;
       if (entry) {
         entry.needsInput = true;
       }
@@ -108,7 +107,7 @@ export function computeThreadStates(snapshot) {
   }
   if (Array.isArray(snapshot.pending_ask_user_questions)) {
     for (const question of snapshot.pending_ask_user_questions) {
-      const entry = ensure(question?.thread_id || activeThreadId);
+      const entry = question?.thread_id ? ensure(question.thread_id) : null;
       if (entry) {
         entry.needsInput = true;
       }
@@ -173,9 +172,8 @@ export function findPendingInputRequestIds(snapshot, threadId = null) {
   for (const source of ["pending_approvals", "pending_ask_user_questions"]) {
     const requests = Array.isArray(snapshot[source]) ? snapshot[source] : [];
     for (const request of requests) {
-      // Older snapshots omit thread_id; attribute those to the active thread,
-      // matching the relay's "force the awaited thread active" behavior.
-      if ((request?.thread_id || activeThreadId) !== target) {
+      // No thread_id means no thread (see computeThreadStates).
+      if (request?.thread_id !== target) {
         continue;
       }
       if (request?.request_id) {
@@ -382,9 +380,8 @@ export const threadAttention = new ThreadAttentionTracker();
  * somewhere else; hand it nothing and a genuinely-blocked thread renders as the
  * read-only "Answered" card instead.
  *
- * The thread-less fallback matches `findPendingInputRequestIds` above: older
- * snapshots omit `thread_id`, and the relay forces an awaited thread active, so
- * those belong to the active thread.
+ * A question without `thread_id` belongs to no thread, as in
+ * `findPendingInputRequestIds` above.
  *
  * @param {object|null} snapshot
  * @param {string|null} threadId defaults to the snapshot's active thread
@@ -402,5 +399,5 @@ export function pendingAskUserQuestionsForThread(snapshot, threadId = null) {
   const requests = Array.isArray(snapshot.pending_ask_user_questions)
     ? snapshot.pending_ask_user_questions
     : [];
-  return requests.filter((request) => (request?.thread_id || activeThreadId) === target);
+  return requests.filter((request) => request?.thread_id === target);
 }

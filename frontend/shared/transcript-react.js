@@ -13,6 +13,7 @@ import {
 import { createTranscriptScrollAdjuster } from "./transcript-scroll-adjust.js";
 import { CHECK_SVG, COPY_SVG, FORK_SVG, SPARKLES_SVG } from "../svg.js";
 import { approvalKindLabel } from "./approval-labels.js";
+import { approvalTitle } from "./approval-view.js";
 import {
   askUserDraftKey,
   readAskUserDraft,
@@ -368,29 +369,91 @@ function CommandEntry({ entry, isJustPrepended = false, options = null, inGroup 
   );
 }
 
-function ReasoningEntryImpl({ entry, isJustPrepended = false, inGroup = false }) {
-  const hasText = Boolean(String(entry.text || "").trim());
+// Past ~6 rendered lines an opened reasoning is clamped behind "Show all".
+const REASONING_CLAMP_LINES = 6;
+const REASONING_CLAMP_CHARS = 480;
+
+export function reasoningExpandKey(entry) {
+  const key = transcriptRowKey(entry);
+  return key ? `reasoning:${key}` : "";
+}
+
+export function reasoningShowAllKey(entry) {
+  const key = transcriptRowKey(entry);
+  return key ? `reasoning-all:${key}` : "";
+}
+
+function reasoningPreview(text) {
+  const line = String(text || "")
+    .split("\n")
+    .map((part) => part.replace(/^[#>\s*-]+|[*_\x60]+/g, "").trim())
+    .find(Boolean);
+  return line || "";
+}
+
+function reasoningLabel(status) {
+  const value = status || "completed";
+  if (value === "running") return "Thinking";
+  if (value === "completed") return "Thought";
+  return `Thought · ${value}`;
+}
+
+function ReasoningEntryImpl({
+  entry,
+  expanded = false,
+  isJustPrepended = false,
+  inGroup = false,
+  showAll = false,
+}) {
+  const text = String(entry.text || "").trim();
+  const toggleKey = reasoningExpandKey(entry);
+  // No row key means no way to toggle it, so it cannot be hidden either.
+  const open = Boolean(text) && (expanded || !toggleKey);
+  const long = text.split("\n").length > REASONING_CLAMP_LINES || text.length > REASONING_CLAMP_CHARS;
+  const allKey = reasoningShowAllKey(entry);
+  const clamped = open && long && !showAll && Boolean(allKey);
+  const label = h("span", { className: "reasoning-label" }, reasoningLabel(entry.status));
+
   return h(
     "article",
-    transcriptEntryDomAttrs(entry, "chat-message chat-message-system", null, {
+    transcriptEntryDomAttrs(entry, "chat-message chat-message-system chat-message-reasoning", null, {
       justPrepended: isJustPrepended,
       inGroup,
     }),
-    h(
-      "div",
-      {
-        className: `message-card message-card-system message-card-reasoning${hasText ? "" : " message-card-reasoning-empty"}`,
-      },
-      h(
-        "div",
-        { className: "message-meta" },
-        h("strong", null, "Reasoning"),
-        h("span", null, entry.status || "completed")
-      ),
-      hasText
-        ? h("div", { className: "message-body" }, entry.text)
-        : null
-    )
+    text && toggleKey
+      ? h(
+          "button",
+          {
+            "aria-expanded": open ? "true" : "false",
+            className: "reasoning-toggle",
+            "data-expand-key": toggleKey,
+            "data-transcript-toggle": "group",
+            type: "button",
+          },
+          h("span", { "aria-hidden": "true", className: "reasoning-chevron" }, open ? "▾" : "▸"),
+          label,
+          open ? null : h("span", { className: "reasoning-preview" }, reasoningPreview(text))
+        )
+      : h("div", { className: "reasoning-line" }, label),
+    open
+      ? h(
+          "div",
+          { className: "reasoning-detail" },
+          h("div", { className: clamped ? "reasoning-body is-clamped" : "reasoning-body" }, text),
+          long && allKey
+            ? h(
+                "button",
+                {
+                  className: "reasoning-show-all",
+                  "data-expand-key": allKey,
+                  "data-transcript-toggle": "group",
+                  type: "button",
+                },
+                showAll ? "Show less" : "Show all"
+              )
+            : null
+        )
+      : null
   );
 }
 
@@ -2139,7 +2202,14 @@ export function TranscriptEntry({
     return h(ToolEntry, { entry, isJustPrepended, options, inGroup });
   }
   if (kind === "reasoning") {
-    return h(ReasoningEntry, { entry, isJustPrepended, inGroup });
+    const expandedKeys = options?.expandedKeys;
+    return h(ReasoningEntry, {
+      entry,
+      expanded: Boolean(expandedKeys?.has(reasoningExpandKey(entry))),
+      inGroup,
+      isJustPrepended,
+      showAll: Boolean(expandedKeys?.has(reasoningShowAllKey(entry))),
+    });
   }
   if (kind === "error") {
     return h(ErrorEntry, { entry, isJustPrepended });
@@ -2149,80 +2219,111 @@ export function TranscriptEntry({
 }
 
 export function ApprovalCard({ approval, options = null }) {
-  const approvalCommandExpandKey = approval.request_id ? `approval:${approval.request_id}:command` : "";
-  const contextExpandKey = approval.request_id ? `approval:${approval.request_id}:context` : "";
-  const permissionsExpandKey = approval.request_id ? `approval:${approval.request_id}:permissions` : "";
+  const id = approval.request_id || "";
+  const expandedKeys = options?.expandedKeys;
+  const commandKey = id ? `approval:${id}:command` : "";
+  const contextKey = id ? `approval:${id}:context` : "";
+  const rawKey = id ? `approval:${id}:raw` : "";
   const approvalKind = approvalKindLabel(approval.kind);
+  const title = approvalTitle(approval);
+  const command = approval.command || "";
+  const permissionsJson = approval.requested_permissions
+    ? JSON.stringify(approval.requested_permissions, null, 2)
+    : "";
+  // With a command on screen the context is its echo (Claude's input JSON), so it
+  // goes behind "raw input"; without one it IS the subject (a diff, a plan).
+  const subject = command || approval.context_preview || "";
+  const raw = [command ? approval.context_preview : "", permissionsJson].filter(Boolean).join("\n\n");
+  // No key means no toggle, so nothing may be hidden behind one.
+  const rawOpen = Boolean(raw) && (!rawKey || Boolean(expandedKeys?.has(rawKey)));
+  const showFallbackCopy = !approval.detail && !subject;
 
   return h(
     "article",
     {
-      className: "chat-message chat-message-system",
-      ...(approval.request_id ? { "data-approval-id": approval.request_id } : {}),
+      "aria-label": "Approval required",
+      className: "chat-message chat-message-system chat-message-approval",
+      ...(id ? { "data-approval-id": id } : {}),
     },
     h(
       "div",
-      { className: "message-card message-card-approval" },
+      { className: "message-card-approval" },
       h(
         "div",
-        { className: "message-meta" },
-        h("strong", null, "Approval required"),
-        // Named in words, and in its own element: printing the wire enum here
-        // put "command_execution" on screen, run into the label because
-        // `.message-meta` is not a flex row. See frontend/approval-card.test.mjs.
-        approvalKind
-          ? h("span", { className: "approval-kind" }, approvalKind)
+        { className: "approval-main" },
+        h(
+          "div",
+          { className: "approval-head" },
+          // Named in words, in its own element: the wire enum once reached the
+          // screen here. See frontend/approval-card.test.mjs.
+          approvalKind ? h("span", { className: "approval-kind" }, approvalKind) : null,
+          title ? h("span", { className: "approval-title" }, title) : null
+        ),
+        approval.detail ? h("p", { className: "approval-copy" }, approval.detail) : null,
+        // No provider name: the card carries no provider field to name one.
+        showFallbackCopy
+          ? h("p", { className: "approval-copy" }, "The agent is waiting for a remote approval.")
+          : null,
+        subject || approval.cwd || raw
+          ? h(
+              "div",
+              { className: "approval-subject" },
+              command
+                ? isCollapsible(command)
+                  ? h(ExpandableBlock, {
+                      className: "approval-command",
+                      expandKey: commandKey,
+                      expanded: Boolean(commandKey && expandedKeys?.has(commandKey)),
+                      preformatted: true,
+                      value: command,
+                    })
+                  : h(
+                      "pre",
+                      { className: "approval-command" },
+                      h("span", { "aria-hidden": "true", className: "approval-prompt" }, "$ "),
+                      command
+                    )
+                : subject
+                  ? h(ExpandableBlock, {
+                      className: "approval-command",
+                      expandKey: contextKey,
+                      expanded: Boolean(contextKey && expandedKeys?.has(contextKey)),
+                      preformatted: true,
+                      value: subject,
+                    })
+                  : null,
+              approval.cwd || (raw && rawKey)
+                ? h(
+                    "div",
+                    { className: "approval-subject-meta" },
+                    approval.cwd
+                      ? h(
+                          "span",
+                          // The exact path, never clipped: it is the blast radius being authorised.
+                          { className: "approval-scope-chip", title: `Working directory: ${approval.cwd}` },
+                          h("span", { className: "approval-scope-label" }, "in"),
+                          h("span", { className: "approval-scope-path" }, approval.cwd)
+                        )
+                      : null,
+                    raw && rawKey
+                      ? h(
+                          "button",
+                          {
+                            "aria-expanded": rawOpen ? "true" : "false",
+                            className: "approval-raw-toggle",
+                            "data-expand-key": rawKey,
+                            "data-transcript-toggle": "group",
+                            type: "button",
+                          },
+                          "raw input"
+                        )
+                      : null
+                  )
+                : null,
+              rawOpen ? h("pre", { className: "approval-raw" }, raw) : null
+            )
           : null
       ),
-      h("h3", { className: "approval-title" }, approval.summary),
-      // No provider name: the card carries no provider field, and guessing one
-      // told every non-Codex user their agent was Codex.
-      h("p", { className: "approval-copy" }, approval.detail || "The agent is waiting for a remote approval."),
-      // The working directory is the best available answer to "what can this
-      // touch", so it reads as scope rather than as a third line of prose in
-      // the same style as the explanation above it.
-      approval.cwd
-        ? h(
-            "div",
-            { className: "approval-scope" },
-            h(
-              "span",
-              // The exact value, not just the field name: this is the blast
-              // radius of a decision being authorised, so it has to stay
-              // recoverable even where the layout is tightest.
-              { className: "approval-scope-chip", title: `Working directory: ${approval.cwd}` },
-              h("span", { className: "approval-scope-label" }, "cwd"),
-              h("span", { className: "approval-scope-path" }, approval.cwd)
-            )
-          )
-        : null,
-      approval.command
-        ? h(ExpandableBlock, {
-            className: "message-pre",
-            expandKey: approvalCommandExpandKey,
-            expanded: Boolean(approvalCommandExpandKey && options?.expandedKeys?.has(approvalCommandExpandKey)),
-            preformatted: true,
-            value: approval.command,
-          })
-        : null,
-      approval.context_preview
-        ? h(ExpandableBlock, {
-            className: "message-pre",
-            expandKey: contextExpandKey,
-            expanded: Boolean(contextExpandKey && options?.expandedKeys?.has(contextExpandKey)),
-            preformatted: true,
-            value: approval.context_preview,
-          })
-        : null,
-      approval.requested_permissions
-        ? h(ExpandableBlock, {
-            className: "message-pre",
-            expandKey: permissionsExpandKey,
-            expanded: Boolean(permissionsExpandKey && options?.expandedKeys?.has(permissionsExpandKey)),
-            preformatted: true,
-            value: JSON.stringify(approval.requested_permissions, null, 2),
-          })
-        : null,
       h(
         "div",
         { className: "approval-actions" },
@@ -2245,13 +2346,14 @@ export function ApprovalCard({ approval, options = null }) {
                 "data-approval-scope": "session",
                 type: "button",
               },
-              "Approve Session"
+              "Allow for this session"
             )
           : null,
+        h("span", { "aria-hidden": "true", className: "approval-actions-spacer" }),
         h(
           "button",
           {
-            className: "approval-button approval-button-danger",
+            className: "approval-button approval-button-deny",
             "data-approval-decision": "deny",
             "data-approval-scope": "once",
             type: "button",

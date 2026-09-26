@@ -36,7 +36,7 @@ import {
 const TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 60000);
 const PROMPT = "Reply with exactly: pong";
 const EXPECTED_REPLY = "pong";
-const APPROVAL_BANNER = ".pending-action-banner-approval";
+const APPROVAL_BANNER = ".chat-message-approval";
 
 function logStep(message, details) {
   const suffix = details ? ` ${JSON.stringify(details)}` : "";

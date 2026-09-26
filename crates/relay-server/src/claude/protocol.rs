@@ -40,7 +40,7 @@ pub(super) fn parse_thread_summary(value: &Value) -> Result<ThreadSummaryView, S
 pub(super) fn parse_claude_approval(
     payload: &Value,
     relay: &RelayState,
-    session_id: Option<&str>,
+    thread_id: String,
 ) -> Option<PendingApproval> {
     let request_id = string_at(payload, &["id"])?;
     let tool_name = string_at(payload, &["tool_name"]).unwrap_or_else(|| "tool".to_string());
@@ -50,10 +50,8 @@ pub(super) fn parse_claude_approval(
     let command = value_at(payload, &["input", "command"])
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
-    let thread_id = session_id
-        .map(str::to_string)
-        .or_else(|| relay.active_thread_id.clone())
-        .unwrap_or_default();
+    // Never the relay's `current_cwd`: that is the ACTIVE session's, and this
+    // request may come from a background one.
     let cwd = value_at(payload, &["input", "cwd"])
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
@@ -64,7 +62,7 @@ pub(super) fn parse_claude_approval(
                 .find(|thread| thread.id == thread_id)
                 .map(|thread| thread.cwd.clone())
         })
-        .or_else(|| Some(relay.current_cwd.clone()));
+        .or_else(|| relay.thread_cwd(&thread_id));
     let context_preview = payload.get("input").map(compact_json);
 
     Some(PendingApproval {

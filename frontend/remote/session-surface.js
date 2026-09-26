@@ -10,9 +10,12 @@ import {
   canCurrentDeviceWrite as canRemoteDeviceWrite,
   isCurrentDeviceActiveController as isRemoteController,
 } from "./chrome-view-model.js";
+import { pendingApprovalForThread } from "../shared/session-view-model.js";
 
+// `session` stays whole (approval events merge into it); only the Approve target
+// is narrowed to the session on screen.
 export function renderSession(session) {
-  const approval = session.pending_approvals?.[0] || null;
+  const approval = pendingApprovalForThread(session, session?.active_thread_id || null);
   applyRemoteSurfacePatch({
     currentApprovalId: approval?.request_id || null,
     session,
