@@ -132,6 +132,7 @@ import {
 } from "../shared/reviews-cache.js";
 import { createWorkflowsCache } from "../shared/workflows-cache.js";
 import { createTeamsCache } from "../shared/teams-cache.js";
+import { createProposalsCache, proposalsRevisionOf } from "../shared/proposals-cache.js";
 import {
   selectTeamRun,
   sortTeamRuns,
@@ -343,6 +344,8 @@ export function createSessionRenderer({
   // (which screen, and which task).
   teamsCache = createTeamsCache(),
   fetchTeams,
+  proposalsCache = createProposalsCache(),
+  fetchOrchestratorProposals,
   fetchUsage,
   fetchTeamCatalog,
   ensureOrchestrator,
@@ -669,6 +672,20 @@ export function createSessionRenderer({
           const next = error ? error.message || String(error) : null;
           if (state.teamsError !== next) {
             state.teamsError = next;
+            renderSession(state.session || session);
+          }
+        }
+      );
+    }
+    if (typeof fetchOrchestratorProposals === "function" && !tasksLocked(session)) {
+      void proposalsCache.sync(
+        proposalsRevisionOf(session),
+        () => fetchOrchestratorProposals(),
+        () => renderSession(state.session || session),
+        (error) => {
+          const next = error ? `Couldn't load proposals: ${error.message || String(error)}` : null;
+          if (state.proposalsError !== next) {
+            state.proposalsError = next;
             renderSession(state.session || session);
           }
         }
@@ -2241,9 +2258,9 @@ export function createSessionRenderer({
               loading: Boolean(state.orchestratorLoading || state.orchestratorEntriesLoading),
               composerDisabled: !orchId || Boolean(state.orchestratorLoading),
               composerBusy: Boolean(state.orchestratorSending || state.orchestratorProposalBusy),
-              composerError: state.orchestratorSendError || null,
+              composerError: state.orchestratorSendError || state.proposalsError || null,
               stopPending: orchStopPending,
-              proposals: session?.orchestrator_proposals || [],
+              proposals: proposalsCache.current().proposals,
               onSend: orchId ? (text) => sendOrchestratorMessage(text, orchId) : null,
               onPropose: (text) => proposeFromOrchestratorDraft(text),
               onConfirmProposal: (proposalId) => confirmOrchestratorProposalCard(proposalId),
@@ -2646,6 +2663,7 @@ export function createSessionRenderer({
     confirmOrchestratorProposal,
     reviseOrchestratorProposal,
     teamsCache,
+    proposalsCache,
     onOpenTask,
     // The Orchestrator has no composer node under it, so the failure `sendMessage`
     // filed against its thread would otherwise never reach a screen.
@@ -3033,14 +3051,7 @@ export function createSessionRenderer({
     }
     try {
       await dismissOrchestratorProposal(proposalId);
-      if (state.session) {
-        state.session = {
-          ...state.session,
-          orchestrator_proposals: (state.session.orchestrator_proposals || []).filter(
-            (entry) => entry?.id !== proposalId
-          ),
-        };
-      }
+      proposalsCache.drop(proposalId);
     } catch (error) {
       state.orchestratorSendError = error?.message || String(error);
     } finally {

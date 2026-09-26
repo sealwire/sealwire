@@ -3862,6 +3862,20 @@ so {} never got it — hand over again when you are ready.",
         acc
     }
 
+    /// Hashes the serialized cards, so it moves for exactly what a client can see.
+    pub(crate) fn orchestrator_proposals_revision(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        if self.orchestrator_proposals.is_empty() {
+            return 0;
+        }
+        let bytes = serde_json::to_vec(&self.orchestrator_proposals).unwrap_or_default();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        // Masked to 53 bits so the page's JS number holds it exactly; 0 is reserved
+        // for "no cards", so a real set never lands on it.
+        (hasher.finish() & ((1_u64 << 53) - 1)).max(1)
+    }
+
     /// Minimal, non-terminal workflow state retained in SessionSnapshot.
     pub(crate) fn workflow_activity_view(&self) -> Vec<crate::protocol::WorkflowActivityView> {
         let mut runs = self
@@ -4430,7 +4444,7 @@ so {} never got it — hand over again when you are ready.",
             thread_workspaces_revision: self.thread_workspaces_revision,
             teams_revision: self.teams_revision(),
             orchestrator_thread_id: self.orchestrator_thread_id.clone(),
-            orchestrator_proposals: self.orchestrator_proposals.clone(),
+            orchestrator_proposals_revision: self.orchestrator_proposals_revision(),
         }
     }
 
@@ -8424,6 +8438,109 @@ mod tests {
             !relay.team_runs.contains_key("finished"),
             "empty-owned terminal history should be pruned before the new insert when already at cap"
         );
+    }
+
+    fn pending_proposal(id: &str) -> crate::protocol::OrchestratorProposalView {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "kind": "start_task",
+            "title": format!("Proposal {id}"),
+            "context": "Background the card carries for the user to read. ".repeat(50),
+            "acceptance_criteria": "1. A regression test reproduces the bug. ".repeat(30),
+            "team_id": "builtin",
+            "team_version_id": "builtin-v1",
+            "team_name": "Default",
+            "why": "Why this team and these agents fit the task. ".repeat(6),
+            "created_at": 1_788_542_733_u64,
+        }))
+        .expect("proposal fixture")
+    }
+
+    #[test]
+    fn pending_proposal_cards_do_not_shell_the_live_transcript() {
+        // Cards can sit pending for weeks, each with a multi-KB brief. Riding every
+        // LocalWeb frame, they left no room for the active thread's messages, so every
+        // live row arrived as an omitted shell the page then had to fetch back.
+        let mut relay = test_relay();
+        relay.activate_thread(
+            test_thread("t1", "/tmp/project"),
+            "/tmp/project",
+            "model",
+            "never",
+            "workspace-write",
+            "medium",
+            "device-1",
+        );
+        for index in 0..4 {
+            relay.upsert_transcript_item(
+                format!("msg-{index}"),
+                crate::protocol::TranscriptEntryKind::AgentText,
+                Some(format!(
+                    "Live assistant message {index} must stay readable."
+                )),
+                "completed".to_string(),
+                Some("turn-1".to_string()),
+                None,
+            );
+        }
+        for index in 0..4 {
+            relay
+                .orchestrator_proposals
+                .push(pending_proposal(&format!("orch_prop_{index}")));
+        }
+
+        let compacted = relay
+            .snapshot()
+            .compact_for(crate::protocol::SessionSnapshotCompactProfile::LocalWeb);
+
+        let states = compacted
+            .transcript
+            .iter()
+            .map(|entry| entry.content_state)
+            .collect::<Vec<_>>();
+        assert_eq!(compacted.transcript.len(), 4);
+        assert!(
+            states
+                .iter()
+                .all(|state| *state == crate::protocol::TranscriptContentState::Full),
+            "pending proposal cards must not push live messages into shells: {states:?}"
+        );
+    }
+
+    #[test]
+    fn orchestrator_proposals_revision_moves_for_any_change_a_client_can_see() {
+        // Content hash, like `teams_revision`: cards are edited from several places
+        // (revise, auto-start toggle, the schedule watchdog) and a hash cannot be forgotten.
+        let mut relay = test_relay();
+        assert_eq!(relay.orchestrator_proposals_revision(), 0);
+
+        relay.orchestrator_proposals.push(pending_proposal("a"));
+        let one = relay.orchestrator_proposals_revision();
+        assert_ne!(one, 0);
+        assert!(
+            one <= (1_u64 << 53) - 1,
+            "the page compares revisions as JS numbers, exact only up to 2^53: {one}"
+        );
+        assert_eq!(
+            one,
+            relay.orchestrator_proposals_revision(),
+            "stable while unchanged"
+        );
+
+        relay.orchestrator_proposals[0].auto_start = true;
+        let toggled = relay.orchestrator_proposals_revision();
+        assert_ne!(toggled, one, "an auto-start toggle is visible on the card");
+
+        relay.orchestrator_proposals[0].schedule_error = Some("no device".to_string());
+        assert_ne!(relay.orchestrator_proposals_revision(), toggled);
+
+        relay.orchestrator_proposals.push(pending_proposal("b"));
+        let two = relay.orchestrator_proposals_revision();
+        relay.orchestrator_proposals.retain(|card| card.id != "b");
+        assert_ne!(two, relay.orchestrator_proposals_revision());
+
+        relay.orchestrator_proposals.clear();
+        assert_eq!(relay.orchestrator_proposals_revision(), 0);
     }
 
     #[test]

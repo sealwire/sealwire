@@ -13,6 +13,7 @@ export function createOrchestratorChatActions({
   confirmOrchestratorProposal,
   reviseOrchestratorProposal,
   teamsCache,
+  proposalsCache,
   onOpenTask,
   // What the relay actually said, for the thread that refused. `sendMessage`
   // only reports pass/fail; it files the relay's sentence against the thread
@@ -24,31 +25,11 @@ export function createOrchestratorChatActions({
   renderSession = () => {},
 }) {
   function stageProposal(proposal) {
-    if (!proposal || !state.session) {
-      return;
-    }
-    const existing = Array.isArray(state.session.orchestrator_proposals)
-      ? state.session.orchestrator_proposals
-      : [];
-    state.session = {
-      ...state.session,
-      orchestrator_proposals: [
-        ...existing.filter((entry) => entry?.id !== proposal.id),
-        proposal,
-      ],
-    };
+    proposalsCache?.stage(proposal);
   }
 
   function dropProposal(proposalId) {
-    if (!state.session) {
-      return;
-    }
-    state.session = {
-      ...state.session,
-      orchestrator_proposals: (state.session.orchestrator_proposals || []).filter(
-        (entry) => entry?.id !== proposalId
-      ),
-    };
+    proposalsCache?.drop(proposalId);
   }
 
   /**

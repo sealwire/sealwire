@@ -204,18 +204,15 @@ try {
     called.content?.[0]?.text ?? ""
   );
 
-  const snap2 = await api("/api/session");
-  const cards = snap2.body?.data?.orchestrator_proposals ?? [];
+  const snap2 = await api("/api/orchestrator/proposals");
+  const cards = snap2.body?.data?.proposals ?? [];
   check(
     "the card is really in relay state, with the title the model sent",
     cards.length === 1 && cards[0].title === "Add a parser",
     JSON.stringify(cards.map((c) => c.title))
   );
-  check(
-    "nothing was started — no team run exists",
-    (snap2.body?.data?.team_runs ?? []).length === 0,
-    `runs=${(snap2.body?.data?.team_runs ?? []).length}`
-  );
+  const runs = (await api("/api/session/teams")).body?.data?.teams ?? [];
+  check("nothing was started — no team run exists", runs.length === 0, `runs=${runs.length}`);
 
   // 5. The tool list is a function of live state, re-read per call.
   const listed2 = await client.listTools();
@@ -247,8 +244,8 @@ try {
     name: "revise_proposal",
     arguments: { proposal_id: cards[0].id, why: "They own the CLI." },
   });
-  const snap3 = await api("/api/session");
-  const card = (snap3.body?.data?.orchestrator_proposals ?? [])[0];
+  const snap3 = await api("/api/orchestrator/proposals");
+  const card = (snap3.body?.data?.proposals ?? [])[0];
   check(
     "revising one field leaves the rest of the card intact",
     revised.isError === false && card?.title === "Add a parser" && card?.context === "Touch the CLI.",

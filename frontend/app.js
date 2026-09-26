@@ -112,6 +112,7 @@ import {
   getAskDetail,
   getWorkflows,
   getTeams,
+  getOrchestratorProposals,
   startTeam,
   teamAction,
   deleteTeam,
@@ -1210,6 +1211,9 @@ const renderer = createSessionRenderer({
   teamsCache,
   fetchTeams() {
     return getTeams(apiFetch);
+  },
+  fetchOrchestratorProposals() {
+    return getOrchestratorProposals(apiFetch);
   },
   fetchUsage(params) {
     return getUsage(apiFetch, params);

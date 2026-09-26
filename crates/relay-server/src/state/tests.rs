@@ -412,7 +412,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             thread_workspaces_revision: 0,
             teams_revision: 0,
             orchestrator_thread_id: None,
-            orchestrator_proposals: Vec::new(),
+            orchestrator_proposals_revision: 0,
         }),
         receipt: Some(ApprovalReceipt {
             request_id: "req-1".to_string(),

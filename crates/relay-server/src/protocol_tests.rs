@@ -165,7 +165,7 @@ fn make_snapshot() -> SessionSnapshot {
         thread_workspaces_revision: 0,
         teams_revision: 0,
         orchestrator_thread_id: None,
-        orchestrator_proposals: Vec::new(),
+        orchestrator_proposals_revision: 0,
     }
 }
 

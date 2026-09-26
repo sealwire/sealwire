@@ -306,9 +306,11 @@ pub struct SessionSnapshot {
     /// view and embed this thread's transcript; they do not `viewThread` into it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestrator_thread_id: Option<String>,
-    /// Pending Orchestrator proposal cards (propose → user confirms → start_team).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub orchestrator_proposals: Vec<OrchestratorProposalView>,
+    /// Cache key for `GET /api/orchestrator/proposals`. Only the key rides the frame:
+    /// cards sit pending for weeks with multi-KB briefs, and carried whole they
+    /// crowded the active thread's messages out of the budget.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub orchestrator_proposals_revision: u64,
 }
 
 fn is_zero_u64(value: &u64) -> bool {
@@ -3071,6 +3073,13 @@ pub struct OrchestratorProposalView {
     /// Why an auto-start did not happen. Written by the watchdog, never here.
     #[serde(default)]
     pub schedule_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OrchestratorProposalsResponse {
+    /// Echoed like `TeamsResponse::teams_revision`; clients still gate on the snapshot's.
+    pub orchestrator_proposals_revision: u64,
+    pub proposals: Vec<OrchestratorProposalView>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

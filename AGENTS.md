@@ -51,7 +51,8 @@ set, send `X-Agent-Relay-CSRF: 1` and nothing else; with a token, send
 non-empty `device_id` — any string; pairing is for remote clients.
 
 - `GET /api/health`, `GET /api/session` — the snapshot everything else reads back
-  from (`beta_features_enabled`, `orchestrator_thread_id`, `orchestrator_proposals`).
+  from (`beta_features_enabled`, `orchestrator_thread_id`). Pending proposal cards
+  are `GET /api/orchestrator/proposals`; the snapshot carries only their revision.
 - `POST /api/session/message` `{text, thread_id, device_id}` — send a turn.
 - `POST /api/session/start`, `GET /api/threads`, `GET /api/providers/:p/models`.
 

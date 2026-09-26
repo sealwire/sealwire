@@ -211,6 +211,15 @@ export async function getTeams(apiFetch) {
   return payload.data;
 }
 
+export async function getOrchestratorProposals(apiFetch) {
+  const response = await apiFetch("/api/orchestrator/proposals", { method: "GET" });
+  const payload = await response.json();
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.error?.message || "Failed to load proposals");
+  }
+  return payload.data;
+}
+
 export async function startTeam(apiFetch, input) {
   // Flat by design: a client filling this in is filling in a form, not assembling
   // a domain object.

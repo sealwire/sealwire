@@ -6,9 +6,9 @@
 use super::*;
 use crate::protocol::{
     ConfirmOrchestratorProposalInput, DismissOrchestratorProposalInput, OrchestratorProposalView,
-    ProposalAgentRowView, ProposeOrchestratorTaskInput, ProposeOrchestratorTaskReceipt,
-    ReviseOrchestratorProposalInput, SeatAgentView, StartTeamInput, StartTeamReceipt,
-    TaskSeatAgentsView,
+    OrchestratorProposalsResponse, ProposalAgentRowView, ProposeOrchestratorTaskInput,
+    ProposeOrchestratorTaskReceipt, ReviseOrchestratorProposalInput, SeatAgentView, StartTeamInput,
+    StartTeamReceipt, TaskSeatAgentsView,
 };
 use relay_api::team::{
     TeamRole, TeamStructure, BUILTIN_TEAM_ID, BUILTIN_TEAM_NAME, BUILTIN_TEAM_VERSION_ID,
@@ -129,6 +129,15 @@ fn resolve_scheduled_start_at(
 }
 
 impl AppState {
+    /// The pending cards, keyed by the revision the snapshot carries.
+    pub async fn orchestrator_proposals(&self) -> OrchestratorProposalsResponse {
+        let relay = self.relay.read().await;
+        OrchestratorProposalsResponse {
+            orchestrator_proposals_revision: relay.orchestrator_proposals_revision(),
+            proposals: relay.orchestrator_proposals.clone(),
+        }
+    }
+
     /// Hold a task spec for confirmation. Does not start a run.
     pub async fn propose_orchestrator_task(
         &self,
@@ -603,6 +612,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proposals_ride_their_own_channel_keyed_by_the_snapshot_revision() {
+        let project = TempDir::new().expect("project");
+        let cwd = project.path().to_string_lossy().to_string();
+        let app = beta_app(&cwd).await;
+
+        let empty = app.orchestrator_proposals().await;
+        assert!(empty.proposals.is_empty());
+        assert_eq!(empty.orchestrator_proposals_revision, 0);
+
+        let receipt = app
+            .propose_orchestrator_task(ProposeOrchestratorTaskInput {
+                title: "Add a parser".to_string(),
+                context: Some("Context only the proposals channel carries.".to_string()),
+                device_id: Some("device-1".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("propose");
+
+        let channel = app.orchestrator_proposals().await;
+        let snapshot = app.snapshot().await;
+        assert_eq!(channel.proposals, vec![receipt.proposal.clone()]);
+        assert_ne!(channel.orchestrator_proposals_revision, 0);
+        assert_eq!(
+            channel.orchestrator_proposals_revision,
+            snapshot.orchestrator_proposals_revision
+        );
+        let wire = serde_json::to_string(&snapshot).expect("snapshot json");
+        assert!(
+            !wire.contains("Context only the proposals channel carries."),
+            "the snapshot carries the revision, never the card"
+        );
+    }
+
+    #[tokio::test]
     async fn propose_then_dismiss_clears_the_card() {
         let project = TempDir::new().expect("project");
         let cwd = project.path().to_string_lossy().to_string();
@@ -638,9 +682,9 @@ mod tests {
             Some("high")
         );
         assert_eq!(
-            app.snapshot().await.orchestrator_proposals.len(),
+            app.orchestrator_proposals().await.proposals.len(),
             1,
-            "snapshot must carry the pending card"
+            "the proposals channel must carry the pending card"
         );
 
         app.dismiss_orchestrator_proposal(
@@ -652,8 +696,8 @@ mod tests {
         .await
         .expect("dismiss");
         assert!(
-            app.snapshot().await.orchestrator_proposals.is_empty(),
-            "dismiss must drop the card from the snapshot"
+            app.orchestrator_proposals().await.proposals.is_empty(),
+            "dismiss must drop the card from the proposals channel"
         );
     }
 
@@ -796,11 +840,11 @@ mod tests {
             "unexpected error: {err}"
         );
         assert_eq!(
-            app.snapshot().await.orchestrator_proposals.len(),
+            app.orchestrator_proposals().await.proposals.len(),
             1,
             "a failed confirm must put the card back"
         );
-        assert_eq!(app.snapshot().await.orchestrator_proposals[0].id, id);
+        assert_eq!(app.orchestrator_proposals().await.proposals[0].id, id);
     }
 
     /// The trap this operation exists to avoid: a caller changing only the team
@@ -845,7 +889,7 @@ mod tests {
         assert_eq!(revised.acceptance_criteria, "Tests green.");
         assert_eq!(revised.why.as_deref(), Some("They own the CLI."));
 
-        let pending = app.snapshot().await.orchestrator_proposals;
+        let pending = app.orchestrator_proposals().await.proposals;
         assert_eq!(pending.len(), 1, "revising must not stage a second card");
     }
 
@@ -1207,7 +1251,7 @@ mod tests {
             app.teams().await.teams.is_empty(),
             "nothing may run before the card's time"
         );
-        let card = &app.snapshot().await.orchestrator_proposals[0];
+        let card = &app.orchestrator_proposals().await.proposals[0];
         assert!(card.auto_start, "and the card keeps waiting, still armed");
         assert_eq!(card.schedule_error, None);
     }
@@ -1228,7 +1272,7 @@ mod tests {
             "the card's time arrived, so its run must have started"
         );
         assert!(
-            app.snapshot().await.orchestrator_proposals.is_empty(),
+            app.orchestrator_proposals().await.proposals.is_empty(),
             "a started card is spent"
         );
         assert!(
@@ -1381,7 +1425,7 @@ mod tests {
             "a fortnight of downtime delays a restored schedule; it does not cancel it"
         );
         assert!(
-            after.snapshot().await.orchestrator_proposals.is_empty(),
+            after.orchestrator_proposals().await.proposals.is_empty(),
             "a started card is spent"
         );
     }
@@ -1405,7 +1449,7 @@ mod tests {
             "a long outage delays a scheduled start; it does not cancel it"
         );
         assert!(
-            app.snapshot().await.orchestrator_proposals.is_empty(),
+            app.orchestrator_proposals().await.proposals.is_empty(),
             "a started card is spent"
         );
     }
@@ -1424,7 +1468,7 @@ mod tests {
 
         app.start_due_scheduled_proposals_at(due_at).await;
 
-        let card = &app.snapshot().await.orchestrator_proposals[0];
+        let card = &app.orchestrator_proposals().await.proposals[0];
         assert!(
             card.auto_start,
             "the card must stay armed for a build that can actually run it"
@@ -1450,7 +1494,7 @@ mod tests {
 
         app.start_due_scheduled_proposals_at(due_at).await;
 
-        let card = &app.snapshot().await.orchestrator_proposals[0];
+        let card = &app.orchestrator_proposals().await.proposals[0];
         assert!(
             card.auto_start,
             "the card must stay armed for a launch that can actually run it"
@@ -1500,7 +1544,7 @@ mod tests {
 
         app.start_due_scheduled_proposals_at(due_at).await;
 
-        let after_first = app.snapshot().await.orchestrator_proposals;
+        let after_first = app.orchestrator_proposals().await.proposals;
         assert_eq!(after_first.len(), 1, "a failed start puts the card back");
         assert!(
             !after_first[0].auto_start,
@@ -1521,7 +1565,7 @@ claim parked while the start was in flight"
         app.start_due_scheduled_proposals_at(due_at + 15).await;
 
         assert_eq!(
-            app.snapshot().await.orchestrator_proposals,
+            app.orchestrator_proposals().await.proposals,
             after_first,
             "a second tick must not touch a card that already failed"
         );

@@ -199,8 +199,8 @@ try {
       : `a run appeared ${offset}s after it came due`
   );
 
-  const after = await api("/api/session");
-  const leftover = after.body?.data?.orchestrator_proposals ?? [];
+  const after = await api("/api/orchestrator/proposals");
+  const leftover = after.body?.data?.proposals ?? [];
   check(
     "the card is spent once it has started",
     leftover.every((entry) => entry.id !== card.id),

@@ -2,12 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { createOrchestratorChatActions } from "./orchestrator-chat.js";
+import { createProposalsCache } from "./proposals-cache.js";
 
 function harness(overrides = {}) {
   const calls = { send: [], propose: [], confirm: [], revise: [], openTask: [], invalidate: 0 };
-  const state = { session: { orchestrator_proposals: [] }, stopPendingByThread: {} };
+  const state = { session: {}, stopPendingByThread: {} };
+  const proposalsCache = createProposalsCache();
   const actions = createOrchestratorChatActions({
     state,
+    proposalsCache,
     sendMessage: async (text, threadId) => {
       calls.send.push([text, threadId]);
       return true;
@@ -32,7 +35,8 @@ function harness(overrides = {}) {
     onOpenTask: (id) => calls.openTask.push(id),
     ...overrides,
   });
-  return { actions, calls, state };
+  const cards = () => proposalsCache.current().proposals;
+  return { actions, calls, state, proposalsCache, cards };
 }
 
 // The bug this pins: every Send proposed *and* confirmed, so saying "hello" to
@@ -49,14 +53,14 @@ test("chatting with the Orchestrator never starts a task", async () => {
 });
 
 test("even a task-shaped message is still only chat", async () => {
-  const { actions, calls, state } = harness();
+  const { actions, calls, cards } = harness();
 
   await actions.send("Add a parser to the CLI\n\nKeep the tests green.", "orch-1");
 
   assert.equal(calls.send.length, 1);
   assert.deepEqual(calls.propose, []);
   assert.deepEqual(calls.confirm, []);
-  assert.deepEqual(state.session.orchestrator_proposals, []);
+  assert.deepEqual(cards(), []);
 });
 
 test("a refused message surfaces the error and still starts nothing", async () => {
@@ -197,15 +201,16 @@ test("a second Stop while already pending is a no-op", async () => {
 });
 
 test("Propose as task stages a card without starting it", async () => {
-  const { actions, calls, state } = harness();
+  const { actions, calls, cards } = harness();
 
   await actions.propose("Add a parser\n\nTouch the CLI.");
 
   assert.deepEqual(calls.propose, [{ title: "Add a parser", context: "Touch the CLI." }]);
   assert.deepEqual(calls.confirm, [], "the user applies the card; propose must not");
   assert.deepEqual(
-    state.session.orchestrator_proposals.map((entry) => entry.id),
-    ["prop-1"]
+    cards().map((entry) => entry.id),
+    ["prop-1"],
+    "the staged card shows before the next snapshot names its revision"
   );
 });
 
@@ -219,7 +224,7 @@ test("a title-less draft is refused before any request goes out", async () => {
 });
 
 test("confirming a card is the step that starts the run", async () => {
-  const { actions, calls, state } = harness();
+  const { actions, calls, cards } = harness();
   await actions.propose("Add a parser");
 
   const receipt = await actions.confirm("prop-1");
@@ -228,12 +233,12 @@ test("confirming a card is the step that starts the run", async () => {
   assert.equal(receipt.team_run_id, "run-1");
   assert.deepEqual(calls.openTask, ["run-1"], "confirming opens the run it started");
   assert.equal(calls.invalidate, 1, "the teams cache must refetch after a run starts");
-  assert.deepEqual(state.session.orchestrator_proposals, [], "the applied card is cleared");
+  assert.deepEqual(cards(), [], "the applied card is cleared");
 });
 
 test("send forwards attached images, and an image alone is enough to send", async () => {
   const calls = [];
-  const state = { session: { orchestrator_proposals: [] } };
+  const state = { session: {} };
   const actions = createOrchestratorChatActions({
     state,
     sendMessage: async (text, threadId, images) => {
@@ -255,10 +260,8 @@ test("send forwards attached images, and an image alone is enough to send", asyn
 // Arming a card is an edit, not a start. It goes through the same staging the
 // propose path uses, so the card redraws from what the relay stored.
 test("arming a staged card updates it in place and starts nothing", async () => {
-  const { actions, calls, state } = harness();
-  state.session.orchestrator_proposals = [
-    { id: "prop-1", title: "Add a parser", auto_start: false },
-  ];
+  const { actions, calls, proposalsCache, cards } = harness();
+  proposalsCache.stage({ id: "prop-1", title: "Add a parser", auto_start: false });
 
   const receipt = await actions.revise("prop-1", { auto_start: true });
 
@@ -267,18 +270,18 @@ test("arming a staged card updates it in place and starts nothing", async () => 
   assert.deepEqual(calls.openTask, [], "and must not navigate into one");
   assert.equal(receipt.proposal.auto_start, true);
   assert.deepEqual(
-    state.session.orchestrator_proposals,
+    cards(),
     [{ id: "prop-1", title: "Add a parser", auto_start: true }],
     "the staged card is replaced, not duplicated",
   );
 });
 
 test("revising without a backing call does nothing at all", async () => {
-  const { actions, state } = harness({ reviseOrchestratorProposal: undefined });
-  state.session.orchestrator_proposals = [{ id: "prop-1", auto_start: false }];
+  const { actions, proposalsCache, cards } = harness({ reviseOrchestratorProposal: undefined });
+  proposalsCache.stage({ id: "prop-1", auto_start: false });
 
   assert.equal(await actions.revise("prop-1", { auto_start: true }), null);
-  assert.deepEqual(state.session.orchestrator_proposals, [
+  assert.deepEqual(cards(), [
     { id: "prop-1", auto_start: false },
   ]);
 });

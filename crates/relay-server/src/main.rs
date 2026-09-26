@@ -380,7 +380,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route("/api/orchestrator/reset", post(reset_orchestrator))
         .route(
             "/api/orchestrator/proposals",
-            post(propose_orchestrator_task),
+            get(list_orchestrator_proposals).post(propose_orchestrator_task),
         )
         .route(
             "/api/orchestrator/proposals/:proposal_id/confirm",
@@ -746,6 +746,20 @@ async fn reset_orchestrator(
             ))
         })
         .map_err(bad_request)
+}
+
+async fn list_orchestrator_proposals(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<
+    Json<ApiEnvelope<crate::protocol::OrchestratorProposalsResponse>>,
+    (StatusCode, Json<ApiError>),
+> {
+    authorize_api(&context, &headers, &uri)?;
+    Ok(Json(ApiEnvelope::ok(
+        context.app.orchestrator_proposals().await,
+    )))
 }
 
 async fn propose_orchestrator_task(

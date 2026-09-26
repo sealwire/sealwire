@@ -1170,9 +1170,9 @@ mod tests {
             text.contains("NOT started"),
             "the model must be told: {text}"
         );
-        let snap = app.snapshot().await;
-        assert_eq!(snap.orchestrator_proposals.len(), 1);
-        assert_eq!(snap.orchestrator_proposals[0].title, "Add a parser");
+        let snap = app.orchestrator_proposals().await;
+        assert_eq!(snap.proposals.len(), 1);
+        assert_eq!(snap.proposals[0].title, "Add a parser");
     }
 
     /// Every tool is on offer, so CALL time is the only gate left — and a
@@ -1219,11 +1219,8 @@ mod tests {
         .await
         .expect("propose");
 
-        let snap = app.snapshot().await;
-        let staged = snap
-            .orchestrator_proposals
-            .first()
-            .expect("one staged task");
+        let snap = app.orchestrator_proposals().await;
+        let staged = snap.proposals.first().expect("one staged task");
         assert_eq!(staged.agents.tl.provider.as_deref(), Some("codex"));
         assert_eq!(staged.agents.dev.effort.as_deref(), Some("medium"));
         assert_eq!(
@@ -1254,9 +1251,9 @@ mod tests {
         .await
         .expect("propose");
         let staged_id = app
-            .snapshot()
+            .orchestrator_proposals()
             .await
-            .orchestrator_proposals
+            .proposals
             .first()
             .expect("staged")
             .id
@@ -1270,8 +1267,8 @@ mod tests {
         .await
         .expect("revise");
 
-        let snap = app.snapshot().await;
-        let staged = snap.orchestrator_proposals.first().expect("still staged");
+        let snap = app.orchestrator_proposals().await;
+        let staged = snap.proposals.first().expect("still staged");
         assert_eq!(staged.agents.dev.effort.as_deref(), Some("max"));
         assert_eq!(
             staged.agents.dev.model.as_deref(),
@@ -1535,9 +1532,9 @@ mod tests {
         .expect("propose_reopen with a rewritten definition");
 
         let card = app
-            .snapshot()
+            .orchestrator_proposals()
             .await
-            .orchestrator_proposals
+            .proposals
             .first()
             .cloned()
             .expect("a card is staged");
@@ -1588,9 +1585,9 @@ mod tests {
         .expect("propose_reopen");
 
         let card = app
-            .snapshot()
+            .orchestrator_proposals()
             .await
-            .orchestrator_proposals
+            .proposals
             .first()
             .cloned()
             .expect("a card is staged");
@@ -1625,7 +1622,7 @@ mod tests {
         assert!(error.contains("Cloud orchestration"), "{error}");
 
         assert!(
-            app.snapshot().await.orchestrator_proposals.is_empty(),
+            app.orchestrator_proposals().await.proposals.is_empty(),
             "a refused inert reopen must not stage a card"
         );
     }
