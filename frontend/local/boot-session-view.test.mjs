@@ -81,10 +81,43 @@ test("boot completes route restoration before session loading can reconcile Proj
     "restore-start",
     "restore-complete",
     "load-session",
-    "load-threads",
     "connect-stream",
+    "load-threads",
     "schedule-poll",
   ]);
+});
+
+test("the live stream opens while the thread list is still loading", async () => {
+  // Listing asks every provider in turn; on a busy machine that has taken 30+ seconds.
+  const calls = [];
+  let releaseThreads;
+  const threadsGate = new Promise((resolve) => {
+    releaseThreads = resolve;
+  });
+
+  const bootPromise = runLocalBootDataPhase({
+    async restoreHistory() {},
+    async loadSession() {
+      calls.push("load-session");
+    },
+    async loadThreads() {
+      calls.push("load-threads");
+      await threadsGate;
+      calls.push("threads-loaded");
+    },
+    connectSessionStream() {
+      calls.push("connect-stream");
+    },
+    scheduleThreadsPoll() {
+      calls.push("schedule-poll");
+    },
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(calls.includes("connect-stream"), `stream still waiting on the list: ${calls.join(", ")}`);
+  releaseThreads();
+  await bootPromise;
+  assert.deepEqual(calls.slice(-2), ["threads-loaded", "schedule-poll"]);
 });
 
 test("a failed route restore degrades to data, stream, and poll startup", async () => {
@@ -117,8 +150,8 @@ test("a failed route restore degrades to data, stream, and poll startup", async 
     "restore-history",
     "restore-error:corrupt persisted session view",
     "load-session",
-    "load-threads",
     "connect-stream",
+    "load-threads",
     "schedule-poll",
   ]);
 });

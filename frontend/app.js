@@ -160,6 +160,7 @@ import {
 import { createSessionRenderer } from "./local/render-session.js";
 import { createSessionController } from "./local/session-controller.js";
 import {
+  loadLocalSessionData,
   runLocalBootDataPhase,
   syncProjectsForSession,
 } from "./local/boot-session-view.js";
@@ -3560,9 +3561,11 @@ async function resumeAfterAuthChange(reason) {
     return;
   }
 
-  await loadSession(reason);
-  await loadThreads(reason);
-  connectSessionStream();
+  await loadLocalSessionData({
+    loadSession: () => loadSession(reason),
+    loadThreads: () => loadThreads(reason),
+    connectSessionStream,
+  });
 }
 
 function handleUnauthorized(message) {

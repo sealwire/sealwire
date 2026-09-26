@@ -23,10 +23,16 @@ export async function runLocalBootDataPhase({
       // Error reporting must not become another boot dependency.
     }
   }
-  await loadSession();
-  await loadThreads();
-  connectSessionStream();
+  await loadLocalSessionData({ loadSession, loadThreads, connectSessionStream });
   scheduleThreadsPoll();
+}
+
+// The stream does not wait on the thread list: listing asks every provider in turn
+// and has taken 30+ seconds on a busy machine, with no live updates until it returned.
+export async function loadLocalSessionData({ loadSession, loadThreads, connectSessionStream }) {
+  await loadSession();
+  connectSessionStream();
+  await loadThreads();
 }
 
 export function syncProjectsForSession(projectsStore, session) {
