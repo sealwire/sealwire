@@ -4965,6 +4965,407 @@ test("gap repair updates the live session while preserving a view-only thread", 
   remoteQueryClient.clear();
 });
 
+// Answers each transcript page request only when the test says so, with the page it picks.
+function createHeldTranscriptPageSocket(handleRemoteBrokerPayload) {
+  const held = [];
+  return {
+    get pending() {
+      return held.length;
+    },
+    socket: {
+      readyState: 1,
+      send(frameText) {
+        const frame = JSON.parse(frameText);
+        if (frame.payload.request?.type === "fetch_thread_transcript") {
+          held.push(frame.payload.action_id);
+        }
+      },
+    },
+    answer(index, threadTranscript) {
+      const [actionId] = held.splice(index, 1);
+      assert.ok(actionId, "expected a held transcript page request");
+      return handleRemoteBrokerPayload({
+        kind: "remote_action_result",
+        action_id: actionId,
+        action: "fetch_thread_transcript",
+        ok: true,
+        snapshot: {},
+        thread_transcript: threadTranscript,
+      });
+    },
+  };
+}
+
+test("a viewed thread's page read before a newer repair does not undo that repair", async () => {
+  activeBrowser = installBrowserStubs();
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const {
+    applySessionSnapshot,
+    applyTranscriptEvent,
+    clearSessionRuntime,
+    viewRemoteThread,
+  } = await import("./session-ops.js");
+  const { remoteQueryClient } = await import("./query-client.js");
+
+  clearSessionRuntime();
+  seedRemoteViewedTerminalRefreshFixture(state, saveRemoteAuth);
+  remoteQueryClient.clear();
+  const pages = createHeldTranscriptPageSocket(handleRemoteBrokerPayload);
+  state.socket = pages.socket;
+  const row = (status, text) => ({
+    item_id: "b-1",
+    kind: "agent_text",
+    text,
+    status,
+    turn_id: "turn-b",
+    tool: null,
+  });
+  const pageOfB = (revision, entry) => ({
+    thread_id: "thread-b",
+    revision,
+    entries: [entry],
+    prev_cursor: null,
+  });
+
+  applySessionSnapshot({
+    active_thread_id: "thread-a",
+    active_turn_id: null,
+    current_cwd: "/tmp/a",
+    current_status: "idle",
+    pending_approvals: [],
+    pending_ask_user_questions: [],
+    transcript: [{ item_id: "a-1", kind: "agent_text", text: "live A", turn_id: "turn-a" }],
+    transcript_revision: 1,
+    transcript_truncated: false,
+  });
+  const firstView = viewRemoteThread("thread-b");
+  await waitFor(() => pages.pending === 1);
+  await pages.answer(0, pageOfB(2, row("running", "partial")));
+  assert.equal(await firstView, true);
+
+  // A second read of B goes out; before it returns, a repair reads B again later.
+  const refresh = viewRemoteThread("thread-b");
+  await waitFor(() => pages.pending === 1);
+  applyTranscriptEvent({
+    kind: "transcript_resync",
+    thread_id: "thread-b",
+    revision: 4,
+    reason: "rows_not_streamed",
+  });
+  await waitFor(() => pages.pending === 2);
+  await pages.answer(1, pageOfB(4, row("completed", "partial and done")));
+  await waitFor(() => state.session.transcript.find((entry) => entry.item_id === "b-1")?.status === "completed");
+
+  // The earlier read, taken at revision 3, arrives last.
+  await pages.answer(0, {
+    ...pageOfB(3, row("running", "partial and")),
+    thread_state: { current_status: "idle", active_turn_id: null, model: "model-from-late-page" },
+  });
+  await refresh;
+  await nextTick();
+
+  const shown = state.session.transcript.find((entry) => entry.item_id === "b-1");
+  assert.equal(state.session.active_thread_id, "thread-b");
+  assert.equal(shown?.status, "completed", "an older page must not put a finished row back to running");
+  assert.equal(shown?.text, "partial and done");
+  assert.equal(state.session.transcript_revision, 4, "the view's revision must not go backwards");
+  assert.equal(state.session.model, "model-from-late-page", "the thread's state still comes from that page");
+
+  clearSessionRuntime();
+  state.socket = null;
+  state.pendingActions.clear();
+  remoteQueryClient.clear();
+});
+
+test("a viewed thread's page sent before a confirmed model change does not bring the old model back", async () => {
+  activeBrowser = installBrowserStubs();
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const {
+    applySessionSnapshot,
+    clearSessionRuntime,
+    updateRemoteSessionSettings,
+    viewRemoteThread,
+  } = await import("./session-ops.js");
+  const { remoteQueryClient } = await import("./query-client.js");
+
+  clearSessionRuntime();
+  seedRemoteViewedTerminalRefreshFixture(state, saveRemoteAuth);
+  state.remoteAuth.sessionClaim = "claim-token-1";
+  state.remoteAuth.sessionClaimExpiresAt = Math.floor(Date.now() / 1000) + 300;
+  remoteQueryClient.clear();
+  const liveA = {
+    active_thread_id: "thread-a",
+    active_turn_id: null,
+    current_cwd: "/tmp/a",
+    current_status: "idle",
+    pending_approvals: [],
+    pending_ask_user_questions: [],
+    transcript: [{ item_id: "a-1", kind: "agent_text", text: "live A", turn_id: "turn-a" }],
+    transcript_revision: 1,
+    transcript_truncated: false,
+  };
+  const pages = createHeldTranscriptPageSocket(handleRemoteBrokerPayload);
+  const holdPages = pages.socket.send;
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      if (frame.payload.request?.type !== "update_session_settings") {
+        holdPages(frameText);
+        return;
+      }
+      setImmediate(() => {
+        void handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "update_session_settings",
+          ok: true,
+          snapshot: liveA,
+        });
+      });
+    },
+  };
+  const pageOfB = (model) => ({
+    thread_id: "thread-b",
+    revision: 2,
+    entries: [{ item_id: "b-1", kind: "agent_text", text: "B", status: "completed", turn_id: "turn-b", tool: null }],
+    prev_cursor: null,
+    thread_state: { current_status: "idle", active_turn_id: null, model, settings_writable: true },
+  });
+
+  applySessionSnapshot(liveA);
+  const firstView = viewRemoteThread("thread-b");
+  await waitFor(() => pages.pending === 1);
+  await pages.answer(0, pageOfB("old-model"));
+  assert.equal(await firstView, true);
+  assert.equal(state.session.model, "old-model", "precondition");
+
+  // A refresh of B goes out, then the user picks a new model and the relay confirms it.
+  const refresh = viewRemoteThread("thread-b");
+  await waitFor(() => pages.pending === 1);
+  assert.equal(await updateRemoteSessionSettings({ model: "new-model" }), true);
+  assert.equal(state.session.model, "new-model", "precondition: the pick shows at once");
+
+  await pages.answer(0, pageOfB("old-model"));
+  await refresh;
+  await nextTick();
+
+  assert.equal(state.session.model, "new-model", "a read sent before the change must not undo it");
+
+  // One sent after it is current again, e.g. a model changed from another device.
+  const later = viewRemoteThread("thread-b");
+  await waitFor(() => pages.pending === 1);
+  await pages.answer(0, pageOfB("model-from-elsewhere"));
+  await later;
+  assert.equal(state.session.model, "model-from-elsewhere");
+
+  clearSessionRuntime();
+  state.socket = null;
+  state.pendingActions.clear();
+  remoteQueryClient.clear();
+});
+
+// Phone harness for settings races: pages held for the test, settings updates confirmed at once.
+async function setUpRemoteSettingsRace() {
+  activeBrowser = installBrowserStubs();
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const ops = await import("./session-ops.js");
+  const { remoteQueryClient } = await import("./query-client.js");
+
+  ops.clearSessionRuntime();
+  seedRemoteViewedTerminalRefreshFixture(state, saveRemoteAuth);
+  state.remoteAuth.sessionClaim = "claim-token-1";
+  state.remoteAuth.sessionClaimExpiresAt = Math.floor(Date.now() / 1000) + 300;
+  remoteQueryClient.clear();
+  const liveA = {
+    active_thread_id: "thread-a",
+    active_turn_id: null,
+    current_cwd: "/tmp/a",
+    current_status: "idle",
+    pending_approvals: [],
+    pending_ask_user_questions: [],
+    transcript: [{ item_id: "a-1", kind: "agent_text", text: "live A", turn_id: "turn-a" }],
+    transcript_revision: 1,
+    transcript_truncated: false,
+  };
+  const pages = createHeldTranscriptPageSocket(handleRemoteBrokerPayload);
+  const holdPages = pages.socket.send;
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      if (frame.payload.request?.type !== "update_session_settings") {
+        holdPages(frameText);
+        return;
+      }
+      setImmediate(() => {
+        void handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "update_session_settings",
+          ok: true,
+          snapshot: liveA,
+        });
+      });
+    },
+  };
+  const answerB = (threadState) =>
+    pages.answer(0, {
+      thread_id: "thread-b",
+      revision: 2,
+      entries: [{ item_id: "b-1", kind: "agent_text", text: "B", status: "completed", turn_id: "turn-b", tool: null }],
+      prev_cursor: null,
+      thread_state: { current_status: "idle", active_turn_id: null, settings_writable: true, ...threadState },
+    });
+  const cleanUp = () => {
+    ops.clearSessionRuntime();
+    state.socket = null;
+    state.pendingActions.clear();
+    remoteQueryClient.clear();
+  };
+
+  ops.applySessionSnapshot(liveA);
+  return { state, ops, pages, answerB, cleanUp };
+}
+
+test("a phone read that shares a request sent before a confirmed model change does not bring the old model back", async () => {
+  const { state, ops, pages, answerB, cleanUp } = await setUpRemoteSettingsRace();
+  const firstView = ops.viewRemoteThread("thread-b");
+  await waitFor(() => pages.pending === 1);
+  await answerB({ model: "old-model" });
+  assert.equal(await firstView, true);
+
+  const before = ops.viewRemoteThread("thread-b");
+  await waitFor(() => pages.pending === 1);
+  assert.equal(await ops.updateRemoteSessionSettings({ model: "new-model" }), true);
+  // Asked after the change, but answered by the request that went out before it.
+  const after = ops.viewRemoteThread("thread-b");
+  await nextTick();
+  assert.equal(pages.pending, 1, "precondition: the second read shares the first request");
+
+  await answerB({ model: "old-model" });
+  await Promise.all([before, after]);
+  await nextTick();
+
+  assert.equal(state.session.model, "new-model");
+  cleanUp();
+});
+
+test("a confirmed phone model change does not hold back another setting changed elsewhere", async () => {
+  const { state, ops, pages, answerB, cleanUp } = await setUpRemoteSettingsRace();
+  const firstView = ops.viewRemoteThread("thread-b");
+  await waitFor(() => pages.pending === 1);
+  await answerB({ model: "old-model", reasoning_effort: "low" });
+  assert.equal(await firstView, true);
+
+  const refresh = ops.viewRemoteThread("thread-b");
+  await waitFor(() => pages.pending === 1);
+  assert.equal(await ops.updateRemoteSessionSettings({ model: "new-model" }), true);
+  // This read predates the model change, but another device raised the effort before it.
+  await answerB({ model: "old-model", reasoning_effort: "high" });
+  await refresh;
+  await nextTick();
+
+  assert.equal(state.session.model, "new-model");
+  assert.equal(state.session.reasoning_effort, "high");
+  cleanUp();
+});
+
+test("a background live thread's repair read before a newer snapshot does not undo it", async () => {
+  // The window follows the viewed thread, so the live thread has no row records here.
+  activeBrowser = installBrowserStubs();
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const {
+    applySessionSnapshot,
+    applyTranscriptDelta,
+    clearSessionRuntime,
+    viewRemoteThread,
+  } = await import("./session-ops.js");
+  const { remoteQueryClient } = await import("./query-client.js");
+
+  clearSessionRuntime();
+  seedRemoteViewedTerminalRefreshFixture(state, saveRemoteAuth);
+  remoteQueryClient.clear();
+  const edit = (applyState, status) => ({
+    item_id: "b-1",
+    kind: "tool_call",
+    text: "Hello",
+    status,
+    turn_id: "turn-b",
+    tool: {
+      item_type: "fileChange",
+      name: "Edit",
+      title: "Edit",
+      file_changes: [{ path: "a.rs", change_type: "update", diff: "" }],
+      apply_state: applyState,
+    },
+  });
+  const liveB = (revision, entry) => ({
+    active_thread_id: "thread-b",
+    active_turn_id: "turn-b",
+    current_cwd: "/tmp/b",
+    current_status: "active",
+    pending_approvals: [],
+    pending_ask_user_questions: [],
+    transcript: [entry],
+    transcript_revision: revision,
+    transcript_truncated: false,
+  });
+
+  applySessionSnapshot({
+    active_thread_id: "thread-a",
+    active_turn_id: null,
+    current_cwd: "/tmp/a",
+    current_status: "idle",
+    pending_approvals: [],
+    pending_ask_user_questions: [],
+    transcript: [{ item_id: "a-1", kind: "agent_text", text: "thread A" }],
+    transcript_revision: 1,
+    transcript_truncated: false,
+  });
+  assert.equal(await viewRemoteThread("thread-a"), true);
+  applySessionSnapshot(liveB(5, edit("rolled_back", "in_progress")));
+
+  const pages = createHeldTranscriptPageSocket(handleRemoteBrokerPayload);
+  state.socket = pages.socket;
+  applyTranscriptDelta({
+    thread_id: "thread-b",
+    base_revision: 10,
+    revision: 11,
+    item_id: "b-1",
+    turn_id: "turn-b",
+    delta: " again",
+    delta_kind: "agent_text",
+    text_offset: 11,
+  });
+  await waitFor(() => pages.pending === 1);
+  // While the repair is out, a snapshot at 13 re-applies the edit; the page was read at 12.
+  applySessionSnapshot(liveB(13, edit("applied", "completed")));
+  await pages.answer(0, {
+    thread_id: "thread-b",
+    revision: 12,
+    entries: [edit("rolled_back", "in_progress")],
+    prev_cursor: null,
+  });
+  await nextTick();
+  await nextTick();
+
+  const shown = state.realSession.transcript.find((entry) => entry.item_id === "b-1");
+  assert.equal(shown?.tool?.apply_state, "applied", "an older page must not roll back a newer apply");
+  assert.equal(shown?.status, "completed");
+  assert.equal(state.realSession.transcript_revision, 13);
+  assert.equal(state.session.active_thread_id, "thread-a");
+
+  clearSessionRuntime();
+  state.socket = null;
+  state.pendingActions.clear();
+  remoteQueryClient.clear();
+});
+
 test("applyTranscriptDelta gap repair retries after a transient fetch failure and still converges", async () => {
   activeBrowser || installBrowserStubs();
   const sentPayloads = [];

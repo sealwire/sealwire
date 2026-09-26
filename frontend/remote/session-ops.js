@@ -110,6 +110,13 @@ import {
 } from "../shared/transcript-hydration-store.js";
 import { preserveVisibleTranscriptText } from "../shared/preserve-visible-transcript-text.js";
 import { reviewerPreviewEntriesFromPage } from "../shared/reviewer-panel.js";
+import {
+  keepConfirmedSettings,
+  noteSettingsConfirmed,
+  noteSettingsReadSent,
+  settingsReadSentAt,
+  stampSettingsReadSent,
+} from "../shared/settings-read-order.js";
 
 const fetchTranscriptPageOverBroker = createTranscriptPageFetcher(dispatchOrRecover);
 const fetchTranscriptRowsOverBroker = createTranscriptRowsFetcher(dispatchOrRecover);
@@ -274,6 +281,8 @@ function remoteQueryScope() {
 // their in-flight requests, for the life of the tab.
 let sweptRemoteGeneration = null;
 
+const fetchStampedTranscriptPage = stampSettingsReadSent(fetchCachedTranscriptPage);
+
 function fetchTranscriptPage({ threadId, before }) {
   const generation = (state.realSession || state.session)?.transcript_generation || "";
   if (sweptRemoteGeneration !== generation) {
@@ -284,7 +293,7 @@ function fetchTranscriptPage({ threadId, before }) {
     .fetchQuery(
       createThreadTranscriptPageQueryOptions({
         before,
-        fetchPage: fetchCachedTranscriptPage,
+        fetchPage: fetchStampedTranscriptPage,
         // Keyed by the run, so a request made after a restart cannot dedupe onto the
         // identical one still in flight from before it.
         generation: (state.realSession || state.session)?.transcript_generation || "",
@@ -719,6 +728,10 @@ async function repairActiveTranscriptTail(threadId, targetRevision) {
   const pageEntries = Array.isArray(page.entries) ? page.entries : [];
   const current = Array.isArray(liveSession.transcript) ? liveSession.transcript : [];
   const repairsWindowThread = state.transcriptHydrationThreadId === threadId;
+  const heldRevision = numericRevision(liveSession.transcript_revision);
+  // Without row records we cannot tell which rows moved on after this read, so a
+  // page older than the session overwrites none of them; it may still add rows.
+  const pageIsOlderThanHeld = pageRevision != null && heldRevision != null && pageRevision < heldRevision;
   // The array holds entries with no `item_id` (never addressable) alongside
   // the normal, id-keyed ones — build the id order/lookup the shared
   // primitive expects from the addressable ones, and remember where the rest
@@ -729,14 +742,18 @@ async function repairActiveTranscriptTail(threadId, targetRevision) {
     order,
     entries,
     pageEntries,
-    currentRevision: numericRevision(liveSession.transcript_revision),
+    currentRevision: heldRevision,
     pageRevision,
     targetRevision: numericRevision(targetRevision),
     prevCursor: page.prev_cursor,
     // The same rule every other merge keeps: an older copy never undoes a newer
     // one. The row records belong to the window's thread, and row ids are only
     // unique within a thread, so they are consulted and kept for that thread alone.
-    isStale: repairsWindowThread ? staleTranscriptRowGuard(state, pageRevision) : null,
+    isStale: repairsWindowThread
+      ? staleTranscriptRowGuard(state, pageRevision)
+      : pageIsOlderThanHeld
+        ? () => true
+        : null,
   });
   if (repairsWindowThread) {
     // Only ever advances, so the refused rows leave their newer mark alone.
@@ -1827,6 +1844,7 @@ export async function updateRemoteSessionSettings({ approval_policy, sandbox, ef
   const threadId = input.thread_id;
   try {
     await dispatchOrRecover("update_session_settings", { input });
+    noteSettingsConfirmed(threadId, input);
     const parts = [];
     if (input.approval_policy) parts.push(`approval=${input.approval_policy}`);
     if (input.sandbox) parts.push(`sandbox=${input.sandbox}`);
@@ -1879,6 +1897,7 @@ export async function viewRemoteThread(threadId) {
 
   try {
     const viewOnlyGeneration = (state.realSession || state.session)?.transcript_generation || "";
+    const readSentAt = noteSettingsReadSent();
     const page = await fetchTranscriptPage({
       before: null,
       threadId,
@@ -1910,6 +1929,10 @@ export async function viewRemoteThread(threadId) {
     // stale in state.realSession until something else happens to touch the
     // OLD thread's window again, which pinning a different thread does not.
     settleTranscriptProjection();
+    // Read before the pin moves: only a view already on this thread has a copy to protect.
+    const heldRevision = heldTranscriptRevision(threadId);
+    const pageRevision = numericRevision(page.revision);
+    const pageIsOlderThanView = heldRevision != null && pageRevision != null && pageRevision < heldRevision;
     // Retain the leaving thread's loaded window and restore the target thread's
     // retained window (if any) instead of clearing — so switching between remote
     // threads and back keeps the older history scrolled into view. The page fetch
@@ -1925,21 +1948,29 @@ export async function viewRemoteThread(threadId) {
     } else {
       seedViewOnlyWasWorking(threadId);
     }
+    // A repair or delta landed after this read: keep that transcript, but still take
+    // the thread's status and reviewers, which only a page refresh brings.
+    const heldView = pageIsOlderThanView ? state.session : null;
     applyRenderedSession(
       projectRemoteViewedSession(
         state.realSession || state.session,
         threadId,
         {
           active_thread_id: threadId,
-          transcript: page.entries || [],
-          transcript_revision: page.revision || 0,
-          transcript_truncated: page.prev_cursor != null,
-          thread_state: page.thread_state || null,
+          transcript: heldView ? heldView.transcript || [] : page.entries || [],
+          transcript_revision: heldView ? heldRevision : page.revision || 0,
+          transcript_truncated: heldView ? Boolean(heldView.transcript_truncated) : page.prev_cursor != null,
+          thread_state: keepConfirmedSettings(
+            threadId,
+            settingsReadSentAt(page, readSentAt),
+            page.thread_state || null,
+            state.session?.active_thread_id === threadId ? state.session : null
+          ),
           view_last_refresh_server_time: page.server_time ?? null,
         }
       ),
       {
-        hydrateTranscript: true,
+        hydrateTranscript: !heldView,
       }
     );
     // Not left to the next snapshot: a row written before the relay knows this

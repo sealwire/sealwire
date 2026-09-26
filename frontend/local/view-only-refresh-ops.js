@@ -19,6 +19,11 @@ import {
   createViewedThreadRefreshLatch,
   shouldRefreshViewedThread,
 } from "../shared/viewed-thread-refresh.js";
+import {
+  keepConfirmedSettings,
+  noteSettingsReadSent,
+  settingsReadSentAt,
+} from "../shared/settings-read-order.js";
 
 function pinForGeneration(state, threadId, generation, fallback = null) {
   const pin = state.viewOnlyThread;
@@ -106,6 +111,7 @@ export function createViewOnlyRefreshOps({
     if (state.session) renderSession(state.session);
 
     try {
+      const readSentAt = noteSettingsReadSent();
       const page = await fetchTranscriptPage(threadId, {});
       if (generation !== state.viewOnlyGeneration) return;
       if (transcriptPageIsFromAnotherGeneration(session, page)) {
@@ -118,6 +124,14 @@ export function createViewOnlyRefreshOps({
       const livePin = pinForGeneration(state, threadId, generation, prior);
       const { page: normalized, ...refreshed } = refreshedPinPage(livePin, page, threadId);
       const exactReview = Boolean(normalized.thread_state?.review_locked ?? review);
+      const pageSettings = normalized.thread_state
+        ? {
+          approval_policy: normalized.thread_state.approval_policy || "",
+          sandbox: normalized.thread_state.sandbox || "",
+          reasoning_effort: normalized.thread_state.reasoning_effort || "",
+          model: normalized.thread_state.model || "",
+        }
+        : null;
       const isWorkingNow = viewOnlyThreadIsWorking(session, threadId);
       const built = buildViewOnlyPin({
         relayGeneration: liveGeneration,
@@ -143,14 +157,12 @@ export function createViewOnlyRefreshOps({
         currentPhase: normalized.thread_state?.current_phase || null,
         currentTool: normalized.thread_state?.current_tool || null,
         lastProgressAt: normalized.thread_state?.last_progress_at ?? null,
-        settings: normalized.thread_state
-          ? {
-            approval_policy: normalized.thread_state.approval_policy || "",
-            sandbox: normalized.thread_state.sandbox || "",
-            reasoning_effort: normalized.thread_state.reasoning_effort || "",
-            model: normalized.thread_state.model || "",
-          }
-          : null,
+        settings: keepConfirmedSettings(
+          threadId,
+          settingsReadSentAt(page, readSentAt),
+          pageSettings,
+          livePin?.settings ?? null
+        ),
         settingsWritable: Boolean(normalized.thread_state?.settings_writable),
         taskReviewer: Boolean(normalized.thread_state?.task_reviewer),
         availableModels: normalized.thread_state?.available_models || [],

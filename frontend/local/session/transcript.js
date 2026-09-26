@@ -13,6 +13,7 @@ import {
   fetchThreadTranscriptPageFresh,
 } from "../../shared/thread-queries.js";
 import { createCachingTranscriptPageFetcher } from "../../shared/caching-transcript-fetcher.js";
+import { stampSettingsReadSent } from "../../shared/settings-read-order.js";
 import { localTranscriptPageCache } from "../transcript/page-cache-instance.js";
 import { readLocalUiState } from "../ui-store.js";
 import {
@@ -136,13 +137,15 @@ export function createTranscriptController(ctx) {
     dropTranscriptPageQueriesFromOtherGenerations(queryClient, generation);
   }
 
+  const fetchStampedTranscriptPage = stampSettingsReadSent(fetchCachedTranscriptPage);
+
   async function fetchTranscriptPage(threadId, { before = null } = {}) {
     dropOtherGenerations(state.session?.transcript_generation || "");
     const page = queryClient
       ? await queryClient.fetchQuery(
         createThreadTranscriptPageQueryOptions({
           before,
-          fetchPage: fetchCachedTranscriptPage,
+          fetchPage: fetchStampedTranscriptPage,
           // Keyed by the run, so a request made after a restart cannot dedupe onto
           // the identical one still in flight from before it.
           generation: state.session?.transcript_generation || "",
@@ -151,7 +154,7 @@ export function createTranscriptController(ctx) {
           threadId,
         })
       )
-      : await fetchCachedTranscriptPage({ threadId, before });
+      : await fetchStampedTranscriptPage({ threadId, before });
 
     return page;
   }

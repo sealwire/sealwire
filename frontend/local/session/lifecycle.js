@@ -71,6 +71,7 @@ import { threadAttention } from "../../shared/thread-attention.js";
 import { isDocumentForeground, notifyThreadEvents } from "../../shared/thread-notify.js";
 import { imageFileToDataUrl } from "../image-attachments.js";
 import { preserveVisibleTranscriptText } from "../../shared/preserve-visible-transcript-text.js";
+import { noteSettingsConfirmed } from "../../shared/settings-read-order.js";
 
 function requestIdSet(list) {
   return new Set(
@@ -540,6 +541,7 @@ export function createLifecycleController(ctx) {
       if (!response.ok || !payload.ok) {
         throw new Error(payload?.error?.message || "Failed to update session settings");
       }
+      noteSettingsConfirmed(body.thread_id, body);
       applySessionSnapshot(payload.data);
       if (state.viewOnlyThread?.threadId === body.thread_id) {
         state.viewOnlyThread = {
