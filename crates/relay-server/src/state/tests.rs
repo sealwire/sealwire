@@ -4775,6 +4775,44 @@ fn prepare_pairing_ticket_defaults_to_a_three_minute_approval_window() {
     );
 }
 
+/// Nothing else bounds how many pairing tickets wait at once. Preparing one must not cost
+/// an existing ticket, since Cloud may still refuse to sign the new one.
+#[test]
+fn a_full_pairing_queue_refuses_new_tickets_instead_of_dropping_old_ones() {
+    let mut relay = test_state();
+    let oldest = relay
+        .prepare_pairing_ticket(Some(600), Vec::new())
+        .expect("pairing ticket should prepare");
+    relay
+        .register_pairing_request(
+            &oldest.pairing_id,
+            Some("waiting-phone".to_string()),
+            None,
+            "surface-waiting",
+            TEST_VERIFY_KEY_B64.to_string(),
+            unix_now(),
+        )
+        .expect("a device waits on the oldest ticket");
+
+    let refused = (0..200)
+        .filter(|_| relay.prepare_pairing_ticket(Some(600), Vec::new()).is_err())
+        .count();
+
+    assert!(
+        relay.pending_pairings.len() <= 64,
+        "{} pairing tickets are waiting at once",
+        relay.pending_pairings.len()
+    );
+    assert!(refused > 0, "tickets past the cap must be refused");
+    assert!(
+        relay.pending_pairings.contains_key(&oldest.pairing_id)
+            && relay
+                .pending_pairing_requests
+                .contains_key(&oldest.pairing_id),
+        "the ticket a device is waiting on must survive"
+    );
+}
+
 #[test]
 fn prepare_pairing_ticket_carries_path_scope() {
     let mut relay = test_state();

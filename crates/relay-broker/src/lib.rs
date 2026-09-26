@@ -38,7 +38,7 @@ use axum::{
     extract::{
         connect_info::ConnectInfo,
         ws::{Message, WebSocket},
-        Path, Query, Request, State, WebSocketUpgrade,
+        DefaultBodyLimit, Path, Query, Request, State, WebSocketUpgrade,
     },
     http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     middleware::{self, Next},
@@ -82,6 +82,12 @@ const DEFAULT_PUBLIC_API_RATE_LIMIT_PER_MINUTE: usize = 120;
 /// provide fairness; this cap bounds aggregate work during a distributed flood.
 const DEFAULT_PUBLIC_API_GLOBAL_RATE_LIMIT_PER_MINUTE: usize = 600;
 const DEFAULT_JOIN_RATE_LIMIT_PER_MINUTE: usize = 40;
+/// Join attempts per client network across all rooms. The room is caller-chosen, so the
+/// per-room budget above cannot bound attempts on its own.
+const DEFAULT_JOIN_IP_RATE_LIMIT_PER_MINUTE: usize = 120;
+/// Pairing tickets one relay may mint a minute; someone pairing devices by hand needs
+/// well under 20.
+const DEFAULT_PAIRING_TICKET_RATE_LIMIT_PER_MINUTE: usize = 30;
 /// Publish allowance for a surface peer: a browser tab sending user-driven actions.
 const DEFAULT_PUBLISH_RATE_LIMIT_PER_MINUTE: usize = 240;
 /// Publish allowance for a relay peer, which is first-party and not traffic-shaped by
@@ -194,6 +200,9 @@ const BYTE_BUCKET_PRUNE_THRESHOLD: usize = 1_024;
 /// prune so arbitrary IP/key churn cannot grow the map without bound.
 const RATE_LIMIT_BUCKET_PRUNE_THRESHOLD: usize = 1_024;
 const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 24;
+/// Open sockets across all clients. Per-address limits cannot bound the sum, and each
+/// socket holds a descriptor and up to 2x the frame cap of read buffer (~256 MiB at 2048).
+const DEFAULT_MAX_TOTAL_CONNECTIONS: usize = 2_048;
 const DEFAULT_MAX_TEXT_FRAME_BYTES: usize = 64 * 1024;
 /// Floor under [`BrokerHardeningConfig::max_text_frame_bytes`].
 ///
@@ -217,6 +226,8 @@ const PUBLIC_API_RATE_LIMIT_ENV: &str = "RELAY_BROKER_PUBLIC_API_RATE_LIMIT_PER_
 const PUBLIC_API_GLOBAL_RATE_LIMIT_ENV: &str =
     "RELAY_BROKER_PUBLIC_API_GLOBAL_RATE_LIMIT_PER_MINUTE";
 const JOIN_RATE_LIMIT_ENV: &str = "RELAY_BROKER_JOIN_RATE_LIMIT_PER_MINUTE";
+const JOIN_IP_RATE_LIMIT_ENV: &str = "RELAY_BROKER_JOIN_IP_RATE_LIMIT_PER_MINUTE";
+const PAIRING_TICKET_RATE_LIMIT_ENV: &str = "RELAY_BROKER_PAIRING_TICKET_RATE_LIMIT_PER_MINUTE";
 const PUBLISH_RATE_LIMIT_ENV: &str = "RELAY_BROKER_PUBLISH_RATE_LIMIT_PER_MINUTE";
 const RELAY_PUBLISH_RATE_LIMIT_ENV: &str = "RELAY_BROKER_RELAY_PUBLISH_RATE_LIMIT_PER_MINUTE";
 const PUBLISH_BYTES_ENV: &str = "RELAY_BROKER_PUBLISH_BYTES_PER_MINUTE";
@@ -224,6 +235,7 @@ const RELAY_PUBLISH_BYTES_ENV: &str = "RELAY_BROKER_RELAY_PUBLISH_BYTES_PER_MINU
 const PUBLISH_BURST_BYTES_ENV: &str = "RELAY_BROKER_PUBLISH_BURST_BYTES";
 const RELAY_PUBLISH_BURST_BYTES_ENV: &str = "RELAY_BROKER_RELAY_PUBLISH_BURST_BYTES";
 const MAX_CONNECTIONS_PER_IP_ENV: &str = "RELAY_BROKER_MAX_CONNECTIONS_PER_IP";
+const MAX_TOTAL_CONNECTIONS_ENV: &str = "RELAY_BROKER_MAX_TOTAL_CONNECTIONS";
 const MAX_TEXT_FRAME_BYTES_ENV: &str = "RELAY_BROKER_MAX_TEXT_FRAME_BYTES";
 const IDLE_TIMEOUT_SECS_ENV: &str = "RELAY_BROKER_IDLE_TIMEOUT_SECS";
 const CSP_CONNECT_SRC_ENV: &str = "RELAY_BROKER_CSP_CONNECT_SRC";
@@ -642,6 +654,11 @@ fn admin_token_from_env() -> Option<Arc<str>> {
 /// (strong_count == 1, i.e. only the map holds them) are evicted. Evicting an
 /// idle lock is safe — a later request for that key just recreates it.
 const ENROLLMENT_LOCK_MAP_CAP: usize = 4096;
+/// Every public API body is a few hundred bytes; axum's default would buffer 2 MiB each.
+const PUBLIC_API_BODY_LIMIT_BYTES: usize = 64 * 1024;
+/// Any caller can present a fresh invalid bearer, so this telemetry must not grow per token.
+const MAX_TRACKED_INVALID_REFRESH_TOKENS: usize = 1024;
+const MAX_TRACKED_CHAIN_ENVIRONMENTS: usize = 4096;
 
 #[derive(Clone)]
 enum BrokerJoinVerifier {
@@ -662,6 +679,12 @@ struct VerifiedBrokerJoin {
 struct BrokerHardeningState {
     config: BrokerHardeningConfig,
     rate_limiter: SlidingWindowRateLimiter,
+    /// Separate from `rate_limiter` so join churn cannot fill the map the API shares.
+    join_rate_limiter: SlidingWindowRateLimiter,
+    /// Keyed by an authenticated relay, so its keys cannot be minted by strangers.
+    relay_rate_limiter: SlidingWindowRateLimiter,
+    /// Keyed by a verified peer; kept apart because a refused publish is fatal to a relay.
+    publish_rate_limiter: SlidingWindowRateLimiter,
     byte_limiter: ByteRateLimiter,
     publish_metrics: PublishMetrics,
     connection_tracker: ActiveConnectionTracker,
@@ -672,6 +695,8 @@ struct BrokerHardeningConfig {
     public_api_rate_limit_per_minute: usize,
     public_api_global_rate_limit_per_minute: usize,
     join_rate_limit_per_minute: usize,
+    join_ip_rate_limit_per_minute: usize,
+    pairing_ticket_rate_limit_per_minute: usize,
     publish_rate_limit_per_minute: usize,
     relay_publish_rate_limit_per_minute: usize,
     publish_bytes_per_minute: usize,
@@ -679,6 +704,7 @@ struct BrokerHardeningConfig {
     publish_burst_bytes: usize,
     relay_publish_burst_bytes: usize,
     max_connections_per_ip: usize,
+    max_total_connections: usize,
     max_text_frame_bytes: usize,
     idle_timeout: Duration,
 }
@@ -774,7 +800,13 @@ struct PublishMetricsInner {
 
 #[derive(Clone, Default)]
 struct ActiveConnectionTracker {
-    counts: Arc<StdMutex<HashMap<IpAddr, usize>>>,
+    counts: Arc<StdMutex<ConnectionCounts>>,
+}
+
+#[derive(Default)]
+struct ConnectionCounts {
+    per_ip: HashMap<IpAddr, usize>,
+    total: usize,
 }
 
 #[derive(Clone, Default)]
@@ -791,8 +823,20 @@ struct PublicMonitoringInner {
     invalid_refresh_token_uses: u64,
     repeated_invalid_refresh_token_uses: u64,
     environment_mutation_events: u64,
-    invalid_refresh_token_counts: HashMap<String, u64>,
-    observed_chain_environments: HashMap<String, RequestEnvironment>,
+    invalid_refresh_token_counts: HashMap<String, InvalidTokenUse>,
+    observed_chain_environments: HashMap<String, ObservedEnvironment>,
+    /// Recency stamp for the two maps above, which evict once full.
+    observation_seq: u64,
+}
+
+struct InvalidTokenUse {
+    attempts: u64,
+    last_seen: u64,
+}
+
+struct ObservedEnvironment {
+    environment: RequestEnvironment,
+    last_seen: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -820,6 +864,8 @@ impl Default for BrokerHardeningConfig {
             public_api_global_rate_limit_per_minute:
                 DEFAULT_PUBLIC_API_GLOBAL_RATE_LIMIT_PER_MINUTE,
             join_rate_limit_per_minute: DEFAULT_JOIN_RATE_LIMIT_PER_MINUTE,
+            join_ip_rate_limit_per_minute: DEFAULT_JOIN_IP_RATE_LIMIT_PER_MINUTE,
+            pairing_ticket_rate_limit_per_minute: DEFAULT_PAIRING_TICKET_RATE_LIMIT_PER_MINUTE,
             publish_rate_limit_per_minute: DEFAULT_PUBLISH_RATE_LIMIT_PER_MINUTE,
             relay_publish_rate_limit_per_minute: DEFAULT_RELAY_PUBLISH_RATE_LIMIT_PER_MINUTE,
             publish_bytes_per_minute: DEFAULT_PUBLISH_BYTES_PER_MINUTE,
@@ -827,6 +873,7 @@ impl Default for BrokerHardeningConfig {
             publish_burst_bytes: DEFAULT_PUBLISH_BURST_BYTES,
             relay_publish_burst_bytes: DEFAULT_RELAY_PUBLISH_BURST_BYTES,
             max_connections_per_ip: DEFAULT_MAX_CONNECTIONS_PER_IP,
+            max_total_connections: DEFAULT_MAX_TOTAL_CONNECTIONS,
             max_text_frame_bytes: DEFAULT_MAX_TEXT_FRAME_BYTES,
             idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
         }
@@ -848,6 +895,14 @@ impl BrokerHardeningConfig {
                 JOIN_RATE_LIMIT_ENV,
                 DEFAULT_JOIN_RATE_LIMIT_PER_MINUTE,
             )?,
+            join_ip_rate_limit_per_minute: parse_usize_env(
+                JOIN_IP_RATE_LIMIT_ENV,
+                DEFAULT_JOIN_IP_RATE_LIMIT_PER_MINUTE,
+            )?,
+            pairing_ticket_rate_limit_per_minute: parse_usize_env(
+                PAIRING_TICKET_RATE_LIMIT_ENV,
+                DEFAULT_PAIRING_TICKET_RATE_LIMIT_PER_MINUTE,
+            )?,
             publish_rate_limit_per_minute: parse_usize_env(
                 PUBLISH_RATE_LIMIT_ENV,
                 DEFAULT_PUBLISH_RATE_LIMIT_PER_MINUTE,
@@ -866,6 +921,10 @@ impl BrokerHardeningConfig {
             max_connections_per_ip: parse_usize_env(
                 MAX_CONNECTIONS_PER_IP_ENV,
                 DEFAULT_MAX_CONNECTIONS_PER_IP,
+            )?,
+            max_total_connections: parse_usize_env(
+                MAX_TOTAL_CONNECTIONS_ENV,
+                DEFAULT_MAX_TOTAL_CONNECTIONS,
             )?,
             max_text_frame_bytes: {
                 let configured =
@@ -904,6 +963,12 @@ impl BrokerHardeningConfig {
     /// smaller one rejects frames it is compiled to produce rather than making it produce
     /// smaller ones. Raised rather than refused at startup, matching the publish burst
     /// floor — a misconfigured limit should throttle, never brick.
+    /// Where the WebSocket layer stops reading. Above the frame cap, so a modest overshoot
+    /// still gets `frame_too_large`, but far below the library's 64 MiB default.
+    fn max_ws_read_bytes(&self) -> usize {
+        self.max_text_frame_bytes().saturating_mul(2)
+    }
+
     fn max_text_frame_bytes(&self) -> usize {
         self.max_text_frame_bytes.max(MIN_MAX_TEXT_FRAME_BYTES)
     }
@@ -1093,6 +1158,53 @@ impl SlidingWindowRateLimiter {
         true
     }
 
+    /// Admits only when both windows have room, recording in both or neither, so a refused
+    /// caller plants no key: with the shared budget below the cap, the map cannot fill.
+    async fn allow_both(
+        &self,
+        key: String,
+        limit: usize,
+        shared_key: &str,
+        shared_limit: usize,
+    ) -> bool {
+        let window = Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
+        let now = Instant::now();
+        let cutoff = now.checked_sub(window).unwrap_or(now);
+        let mut buckets = self.buckets.lock().await;
+        let mut live = |key: &str| {
+            buckets.get_mut(key).map_or(0, |bucket| {
+                while bucket.front().is_some_and(|timestamp| *timestamp <= cutoff) {
+                    bucket.pop_front();
+                }
+                bucket.len()
+            })
+        };
+        if live(&key) >= limit || live(shared_key) >= shared_limit {
+            return false;
+        }
+        let new_keys = [key.as_str(), shared_key]
+            .iter()
+            .filter(|key| !buckets.contains_key(**key))
+            .count();
+        if buckets.len() + new_keys > RATE_LIMIT_BUCKET_PRUNE_THRESHOLD {
+            buckets.retain(|_, bucket| {
+                while bucket.front().is_some_and(|timestamp| *timestamp <= cutoff) {
+                    bucket.pop_front();
+                }
+                !bucket.is_empty()
+            });
+            if buckets.len() + new_keys > RATE_LIMIT_BUCKET_PRUNE_THRESHOLD {
+                return false;
+            }
+        }
+        buckets.entry(key).or_default().push_back(now);
+        buckets
+            .entry(shared_key.to_string())
+            .or_default()
+            .push_back(now);
+        true
+    }
+
     #[cfg(test)]
     async fn bucket_count_for_test(&self) -> usize {
         self.buckets.lock().await.len()
@@ -1100,19 +1212,28 @@ impl SlidingWindowRateLimiter {
 }
 
 impl ActiveConnectionTracker {
-    fn try_acquire(&self, remote_ip: IpAddr, limit: usize) -> Option<ActiveConnectionPermit> {
+    fn try_acquire(
+        &self,
+        remote_ip: IpAddr,
+        per_ip_limit: usize,
+        total_limit: usize,
+    ) -> Result<ActiveConnectionPermit, &'static str> {
         let mut counts = self
             .counts
             .lock()
             .expect("active broker connection tracker should not be poisoned");
-        let entry = counts.entry(remote_ip).or_insert(0);
-        if *entry >= limit {
-            return None;
+        if counts.total >= total_limit {
+            return Err("broker is at connection capacity; try again later");
         }
-        *entry += 1;
-        Some(ActiveConnectionPermit {
+        let network = client_network(remote_ip);
+        if counts.per_ip.get(&network).copied().unwrap_or(0) >= per_ip_limit {
+            return Err("too many broker connections from this client");
+        }
+        *counts.per_ip.entry(network).or_insert(0) += 1;
+        counts.total += 1;
+        Ok(ActiveConnectionPermit {
             tracker: self.clone(),
-            remote_ip,
+            remote_ip: network,
         })
     }
 
@@ -1121,11 +1242,12 @@ impl ActiveConnectionTracker {
             .counts
             .lock()
             .expect("active broker connection tracker should not be poisoned");
-        let Some(entry) = counts.get_mut(&remote_ip) else {
+        counts.total = counts.total.saturating_sub(1);
+        let Some(entry) = counts.per_ip.get_mut(&remote_ip) else {
             return;
         };
         if *entry <= 1 {
-            counts.remove(&remote_ip);
+            counts.per_ip.remove(&remote_ip);
         } else {
             *entry -= 1;
         }
@@ -1184,14 +1306,22 @@ impl PublicMonitoringState {
             return;
         }
         inner.invalid_refresh_token_uses += 1;
+        inner.observation_seq += 1;
+        let seq = inner.observation_seq;
         let token_hash = sha256_hex(token.trim());
+        let counts = &mut inner.invalid_refresh_token_counts;
+        if !counts.contains_key(&token_hash) && counts.len() >= MAX_TRACKED_INVALID_REFRESH_TOKENS {
+            // One-off bearers go first, so a token that keeps coming back survives a flood.
+            evict_first_ranked(counts, |entry| (entry.attempts > 1, entry.last_seen));
+        }
         let attempts = {
-            let entry = inner
-                .invalid_refresh_token_counts
-                .entry(token_hash.clone())
-                .or_insert(0);
-            *entry += 1;
-            *entry
+            let entry = counts.entry(token_hash.clone()).or_insert(InvalidTokenUse {
+                attempts: 0,
+                last_seen: seq,
+            });
+            entry.attempts += 1;
+            entry.last_seen = seq;
+            entry.attempts
         };
         if attempts > 1 {
             inner.repeated_invalid_refresh_token_uses += 1;
@@ -1205,14 +1335,34 @@ impl PublicMonitoringState {
         }
     }
 
+    #[cfg(test)]
+    async fn tracked_sizes_for_test(&self) -> (usize, usize) {
+        let inner = self.inner.lock().await;
+        (
+            inner.invalid_refresh_token_counts.len(),
+            inner.observed_chain_environments.len(),
+        )
+    }
+
     async fn observe_chain_environment(&self, chain_key: String, headers: &HeaderMap) {
         let Some(environment) = request_environment(headers) else {
             return;
         };
         let mut inner = self.inner.lock().await;
-        if let Some(previous) = inner
-            .observed_chain_environments
-            .insert(chain_key.clone(), environment.clone())
+        inner.observation_seq += 1;
+        let seq = inner.observation_seq;
+        let chains = &mut inner.observed_chain_environments;
+        if !chains.contains_key(&chain_key) && chains.len() >= MAX_TRACKED_CHAIN_ENVIRONMENTS {
+            evict_first_ranked(chains, |entry| entry.last_seen);
+        }
+        let observed = ObservedEnvironment {
+            environment: environment.clone(),
+            last_seen: seq,
+        };
+        if let Some(ObservedEnvironment {
+            environment: previous,
+            ..
+        }) = chains.insert(chain_key.clone(), observed)
         {
             if previous != environment {
                 inner.environment_mutation_events += 1;
@@ -1224,6 +1374,17 @@ impl PublicMonitoringState {
                 );
             }
         }
+    }
+}
+
+/// Make room for one new key by dropping the entry `rank` orders first.
+fn evict_first_ranked<V, R: Ord>(map: &mut HashMap<String, V>, rank: impl Fn(&V) -> R) {
+    let victim = map
+        .iter()
+        .min_by_key(|(_, value)| rank(value))
+        .map(|(key, _)| key.clone());
+    if let Some(key) = victim {
+        map.remove(&key);
     }
 }
 
@@ -1526,12 +1687,16 @@ fn app_with_access_strategy_parts(
     }
 
     router
+        .layer(DefaultBodyLimit::max(PUBLIC_API_BODY_LIMIT_BYTES))
         .with_state(BrokerAppState {
             broker: state,
             join_verifier,
             hardening: BrokerHardeningState {
                 config: hardening_config,
                 rate_limiter: SlidingWindowRateLimiter::default(),
+                join_rate_limiter: SlidingWindowRateLimiter::default(),
+                relay_rate_limiter: SlidingWindowRateLimiter::default(),
+                publish_rate_limiter: SlidingWindowRateLimiter::default(),
                 byte_limiter: ByteRateLimiter::default(),
                 publish_metrics: PublishMetrics::default(),
                 connection_tracker: ActiveConnectionTracker::default(),
@@ -1826,16 +1991,25 @@ async fn public_create_relay_enrollment_challenge(
 
 /// Get (or create) the per-verify-key enrollment lock. Evicts idle locks when the
 /// map grows past a cap so a stream of distinct keys can't grow it without bound.
-fn acquire_enrollment_lock(state: &BrokerAppState, verify_key: &str) -> Arc<Mutex<()>> {
-    let mut map = state
-        .enrollment_locks
+fn enrollment_busy_error(error: String) -> (StatusCode, Json<ApiErrorBody>) {
+    access_denial_error(AccessDenial::unavailable().with_internal(error))
+}
+
+fn acquire_enrollment_lock(
+    locks: &StdMutex<HashMap<String, Arc<Mutex<()>>>>,
+    verify_key: &str,
+) -> Result<Arc<Mutex<()>>, String> {
+    let mut map = locks
         .lock()
         .expect("enrollment lock map should not be poisoned");
-    if map.len() > ENROLLMENT_LOCK_MAP_CAP {
+    if !map.contains_key(verify_key) && map.len() >= ENROLLMENT_LOCK_MAP_CAP {
         // Only removes locks nobody currently holds/awaits (strong_count == 1).
         map.retain(|_, lock| Arc::strong_count(lock) > 1);
+        if map.len() >= ENROLLMENT_LOCK_MAP_CAP {
+            return Err("every enrollment lock is in use".to_string());
+        }
     }
-    map.entry(verify_key.to_string()).or_default().clone()
+    Ok(map.entry(verify_key.to_string()).or_default().clone())
 }
 
 async fn public_complete_relay_enrollment(
@@ -1851,9 +2025,15 @@ async fn public_complete_relay_enrollment(
     // the same verify key must not interleave, or one request's rollback could
     // delete a registration created by the other. Held for the whole operation.
     let verify_key = trimmed_option_string(Some(input.relay_verify_key.clone()));
+    // Anonymous input keys a shared map, so it must be a real key before it can.
+    if let Some(key) = verify_key.as_deref() {
+        public_control::validate_relay_verify_key(key).map_err(public_api_error)?;
+    }
     let enrollment_lock = verify_key
         .as_deref()
-        .map(|vk| acquire_enrollment_lock(&state, vk));
+        .map(|vk| acquire_enrollment_lock(&state.enrollment_locks, vk))
+        .transpose()
+        .map_err(enrollment_busy_error)?;
     let _enrollment_guard = match &enrollment_lock {
         Some(lock) => Some(lock.lock().await),
         None => None,
@@ -2024,7 +2204,9 @@ async fn public_release_relay_access(
         .authenticate_relay_access(bearer, &input.relay_id, &input.broker_room_id)
         .await
         .map_err(public_api_error)?;
-    let enrollment_lock = acquire_enrollment_lock(&state, &first_auth.lifecycle_lock_key);
+    let enrollment_lock =
+        acquire_enrollment_lock(&state.enrollment_locks, &first_auth.lifecycle_lock_key)
+            .map_err(enrollment_busy_error)?;
     let _lifecycle_guard = enrollment_lock.lock().await;
 
     // Re-authenticate under the lock so concurrent re-enrollment cannot rotate
@@ -2083,9 +2265,29 @@ async fn public_issue_pairing_ws_token(
     enforce_public_api_rate_limit(&state, remote_addr, "pairing_ws_token").await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
-    control_plane
-        .issue_pairing_ws_token(bearer, input)
+    let relay = control_plane
+        .authenticate_relay_access(bearer, &input.relay_id, &input.broker_room_id)
         .await
+        .map_err(public_api_error)?;
+    if !state
+        .hardening
+        .relay_rate_limiter
+        .allow(
+            format!("pairing-ticket:{}", relay.relay_id),
+            state.hardening.config.pairing_ticket_rate_limit_per_minute,
+        )
+        .await
+    {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ApiErrorBody::new(
+                "rate_limited",
+                "pairing ticket rate limit exceeded for this relay".to_string(),
+            )),
+        ));
+    }
+    control_plane
+        .mint_pairing_ws_token(&relay, &input)
         .map(Json)
         .map_err(public_api_error)
 }
@@ -2566,7 +2768,10 @@ async fn websocket(
         return error.into_response();
     }
 
-    ws.on_upgrade(move |socket| handle_socket(state, socket, remote_addr, channel_id, query))
+    let read_limit = state.hardening.config.max_ws_read_bytes();
+    ws.max_message_size(read_limit)
+        .max_frame_size(read_limit)
+        .on_upgrade(move |socket| handle_socket(state, socket, remote_addr, channel_id, query))
 }
 
 async fn handle_socket(
@@ -2586,25 +2791,29 @@ async fn handle_socket(
         .await;
         return;
     }
-    let Some(_connection_permit) = state.hardening.connection_tracker.try_acquire(
+    let _connection_permit = match state.hardening.connection_tracker.try_acquire(
         remote_addr.ip(),
         state.hardening.config.max_connections_per_ip,
-    ) else {
-        reject_socket(
-            &state.hardening.publish_metrics,
-            socket,
-            "rate_limited",
-            "too many broker connections from this client",
-        )
-        .await;
-        return;
+        state.hardening.config.max_total_connections,
+    ) {
+        Ok(permit) => permit,
+        Err(message) => {
+            reject_socket(
+                &state.hardening.publish_metrics,
+                socket,
+                "rate_limited",
+                message,
+            )
+            .await;
+            return;
+        }
     };
     if !state
         .hardening
-        .rate_limiter
+        .join_rate_limiter
         .allow(
-            format!("join:{}:{}", remote_addr.ip(), channel_id),
-            state.hardening.config.join_rate_limit_per_minute,
+            format!("join-ip:{}", client_network_key(remote_addr.ip())),
+            state.hardening.config.join_ip_rate_limit_per_minute,
         )
         .await
     {
@@ -2642,6 +2851,30 @@ async fn handle_socket(
             return;
         }
     };
+
+    // Charged only once a ticket vouches for the room, so these keys track real rooms.
+    if !state
+        .hardening
+        .join_rate_limiter
+        .allow(
+            format!(
+                "join:{}:{}",
+                client_network_key(remote_addr.ip()),
+                channel_id
+            ),
+            state.hardening.config.join_rate_limit_per_minute,
+        )
+        .await
+    {
+        reject_socket(
+            &state.hardening.publish_metrics,
+            socket,
+            "rate_limited",
+            "broker join rate limit exceeded for this client",
+        )
+        .await;
+        return;
+    }
 
     // Capture the access epoch before the async policy check so a concurrent
     // access release (which bumps the epoch even for an empty room) cannot let
@@ -2860,7 +3093,7 @@ async fn handle_socket(
                                 let frame_bytes = text.len();
                                 if !state
                                     .hardening
-                                    .rate_limiter
+                                    .publish_rate_limiter
                                     .allow(
                                         format!("publish:{channel_id}:{publish_identity}"),
                                         state.hardening.config.frame_limit(query.role),
@@ -3101,6 +3334,25 @@ fn publish_limit_identity(verified: &VerifiedBrokerJoin, peer_id: &str) -> Strin
         return format!("pairing:{pairing_id}");
     }
     format!("peer:{peer_id}")
+}
+
+/// An IPv6 client typically holds a whole /64, so budgets per exact address would let it
+/// rotate addresses for free; v4 and v4-mapped addresses stay exact.
+fn client_network(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let [a, b, c, d, ..] = v6.segments();
+                IpAddr::V6(std::net::Ipv6Addr::new(a, b, c, d, 0, 0, 0, 0))
+            }
+        },
+    }
+}
+
+fn client_network_key(ip: IpAddr) -> String {
+    client_network(ip).to_string()
 }
 
 fn generated_peer_id(role: protocol::PeerRole) -> String {
@@ -3491,35 +3743,14 @@ async fn enforce_public_api_rate_limit(
     remote_addr: SocketAddr,
     route_name: &str,
 ) -> Result<(), (StatusCode, Json<ApiErrorBody>)> {
-    let per_ip_allowed = state
-        .hardening
-        .rate_limiter
-        .allow(
-            format!("public-api:{}:{route_name}", remote_addr.ip()),
-            state.hardening.config.public_api_rate_limit_per_minute,
-        )
-        .await;
-    if !per_ip_allowed {
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(ApiErrorBody::new(
-                "rate_limited",
-                "public broker control-plane rate limit exceeded".to_string(),
-            )),
-        ));
-    }
-
-    if state
-        .hardening
-        .rate_limiter
-        .allow(
-            "public-api:global".to_string(),
-            state
-                .hardening
-                .config
-                .public_api_global_rate_limit_per_minute,
-        )
-        .await
+    let config = &state.hardening.config;
+    if admit_public_api(
+        &state.hardening.rate_limiter,
+        format!("public-api:{}:{route_name}", remote_addr.ip()),
+        config.public_api_rate_limit_per_minute,
+        config.public_api_global_rate_limit_per_minute,
+    )
+    .await
     {
         Ok(())
     } else {
@@ -3531,6 +3762,17 @@ async fn enforce_public_api_rate_limit(
             )),
         ))
     }
+}
+
+async fn admit_public_api(
+    limiter: &SlidingWindowRateLimiter,
+    per_ip_key: String,
+    per_ip_limit: usize,
+    global_limit: usize,
+) -> bool {
+    limiter
+        .allow_both(per_ip_key, per_ip_limit, "public-api:global", global_limit)
+        .await
 }
 
 fn scrub_sensitive_message(message: &str) -> String {

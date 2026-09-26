@@ -22,6 +22,9 @@ use super::RelayState;
 // over to the laptop to hit Approve. 3 minutes covers that comfortably.
 const DEFAULT_PAIRING_TTL_SECS: u64 = 180;
 const MAX_PAIRING_TTL_SECS: u64 = 600;
+/// Someone pairing by hand makes well under 20 tickets a minute. Past this new tickets are
+/// refused: dropping an old one could strand a device already waiting on it.
+const MAX_PENDING_PAIRINGS: usize = 64;
 const CLAIM_CHALLENGE_TTL_SECS: u64 = 60;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct PendingPairing {
@@ -266,6 +269,12 @@ impl RelayState {
     ) -> Result<PreparedPairingTicket, String> {
         let now = super::super::unix_now();
         self.prune_expired_pairings(now);
+        if self.pending_pairings.len() >= MAX_PENDING_PAIRINGS {
+            return Err(format!(
+                "{MAX_PENDING_PAIRINGS} pairing tickets are already waiting; finish or let some \
+                 expire before starting another"
+            ));
+        }
 
         let ttl_secs = requested_ttl_secs
             .unwrap_or(DEFAULT_PAIRING_TTL_SECS)

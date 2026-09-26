@@ -332,6 +332,13 @@ Broker env:
 - optional `RELAY_BROKER_PUBLIC_STATE_PATH` for localhost-only development
 - optional `RELAY_BROKER_PUBLIC_POSTGRES_URL` — durable control-plane state in
   Postgres instead of the JSON file (set exactly one of state path or Postgres URL)
+  - On startup the broker requires GIN indexes over `superseded_tokens`, which let it
+    check a rotated-away token without scanning the table. It builds any that are
+    missing with `CREATE INDEX CONCURRENTLY` (writes carry on, up to 10 minutes), and
+    refuses to start if one exists but is invalid, printing the exact SQL to run. On a
+    large database, build them before upgrading:
+    `CREATE INDEX CONCURRENTLY IF NOT EXISTS public_device_grants_superseded_idx ON public_device_grants USING GIN ((superseded_tokens::jsonb) jsonb_path_ops);`
+    and the same for `public_client_identities`.
 - optional `RELAY_BROKER_PUBLIC_POSTGRES_RELOAD_BEFORE_USE=1` — **cross-instance
   revocation visibility** (NOT full HA). With a single broker process the
   in-memory control plane is authoritative and the broker skips reloading from
@@ -352,7 +359,12 @@ Broker env:
 Optional hardening env:
 
 - `RELAY_BROKER_PUBLIC_API_RATE_LIMIT_PER_MINUTE`
-- `RELAY_BROKER_JOIN_RATE_LIMIT_PER_MINUTE`
+- `RELAY_BROKER_JOIN_RATE_LIMIT_PER_MINUTE` — per client address and room (default 40)
+- `RELAY_BROKER_JOIN_IP_RATE_LIMIT_PER_MINUTE` — per client address across all rooms,
+  IPv6 grouped by /64 (default 120). The room is caller-chosen, so the per-room limit
+  alone does not bound join attempts.
+- `RELAY_BROKER_PAIRING_TICKET_RATE_LIMIT_PER_MINUTE` — pairing tickets one relay may
+  mint (default 30). Tickets are also capped at 600s regardless of the requested expiry.
 - `RELAY_BROKER_PUBLISH_RATE_LIMIT_PER_MINUTE` — surface peers (default 240)
 - `RELAY_BROKER_RELAY_PUBLISH_RATE_LIMIT_PER_MINUTE` — relay peers (default 36000).
   Relays are first-party and an order of magnitude busier than a surface: transcript
@@ -403,7 +415,11 @@ Optional hardening env:
   `pairing_id`), not on the broker-assigned `peer_id`. A surface gets a fresh `peer_id`
   on every join, so keying on that would let any surface reset its budget by reconnecting.
   A consequence worth knowing: two tabs on the same device share one budget.
-- `RELAY_BROKER_MAX_CONNECTIONS_PER_IP`
+- `RELAY_BROKER_MAX_CONNECTIONS_PER_IP` — IPv6 clients are counted per /64.
+- `RELAY_BROKER_MAX_TOTAL_CONNECTIONS` — open websocket connections across all clients
+  (default 2048). Each can buffer up to twice the frame cap (128KiB by default), so the
+  default bounds that at ~256MiB. Past it new joins are refused with `rate_limited` while
+  seated sockets carry on; raise it with the instance's memory and `ulimit -n`.
 - `RELAY_BROKER_MAX_TEXT_FRAME_BYTES` — **has a 64KiB floor**, and values below it are
   raised with a warning rather than honoured. relay-server fits every chunk against a fixed
   64KiB limit compiled into its binary and never learns this setting, so a smaller cap does

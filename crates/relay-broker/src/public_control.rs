@@ -22,6 +22,7 @@ use sqlx::{
 use tokio::{
     fs,
     sync::{Mutex, MutexGuard, Semaphore},
+    time::Instant,
 };
 use tracing::{info, warn};
 
@@ -69,6 +70,26 @@ const DEFAULT_PUBLIC_DB_CONCURRENCY: usize = 8;
 /// one is writable by any authenticated relay, so it needs a bound: without it
 /// a hostile relay can grow it without limit inside the TTL window.
 const MAX_PENDING_CLIENT_CLAIMS: usize = 512;
+/// Minimum gap between the end of one full reload and the start of the next.
+const MISS_RELOAD_MIN_INTERVAL: Duration = Duration::from_secs(1);
+/// The expression the superseded-token index covers; the probe must filter on exactly this.
+const SUPERSEDED_JSONB: &str = "superseded_tokens::jsonb";
+/// Server-side cap on the one-off index build, far past the pool's per-query timeout.
+const SUPERSEDED_INDEX_BUILD_TIMEOUT_SECS: u64 = 600;
+/// Labels are display text (the official relay sends at most 80 chars); longer is cut.
+const MAX_LABEL_CHARS: usize = 128;
+/// Caller-chosen ids that are held or stored; the official relay's are at most 48 bytes.
+const MAX_ID_BYTES: usize = 128;
+/// Above the ~3000 the default global API budget can create in one 300s TTL, so it only
+/// binds if that budget is raised.
+const MAX_PENDING_RELAY_ENROLLMENT_CHALLENGES: usize = 4096;
+/// Test-only: reads like a real driver error, including a word the HTTP layer maps to 401.
+#[cfg(test)]
+const SIMULATED_DATABASE_ERROR: &str = "error returned from database: invalid input syntax";
+const RELOAD_FAILED_ERROR: &str = "public control-plane state reload failed; retry shortly";
+const PROBE_FAILED_ERROR: &str = "public control-plane database unavailable; retry shortly";
+/// The longest pairing window the official relay asks for (`MAX_PAIRING_TTL_SECS`).
+const MAX_PAIRING_TICKET_TTL_SECS: u64 = 600;
 const PUBLIC_CONTROL_STATE_VERSION: u32 = 2;
 
 #[derive(Clone, Debug)]
@@ -142,6 +163,8 @@ impl PublicControlDbConfig {
 #[derive(Clone)]
 struct PublicControlDbGate {
     permits: Arc<Semaphore>,
+    /// Caps work any caller can trigger at a quarter of `permits`.
+    spare_permits: Arc<Semaphore>,
     query_timeout: Duration,
 }
 
@@ -172,8 +195,23 @@ impl PublicControlDbGate {
         }
         Ok(Self {
             permits: Arc::new(Semaphore::new(concurrency)),
+            spare_permits: Arc::new(Semaphore::new((concurrency / 4).max(1))),
             query_timeout,
         })
+    }
+
+    /// For queries any caller can trigger, so a flood of them cannot starve the writes
+    /// and reloads that share this gate.
+    async fn run_spare<T, F>(&self, operation: F) -> Result<T, PublicControlDbGateError>
+    where
+        F: Future<Output = Result<T, String>>,
+    {
+        let _spare = self
+            .spare_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| PublicControlDbGateError::Busy)?;
+        self.run(operation).await
     }
 
     async fn run<T, F>(&self, operation: F) -> Result<T, PublicControlDbGateError>
@@ -238,6 +276,35 @@ mod public_control_db_gate_tests {
             .expect("first permit");
         let result = gate.run(async { Ok::<_, String>(()) }).await;
         assert!(matches!(result, Err(PublicControlDbGateError::Busy)));
+    }
+
+    #[tokio::test]
+    async fn concurrent_spare_work_never_holds_more_than_a_quarter_of_the_gate() {
+        let gate = PublicControlDbGate::new(8, Duration::from_secs(5)).expect("valid gate");
+        let release = Arc::new(tokio::sync::Notify::new());
+        let probes = (0..8)
+            .map(|_| {
+                let gate = gate.clone();
+                let release = release.clone();
+                tokio::spawn(async move {
+                    gate.run_spare(async move {
+                        release.notified().await;
+                        Ok::<_, String>(())
+                    })
+                    .await
+                })
+            })
+            .collect::<Vec<_>>();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let free = gate.permits.available_permits();
+        release.notify_waiters();
+        for probe in probes {
+            let _ = probe.await;
+        }
+        assert!(
+            free >= 6,
+            "concurrent spare work left {free} of 8 permits for writes and reloads"
+        );
     }
 
     #[tokio::test]
@@ -576,6 +643,30 @@ struct PublicControlPlaneInner {
     state: Mutex<PublicControlStateStore>,
     relay_enrollment_challenges: Mutex<HashMap<String, PendingRelayEnrollmentChallenge>>,
     pending_client_claims: Mutex<HashMap<String, PendingClientClaim>>,
+    last_full_load: std::sync::Mutex<Option<FullLoad>>,
+    miss_reload_min_interval: Duration,
+    /// Test-only: treat the JSON file as shared so a second plane on the same
+    /// path can stand in for another broker instance.
+    #[cfg(test)]
+    force_shared_backend: bool,
+    #[cfg(test)]
+    force_probe_hit: bool,
+    /// Test-only: each probe waits for one permit, so a test can act while it is parked.
+    #[cfg(test)]
+    probe_release: Option<Arc<Semaphore>>,
+    #[cfg(test)]
+    force_reload_before_use: bool,
+    #[cfg(test)]
+    full_load_count: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    probe_count: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    load_delay: Duration,
+    #[cfg(test)]
+    persistence_down: AtomicBool,
+    /// Test-only: (start, finish) of every full load.
+    #[cfg(test)]
+    load_log: std::sync::Mutex<Vec<(Instant, Instant)>>,
     /// Test-only: next N persistence saves fail after mutating memory so callers
     /// can exercise definite-failure restore / retry paths.
     #[cfg(test)]
@@ -588,6 +679,20 @@ struct PublicControlPlaneInner {
     /// concurrent joins can seat while registration still exists.
     #[cfg(test)]
     cleanup_pause: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+}
+
+#[derive(Clone, Copy)]
+struct FullLoad {
+    started: Instant,
+    finished: Instant,
+    succeeded: bool,
+}
+
+#[derive(Clone, Copy)]
+enum CredentialKind {
+    Relay,
+    Device,
+    Client,
 }
 
 #[derive(Clone)]
@@ -824,7 +929,13 @@ impl PublicControlPlane {
                 crate::auth::BROKER_AUTH_MODE_ENV
             ));
         }
+        let load_started = Instant::now();
         let mut state = persistence.load().await?;
+        let initial_load = FullLoad {
+            started: load_started,
+            finished: Instant::now(),
+            succeeded: true,
+        };
         let seeded =
             state.seed_relay_registrations(parse_relay_registrations(relay_registrations_json)?);
         if seeded {
@@ -853,6 +964,26 @@ impl PublicControlPlane {
                 state: Mutex::new(state),
                 relay_enrollment_challenges: Mutex::new(HashMap::new()),
                 pending_client_claims: Mutex::new(HashMap::new()),
+                last_full_load: std::sync::Mutex::new(Some(initial_load)),
+                miss_reload_min_interval: MISS_RELOAD_MIN_INTERVAL,
+                #[cfg(test)]
+                force_shared_backend: false,
+                #[cfg(test)]
+                force_probe_hit: false,
+                #[cfg(test)]
+                probe_release: None,
+                #[cfg(test)]
+                force_reload_before_use: false,
+                #[cfg(test)]
+                full_load_count: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(test)]
+                probe_count: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(test)]
+                load_delay: Duration::ZERO,
+                #[cfg(test)]
+                persistence_down: AtomicBool::new(false),
+                #[cfg(test)]
+                load_log: std::sync::Mutex::new(Vec::new()),
                 #[cfg(test)]
                 save_fail_remaining: std::sync::atomic::AtomicU64::new(0),
                 #[cfg(test)]
@@ -890,22 +1021,27 @@ impl PublicControlPlane {
         let relay_verify_key = trimmed_option_string(Some(request.relay_verify_key))
             .ok_or_else(|| "relay verify key is required".to_string())?;
         validate_relay_verify_key(&relay_verify_key)?;
-        let relay_label = request
-            .relay_label
-            .and_then(|label| trimmed_option_string(Some(label)))
-            .filter(|label| !label.is_empty());
+        let relay_label = compact_label(request.relay_label);
         let challenge_id = format!("rch-{}", random_token(24).to_ascii_lowercase());
         let challenge = format!("rc-{}", random_token(40).to_ascii_lowercase());
-        let expires_at = unix_now().saturating_add(DEFAULT_RELAY_ENROLLMENT_CHALLENGE_TTL_SECS);
-        self.inner.relay_enrollment_challenges.lock().await.insert(
-            challenge_id.clone(),
-            PendingRelayEnrollmentChallenge {
-                relay_verify_key: relay_verify_key.clone(),
-                challenge: challenge.clone(),
-                relay_label,
-                expires_at,
-            },
-        );
+        let now = unix_now();
+        let expires_at = now.saturating_add(DEFAULT_RELAY_ENROLLMENT_CHALLENGE_TTL_SECS);
+        {
+            let mut challenges = self.inner.relay_enrollment_challenges.lock().await;
+            challenges.retain(|_, challenge| challenge.expires_at > now);
+            if challenges.len() >= MAX_PENDING_RELAY_ENROLLMENT_CHALLENGES {
+                return Err("too many pending relay enrollments; retry shortly".to_string());
+            }
+            challenges.insert(
+                challenge_id.clone(),
+                PendingRelayEnrollmentChallenge {
+                    relay_verify_key: relay_verify_key.clone(),
+                    challenge: challenge.clone(),
+                    relay_label,
+                    expires_at,
+                },
+            );
+        }
         Ok(RelayEnrollmentChallengeResponse {
             relay_verify_key,
             challenge_id,
@@ -946,11 +1082,7 @@ impl PublicControlPlane {
             &pending.challenge,
             &challenge_signature,
         )?;
-        let relay_label = request
-            .relay_label
-            .and_then(|label| trimmed_option_string(Some(label)))
-            .filter(|label| !label.is_empty())
-            .or(pending.relay_label);
+        let relay_label = compact_label(request.relay_label).or(pending.relay_label);
         self.issue_relay_registration_for_verify_key(&relay_verify_key, relay_label)
             .await
     }
@@ -971,7 +1103,7 @@ impl PublicControlPlane {
                     .remove(&token_hash)
                     .is_some()
                 {
-                    if let Err(error) = self.inner.persistence.save(&mut store).await {
+                    if let Err(error) = self.persist(&mut store).await {
                         warn!(%error, "failed to persist relay enrollment rollback");
                     }
                 }
@@ -1015,7 +1147,7 @@ impl PublicControlPlane {
                 store
                     .relay_registrations_by_hash
                     .insert(registration.refresh_token_hash.clone(), registration);
-                if let Err(error) = self.inner.persistence.save(&mut store).await {
+                if let Err(error) = self.persist(&mut store).await {
                     warn!(%error, "failed to persist relay registration restore");
                 }
             }
@@ -1046,25 +1178,31 @@ impl PublicControlPlane {
         })
     }
 
-    pub async fn issue_pairing_ws_token(
+    /// Mint for a relay the caller has already authenticated, leaving room for a per-relay
+    /// budget between the two. The relay picks the expiry, so it is capped here.
+    pub(crate) fn mint_pairing_ws_token(
         &self,
-        bearer_token: &str,
-        request: PairingWsTokenRequest,
+        relay: &AuthenticatedRelayIdentity,
+        request: &PairingWsTokenRequest,
     ) -> Result<PairingWsTokenResponse, String> {
-        let registration = self
-            .authenticate_relay(bearer_token, &request.relay_id, &request.broker_room_id)
-            .await?;
+        let now = unix_now();
+        if request.expires_at <= now {
+            return Err("pairing expires_at is already past".to_string());
+        }
+        let expires_at = request
+            .expires_at
+            .min(now.saturating_add(MAX_PAIRING_TICKET_TTL_SECS));
         Ok(PairingWsTokenResponse {
-            relay_id: registration.relay_id.clone(),
-            broker_room_id: registration.broker_room_id.clone(),
+            relay_id: relay.relay_id.clone(),
+            broker_room_id: relay.broker_room_id.clone(),
             pairing_join_ticket: self.inner.issuer_key.mint(
                 &JoinTicketClaims::pairing_surface_join(
-                    &registration.broker_room_id,
+                    &relay.broker_room_id,
                     &request.pairing_id,
-                    request.expires_at,
+                    expires_at,
                 ),
             )?,
-            pairing_join_ticket_expires_at: request.expires_at,
+            pairing_join_ticket_expires_at: expires_at,
         })
     }
 
@@ -1268,7 +1406,7 @@ impl PublicControlPlane {
             ));
         }
 
-        match self.inner.persistence.save(&mut store).await {
+        match self.persist(&mut store).await {
             Ok(()) => Ok(()),
             Err(error) => {
                 // Definite local rollback for non-shared backends.
@@ -1308,6 +1446,7 @@ impl PublicControlPlane {
         let registration = self
             .authenticate_relay(bearer_token, &request.relay_id, &request.broker_room_id)
             .await?;
+        check_id_length("device_id", &request.device_id)?;
         let refresh_token = format!("dref-{}", random_token(40).to_ascii_lowercase());
         let refresh_token_hash = sha256_hex(&refresh_token);
         let created_at = unix_now();
@@ -1358,7 +1497,7 @@ impl PublicControlPlane {
                 superseded,
             },
         );
-        self.inner.persistence.save(&mut store).await?;
+        self.persist(&mut store).await?;
 
         let issued =
             self.issue_device_ws_token_for_registration(&registration, &request.device_id)?;
@@ -1475,7 +1614,7 @@ impl PublicControlPlane {
             relay_label: None,
             device_label: None,
         });
-        self.inner.persistence.save(&mut store).await.expect("save");
+        self.persist(&mut store).await.expect("save");
     }
 
     pub async fn issue_client_grant(
@@ -1489,14 +1628,9 @@ impl PublicControlPlane {
         let client_verify_key = trimmed_option_string(Some(request.client_verify_key))
             .ok_or_else(|| "client verify key is required".to_string())?;
         validate_relay_verify_key(&client_verify_key)?;
-        let client_label = request
-            .client_label
-            .and_then(|label| trimmed_option_string(Some(label)))
-            .filter(|label| !label.is_empty());
-        let device_label = request
-            .device_label
-            .and_then(|label| trimmed_option_string(Some(label)))
-            .filter(|label| !label.is_empty());
+        check_id_length("device_id", &request.device_id)?;
+        let client_label = compact_label(request.client_label);
+        let device_label = compact_label(request.device_label);
         // Nothing durable is written here. The relay is only attesting that this
         // key may reach it; until the key's owner signs, there is no identity to
         // rotate and no grant row to enumerate. Writing either at this point is
@@ -1591,7 +1725,7 @@ impl PublicControlPlane {
             relay_label: pending.relay_label.clone(),
             device_label: pending.device_label,
         });
-        self.inner.persistence.save(&mut store).await?;
+        self.persist(&mut store).await?;
 
         Ok(ClientClaimResponse {
             client_id,
@@ -1676,7 +1810,7 @@ impl PublicControlPlane {
         let mut store = self.lock_state().await?;
         let refreshed_token =
             store.rotate_client_identity(&client, unix_now(), self.inner.rotation_grace_secs);
-        self.inner.persistence.save(&mut store).await?;
+        self.persist(&mut store).await?;
         Ok((client.client_id, refreshed_token))
     }
 
@@ -1689,7 +1823,7 @@ impl PublicControlPlane {
         let revoked_identity_count = store.remove_client_identity_by_client_id(&client.client_id);
         let revoked_grant_count = store.remove_client_relay_grants_by_client_id(&client.client_id);
         if revoked_identity_count > 0 || revoked_grant_count > 0 {
-            self.inner.persistence.save(&mut store).await?;
+            self.persist(&mut store).await?;
         }
         Ok(ClientIdentityRevokeResponse {
             client_id: client.client_id,
@@ -1728,13 +1862,14 @@ impl PublicControlPlane {
         let now = unix_now();
         let token_hash = sha256_hex(bearer_token.trim());
         let grant = {
-            let mut store = self.lock_state().await?;
-            let mut found = find_device_grant_for_token(&store, &token_hash, now);
-            if found.is_none() && self.reload_state_on_miss(&mut store).await? {
-                found = find_device_grant_for_token(&store, &token_hash, now);
-            }
-            let (primary_hash, grant) =
-                found.ok_or_else(|| "device refresh token is invalid".to_string())?;
+            let Some((mut store, (primary_hash, grant))) = self
+                .find_credential(CredentialKind::Device, &token_hash, |store| {
+                    find_device_grant_for_token(store, &token_hash, now)
+                })
+                .await?
+            else {
+                return Err("device refresh token is invalid".to_string());
+            };
             if let Some(expected) = expected_room {
                 if grant.broker_room_id != expected {
                     return Err("device refresh token is invalid".to_string());
@@ -1750,7 +1885,7 @@ impl PublicControlPlane {
                         now,
                         self.inner.rotation_grace_secs,
                     ) {
-                        if let Err(error) = self.inner.persistence.save(&mut store).await {
+                        if let Err(error) = self.persist(&mut store).await {
                             warn!(%error, "failed to persist device grace renewal; continuing");
                         }
                     }
@@ -1811,7 +1946,7 @@ impl PublicControlPlane {
         // Persist if EITHER removal happened, so an orphan client_relay_grant
         // (no matching device grant) is still cleaned up durably.
         if revoked_grant_count > 0 || revoked_client_grant_count > 0 {
-            self.inner.persistence.save(&mut store).await?;
+            self.persist(&mut store).await?;
         }
         Ok(DeviceGrantRevokeResponse {
             relay_id: registration.relay_id.clone(),
@@ -1842,7 +1977,7 @@ impl PublicControlPlane {
             &request.keep_device_id,
         );
         if !revoked_device_ids.is_empty() {
-            self.inner.persistence.save(&mut store).await?;
+            self.persist(&mut store).await?;
         }
         Ok(DeviceGrantBulkRevokeResponse {
             relay_id: registration.relay_id.clone(),
@@ -1855,25 +1990,183 @@ impl PublicControlPlane {
 
     async fn lock_state(&self) -> Result<MutexGuard<'_, PublicControlStateStore>, String> {
         let mut store = self.inner.state.lock().await;
-        if self.inner.persistence.reload_before_use() {
-            *store = self.inner.persistence.load().await?;
+        if self.reload_before_use() {
+            // Memory cannot be served here, but retrying a failing load on every request
+            // would hold this lock and hit the database for the whole outage.
+            let last = *self.last_full_load();
+            if last.is_some_and(|load| {
+                !load.succeeded
+                    && load.finished + self.inner.miss_reload_min_interval > Instant::now()
+            }) {
+                return Err(RELOAD_FAILED_ERROR.to_string());
+            }
+            *store = self.load_full_state().await?;
         }
         Ok(store)
     }
 
-    /// A token miss against a shared backend may just mean this instance's
-    /// memory is stale — reload the authoritative state once so the caller can
-    /// retry the lookup before rejecting the credential. Returns whether a
-    /// reload happened.
-    async fn reload_state_on_miss(
-        &self,
-        store: &mut PublicControlStateStore,
-    ) -> Result<bool, String> {
-        if !self.inner.persistence.shared_backend() {
-            return Ok(false);
+    /// Driver text can say "invalid", and the HTTP layer maps that to a terminal 401.
+    async fn persist(&self, store: &mut PublicControlStateStore) -> Result<(), String> {
+        self.persist_raw(store).await.map_err(|error| {
+            warn!(%error, "public control-plane save failed");
+            sanitize_persistence_error(error)
+        })
+    }
+
+    async fn persist_raw(&self, store: &mut PublicControlStateStore) -> Result<(), String> {
+        #[cfg(test)]
+        if self.inner.persistence_down.load(Ordering::SeqCst) {
+            return Err(SIMULATED_DATABASE_ERROR.to_string());
         }
-        *store = self.inner.persistence.load().await?;
-        Ok(true)
+        self.inner.persistence.save(store).await
+    }
+
+    fn reload_before_use(&self) -> bool {
+        #[cfg(test)]
+        if self.inner.force_reload_before_use {
+            return true;
+        }
+        self.inner.persistence.reload_before_use()
+    }
+
+    async fn load_full_state(&self) -> Result<PublicControlStateStore, String> {
+        let started = Instant::now();
+        #[cfg(test)]
+        self.inner.full_load_count.fetch_add(1, Ordering::SeqCst);
+        let loaded = self.persistence_load().await;
+        *self.last_full_load() = Some(FullLoad {
+            started,
+            finished: Instant::now(),
+            succeeded: loaded.is_ok(),
+        });
+        // Same reason as the probe: raw driver text must not reach the client.
+        loaded.map_err(|error| {
+            warn!(%error, "public control-plane reload failed");
+            RELOAD_FAILED_ERROR.to_string()
+        })
+    }
+
+    async fn persistence_load(&self) -> Result<PublicControlStateStore, String> {
+        #[cfg(test)]
+        {
+            let started = Instant::now();
+            tokio::time::sleep(self.inner.load_delay).await;
+            let loaded = if self.inner.persistence_down.load(Ordering::SeqCst) {
+                Err(SIMULATED_DATABASE_ERROR.to_string())
+            } else {
+                self.inner.persistence.load().await
+            };
+            self.inner
+                .load_log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((started, Instant::now()));
+            loaded
+        }
+        #[cfg(not(test))]
+        self.inner.persistence.load().await
+    }
+
+    fn last_full_load(&self) -> std::sync::MutexGuard<'_, Option<FullLoad>> {
+        self.inner
+            .last_full_load
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// On a shared backend a miss may only mean this instance is behind, so only a probe
+    /// made after the miss, or a load begun after a positive probe, can call a token absent.
+    /// A confirmed hash is in memory after one reload, so each live hash buys at most one.
+    async fn find_credential<T>(
+        &self,
+        kind: CredentialKind,
+        token_hash: &str,
+        lookup: impl Fn(&PublicControlStateStore) -> Option<T>,
+    ) -> Result<Option<(MutexGuard<'_, PublicControlStateStore>, T)>, String> {
+        let store = self.lock_state().await?;
+        if let Some(found) = lookup(&store) {
+            return Ok(Some((store, found)));
+        }
+        if !self.miss_may_be_stale() {
+            return Ok(None);
+        }
+        drop(store);
+        if !self.probe_credential(kind, token_hash).await? {
+            return Ok(None);
+        }
+        let observed = Instant::now();
+        loop {
+            let mut store = self.lock_state().await?;
+            if let Some(found) = lookup(&store) {
+                return Ok(Some((store, found)));
+            }
+            let last = *self.last_full_load();
+            if let Some(load) = last {
+                if load.started >= observed {
+                    // Read the table after the probe saw the token, so it is gone since.
+                    return if load.succeeded {
+                        Ok(None)
+                    } else {
+                        Err(RELOAD_FAILED_ERROR.to_string())
+                    };
+                }
+                let ready_at = load.finished + self.inner.miss_reload_min_interval;
+                if ready_at > Instant::now() {
+                    drop(store);
+                    tokio::time::sleep_until(ready_at).await;
+                    continue;
+                }
+            }
+            *store = self.load_full_state().await?;
+            let found = lookup(&store);
+            return Ok(found.map(|found| (store, found)));
+        }
+    }
+
+    /// Driver text can say "invalid", which the HTTP layer would turn into a terminal 401.
+    async fn probe_credential(
+        &self,
+        kind: CredentialKind,
+        token_hash: &str,
+    ) -> Result<bool, String> {
+        self.probe_credential_raw(kind, token_hash)
+            .await
+            .map_err(|error| {
+                warn!(%error, "public control-plane credential probe failed");
+                PROBE_FAILED_ERROR.to_string()
+            })
+    }
+
+    async fn probe_credential_raw(
+        &self,
+        kind: CredentialKind,
+        token_hash: &str,
+    ) -> Result<bool, String> {
+        #[cfg(test)]
+        {
+            self.inner.probe_count.fetch_add(1, Ordering::SeqCst);
+            if let Some(release) = &self.inner.probe_release {
+                release.acquire().await.expect("probe release").forget();
+            }
+            if self.inner.force_probe_hit {
+                return Ok(true);
+            }
+            if self.inner.persistence_down.load(Ordering::SeqCst) {
+                return Err(SIMULATED_DATABASE_ERROR.to_string());
+            }
+        }
+        self.inner
+            .persistence
+            .credential_exists(kind, token_hash, unix_now())
+            .await
+    }
+
+    fn miss_may_be_stale(&self) -> bool {
+        #[cfg(test)]
+        if self.inner.force_shared_backend {
+            return true;
+        }
+        self.inner.persistence.shared_backend()
     }
 
     async fn authenticate_relay(
@@ -1882,13 +2175,14 @@ impl PublicControlPlane {
         relay_id: &str,
         broker_room_id: &str,
     ) -> Result<PersistedRelayRegistration, String> {
-        let mut store = self.lock_state().await?;
         let token_hash = sha256_hex(bearer_token.trim());
-        let mut found = store.relay_registrations_by_hash.get(&token_hash).cloned();
-        if found.is_none() && self.reload_state_on_miss(&mut store).await? {
-            found = store.relay_registrations_by_hash.get(&token_hash).cloned();
-        }
-        let registration = found.ok_or_else(|| "relay refresh token is invalid".to_string())?;
+        let registration = self
+            .find_credential(CredentialKind::Relay, &token_hash, |store| {
+                store.relay_registrations_by_hash.get(&token_hash).cloned()
+            })
+            .await?
+            .map(|(_store, registration)| registration)
+            .ok_or_else(|| "relay refresh token is invalid".to_string())?;
         if registration.relay_id != relay_id {
             return Err("relay refresh token does not match relay_id".to_string());
         }
@@ -1902,15 +2196,16 @@ impl PublicControlPlane {
         &self,
         bearer_token: &str,
     ) -> Result<PersistedClientIdentity, String> {
-        let mut store = self.lock_state().await?;
         let token_hash = sha256_hex(bearer_token.trim());
         let now = unix_now();
-        let mut found = find_client_identity_for_token(&store, &token_hash, now);
-        if found.is_none() && self.reload_state_on_miss(&mut store).await? {
-            found = find_client_identity_for_token(&store, &token_hash, now);
-        }
-        let (primary_hash, identity) =
-            found.ok_or_else(|| "client refresh token is invalid".to_string())?;
+        let Some((mut store, (primary_hash, identity))) = self
+            .find_credential(CredentialKind::Client, &token_hash, |store| {
+                find_client_identity_for_token(store, &token_hash, now)
+            })
+            .await?
+        else {
+            return Err("client refresh token is invalid".to_string());
+        };
         if primary_hash != token_hash {
             // Matched via a superseded token inside its grace window: slide the
             // window forward (throttled) so an actively-used device keeps working
@@ -1923,7 +2218,7 @@ impl PublicControlPlane {
                     now,
                     self.inner.rotation_grace_secs,
                 ) {
-                    if let Err(error) = self.inner.persistence.save(&mut store).await {
+                    if let Err(error) = self.persist(&mut store).await {
                         warn!(%error, "failed to persist client grace renewal; continuing");
                     }
                 }
@@ -1958,15 +2253,16 @@ impl PublicControlPlane {
         bearer_token: &str,
         expected_room: Option<&str>,
     ) -> Result<PersistedDeviceGrant, String> {
-        let mut store = self.lock_state().await?;
         let token_hash = sha256_hex(bearer_token.trim());
         let now = unix_now();
-        let mut found = find_device_grant_for_token(&store, &token_hash, now);
-        if found.is_none() && self.reload_state_on_miss(&mut store).await? {
-            found = find_device_grant_for_token(&store, &token_hash, now);
-        }
-        let (primary_hash, grant) =
-            found.ok_or_else(|| "device refresh token is invalid".to_string())?;
+        let Some((mut store, (primary_hash, grant))) = self
+            .find_credential(CredentialKind::Device, &token_hash, |store| {
+                find_device_grant_for_token(store, &token_hash, now)
+            })
+            .await?
+        else {
+            return Err("device refresh token is invalid".to_string());
+        };
         // Verify the room BEFORE the grace-window bump below, so a wrong-room
         // request has zero side effects (it must not renew a superseded token's
         // grace and thereby extend a credential's validity).
@@ -1983,7 +2279,7 @@ impl PublicControlPlane {
                     now,
                     self.inner.rotation_grace_secs,
                 ) {
-                    if let Err(error) = self.inner.persistence.save(&mut store).await {
+                    if let Err(error) = self.persist(&mut store).await {
                         warn!(%error, "failed to persist device grace renewal; continuing");
                     }
                 }
@@ -1997,16 +2293,14 @@ impl PublicControlPlane {
         bearer_token: &str,
         expected_room: &str,
     ) -> Result<bool, String> {
-        let mut store = self.lock_state().await?;
         let token_hash = sha256_hex(bearer_token.trim());
         let now = unix_now();
-        let mut found = find_device_grant_for_token(&store, &token_hash, now);
-        if found.is_none() && self.reload_state_on_miss(&mut store).await? {
-            found = find_device_grant_for_token(&store, &token_hash, now);
-        }
-        Ok(found
-            .map(|(_, grant)| grant.broker_room_id == expected_room)
-            .unwrap_or(false))
+        Ok(self
+            .find_credential(CredentialKind::Device, &token_hash, |store| {
+                find_device_grant_for_token(store, &token_hash, now)
+            })
+            .await?
+            .is_some_and(|(_store, (_, grant))| grant.broker_room_id == expected_room))
     }
 
     async fn issue_relay_registration_for_verify_key(
@@ -2039,7 +2333,7 @@ impl PublicControlPlane {
         store
             .relay_registrations_by_hash
             .insert(refresh_token_hash, registration);
-        self.inner.persistence.save(&mut store).await?;
+        self.persist(&mut store).await?;
         Ok(RelayEnrollmentResponse {
             relay_id,
             broker_room_id,
@@ -2261,6 +2555,54 @@ impl PublicControlPersistence {
         }
     }
 
+    /// Index lookups only (primary key, plus the GIN index over superseded hashes), so a
+    /// stranger's bearer costs a probe, not a reload.
+    async fn credential_exists(
+        &self,
+        kind: CredentialKind,
+        token_hash: &str,
+        now: u64,
+    ) -> Result<bool, String> {
+        match self {
+            Self::InMemory => Ok(false),
+            // Process-exclusive, so only reached when a test treats the file as shared.
+            Self::Json(path) => Ok(load_public_control_json(path)
+                .await?
+                .has_credential(kind, token_hash, now)),
+            Self::Postgres { pool, gate, .. } => {
+                let table = match kind {
+                    CredentialKind::Relay => "public_relay_registrations",
+                    CredentialKind::Device => "public_device_grants",
+                    CredentialKind::Client => "public_client_identities",
+                };
+                let query = match kind {
+                    CredentialKind::Relay => format!(
+                        "SELECT EXISTS (SELECT 1 FROM {table} WHERE refresh_token_hash = $1)"
+                    ),
+                    CredentialKind::Device | CredentialKind::Client => superseded_probe_sql(table),
+                };
+                let superseded =
+                    serde_json::json!([{ "refresh_token_hash": token_hash }]).to_string();
+                let now = u64_to_i64(now, "now")?;
+                gate.run_spare(async {
+                    let probe = sqlx::query_scalar::<_, bool>(&query).bind(token_hash);
+                    let probe = match kind {
+                        CredentialKind::Relay => probe,
+                        CredentialKind::Device | CredentialKind::Client => {
+                            probe.bind(&superseded).bind(now)
+                        }
+                    };
+                    probe.fetch_one(pool).await.map_err(|error| {
+                        warn!(%error, "public control-plane credential probe failed");
+                        "public control-plane database unavailable".to_string()
+                    })
+                })
+                .await
+                .map_err(PublicControlDbGateError::into_message)
+            }
+        }
+    }
+
     fn reload_before_use(&self) -> bool {
         match self {
             Self::Postgres {
@@ -2375,6 +2717,31 @@ impl PublicControlStateStore {
     /// Count device grants currently bound to `relay_id`. One grant row == one
     /// registered device (device_id is deduped on issue), so this is the seat
     /// count the numeric device limit is compared against.
+    /// Mirrors the Postgres probe, and the lookup: primary, or superseded and unexpired.
+    fn has_credential(&self, kind: CredentialKind, token_hash: &str, now: u64) -> bool {
+        let superseded = |list: &[SupersededToken]| {
+            list.iter()
+                .any(|token| token.refresh_token_hash == token_hash && token.expires_at > now)
+        };
+        match kind {
+            CredentialKind::Relay => self.relay_registrations_by_hash.contains_key(token_hash),
+            CredentialKind::Device => {
+                self.grants_by_hash.contains_key(token_hash)
+                    || self
+                        .grants_by_hash
+                        .values()
+                        .any(|grant| superseded(&grant.superseded))
+            }
+            CredentialKind::Client => {
+                self.client_registrations_by_hash.contains_key(token_hash)
+                    || self
+                        .client_registrations_by_hash
+                        .values()
+                        .any(|client| superseded(&client.superseded))
+            }
+        }
+    }
+
     fn count_device_grants_for_relay(&self, relay_id: &str) -> usize {
         self.grants_by_hash
             .values()
@@ -2947,8 +3314,110 @@ async fn initialize_postgres_public_control_schema(pool: &PgPool) -> Result<(), 
         .execute(pool)
         .await
         .map_err(|error| format!("failed to add superseded_tokens to {table}: {error}"))?;
+        ensure_superseded_index(pool, table).await?;
     }
     Ok(())
+}
+
+/// The credential probe needs this index or every unknown bearer scans the table, so
+/// startup stops without it. Built concurrently so a live instance's writes carry on.
+async fn ensure_superseded_index(pool: &PgPool, table: &str) -> Result<(), String> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|error| format!("failed to check {table}_superseded_idx: {error}"))?;
+    let outcome = build_superseded_index(&mut conn, table).await;
+    // The build lifts this session's statement timeout; never hand it back to the pool.
+    let _ = conn.close().await;
+    outcome
+}
+
+async fn build_superseded_index(conn: &mut sqlx::PgConnection, table: &str) -> Result<(), String> {
+    use sqlx::Executor as _;
+    match superseded_index_step(table, superseded_index_valid(conn, table).await?) {
+        SupersededIndexStep::Ready => return Ok(()),
+        SupersededIndexStep::Refuse(message) => return Err(message),
+        SupersededIndexStep::Build => {}
+    }
+    info!(table, "building the superseded-token index concurrently");
+    conn.execute(
+        format!("SET statement_timeout = '{SUPERSEDED_INDEX_BUILD_TIMEOUT_SECS}s'").as_str(),
+    )
+    .await
+    .map_err(|error| format!("failed to lift the timeout for {table}_superseded_idx: {error}"))?;
+    if let Err(error) = conn.execute(superseded_index_sql(table).as_str()).await {
+        return Err(format!(
+            "{error}; {}",
+            superseded_index_instructions(table, "could not be built")
+        ));
+    }
+    match superseded_index_valid(conn, table).await? {
+        Some(true) => Ok(()),
+        _ => Err(superseded_index_instructions(
+            table,
+            "is not valid after building",
+        )),
+    }
+}
+
+async fn superseded_index_valid(
+    conn: &mut sqlx::PgConnection,
+    table: &str,
+) -> Result<Option<bool>, String> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid \
+         WHERE c.relname = $1 AND pg_table_is_visible(c.oid)",
+    )
+    .bind(format!("{table}_superseded_idx"))
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|error| format!("failed to check {table}_superseded_idx: {error}"))
+}
+
+enum SupersededIndexStep {
+    Ready,
+    Build,
+    Refuse(String),
+}
+
+fn superseded_index_step(table: &str, valid: Option<bool>) -> SupersededIndexStep {
+    match valid {
+        Some(true) => SupersededIndexStep::Ready,
+        None => SupersededIndexStep::Build,
+        // Left by a failed or still-running concurrent build. Dropping it here could kill
+        // another instance's build, so the operator decides.
+        Some(false) => SupersededIndexStep::Refuse(superseded_index_instructions(
+            table,
+            "exists but is not valid",
+        )),
+    }
+}
+
+fn superseded_index_instructions(table: &str, problem: &str) -> String {
+    format!(
+        "public control-plane index {table}_superseded_idx {problem}; credential probes need it \
+         to avoid scanning {table}. With no other broker starting, run \
+         `DROP INDEX CONCURRENTLY IF EXISTS {table}_superseded_idx;` then `{};` and restart",
+        superseded_index_sql(table)
+    )
+}
+
+fn superseded_index_sql(table: &str) -> String {
+    format!(
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS {table}_superseded_idx ON {table} \
+         USING GIN (({SUPERSEDED_JSONB}) jsonb_path_ops)"
+    )
+}
+
+/// Containment narrows to the one row holding the hash via the index; only that row's
+/// entries (at most `MAX_SUPERSEDED_TOKENS`) are expanded to check expiry.
+fn superseded_probe_sql(table: &str) -> String {
+    format!(
+        "SELECT EXISTS (SELECT 1 FROM {table} WHERE refresh_token_hash = $1) \
+         OR EXISTS (SELECT 1 FROM {table}, jsonb_array_elements({SUPERSEDED_JSONB}) AS entry \
+         WHERE {SUPERSEDED_JSONB} @> $2::jsonb AND entry->>'refresh_token_hash' = $1 \
+         AND (entry->>'expires_at')::numeric > $3)"
+    )
 }
 
 fn encode_superseded(superseded: &[SupersededToken]) -> Result<Option<String>, String> {
@@ -3658,7 +4127,19 @@ fn public_mode_requires_persistent_state() -> bool {
         .unwrap_or(false)
 }
 
-fn validate_relay_verify_key(verify_key_b64: &str) -> Result<(), String> {
+fn compact_label(label: Option<String>) -> Option<String> {
+    let label = trimmed_option_string(label)?;
+    Some(label.chars().take(MAX_LABEL_CHARS).collect())
+}
+
+fn check_id_length(name: &str, value: &str) -> Result<(), String> {
+    if value.len() > MAX_ID_BYTES {
+        return Err(format!("{name} is too long"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_relay_verify_key(verify_key_b64: &str) -> Result<(), String> {
     parse_relay_verifying_key(verify_key_b64).map(|_| ())
 }
 
@@ -5380,6 +5861,17 @@ mod postgres_persistence_opt_tests {
                 state: Mutex::new(PublicControlStateStore::default()),
                 relay_enrollment_challenges: Mutex::new(HashMap::new()),
                 pending_client_claims: Mutex::new(HashMap::new()),
+                last_full_load: std::sync::Mutex::new(None),
+                miss_reload_min_interval: MISS_RELOAD_MIN_INTERVAL,
+                force_shared_backend: false,
+                force_probe_hit: false,
+                probe_release: None,
+                force_reload_before_use: false,
+                full_load_count: std::sync::atomic::AtomicU64::new(0),
+                probe_count: std::sync::atomic::AtomicU64::new(0),
+                load_delay: Duration::ZERO,
+                persistence_down: AtomicBool::new(false),
+                load_log: std::sync::Mutex::new(Vec::new()),
                 save_fail_remaining: std::sync::atomic::AtomicU64::new(0),
                 reload_uncertain_fail_remaining: std::sync::atomic::AtomicU64::new(0),
                 cleanup_pause: std::sync::Mutex::new(None),
@@ -5465,6 +5957,117 @@ mod postgres_persistence_opt_tests {
         let session =
             session.expect("reload-before-use must consult the DB and accept the persisted token");
         assert_eq!(session.client_id, "client-lockout");
+    }
+
+    /// The indexed probe decides whether a miss reloads: an unknown bearer costs no full
+    /// reload, a token durably in the database still gets one.
+    #[tokio::test]
+    async fn postgres_probe_gates_the_reload_on_a_miss() {
+        let Some(url) = test_url() else {
+            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
+            return;
+        };
+        let pool = connect_and_init(&url).await;
+        truncate_all(&pool).await;
+        let plane = postgres_plane(pool.clone(), false);
+        let now = tokio::time::Instant::now();
+        *plane.last_full_load() = Some(FullLoad {
+            started: now,
+            finished: now,
+            succeeded: true,
+        });
+
+        let unknown = plane.issue_client_session("cref-probe-unknown").await;
+        let loads_after_unknown = plane.inner.full_load_count.load(Ordering::SeqCst);
+        inject_client_identity_into_db(&pool, "client-probe", "cref-probe-token").await;
+        let known = plane.issue_client_session("cref-probe-token").await;
+        // Rotated elsewhere: the old token lives only in the superseded JSON column.
+        sqlx::query(
+            "INSERT INTO public_client_identities \
+             (refresh_token_hash, client_id, client_verify_key, created_at, client_label, \
+              superseded_tokens) VALUES ($1, $2, $3, 300, NULL, $4)",
+        )
+        .bind(sha256_hex("cref-probe-current"))
+        .bind("client-rotated")
+        .bind("cvk-client-rotated")
+        .bind(
+            encode_superseded(&[SupersededToken {
+                refresh_token_hash: sha256_hex("cref-probe-old"),
+                expires_at: unix_now() + 3600,
+            }])
+            .expect("encode superseded"),
+        )
+        .execute(&pool)
+        .await
+        .expect("inject rotated client identity row");
+        let rotated = plane.issue_client_session("cref-probe-old").await;
+        sqlx::query(
+            "INSERT INTO public_client_identities \
+             (refresh_token_hash, client_id, client_verify_key, created_at, client_label, \
+              superseded_tokens) VALUES ($1, $2, $3, 300, NULL, $4)",
+        )
+        .bind(sha256_hex("cref-probe-expired-current"))
+        .bind("client-expired")
+        .bind("cvk-client-expired")
+        .bind(
+            encode_superseded(&[SupersededToken {
+                refresh_token_hash: sha256_hex("cref-probe-expired"),
+                expires_at: 1,
+            }])
+            .expect("encode superseded"),
+        )
+        .execute(&pool)
+        .await
+        .expect("inject expired client identity row");
+        let loads_before_expired = plane.inner.full_load_count.load(Ordering::SeqCst);
+        let expired = plane.issue_client_session("cref-probe-expired").await;
+        let loads_after_expired = plane.inner.full_load_count.load(Ordering::SeqCst);
+        truncate_all(&pool).await;
+
+        assert!(unknown.is_err());
+        assert_eq!(
+            loads_after_unknown, 0,
+            "an unknown bearer must not buy a full reload"
+        );
+        assert_eq!(
+            known
+                .expect("a token durably in Postgres must authenticate")
+                .client_id,
+            "client-probe"
+        );
+        assert_eq!(
+            rotated
+                .expect("a superseded token in its grace window must authenticate")
+                .client_id,
+            "client-rotated"
+        );
+        assert!(expired.is_err());
+        assert_eq!(
+            loads_after_expired, loads_before_expired,
+            "an expired superseded token must not buy a full reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_schema_init_leaves_a_valid_superseded_index() {
+        let Some(url) = test_url() else {
+            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
+            return;
+        };
+        let pool = connect_and_init(&url).await;
+        initialize_postgres_public_control_schema(&pool)
+            .await
+            .expect("a second startup must find the index ready");
+        for table in ["public_device_grants", "public_client_identities"] {
+            let mut conn = pool.acquire().await.expect("connection");
+            assert_eq!(
+                superseded_index_valid(&mut conn, table)
+                    .await
+                    .expect("index check"),
+                Some(true),
+                "{table} must carry a valid superseded index"
+            );
+        }
     }
 
     /// Not a pass/fail test — prints timings so we can compare JSON vs Postgres
@@ -5594,6 +6197,654 @@ mod postgres_persistence_opt_tests {
             "NOTE: Railway adds network RTT per round-trip. full-rebuild does O(rows) round-trips \
              and reload does O(1) SELECTs returning all rows; targeted save + reload-off do far \
              fewer, which is the win you feel over the wire.\n"
+        );
+    }
+}
+
+#[cfg(test)]
+mod superseded_index_tests {
+    use super::*;
+
+    #[test]
+    fn startup_builds_a_missing_index_and_refuses_an_invalid_one() {
+        assert!(matches!(
+            superseded_index_step("public_device_grants", Some(true)),
+            SupersededIndexStep::Ready
+        ));
+        assert!(matches!(
+            superseded_index_step("public_device_grants", None),
+            SupersededIndexStep::Build
+        ));
+        let SupersededIndexStep::Refuse(message) =
+            superseded_index_step("public_device_grants", Some(false))
+        else {
+            panic!("an invalid index must stop startup, not fall back to scanning");
+        };
+        assert!(message
+            .contains("DROP INDEX CONCURRENTLY IF EXISTS public_device_grants_superseded_idx"));
+        assert!(message.contains(&superseded_index_sql("public_device_grants")));
+    }
+
+    /// The planner only uses an expression index for the same expression.
+    #[test]
+    fn the_probe_filters_on_the_indexed_expression() {
+        for table in ["public_device_grants", "public_client_identities"] {
+            assert!(superseded_index_sql(table)
+                .contains(&format!("(({SUPERSEDED_JSONB}) jsonb_path_ops)")));
+            assert!(
+                superseded_probe_sql(table).contains(&format!("{SUPERSEDED_JSONB} @> $2::jsonb"))
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod anonymous_input_tests {
+    use super::*;
+
+    fn verify_key(seed: u32) -> String {
+        let mut bytes = [7_u8; 32];
+        bytes[..4].copy_from_slice(&seed.to_le_bytes());
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&bytes);
+        STANDARD.encode(signing_key.verifying_key().to_bytes())
+    }
+
+    async fn in_memory_plane() -> PublicControlPlane {
+        PublicControlPlane::from_parts(
+            Some("input-test-issuer".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("in-memory plane should build")
+    }
+
+    /// The challenge endpoint is anonymous and each entry lives 300s.
+    #[tokio::test]
+    async fn enrollment_challenges_keep_labels_short_and_stop_at_a_cap() {
+        let plane = in_memory_plane().await;
+        plane
+            .create_relay_enrollment_challenge(RelayEnrollmentChallengeRequest {
+                relay_verify_key: verify_key(0),
+                relay_label: Some("x".repeat(10_000)),
+            })
+            .await
+            .expect("a long label is shortened, not refused");
+        let mut accepted = 1;
+        for seed in 1..5_000 {
+            if plane
+                .create_relay_enrollment_challenge(RelayEnrollmentChallengeRequest {
+                    relay_verify_key: verify_key(seed),
+                    relay_label: None,
+                })
+                .await
+                .is_ok()
+            {
+                accepted += 1;
+            }
+        }
+
+        let challenges = plane.inner.relay_enrollment_challenges.lock().await;
+        let longest_label = challenges
+            .values()
+            .filter_map(|challenge| challenge.relay_label.as_ref())
+            .map(|label| label.chars().count())
+            .max();
+        assert!(
+            longest_label <= Some(128),
+            "a {longest_label:?}-char label is held"
+        );
+        assert!(
+            challenges.len() <= 4_096 && accepted < 5_000,
+            "{} pending challenges are held",
+            challenges.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_client_claims_keep_labels_short_and_refuse_oversized_ids() {
+        let plane = in_memory_plane().await;
+        let enrolled = plane
+            .issue_relay_registration_for_verify_key(&verify_key(1), None)
+            .await
+            .expect("enroll");
+        let request = |device_id: String| ClientGrantRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            device_id,
+            client_verify_key: verify_key(2),
+            client_label: Some("c".repeat(10_000)),
+            device_label: Some("d".repeat(10_000)),
+        };
+        plane
+            .issue_client_grant(&enrolled.relay_refresh_token, request("phone".to_string()))
+            .await
+            .expect("long labels are shortened, not refused");
+        let oversized = plane
+            .issue_client_grant(&enrolled.relay_refresh_token, request("p".repeat(10_000)))
+            .await;
+
+        let claims = plane.inner.pending_client_claims.lock().await;
+        let longest_label = claims
+            .values()
+            .flat_map(|claim| [&claim.client_label, &claim.device_label])
+            .filter_map(Option::as_ref)
+            .map(|label| label.chars().count())
+            .max();
+        assert!(
+            longest_label <= Some(128),
+            "a {longest_label:?}-char label is held"
+        );
+        assert!(oversized.is_err(), "a 10k-byte device id must be refused");
+        assert_eq!(claims.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod miss_reload_tests {
+    use super::*;
+
+    fn temp_state_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "public-control-miss-reload-{tag}-{}-{}.json",
+            std::process::id(),
+            random_token(8).to_ascii_lowercase()
+        ))
+    }
+
+    async fn json_plane(path: &Path) -> PublicControlPlane {
+        PublicControlPlane::from_parts(
+            Some("miss-reload-test-issuer".to_string()),
+            None,
+            Some(path.display().to_string()),
+            None,
+            None,
+        )
+        .await
+        .expect("json plane should build")
+    }
+
+    /// Treats its file as shared, the way Postgres is, so a second plane on the
+    /// same path stands in for another broker instance.
+    async fn shared_json_plane(
+        path: &Path,
+        configure: impl FnOnce(&mut PublicControlPlaneInner),
+    ) -> PublicControlPlane {
+        let mut plane = json_plane(path).await;
+        let inner = Arc::get_mut(&mut plane.inner).expect("a fresh plane is unshared");
+        inner.force_shared_backend = true;
+        inner.miss_reload_min_interval = Duration::from_millis(100);
+        configure(inner);
+        plane
+    }
+
+    fn relay_ws_request(relay_id: &str, broker_room_id: &str) -> RelayWsTokenRequest {
+        RelayWsTokenRequest {
+            relay_id: relay_id.to_string(),
+            broker_room_id: broker_room_id.to_string(),
+            relay_peer_id: "relay-peer".to_string(),
+        }
+    }
+
+    fn device_request(enrolled: &RelayEnrollmentResponse, device_id: &str) -> DeviceGrantRequest {
+        DeviceGrantRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            device_id: device_id.to_string(),
+        }
+    }
+
+    /// Eight streams of five unknown bearers each, across all three credential kinds.
+    async fn unknown_bearer_streams(plane: &PublicControlPlane) -> Vec<Result<(), String>> {
+        let streams = (0..8)
+            .map(|stream| {
+                let plane = plane.clone();
+                tokio::spawn(async move {
+                    let mut outcomes = Vec::new();
+                    for attempt in 0..5 {
+                        let bearer = format!("unknown-{stream}-{attempt}");
+                        let outcome = match attempt % 3 {
+                            0 => plane.issue_device_ws_token(&bearer).await.map(|_| ()),
+                            1 => plane.issue_client_session(&bearer).await.map(|_| ()),
+                            _ => plane
+                                .issue_relay_ws_token(&bearer, relay_ws_request("r", "room"))
+                                .await
+                                .map(|_| ()),
+                        };
+                        outcomes.push(outcome);
+                    }
+                    outcomes
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut outcomes = Vec::new();
+        for stream in streams {
+            outcomes.extend(stream.await.expect("stream should finish"));
+        }
+        outcomes
+    }
+
+    fn full_loads(plane: &PublicControlPlane) -> u64 {
+        plane.inner.full_load_count.load(Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn unknown_bearers_never_buy_a_full_reload_while_memory_is_fresh() {
+        let path = temp_state_path("unknown");
+        let plane = shared_json_plane(&path, |_| {}).await;
+
+        let outcomes = unknown_bearer_streams(&plane).await;
+        let loads = full_loads(&plane);
+        let probes = plane.inner.probe_count.load(Ordering::SeqCst);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            outcomes.iter().all(Result::is_err),
+            "unknown bearers must be refused"
+        );
+        assert_eq!(loads, 0, "40 unknown bearers caused {loads} full reloads");
+        assert_eq!(
+            probes, 40,
+            "each unknown bearer should cost one indexed probe"
+        );
+    }
+
+    /// A 401 is terminal to the remote client, so a token still inside its rotation grace
+    /// window must not be refused just because another instance rotated it.
+    #[tokio::test]
+    async fn a_rotated_away_token_minted_elsewhere_authenticates_without_waiting() {
+        let path = temp_state_path("rotated");
+        let reader = shared_json_plane(&path, |_| {}).await;
+        let writer = json_plane(&path).await;
+        let enrolled = writer
+            .issue_relay_registration_for_verify_key("vk-rotated", None)
+            .await
+            .expect("enroll on the other instance");
+        let first = writer
+            .issue_device_grant(
+                &enrolled.relay_refresh_token,
+                device_request(&enrolled, "device-rotated"),
+                None,
+            )
+            .await
+            .expect("grant on the other instance");
+        // A re-approval rotates the token; `first` survives only as a superseded hash.
+        writer
+            .issue_device_grant(
+                &enrolled.relay_refresh_token,
+                device_request(&enrolled, "device-rotated"),
+                None,
+            )
+            .await
+            .expect("re-grant on the other instance");
+
+        let device = reader
+            .issue_device_ws_token(&first.device_refresh_token)
+            .await;
+        let _ = std::fs::remove_file(&path);
+
+        device.expect("a token inside its rotation grace window must authenticate");
+    }
+
+    #[tokio::test]
+    async fn an_expired_rotated_away_token_is_refused_without_a_reload() {
+        let path = temp_state_path("expired");
+        let reader = shared_json_plane(&path, |_| {}).await;
+        let writer = json_plane(&path).await;
+        let enrolled = writer
+            .issue_relay_registration_for_verify_key("vk-expired", None)
+            .await
+            .expect("enroll on the other instance");
+        let first = writer
+            .issue_device_grant(
+                &enrolled.relay_refresh_token,
+                device_request(&enrolled, "device-expired"),
+                None,
+            )
+            .await
+            .expect("grant on the other instance");
+        writer
+            .issue_device_grant(
+                &enrolled.relay_refresh_token,
+                device_request(&enrolled, "device-expired"),
+                None,
+            )
+            .await
+            .expect("re-grant on the other instance");
+        // Age the grace window out on disk, as a later instance would find it.
+        let mut stored = load_public_control_json(&path).await.expect("load state");
+        for grant in stored.grants_by_hash.values_mut() {
+            for token in &mut grant.superseded {
+                token.expires_at = 1;
+            }
+        }
+        save_public_control_json(&path, &stored)
+            .await
+            .expect("save state");
+
+        let mut refused = 0;
+        for _ in 0..5 {
+            if reader
+                .issue_device_ws_token(&first.device_refresh_token)
+                .await
+                .is_err()
+            {
+                refused += 1;
+            }
+        }
+        let loads = full_loads(&reader);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(refused, 5);
+        assert_eq!(loads, 0, "an expired token bought {loads} full reloads");
+    }
+
+    /// A token found by the probe is in memory after one reload, so presenting it again
+    /// with the wrong scope is refused from memory rather than by another reload.
+    #[tokio::test]
+    async fn a_valid_token_presented_for_the_wrong_room_buys_one_reload_at_most() {
+        let path = temp_state_path("wrong-room");
+        let reader = shared_json_plane(&path, |_| {}).await;
+        let writer = json_plane(&path).await;
+        let enrolled = writer
+            .issue_relay_registration_for_verify_key("vk-wrong-room", None)
+            .await
+            .expect("enroll on the other instance");
+        let grant = writer
+            .issue_device_grant(
+                &enrolled.relay_refresh_token,
+                device_request(&enrolled, "device-wrong-room"),
+                None,
+            )
+            .await
+            .expect("grant on the other instance");
+
+        for _ in 0..5 {
+            assert!(reader
+                .issue_device_ws_token_scoped(&grant.device_refresh_token, "some-other-room")
+                .await
+                .is_err());
+        }
+        let loads = full_loads(&reader);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(loads, 1, "a wrong-room token bought {loads} full reloads");
+    }
+
+    /// Stands in for another instance committing a device grant for `token`.
+    async fn mint_device_token_on_disk(path: &Path, token: &str) {
+        let mut stored = load_public_control_json(path).await.expect("load state");
+        let hash = sha256_hex(token);
+        stored.grants_by_hash.insert(
+            hash.clone(),
+            PersistedDeviceGrant {
+                relay_id: "relay-elsewhere".to_string(),
+                broker_room_id: "room-elsewhere".to_string(),
+                device_id: "device-elsewhere".to_string(),
+                refresh_token_hash: hash,
+                created_at: unix_now(),
+                last_seen: None,
+                superseded: Vec::new(),
+            },
+        );
+        save_public_control_json(path, &stored)
+            .await
+            .expect("save state");
+    }
+
+    /// A load that began after the request arrived but read the table before the token
+    /// was committed must not stand in for looking.
+    #[tokio::test]
+    async fn a_load_that_read_before_the_mint_does_not_make_a_miss_final() {
+        let path = temp_state_path("early-fresh");
+        let reader = shared_json_plane(&path, |_| {}).await;
+        json_plane(&path).await;
+
+        let held = reader.inner.state.lock().await;
+        let request = {
+            let reader = reader.clone();
+            tokio::spawn(async move { reader.issue_device_ws_token("dref-early").await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let loaded = reader
+            .load_full_state()
+            .await
+            .expect("load before the mint");
+        mint_device_token_on_disk(&path, "dref-early").await;
+        let mut held = held;
+        *held = loaded;
+        drop(held);
+        let outcome = request.await.expect("request should finish");
+        let _ = std::fs::remove_file(&path);
+
+        outcome.expect("a token committed before the lookup looked must authenticate");
+    }
+
+    /// A positive probe can only be overruled by a load that began after the probe saw it.
+    #[tokio::test]
+    async fn a_positive_probe_is_not_overruled_by_a_load_that_began_before_it() {
+        let path = temp_state_path("positive-probe");
+        let release = Arc::new(Semaphore::new(0));
+        let reader = shared_json_plane(&path, |inner| {
+            inner.probe_release = Some(release.clone());
+        })
+        .await;
+        json_plane(&path).await;
+
+        let request = {
+            let reader = reader.clone();
+            tokio::spawn(async move { reader.issue_device_ws_token("dref-probed").await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        {
+            let mut store = reader.inner.state.lock().await;
+            *store = reader
+                .load_full_state()
+                .await
+                .expect("load before the mint");
+        }
+        mint_device_token_on_disk(&path, "dref-probed").await;
+        release.add_permits(1);
+        let outcome = request.await.expect("request should finish");
+        let _ = std::fs::remove_file(&path);
+
+        outcome.expect("a token the probe saw must not be refused on an older load");
+    }
+
+    /// The HTTP layer maps any error mentioning "invalid" to a terminal 401.
+    #[tokio::test]
+    async fn a_database_failure_never_reads_as_an_invalid_credential() {
+        let path = temp_state_path("db-error-text");
+        let probe_fails = shared_json_plane(&path, |_| {}).await;
+        let load_fails = shared_json_plane(&path, |inner| inner.force_probe_hit = true).await;
+        probe_fails
+            .inner
+            .persistence_down
+            .store(true, Ordering::SeqCst);
+        load_fails
+            .inner
+            .persistence_down
+            .store(true, Ordering::SeqCst);
+
+        let from_probe = probe_fails.issue_device_ws_token("dref-any").await;
+        let from_load = load_fails.issue_device_ws_token("dref-any").await;
+        let _ = std::fs::remove_file(&path);
+
+        for (path_name, outcome) in [("probe", from_probe), ("reload", from_load)] {
+            let error = outcome.expect_err("the database is down");
+            assert!(
+                !error.to_ascii_lowercase().contains("invalid"),
+                "a {path_name} failure surfaced as {error:?}, which the HTTP layer calls a 401"
+            );
+        }
+    }
+
+    /// Same rule for writes: a storage failure after a good bearer is not a bad bearer.
+    #[tokio::test]
+    async fn a_storage_failure_never_reads_as_an_invalid_credential() {
+        let path = temp_state_path("save-error-text");
+        let plane = shared_json_plane(&path, |_| {}).await;
+        let enrolled = plane
+            .issue_relay_registration_for_verify_key("vk-save-error", None)
+            .await
+            .expect("enroll");
+        plane.inner.persistence_down.store(true, Ordering::SeqCst);
+
+        let grant = plane
+            .issue_device_grant(
+                &enrolled.relay_refresh_token,
+                device_request(&enrolled, "device-save-error"),
+                None,
+            )
+            .await;
+        let _ = std::fs::remove_file(&path);
+
+        let error = grant.expect_err("the store is down");
+        assert!(
+            !error.to_ascii_lowercase().contains("invalid"),
+            "a storage failure surfaced as {error:?}, which the HTTP layer calls a 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn tokens_minted_elsewhere_back_to_back_both_authenticate() {
+        let path = temp_state_path("visibility");
+        let reader = shared_json_plane(&path, |_| {}).await;
+        let writer = json_plane(&path).await;
+
+        let enrolled = writer
+            .issue_relay_registration_for_verify_key("vk-minted-elsewhere", None)
+            .await
+            .expect("enroll on the other instance");
+        let relay = reader
+            .issue_relay_ws_token(
+                &enrolled.relay_refresh_token,
+                relay_ws_request(&enrolled.relay_id, &enrolled.broker_room_id),
+            )
+            .await;
+        // Minted right after the reader's reload, so the next miss lands in the spacing window.
+        let grant = writer
+            .issue_device_grant(
+                &enrolled.relay_refresh_token,
+                device_request(&enrolled, "device-elsewhere"),
+                None,
+            )
+            .await
+            .expect("grant on the other instance");
+        let device = reader
+            .issue_device_ws_token(&grant.device_refresh_token)
+            .await;
+        let _ = std::fs::remove_file(&path);
+
+        relay.expect("a relay token another instance minted must authenticate here");
+        device.expect("a device token another instance minted must authenticate here");
+    }
+
+    #[tokio::test]
+    async fn slow_reloads_never_run_back_to_back_or_starve_requests_that_hit() {
+        let path = temp_state_path("slow");
+        let load_delay = Duration::from_millis(200);
+        let plane = shared_json_plane(&path, |inner| {
+            inner.load_delay = load_delay;
+            // Every miss now asks for a reload: the worst case for spacing.
+            inner.force_probe_hit = true;
+        })
+        .await;
+        let enrolled = plane
+            .issue_relay_registration_for_verify_key("vk-hit", None)
+            .await
+            .expect("enroll");
+
+        let hitter = {
+            let plane = plane.clone();
+            let enrolled = enrolled.clone();
+            tokio::spawn(async move {
+                let mut slowest = Duration::ZERO;
+                for _ in 0..10 {
+                    let started = Instant::now();
+                    plane
+                        .issue_relay_ws_token(
+                            &enrolled.relay_refresh_token,
+                            relay_ws_request(&enrolled.relay_id, &enrolled.broker_room_id),
+                        )
+                        .await
+                        .expect("a known relay token must keep authenticating");
+                    slowest = slowest.max(started.elapsed());
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                slowest
+            })
+        };
+        unknown_bearer_streams(&plane).await;
+        let slowest_hit = hitter.await.expect("hitter should finish");
+        let log = plane.inner.load_log.lock().expect("load log").clone();
+        let _ = std::fs::remove_file(&path);
+
+        let interval = plane.inner.miss_reload_min_interval;
+        for pair in log.windows(2) {
+            let gap = pair[1].0.saturating_duration_since(pair[0].1);
+            assert!(
+                gap + Duration::from_millis(5) >= interval,
+                "a full reload began {gap:?} after the previous one ended; loads: {log:?}"
+            );
+        }
+        assert!(
+            slowest_hit < load_delay * 2,
+            "a request whose token is in memory waited {slowest_hit:?}, longer than one reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_outage_refuses_misses_without_reloading_and_still_serves_hits() {
+        let path = temp_state_path("outage");
+        let plane = shared_json_plane(&path, |inner| {
+            inner.load_delay = Duration::from_millis(50);
+        })
+        .await;
+        let enrolled = plane
+            .issue_relay_registration_for_verify_key("vk-outage", None)
+            .await
+            .expect("enroll");
+        plane.inner.persistence_down.store(true, Ordering::SeqCst);
+
+        let outcomes = unknown_bearer_streams(&plane).await;
+        let hit = plane
+            .issue_relay_ws_token(
+                &enrolled.relay_refresh_token,
+                relay_ws_request(&enrolled.relay_id, &enrolled.broker_room_id),
+            )
+            .await;
+        let loads = full_loads(&plane);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(outcomes.iter().all(Result::is_err));
+        assert_eq!(
+            loads, 0,
+            "misses during an outage attempted {loads} full reloads"
+        );
+        hit.expect("a token already in memory must keep working through an outage");
+    }
+
+    #[tokio::test]
+    async fn a_forced_reload_during_an_outage_is_attempted_once_not_per_request() {
+        let path = temp_state_path("forced");
+        let plane = shared_json_plane(&path, |inner| {
+            inner.force_reload_before_use = true;
+            inner.load_delay = Duration::from_millis(50);
+        })
+        .await;
+        plane.inner.persistence_down.store(true, Ordering::SeqCst);
+
+        let outcomes = unknown_bearer_streams(&plane).await;
+        let loads = full_loads(&plane);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(outcomes.iter().all(Result::is_err));
+        assert!(
+            loads <= 2,
+            "40 requests during an outage made {loads} full-reload attempts"
         );
     }
 }

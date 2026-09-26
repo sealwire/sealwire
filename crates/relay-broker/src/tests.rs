@@ -1808,6 +1808,138 @@ async fn public_relay_ws_token_can_join_broker() {
     }
 }
 
+fn pairing_ticket_request(
+    relay_id: &str,
+    broker_room_id: &str,
+    pairing_id: &str,
+    expires_at: u64,
+) -> PairingWsTokenRequest {
+    PairingWsTokenRequest {
+        relay_id: relay_id.to_string(),
+        broker_room_id: broker_room_id.to_string(),
+        pairing_id: pairing_id.to_string(),
+        expires_at,
+    }
+}
+
+/// The relay picks `expires_at`, but a surface ticket must not outlive the 600s the
+/// official relay ever asks for (`MAX_PAIRING_TTL_SECS` in relay-server).
+#[tokio::test]
+async fn a_pairing_ticket_never_outlives_the_relay_pairing_cap() {
+    let address = spawn_public_mode_app().await;
+
+    let response: PairingWsTokenResponse = public_post(
+        address,
+        "/api/public/pairing/ws-token",
+        "relay-refresh-1",
+        &pairing_ticket_request("relay-1", "room-a", "pair-forever", u64::MAX - 1),
+    )
+    .await;
+    let claims = JoinTicketKey::from_secret(b"public-broker-issuer-secret")
+        .expect("issuer key")
+        .verify(&response.pairing_join_ticket)
+        .expect("the minted ticket should verify");
+    let cap = crate::join_ticket::unix_now() + 600;
+    assert!(
+        claims
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= cap),
+        "pairing ticket outlives the relay pairing cap: {:?}",
+        claims.expires_at
+    );
+    assert_eq!(
+        claims.expires_at,
+        Some(response.pairing_join_ticket_expires_at)
+    );
+
+    let already_expired = public_post_response(
+        address,
+        "/api/public/pairing/ws-token",
+        "relay-refresh-1",
+        &pairing_ticket_request(
+            "relay-1",
+            "room-a",
+            "pair-expired",
+            crate::join_ticket::unix_now().saturating_sub(1),
+        ),
+    )
+    .await
+    .status();
+    assert_eq!(already_expired, reqwest::StatusCode::BAD_REQUEST);
+}
+
+/// Issuance was bounded only per IP and route, so one relay could mint pairing tickets as
+/// fast as the whole API allows.
+#[tokio::test]
+async fn pairing_tickets_have_a_per_relay_budget() {
+    let plane = PublicControlPlane::from_parts(
+        Some("public-broker-issuer-secret".to_string()),
+        Some(
+            serde_json::to_string(&vec![
+                json!({"relay_id": "relay-1", "broker_room_id": "room-a", "refresh_token": "relay-refresh-1"}),
+                json!({"relay_id": "relay-2", "broker_room_id": "room-b", "refresh_token": "relay-refresh-2"}),
+            ])
+            .expect("relay registrations should encode"),
+        ),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("public control plane should configure");
+    let address = spawn_public_mode_app_with(
+        plane,
+        BrokerHardeningConfig::default(),
+        SecurityHeadersConfig::default(),
+    )
+    .await;
+
+    let mut statuses = Vec::new();
+    for index in 0..100 {
+        let expires_at = crate::join_ticket::unix_now() + 180;
+        statuses.push(
+            public_post_response(
+                address,
+                "/api/public/pairing/ws-token",
+                "relay-refresh-1",
+                &pairing_ticket_request("relay-1", "room-a", &format!("pair-{index}"), expires_at),
+            )
+            .await
+            .status(),
+        );
+    }
+    assert!(
+        statuses[..20]
+            .iter()
+            .all(|status| *status == reqwest::StatusCode::OK),
+        "someone pairing a handful of devices must stay well inside the budget: {statuses:?}"
+    );
+    assert_eq!(
+        statuses[99],
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        "one relay must not mint a hundred pairing tickets a minute"
+    );
+
+    let other_relay = public_post_response(
+        address,
+        "/api/public/pairing/ws-token",
+        "relay-refresh-2",
+        &pairing_ticket_request(
+            "relay-2",
+            "room-b",
+            "pair-other",
+            crate::join_ticket::unix_now() + 180,
+        ),
+    )
+    .await
+    .status();
+    assert_eq!(
+        other_relay,
+        reqwest::StatusCode::OK,
+        "one relay's budget must not spend another's"
+    );
+}
+
 #[tokio::test]
 async fn public_pairing_and_device_tokens_work_end_to_end() {
     let address = spawn_public_mode_app().await;
@@ -2930,6 +3062,121 @@ async fn repeated_invalid_device_refresh_token_use_is_tracked() {
     assert_eq!(monitoring.repeated_invalid_refresh_token_uses, 1);
 }
 
+/// Every distinct invalid bearer used to leave its hash behind for the life of the process.
+#[tokio::test]
+async fn invalid_refresh_token_tracking_is_bounded_and_keeps_repeat_offenders() {
+    let monitoring = PublicMonitoringState::default();
+    let error = "device refresh token is invalid";
+    for _ in 0..2 {
+        monitoring
+            .record_refresh_failure(RefreshChainKind::DeviceWsToken, "dead-token", error)
+            .await;
+    }
+    for index in 0..5_000 {
+        monitoring
+            .record_refresh_failure(
+                RefreshChainKind::DeviceWsToken,
+                &format!("one-off-{index}"),
+                error,
+            )
+            .await;
+    }
+    monitoring
+        .record_refresh_failure(RefreshChainKind::DeviceWsToken, "dead-token", error)
+        .await;
+
+    let (tracked_tokens, _) = monitoring.tracked_sizes_for_test().await;
+    assert!(
+        tracked_tokens <= 1_024,
+        "{tracked_tokens} invalid token hashes are held"
+    );
+    assert_eq!(
+        monitoring.snapshot().await.repeated_invalid_refresh_token_uses,
+        2,
+        "a token that keeps coming back must still count as repeated through a flood of one-off bearers"
+    );
+}
+
+#[tokio::test]
+async fn chain_environment_tracking_is_bounded_and_still_sees_a_hot_chain_change() {
+    let monitoring = PublicMonitoringState::default();
+    let user_agent = |value: &str| {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::USER_AGENT, value.parse().expect("header value"));
+        headers
+    };
+    for index in 0..5_000 {
+        if index % 500 == 0 {
+            monitoring
+                .observe_chain_environment("client:hot".to_string(), &user_agent("A"))
+                .await;
+        }
+        monitoring
+            .observe_chain_environment(format!("client:{index}"), &user_agent("A"))
+            .await;
+    }
+    monitoring
+        .observe_chain_environment("client:hot".to_string(), &user_agent("B"))
+        .await;
+
+    let (_, tracked_chains) = monitoring.tracked_sizes_for_test().await;
+    assert!(
+        tracked_chains <= 4_096,
+        "{tracked_chains} chain environments are held"
+    );
+    assert_eq!(monitoring.snapshot().await.environment_mutation_events, 1);
+}
+
+/// A refused request used to leave its per-address key behind, so callers from enough
+/// addresses filled the map once the shared budget ran out.
+#[tokio::test]
+async fn public_api_admission_plants_no_keys_for_refused_callers() {
+    let limiter = SlidingWindowRateLimiter::default();
+    assert!(admit_public_api(&limiter, "public-api:198.18.0.1:route".to_string(), 120, 1).await);
+    for index in 0..2_000 {
+        let key = format!("public-api:10.0.{}.{}:route", index / 256, index % 256);
+        assert!(!admit_public_api(&limiter, key, 120, 1).await);
+    }
+    assert_eq!(
+        limiter.bucket_count_for_test().await,
+        2,
+        "only the admitted caller and the shared budget may hold keys"
+    );
+}
+
+#[test]
+fn enrollment_locks_stop_at_the_cap_and_idle_ones_give_way() {
+    let locks = StdMutex::new(HashMap::new());
+    let held = (0..=ENROLLMENT_LOCK_MAP_CAP)
+        .map(|index| acquire_enrollment_lock(&locks, &format!("key-{index}")))
+        .collect::<Vec<_>>();
+    let len = locks.lock().expect("lock map").len();
+    assert!(
+        len <= ENROLLMENT_LOCK_MAP_CAP && held.iter().any(Result::is_err),
+        "{len} enrollment locks are held"
+    );
+    drop(held);
+    assert!(
+        acquire_enrollment_lock(&locks, "key-after").is_ok(),
+        "idle locks must give way to a new key"
+    );
+}
+
+#[tokio::test]
+async fn public_api_bodies_are_capped_before_they_are_parsed() {
+    let address = spawn_public_mode_app().await;
+    let status = reqwest::Client::new()
+        .post(format!(
+            "http://{address}/api/public/relay-enrollment/challenge"
+        ))
+        .json(&json!({"relay_verify_key": "k", "relay_label": "x".repeat(200_000)}))
+        .send()
+        .await
+        .expect("request should complete")
+        .status();
+    assert_eq!(status, reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+}
+
 #[tokio::test]
 async fn client_environment_mutations_are_tracked() {
     let address = spawn_public_mode_app().await;
@@ -3146,6 +3393,59 @@ async fn websocket_join_rate_limit_is_enforced() {
     }
 }
 
+/// The room is caller-chosen, so a per-(IP, room) budget alone let one client churn joins
+/// without limit, each planting a bucket in the limiter the control-plane API shares.
+#[tokio::test]
+async fn a_random_room_join_flood_is_capped_per_ip_and_leaves_the_public_api_usable() {
+    let address = spawn_public_mode_app().await;
+    let attempts = RATE_LIMIT_BUCKET_PRUNE_THRESHOLD + 32;
+    let mut codes = Vec::with_capacity(attempts);
+    for index in 0..attempts {
+        let (mut socket, _) =
+            connect_async(format!("ws://{address}/ws/flood-{index}?role=surface"))
+                .await
+                .expect("upgrade should succeed");
+        codes.push(match next_server_message(&mut socket).await {
+            ServerMessage::Error { code, .. } => code,
+            other => panic!("a ticketless join must be refused, got {other:?}"),
+        });
+    }
+    let first_limited = codes.iter().position(|code| code == "rate_limited");
+    assert!(
+        first_limited.is_some_and(|index| index <= 300)
+            && codes[300..].iter().all(|code| code == "rate_limited"),
+        "one client must not get hundreds of join attempts by varying the room \
+         (first rate_limited at {first_limited:?})"
+    );
+
+    let status = public_post_response(
+        address,
+        "/api/public/relay/ws-token",
+        "relay-refresh-1",
+        &RelayWsTokenRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            relay_peer_id: "relay-1".to_string(),
+        },
+    )
+    .await
+    .status();
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "a websocket join flood must not lock a new caller out of the control-plane API"
+    );
+}
+
+#[test]
+fn join_budgets_group_an_ipv6_client_by_its_slash_64() {
+    let key = |ip: &str| client_network_key(ip.parse().expect("valid ip"));
+    assert_eq!(key("2001:db8:1:2:aaaa::1"), key("2001:db8:1:2:ffff::9"));
+    assert_ne!(key("2001:db8:1:2::1"), key("2001:db8:1:3::1"));
+    assert_eq!(key("::ffff:203.0.113.5"), "203.0.113.5");
+    assert_ne!(key("203.0.113.5"), key("203.0.113.6"));
+}
+
 #[tokio::test]
 async fn websocket_connection_limit_is_enforced_per_ip() {
     let address = spawn_app_with(
@@ -3188,6 +3488,180 @@ async fn websocket_connection_limit_is_enforced_per_ip() {
         }
         other => panic!("unexpected connection limit response: {other:?}"),
     }
+}
+
+/// Per-address limits cannot bound the total, so past the cap new joins from any address
+/// are refused, and a closed socket frees its slot.
+#[tokio::test]
+async fn open_sockets_are_capped_across_addresses() {
+    let guard = BanGuard {
+        blocklist: Blocklist::disabled(),
+        trusted_ip_header: Some("x-forwarded-for".parse().expect("valid header name")),
+    };
+    let address = spawn_app_with_guard_and_hardening(
+        guard,
+        BrokerHardeningConfig {
+            max_total_connections: 2,
+            ..BrokerHardeningConfig::default()
+        },
+    )
+    .await;
+    let join = |client: u8| {
+        let url = websocket_url(
+            address,
+            "room-a",
+            protocol::PeerRole::Surface,
+            None,
+            JoinTicketClaims::pairing_surface_join("room-a", &format!("pair-{client}"), u64::MAX),
+        );
+        let mut request = url.into_client_request().expect("ws request builds");
+        request.headers_mut().append(
+            "x-forwarded-for",
+            format!("203.0.113.{client}").parse().expect("header value"),
+        );
+        async move {
+            let (mut socket, _) = connect_async(request)
+                .await
+                .expect("upgrade should succeed");
+            let first = next_server_message(&mut socket).await;
+            (socket, first)
+        }
+    };
+
+    let (mut first, welcome) = join(1).await;
+    assert!(
+        matches!(welcome, ServerMessage::Welcome { .. }),
+        "{welcome:?}"
+    );
+    let (_second, welcome) = join(2).await;
+    assert!(
+        matches!(welcome, ServerMessage::Welcome { .. }),
+        "{welcome:?}"
+    );
+    let (_third, refused) = join(3).await;
+    assert!(
+        matches!(&refused, ServerMessage::Error { code, .. } if code == "rate_limited"),
+        "a third open socket from a third address must be refused: {refused:?}"
+    );
+
+    first.close(None).await.expect("first socket should close");
+    let mut rejoined = None;
+    for attempt in 0..40 {
+        let (_socket, reply) = join(10 + attempt).await;
+        if matches!(reply, ServerMessage::Welcome { .. }) {
+            rejoined = Some(reply);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(rejoined.is_some(), "closing a socket must free its slot");
+}
+
+/// The per-room key used the exact address, so one ticket rotated across a /64 planted a
+/// key per address in the join limiter.
+#[tokio::test]
+async fn valid_ticket_joins_share_the_per_room_budget_across_an_ipv6_slash_64() {
+    let guard = BanGuard {
+        blocklist: Blocklist::disabled(),
+        trusted_ip_header: Some("x-forwarded-for".parse().expect("valid header name")),
+    };
+    let address = spawn_app_with_guard_and_hardening(
+        guard,
+        BrokerHardeningConfig {
+            join_rate_limit_per_minute: 1,
+            ..BrokerHardeningConfig::default()
+        },
+    )
+    .await;
+    let join = |source: &str| {
+        let url = websocket_url(
+            address,
+            "room-a",
+            protocol::PeerRole::Surface,
+            None,
+            JoinTicketClaims::pairing_surface_join("room-a", source, u64::MAX),
+        );
+        let mut request = url.into_client_request().expect("ws request builds");
+        request
+            .headers_mut()
+            .append("x-forwarded-for", source.parse().expect("header value"));
+        async move {
+            let (mut socket, _) = connect_async(request)
+                .await
+                .expect("upgrade should succeed");
+            let first = next_server_message(&mut socket).await;
+            (socket, first)
+        }
+    };
+
+    let (_first, welcome) = join("2001:db8:5:6::1").await;
+    assert!(
+        matches!(welcome, ServerMessage::Welcome { .. }),
+        "{welcome:?}"
+    );
+    let (_second, refused) = join("2001:db8:5:6::2").await;
+    assert!(
+        matches!(&refused, ServerMessage::Error { code, .. } if code == "rate_limited"),
+        "a second address in the same /64 must share the room's join budget: {refused:?}"
+    );
+    let (_other, welcome) = join("2001:db8:5:7::1").await;
+    assert!(
+        matches!(welcome, ServerMessage::Welcome { .. }),
+        "{welcome:?}"
+    );
+}
+
+/// An IPv6 client usually holds a whole /64, so a per-address socket cap was per socket.
+#[tokio::test]
+async fn open_sockets_are_capped_per_ipv6_slash_64() {
+    let guard = BanGuard {
+        blocklist: Blocklist::disabled(),
+        trusted_ip_header: Some("x-forwarded-for".parse().expect("valid header name")),
+    };
+    let address = spawn_app_with_guard_and_hardening(
+        guard,
+        BrokerHardeningConfig {
+            max_connections_per_ip: 1,
+            ..BrokerHardeningConfig::default()
+        },
+    )
+    .await;
+    let join = |source: &str| {
+        let url = websocket_url(
+            address,
+            "room-a",
+            protocol::PeerRole::Surface,
+            None,
+            JoinTicketClaims::pairing_surface_join("room-a", source, u64::MAX),
+        );
+        let mut request = url.into_client_request().expect("ws request builds");
+        request
+            .headers_mut()
+            .append("x-forwarded-for", source.parse().expect("header value"));
+        async move {
+            let (mut socket, _) = connect_async(request)
+                .await
+                .expect("upgrade should succeed");
+            let first = next_server_message(&mut socket).await;
+            (socket, first)
+        }
+    };
+
+    let (_first, welcome) = join("2001:db8:1:2::1").await;
+    assert!(
+        matches!(welcome, ServerMessage::Welcome { .. }),
+        "{welcome:?}"
+    );
+    let (_second, refused) = join("2001:db8:1:2::2").await;
+    assert!(
+        matches!(&refused, ServerMessage::Error { code, .. } if code == "rate_limited"),
+        "a second address in the same /64 must share the cap: {refused:?}"
+    );
+    let (_other, welcome) = join("2001:db8:1:3::1").await;
+    assert!(
+        matches!(welcome, ServerMessage::Welcome { .. }),
+        "{welcome:?}"
+    );
 }
 
 #[tokio::test]
@@ -3253,6 +3727,33 @@ async fn websocket_publish_rate_limit_rejects_messages_without_closing_socket() 
             assert!(message.contains("rate limit"));
         }
         other => panic!("unexpected repeated publish rate limit response: {other:?}"),
+    }
+}
+
+/// The frame cap used to be checked only after the WebSocket layer had buffered the whole
+/// message, up to its 64 MiB default, so every seated socket could pin that much memory.
+#[tokio::test]
+async fn a_message_far_past_the_frame_cap_is_cut_off_before_it_is_buffered() {
+    let address = spawn_app().await;
+    let url = websocket_url(
+        address,
+        "room-a",
+        protocol::PeerRole::Surface,
+        None,
+        JoinTicketClaims::pairing_surface_join("room-a", "pair-huge-frame", u64::MAX),
+    );
+    let (mut socket, _) = connect_async(&url).await.expect("socket should connect");
+    let _welcome = next_server_message(&mut socket).await;
+
+    // The broker may hang up mid-send, which is the point.
+    let _ = socket
+        .send(Message::Text("x".repeat(4 * 1024 * 1024)))
+        .await;
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+        .await
+        .expect("the broker should answer or hang up");
+    if let Some(Ok(Message::Text(text))) = reply {
+        panic!("the broker read the whole message before refusing it: {text}");
     }
 }
 
@@ -5829,6 +6330,69 @@ async fn a_relays_designed_publish_cadence_is_not_rate_limited() {
         "the relay was rate limited at its own designed cadence: {unexpected:?}. The \
          broker drops those frames silently, so this is lost transcript content and \
          chunked replies the client can only time out on."
+    );
+}
+
+/// API callers from enough addresses used to fill the limiter map publishes shared, and a
+/// refused publish is fatal to a relay.
+#[tokio::test]
+async fn an_api_flood_from_many_addresses_cannot_refuse_a_relays_publish() {
+    let guard = BanGuard {
+        blocklist: Blocklist::disabled(),
+        trusted_ip_header: Some("x-forwarded-for".parse().expect("valid header name")),
+    };
+    let address = spawn_app_with_guard_and_hardening(guard, BrokerHardeningConfig::default()).await;
+    let client = reqwest::Client::new();
+    for index in 0..RATE_LIMIT_BUCKET_PRUNE_THRESHOLD {
+        client
+            .post(format!("http://{address}/api/public/relay/ws-token"))
+            .header(
+                "x-forwarded-for",
+                format!("198.18.{}.{}", index / 256, index % 256),
+            )
+            .json(&RelayWsTokenRequest {
+                relay_id: "relay-x".to_string(),
+                broker_room_id: "room-x".to_string(),
+                relay_peer_id: "relay-x".to_string(),
+            })
+            .send()
+            .await
+            .expect("request should complete");
+    }
+
+    let (mut relay, _) = connect_async(websocket_url(
+        address,
+        "room-a",
+        protocol::PeerRole::Relay,
+        Some("relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1"),
+    ))
+    .await
+    .expect("relay socket should connect");
+    match next_server_message(&mut relay).await {
+        ServerMessage::Welcome { .. } => {}
+        other => panic!("the relay should still be able to join, got {other:?}"),
+    }
+    relay
+        .send(Message::Text(
+            serde_json::to_string(&ClientMessage::Publish {
+                protocol_version: protocol::BROKER_PROTOCOL_VERSION,
+                payload: json!({"ciphertext": "abc"}),
+            })
+            .expect("client frame should serialize"),
+        ))
+        .await
+        .expect("publish should send");
+
+    // Nobody else is in the room, so the only thing that can come back is an error.
+    let unexpected = tokio::time::timeout(
+        std::time::Duration::from_millis(400),
+        next_server_message(&mut relay),
+    )
+    .await;
+    assert!(
+        unexpected.is_err(),
+        "an API flood from other addresses refused the relay's publish: {unexpected:?}"
     );
 }
 
