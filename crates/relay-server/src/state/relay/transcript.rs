@@ -225,7 +225,12 @@ impl RelayState {
         runtime
             .transcript
             .update_row(&row_id, |entry| entry.withdrawn = true);
-        runtime.transcript_revision = runtime.transcript_revision.saturating_add(1);
+        // From the shared clock like every other write: a revision drawn locally
+        // is the next one the clock hands out, and two states would share it.
+        let revision = self.next_transcript_revision();
+        if let Some(runtime) = self.runtimes.get_mut(thread_id) {
+            runtime.transcript_revision = revision;
+        }
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
         }

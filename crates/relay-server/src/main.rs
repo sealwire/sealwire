@@ -426,6 +426,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route("/api/stream", get(session_stream))
         .route("/api/threads", get(list_threads))
         .route("/api/threads/:thread_id/transcript", get(thread_transcript))
+        .route("/api/threads/:thread_id/rows", get(thread_transcript_rows))
         .route(
             "/api/threads/:thread_id/entries/:item_id/detail",
             get(thread_entry_detail),
@@ -1483,6 +1484,35 @@ fn transcript_read_error(error: TranscriptReadError) -> (StatusCode, Json<ApiErr
         status,
         Json(ApiError::new(code.as_str(), error.to_string())),
     )
+}
+
+#[derive(Debug, Deserialize)]
+struct ThreadTranscriptRowsQuery {
+    /// A JSON array of row ids, so an id can hold any character.
+    ids: String,
+}
+
+async fn thread_transcript_rows(
+    Path(thread_id): Path<String>,
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Query(query): Query<ThreadTranscriptRowsQuery>,
+) -> Result<Json<ApiEnvelope<ThreadTranscriptResponse>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    let row_ids: Vec<String> = serde_json::from_str(&query.ids)
+        .map_err(|error| bad_request(format!("`ids` must be a JSON array of row ids: {error}")))?;
+    crate::protocol::validate_transcript_row_ids(&row_ids).map_err(bad_request)?;
+    context
+        .app
+        .read_thread_transcript_rows(crate::protocol::ReadThreadTranscriptRowsInput {
+            thread_id,
+            row_ids,
+            device_id: None,
+        })
+        .await
+        .map(|rows| Json(ApiEnvelope::ok(rows)))
+        .map_err(classify_session_error)
 }
 
 async fn thread_entry_detail(

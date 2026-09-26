@@ -40,6 +40,14 @@ export function createClearedTranscriptHydrationPatch() {
     // every cheaper write; anything that cannot preserve it clears it, and the
     // next page merge re-establishes it. An empty window is trivially both.
     transcriptHydrationKeyed: true,
+    // Rows whose body we still owe the screen, keyed by row id; see
+    // transcript-row-recovery.js. Maintained from the snapshot tail only.
+    transcriptUnresolvedRows: new Map(),
+    transcriptRowBodyRevisions: new Map(),
+    transcriptRowSeenRevisions: new Map(),
+    // A tail shell was seen since the last tail fetch; see prepareTranscriptHydrationState.
+    transcriptTailSawShells: false,
+    transcriptHydrationNeedsTailRepair: false,
   };
 }
 
@@ -88,6 +96,11 @@ export function stashTranscriptHydrationForThread(state, extra = null) {
     tailReady: Boolean(state.transcriptHydrationTailReady),
     generation: state.transcriptHydrationGeneration ?? null,
     keyed: state.transcriptHydrationKeyed === true,
+    // Owed rows and what the thread knew about each row travel with the window,
+    // or a restored thread would re-ask nothing and accept copies it had outgrown.
+    unresolved: [...unresolvedRowsOf(state).keys()],
+    bodyRevisions: new Map(rowBodyRevisionsOf(state)),
+    seenRevisions: new Map(rowSeenRevisionsOf(state)),
     ...(extra ? { extra } : {}),
   });
   while (cache.size > MAX_RETAINED_HYDRATION_THREADS) {
@@ -134,6 +147,11 @@ export function restoreTranscriptHydrationForThread(state, threadId) {
     // A restored window keeps the proof it was stashed with; a stash written
     // before this field existed restores as unproven, not as trusted.
     transcriptHydrationKeyed: stash.keyed === true,
+    transcriptUnresolvedRows: new Map(
+      (stash.unresolved || []).map((rowId) => [rowId, freshUnresolvedRow()])
+    ),
+    transcriptRowBodyRevisions: new Map(stash.bodyRevisions || []),
+    transcriptRowSeenRevisions: new Map(stash.seenRevisions || []),
     // Leave status idle: the next snapshot's prepareTranscriptHydration recomputes
     // whether the tail still needs a fetch, merging onto the restored window.
     transcriptHydrationStatus: "idle",
@@ -280,17 +298,6 @@ export function transcriptEntryContentOmitted(entry) {
   return contentStateOf(entry) === CONTENT_STATE_OMITTED;
 }
 
-// True when the snapshot's tail contains a preview/omitted entry whose
-// authoritative body we do not already hold. This is the sole re-hydration gate
-// (no signature/shape gate), so a same-id `full -> preview/omitted` transition
-// also re-fetches. It is self-terminating:
-//   * no full body cached            -> fetch;
-//   * preview whose body is LONGER than our cached body (a stale partial)
-//                                     -> fetch (the grown server body wins);
-//   * omitted whose cached body is non-terminal (still running, provisional)
-//                                     -> fetch; once terminal+full it is trusted;
-//   * otherwise (cached full+terminal, or a preview no longer than our body)
-//                                     -> trusted, no fetch.
 /**
  * Has the transcript advanced past the revision we last fetched at, with no
  * turn still running? Then a cached body predates the final text.
@@ -308,49 +315,360 @@ function turnSettledSinceHydration(state, snapshot) {
   return revision !== state.transcriptHydrationBodyRevision;
 }
 
-function snapshotTailNeedsFullText(state, snapshot) {
-  const entries = state.transcriptHydrationEntries;
-  for (const entry of snapshot.transcript || []) {
-    const incomingState = contentStateOf(entry);
-    if (incomingState === CONTENT_STATE_FULL) {
+// A running row we can only see by reading it is re-read at most this often.
+export const RUNNING_ROW_REFRESH_MS = 1_500;
+
+// Retry spacing for a row whose recovery failed; doubles per attempt.
+export const ROW_RECOVERY_RETRY_BASE_MS = 1_000;
+export const ROW_RECOVERY_RETRY_MAX_MS = 30_000;
+
+function freshUnresolvedRow() {
+  return { attempts: 0, retryAt: 0, inFlight: false };
+}
+
+function unresolvedRowsOf(state) {
+  if (!(state.transcriptUnresolvedRows instanceof Map)) {
+    state.transcriptUnresolvedRows = new Map();
+  }
+  return state.transcriptUnresolvedRows;
+}
+
+// `{ revision, at, terminal }` for each row whose held body came from a read (a
+// page or a recovery). A merge overwrites the held row's status, so whether the
+// body was read after the row finished lives here. Deltas never set it.
+function rowBodyRevisionsOf(state) {
+  if (!(state.transcriptRowBodyRevisions instanceof Map)) {
+    state.transcriptRowBodyRevisions = new Map();
+  }
+  return state.transcriptRowBodyRevisions;
+}
+
+// Authoritative rows (a page, a recovery) settle whatever we owed for them.
+function resolveRowsCarriedBy(state, rows, bodyRevision = null) {
+  const unresolved = unresolvedRowsOf(state);
+  const revisions = rowBodyRevisionsOf(state);
+  for (const row of rows) {
+    const rowId = transcriptRowKey(row);
+    if (!rowId) {
       continue;
     }
-    const cached = entries?.get?.(transcriptRowKey(entry));
-    if (!isFullContent(cached)) {
-      return true;
-    }
-    if (incomingState === CONTENT_STATE_PREVIEW) {
-      const cachedLen = typeof cached.text === "string" ? cached.text.length : 0;
-      const previewLen = typeof entry.text === "string" ? entry.text.length : 0;
-      if (cachedLen < previewLen) {
-        return true;
-      }
-      // Length cannot establish freshness. The relay clips a preview to a FIXED
-      // `max_transcript_chars` (1600 local, 1200 remote), so `previewLen` is
-      // that constant for every long message and the test above is really
-      // "cachedLen >= 1600" — which any mid-turn body passes. There is no
-      // per-entry completion event in the relay, so a turn's final text arrives
-      // ONLY as this preview; trusting the cache on length alone is what left
-      // the last message of a long task rendering as its mid-turn tail until a
-      // reload. Cursor makes it certain rather than likely, its bridge emitting
-      // no deltas at all for a foreground thread.
-      //
-      // So re-check once when the turn has SETTLED. Deliberately not while it
-      // runs: the revision bumps on every delta, and the stream owns the tail
-      // then anyway, so re-checking would be a fetch per chunk. Paired with the
-      // once-per-revision arm above, this is at most one repair per turn.
-      if (turnSettledSinceHydration(state, snapshot)) {
-        return true;
-      }
-      continue;
-    }
-    // Omitted: the shell text carries no usable length, so trust the cache only
-    // when it is a terminal (final) body.
-    if (!isTerminalEntryStatus(cached.status)) {
-      return true;
+    unresolved.delete(rowId);
+    if (bodyRevision != null) {
+      revisions.set(rowId, {
+        revision: bodyRevision,
+        at: Date.now(),
+        terminal: isTerminalEntryStatus(row.status),
+      });
     }
   }
-  return false;
+}
+
+// The newest transcript revision at which we learned something about each row: a
+// page or recovery (a full copy), or a snapshot that changed what we hold. A copy
+// older than that is refused everywhere, so an answer that was slow to arrive can
+// never undo a newer status, body or apply state. A snapshot that only repeats a
+// row does not count, or every streamed chunk would outdate every answer in flight.
+function rowSeenRevisionsOf(state) {
+  if (!(state.transcriptRowSeenRevisions instanceof Map)) {
+    state.transcriptRowSeenRevisions = new Map();
+  }
+  return state.transcriptRowSeenRevisions;
+}
+
+function noteRowSeen(state, rowId, revision) {
+  if (revision == null) {
+    return;
+  }
+  const seen = rowSeenRevisionsOf(state);
+  const prior = seen.get(rowId);
+  if (prior == null || revision > prior) {
+    seen.set(rowId, revision);
+  }
+}
+
+function isStaleCopy(state, rowId, revision) {
+  if (revision == null) {
+    return false;
+  }
+  const seen = rowSeenRevisionsOf(state).get(rowId);
+  return seen != null && revision < seen;
+}
+
+// A page row that the window already holds a newer copy of.
+function isStaleHeldRow(state, row, revision) {
+  const rowId = transcriptRowKey(row);
+  return state.transcriptHydrationEntries.has(rowId) && isStaleCopy(state, rowId, revision ?? null);
+}
+
+/** For reconcileAuthoritativeTail's `isStale`: is a page read at `revision` older than what we hold? */
+export function staleTranscriptRowGuard(state, revision) {
+  return (_existing, incoming) => isStaleCopy(state, transcriptRowKey(incoming), revision);
+}
+
+/** Record authoritative rows a caller merged itself (Remote's gap repair). */
+export function noteTranscriptRowsSeen(state, rows, revision) {
+  for (const row of rows || []) {
+    const rowId = transcriptRowKey(row);
+    if (rowId) {
+      noteRowSeen(state, rowId, revision);
+    }
+  }
+}
+
+/**
+ * Merge one snapshot-tail row into `entries` and keep the owed set in step.
+ * The one place a snapshot row lands, whether the render overlay or the
+ * hydration merge gets there first, so "is it owed" is always judged against
+ * the row as held before this snapshot touched it.
+ */
+function mergeSnapshotTailRow(state, entries, itemId, entry, snapshot) {
+  const existing = entries.get(itemId);
+  const revision = snapshot.transcript_revision ?? null;
+  if (existing !== undefined && isStaleCopy(state, itemId, revision)) {
+    return existing;
+  }
+  const incoming = prepareSnapshotOverlayEntry(existing, entry);
+  if (snapshotRowTellsSomethingNew(existing, incoming)) {
+    noteRowSeen(state, itemId, revision);
+  }
+  const unresolved = unresolvedRowsOf(state);
+  if (rowNeedsRecovery(existing, incoming, snapshot, rowBodyRevisionsOf(state))) {
+    oweRow(unresolved, itemId);
+  } else if (contentStateOf(incoming) === CONTENT_STATE_FULL || incoming.withdrawn === true) {
+    // Only an authoritative body settles a row; a frame that merely stops
+    // asking (its status was just overwritten) does not.
+    unresolved.delete(itemId);
+  }
+  if (contentStateOf(incoming) !== CONTENT_STATE_FULL) {
+    state.transcriptTailSawShells = true;
+  }
+  return mergeTranscriptEntry(existing, incoming);
+}
+
+// A status or withdrawal change, or a full copy that differs from ours (its text,
+// or its tool, apply state included). Tail rows only, so the compare stays small.
+function snapshotRowTellsSomethingNew(existing, incoming) {
+  if (existing === undefined) {
+    return true;
+  }
+  if (existing.status !== incoming.status || (existing.withdrawn === true) !== (incoming.withdrawn === true)) {
+    return true;
+  }
+  // Compaction clips text and diffs but keeps these as they are, so a clipped
+  // row can still report them changed.
+  if (
+    (existing.tool?.apply_state ?? null) !== (incoming.tool?.apply_state ?? null)
+    || (existing.tool?.can_apply ?? null) !== (incoming.tool?.can_apply ?? null)
+  ) {
+    return true;
+  }
+  if (contentStateOf(incoming) !== CONTENT_STATE_FULL) {
+    return false;
+  }
+  return (
+    existing.text !== incoming.text
+    || JSON.stringify(existing.tool ?? null) !== JSON.stringify(incoming.tool ?? null)
+  );
+}
+
+// Owed rows the relay keeps failing on are kept to this many, newest first.
+export const MAX_OWED_ROWS = 128;
+
+function oweRow(unresolved, rowId) {
+  if (unresolved.has(rowId)) {
+    return;
+  }
+  unresolved.set(rowId, freshUnresolvedRow());
+  if (unresolved.size <= MAX_OWED_ROWS) {
+    return;
+  }
+  for (const [oldestId, record] of unresolved) {
+    if (unresolved.size <= MAX_OWED_ROWS) {
+      break;
+    }
+    if (!record.inFlight && oldestId !== rowId) {
+      unresolved.delete(oldestId);
+    }
+  }
+}
+
+/**
+ * Do we owe the screen this row's body, given the copy held BEFORE this
+ * snapshot is merged (the merge overwrites its status)?
+ *
+ * A running row is owed when nothing readable is held. After that its growth is
+ * the delta stream's; only a shell whose body we could get by reading alone is
+ * re-read as the revision moves, and no more often than RUNNING_ROW_REFRESH_MS.
+ * A finished row is owed until we hold a full body that was read after it
+ * finished. A preview is clipped to a fixed length, so length cannot prove a
+ * held body is final: once the turn settles, a preview row is owed once more
+ * unless its body was read at or after this revision.
+ */
+function rowNeedsRecovery(existing, incoming, snapshot, bodyRevisions, now = Date.now()) {
+  if (incoming.withdrawn === true || existing?.withdrawn === true) {
+    return false;
+  }
+  const incomingState = contentStateOf(incoming);
+  if (incomingState === CONTENT_STATE_FULL) {
+    return false;
+  }
+  const read = bodyRevisions.get(transcriptRowKey(incoming));
+  if (!isTerminalEntryStatus(incoming.status)) {
+    if (!existing || contentStateOf(existing) === CONTENT_STATE_OMITTED) {
+      return true;
+    }
+    return (
+      incomingState === CONTENT_STATE_OMITTED
+      && read != null
+      && snapshot.transcript_revision != null
+      && read.revision < snapshot.transcript_revision
+      && now - read.at >= RUNNING_ROW_REFRESH_MS
+    );
+  }
+  if (!isFullContent(existing) || !isTerminalEntryStatus(existing.status)) {
+    return true;
+  }
+  if (read?.terminal === false) {
+    return true;
+  }
+  if (incomingState !== CONTENT_STATE_PREVIEW) {
+    return false;
+  }
+  const heldLen = typeof existing.text === "string" ? existing.text.length : 0;
+  const previewLen = typeof incoming.text === "string" ? incoming.text.length : 0;
+  if (heldLen < previewLen) {
+    return true;
+  }
+  const revision = snapshot.transcript_revision;
+  if (snapshot.active_turn_id || revision == null) {
+    return false;
+  }
+  return read == null || read.revision < revision;
+}
+
+/**
+ * Take up to `max` owed rows that are not in flight and whose retry time has
+ * come, marking them in flight. `nextRetryAt` is the earliest pending retry.
+ */
+export function takeDueTranscriptRows(state, now, max) {
+  const due = [];
+  let nextRetryAt = null;
+  for (const [rowId, record] of unresolvedRowsOf(state)) {
+    if (record.inFlight) {
+      continue;
+    }
+    if (record.retryAt > now) {
+      nextRetryAt = nextRetryAt == null ? record.retryAt : Math.min(nextRetryAt, record.retryAt);
+      continue;
+    }
+    if (due.length < max) {
+      record.inFlight = true;
+      due.push(rowId);
+    }
+  }
+  return { due, nextRetryAt };
+}
+
+export function noteTranscriptRowsFailed(state, rowIds, now) {
+  const unresolved = unresolvedRowsOf(state);
+  for (const rowId of rowIds) {
+    const record = unresolved.get(rowId);
+    if (!record) {
+      continue;
+    }
+    record.attempts += 1;
+    record.inFlight = false;
+    record.retryAt =
+      now + Math.min(ROW_RECOVERY_RETRY_MAX_MS, ROW_RECOVERY_RETRY_BASE_MS * 2 ** (record.attempts - 1));
+  }
+}
+
+/**
+ * Merge recovered rows into the rows the window already holds; never adds a
+ * row. `bodyRevision` is the snapshot revision the request was made at.
+ */
+export function createRecoveredTranscriptRowsPatch(
+  state,
+  page,
+  requestedIds,
+  { prepareEntry = defaultPrepareTranscriptEntry, bodyRevision = null, now = Date.now() } = {}
+) {
+  const entries = state.transcriptHydrationEntries;
+  const unresolved = unresolvedRowsOf(state);
+  const revisions = rowBodyRevisionsOf(state);
+  // The relay stamps the revision it read at; the request-time snapshot is the fallback.
+  const answerRevision = page?.revision ?? bodyRevision;
+  let workingState = state;
+  let accumulatedPatch = null;
+  const answered = new Set();
+  for (const entry of page?.entries || []) {
+    const rowId = transcriptRowKey(entry);
+    if (!rowId) {
+      continue;
+    }
+    answered.add(rowId);
+    const existing = entries.get(rowId);
+    if (existing === undefined) {
+      continue;
+    }
+    const read = revisions.get(rowId);
+    // A newer copy was already seen, or the answer was read before the row
+    // finished (rows never reopen): keep what we have and ask again.
+    const stale =
+      isStaleCopy(state, rowId, answerRevision)
+      || (read != null && answerRevision != null && read.revision > answerRevision);
+    const predatesFinish =
+      isTerminalEntryStatus(existing.status) && !isTerminalEntryStatus(entry.status);
+    if (stale || predatesFinish) {
+      continue;
+    }
+    const prepared = prepareEntry(
+      workingState,
+      page.thread_id || state.transcriptHydrationThreadId,
+      entry
+    ) || {};
+    if (prepared.patch) {
+      accumulatedPatch = { ...(accumulatedPatch || {}), ...prepared.patch };
+      workingState = { ...workingState, ...prepared.patch };
+    }
+    entries.set(rowId, mergeTranscriptEntry(existing, toTranscriptEntry(prepared.entry || entry)));
+    unresolved.delete(rowId);
+    noteRowSeen(state, rowId, answerRevision);
+    if (answerRevision != null) {
+      revisions.set(rowId, {
+        revision: answerRevision,
+        at: now,
+        terminal: isTerminalEntryStatus(entry.status),
+      });
+    }
+  }
+  for (const rowId of page?.missing_rows || []) {
+    answered.add(rowId);
+    unresolved.delete(rowId);
+  }
+  // Deferred rows only lost the byte budget: ask again at once. Anything else
+  // still owed (left out, or a refused stale answer) backs off, so a relay that
+  // keeps answering stale cannot spin this.
+  const deferred = new Set(page?.deferred_rows || []);
+  const retry = [];
+  for (const rowId of requestedIds) {
+    const record = unresolved.get(rowId);
+    if (!record) {
+      continue;
+    }
+    if (deferred.has(rowId)) {
+      record.inFlight = false;
+      record.retryAt = 0;
+    } else {
+      retry.push(rowId);
+    }
+  }
+  noteTranscriptRowsFailed(state, retry, now);
+  return {
+    ...(accumulatedPatch || {}),
+    transcriptHydrationEntries: entries,
+    transcriptUnresolvedRows: unresolved,
+  };
 }
 
 export function prepareTranscriptHydrationState(state, snapshot) {
@@ -410,22 +728,21 @@ export function prepareTranscriptHydrationState(state, snapshot) {
     snapshot.transcript_revision != null
     && snapshot.transcript_revision === state.transcriptHydrationFetchedRevision;
 
-  // Re-arm hydration whenever the visible tail still carries a preview/omitted
-  // entry whose authoritative body we don't already hold. `snapshotTailNeedsFullText`
-  // is the sole gate (NOT a signature/shape change), so:
-  //   * a NEW oversized entry joining the tail re-fetches (its body is uncached);
-  //   * a same-id entry transitioning `full -> preview/omitted` (it grew past the
-  //     budget or was shelled) ALSO re-fetches — the previous shape-change gate
-  //     missed this and left the entry frozen on a stale partial body;
-  //   * it stays loop-safe because the gate is self-terminating: once we hold the
-  //     full terminal body (or a preview no longer than our cache), it returns
-  //     false, so repeated snapshots of one turn and pure preview-text shrinks
-  //     never re-fetch — and a re-arm never overlaps an in-flight fetch.
+  // Bodies are owed and recovered row by row (transcript-row-recovery.js), never
+  // by re-reading the latest page, which with long rows holds only one or two.
+  // The tail page is read once more only when a turn settles after shells were
+  // seen, to place rows a skipped snapshot never named.
   const reHydrateTail =
     sameThreadWithVisibleEntries
     && !hydrationInFlight
-    && !alreadyFetchedThisRevision
-    && snapshotTailNeedsFullText(state, snapshot);
+    && (
+      state.transcriptHydrationNeedsTailRepair === true
+      || (
+        !alreadyFetchedThisRevision
+        && state.transcriptTailSawShells === true
+        && turnSettledSinceHydration(state, snapshot)
+      )
+    );
 
   let patch = sameThreadWithVisibleEntries
     ? createMergedSnapshotTailPatch(state, snapshot, signature)
@@ -540,7 +857,11 @@ export function createClearedTranscriptHydrationPromisePatch(state, promise) {
  * exactly the transcripts the repair targets.
  */
 export function createTranscriptHydrationRevisionPatch(bodyRevision) {
-  return { transcriptHydrationBodyRevision: bodyRevision ?? null };
+  return {
+    transcriptHydrationBodyRevision: bodyRevision ?? null,
+    transcriptTailSawShells: false,
+    transcriptHydrationNeedsTailRepair: false,
+  };
 }
 
 /**
@@ -581,13 +902,15 @@ export function createMergedTranscriptHydrationPagePatch(
   const nextOrder = [...state.transcriptHydrationOrder];
   const pageItemIds = [];
   const preparedPageRows = [];
+  const isStale = staleTranscriptRowGuard(state, page.revision ?? null);
+  const mergeFreshRow = (existing, incoming) =>
+    (existing !== undefined && isStale(existing, incoming) ? existing : mergeTranscriptEntry(existing, incoming));
 
   for (const entry of page.entries || []) {
     const itemId = transcriptRowKey(entry);
     if (!itemId) {
       continue;
     }
-
     const prepared = prepareEntry(
       workingState,
       page.thread_id || state.transcriptHydrationThreadId,
@@ -618,18 +941,21 @@ export function createMergedTranscriptHydrationPagePatch(
     && windowIsOrderKeyed(state.transcriptHydrationOrder, state.transcriptHydrationEntries)
   ) {
     const draft = { order: nextOrder, entries: nextEntries };
-    mergeWindowRowsInPlace(draft, preparedPageRows, { mergeRow: mergeTranscriptEntry });
+    mergeWindowRowsInPlace(draft, preparedPageRows, { mergeRow: mergeFreshRow });
     nextOrderValue = draft.order;
     nextKeyed = true;
   } else {
     for (const pageRow of preparedPageRows) {
       nextEntries.set(
         transcriptRowKey(pageRow),
-        mergeTranscriptEntry(nextEntries.get(transcriptRowKey(pageRow)), pageRow)
+        mergeFreshRow(nextEntries.get(transcriptRowKey(pageRow)), pageRow)
       );
     }
     nextOrderValue = uniqueItemIds([...pageItemIds, ...nextOrder]);
   }
+  const freshRows = preparedPageRows.filter((row) => !isStaleHeldRow(state, row, page.revision));
+  resolveRowsCarriedBy(state, freshRows, page.revision ?? null);
+  noteTranscriptRowsSeen(state, freshRows, page.revision ?? null);
   const nextStatus =
     page.prev_cursor == null
       ? "complete"
@@ -671,7 +997,6 @@ function createMergedTailPagePatch(state, page, prepareEntry) {
     if (!itemId) {
       continue;
     }
-
     const prepared = prepareEntry(
       workingState,
       page.thread_id || state.transcriptHydrationThreadId,
@@ -703,9 +1028,13 @@ function createMergedTailPagePatch(state, page, prepareEntry) {
     // not a dropped result.
     prevCursor: page.prev_cursor,
     mergeEntry: mergeTranscriptEntry,
+    isStale: staleTranscriptRowGuard(state, page.revision ?? null),
   });
   const nextEntries = result.entries;
   const nextOrder = result.order;
+  const freshRows = preparedPageEntries.filter((row) => !isStaleHeldRow(state, row, page.revision));
+  resolveRowsCarriedBy(state, freshRows, page.revision ?? null);
+  noteTranscriptRowsSeen(state, freshRows, page.revision ?? null);
 
   const nextStatus = page.prev_cursor == null ? "complete" : "idle";
 
@@ -891,8 +1220,23 @@ export function buildHydratedTranscriptProgress(state) {
 function computeSnapshotTranscriptTruncated(state, snapshot) {
   return (
     state.transcriptHydrationOlderCursor != null
-    || snapshotTailNeedsFullText(state, snapshot)
+    || unresolvedRowsOf(state).size > 0
+    || snapshotTailOwesRows(state, snapshot)
   );
+}
+
+// The render can run before this snapshot's tail is merged; judge its rows the
+// same way the merge will, without recording anything.
+function snapshotTailOwesRows(state, snapshot) {
+  const entries = state.transcriptHydrationEntries;
+  const bodyRevisions = rowBodyRevisionsOf(state);
+  for (const entry of snapshot?.transcript || []) {
+    const existing = entries?.get?.(transcriptRowKey(entry));
+    if (rowNeedsRecovery(existing, prepareSnapshotOverlayEntry(existing, entry), snapshot, bodyRevisions)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function buildHydratedTranscriptSnapshot(
@@ -921,7 +1265,7 @@ function buildHydratedTranscriptSnapshot(
     const existing = baseEntries.get(itemId);
     (overlay ||= new Map()).set(
       itemId,
-      mergeTranscriptEntry(existing, prepareSnapshotOverlayEntry(existing, entry))
+      mergeSnapshotTailRow(state, baseEntries, itemId, entry, snapshot)
     );
     if (existing === undefined) {
       unorderedIds.add(itemId);
@@ -1034,6 +1378,8 @@ export function markTranscriptWindowNeedsRepair(state) {
       entries.set(itemId, { ...entry, content_state: CONTENT_STATE_PREVIEW });
     }
   }
+  // Frames were dropped, so rows may be missing too: read the tail page again.
+  state.transcriptHydrationNeedsTailRepair = true;
   return true;
 }
 
@@ -1353,14 +1699,10 @@ function createMergedSnapshotTailPatch(state, snapshot, signature) {
     if (!itemId) {
       continue;
     }
-    const existing = entries.get(itemId);
-    if (existing === undefined) {
+    if (!entries.has(itemId)) {
       unorderedIds.add(itemId);
     }
-    entries.set(
-      itemId,
-      mergeTranscriptEntry(existing, prepareSnapshotOverlayEntry(existing, entry))
-    );
+    entries.set(itemId, mergeSnapshotTailRow(state, entries, itemId, entry, snapshot));
     tailIds.push(itemId);
   }
   // In place: an id that is not ordered yet — genuinely new, or orphaned out of
@@ -1380,6 +1722,7 @@ function createMergedSnapshotTailPatch(state, snapshot, signature) {
     // Numbered placement into a proven window leaves it proven; a positional
     // placement — taken whenever any new id arrived unnumbered — does not.
     transcriptHydrationKeyed: keyed,
+    transcriptUnresolvedRows: unresolvedRowsOf(state),
   };
 }
 

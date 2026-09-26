@@ -65,6 +65,33 @@ impl AppState {
         Ok(page.stamp_generation(generation))
     }
 
+    /// Recover named rows from the loaded runtime, each as a page would serve it.
+    pub(crate) async fn read_thread_transcript_rows(
+        &self,
+        mut input: crate::protocol::ReadThreadTranscriptRowsInput,
+    ) -> Result<ThreadTranscriptResponse, String> {
+        crate::protocol::validate_transcript_row_ids(&input.row_ids)?;
+        input.thread_id = self.canonical_session_id(&input.thread_id).await?;
+        let device_id = input.device_id.as_deref().unwrap_or_default();
+        self.ensure_thread_runtime_loaded(&input.thread_id, device_id)
+            .await?;
+        let relay = self.relay.read().await;
+        let runtime = relay
+            .runtime_for_thread(&input.thread_id)
+            .ok_or_else(|| format!("thread `{}` is not loaded", input.thread_id))?;
+        let device_scope = input
+            .device_id
+            .as_deref()
+            .map(|id| relay.device_path_scope(id))
+            .unwrap_or_default();
+        ensure_path_within_device_scope(&runtime.current_cwd, &device_scope, &relay.allowed_roots)?;
+        let rows = runtime
+            .transcript_rows(&input.thread_id, &input.row_ids)
+            .stamp_generation(relay.transcript_generation.clone());
+        rows.debug_assert_within_budget();
+        Ok(rows)
+    }
+
     async fn read_older_transcript_page(
         &self,
         input: ReadThreadTranscriptInput,

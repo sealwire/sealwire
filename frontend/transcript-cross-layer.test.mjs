@@ -219,6 +219,8 @@ test("a turn-end signature change discards an in-flight tail fetch and re-arms a
     transcriptHydrationSignature: `${snapshot.active_thread_id}|prior`,
     transcriptHydrationStatus: "idle",
     transcriptHydrationTailReady: true,
+    // Bodies are recovered by id; a tail refresh now comes from a repair.
+    transcriptHydrationNeedsTailRepair: true,
   };
 
   const midTurnSnapshot = {

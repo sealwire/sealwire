@@ -40,6 +40,7 @@ import {
 import {
   createTranscriptEntryDetailFetcher,
   createTranscriptPageFetcher,
+  createTranscriptRowsFetcher,
 } from "./transcript/api.js";
 import { transcriptPageCache } from "./transcript/page-cache-instance.js";
 import {
@@ -103,10 +104,15 @@ import {
   reduceTranscriptEntryPatchEvent,
 } from "../shared/transcript-event-reducer.js";
 import { reconcileAuthoritativeTail } from "../shared/authoritative-tail-merge.js";
+import {
+  noteTranscriptRowsSeen,
+  staleTranscriptRowGuard,
+} from "../shared/transcript-hydration-store.js";
 import { preserveVisibleTranscriptText } from "../shared/preserve-visible-transcript-text.js";
 import { reviewerPreviewEntriesFromPage } from "../shared/reviewer-panel.js";
 
 const fetchTranscriptPageOverBroker = createTranscriptPageFetcher(dispatchOrRecover);
+const fetchTranscriptRowsOverBroker = createTranscriptRowsFetcher(dispatchOrRecover);
 const fetchRawTranscriptPage = fetchTranscriptPageOverBroker;
 const fetchTranscriptEntryDetailRequest =
   createTranscriptEntryDetailFetcher(dispatchOrRecover, {
@@ -705,8 +711,14 @@ async function repairActiveTranscriptTail(threadId, targetRevision) {
     return "retry";
   }
 
+  const pageRevision = numericRevision(page.revision);
+  // Read before the change that opened the gap, so it cannot close it.
+  if (pageRevision != null && numericRevision(targetRevision) != null && pageRevision < numericRevision(targetRevision)) {
+    return "retry";
+  }
   const pageEntries = Array.isArray(page.entries) ? page.entries : [];
   const current = Array.isArray(liveSession.transcript) ? liveSession.transcript : [];
+  const repairsWindowThread = state.transcriptHydrationThreadId === threadId;
   // The array holds entries with no `item_id` (never addressable) alongside
   // the normal, id-keyed ones — build the id order/lookup the shared
   // primitive expects from the addressable ones, and remember where the rest
@@ -718,10 +730,18 @@ async function repairActiveTranscriptTail(threadId, targetRevision) {
     entries,
     pageEntries,
     currentRevision: numericRevision(liveSession.transcript_revision),
-    pageRevision: numericRevision(page.revision),
+    pageRevision,
     targetRevision: numericRevision(targetRevision),
     prevCursor: page.prev_cursor,
+    // The same rule every other merge keeps: an older copy never undoes a newer
+    // one. The row records belong to the window's thread, and row ids are only
+    // unique within a thread, so they are consulted and kept for that thread alone.
+    isStale: repairsWindowThread ? staleTranscriptRowGuard(state, pageRevision) : null,
   });
+  if (repairsWindowThread) {
+    // Only ever advances, so the refused rows leave their newer mark alone.
+    noteTranscriptRowsSeen(state, pageEntries, pageRevision);
+  }
 
   const nextSession = {
     ...liveSession,
@@ -2553,6 +2573,7 @@ async function sendHeartbeat() {
 async function hydrateActiveTranscript(snapshot) {
   return hydrateRemoteTranscript(state, snapshot, {
     fetchPage: fetchTranscriptPage,
+    fetchRows: fetchTranscriptRowsOverBroker,
     onProgress(hydratedSnapshot) {
       applyRenderedSession(hydratedSnapshot, {
         hydrateTranscript: false,

@@ -26,6 +26,8 @@ import {
  * @param {string|null} [input.prevCursor] - page.prev_cursor.
  * @param {(existing: object|undefined, incoming: object) => object} [input.mergeEntry] -
  *   defaults to a never-shorten text overlay (see `defaultMergeEntry`).
+ * @param {(existing: object, incoming: object) => boolean} [input.isStale] - true when
+ *   the page's copy is older than what the caller already holds; that row is kept.
  * @returns {{order: string[], entries: Map<string, object>, repaired: object[],
  *   revision: number|null, truncated: boolean, olderCursor: string|null}}
  */
@@ -38,7 +40,14 @@ export function reconcileAuthoritativeTail({
   targetRevision = null,
   prevCursor = null,
   mergeEntry = defaultMergeEntry,
+  isStale = null,
 }) {
+  // A row the caller knows a newer copy of keeps that copy, but still stands in
+  // the page's order so its neighbours are placed around it.
+  const merge = isStale
+    ? (existing, incoming) =>
+      (existing !== undefined && isStale(existing, incoming) ? existing : mergeEntry(existing, incoming))
+    : mergeEntry;
   const addressable = (pageEntries || []).filter((entry) => transcriptRowKey(entry));
   const revision = maxRevision(currentRevision, pageRevision, targetRevision);
   const tail = {
@@ -54,7 +63,7 @@ export function reconcileAuthoritativeTail({
   // sits on. The caller's own mergeEntry still decides CONTENT either way.
   if (rowsAreOrderKeyed(addressable) && windowIsOrderKeyed(order, entries)) {
     const draft = { order: [...order], entries: new Map(entries) };
-    mergeWindowRowsInPlace(draft, addressable, { mergeRow: mergeEntry });
+    mergeWindowRowsInPlace(draft, addressable, { mergeRow: merge });
     return {
       ...tail,
       order: draft.order,
@@ -76,7 +85,7 @@ export function reconcileAuthoritativeTail({
     // Entries with no item_id are dropped above: the page cannot be
     // authoritative for something it cannot name.
     const itemId = transcriptRowKey(entry);
-    const merged = mergeEntry(nextEntries.get(itemId), entry);
+    const merged = merge(nextEntries.get(itemId), entry);
     nextEntries.set(itemId, merged);
     pageItemIds.push(itemId);
     repaired.push(merged);

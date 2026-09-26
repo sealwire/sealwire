@@ -19,11 +19,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { hydrateTranscript } from "./shared/transcript-hydration.js";
+import { recoverTranscriptRows } from "./shared/transcript-row-recovery.js";
 import {
   buildHydratedTranscriptProgress,
   createClearedTranscriptHydrationPatch,
   createClearedTranscriptHydrationPromisePatch,
   createMergedTranscriptHydrationPagePatch,
+  createRecoveredTranscriptRowsPatch,
   createOwnedTranscriptHydrationIdlePatch,
   createTranscriptHydrationCompletePatch,
   prepareTranscriptHydrationState,
@@ -66,6 +68,9 @@ function makeStore() {
     },
     mergeTranscriptHydrationPage(state, page, { prepend = false } = {}) {
       Object.assign(state, createMergedTranscriptHydrationPagePatch(state, page, { prepend }));
+    },
+    mergeRecoveredTranscriptRows(state, page, rowIds, options) {
+      Object.assign(state, createRecoveredTranscriptRowsPatch(state, page, rowIds, options));
     },
     getTranscriptHydrationThreadId: (state) => state.transcriptHydrationThreadId,
     getTranscriptHydrationSignature: (state) => state.transcriptHydrationSignature,
@@ -149,6 +154,26 @@ function createConversation(threadId, { perEntryChars = PER_ENTRY_CHARS } = {}) 
         state.session = hydrated;
       },
     });
+    // Both surfaces recover owed rows after each snapshot; model that here.
+    for (let round = 0; round < 10; round += 1) {
+      const recovery = recoverTranscriptRows(state, store, {
+        fetchRows: async ({ rowIds }) => {
+          fetchCount += 1;
+          return {
+            thread_id: threadId,
+            prev_cursor: null,
+            entries: backend
+              .filter((entry) => rowIds.includes(entry.item_id))
+              .map((entry) => ({ ...entry })),
+          };
+        },
+        onProgress: (hydrated) => {
+          state.session = hydrated;
+        },
+      });
+      if (!recovery) break;
+      await recovery;
+    }
   }
 
   return {

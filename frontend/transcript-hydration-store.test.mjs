@@ -395,7 +395,7 @@ test("buildHydratedTranscriptProgress must not republish a status a patch alread
   );
 });
 
-test("prepareTranscriptHydrationState re-arms hydration when a new oversized entry joins a hydrated thread", () => {
+test("prepareTranscriptHydrationState owes a new oversized entry that joins a hydrated thread", () => {
   // Already hydrated (tailReady) — exactly the steady state a few hundred ms into
   // a turn. A new, truncated final message must re-arm the fetch path even though
   // the thread was previously "complete".
@@ -428,11 +428,9 @@ test("prepareTranscriptHydrationState re-arms hydration when a new oversized ent
 
   const prepared = prepareTranscriptHydrationState(state, snapshot);
 
-  assert.equal(prepared.shouldHydrate, true);
-  assert.equal(prepared.alreadyComplete, false);
-  assert.equal(prepared.existingPromise, null);
-  // The fetch path is re-armed...
-  assert.equal(prepared.patch.transcriptHydrationTailReady, false);
+  // Owed by row id, not by re-reading a latest page that may not carry it...
+  assert.equal(prepared.shouldHydrate, false);
+  assert.equal(state.transcriptUnresolvedRows.has("item-final"), true);
   // ...without discarding the already-hydrated history (instant render).
   assert.deepEqual(prepared.patch.transcriptHydrationOrder, [
     "item-1",
@@ -442,7 +440,7 @@ test("prepareTranscriptHydrationState re-arms hydration when a new oversized ent
   ]);
 });
 
-test("prepareTranscriptHydrationState re-arms the newest entry even when a prior fetch left its promise parked", () => {
+test("prepareTranscriptHydrationState owes the newest entry even when a prior fetch left its promise parked", () => {
   // Regression: the in-flight guard that fixed the freeze keyed off
   // `transcriptHydrationPromise != null` as well as status. But a tail fetch's
   // promise is only cleared when its signature still matches
@@ -483,16 +481,13 @@ test("prepareTranscriptHydrationState re-arms the newest entry even when a prior
     ],
   };
 
-  const prepared = prepareTranscriptHydrationState(state, snapshot);
+  prepareTranscriptHydrationState(state, snapshot);
 
   assert.equal(
-    prepared.shouldHydrate,
+    state.transcriptUnresolvedRows.has("item-omitted"),
     true,
-    "a settled (non-loading) status must re-arm the newest entry even with a leftover promise"
+    "a leftover promise must not stop the newest entry from being owed"
   );
-  assert.equal(prepared.alreadyComplete, false);
-  assert.equal(prepared.existingPromise, null);
-  assert.equal(prepared.patch.transcriptHydrationTailReady, false);
 });
 
 test("prepareTranscriptHydrationState does not re-hydrate when only an existing entry's preview shrinks", () => {
@@ -522,7 +517,7 @@ test("prepareTranscriptHydrationState does not re-hydrate when only an existing 
   assert.equal(prepared.alreadyComplete, true);
 });
 
-test("prepareTranscriptHydrationState re-arms hydration when an OMITTED entry joins a hydrated thread (live path)", () => {
+test("prepareTranscriptHydrationState owes an OMITTED entry that joins a hydrated thread (live path)", () => {
   // Live path: a fully-hydrated, "complete" thread receives a new entry the relay
   // dropped to an identity shell (content_state omitted). It must re-arm the
   // fetch path, keep the already-visible history, and present the omitted entry
@@ -557,10 +552,7 @@ test("prepareTranscriptHydrationState re-arms hydration when an OMITTED entry jo
 
   const prepared = prepareTranscriptHydrationState(state, snapshot);
 
-  assert.equal(prepared.shouldHydrate, true);
-  assert.equal(prepared.alreadyComplete, false);
-  assert.equal(prepared.existingPromise, null);
-  assert.equal(prepared.patch.transcriptHydrationTailReady, false);
+  assert.equal(state.transcriptUnresolvedRows.has("item-omitted"), true);
   // History preserved + omitted entry appended in order.
   assert.deepEqual(prepared.patch.transcriptHydrationOrder, [
     "item-1",
@@ -632,57 +624,52 @@ test("prepareTranscriptHydrationState does not re-fetch a still-omitted tail aga
   );
 });
 
-test("prepareTranscriptHydrationState re-fetches the omitted tail once the revision advances, recording it", () => {
-  const state = hydratedState({
-    transcriptHydrationEntries: new Map([
-      [
-        "item-x",
-        {
-          item_id: "item-x",
-          kind: "agent_text",
-          text: null,
-          status: "running",
-          turn_id: "turn-9",
-          tool: null,
-          content_state: "omitted",
-        },
-      ],
-    ]),
-    transcriptHydrationOrder: ["item-x"],
-    transcriptHydrationSignature: "thread-1|turn-9|1|item-x|agent_text|turn-9||||",
-    transcriptHydrationStatus: "idle",
-    transcriptHydrationTailReady: true,
-    transcriptHydrationFetchedRevision: 30,
-  });
-  const snapshot = {
+test("a running shell we can only read is re-read once the revision advances, and only then", () => {
+  // No delta ever grows this row (a tool call, or a provider that sends none), so
+  // re-reading it is the only way its partial body moves while it runs.
+  const partial = {
+    item_id: "item-x",
+    kind: "agent_text",
+    text: "PARTIAL",
+    status: "running",
+    turn_id: "turn-9",
+    tool: null,
+    content_state: "full",
+  };
+  const shellAt = (revision) => ({
     active_thread_id: "thread-1",
     active_turn_id: "turn-9",
-    transcript_revision: 31,
+    transcript_revision: revision,
     transcript_truncated: true,
-    transcript: [
-      {
-        item_id: "item-x",
-        kind: "agent_text",
-        text: "shell...",
-        status: "running",
-        turn_id: "turn-9",
-        tool: null,
-        content_state: "omitted",
-      },
-    ],
-  };
+    transcript: [{ ...partial, text: "shell...", content_state: "omitted" }],
+  });
+  const stateReadAt30 = () =>
+    hydratedState({
+      transcriptHydrationEntries: new Map([["item-x", partial]]),
+      transcriptHydrationOrder: ["item-x"],
+      transcriptHydrationTailReady: true,
+      transcriptRowBodyRevisions: new Map([["item-x", { revision: 30, at: 0 }]]),
+    });
 
-  const prepared = prepareTranscriptHydrationState(state, snapshot);
+  const same = stateReadAt30();
+  prepareTranscriptHydrationState(same, shellAt(30));
+  assert.equal(same.transcriptUnresolvedRows.has("item-x"), false, "nothing new at the revision it was read at");
 
+  const advanced = stateReadAt30();
+  const prepared = prepareTranscriptHydrationState(advanced, shellAt(31));
+  assert.equal(advanced.transcriptUnresolvedRows.has("item-x"), true, "a bumped revision means new data — re-read it");
+  assert.equal(prepared.shouldHydrate, false, "by row id, never by re-reading the latest page");
+
+  const grownByDeltas = hydratedState({
+    transcriptHydrationEntries: new Map([["item-x", partial]]),
+    transcriptHydrationOrder: ["item-x"],
+    transcriptHydrationTailReady: true,
+  });
+  prepareTranscriptHydrationState(grownByDeltas, shellAt(31));
   assert.equal(
-    prepared.shouldHydrate,
-    true,
-    "a bumped revision means new data — re-fetch the latest partial"
-  );
-  assert.equal(
-    prepared.patch.transcriptHydrationFetchedRevision,
-    31,
-    "the fetched revision is recorded so same-revision settles don't re-fetch"
+    grownByDeltas.transcriptUnresolvedRows.has("item-x"),
+    false,
+    "a body the delta stream grows is the stream's to grow"
   );
 });
 
@@ -726,7 +713,7 @@ test("prepareTranscriptHydrationState does not hydrate when a new FULL entry end
   assert.equal(full.content_state, "full");
 });
 
-test("re-hydrates when an already-hydrated full-but-partial entry is later compacted to omitted (streaming settle)", () => {
+test("owes an already-hydrated full-but-partial entry once it settles into an omitted shell", () => {
   // Review finding F1: content_state `full` means "complete as of this
   // revision", not "final". An entry hydrated mid-stream as full+partial, then
   // later shelled to `omitted` by the server (its body grew/over budget), must
@@ -770,14 +757,17 @@ test("re-hydrates when an already-hydrated full-but-partial entry is later compa
   const prepared = prepareTranscriptHydrationState(state, snapshot);
   Object.assign(state, prepared.patch);
 
-  assert.equal(prepared.shouldHydrate, true, "an omitted same-id transition must re-hydrate");
-  assert.equal(prepared.alreadyComplete, false);
+  assert.equal(
+    state.transcriptUnresolvedRows.has("item-x"),
+    true,
+    "a body read while the row ran predates its final text"
+  );
   // The clipped shell text must never become the rendered body.
   const merged = state.transcriptHydrationEntries.get("item-x");
   assert.notEqual(merged.text, "PARTIALplusmuchmore th...");
 });
 
-test("a longer preview replaces a stale shorter cached body and re-hydrates", () => {
+test("a longer preview replaces a stale shorter cached body, and the row is owed once it finishes", () => {
   // Review finding F1 (preview variant): a stale, shorter cached `full` body must
   // not win over the server's newer, longer preview, and the entry must still
   // re-hydrate for the remaining text.
@@ -821,11 +811,26 @@ test("a longer preview replaces a stale shorter cached body and re-hydrates", ()
   const prepared = prepareTranscriptHydrationState(state, snapshot);
   Object.assign(state, prepared.patch);
 
-  assert.equal(prepared.shouldHydrate, true, "a longer preview over a stale cache must re-hydrate");
   assert.equal(
     state.transcriptHydrationEntries.get("item-x").text,
     longPreview,
     "the longer preview must win over the stale shorter cached body"
+  );
+  assert.equal(
+    state.transcriptUnresolvedRows.has("item-x"),
+    false,
+    "while it runs the preview is readable, and the stream owns its growth"
+  );
+
+  prepareTranscriptHydrationState(state, {
+    ...snapshot,
+    transcript_revision: 31,
+    transcript: [{ ...snapshot.transcript[0], status: "completed" }],
+  });
+  assert.equal(
+    state.transcriptUnresolvedRows.has("item-x"),
+    true,
+    "a finished row whose held body was not read after it finished is owed"
   );
 });
 

@@ -4,6 +4,7 @@ import {
   createClearedTranscriptHydrationFetchedRevisionPatch,
   createClearedTranscriptHydrationPromisePatch,
   createMergedTranscriptHydrationPagePatch,
+  createRecoveredTranscriptRowsPatch,
   prepareTranscriptHydrationState,
   createTranscriptHydrationCompletePatch,
   createOwnedTranscriptHydrationIdlePatch,
@@ -138,6 +139,10 @@ export function mergeTranscriptHydrationPage(state, page, { prepend = false } = 
     state,
     createMergedTranscriptHydrationPagePatch(state, page, { prepend })
   );
+}
+
+export function mergeRecoveredTranscriptRows(state, page, rowIds, options) {
+  applyLocalTranscriptPatch(state, createRecoveredTranscriptRowsPatch(state, page, rowIds, options));
 }
 
 export { buildHydratedTranscriptProgress };

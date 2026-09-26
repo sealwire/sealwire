@@ -2,6 +2,7 @@ import {
   hydrateTranscript,
   loadOlderTranscript,
 } from "../../shared/transcript-hydration.js";
+import { recoverTranscriptRows } from "../../shared/transcript-row-recovery.js";
 import * as store from "./store.js";
 
 const INITIAL_TRANSCRIPT_MIN_ENTRIES = 12;
@@ -12,7 +13,7 @@ const INITIAL_TRANSCRIPT_MIN_ENTRIES = 12;
 const INITIAL_TRANSCRIPT_MAX_PAGES = INITIAL_TRANSCRIPT_MIN_ENTRIES;
 
 export function hydrateRemoteTranscript(state, snapshot, options) {
-  return hydrateTranscript(state, snapshot, store, {
+  const hydration = hydrateTranscript(state, snapshot, store, {
     ...options,
     incompletePageError: "remote transcript page response is incomplete",
     missingTailError: "remote transcript page response did not include visible tail entries",
@@ -20,6 +21,13 @@ export function hydrateRemoteTranscript(state, snapshot, options) {
     maxInitialPages: INITIAL_TRANSCRIPT_MAX_PAGES,
     progressBeforeFetch: true,
   });
+  // Owed rows are recovered once any tail read in flight has landed.
+  const kick = () => recoverTranscriptRows(state, store, options);
+  kick();
+  if (hydration && typeof hydration.then === "function") {
+    hydration.then(kick, kick);
+  }
+  return hydration;
 }
 
 export function loadOlderRemoteTranscript(state, options) {

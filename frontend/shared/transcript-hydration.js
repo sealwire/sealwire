@@ -107,7 +107,7 @@ export async function hydrateTranscript(
         return;
       }
 
-      store.mergeTranscriptHydrationPage(state, page, { prepend: false });
+      store.mergeTranscriptHydrationPage(state, withBodyRevision(page, snapshot), { prepend: false });
 
       let loadedPages = 1;
       while (
@@ -135,7 +135,7 @@ export async function hydrateTranscript(
         if (isRefusalEpochStale(state, capturedOlderPageRefusalEpoch)) {
           return;
         }
-        store.mergeTranscriptHydrationPage(state, olderPage, { prepend: true });
+        store.mergeTranscriptHydrationPage(state, withBodyRevision(olderPage, snapshot), { prepend: true });
         loadedPages += 1;
         if (store.getTranscriptHydrationThreadId(state) !== snapshot.active_thread_id) {
           return;
@@ -232,6 +232,7 @@ export async function loadOlderTranscript(
   const { promise: loadPromise, start: startLoad } = createStartableRequest(async () => {
     try {
       const capturedRefusalEpoch = state.transcriptRefusalEpoch;
+      const requestedAt = { transcript_revision: state.session?.transcript_revision ?? null };
       const page = await fetchOlderPageUntilRead(() => fetchPage({ threadId, before }), {
         isCurrent: () =>
           state.session?.active_thread_id === threadId
@@ -249,7 +250,7 @@ export async function loadOlderTranscript(
         return null;
       }
 
-      store.mergeTranscriptHydrationPage(state, page, { prepend: true });
+      store.mergeTranscriptHydrationPage(state, withBodyRevision(page, requestedAt), { prepend: true });
       // The history loader uses this tri-state result to decide whether to keep
       // prefetching the next page within the same burst (see
       // createTranscriptHistoryLoader), which avoids the "scroll to the top,
@@ -285,6 +286,15 @@ export async function loadOlderTranscript(
   store.setTranscriptHydrationPromise(state, loadPromise);
   startLoad();
   return loadPromise;
+}
+
+// A page read after a snapshot is at least that fresh; a relay that stamps its
+// pages says so itself, and this only fills the gap when it does not.
+function withBodyRevision(page, snapshot) {
+  if (page == null || page.revision != null || snapshot?.transcript_revision == null) {
+    return page;
+  }
+  return { ...page, revision: snapshot.transcript_revision };
 }
 
 function applyTranscriptHydrationProgress(state, store, onProgress) {

@@ -336,7 +336,7 @@ test("hydrateLocalTranscript re-entry during progress reuses the in-flight promi
   assert.ok(reenteredPromise instanceof Promise);
 });
 
-test("hydrateLocalTranscript does not recurse while a re-hydration fetch is already in flight", async () => {
+test("hydrateLocalTranscript does not recurse while a row recovery is already in flight", async () => {
   // Reproduces the hard freeze (markdown/transcript-perf-freeze-analysis.md):
   // a thread with an already-hydrated window receives a streaming snapshot whose
   // live tail is an `omitted` shell, so `reHydrateTail` arms a fetch. While that
@@ -419,27 +419,27 @@ test("hydrateLocalTranscript does not recurse while a re-hydration fetch is alre
       return;
     }
     reentryDepth += 1;
-    void hydrateLocalTranscript(state, nextSnapshot, {
-      async fetchPage() {
-        fetchCalls += 1;
-        return page;
-      },
-      onProgress,
-    });
+    void hydrateLocalTranscript(state, nextSnapshot, options);
   }
-
-  await hydrateLocalTranscript(state, snapshot, {
+  const options = {
     async fetchPage() {
       fetchCalls += 1;
       return page;
     },
+    async fetchRows({ rowIds }) {
+      fetchCalls += 1;
+      return { ...page, entries: page.entries.filter((entry) => rowIds.includes(entry.item_id)) };
+    },
     onProgress,
-  });
+  };
+
+  await hydrateLocalTranscript(state, snapshot, options);
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(
     fetchCalls,
     1,
-    "a re-hydration fetch already in flight must be reused, not restarted on every synchronous onProgress re-entry"
+    "a recovery already in flight must be reused, not restarted on every onProgress re-entry"
   );
   assert.ok(
     reentryDepth <= 1,
@@ -801,47 +801,35 @@ test("hydrateLocalTranscript does not publish a new emergency shell while its fu
   const pageGate = new Promise((resolve) => {
     releasePage = resolve;
   });
-  const renderedWhilePending = [];
-
+  const fullItem2 = {
+    item_id: "item-2",
+    kind: "agent_text",
+    text: "The relay boots with the complete provider and transcript state.",
+    status: "completed",
+    turn_id: "turn-2",
+    tool: null,
+  };
   const hydrationPromise = hydrateLocalTranscript(state, nextSnapshot, {
     async fetchPage() {
+      return { thread_id: "thread-1", prev_cursor: null, entries: [fullItem2] };
+    },
+    async fetchRows() {
       await pageGate;
-      return {
-        thread_id: "thread-1",
-        prev_cursor: null,
-        entries: [
-          {
-            item_id: "item-1",
-            kind: "agent_text",
-            text: "Earlier assistant message that is already hydrated.",
-            status: "completed",
-            turn_id: "turn-1",
-            tool: null,
-          },
-          {
-            item_id: "item-2",
-            kind: "agent_text",
-            text: "The relay boots with the complete provider and transcript state.",
-            status: "completed",
-            turn_id: "turn-2",
-            tool: null,
-          },
-        ],
-      };
+      return { thread_id: "thread-1", prev_cursor: null, entries: [fullItem2] };
     },
     onProgress(nextRenderedSnapshot) {
-      renderedWhilePending.push(nextRenderedSnapshot);
       state.session = nextRenderedSnapshot;
     },
   });
 
   await new Promise((resolve) => setImmediate(resolve));
-  const pendingText = renderedWhilePending
-    .at(-1)
-    ?.transcript?.find((entry) => entry.item_id === "item-2")?.text;
+  // What the page draws for this snapshot while the body is still on its way.
+  const pendingText = restoreHydratedTranscript(state, nextSnapshot)
+    .transcript.find((entry) => entry.item_id === "item-2")?.text;
 
   releasePage();
   await hydrationPromise;
+  await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(
     pendingText,
@@ -851,7 +839,7 @@ test("hydrateLocalTranscript does not publish a new emergency shell while its fu
   assert.equal(
     state.session.transcript.find((entry) => entry.item_id === "item-2")?.text,
     "The relay boots with the complete provider and transcript state.",
-    "the authoritative page must replace the unloaded entry with full text"
+    "the recovered row must replace the unloaded entry with full text"
   );
 });
 
@@ -1104,8 +1092,8 @@ test("a thread switch during the wait stops asking for the page it left", async 
   assert.deepEqual(state.transcriptHydrationOrder, ["item-2"]);
 });
 
-test("an older-page request made during a streaming tail refresh pages once the refresh settles", async () => {
-  // A streaming reply keeps the slot busy with tail refreshes; handing back the
+test("an older-page request made during a tail refresh pages once the refresh settles", async () => {
+  // A tail refresh (here a lagged-stream repair) holds the slot; handing back the
   // tail's `undefined` made the loader back off as if nothing could load.
   const shellEntry = {
     item_id: "item-2",
@@ -1136,6 +1124,7 @@ test("an older-page request made during a streaming tail refresh pages once the 
     transcriptHydrationOlderCursor: "cursor-older",
     transcriptHydrationSignature: "thread-1|prior",
     transcriptHydrationTailReady: true,
+    transcriptHydrationNeedsTailRepair: true,
   });
   const snapshot = {
     active_thread_id: "thread-1",
@@ -1431,6 +1420,8 @@ test("a turn-end signature change discards an in-flight tail fetch and re-arms a
     transcriptHydrationSignature: "thread-1|prior",
     transcriptHydrationStatus: "idle",
     transcriptHydrationTailReady: true,
+    // Bodies are recovered by id; a tail refresh now comes from a repair.
+    transcriptHydrationNeedsTailRepair: true,
   });
   const midTurnSnapshot = {
     active_thread_id: "thread-1",
@@ -1583,6 +1574,8 @@ test("a stale thread-A tail fetch must not clear thread-B's fetched-revision arm
     transcriptHydrationSignature: "thread-A|prior",
     transcriptHydrationStatus: "idle",
     transcriptHydrationTailReady: true,
+    // Bodies are recovered by id; a tail refresh now comes from a repair.
+    transcriptHydrationNeedsTailRepair: true,
   });
   const snapshotA = {
     active_thread_id: "thread-A",
@@ -1666,6 +1659,7 @@ test("a stale thread-A tail fetch must not clear thread-B's fetched-revision arm
   state.transcriptHydrationOrder = ["b-tail"];
   state.transcriptHydrationOlderCursor = null;
   state.transcriptHydrationTailReady = true;
+  state.transcriptHydrationNeedsTailRepair = true;
 
   const promiseB = hydrateLocalTranscript(state, snapshotB, { fetchPage, onProgress });
   await new Promise((resolve) => setImmediate(resolve));

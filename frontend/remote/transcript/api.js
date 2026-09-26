@@ -1,7 +1,10 @@
 import {
   fetchTranscriptEntryDetailViaRequester,
 } from "../../shared/transcript-entry-detail.js";
-import { normalizeThreadTranscriptPage } from "../../shared/transcript-page.js";
+import {
+  normalizeThreadTranscriptPage,
+  normalizeThreadTranscriptRows,
+} from "../../shared/transcript-page.js";
 
 export function createTranscriptPageFetcher(dispatchOrRecover) {
   return async function fetchTranscriptPage({ threadId, before }) {
@@ -12,6 +15,18 @@ export function createTranscriptPageFetcher(dispatchOrRecover) {
       },
     });
     return normalizeThreadTranscriptPage(result.thread_transcript);
+  };
+}
+
+export function createTranscriptRowsFetcher(dispatchOrRecover) {
+  return async function fetchTranscriptRows({ threadId, rowIds }) {
+    const result = await dispatchOrRecover("fetch_thread_rows", {
+      input: {
+        row_ids: rowIds,
+        thread_id: threadId,
+      },
+    });
+    return normalizeThreadTranscriptRows(result.thread_transcript);
   };
 }
 

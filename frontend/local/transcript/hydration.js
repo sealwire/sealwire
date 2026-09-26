@@ -2,6 +2,7 @@ import {
   hydrateTranscript,
   loadOlderTranscript,
 } from "../../shared/transcript-hydration.js";
+import { recoverTranscriptRows } from "../../shared/transcript-row-recovery.js";
 import * as store from "./store.js";
 
 const INITIAL_TRANSCRIPT_MIN_ENTRIES = 12;
@@ -15,7 +16,7 @@ export function selectHydrationSnapshot(state, session) {
 }
 
 export function hydrateLocalTranscript(state, snapshot, options) {
-  return hydrateTranscript(state, selectHydrationSnapshot(state, snapshot), store, {
+  const hydration = hydrateTranscript(state, selectHydrationSnapshot(state, snapshot), store, {
     ...options,
     incompletePageError: "local transcript page response is incomplete",
     missingTailError: "local transcript page response did not include visible tail entries",
@@ -23,6 +24,17 @@ export function hydrateLocalTranscript(state, snapshot, options) {
     maxInitialPages: INITIAL_TRANSCRIPT_MAX_PAGES,
     progressBeforeFetch: false,
   });
+  return kickRowRecovery(state, hydration, options);
+}
+
+// Owed rows are recovered once any tail read in flight has landed.
+function kickRowRecovery(state, hydration, options) {
+  const kick = () => recoverTranscriptRows(state, store, options);
+  kick();
+  if (hydration && typeof hydration.then === "function") {
+    hydration.then(kick, kick);
+  }
+  return hydration;
 }
 
 export function loadOlderLocalTranscript(state, options) {

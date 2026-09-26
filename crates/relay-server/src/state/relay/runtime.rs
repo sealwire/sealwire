@@ -542,6 +542,34 @@ impl ThreadRuntime {
             .is_some_and(|row| row.order_seq < cursor.order_key())
     }
 
+    /// One row exactly as a transcript page carries it.
+    fn page_view(&self, record: &TranscriptRecord) -> TranscriptEntryView {
+        let mut view = record.to_view();
+        overlay_apply_state(record, &mut view, &self.apply_states);
+        view
+    }
+
+    /// Named rows, each as `transcript_page` would serve it, in request order.
+    pub(crate) fn transcript_rows(
+        &self,
+        thread_id: &str,
+        row_ids: &[String],
+    ) -> ThreadTranscriptResponse {
+        let mut seen = std::collections::HashSet::new();
+        let requested = row_ids
+            .iter()
+            .filter(|row_id| seen.insert(row_id.as_str()))
+            .map(|row_id| {
+                let view = self
+                    .transcript
+                    .get_row(row_id)
+                    .map(|record| self.page_view(record));
+                (row_id.clone(), view)
+            })
+            .collect();
+        ThreadTranscriptResponse::rows(thread_id.to_string(), self.transcript_revision, requested)
+    }
+
     pub(crate) fn transcript_page(
         &self,
         thread_id: &str,
@@ -555,12 +583,7 @@ impl ThreadRuntime {
             thread_id.to_string(),
             upper_bound,
             self.transcript_revision,
-            |index| {
-                let record = &self.transcript[index];
-                let mut view = record.to_view();
-                overlay_apply_state(record, &mut view, &self.apply_states);
-                view
-            },
+            |index| self.page_view(&self.transcript[index]),
         );
         let mut page = window.page;
         let next_older_key = match self.transcript.get(window.start) {

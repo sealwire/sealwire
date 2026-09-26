@@ -1314,7 +1314,7 @@ impl ThreadsResponseCompactProfile {
     }
 }
 
-fn serialized_len<T: Serialize>(value: &T) -> usize {
+pub(crate) fn serialized_len<T: Serialize>(value: &T) -> usize {
     serde_json::to_vec(value)
         .map(|payload| payload.len())
         .unwrap_or(usize::MAX)
@@ -2133,6 +2133,37 @@ pub struct ReadThreadTranscriptInput {
     pub device_id: Option<String>,
 }
 
+/// Recover specific rows by relay row id, each exactly as a transcript page serves it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadThreadTranscriptRowsInput {
+    pub thread_id: String,
+    pub row_ids: Vec<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
+}
+
+/// Rows one request may name. The answer echoes ids back, so both this and the
+/// id length below bound its size.
+pub(crate) const MAX_TRANSCRIPT_ROWS_PER_REQUEST: usize = 16;
+/// Serialized length, quotes included; relay-minted row ids are far shorter.
+pub(crate) const MAX_TRANSCRIPT_ROW_ID_JSON_BYTES: usize = 258;
+
+pub(crate) fn validate_transcript_row_ids(row_ids: &[String]) -> Result<(), String> {
+    if row_ids.len() > MAX_TRANSCRIPT_ROWS_PER_REQUEST {
+        return Err(format!(
+            "a rows request may name at most {MAX_TRANSCRIPT_ROWS_PER_REQUEST} rows, got {}",
+            row_ids.len()
+        ));
+    }
+    if row_ids
+        .iter()
+        .any(|row_id| serialized_len(row_id) > MAX_TRANSCRIPT_ROW_ID_JSON_BYTES)
+    {
+        return Err("a row id in this request is longer than any the relay issues".to_string());
+    }
+    Ok(())
+}
+
 /// A transcript position the relay minted (see `state::relay::transcript_cursor`).
 /// Clients hand it back as `before` and never parse or compare it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -2178,6 +2209,12 @@ pub struct ThreadTranscriptResponse {
     pub prev_cursor: Option<TranscriptCursorToken>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_state: Option<ThreadStateView>,
+    /// Rows-by-id reads only: requested rows the runtime no longer holds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_rows: Vec<String>,
+    /// Rows-by-id reads only: held, but left for another request by the page budget.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_rows: Vec<String>,
 }
 
 /// One page's rows, packed newest-first under the byte budget, and the index of its
@@ -3890,6 +3927,54 @@ impl ThreadTranscriptResponse {
         build_reverse_thread_transcript_window(&thread_id, upper_bound, revision, entry_at)
     }
 
+    /// Requested rows in request order, packed under the page budget. Always carries
+    /// at least one held row, as a page does, so an oversized row is still reachable.
+    pub(crate) fn rows(
+        thread_id: String,
+        revision: u64,
+        requested: Vec<(String, Option<TranscriptEntryView>)>,
+    ) -> Self {
+        // Reserve room for every id to land in `missing_rows`/`deferred_rows`,
+        // measured as serialized (escapes included) plus its comma.
+        let id_bytes: usize = requested.iter().map(|(id, _)| serialized_len(id) + 1).sum();
+        let envelope_upper_bound =
+            THREAD_TRANSCRIPT_ENVELOPE_UPPER_BOUND_BYTES + thread_id.len() + id_bytes + 64;
+        let mut entries = Vec::new();
+        let mut entry_bytes_sum = 0usize;
+        let mut missing_rows = Vec::new();
+        let mut deferred_rows = Vec::new();
+        for (index, (row_id, entry)) in requested.into_iter().enumerate() {
+            if index >= MAX_TRANSCRIPT_ROWS_PER_REQUEST {
+                deferred_rows.push(row_id);
+                continue;
+            }
+            let Some(mut entry) = entry else {
+                missing_rows.push(row_id);
+                continue;
+            };
+            if !deferred_rows.is_empty() {
+                deferred_rows.push(row_id);
+                continue;
+            }
+            strip_file_change_diffs_for_transport(std::slice::from_mut(&mut entry));
+            let entry_len = serialized_len(&entry);
+            let estimated = envelope_upper_bound
+                .saturating_add(entry_bytes_sum)
+                .saturating_add(entry_len)
+                .saturating_add(entries.len());
+            if estimated > THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES && !entries.is_empty() {
+                deferred_rows.push(row_id);
+                continue;
+            }
+            entry_bytes_sum = entry_bytes_sum.saturating_add(entry_len);
+            entries.push(entry);
+        }
+        let mut page = build_thread_transcript_page(&thread_id, entries, revision);
+        page.missing_rows = missing_rows;
+        page.deferred_rows = deferred_rows;
+        page
+    }
+
     /// Pins `THREAD_TRANSCRIPT_ENVELOPE_UPPER_BOUND_BYTES`: measured as sent, once the
     /// caller has set the cursor and before the generation stamp, which is simulated.
     pub(crate) fn debug_assert_within_budget(&self) {
@@ -4027,6 +4112,8 @@ fn build_thread_transcript_page(
         entries,
         prev_cursor: None,
         thread_state: None,
+        missing_rows: Vec::new(),
+        deferred_rows: Vec::new(),
     }
 }
 

@@ -73,38 +73,39 @@ function settledSnapshot() {
 test("a settled turn re-checks a tail whose cached body only beats the preview cap", () => {
   // 3000 chars: longer than the cap, and so trusted — but it is the body from
   // the middle of the turn, not the 8000-char message the user is waiting for.
-  const prepared = prepareTranscriptHydrationState(
-    stateWithCachedMidTurnBody(3000),
-    settledSnapshot()
-  );
+  const state = stateWithCachedMidTurnBody(3000);
+  prepareTranscriptHydrationState(state, settledSnapshot());
 
   assert.equal(
-    prepared.shouldHydrate,
+    state.transcriptUnresolvedRows.has("item-9"),
     true,
     "being longer than a fixed-size preview is not evidence of being current"
   );
 });
 
-// The gate that stops this from becoming an RTT-paced storm is the existing
-// once-per-revision arm, so a second pass at the same revision must not refetch.
-test("it does not re-arm again at the same revision", () => {
+// What stops this becoming a storm is the row's own read record: a body read at
+// this revision is current, however many snapshots repeat it.
+test("it does not owe the row again once it was read at this revision", () => {
   const state = stateWithCachedMidTurnBody(3000);
-  state.transcriptHydrationBodyRevision = 41;
+  state.transcriptRowBodyRevisions = new Map([["item-9", { revision: 41, at: 0 }]]);
 
   const prepared = prepareTranscriptHydrationState(state, settledSnapshot());
 
-  assert.equal(prepared.shouldHydrate, false, "one repair per revision, not one per render");
+  assert.equal(state.transcriptUnresolvedRows.has("item-9"), false, "one repair per revision, not one per render");
+  assert.equal(prepared.shouldHydrate, false);
 });
 
 // And mid-turn it must stay quiet: a revision bumps on every delta, so
 // re-checking while the turn runs would fetch once per chunk.
 test("it stays quiet while the turn is still running", () => {
-  const prepared = prepareTranscriptHydrationState(stateWithCachedMidTurnBody(3000), {
+  const state = stateWithCachedMidTurnBody(3000);
+  const prepared = prepareTranscriptHydrationState(state, {
     ...settledSnapshot(),
     active_turn_id: "turn-7",
   });
 
-  assert.equal(prepared.shouldHydrate, false, "the stream owns the tail while it streams");
+  assert.equal(state.transcriptUnresolvedRows.has("item-9"), false, "the stream owns the tail while it streams");
+  assert.equal(prepared.shouldHydrate, false);
 });
 
 // The bug this pins, from review: the repair above records which revision the
@@ -120,10 +121,10 @@ test("a long transcript's tail is still re-checked when the turn settles", () =>
   // conversation's tail page does.
   state.transcriptHydrationOlderCursor = "older-cursor";
 
-  const prepared = prepareTranscriptHydrationState(state, settledSnapshot());
+  prepareTranscriptHydrationState(state, settledSnapshot());
 
   assert.equal(
-    prepared.shouldHydrate,
+    state.transcriptUnresolvedRows.has("item-9"),
     true,
     "having history above the tail says nothing about whether the tail is current"
   );

@@ -20,6 +20,7 @@ import {
   renderedTranscriptFromWindow,
   resolveDeltaAppend,
   transcriptWindowIsLoaded,
+  createRecoveredTranscriptRowsPatch,
 } from "../../shared/transcript-hydration-store.js";
 import { prepareTranscriptEntryForSurface } from "./details.js";
 import { applyRemoteSurfacePatch } from "../surface-state.js";
@@ -122,6 +123,22 @@ export function getTranscriptHydrationSignature(state) {
 
 export function getTranscriptHydrationCursor(state) {
   return state.transcriptHydrationOlderCursor;
+}
+
+function prepareRemoteRow(currentState, threadId, entry) {
+  const prepared = prepareTranscriptEntryForSurface(currentState, threadId, entry, {
+    applyPatch: false,
+  });
+  return { entry: prepared.entry, patch: prepared.cachePatch };
+}
+
+export function mergeRecoveredTranscriptRows(state, page, rowIds, options = {}) {
+  applyRemoteSurfacePatch(
+    createRecoveredTranscriptRowsPatch(state, page, rowIds, {
+      ...options,
+      prepareEntry: prepareRemoteRow,
+    })
+  );
 }
 
 export function mergeTranscriptHydrationPage(state, page, { prepend = false } = {}) {

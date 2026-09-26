@@ -2,7 +2,10 @@ import { transcriptRowKey } from "../../shared/transcript-row-key.js";
 import { transcript } from "../dom.js";
 import { displayedEntriesFrom, displayedThreadIdFrom } from "../displayed-thread.js";
 import { fetchTranscriptEntryDetailViaRequester } from "../../shared/transcript-entry-detail.js";
-import { normalizeThreadTranscriptPage } from "../../shared/transcript-page.js";
+import {
+  normalizeThreadTranscriptPage,
+  normalizeThreadTranscriptRows,
+} from "../../shared/transcript-page.js";
 import { relayError } from "../../shared/transcript-protocol.js";
 import {
   createThreadTranscriptPageQueryOptions,
@@ -88,6 +91,24 @@ export function createTranscriptController(ctx) {
     return normalizeThreadTranscriptPage(payload.data);
   };
 
+  // Owed rows by relay row id; never cached, since a recovery exists to beat a stale copy.
+  const fetchTranscriptRows = async ({ threadId, rowIds, signal }) => {
+    const url = new URL(
+      `/api/threads/${encodeURIComponent(threadId)}/rows`,
+      window.location.origin
+    );
+    url.searchParams.set("ids", JSON.stringify(rowIds));
+    const response = await apiFetch(url, signal ? { signal } : undefined);
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) {
+      throw relayError(
+        payload?.error?.message || "Failed to recover transcript rows",
+        payload?.error?.code
+      );
+    }
+    return normalizeThreadTranscriptRows(payload.data);
+  };
+
   // Same older-page disk cache the remote surface uses: older pages
   // (before != null) are served from IndexedDB before hitting the relay, so
   // scroll-up / thread-switch / reload don't pay a fresh relay round trip (and,
@@ -161,6 +182,7 @@ export function createTranscriptController(ctx) {
 
     return hydrateLocalTranscript(state, session, {
       fetchPage: ({ threadId, before }) => fetchTranscriptPage(threadId, { before }),
+      fetchRows: fetchTranscriptRows,
       onProgress(hydratedSnapshot) {
         renderSession(hydratedSnapshot);
       },

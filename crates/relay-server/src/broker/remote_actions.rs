@@ -118,6 +118,9 @@ pub(super) enum RemoteActionRequest {
     FetchThreadTranscript {
         input: ReadThreadTranscriptInput,
     },
+    FetchThreadRows {
+        input: crate::protocol::ReadThreadTranscriptRowsInput,
+    },
     DecideApproval {
         request_id: String,
         input: ApprovalDecisionInput,
@@ -340,6 +343,7 @@ impl RemoteActionRequest {
             Self::ListProviderModels { .. } => RemoteActionKind::ListProviderModels,
             Self::FetchThreadEntryDetail { .. } => RemoteActionKind::FetchThreadEntryDetail,
             Self::FetchThreadTranscript { .. } => RemoteActionKind::FetchThreadTranscript,
+            Self::FetchThreadRows { .. } => RemoteActionKind::FetchThreadRows,
             Self::DecideApproval { .. } => RemoteActionKind::DecideApproval,
             Self::ApplyFileChange { .. } => RemoteActionKind::ApplyFileChange,
             Self::ProjectAction { .. } => RemoteActionKind::ProjectAction,
@@ -435,6 +439,10 @@ impl RemoteActionRequest {
             Self::FetchThreadTranscript { mut input } => {
                 input.device_id = Some(device_id);
                 Self::FetchThreadTranscript { input }
+            }
+            Self::FetchThreadRows { mut input } => {
+                input.device_id = Some(device_id);
+                Self::FetchThreadRows { input }
             }
             Self::DecideApproval {
                 request_id,
@@ -649,6 +657,7 @@ pub(super) enum RemoteActionKind {
     ListProviderModels,
     FetchThreadEntryDetail,
     FetchThreadTranscript,
+    FetchThreadRows,
     DecideApproval,
     ApplyFileChange,
     ProjectAction,
@@ -701,6 +710,7 @@ impl RemoteActionKind {
             Self::ListProviderModels => "list_provider_models",
             Self::FetchThreadEntryDetail => "fetch_thread_entry_detail",
             Self::FetchThreadTranscript => "fetch_thread_transcript",
+            Self::FetchThreadRows => "fetch_thread_rows",
             Self::DecideApproval => "decide_approval",
             Self::ApplyFileChange => "apply_file_change",
             Self::ProjectAction => "project_action",
@@ -1711,6 +1721,16 @@ async fn execute_remote_action(
                 })
                 .map_err(RemoteActionFailure::from);
         }
+        RemoteActionRequest::FetchThreadRows { input } => {
+            return state
+                .read_thread_transcript_rows(input)
+                .await
+                .map(|thread_transcript| RemoteActionOutcome {
+                    thread_transcript: Some(thread_transcript),
+                    ..RemoteActionOutcome::default()
+                })
+                .map_err(RemoteActionFailure::from);
+        }
         RemoteActionRequest::DecideApproval { request_id, input } => state
             .decide_approval(&request_id, input)
             .await
@@ -2002,6 +2022,7 @@ fn remote_action_emits_info_log(action: RemoteActionKind) -> bool {
             | RemoteActionKind::ListThreads
             | RemoteActionKind::FetchThreadEntryDetail
             | RemoteActionKind::FetchThreadTranscript
+            | RemoteActionKind::FetchThreadRows
             | RemoteActionKind::FetchWorkspaceDiff
             | RemoteActionKind::FetchWorkspaceGitContext
             | RemoteActionKind::FetchThreadWorkspace
@@ -3430,6 +3451,7 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         | RemoteActionKind::ListProviderModels => RemoteActionResultKind::RemoteThreadsResult,
         RemoteActionKind::FetchThreadEntryDetail
         | RemoteActionKind::FetchThreadTranscript
+        | RemoteActionKind::FetchThreadRows
         | RemoteActionKind::FetchWorkspaceDiff
         | RemoteActionKind::FetchWorkspaceGitContext
         | RemoteActionKind::FetchThreadWorkspace

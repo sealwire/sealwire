@@ -4642,6 +4642,201 @@ test("applyTranscriptDelta gap repair fetches the authoritative tail and converg
   remoteQueryClient.clear();
 });
 
+test("a gap repair page read before a newer change to a row does not undo that change", async () => {
+  activeBrowser || installBrowserStubs();
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+  const { remoteQueryClient } = await import("./query-client.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  remoteQueryClient.clear();
+  // The window is this thread's: its row records are the ones a repair must honour.
+  seedTranscriptHydrationState(state, { transcriptHydrationThreadId: "thread-1" });
+
+  const tool = (applyState) => ({
+    item_type: "fileChange",
+    name: "Edit",
+    title: "Edit",
+    file_changes: [{ path: "a.rs", change_type: "update", diff: "" }],
+    apply_state: applyState,
+  });
+  const edit = (applyState, status) => ({
+    item_id: "tool-1",
+    kind: "tool_call",
+    text: null,
+    status,
+    turn_id: "turn-1",
+    tool: tool(applyState),
+  });
+  let fetches = 0;
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      if (frame.payload.request?.type !== "fetch_thread_transcript") {
+        return;
+      }
+      fetches += 1;
+      setImmediate(async () => {
+        // While the page is out, a snapshot at revision 4 re-applies the edit.
+        state.session = {
+          ...state.session,
+          transcript_revision: 4,
+          transcript: [edit("applied", "completed")],
+        };
+        state.transcriptRowSeenRevisions = new Map([["tool-1", 4]]);
+        // The page was read at revision 3, before that.
+        await handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: true,
+          snapshot: {},
+          thread_transcript: {
+            thread_id: "thread-1",
+            revision: 3,
+            entries: [edit("rolled_back", "in_progress")],
+            prev_cursor: null,
+          },
+        });
+      });
+    },
+  };
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_truncated: false,
+    transcript_revision: 1,
+    transcript: [edit("rolled_back", "in_progress")],
+  };
+
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 2,
+    revision: 3,
+    item_id: "tool-1",
+    turn_id: "turn-1",
+    delta: "x",
+    delta_kind: "agent_text",
+    text_offset: 5,
+  });
+  await waitFor(() => fetches >= 1);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  const shown = state.session.transcript.find((entry) => entry.item_id === "tool-1");
+  assert.equal(shown?.tool?.apply_state, "applied", "an older page must not roll back a newer apply");
+  assert.equal(shown?.status, "completed");
+
+  state.socket = null;
+  state.pendingActions.clear();
+  remoteQueryClient.clear();
+});
+
+test("a gap repair for a thread other than the window's leaves the window's row records alone", async () => {
+  // Row ids are unique within a thread, not across threads: marking the window's
+  // thread with another thread's row would make its own legitimate pages look old.
+  activeBrowser || installBrowserStubs();
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+  const { remoteQueryClient } = await import("./query-client.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  remoteQueryClient.clear();
+  // The window belongs to thread-B; the repair below is for the live thread-1.
+  seedTranscriptHydrationState(state, { transcriptHydrationThreadId: "thread-B" });
+
+  let fetches = 0;
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      if (frame.payload.request?.type !== "fetch_thread_transcript") {
+        return;
+      }
+      fetches += 1;
+      setImmediate(async () => {
+        await handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: true,
+          snapshot: {},
+          thread_transcript: {
+            thread_id: "thread-1",
+            revision: 20,
+            entries: [{ item_id: "row:1", kind: "agent_text", text: "Hello world again", status: "completed", turn_id: "turn-1", tool: null }],
+            prev_cursor: null,
+          },
+        });
+      });
+    },
+  };
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_truncated: false,
+    transcript_revision: 5,
+    transcript: [{ item_id: "row:1", kind: "agent_text", status: "running", text: "Hello", turn_id: "turn-1", tool: null }],
+  };
+
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 10,
+    revision: 11,
+    item_id: "row:1",
+    turn_id: "turn-1",
+    delta: " again",
+    delta_kind: "agent_text",
+    text_offset: 11,
+  });
+  await waitFor(() => state.session.transcript[0].text === "Hello world again");
+
+  assert.equal(fetches, 1);
+  assert.equal(
+    state.transcriptRowSeenRevisions.has("row:1"),
+    false,
+    "thread-1's row must not be recorded against thread-B's window"
+  );
+
+  state.socket = null;
+  state.pendingActions.clear();
+  remoteQueryClient.clear();
+});
+
 test("gap repair updates the live session while preserving a view-only thread", async () => {
   activeBrowser = installBrowserStubs();
   const sentPayloads = [];
@@ -5616,19 +5811,24 @@ test("applySessionSnapshot re-hydrates a long final message added after the firs
     send(frameText) {
       const frame = JSON.parse(frameText);
       sentPayloads.push(frame.payload);
-      if (frame.payload.request?.type !== "fetch_thread_transcript") {
+      const type = frame.payload.request?.type;
+      if (type !== "fetch_thread_transcript" && type !== "fetch_thread_rows") {
         return;
       }
+      // A rows read answers only the rows it named.
+      const wanted = type === "fetch_thread_rows" ? frame.payload.request.input.row_ids : null;
       setImmediate(async () => {
         await handleRemoteBrokerPayload({
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
-          action: "fetch_thread_transcript",
+          action: type,
           ok: true,
           snapshot: {},
           thread_transcript: {
             thread_id: "thread-1",
-            entries: backendEntries.map((entry) => ({ ...entry })),
+            entries: backendEntries
+              .filter((entry) => !wanted || wanted.includes(entry.item_id))
+              .map((entry) => ({ ...entry })),
             prev_cursor: null,
           },
         });
@@ -5637,7 +5837,9 @@ test("applySessionSnapshot re-hydrates a long final message added after the firs
   };
 
   const fetchCount = () =>
-    sentPayloads.filter((payload) => payload.request?.type === "fetch_thread_transcript").length;
+    sentPayloads.filter((payload) =>
+      ["fetch_thread_transcript", "fetch_thread_rows"].includes(payload.request?.type)
+    ).length;
   const snap = (transcript) => ({
     active_thread_id: "thread-1",
     active_controller_device_id: null,
@@ -5702,6 +5904,11 @@ test("applySessionSnapshot re-hydrates a long final message added after the firs
   assert.equal(state.session.transcript.find((entry) => entry.item_id === "item-2")?.text, replyTwo);
   assert.equal(state.session.transcript_truncated, false);
   assert.equal(fetchCount(), 2, "the new final message triggered exactly one more fetch");
+  assert.equal(
+    sentPayloads.at(-1).request.type,
+    "fetch_thread_rows",
+    "…and it named the row rather than re-reading the latest page"
+  );
 });
 
 test("getRemoteViewedWorkspaceKey changes when only the remembered tree is observed", async () => {

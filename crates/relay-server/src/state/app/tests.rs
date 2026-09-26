@@ -14841,6 +14841,120 @@ tree; got {}",
     }
 
     #[tokio::test]
+    async fn transcript_rows_read_is_scoped_and_stamped_like_a_page() {
+        let project = TempDir::new().expect("project tempdir");
+        let scoped = project.path().join("scoped");
+        let other = project.path().join("other");
+        std::fs::create_dir_all(&scoped).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+
+        let (app, _p, _o) = build_app(other.to_str().unwrap()).await;
+        pair_device(&app, "wide-device", Vec::new()).await;
+        pair_device(&app, "scoped-device", vec![scoped.display().to_string()]).await;
+        let snapshot = app
+            .start_session(crate::protocol::StartSessionInput {
+                device_id: Some("wide-device".to_string()),
+                cwd: Some(other.display().to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("fake".to_string()),
+                initial_prompt: None,
+                project_id: None,
+            })
+            .await
+            .expect("start");
+        let thread_id = snapshot.active_thread_id.expect("active thread");
+        {
+            let mut relay = app.relay.write().await;
+            relay.upsert_transcript_item(
+                "msg-1".to_string(),
+                crate::protocol::TranscriptEntryKind::AgentText,
+                Some("recover me".to_string()),
+                "completed".to_string(),
+                None,
+                None,
+            );
+        }
+        let page = app
+            .read_thread_transcript(ReadThreadTranscriptInput {
+                thread_id: thread_id.clone(),
+                before: None,
+                device_id: Some("wide-device".to_string()),
+            })
+            .await
+            .expect("page");
+        let row = page
+            .entries
+            .iter()
+            .find(|entry| entry.text.as_deref() == Some("recover me"))
+            .expect("row on the page");
+        let row_id = row
+            .row_id
+            .clone()
+            .or_else(|| row.item_id.clone())
+            .expect("row id");
+
+        let rows = app
+            .read_thread_transcript_rows(crate::protocol::ReadThreadTranscriptRowsInput {
+                thread_id: thread_id.clone(),
+                row_ids: vec![row_id.clone()],
+                device_id: Some("wide-device".to_string()),
+            })
+            .await
+            .expect("rows");
+        assert_eq!(
+            serde_json::to_value(&rows.entries).unwrap(),
+            serde_json::to_value(vec![row.clone()]).unwrap()
+        );
+        assert_eq!(rows.transcript_generation, page.transcript_generation);
+        assert!(!rows.transcript_generation.is_empty());
+
+        let error = app
+            .read_thread_transcript_rows(crate::protocol::ReadThreadTranscriptRowsInput {
+                thread_id: thread_id.clone(),
+                row_ids: vec![row_id],
+                device_id: Some("scoped-device".to_string()),
+            })
+            .await
+            .expect_err("a scoped device must not read rows outside its paths");
+        assert!(error.contains("device's allowed paths"), "{error}");
+
+        // The answer echoes ids back, so what a request may name is bounded.
+        let rows_for = |row_ids: Vec<String>| {
+            app.read_thread_transcript_rows(crate::protocol::ReadThreadTranscriptRowsInput {
+                thread_id: thread_id.clone(),
+                row_ids,
+                device_id: Some("wide-device".to_string()),
+            })
+        };
+        let too_many = (0..17)
+            .map(|index| format!("row-{index}"))
+            .collect::<Vec<_>>();
+        assert!(
+            rows_for(too_many).await.is_err(),
+            "17 ids is more than one request may name"
+        );
+        assert!(
+            rows_for(vec!["r".repeat(300)]).await.is_err(),
+            "an id longer than any the relay mints is refused"
+        );
+        // The largest request allowed, every id escaping to its longest, all missing.
+        // Each `"` escapes to two bytes: 2 + 252 + 2 quotes = 256 serialized bytes.
+        let widest = (0..16)
+            .map(|index| format!("{index:02}{}", "\"".repeat(126)))
+            .collect::<Vec<_>>();
+        let answer = rows_for(widest).await.expect("allowed request");
+        assert_eq!(answer.missing_rows.len(), 16);
+        assert!(
+            crate::protocol::serialized_len(&answer) <= 20_000,
+            "{} bytes",
+            crate::protocol::serialized_len(&answer)
+        );
+    }
+
+    #[tokio::test]
     async fn transcript_read_repairs_an_empty_runtime_cwd_from_the_remembered_workspace() {
         let project = TempDir::new().expect("project tempdir");
         let cwd = project.path().to_str().unwrap();

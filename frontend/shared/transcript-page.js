@@ -16,3 +16,16 @@ export function normalizeThreadTranscriptPage(page) {
     transcript_generation: page.transcript_generation ?? "",
   };
 }
+
+/** A rows-by-id answer: a page plus which requested rows it could not carry. */
+export function normalizeThreadTranscriptRows(page) {
+  const normalized = normalizeThreadTranscriptPage(page);
+  if (!normalized || !Array.isArray(normalized.entries)) {
+    return normalized;
+  }
+  return {
+    ...normalized,
+    missing_rows: Array.isArray(page.missing_rows) ? page.missing_rows : [],
+    deferred_rows: Array.isArray(page.deferred_rows) ? page.deferred_rows : [],
+  };
+}

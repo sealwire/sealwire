@@ -1375,6 +1375,8 @@ fn summarize_thread_transcript_response_reports_entry_and_char_counts() {
             "tc1.test.3".to_string(),
         )),
         thread_state: None,
+        missing_rows: Vec::new(),
+        deferred_rows: Vec::new(),
     });
 
     assert!(summary.contains("thread_id=thread-1"));

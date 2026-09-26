@@ -65,7 +65,7 @@ function rawSettledSnapshot(overrides = {}) {
   };
 }
 
-test("a snapshot that has been through restoreHydratedTranscript still yields shouldHydrate at turn end", () => {
+test("a snapshot that has been through restoreHydratedTranscript still owes the clipped row at turn end", () => {
   const state = cachedState(3000);
   const raw = rawSettledSnapshot();
   state.rawSessionSnapshot = raw;
@@ -76,17 +76,19 @@ test("a snapshot that has been through restoreHydratedTranscript still yields sh
     "full",
     "precondition: the merge promoted the clipped tail entry to full"
   );
+  prepareTranscriptHydrationState(state, merged);
   assert.equal(
-    prepareTranscriptHydrationState(state, merged).shouldHydrate,
+    state.transcriptUnresolvedRows?.has("item-9") ?? false,
     false,
-    "precondition: the merged snapshot alone hides the clip from the gate"
+    "precondition: the merged snapshot alone hides the clip"
   );
 
   const selected = selectHydrationSnapshot(state, merged);
+  prepareTranscriptHydrationState(state, selected);
   assert.equal(
-    prepareTranscriptHydrationState(state, selected).shouldHydrate,
+    state.transcriptUnresolvedRows.has("item-9"),
     true,
-    "the raw snapshot's true preview state must drive the gate, not the merge's promoted full"
+    "the raw snapshot's true preview state must decide, not the merge's promoted full"
   );
 });
 
@@ -193,10 +195,13 @@ test("hydrateLocalTranscript fires a fetch when the raw snapshot is truncated ev
     "precondition: the merge still exposes transcript_truncated from the raw source"
   );
 
-  let fetchCalled = false;
+  const recovered = [];
   await hydrateLocalTranscript(state, merged, {
     async fetchPage() {
-      fetchCalled = true;
+      return { thread_id: "thread-1", prev_cursor: null, entries: [] };
+    },
+    async fetchRows({ rowIds }) {
+      recovered.push(...rowIds);
       return {
         thread_id: "thread-1",
         prev_cursor: null,
@@ -206,7 +211,7 @@ test("hydrateLocalTranscript fires a fetch when the raw snapshot is truncated ev
             kind: "agent_text",
             status: "completed",
             content_state: "full",
-            text: "x".repeat(3000),
+            text: "y".repeat(3200),
           },
         ],
       };
@@ -215,12 +220,14 @@ test("hydrateLocalTranscript fires a fetch when the raw snapshot is truncated ev
       state.session = next;
     },
   });
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
-  assert.equal(
-    fetchCalled,
-    true,
-    "the raw snapshot's transcript_truncated must drive a tail fetch even though the merged view's content_state is full"
+  assert.deepEqual(
+    recovered,
+    ["item-9"],
+    "the raw snapshot's preview must drive a recovery even though the merged view's content_state is full"
   );
+  assert.equal(state.transcriptHydrationEntries.get("item-9").text, "y".repeat(3200));
 });
 
 test("hydrateLocalTranscript suppresses the fetch when the merged snapshot has no raw stash (merged-only control)", async () => {
@@ -234,9 +241,10 @@ test("hydrateLocalTranscript suppresses the fetch when the merged snapshot has n
   // and not prove this path at all.
   const state = makeHydrateState(3000);
   const raw = rawSettledSnapshot(); // transcript_truncated: true, content_state: "preview"
-  // Build the merged view exactly as lifecycle.js does, then clear the raw stash so
-  // hydrateLocalTranscript has no raw snapshot to reach for.
-  const merged = restoreHydratedTranscript(state, raw);
+  // Build the merged view exactly as lifecycle.js does, but on another state: the
+  // render is where a raw snapshot is judged now, and this control asks what the
+  // merged view alone decides.
+  const merged = restoreHydratedTranscript(makeHydrateState(3000), raw);
   state.rawSessionSnapshot = null;
 
   assert.equal(
@@ -256,10 +264,15 @@ test("hydrateLocalTranscript suppresses the fetch when the merged snapshot has n
       fetchCalled = true;
       return { thread_id: "thread-1", prev_cursor: null, entries: [] };
     },
+    async fetchRows() {
+      fetchCalled = true;
+      return { thread_id: "thread-1", prev_cursor: null, entries: [] };
+    },
     onProgress(next) {
       state.session = next;
     },
   });
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(
     fetchCalled,
@@ -278,7 +291,8 @@ test("hydrateLocalTranscript ignores a raw stash from another thread and does no
   // (same structure as the positive test), then swap the raw stash to thread-2.
   const state = makeHydrateState(3000);
   const raw = rawSettledSnapshot();
-  const merged = restoreHydratedTranscript(state, raw);
+  // Rendered on another state, as above: only the stash choice is under test here.
+  const merged = restoreHydratedTranscript(makeHydrateState(3000), raw);
   // Cross-thread stash: same shape but wrong active_thread_id.
   state.rawSessionSnapshot = rawSettledSnapshot({ active_thread_id: "thread-2" });
 
@@ -299,10 +313,15 @@ test("hydrateLocalTranscript ignores a raw stash from another thread and does no
       fetchCalled = true;
       return { thread_id: "thread-1", prev_cursor: null, entries: [] };
     },
+    async fetchRows() {
+      fetchCalled = true;
+      return { thread_id: "thread-1", prev_cursor: null, entries: [] };
+    },
     onProgress(next) {
       state.session = next;
     },
   });
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(
     fetchCalled,

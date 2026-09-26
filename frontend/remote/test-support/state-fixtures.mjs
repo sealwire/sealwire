@@ -46,6 +46,14 @@ export function seedTranscriptHydrationState(state, patch = {}) {
       transcriptHydrationStatus: "idle",
       transcriptHydrationTailReady: false,
       transcriptHydrationLastFetchAt: 0,
+      // Row bookkeeping lives on the shared state too; a test must not inherit it.
+      transcriptUnresolvedRows: new Map(),
+      transcriptRowBodyRevisions: new Map(),
+      transcriptRowSeenRevisions: new Map(),
+      transcriptTailSawShells: false,
+      transcriptHydrationNeedsTailRepair: false,
+      transcriptRowRecoveryInFlight: null,
+      transcriptRowRecoveryInFlightSet: null,
     },
     patch
   );

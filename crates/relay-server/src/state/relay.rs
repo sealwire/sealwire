@@ -8507,6 +8507,218 @@ mod tests {
         );
     }
 
+    fn tool_view(
+        name: &str,
+        file_changes: Vec<crate::protocol::FileChangeDiffView>,
+    ) -> crate::protocol::ToolCallView {
+        crate::protocol::ToolCallView {
+            item_type: "toolCall".to_string(),
+            name: name.to_string(),
+            title: name.to_string(),
+            kind: None,
+            detail: Some(format!("{name} detail")),
+            query: None,
+            path: None,
+            url: None,
+            command: None,
+            input_preview: Some("{\"input\":1}".to_string()),
+            result_preview: Some(format!("{name} result")),
+            diff: None,
+            file_changes,
+            apply_state: None,
+            file_changes_omitted: false,
+            can_apply: None,
+        }
+    }
+
+    fn relay_with_rows(
+        rows: &[(
+            &str,
+            crate::protocol::TranscriptEntryKind,
+            Option<String>,
+            Option<crate::protocol::ToolCallView>,
+        )],
+    ) -> RelayState {
+        let mut relay = test_relay();
+        relay.activate_thread(
+            test_thread("t1", "/tmp/project"),
+            "/tmp/project",
+            "model",
+            "never",
+            "workspace-write",
+            "medium",
+            "device-1",
+        );
+        for (id, kind, text, tool) in rows {
+            relay.upsert_transcript_item(
+                id.to_string(),
+                *kind,
+                text.clone(),
+                "completed".to_string(),
+                Some("turn-1".to_string()),
+                tool.clone(),
+            );
+        }
+        relay
+    }
+
+    fn row_key(entry: &crate::protocol::TranscriptEntryView) -> String {
+        entry
+            .row_id
+            .clone()
+            .or_else(|| entry.item_id.clone())
+            .expect("row key")
+    }
+
+    #[test]
+    fn a_withdrawal_takes_its_own_revision_from_the_shared_clock() {
+        // Clients judge a late answer by comparing revisions, so two different
+        // transcript states must never share one.
+        use crate::protocol::TranscriptEntryKind;
+        let mut relay = relay_with_rows(&[]);
+        relay.upsert_relay_named_item(
+            "turn-diff:turn-1".to_string(),
+            TranscriptEntryKind::ToolCall,
+            None,
+            "completed".to_string(),
+            Some("turn-1".to_string()),
+            Some(tool_view("turnDiff", Vec::new())),
+        );
+        let upserted = relay
+            .runtime_for_thread("t1")
+            .expect("runtime")
+            .transcript_revision;
+
+        assert!(relay.withdraw_relay_named_item_for_thread("t1", "turn-diff:turn-1"));
+        let withdrawn = relay
+            .runtime_for_thread("t1")
+            .expect("runtime")
+            .transcript_revision;
+
+        relay.upsert_transcript_item(
+            "msg-after".to_string(),
+            TranscriptEntryKind::AgentText,
+            Some("next".to_string()),
+            "completed".to_string(),
+            Some("turn-1".to_string()),
+            None,
+        );
+        let next = relay
+            .runtime_for_thread("t1")
+            .expect("runtime")
+            .transcript_revision;
+
+        assert!(upserted < withdrawn, "{upserted} < {withdrawn}");
+        assert!(
+            withdrawn < next,
+            "the next write must not reuse the withdrawal's revision: {withdrawn} < {next}"
+        );
+    }
+
+    #[test]
+    fn transcript_rows_are_the_rows_a_page_would_serve() {
+        // Recovery by row id must hand back exactly what hydration treats as
+        // authoritative, for every kind — including a tool call with no diff, which
+        // the UI detail read sends off to the provider instead.
+        use crate::protocol::{FileChangeDiffView, TranscriptEntryKind};
+        let relay = relay_with_rows(&[
+            (
+                "msg-1",
+                TranscriptEntryKind::AgentText,
+                Some("hello".to_string()),
+                None,
+            ),
+            (
+                "cmd-1",
+                TranscriptEntryKind::Command,
+                Some("ls\nout".to_string()),
+                None,
+            ),
+            (
+                "tool-1",
+                TranscriptEntryKind::ToolCall,
+                None,
+                Some(tool_view("Read", Vec::new())),
+            ),
+            (
+                "tool-2",
+                TranscriptEntryKind::ToolCall,
+                None,
+                Some(tool_view(
+                    "Edit",
+                    vec![FileChangeDiffView {
+                        path: "src/a.rs".to_string(),
+                        change_type: "update".to_string(),
+                        diff: "@@ -1 +1 @@\n-a\n+b\n".to_string(),
+                    }],
+                )),
+            ),
+        ]);
+        let runtime = relay.runtime_for_thread("t1").expect("runtime");
+        let page = runtime.transcript_page("t1", None);
+        assert_eq!(page.entries.len(), 4);
+        let mut wanted = page.entries.iter().map(row_key).collect::<Vec<_>>();
+        wanted.reverse();
+        wanted.push("gone".to_string());
+
+        let rows = runtime.transcript_rows("t1", &wanted);
+
+        let mut expected = page.entries.clone();
+        expected.reverse();
+        assert_eq!(
+            serde_json::to_value(&rows.entries).unwrap(),
+            serde_json::to_value(&expected).unwrap(),
+            "same projection as the page, in request order"
+        );
+        assert_eq!(rows.missing_rows, vec!["gone".to_string()]);
+        assert!(rows.deferred_rows.is_empty());
+        assert_eq!(rows.revision, page.revision);
+        assert_eq!(rows.prev_cursor, None);
+    }
+
+    #[test]
+    fn transcript_rows_defer_what_does_not_fit_one_page() {
+        use crate::protocol::TranscriptEntryKind;
+        let big = |c: char| Some(c.to_string().repeat(15_000));
+        let relay = relay_with_rows(&[
+            ("a", TranscriptEntryKind::AgentText, big('a'), None),
+            ("b", TranscriptEntryKind::AgentText, big('b'), None),
+            (
+                "huge",
+                TranscriptEntryKind::AgentText,
+                Some("h".repeat(60_000)),
+                None,
+            ),
+        ]);
+        let runtime = relay.runtime_for_thread("t1").expect("runtime");
+        let ids = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| {
+                    runtime
+                        .transcript
+                        .get_row(name)
+                        .unwrap_or_else(|| panic!("row {name}"))
+                        .row_id
+                        .clone()
+                })
+                .collect::<Vec<_>>()
+        };
+        let both = ids(&["a", "b"]);
+
+        let rows = runtime.transcript_rows("t1", &both);
+        assert_eq!(rows.entries.len(), 1, "two 15KB rows do not share one page");
+        assert_eq!(rows.deferred_rows, vec![both[1].clone()]);
+
+        let alone = runtime.transcript_rows("t1", &ids(&["huge"]));
+        assert_eq!(
+            alone.entries.len(),
+            1,
+            "an oversized row still comes back, alone"
+        );
+        assert!(alone.deferred_rows.is_empty());
+    }
+
     #[test]
     fn orchestrator_proposals_revision_moves_for_any_change_a_client_can_see() {
         // Content hash, like `teams_revision`: cards are edited from several places

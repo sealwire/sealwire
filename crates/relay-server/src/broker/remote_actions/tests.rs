@@ -604,6 +604,8 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
             "tc1.test.1".to_string(),
         )),
         thread_state: None,
+        missing_rows: Vec::new(),
+        deferred_rows: Vec::new(),
     };
     let breakdown = measure_remote_action_result_sizes(
         RemoteActionKind::FetchThreadTranscript,
@@ -685,6 +687,8 @@ fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
                 "tc1.test.1".to_string(),
             )),
             thread_state: None,
+            missing_rows: Vec::new(),
+            deferred_rows: Vec::new(),
         }),
         workspace_diff: None,
         workspace_git_context: None,
@@ -2395,4 +2399,55 @@ async fn a_rejected_transcript_cursor_reaches_the_device_as_its_code() {
     )
     .expect("plaintext json");
     assert_eq!(plain["error_code"], "transcript_cursor_rejected");
+}
+
+// The phone recovers shelled rows by id; the action must parse and answer like a page.
+#[tokio::test]
+async fn fetch_thread_rows_answers_the_named_rows_and_names_the_missing() {
+    use crate::state::{RelayState, SecurityProfile};
+    use std::sync::Arc;
+    use tokio::sync::{watch, RwLock};
+
+    let dir = tempfile::TempDir::new().expect("tmpdir");
+    let cwd = dir.path().to_string_lossy().to_string();
+    let (change_tx, _rx) = watch::channel(0_u64);
+    let relay = Arc::new(RwLock::new(RelayState::new(
+        cwd.clone(),
+        change_tx.clone(),
+        SecurityProfile::private(),
+    )));
+    {
+        let mut relay = relay.write().await;
+        relay.ensure_runtime_for_thread("t1").current_cwd = cwd;
+        relay.upsert_transcript_item_for_thread(
+            "t1",
+            "r1".to_string(),
+            crate::protocol::TranscriptEntryKind::AgentText,
+            Some("recovered body".to_string()),
+            "completed".to_string(),
+            None,
+            None,
+        );
+    }
+    let state = AppState::from_parts(relay, std::collections::HashMap::new(), change_tx);
+    let request: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "fetch_thread_rows",
+        "input": { "thread_id": "t1", "row_ids": ["r1", "gone"] },
+    }))
+    .expect("the request the phone sends");
+    assert_eq!(request.kind(), RemoteActionKind::FetchThreadRows);
+    assert!(!remote_action_emits_info_log(
+        RemoteActionKind::FetchThreadRows
+    ));
+
+    let outcome = execute_remote_action(&state, request, 0)
+        .await
+        .map_err(|failure| failure.into_refusal().1)
+        .expect("rows");
+    let rows = outcome
+        .thread_transcript
+        .expect("rows ride the transcript result");
+    assert_eq!(rows.entries.len(), 1);
+    assert_eq!(rows.entries[0].text.as_deref(), Some("recovered body"));
+    assert_eq!(rows.missing_rows, vec!["gone".to_string()]);
 }

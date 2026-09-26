@@ -283,3 +283,39 @@ test("an unnumbered page keeps the legacy split-point behaviour exactly", () => 
 
   assert.deepEqual(result.order, ["p1", "p2", "live"]);
 });
+
+// A page read before the newest thing we learned about a row must not undo it,
+// but the row still anchors the page's order, numbered or not.
+test("a row the caller calls stale keeps its content and still places its neighbours", () => {
+  const held = { item_id: "b", text: "b final", status: "completed" };
+  const result = reconcileAuthoritativeTail({
+    order: ["b"],
+    entries: new Map([["b", held]]),
+    pageEntries: [
+      { item_id: "a", order_seq: 1, text: "a", status: "completed" },
+      { item_id: "b", order_seq: 2, text: "b older and longer", status: "in_progress" },
+      { item_id: "c", order_seq: 3, text: "c", status: "completed" },
+    ],
+    isStale: (existing, incoming) => existing !== undefined && incoming.item_id === "b",
+  });
+
+  assert.deepEqual(result.order, ["a", "b", "c"]);
+  assert.equal(result.entries.get("b"), held, "the held copy stands");
+  assert.equal(result.entries.get("a").text, "a");
+});
+
+test("a stale row keeps its content on the numbered path too", () => {
+  const held = { item_id: "b", order_seq: 2, text: "b final", status: "completed" };
+  const result = reconcileAuthoritativeTail({
+    order: ["b"],
+    entries: new Map([["b", held]]),
+    pageEntries: [
+      { item_id: "a", order_seq: 1, text: "a", status: "completed" },
+      { item_id: "b", order_seq: 2, text: "b older", status: "in_progress" },
+    ],
+    isStale: (existing, incoming) => existing !== undefined && incoming.item_id === "b",
+  });
+
+  assert.deepEqual(result.order, ["a", "b"]);
+  assert.equal(result.entries.get("b").status, "completed");
+});
