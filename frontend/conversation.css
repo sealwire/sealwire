@@ -577,45 +577,24 @@
   color: var(--err-fg);
 }
 
-/* Members revealed by opening a tool or reasoning group.
- *
- * What this fixes: an opened group used to drop a stack of cards each carrying
- * its own 2px left stripe in its own semantic colour (tool = accent, reasoning
- * = warn, error = err). Four or five in a row read as a barcode. Here the card
- * chrome comes off entirely and state moves to a single dot per row.
- *
- * DELIBERATELY NOT a continuous vertical line. An earlier version drew a
- * per-row segment spanning top:0 to bottom:0, on the theory that consecutive
- * rows would join up. Measured, they do not: `.thread-content` puts a 24px gap
- * between siblings, so the segments were 8px apart, and under virtualization
- * every row is wrapped in `.transcript-virtual-row` (24px bottom padding),
- * which both widens the break and stops any adjacent-sibling rule from
- * matching. Bridging the gap by overhanging the segment does not work either:
- * `.chat-message` sets `content-visibility: auto`, which brings paint
- * containment and clips anything drawn outside the row's box. Grouping is
- * carried by the shared indent and the dot column instead — those hold in both
- * layouts, which a line does not.
- *
- * `position: relative` is scoped to member rows rather than set on
- * `.chat-message` globally so this cannot shift stacking for ordinary rows. */
+/* Members of an opened group (design 20c): one hairline threads them, text in line
+ * with the group's own. The gaps between members are closed so the line is one
+ * piece; per-row segments only join when nothing sits between them. */
 .chat-message.is-group-member {
-  position: relative;
-  padding-left: 18px;
+  margin-left: 4px;
+  padding-left: 14px;
+  border-left: 1px solid var(--border-soft);
 }
 
-.chat-message.is-group-member::before {
-  content: "";
-  position: absolute;
-  left: 2px;
-  top: 10px;
-  width: 7px;
-  height: 7px;
-  border-radius: var(--r-pill);
-  background: var(--text-faint);
+.thread-content > .chat-message-work-group + .chat-message.is-group-member,
+.thread-content > .chat-message.is-group-member + .chat-message.is-group-member {
+  margin-top: -24px; /* .thread-content's gap */
 }
 
-.chat-message.is-group-member[data-transcript-entry-kind="reasoning"]::before {
-  background: var(--warn-fg);
+/* Virtualized, each row is wrapped and spaced by the wrapper's own padding. */
+.transcript-virtual-row:has(> .chat-message-work-group):has(+ .transcript-virtual-row > .is-group-member),
+.transcript-virtual-row:has(> .is-group-member):has(+ .transcript-virtual-row > .is-group-member) {
+  padding-bottom: 0;
 }
 
 .chat-message.is-group-member .message-card {
@@ -647,8 +626,11 @@
   font-size: var(--text-sm);
 }
 
+/* `justify-content` because a global `button` rule centres; a title-only row
+ * (Cursor's "grep") has nothing else to fill the width. */
 .tool-run-row {
   display: flex;
+  justify-content: flex-start;
   align-items: baseline;
   gap: 10px;
   width: 100%;
@@ -691,8 +673,21 @@ button.tool-run-row:focus-visible {
   width: 6px;
   height: 6px;
   border-radius: var(--r-pill);
-  background: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  background: var(--ok-fg);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok-fg) 18%, transparent);
+  animation: tool-run-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes tool-run-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-run-live {
+    animation: none;
+  }
 }
 
 /* Never squeezed by the command beside it; only a very long title clips itself. */
@@ -738,7 +733,7 @@ button.tool-run-row:focus-visible {
 }
 
 .tool-run-row.is-running .tool-run-command {
-  color: var(--accent);
+  color: var(--text-2);
 }
 
 .tool-run-status {
@@ -869,6 +864,7 @@ button.tool-run-row:focus-visible {
 .reasoning-toggle,
 .reasoning-line {
   display: flex;
+  justify-content: flex-start;
   align-items: baseline;
   gap: 6px;
   max-width: 100%;
@@ -1918,6 +1914,7 @@ button.tool-run-row:focus-visible {
 
 .ask-user-summary {
   display: flex;
+  justify-content: flex-start;
   align-items: baseline;
   gap: 9px;
   width: 100%;
@@ -2466,9 +2463,9 @@ button.ask-user-summary:focus-visible {
   }
 }
 
-/* Inside an opened group the dot column already marks each row. */
-.chat-message.is-group-member .tool-run-row:not(.is-running) .tool-run-marker {
-  visibility: hidden;
+/* In an opened group the line marks each row; a finished row needs no chevron. */
+.chat-message.is-group-member .tool-run-row:not(.is-running):not(.is-pending) .tool-run-marker {
+  display: none;
 }
 
 .ask-user-question .ask-user-error {

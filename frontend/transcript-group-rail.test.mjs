@@ -14,8 +14,8 @@ import { TranscriptContent } from "./shared/transcript-react.js";
 // read as a barcode: the eye has to re-anchor on every card to find out which
 // step it is looking at.
 //
-// The fix strips the card chrome off the members and moves state to a single
-// dot per row. Three constraints shaped how it is built:
+// The fix strips the card chrome off the members and threads them on one line.
+// Three constraints shaped how it is built:
 //
 //   1. NO WRAPPER ELEMENT. `TranscriptContent` pushes expanded members into the
 //      same flat node list as everything else, and that flat list is what the
@@ -29,15 +29,8 @@ import { TranscriptContent } from "./shared/transcript-react.js";
 //      (`expandedKeys` starts empty), so this changes nothing until the user
 //      opens a group.
 //
-//   3. NO CONTINUOUS VERTICAL LINE. The first attempt drew a per-row segment
-//      spanning the row's full height, assuming consecutive rows would join.
-//      Measured in a browser they did not: 8px apart in the plain layout
-//      (`.thread-content` has a 24px sibling gap), and worse once virtualized,
-//      where `.transcript-virtual-row` wraps every message and no
-//      adjacent-sibling rule matches. Overhanging the segment cannot bridge it
-//      either — `.chat-message` sets `content-visibility: auto`, whose paint
-//      containment clips anything outside the row. So the grouping cue is the
-//      shared indent plus the dot column, both of which survive virtualization.
+//   3. ONE HAIRLINE, NO DOTS. Members touch because the gaps between them are
+//      closed, virtualized or not; measured in tool-run-rows.layout.test.mjs.
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -110,23 +103,6 @@ test("rail rows stay siblings — no wrapper element is introduced", () => {
     markup,
     /class="[^"]*group-members[^"]*"/,
     "a wrapper would change the virtualizer's row count for a cosmetic change"
-  );
-});
-
-test("each row carries its own state dot, independent of its neighbours", () => {
-  const css = readFileSync(join(HERE, "conversation.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
-  const dot = css.match(/\.chat-message\.is-group-member::before\s*\{([^}]*)\}/);
-  assert.ok(dot, "expected a `.chat-message.is-group-member::before` dot");
-  // Fixed size and offset — nothing that depends on where the previous or next
-  // row happens to sit, because under virtualization there is no reliable
-  // relationship between them.
-  assert.match(dot[1], /width:\s*\d/, "the dot has its own size");
-  assert.match(dot[1], /border-radius:/, "and is round rather than a line segment");
-  assert.doesNotMatch(
-    dot[1],
-    /bottom:\s*0/,
-    "must not try to span the row: consecutive rows do not touch, so a "
-      + "full-height segment reads as a broken line rather than a rail"
   );
 });
 
