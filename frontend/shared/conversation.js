@@ -14,12 +14,14 @@ export function ConversationEmptyState({
   actions = [],
   badge = null,
   className = "",
+  // For a session name, which may be a whole first prompt; paths must stay whole.
+  clampDetails = false,
   copy = "",
   details = [],
   title,
 }) {
   const classes = ["thread-empty", className].filter(Boolean).join(" ");
-  const visibleDetails = details.filter(Boolean);
+  const detailText = details.filter(Boolean).join(" / ");
 
   return h(
     "div",
@@ -27,8 +29,14 @@ export function ConversationEmptyState({
     badge ? h("span", { className: "thread-empty-badge" }, badge) : null,
     h("h2", null, title),
     copy ? h("p", null, copy) : null,
-    visibleDetails.length
-      ? h("p", { className: "thread-empty-detail" }, visibleDetails.join(" / "))
+    detailText
+      ? h(
+          "p",
+          clampDetails
+            ? { className: "thread-empty-detail thread-empty-detail-clamped", title: detailText }
+            : { className: "thread-empty-detail" },
+          detailText
+        )
       : null,
     actions.length
       ? h(

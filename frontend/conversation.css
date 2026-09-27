@@ -228,6 +228,16 @@
   margin-top: 8px;
 }
 
+/* An unnamed session is labelled by its whole first prompt; the full text is on hover. */
+.thread-empty-detail-clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
 /* Zero-height marker watched by IntersectionObserver to start prefetching
  * older pages before the user reaches the top of the transcript. Visual
  * height stays at 0 so it doesn't add gap above the first message. */

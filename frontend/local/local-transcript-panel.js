@@ -86,6 +86,7 @@ export function LocalTranscriptPanel({
         },
       ],
       copy: "This saved session is loading.",
+      clampDetails: true,
       details: [`Requested session: ${requestedSessionLabel}`],
       title: "Loading session",
     });
@@ -100,6 +101,7 @@ export function LocalTranscriptPanel({
       badge: "Live",
       className: "thread-empty-ready",
       copy: "A live session is running, but the conversation stays behind its own session page so the local home does not default into chat.",
+      clampDetails: true,
       details: [`Current session: ${activeThreadLabel}`],
       title: "Relay console home",
     });
