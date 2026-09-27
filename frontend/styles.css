@@ -8026,25 +8026,11 @@ body.is-resizing-panel {
   background: var(--surface-4);
 }
 
-/* Creating is a different KIND of act from navigating, so it is separated rather
- * than sitting as one more name in the list. */
-.project-switcher-create {
-  margin-top: 4px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border-faint);
-  color: var(--text-2);
-  border-radius: 0 0 var(--r-sm) var(--r-sm);
-}
-
-.project-switcher-create:hover {
-  color: var(--text-1);
-}
-
-/* Managing the project you are IN is a different kind of act again from creating one,
- * so it gets its own group at the bottom. The divider sits on whatever comes first in
- * that group rather than on every member — a border on each would draw a line between
- * rename and delete, which belong together. */
-.project-switcher-manage {
+/* New / rename / delete are acts, not places, so they share one group under one divider.
+ * The divider goes on the group's first member only; a border on each would split them.
+ * Scoped to the menu so the generic `.project-switcher-option` rule further down cannot
+ * reset these, which it silently did. */
+.project-switcher-menu .project-switcher-manage {
   color: var(--text-2);
 }
 
@@ -8052,12 +8038,13 @@ body.is-resizing-panel {
   margin-top: 4px;
   padding-top: 8px;
   border-top: 1px solid var(--border-faint);
+  border-radius: 0 0 var(--r-sm) var(--r-sm);
 }
 
 /* Same tokens the project header's delete button uses, so "destructive" looks the same
  * wherever it is offered. Referenced bare: an undefined token must break loudly rather
  * than fall back to something that merely looks deliberate. */
-.project-switcher-danger {
+.project-switcher-menu .project-switcher-danger {
   color: var(--err-fg);
 }
 

@@ -271,7 +271,7 @@ test("the management group is separated by a divider and the destructive one is 
   assert.match(declaration(divider, "border-top") || "", /1px solid/, "a real divider rule exists");
 
   for (const theme of THEMES) {
-    const danger = declaration(ruleBody(".project-switcher-danger"), "color");
+    const danger = declaration(ruleBody(".project-switcher-menu .project-switcher-danger"), "color");
     const ordinary = declaration(ruleBody(".project-switcher-option"), "color");
     assert.ok(danger && ordinary, "both declare a colour");
     const missing = new Set();

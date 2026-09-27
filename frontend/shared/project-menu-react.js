@@ -52,11 +52,12 @@ export function ProjectMenu({
         h("span", { "aria-hidden": "true", className: "project-switcher-option-check" }, "✓")
       )
     ),
+    // One action group under one divider; destructive last, never among the projects.
     onCreateProject
       ? h(
           "button",
           {
-            className: "project-switcher-option project-switcher-create",
+            className: "project-switcher-option project-switcher-manage project-switcher-create",
             onClick: () => onCreateProject(),
             role: "menuitem",
             type: "button",
@@ -64,7 +65,6 @@ export function ProjectMenu({
           createLabel
         )
       : null,
-    // Destructive pair last, never mixed into the navigation rows.
     activeProject && onRenameProject
       ? h(
           "button",
