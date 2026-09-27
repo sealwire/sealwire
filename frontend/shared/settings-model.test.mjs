@@ -75,8 +75,10 @@ test("relativeTime / expiresInLabel read epoch seconds", () => {
   assert.equal(relativeTime(1_000_000 - 120, now), "2m ago");
   assert.equal(relativeTime(1_000_000 - 3 * 3600, now), "3h ago");
   assert.equal(relativeTime(null, now), "");
-  assert.equal(expiresInLabel(1_000_000 + 23 * 3600 + 50, now), "Expires in 23 h");
-  assert.equal(expiresInLabel(1_000_000 + 600, now), "Expires in 10 min");
+  assert.equal(expiresInLabel(1_000_000 + 23 * 3600 + 41 * 60 + 8, now), "Expires in 23:41:08");
+  assert.equal(expiresInLabel(1_000_000 + 605, now), "Expires in 10:05");
+  assert.equal(expiresInLabel(1_000_000 + 9, now), "Expires in 0:09");
+  assert.equal(expiresInLabel(1_000_000, now), "Expired");
   assert.equal(expiresInLabel(1_000_000 - 1, now), "Expired");
 });
 

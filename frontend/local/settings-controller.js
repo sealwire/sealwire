@@ -6,7 +6,7 @@ import { createRoot } from "react-dom/client";
 import { mergeLogEntries } from "../shared/client-log-merge.js";
 import { filterActivePairings } from "../shared/pairing-helpers.js";
 import { buildProviderStatusModel, hasSignedOutProvider } from "../shared/provider-status.js";
-import { LOCAL_SETTINGS_TABS, LocalSettings, logEntriesAsText } from "./settings-view.js";
+import { LOCAL_SETTINGS_TABS, LocalSettings } from "./settings-view.js";
 
 /**
  * @param {{
@@ -188,17 +188,7 @@ export function createSettingsController({
         saving: Boolean(state.allowedRootsSaving),
         onSave: (roots) => actions.saveAllowedRoots(roots),
       },
-      log: {
-        entries,
-        onCopy: async () => {
-          try {
-            await navigator.clipboard.writeText(logEntriesAsText(entries));
-            return true;
-          } catch {
-            return false;
-          }
-        },
-      },
+      log: { entries },
     });
     // Synchronous so callers (and e2e reading #client-log) see the new lines immediately.
     flushSync(() => root.render(element));

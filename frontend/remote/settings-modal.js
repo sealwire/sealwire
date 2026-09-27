@@ -4,6 +4,7 @@
 import React from "react";
 import { ManagedDialog } from "../shared/managed-dialog.js";
 import { SettingsFooter, SettingsFrame, SettingsPage, SettingsSection } from "../shared/settings-frame.js";
+import { LogPage } from "../shared/settings-log.js";
 import { ProvidersPage } from "../shared/settings-providers.js";
 import { DeviceMetaPanel } from "./react-renderer.js";
 
@@ -18,6 +19,7 @@ export function RemoteSettingsModal({
   device,
   loadBuildInfo,
   onRecheckSignedOut,
+  logEntries,
 }) {
   const providers = providerModel || [];
   // Read at the moment Settings opens, so re-renders while open never re-ask.
@@ -38,7 +40,7 @@ export function RemoteSettingsModal({
     },
     { key: "device", label: "This device", meta: device.statusLabel, metaTone: device.statusTone },
   ];
-  const active = nav.some((item) => item.key === tab) ? tab : "providers";
+  const active = tab === "log" || nav.some((item) => item.key === tab) ? tab : "providers";
   return h(
     ManagedDialog,
     {
@@ -52,7 +54,12 @@ export function RemoteSettingsModal({
       {
         active,
         closeId: "close-remote-settings-modal",
-        footer: h(SettingsFooter, { loadBuildInfo }),
+        footer: h(SettingsFooter, {
+          loadBuildInfo,
+          logActive: active === "log",
+          logButtonId: "remote-settings-tab-log",
+          onOpenLog: () => onSelectTab("log"),
+        }),
         nav,
         onClose,
         onSelect: onSelectTab,
@@ -65,7 +72,13 @@ export function RemoteSettingsModal({
         listId: "remote-provider-status-list",
         model: providers,
       }),
-      h(DevicePage, { active: active === "device", device })
+      h(DevicePage, { active: active === "device", device }),
+      h(LogPage, {
+        active: active === "log",
+        entries: logEntries || [],
+        footnote: "Newest first · the last 400 lines from this device and the relay.",
+        listId: "remote-client-log",
+      })
     )
   );
 }

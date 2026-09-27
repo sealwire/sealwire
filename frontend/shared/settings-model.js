@@ -116,16 +116,18 @@ export function relativeTime(seconds, nowMs = Date.now()) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-/** @param {number} seconds epoch seconds */
+/** "Expires in 23:41:08", or "Expires in 41:08" inside the last hour. */
 export function expiresInLabel(seconds, nowMs = Date.now()) {
-  const remaining = Math.round(seconds - nowMs / 1000);
+  const remaining = Math.floor(seconds - nowMs / 1000);
   if (remaining <= 0) {
     return "Expired";
   }
-  if (remaining < 3600) {
-    return `Expires in ${Math.max(1, Math.floor(remaining / 60))} min`;
-  }
-  return `Expires in ${Math.floor(remaining / 3600)} h`;
+  const hours = Math.floor(remaining / 3600);
+  const minutes = Math.floor((remaining % 3600) / 60);
+  const secs = String(remaining % 60).padStart(2, "0");
+  return hours
+    ? `Expires in ${hours}:${String(minutes).padStart(2, "0")}:${secs}`
+    : `Expires in ${minutes}:${secs}`;
 }
 
 export function deviceStatusLine(record, nowMs = Date.now()) {

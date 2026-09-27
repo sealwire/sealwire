@@ -19,7 +19,6 @@ import {
 import { createRemoteComposerSend } from "./composer-send.js";
 import { StartSessionSplitButton } from "../shared/start-session-split-button.js";
 import { ConversationHeader } from "../shared/conversation-header.js";
-import { ClientLog } from "../shared/client-log.js";
 import {
   askUserDetailSignature,
   createAskUserQuestionDetailLoader,
@@ -2627,9 +2626,6 @@ function RemoteApp() {
           askUserDetailLoadingRequestIds: askUserQuestionDetailLoading,
           askUserDetailErrors: askUserQuestionDetailErrors,
           uiState: transcriptUiState,
-        }),
-        h(RemoteClientLogDrawer, {
-          lines: currentState.clientLogs,
         })
       ),
       h(RemoteWorkspaceChangesRail, { reviewer: reviewerActions })
@@ -2708,6 +2704,7 @@ function RemoteApp() {
       open: remoteUi.settingsModalOpen,
       tab: remoteUi.settingsTab,
       loadBuildInfo: loadRemoteBuildInfo,
+      logEntries: currentState.clientLogs,
       onRecheckSignedOut: () => void handlers.onRecheckSignedOutProviders(),
       providerModel: buildProviderStatusModel(session),
       device: {
@@ -3720,17 +3717,5 @@ function ThreadActionsSheet({ onClose, onSelect, open, sections, threadTitle }) 
         )
       )
     )
-  );
-}
-
-function RemoteClientLogDrawer({ lines }) {
-  return h(
-    "details",
-    { className: "log-drawer" },
-    h("summary", null, "Remote log"),
-    h(ClientLog, {
-      id: "remote-client-log",
-      lines,
-    })
   );
 }

@@ -650,7 +650,7 @@ test("a gap detected while appends are already buffered is computed from the buf
   });
   assert.equal(window.__transcriptGapRepairCount, 1);
   assert.match(
-    state.clientLogs[0],
+    state.clientLogs[0].text,
     /have=9\b/,
     "the gap detail must report the buffered have (9), not the stale array's (5)"
   );

@@ -188,7 +188,8 @@ test("revoked devices fold into one line and list only id and date, four at a ti
 });
 
 // The QR arrives as SVG markup from the relay; it must go through an <img>, never be injected.
-test("the pairing page shows the QR as an image and the link to copy", () => {
+test("the pairing page shows the QR as an image and the link to copy", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW_SECONDS * 1000 });
   const { props, calls } = baseProps();
   const view = render(props);
   try {
@@ -208,7 +209,7 @@ test("the pairing page shows the QR as an image and the link to copy", () => {
     assert.ok(img.getAttribute("src").startsWith("data:image/svg+xml"));
     assert.equal(qr.querySelector("script"), null);
     assert.equal(view.host.querySelector("#pairing-link-input").value, ticket.pairing_url);
-    assert.match(view.host.querySelector("#pairing-expiry").textContent, /Expires in 23 h/);
+    assert.match(view.host.querySelector("#pairing-expiry").textContent, /Expires in 23:00:05/);
     assert.match(view.panel("devices").textContent, /Devices\/Pair new device/);
   } finally {
     view.cleanup();
@@ -298,6 +299,40 @@ test("picking One folder only hides the all-roots code until a folder is used", 
     assert.equal(view.host.querySelector("#pairing-qr img"), null, "no code that grants more than the page says");
     assert.equal(view.host.querySelector("#pairing-link-input").value, "");
     assert.match(view.host.querySelector("#pairing-qr").textContent, /Choose a folder/);
+  } finally {
+    view.cleanup();
+  }
+});
+
+test("the pairing code's expiry counts down every second", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: NOW_SECONDS * 1000 });
+  const { props } = baseProps();
+  const ticket = { pairing_id: "pair-1", pairing_url: "u", pairing_qr_svg: "<svg/>", expires_at: NOW_SECONDS + 65, path_scope: [] };
+  const view = render({ ...props, pairing: { ...props.pairing, open: true, ticket } });
+  try {
+    const expiry = () => view.host.querySelector("#pairing-expiry").textContent;
+    assert.match(expiry(), /Expires in 1:05/);
+    act(() => t.mock.timers.tick(1000));
+    assert.match(expiry(), /Expires in 1:04/);
+    act(() => t.mock.timers.tick(64_000));
+    assert.match(expiry(), /Expired/);
+  } finally {
+    view.cleanup();
+  }
+});
+
+test("a code shown again after being hidden shows the time left now, not when it was hidden", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: NOW_SECONDS * 1000 });
+  const { props } = baseProps();
+  const ticket = { pairing_id: "pair-1", pairing_url: "u", pairing_qr_svg: "<svg/>", expires_at: NOW_SECONDS + 65, path_scope: ["/one"] };
+  const view = render({ ...props, pairing: { ...props.pairing, open: true, ticket, requestedScope: ["/one"] } });
+  try {
+    const input = view.host.querySelector("#pairing-path-scope-input");
+    assert.match(view.host.querySelector("#pairing-expiry").textContent, /Expires in 1:05/);
+    act(() => typeInto(input, "/other"));
+    act(() => t.mock.timers.tick(120_000));
+    act(() => typeInto(input, "/one"));
+    assert.match(view.host.querySelector("#pairing-expiry").textContent, /Expired/);
   } finally {
     view.cleanup();
   }

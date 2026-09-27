@@ -64,7 +64,11 @@ function setup(respond) {
     readDevices: () => devices,
   });
   // Leftover mounts share ids with the next test, and JSDOM's id lookup then finds theirs.
-  const cleanup = () => mount.remove();
+  // Closing unmounts the pairing page, which stops its countdown timer.
+  const cleanup = () => {
+    dialog.close();
+    mount.remove();
+  };
   return { cleanup, dialog, devices, mount, settings, state };
 }
 

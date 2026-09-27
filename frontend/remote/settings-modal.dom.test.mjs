@@ -115,3 +115,22 @@ test("opening Settings rechecks a signed-out provider once, and never a signed-i
     view.cleanup();
   }
 });
+
+// e2e scripts read #remote-client-log for diagnostics whether or not anyone opened it.
+test("the log sits behind the footer link and stays readable while closed", () => {
+  const { device } = deviceProps();
+  const picked = [];
+  const logEntries = [
+    { at: 2_000, text: "Remote claim challenge accepted" },
+    { at: 1_000, text: "Booting broker remote surface..." },
+  ];
+  const view = render({ open: false, tab: "providers", device, logEntries, onSelectTab: (key) => picked.push(key) });
+  try {
+    assert.match(view.host.querySelector("#remote-client-log").textContent, /Remote claim challenge accepted/);
+    assert.equal(view.host.querySelector('[data-settings-panel="log"]').hidden, true);
+    act(() => view.host.querySelector("#remote-settings-tab-log").click());
+    assert.deepEqual(picked, ["log"]);
+  } finally {
+    view.cleanup();
+  }
+});

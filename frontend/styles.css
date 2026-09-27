@@ -4892,28 +4892,6 @@ body.sidebar-collapsed .app-shell[data-view="tasks"] #tasks-sidebar-toggle {
 .composer-actions .send-button[hidden] + .stop-button,
 .composer-actions .stop-button[hidden] ~ .send-button { margin-left: auto; }
 
-.client-log {
-  margin: 0;
-  padding: 16px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-  max-height: 220px;
-  overflow-y: auto;
-  /* Wrap long relay-log lines (e.g. broker-disconnect messages) instead of
-     overflowing the modal. macOS hides horizontal scrollbars, so a scroll box
-     just reads as "cut off" — wrapping keeps every line readable and contained. */
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.log-drawer {
-  display: none;
-}
-
 /* QR code background stays white in both themes — required for scanner contrast. */
 .pairing-qr { background: var(--qr-surface); padding: 12px; border-radius: var(--radius-sm); text-align: center; }
 .pairing-qr-image { display: block; width: 100%; height: auto; max-width: 240px; margin: 0 auto; }

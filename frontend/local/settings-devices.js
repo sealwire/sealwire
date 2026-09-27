@@ -26,7 +26,7 @@ export function DevicesPage({ active, devices, pairing, roots, formatTimestamp, 
         title: "Pair new device",
         parent: { label: "Devices", onBack: pairing.onCancel },
       },
-      h(PairingBody, { pairing, roots, now })
+      h(PairingBody, { pairing, roots })
     );
   }
   const { current, past } = splitDeviceRecords(devices.records);
@@ -249,12 +249,13 @@ function DeviceHistory({ records, formatTimestamp, onClear }) {
   );
 }
 
-function PairingBody({ pairing, roots, now }) {
+function PairingBody({ pairing, roots }) {
   const ticket = pairing.ticket;
   const requested = pairing.requestedScope;
   const [mode, setMode] = React.useState(requested.length ? "folder" : "all");
   const [folder, setFolder] = React.useState(requested[0] || "");
   const [copied, setCopied] = React.useState(false);
+  const [, setTick] = React.useState(0);
 
   // With no code on show (it failed), the same scope again is a retry, not a repeat.
   const ask = (scope) => {
@@ -281,6 +282,17 @@ function PairingBody({ pairing, roots, now }) {
   const typed = folder.trim();
   const wanted = mode === "all" ? [] : typed ? [typed] : null;
   const shown = ticket && !pairing.busy && wanted && sameScope(requested, wanted) ? ticket : null;
+
+  // The label reads the clock itself, so a code shown again after hiding is right at once;
+  // the timer only asks for a fresh render each second.
+  const shownId = shown?.pairing_id;
+  React.useEffect(() => {
+    if (!shownId) {
+      return undefined;
+    }
+    const timer = setInterval(() => setTick((tick) => tick + 1), 1000);
+    return () => clearInterval(timer);
+  }, [shownId]);
   const copy = async () => {
     if (await pairing.onCopy()) {
       setCopied(true);
@@ -341,7 +353,7 @@ function PairingBody({ pairing, roots, now }) {
           ? h(
               "p",
               { className: "settings-hint", id: "pairing-expiry" },
-              expiresInLabel(shown.expires_at, now),
+              expiresInLabel(shown.expires_at, Date.now()),
               " · ",
               h(
                 "button",
