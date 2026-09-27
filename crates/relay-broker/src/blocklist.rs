@@ -288,8 +288,7 @@ mod tests {
     //     cargo test -p relay-broker banned_ips_load -- --nocapture
     #[tokio::test]
     async fn banned_ips_load_from_postgres() {
-        let Some(url) = trimmed_option_string(std::env::var("RELAY_BROKER_TEST_POSTGRES_URL").ok())
-        else {
+        let Some((url, _serial)) = crate::postgres_test_url().await else {
             eprintln!("skipping banned_ips postgres test: set RELAY_BROKER_TEST_POSTGRES_URL");
             return;
         };

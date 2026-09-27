@@ -589,8 +589,7 @@ mod tests {
     ///     cargo test -p relay-broker postgres_sink -- --nocapture
     #[tokio::test]
     async fn postgres_sink_writes_usage_events() {
-        let Some(url) = trimmed_option_string(std::env::var("RELAY_BROKER_TEST_POSTGRES_URL").ok())
-        else {
+        let Some((url, _serial)) = crate::postgres_test_url().await else {
             eprintln!("skipping postgres usage sink: set RELAY_BROKER_TEST_POSTGRES_URL");
             return;
         };
@@ -720,8 +719,7 @@ mod tests {
     ///     cargo test -p relay-broker prune_usage_events -- --nocapture
     #[tokio::test]
     async fn prune_usage_events_deletes_only_stale_rows() {
-        let Some(url) = trimmed_option_string(std::env::var("RELAY_BROKER_TEST_POSTGRES_URL").ok())
-        else {
+        let Some((url, _serial)) = crate::postgres_test_url().await else {
             eprintln!("skipping postgres retention test: set RELAY_BROKER_TEST_POSTGRES_URL");
             return;
         };

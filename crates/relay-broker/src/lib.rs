@@ -3982,5 +3982,18 @@ fn request_environment(headers: &HeaderMap) -> Option<RequestEnvironment> {
     })
 }
 
+/// PG-gated tests share one disposable database and one of them drops every table, so they
+/// take turns; overlapping, a schema init races an index build and can leave it invalid.
+#[cfg(test)]
+pub(crate) async fn postgres_test_url() -> Option<(String, tokio::sync::MutexGuard<'static, ()>)> {
+    static SERIAL: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let url = trimmed_option_string(std::env::var("RELAY_BROKER_TEST_POSTGRES_URL").ok())?;
+    let serial = SERIAL
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    Some((url, serial))
+}
+
 #[cfg(test)]
 mod tests;

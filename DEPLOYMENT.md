@@ -335,10 +335,15 @@ Broker env:
   - On startup the broker requires GIN indexes over `superseded_tokens`, which let it
     check a rotated-away token without scanning the table. It builds any that are
     missing with `CREATE INDEX CONCURRENTLY` (writes carry on, up to 10 minutes), and
-    refuses to start if one exists but is invalid, printing the exact SQL to run. On a
-    large database, build them before upgrading:
+    refuses to start if one exists but is invalid, printing the exact SQL to run.
+    If the platform's startup healthcheck is shorter than the 10-minute build timeout,
+    build both indexes while the old broker is still serving, **before** deploying:
     `CREATE INDEX CONCURRENTLY IF NOT EXISTS public_device_grants_superseded_idx ON public_device_grants USING GIN ((superseded_tokens::jsonb) jsonb_path_ops);`
-    and the same for `public_client_identities`.
+    and the same for `public_client_identities`. Before the rollout, verify that
+    both rows from the following query have `indisvalid = true`:
+    `SELECT c.relname, i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname IN ('public_device_grants_superseded_idx', 'public_client_identities_superseded_idx');`
+    An interrupted concurrent build can leave an invalid index that prevents the
+    new broker from starting.
 - optional `RELAY_BROKER_PUBLIC_POSTGRES_RELOAD_BEFORE_USE=1` — **cross-instance
   revocation visibility** (NOT full HA). With a single broker process the
   in-memory control plane is authoritative and the broker skips reloading from

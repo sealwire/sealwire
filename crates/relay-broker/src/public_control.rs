@@ -3410,13 +3410,16 @@ fn superseded_index_sql(table: &str) -> String {
 }
 
 /// Containment narrows to the one row holding the hash via the index; only that row's
-/// entries (at most `MAX_SUPERSEDED_TOKENS`) are expanded to check expiry.
+/// entries (at most `MAX_SUPERSEDED_TOKENS`) are expanded to check expiry. The candidates
+/// are materialized because inside EXISTS a generic plan costs for the first match and
+/// picks a table scan; costed as a full fetch, the index wins.
 fn superseded_probe_sql(table: &str) -> String {
     format!(
-        "SELECT EXISTS (SELECT 1 FROM {table} WHERE refresh_token_hash = $1) \
-         OR EXISTS (SELECT 1 FROM {table}, jsonb_array_elements({SUPERSEDED_JSONB}) AS entry \
-         WHERE {SUPERSEDED_JSONB} @> $2::jsonb AND entry->>'refresh_token_hash' = $1 \
-         AND (entry->>'expires_at')::numeric > $3)"
+        "WITH candidates AS MATERIALIZED (SELECT {SUPERSEDED_JSONB} AS superseded FROM {table} \
+         WHERE {SUPERSEDED_JSONB} @> $2::jsonb) \
+         SELECT EXISTS (SELECT 1 FROM {table} WHERE refresh_token_hash = $1) \
+         OR EXISTS (SELECT 1 FROM candidates, jsonb_array_elements(candidates.superseded) AS entry \
+         WHERE entry->>'refresh_token_hash' = $1 AND (entry->>'expires_at')::numeric > $3)"
     )
 }
 
@@ -4235,8 +4238,7 @@ mod postgres_round_trip_tests {
     ///     cargo test -p relay-broker postgres_relay_registration -- --test-threads=1
     #[tokio::test]
     async fn postgres_relay_registration_persists_across_reload() {
-        let Some(url) = trimmed_option_string(std::env::var("RELAY_BROKER_TEST_POSTGRES_URL").ok())
-        else {
+        let Some((url, _serial)) = crate::postgres_test_url().await else {
             eprintln!(
                 "skipping postgres round-trip: set RELAY_BROKER_TEST_POSTGRES_URL to a live DB"
             );
@@ -4318,8 +4320,7 @@ mod postgres_round_trip_tests {
     /// save) to minimise blast radius.
     #[tokio::test]
     async fn postgres_device_grant_last_seen_round_trips_and_touches() {
-        let Some(url) = trimmed_option_string(std::env::var("RELAY_BROKER_TEST_POSTGRES_URL").ok())
-        else {
+        let Some((url, _serial)) = crate::postgres_test_url().await else {
             eprintln!(
                 "skipping postgres device-grant round-trip: set RELAY_BROKER_TEST_POSTGRES_URL"
             );
@@ -5398,8 +5399,8 @@ mod postgres_persistence_opt_tests {
             .expect("init schema");
         pool
     }
-    fn test_url() -> Option<String> {
-        trimmed_option_string(std::env::var("RELAY_BROKER_TEST_POSTGRES_URL").ok())
+    async fn test_url() -> Option<(String, tokio::sync::MutexGuard<'static, ()>)> {
+        crate::postgres_test_url().await
     }
 
     /// The diff-save must apply adds, in-place updates, AND deletes so a reload
@@ -5407,7 +5408,7 @@ mod postgres_persistence_opt_tests {
     /// switch away from wipe-and-rebuild did not silently drop or stale any row.
     #[tokio::test]
     async fn postgres_targeted_save_applies_add_update_delete() {
-        let Some(url) = test_url() else {
+        let Some((url, _serial)) = test_url().await else {
             eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
             return;
         };
@@ -5495,7 +5496,7 @@ mod postgres_persistence_opt_tests {
     /// control plane. This is the regression guard for that ordering.
     #[tokio::test]
     async fn postgres_targeted_save_handles_credential_rotation() {
-        let Some(url) = test_url() else {
+        let Some((url, _serial)) = test_url().await else {
             eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
             return;
         };
@@ -5553,7 +5554,7 @@ mod postgres_persistence_opt_tests {
     /// refresh token but keeps relay_id/room/verify_key, which must persist.
     #[tokio::test]
     async fn postgres_relay_reenrollment_through_save_path_persists() {
-        let Some(url) = test_url() else {
+        let Some((url, _serial)) = test_url().await else {
             eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
             return;
         };
@@ -5637,7 +5638,7 @@ mod postgres_persistence_opt_tests {
     /// never run ahead of the database.
     #[tokio::test]
     async fn postgres_save_failure_reconciles_memory_with_db() {
-        let Some(url) = test_url() else {
+        let Some((url, _serial)) = test_url().await else {
             eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
             return;
         };
@@ -5693,7 +5694,7 @@ mod postgres_persistence_opt_tests {
     /// restoring the snapshot yields {A} and fails the `contains_key("B")` assert.
     #[tokio::test]
     async fn postgres_ambiguous_save_failure_reconciles_to_db_truth() {
-        let Some(url) = test_url() else {
+        let Some((url, _serial)) = test_url().await else {
             eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
             return;
         };
@@ -5782,7 +5783,7 @@ mod postgres_persistence_opt_tests {
     /// possibly-stale snapshot with reload-before-use off).
     #[tokio::test]
     async fn postgres_save_and_reload_both_failing_arms_forced_reload() {
-        let Some(url) = test_url() else {
+        let Some((url, _serial)) = test_url().await else {
             eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
             return;
         };
@@ -5908,7 +5909,7 @@ mod postgres_persistence_opt_tests {
     /// This assertion currently FAILS (the bug); it is the regression guard for the fix.
     #[tokio::test]
     async fn client_token_in_db_but_not_in_memory_is_rejected_without_reload() {
-        let Some(url) = test_url() else {
+        let Some((url, _serial)) = test_url().await else {
             eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
             return;
         };
@@ -5939,7 +5940,7 @@ mod postgres_persistence_opt_tests {
     /// DB (the rotation-protocol lockout / follow-up A) — that needs a grace period.
     #[tokio::test]
     async fn client_token_in_db_authenticates_with_reload_before_use() {
-        let Some(url) = test_url() else {
+        let Some((url, _serial)) = test_url().await else {
             eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
             return;
         };
@@ -5963,7 +5964,7 @@ mod postgres_persistence_opt_tests {
     /// reload, a token durably in the database still gets one.
     #[tokio::test]
     async fn postgres_probe_gates_the_reload_on_a_miss() {
-        let Some(url) = test_url() else {
+        let Some((url, _serial)) = test_url().await else {
             eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
             return;
         };
@@ -6048,9 +6049,108 @@ mod postgres_persistence_opt_tests {
         );
     }
 
+    /// Prepared statements may switch to a generic plan, where the planner no longer sees the
+    /// hash; the probe then scanned every row per unknown bearer (~30ms at 50k rows).
+    #[tokio::test]
+    async fn postgres_probe_uses_the_superseded_index_under_a_generic_plan() {
+        use sqlx::{Connection as _, Executor as _, Row as _};
+        let Some((url, _serial)) = test_url().await else {
+            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
+            return;
+        };
+        // TEMP tables on a private connection shadow the real names for this session only,
+        // so the probe runs as production writes it and parallel tests cannot interfere.
+        let mut conn = sqlx::PgConnection::connect(&url).await.expect("connect");
+        let now = 1_790_000_001_i64;
+        for table in ["public_device_grants", "public_client_identities"] {
+            let setup = [
+                format!(
+                    "CREATE TEMP TABLE {table} (refresh_token_hash TEXT PRIMARY KEY, \
+                     owner_id TEXT NOT NULL, label TEXT, created_at BIGINT NOT NULL, \
+                     last_seen BIGINT, superseded_tokens TEXT)"
+                ),
+                // Two in five rows carry one to three rotated-away hashes, as re-approvals leave.
+                format!(
+                    "INSERT INTO {table} SELECT md5('p' || g) || md5('q' || g), 'owner-' || g, \
+                     'Phone ' || g, 1700000000, NULL, CASE WHEN g % 5 < 2 THEN (SELECT \
+                     jsonb_agg(jsonb_build_object('refresh_token_hash', md5('s' || g || '-' || k) \
+                     || md5('t' || g || '-' || k), 'expires_at', {now} - 1 + k))::text \
+                     FROM generate_series(1, 1 + g % 3) k) END FROM generate_series(1, 50000) g"
+                ),
+                // CONCURRENTLY is meaningless on a session-private table; same expression.
+                superseded_index_sql(table).replace("CONCURRENTLY ", ""),
+                format!("ANALYZE {table}"),
+            ];
+            for statement in setup {
+                conn.execute(statement.as_str())
+                    .await
+                    .expect("set up probe table");
+            }
+        }
+        conn.execute("SET plan_cache_mode = force_generic_plan")
+            .await
+            .expect("force generic plans");
+
+        for (name, table) in [
+            ("device_probe", "public_device_grants"),
+            ("client_probe", "public_client_identities"),
+        ] {
+            conn.execute(
+                format!(
+                    "PREPARE {name}(text, text, bigint) AS {}",
+                    superseded_probe_sql(table)
+                )
+                .as_str(),
+            )
+            .await
+            .expect("prepare probe");
+            // Arguments are SQL expressions, so the fixture's hashes are rebuilt in place.
+            let run = |hash: &str| {
+                format!(
+                    r#"EXECUTE {name}({hash}, '[{{"refresh_token_hash":"' || {hash} || '"}}]', {now})"#
+                )
+            };
+            let plan = conn
+                .fetch_all(format!("EXPLAIN {}", run("repeat('f', 64)")).as_str())
+                .await
+                .expect("explain probe")
+                .iter()
+                .map(|row| row.get::<String, _>(0))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                plan.contains(&format!("Index Scan on {table}_superseded_idx"))
+                    && !plan.contains(&format!("Seq Scan on {table}")),
+                "the {table} probe must use its superseded index under a generic plan:\n{plan}"
+            );
+            // Row 1 holds hashes expiring at `now` (k = 1) and just after it (k = 2).
+            for (hash, expected, what) in [
+                (
+                    "md5('s1-2') || md5('t1-2')",
+                    true,
+                    "an unexpired rotated-away hash",
+                ),
+                (
+                    "md5('s1-1') || md5('t1-1')",
+                    false,
+                    "an expired rotated-away hash",
+                ),
+                ("md5('p7') || md5('q7')", true, "a current hash"),
+                ("repeat('f', 64)", false, "an unknown hash"),
+            ] {
+                let found = conn
+                    .fetch_one(run(hash).as_str())
+                    .await
+                    .expect("run probe")
+                    .get::<bool, _>(0);
+                assert_eq!(found, expected, "{table}: {what}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn postgres_schema_init_leaves_a_valid_superseded_index() {
-        let Some(url) = test_url() else {
+        let Some((url, _serial)) = test_url().await else {
             eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
             return;
         };
@@ -6078,7 +6178,7 @@ mod postgres_persistence_opt_tests {
     #[tokio::test]
     #[ignore = "perf benchmark; needs RELAY_BROKER_TEST_POSTGRES_URL; run with --ignored --nocapture"]
     async fn bench_persistence_backends() {
-        let Some(url) = test_url() else {
+        let Some((url, _serial)) = test_url().await else {
             eprintln!("skipping benchmark: set RELAY_BROKER_TEST_POSTGRES_URL");
             return;
         };
