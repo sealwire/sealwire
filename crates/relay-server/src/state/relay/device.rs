@@ -22,9 +22,10 @@ use super::RelayState;
 // over to the laptop to hit Approve. 3 minutes covers that comfortably.
 const DEFAULT_PAIRING_TTL_SECS: u64 = 180;
 const MAX_PAIRING_TTL_SECS: u64 = 600;
-/// Someone pairing by hand makes well under 20 tickets a minute. Past this new tickets are
-/// refused: dropping an old one could strand a device already waiting on it.
-const MAX_PENDING_PAIRINGS: usize = 64;
+/// Pairing QR attempts one relay may start a minute; someone pairing by hand needs a few.
+/// Each costs a Cloud request, signed or not, so all count; a refused one counts nothing.
+const MAX_PAIRING_STARTS_PER_MINUTE: usize = 10;
+const PAIRING_REPLACED_ERROR: &str = "this pairing QR was replaced by a newer one; scan the new QR";
 const CLAIM_CHALLENGE_TTL_SECS: u64 = 60;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct PendingPairing {
@@ -259,6 +260,7 @@ pub(crate) struct PreparedPairingTicket {
     pub(crate) pairing_secret: String,
     pub(crate) expires_at: u64,
     pub(crate) path_scope: Vec<String>,
+    pub(crate) generation: u64,
 }
 
 impl RelayState {
@@ -269,12 +271,26 @@ impl RelayState {
     ) -> Result<PreparedPairingTicket, String> {
         let now = super::super::unix_now();
         self.prune_expired_pairings(now);
-        if self.pending_pairings.len() >= MAX_PENDING_PAIRINGS {
+        let window_start = now.saturating_sub(60);
+        while self
+            .pairing_starts
+            .front()
+            .is_some_and(|started| *started <= window_start)
+        {
+            self.pairing_starts.pop_front();
+        }
+        if let Some(oldest) = self
+            .pairing_starts
+            .front()
+            .filter(|_| self.pairing_starts.len() >= MAX_PAIRING_STARTS_PER_MINUTE)
+        {
+            let retry_in = oldest.saturating_add(60).saturating_sub(now).max(1);
             return Err(format!(
-                "{MAX_PENDING_PAIRINGS} pairing tickets are already waiting; finish or let some \
-                 expire before starting another"
+                "Too many new pairing QRs: at most {MAX_PAIRING_STARTS_PER_MINUTE} a minute. \
+                 Try again in {retry_in}s; a QR already on screen still works."
             ));
         }
+        self.pairing_starts.push_back(now);
 
         let ttl_secs = requested_ttl_secs
             .unwrap_or(DEFAULT_PAIRING_TTL_SECS)
@@ -282,24 +298,88 @@ impl RelayState {
         let pairing_id = format!("pair-{}", random_token(10).to_ascii_lowercase());
         let pairing_secret = random_token(32);
         let expires_at = now.saturating_add(ttl_secs);
-
-        self.pending_pairings.insert(
-            pairing_id.clone(),
-            PendingPairing {
-                pairing_id: pairing_id.clone(),
-                pairing_secret: pairing_secret.clone(),
-                secret_hash: sha256_hex(&pairing_secret),
-                created_at: now,
-                expires_at,
-                path_scope: path_scope.clone(),
-            },
-        );
+        self.pairing_generation += 1;
         Ok(PreparedPairingTicket {
             pairing_id,
             pairing_secret,
             expires_at,
             path_scope,
+            generation: self.pairing_generation,
         })
+    }
+
+    /// Makes `prepared` the only live pairing QR once Cloud has signed it, and returns the
+    /// answers owed to phones waiting on the QRs it retires. Refused if a newer start began
+    /// since, so a slow response can never hand out a link that is already dead.
+    pub fn install_pairing_ticket(
+        &mut self,
+        prepared: &PreparedPairingTicket,
+        now: u64,
+    ) -> Result<Vec<PendingPairingResult>, String> {
+        if prepared.generation != self.pairing_generation {
+            return Err("a newer pairing QR was requested; use that one".to_string());
+        }
+        if prepared.expires_at <= now {
+            return Err("the pairing QR expired before it could be issued".to_string());
+        }
+        let mut owed = Vec::new();
+        for (pairing_id, pairing) in std::mem::take(&mut self.pending_pairings) {
+            if let Some(request) = self.pending_pairing_requests.remove(&pairing_id) {
+                owed.push(self.retire_pairing_request(pairing, request));
+            } else {
+                self.retired_pairings.insert(pairing_id, pairing);
+            }
+        }
+        self.pending_pairing_requests.clear();
+        self.pending_pairings.insert(
+            prepared.pairing_id.clone(),
+            PendingPairing {
+                pairing_id: prepared.pairing_id.clone(),
+                pairing_secret: prepared.pairing_secret.clone(),
+                secret_hash: sha256_hex(&prepared.pairing_secret),
+                created_at: now,
+                expires_at: prepared.expires_at,
+                path_scope: prepared.path_scope.clone(),
+            },
+        );
+        Ok(owed)
+    }
+
+    /// Answers a phone waiting on a replaced QR the way a rejection does, minus the device
+    /// record: nobody decided against it.
+    fn retire_pairing_request(
+        &mut self,
+        pairing: PendingPairing,
+        request: PendingPairingRequest,
+    ) -> PendingPairingResult {
+        self.retired_pairings
+            .insert(pairing.pairing_id.clone(), pairing.clone());
+        self.completed_pairings.insert(
+            pairing.pairing_id.clone(),
+            CompletedPairing {
+                pairing_id: pairing.pairing_id.clone(),
+                pairing_secret: pairing.pairing_secret.clone(),
+                expires_at: pairing.expires_at,
+                device_verify_key: request.device_verify_key,
+                device: None,
+                payload_secret: None,
+                relay_id: None,
+                relay_label: None,
+                client_claim_id: None,
+                client_claim_nonce: None,
+                client_claim_expires_at: None,
+                device_refresh_token: None,
+                device_join_ticket: None,
+                device_join_ticket_expires_at: None,
+                error: Some(PAIRING_REPLACED_ERROR.to_string()),
+                path_scope: pairing.path_scope,
+            },
+        );
+        replaced_pairing_result(
+            pairing.pairing_id,
+            request.broker_peer_id,
+            pairing.pairing_secret,
+        )
     }
 
     pub fn render_pairing_ticket_view(
@@ -419,6 +499,13 @@ impl RelayState {
             .get(pairing_id)
             .map(|pairing| (pairing.expires_at, pairing.path_scope.clone()))
             .ok_or_else(|| "pairing request is missing or expired".to_string())?;
+        // Refused rather than queued: the restored claim would overwrite the newcomer.
+        if self.claimed_pairing_requests.contains(pairing_id) {
+            return Err(
+                "an approval for this pairing is already in progress; wait for its result"
+                    .to_string(),
+            );
+        }
         if let Some(existing) = self.pending_pairing_requests.get_mut(pairing_id) {
             // Rebinding exists so ONE device can retry over a fresh broker peer (a
             // network blip mid-approval). It must stay keyed to that device: the
@@ -487,16 +574,23 @@ impl RelayState {
         now: u64,
     ) -> Result<PendingPairingRequest, String> {
         self.prune_expired_pairings(now);
-        self.pending_pairing_requests
+        let request = self
+            .pending_pairing_requests
             .remove(pairing_id)
-            .ok_or_else(|| "pairing request is not waiting for approval".to_string())
+            .ok_or_else(|| "pairing request is not waiting for approval".to_string())?;
+        self.claimed_pairing_requests.insert(pairing_id.to_string());
+        Ok(request)
     }
 
     /// Put a claimed pairing request back (broker issuance failed, or the claim
     /// is being handed to `decide_pairing_request` under the same lock).
     pub fn restore_pairing_request(&mut self, request: PendingPairingRequest) {
-        self.pending_pairing_requests
-            .insert(request.pairing_id.clone(), request);
+        self.claimed_pairing_requests.remove(&request.pairing_id);
+        // Its pairing may have expired while the approval was in flight.
+        if self.pending_pairings.contains_key(&request.pairing_id) {
+            self.pending_pairing_requests
+                .insert(request.pairing_id.clone(), request);
+        }
     }
 
     pub fn decide_pairing_request(
@@ -695,6 +789,23 @@ impl RelayState {
         Ok(revoked_device_ids)
     }
 
+    /// The "replaced" answer for a phone reaching a retired QR, whose Cloud join ticket
+    /// still works until it expires.
+    pub fn retired_pairing_result(
+        &mut self,
+        pairing_id: &str,
+        peer_id: &str,
+        now: u64,
+    ) -> Option<PendingPairingResult> {
+        self.prune_expired_pairings(now);
+        let pairing = self.retired_pairings.get(pairing_id)?;
+        Some(replaced_pairing_result(
+            pairing.pairing_id.clone(),
+            peer_id.to_string(),
+            pairing.pairing_secret.clone(),
+        ))
+    }
+
     pub fn pending_pairing_secret(&mut self, pairing_id: &str, now: u64) -> Result<String, String> {
         self.prune_expired_pairings(now);
         self.pending_pairings
@@ -702,6 +813,11 @@ impl RelayState {
             .map(|pairing| pairing.pairing_secret.clone())
             .or_else(|| {
                 self.completed_pairings
+                    .get(pairing_id)
+                    .map(|pairing| pairing.pairing_secret.clone())
+            })
+            .or_else(|| {
+                self.retired_pairings
                     .get(pairing_id)
                     .map(|pairing| pairing.pairing_secret.clone())
             })
@@ -924,6 +1040,10 @@ impl RelayState {
             .retain(|_, pairing| pairing.expires_at > now);
         self.pending_pairing_requests
             .retain(|pairing_id, _| self.pending_pairings.contains_key(pairing_id));
+        self.claimed_pairing_requests
+            .retain(|pairing_id| self.pending_pairings.contains_key(pairing_id));
+        self.retired_pairings
+            .retain(|_, pairing| pairing.expires_at > now);
         self.completed_pairings
             .retain(|_, pairing| pairing.expires_at > now);
     }
@@ -999,6 +1119,29 @@ impl RelayState {
             .retain(|challenge_id, challenge| {
                 challenge.device_id != device_id || challenge_id == except_challenge_id
             });
+    }
+}
+
+fn replaced_pairing_result(
+    pairing_id: String,
+    target_peer_id: String,
+    pairing_secret: String,
+) -> PendingPairingResult {
+    PendingPairingResult {
+        pairing_id,
+        target_peer_id,
+        pairing_secret,
+        device: None,
+        payload_secret: None,
+        relay_id: None,
+        relay_label: None,
+        client_claim_id: None,
+        client_claim_nonce: None,
+        client_claim_expires_at: None,
+        device_refresh_token: None,
+        device_join_ticket: None,
+        device_join_ticket_expires_at: None,
+        error: Some(PAIRING_REPLACED_ERROR.to_string()),
     }
 }
 

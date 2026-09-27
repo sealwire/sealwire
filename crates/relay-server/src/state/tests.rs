@@ -212,6 +212,9 @@ fn issue_test_pairing_ticket_with_scope(
     let prepared = relay
         .prepare_pairing_ticket(expires_in_seconds, path_scope)
         .expect("pairing ticket should prepare");
+    relay
+        .install_pairing_ticket(&prepared, unix_now())
+        .expect("pairing ticket should install");
     relay.render_pairing_ticket_view(
         &prepared,
         broker.public_base_url(),
@@ -4325,14 +4328,6 @@ fn revoke_all_other_devices_keeps_selected_device_and_marks_others_revoked() {
         "relay-a",
         Some(60),
     );
-    let drop_ticket = issue_test_pairing_ticket(
-        &mut relay,
-        "ws://127.0.0.1:8789",
-        "room-a",
-        "relay-a",
-        Some(60),
-    );
-
     let (keep_device, _) = relay
         .consume_pairing_ticket(
             &keep_ticket.pairing_id,
@@ -4345,6 +4340,14 @@ fn revoke_all_other_devices_keeps_selected_device_and_marks_others_revoked() {
             100,
         )
         .expect("keep device should pair");
+    // Only the newest QR pairs, so the second phone scans a second QR.
+    let drop_ticket = issue_test_pairing_ticket(
+        &mut relay,
+        "ws://127.0.0.1:8789",
+        "room-a",
+        "relay-a",
+        Some(60),
+    );
     let (drop_device, _) = relay
         .consume_pairing_ticket(
             &drop_ticket.pairing_id,
@@ -4775,42 +4778,289 @@ fn prepare_pairing_ticket_defaults_to_a_three_minute_approval_window() {
     );
 }
 
-/// Nothing else bounds how many pairing tickets wait at once. Preparing one must not cost
-/// an existing ticket, since Cloud may still refuse to sign the new one.
-#[test]
-fn a_full_pairing_queue_refuses_new_tickets_instead_of_dropping_old_ones() {
-    let mut relay = test_state();
-    let oldest = relay
-        .prepare_pairing_ticket(Some(600), Vec::new())
-        .expect("pairing ticket should prepare");
+fn register_waiting_phone(relay: &mut RelayState, pairing_id: &str, peer_id: &str) {
     relay
         .register_pairing_request(
-            &oldest.pairing_id,
-            Some("waiting-phone".to_string()),
+            pairing_id,
+            Some(format!("{peer_id}-phone")),
             None,
-            "surface-waiting",
+            peer_id,
             TEST_VERIFY_KEY_B64.to_string(),
             unix_now(),
         )
-        .expect("a device waits on the oldest ticket");
+        .expect("a phone waits on the QR");
+}
 
-    let refused = (0..200)
-        .filter(|_| relay.prepare_pairing_ticket(Some(600), Vec::new()).is_err())
-        .count();
+/// Only the newest QR may pair. A phone already waiting on the old one is told so,
+/// instead of being left to time out.
+#[test]
+fn a_new_pairing_qr_retires_the_previous_one_and_its_waiting_phone() {
+    let mut relay = test_state();
+    let old = relay
+        .prepare_pairing_ticket(Some(600), Vec::new())
+        .expect("old QR prepares");
+    relay
+        .install_pairing_ticket(&old, unix_now())
+        .expect("old QR installs");
+    register_waiting_phone(&mut relay, &old.pairing_id, "surface-waiting");
 
-    assert!(
-        relay.pending_pairings.len() <= 64,
-        "{} pairing tickets are waiting at once",
-        relay.pending_pairings.len()
+    let new = relay
+        .prepare_pairing_ticket(Some(600), Vec::new())
+        .expect("new QR prepares");
+    let owed = relay
+        .install_pairing_ticket(&new, unix_now())
+        .expect("new QR installs");
+
+    assert_eq!(
+        relay.pending_pairings.keys().collect::<Vec<_>>(),
+        vec![&new.pairing_id]
     );
-    assert!(refused > 0, "tickets past the cap must be refused");
     assert!(
-        relay.pending_pairings.contains_key(&oldest.pairing_id)
-            && relay
-                .pending_pairing_requests
-                .contains_key(&oldest.pairing_id),
-        "the ticket a device is waiting on must survive"
+        relay.pending_pairing_requests.is_empty(),
+        "the old QR's pending approval must be retired"
     );
+    assert!(
+        relay
+            .register_pairing_request(
+                &old.pairing_id,
+                Some("late-phone".to_string()),
+                None,
+                "surface-late",
+                TEST_VERIFY_KEY_B64.to_string(),
+                unix_now(),
+            )
+            .is_err(),
+        "the old QR must no longer pair"
+    );
+    assert_eq!(owed.len(), 1, "the waiting phone is owed an answer");
+    assert_eq!(owed[0].target_peer_id, "surface-waiting");
+    assert!(owed[0].device.is_none() && owed[0].error.is_some());
+    let fetched = relay
+        .completed_pairing_result(
+            &old.pairing_id,
+            TEST_VERIFY_KEY_B64,
+            "surface-waiting",
+            unix_now(),
+        )
+        .expect("the waiting phone can fetch its answer")
+        .expect("an answer is recorded");
+    assert!(fetched.device.is_none() && fetched.error.is_some());
+}
+
+/// Cloud may never sign the new QR; until it does, the one on screen must keep working.
+#[test]
+fn an_unsigned_pairing_start_keeps_the_current_qr() {
+    let mut relay = test_state();
+    let current = relay
+        .prepare_pairing_ticket(Some(600), Vec::new())
+        .expect("current QR prepares");
+    relay
+        .install_pairing_ticket(&current, unix_now())
+        .expect("current QR installs");
+    register_waiting_phone(&mut relay, &current.pairing_id, "surface-waiting");
+
+    let _never_signed = relay
+        .prepare_pairing_ticket(Some(600), Vec::new())
+        .expect("next QR prepares");
+
+    assert!(relay.pending_pairings.contains_key(&current.pairing_id));
+    assert!(relay
+        .pending_pairing_requests
+        .contains_key(&current.pairing_id));
+}
+
+/// Every attempt that could reach Cloud counts, signed or not, since each one costs a Cloud
+/// request; a refused attempt costs nothing and must leave the current QR alone.
+#[test]
+fn pairing_qr_attempts_are_capped_and_a_refusal_keeps_the_current_qr() {
+    let mut relay = test_state();
+    let current = relay
+        .prepare_pairing_ticket(Some(600), Vec::new())
+        .expect("current QR prepares");
+    relay
+        .install_pairing_ticket(&current, unix_now())
+        .expect("current QR installs");
+    // Attempts Cloud never signed.
+    let admitted = 1
+        + (0..20)
+            .filter(|_| relay.prepare_pairing_ticket(Some(600), Vec::new()).is_ok())
+            .count();
+
+    assert_eq!(
+        admitted, 10,
+        "{admitted} attempts were let through in a minute"
+    );
+    assert!(relay.pairing_starts.len() <= 10);
+    assert!(
+        relay.pending_pairings.contains_key(&current.pairing_id),
+        "a refused refresh must leave the current QR alone"
+    );
+    for started in relay.pairing_starts.iter_mut() {
+        *started = started.saturating_sub(61);
+    }
+    assert!(
+        relay.prepare_pairing_ticket(Some(600), Vec::new()).is_ok(),
+        "refusals spent nothing, so the budget comes back as admitted attempts age out"
+    );
+}
+
+/// Two starts in flight: the older one must not install after the newer began, or its
+/// caller would be handed a link the newer QR is about to retire.
+#[test]
+fn a_pairing_start_overtaken_by_a_newer_one_cannot_install() {
+    let mut relay = test_state();
+    let older = relay
+        .prepare_pairing_ticket(Some(600), Vec::new())
+        .expect("older QR prepares");
+    let newer = relay
+        .prepare_pairing_ticket(Some(600), Vec::new())
+        .expect("newer QR prepares");
+
+    assert!(relay.install_pairing_ticket(&older, unix_now()).is_err());
+    relay
+        .install_pairing_ticket(&newer, unix_now())
+        .expect("newer QR installs");
+    assert_eq!(
+        relay.pending_pairings.keys().collect::<Vec<_>>(),
+        vec![&newer.pairing_id]
+    );
+}
+
+/// An approval already in flight when its QR is replaced must not come back to life.
+#[test]
+fn an_approval_in_flight_on_a_replaced_qr_is_not_restored() {
+    let mut relay = test_state();
+    let old = relay
+        .prepare_pairing_ticket(Some(600), Vec::new())
+        .expect("old QR prepares");
+    relay
+        .install_pairing_ticket(&old, unix_now())
+        .expect("old QR installs");
+    register_waiting_phone(&mut relay, &old.pairing_id, "surface-waiting");
+    let claimed = relay
+        .claim_pairing_request(&old.pairing_id, unix_now())
+        .expect("the approval claims the request");
+
+    let new = relay
+        .prepare_pairing_ticket(Some(600), Vec::new())
+        .expect("new QR prepares");
+    relay
+        .install_pairing_ticket(&new, unix_now())
+        .expect("new QR installs");
+    relay.restore_pairing_request(claimed);
+
+    assert!(relay.pending_pairing_requests.is_empty());
+    assert!(relay.claimed_pairing_requests.is_empty());
+    assert!(relay
+        .decide_pairing_request(&old.pairing_id, true, None, unix_now())
+        .is_err());
+}
+
+/// While an approval holds the claim, nobody else may register on that QR: restoring the
+/// claim would overwrite the newcomer, and the claimed phone must be the one answered.
+#[test]
+fn a_second_registration_cannot_slip_in_while_an_approval_holds_the_claim() {
+    let mut relay = test_state();
+    let old = relay
+        .prepare_pairing_ticket(Some(600), Vec::new())
+        .expect("old QR prepares");
+    relay
+        .install_pairing_ticket(&old, unix_now())
+        .expect("old QR installs");
+    register_waiting_phone(&mut relay, &old.pairing_id, "surface-waiting");
+    let claimed = relay
+        .claim_pairing_request(&old.pairing_id, unix_now())
+        .expect("the approval claims the request");
+
+    for (peer_id, verify_key) in [
+        ("surface-other", "dmstb3RoZXI="),
+        ("surface-waiting-again", TEST_VERIFY_KEY_B64),
+    ] {
+        assert!(
+            relay
+                .register_pairing_request(
+                    &old.pairing_id,
+                    Some(format!("{peer_id}-phone")),
+                    None,
+                    peer_id,
+                    verify_key.to_string(),
+                    unix_now(),
+                )
+                .is_err(),
+            "{peer_id} registered on a claimed QR"
+        );
+    }
+    assert!(relay.pending_pairing_requests.is_empty());
+    assert!(
+        relay
+            .claim_pairing_request(&old.pairing_id, unix_now())
+            .is_err(),
+        "a second approval must still fail"
+    );
+
+    // The approval gives the claim back (say Cloud failed); a later QR then answers the
+    // phone that was being approved, not some newcomer.
+    relay.restore_pairing_request(claimed);
+    assert!(relay.claimed_pairing_requests.is_empty());
+    let new = relay
+        .prepare_pairing_ticket(Some(600), Vec::new())
+        .expect("new QR prepares");
+    let owed = relay
+        .install_pairing_ticket(&new, unix_now())
+        .expect("new QR installs");
+    assert_eq!(owed.len(), 1);
+    assert_eq!(owed[0].target_peer_id, "surface-waiting");
+    assert!(owed[0].device.is_none() && owed[0].error.is_some());
+}
+
+/// The Cloud join ticket of a replaced QR cannot be revoked, so a phone can still reach
+/// the relay with it; it must get a terminal answer rather than silence.
+#[test]
+fn a_phone_scanning_a_replaced_qr_gets_a_replaced_answer() {
+    let mut relay = test_state();
+    let old = relay
+        .prepare_pairing_ticket(Some(600), Vec::new())
+        .expect("old QR prepares");
+    relay
+        .install_pairing_ticket(&old, unix_now())
+        .expect("old QR installs");
+    let new = relay
+        .prepare_pairing_ticket(Some(600), Vec::new())
+        .expect("new QR prepares");
+    relay
+        .install_pairing_ticket(&new, unix_now())
+        .expect("new QR installs");
+
+    assert_eq!(
+        relay
+            .pending_pairing_secret(&old.pairing_id, unix_now())
+            .as_deref(),
+        Ok(old.pairing_secret.as_str()),
+        "the relay must still read the old QR's request to answer it"
+    );
+    let answer = relay
+        .retired_pairing_result(&old.pairing_id, "surface-late", unix_now())
+        .expect("a replaced QR is answered");
+    assert_eq!(answer.target_peer_id, "surface-late");
+    assert_eq!(answer.pairing_secret, old.pairing_secret);
+    assert!(answer.device.is_none());
+    assert!(answer
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("replaced")));
+    assert!(relay
+        .retired_pairing_result(&new.pairing_id, "surface-new", unix_now())
+        .is_none());
+    assert!(relay
+        .register_pairing_request(
+            &old.pairing_id,
+            Some("late-phone".to_string()),
+            None,
+            "surface-late",
+            TEST_VERIFY_KEY_B64.to_string(),
+            unix_now(),
+        )
+        .is_err());
 }
 
 #[test]

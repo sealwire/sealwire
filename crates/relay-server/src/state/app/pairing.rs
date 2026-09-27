@@ -14,6 +14,14 @@ impl AppState {
         let broker = BrokerConfig::from_env().await?.ok_or_else(|| {
             "broker pairing is unavailable because RELAY_BROKER_URL is not configured".to_string()
         })?;
+        self.start_pairing_with(&broker, input).await
+    }
+
+    pub(crate) async fn start_pairing_with(
+        &self,
+        broker: &BrokerConfig,
+        input: PairingStartInput,
+    ) -> Result<PairingTicketView, String> {
         let path_scope = normalize_allowed_roots(input.path_scope.unwrap_or_default())?;
         {
             let relay = self.relay.read().await;
@@ -27,18 +35,15 @@ impl AppState {
             let mut relay = self.relay.write().await;
             relay.prepare_pairing_ticket(input.expires_in_seconds, path_scope)?
         };
-        let pairing_credential = match broker
+        // Nothing is installed until Cloud signs, so a failure leaves the current QR live.
+        let pairing_credential = broker
             .pairing_join_credential(&prepared.pairing_id, prepared.expires_at)
-            .await
-        {
-            Ok(credential) => credential,
-            Err(error) => {
-                let mut relay = self.relay.write().await;
-                relay.pending_pairings.remove(&prepared.pairing_id);
-                return Err(error);
-            }
-        };
+            .await?;
+        let _decision = self.pairing_decision_guard.lock().await;
         let mut relay = self.relay.write().await;
+        for result in relay.install_pairing_ticket(&prepared, unix_now())? {
+            relay.queue_broker_message(super::BrokerPendingMessage::PairingResult(result));
+        }
         let ticket = relay.render_pairing_ticket_view(
             &prepared,
             broker.public_base_url(),
@@ -133,6 +138,17 @@ impl AppState {
         let broker = BrokerConfig::from_env().await?.ok_or_else(|| {
             "broker pairing is unavailable because RELAY_BROKER_URL is not configured".to_string()
         })?;
+        self.decide_pairing_request_with(&broker, pairing_id, input)
+            .await
+    }
+
+    pub(crate) async fn decide_pairing_request_with(
+        &self,
+        broker: &BrokerConfig,
+        pairing_id: &str,
+        input: PairingDecisionInput,
+    ) -> Result<PairingDecisionReceipt, String> {
+        let _decision = self.pairing_decision_guard.lock().await;
         let now = unix_now();
         let approved = matches!(input.decision, PairingDecision::Approve);
         // Claim the request atomically BEFORE issuing any broker credential. The
@@ -310,6 +326,15 @@ impl AppState {
         );
         relay.notify();
         Ok(request)
+    }
+
+    pub(crate) async fn retired_pairing_result(
+        &self,
+        pairing_id: &str,
+        peer_id: &str,
+    ) -> Option<super::PendingPairingResult> {
+        let mut relay = self.relay.write().await;
+        relay.retired_pairing_result(pairing_id, peer_id, unix_now())
     }
 
     pub(crate) async fn pending_pairing_secret(&self, pairing_id: &str) -> Result<String, String> {

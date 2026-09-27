@@ -138,6 +138,10 @@ pub struct AppState {
     /// a provider handshake is exactly what that guard's own comment refuses to
     /// do.
     orchestrator_create_guard: Arc<tokio::sync::Mutex<()>>,
+    /// Held by a pairing decision from its claim until it settles, and by a new QR only to
+    /// install. Retiring a pairing mid-approval would mean revoking Cloud's grant by device
+    /// id, which also cuts off an existing device re-pairing under that id.
+    pairing_decision_guard: Arc<tokio::sync::Mutex<()>>,
     /// Per-turn timeout (ms) for review steps. Overridable in tests so the
     /// timeout-interrupt path can be exercised without a 10-minute wait.
     review_step_timeout_ms: Arc<std::sync::atomic::AtomicU64>,
@@ -438,6 +442,7 @@ impl AppState {
             change_tx,
             session_guard: Arc::new(tokio::sync::Mutex::new(())),
             orchestrator_create_guard: Arc::new(tokio::sync::Mutex::new(())),
+            pairing_decision_guard: Arc::new(tokio::sync::Mutex::new(())),
             review_step_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(600_000)),
             review_drain_max_ms: Arc::new(std::sync::atomic::AtomicU64::new(300_000)),
             workflow_drain_max_ms: Arc::new(std::sync::atomic::AtomicU64::new(30_000)),
@@ -634,6 +639,7 @@ impl AppState {
             change_tx,
             session_guard: Arc::new(tokio::sync::Mutex::new(())),
             orchestrator_create_guard: Arc::new(tokio::sync::Mutex::new(())),
+            pairing_decision_guard: Arc::new(tokio::sync::Mutex::new(())),
             review_step_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(600_000)),
             review_drain_max_ms: Arc::new(std::sync::atomic::AtomicU64::new(300_000)),
             workflow_drain_max_ms: Arc::new(std::sync::atomic::AtomicU64::new(30_000)),

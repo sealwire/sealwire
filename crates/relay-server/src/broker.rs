@@ -2090,6 +2090,20 @@ async fn handle_pairing_request(
             .await;
         return Ok(());
     }
+    // A replaced QR's Cloud join ticket still works, so answer instead of going silent.
+    if let Some(result) = state
+        .retired_pairing_result(&pairing_id, &from_peer_id)
+        .await
+    {
+        publish_pairing_result(writer, result).await?;
+        state
+            .push_runtime_log(
+                "info",
+                format!("Told broker peer {from_peer_id} that pairing {pairing_id} was replaced."),
+            )
+            .await;
+        return Ok(());
+    }
     let replay_result = match state
         .completed_pairing_result(
             &pairing_id,

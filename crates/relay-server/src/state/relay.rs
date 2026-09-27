@@ -540,7 +540,16 @@ pub struct RelayState {
     /// cannot unsubscribe its own replacement.
     surface_generations: HashMap<String, u64>,
     pub pending_pairings: HashMap<String, PendingPairing>,
+    /// Bumped by each pairing start; only the latest start may install its QR.
+    pub(crate) pairing_generation: u64,
+    /// When recent pairing starts were admitted, for the refresh budget.
+    pub(crate) pairing_starts: VecDeque<u64>,
     pub pending_pairing_requests: HashMap<String, PendingPairingRequest>,
+    /// Pairings whose request an approval has claimed; nobody else may register on them.
+    pub(crate) claimed_pairing_requests: HashSet<String>,
+    /// Replaced QRs until they expire: their Cloud join ticket still works, so a phone
+    /// using one is answered "replaced" instead of silence.
+    pub(crate) retired_pairings: HashMap<String, PendingPairing>,
     pub completed_pairings: HashMap<String, CompletedPairing>,
     pub pending_claim_challenges: HashMap<String, ClaimChallenge>,
     pub pending_broker_messages: Vec<BrokerPendingMessage>,
@@ -768,7 +777,11 @@ impl RelayState {
             broker_surface_ids: HashSet::new(),
             surface_generations: HashMap::new(),
             pending_pairings: HashMap::new(),
+            pairing_generation: 0,
+            pairing_starts: VecDeque::new(),
             pending_pairing_requests: HashMap::new(),
+            claimed_pairing_requests: HashSet::new(),
+            retired_pairings: HashMap::new(),
             completed_pairings: HashMap::new(),
             pending_claim_challenges: HashMap::new(),
             pending_broker_messages: Vec::new(),
@@ -5003,6 +5016,8 @@ so {} never got it — hand over again when you are ready.",
         self.backfill_device_records_from_paired_devices();
         self.pending_pairings.clear();
         self.pending_pairing_requests.clear();
+        self.claimed_pairing_requests.clear();
+        self.retired_pairings.clear();
         self.completed_pairings.clear();
         self.pending_claim_challenges.clear();
         self.pending_broker_messages.clear();
@@ -6602,6 +6617,8 @@ so {} never got it — hand over again when you are ready.",
         self.backfill_device_records_from_paired_devices();
         self.pending_pairings.clear();
         self.pending_pairing_requests.clear();
+        self.claimed_pairing_requests.clear();
+        self.retired_pairings.clear();
         self.completed_pairings.clear();
         self.pending_broker_messages.clear();
         self.pending_approvals.clear();

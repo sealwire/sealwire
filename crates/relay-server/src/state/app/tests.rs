@@ -27616,6 +27616,9 @@ mod double_approve_race {
                 .prepare_pairing_ticket(Some(600), Vec::new())
                 .expect("pairing ticket should prepare");
             relay
+                .install_pairing_ticket(&prepared, crate::state::unix_now())
+                .expect("pairing ticket should install");
+            relay
                 .register_pairing_request(
                     &prepared.pairing_id,
                     Some("phone-1".to_string()),
@@ -36448,5 +36451,488 @@ sharing a directory is not being the person who typed the command",
             "the source must not be woken with anything: {:?}",
             received(&app, &source).await,
         );
+    }
+}
+
+mod pairing_qr_replacement {
+    use super::super::*;
+    use crate::protocol::{PairingDecision, PairingDecisionInput, PairingStartInput};
+    use crate::state::security::SecurityProfile;
+    use axum::{
+        extract::{Path as AxumPath, State as AxumState},
+        http::StatusCode,
+        response::IntoResponse,
+        routing::post,
+        Json, Router,
+    };
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio::sync::{watch, RwLock, Semaphore};
+
+    /// How the mock Cloud answers each pairing ticket request, in order.
+    #[derive(Clone, Copy)]
+    enum Answer {
+        Sign { after: Duration },
+        RateLimited,
+    }
+
+    struct MockCloud {
+        answers: Mutex<VecDeque<Answer>>,
+        pairing_calls: AtomicUsize,
+        device_grants: AtomicUsize,
+        revokes: AtomicUsize,
+        /// When set, each device grant waits for a `grant_release` permit.
+        pause_grants: AtomicBool,
+        grant_entered: Semaphore,
+        grant_release: Semaphore,
+    }
+
+    async fn issue_pairing_ticket(
+        AxumState(cloud): AxumState<Arc<MockCloud>>,
+        Json(body): Json<serde_json::Value>,
+    ) -> axum::response::Response {
+        cloud.pairing_calls.fetch_add(1, Ordering::SeqCst);
+        let answer = cloud
+            .answers
+            .lock()
+            .expect("answers")
+            .pop_front()
+            .unwrap_or(Answer::RateLimited);
+        match answer {
+            Answer::Sign { after } => {
+                tokio::time::sleep(after).await;
+                Json(serde_json::json!({
+                    "relay_id": "relay-owner-1",
+                    "broker_room_id": "demo-room",
+                    "pairing_join_ticket": format!("pjt-{}", body["pairing_id"].as_str().unwrap_or_default()),
+                    "pairing_join_ticket_expires_at": body["expires_at"],
+                }))
+                .into_response()
+            }
+            Answer::RateLimited => (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "error": "rate_limited",
+                    "message": "pairing ticket rate limit exceeded for this relay",
+                })),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn issue_device_grant(
+        AxumState(cloud): AxumState<Arc<MockCloud>>,
+        Json(body): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        cloud.device_grants.fetch_add(1, Ordering::SeqCst);
+        if cloud.pause_grants.load(Ordering::SeqCst) {
+            cloud.grant_entered.add_permits(1);
+            cloud
+                .grant_release
+                .acquire()
+                .await
+                .expect("grant release")
+                .forget();
+        }
+        Json(serde_json::json!({
+            "relay_id": "relay-owner-1",
+            "broker_room_id": "demo-room",
+            "device_id": body["device_id"],
+            "device_refresh_token": "dref-attempt",
+            "device_ws_token": "ws-attempt",
+            "device_ws_token_expires_at": 4102444800_u64,
+        }))
+    }
+
+    async fn issue_client_grant(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "claim_id": "claim-attempt",
+            "claim_nonce": "nonce-attempt",
+            "claim_expires_at": 4102444800_u64,
+            "relay_id": "relay-owner-1",
+            "broker_room_id": "demo-room",
+            "device_id": body["device_id"],
+            "relay_label": "Demo Relay",
+        }))
+    }
+
+    async fn revoke_device(
+        AxumState(cloud): AxumState<Arc<MockCloud>>,
+        AxumPath(device_id): AxumPath<String>,
+        Json(_body): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        cloud.revokes.fetch_add(1, Ordering::SeqCst);
+        Json(serde_json::json!({
+            "relay_id": "relay-owner-1",
+            "broker_room_id": "demo-room",
+            "device_id": device_id,
+            "revoked": true,
+            "revoked_grant_count": 1,
+        }))
+    }
+
+    async fn relay_with_cloud(
+        answers: Vec<Answer>,
+    ) -> (AppState, crate::broker::BrokerConfig, Arc<MockCloud>) {
+        let cloud = Arc::new(MockCloud {
+            answers: Mutex::new(VecDeque::from(answers)),
+            pairing_calls: AtomicUsize::new(0),
+            device_grants: AtomicUsize::new(0),
+            revokes: AtomicUsize::new(0),
+            pause_grants: AtomicBool::new(false),
+            grant_entered: Semaphore::new(0),
+            grant_release: Semaphore::new(0),
+        });
+        let app = Router::new()
+            .route("/api/public/pairing/ws-token", post(issue_pairing_ticket))
+            .route("/api/public/devices", post(issue_device_grant))
+            .route("/api/public/clients/grants", post(issue_client_grant))
+            .route("/api/public/devices/:device_id/revoke", post(revoke_device))
+            .with_state(cloud.clone());
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("mock control plane should bind");
+        let address = listener.local_addr().expect("mock address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("mock control plane should serve");
+        });
+        let broker = crate::broker::BrokerConfig::from_parts(
+            Some("wss://broker.example.com".to_string()),
+            None,
+            Some(format!("http://{address}")),
+            Some("demo-room".to_string()),
+            Some("relay-1".to_string()),
+            Some("public".to_string()),
+            None,
+            Some("relay-owner-1".to_string()),
+            Some("relay-refresh-1".to_string()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("broker config should parse")
+        .expect("broker config should be enabled");
+        let (change_tx, _change_rx) = watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            "/tmp/project".to_string(),
+            change_tx.clone(),
+            SecurityProfile::private(),
+        )));
+        (
+            AppState::from_parts(relay, HashMap::new(), change_tx),
+            broker,
+            cloud,
+        )
+    }
+
+    fn start_input() -> PairingStartInput {
+        PairingStartInput {
+            expires_in_seconds: Some(600),
+            path_scope: None,
+        }
+    }
+
+    fn phone_was_told(relay: &RelayState, peer_id: &str) -> bool {
+        relay.pending_broker_messages.iter().any(|message| {
+            matches!(
+                message,
+                crate::state::relay::BrokerPendingMessage::PairingResult(result)
+                    if result.target_peer_id == peer_id
+                        && result.device.is_none()
+                        && result.error.as_deref().is_some_and(|error| error.contains("replaced"))
+            )
+        })
+    }
+
+    #[tokio::test]
+    async fn only_a_signed_start_replaces_the_current_qr() {
+        let now = Duration::ZERO;
+        let (app, broker, _cloud) = relay_with_cloud(vec![
+            Answer::Sign { after: now },
+            Answer::RateLimited,
+            Answer::Sign { after: now },
+        ])
+        .await;
+
+        let first = app
+            .start_pairing_with(&broker, start_input())
+            .await
+            .expect("first QR is signed");
+        app.complete_pairing(
+            &first.pairing_id,
+            Some("waiting-phone".to_string()),
+            None,
+            "vk-waiting".to_string(),
+            "surface-waiting",
+        )
+        .await
+        .expect("a phone waits on the first QR");
+        assert!(app
+            .start_pairing_with(&broker, start_input())
+            .await
+            .is_err());
+        assert!(
+            app.pending_pairing_secret(&first.pairing_id).await.is_ok(),
+            "a refused Cloud signature must leave the current QR working"
+        );
+
+        let third = app
+            .start_pairing_with(&broker, start_input())
+            .await
+            .expect("third QR is signed");
+        let relay = app.relay.read().await;
+        assert_eq!(
+            relay.pending_pairings.keys().collect::<Vec<_>>(),
+            vec![&third.pairing_id]
+        );
+        assert!(relay.pending_pairing_requests.is_empty());
+        assert!(
+            phone_was_told(&relay, "surface-waiting"),
+            "the phone waiting on the replaced QR must be told"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_cloud_failures_stop_at_the_local_budget() {
+        let (app, broker, cloud) = relay_with_cloud(vec![Answer::Sign {
+            after: Duration::ZERO,
+        }])
+        .await;
+        let current = app
+            .start_pairing_with(&broker, start_input())
+            .await
+            .expect("current QR is signed");
+
+        for _ in 0..15 {
+            assert!(app
+                .start_pairing_with(&broker, start_input())
+                .await
+                .is_err());
+        }
+
+        assert_eq!(cloud.pairing_calls.load(Ordering::SeqCst), 10);
+        assert!(
+            app.pending_pairing_secret(&current.pairing_id)
+                .await
+                .is_ok(),
+            "failed and refused refreshes must leave the current QR working"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_starts_make_at_most_ten_cloud_calls() {
+        let (app, broker, cloud) = relay_with_cloud(
+            (0..20)
+                .map(|_| Answer::Sign {
+                    after: Duration::from_millis(200),
+                })
+                .collect(),
+        )
+        .await;
+
+        let starts = (0..20)
+            .map(|_| {
+                let app = app.clone();
+                let broker = broker.clone();
+                tokio::spawn(async move { app.start_pairing_with(&broker, start_input()).await })
+            })
+            .collect::<Vec<_>>();
+        let mut issued = 0;
+        for start in starts {
+            if start.await.expect("start should finish").is_ok() {
+                issued += 1;
+            }
+        }
+
+        assert_eq!(cloud.pairing_calls.load(Ordering::SeqCst), 10);
+        assert_eq!(
+            issued, 1,
+            "only the newest admitted start may hand out a link"
+        );
+        assert_eq!(app.relay.read().await.pending_pairings.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn overlapping_starts_hand_out_only_the_newest_link() {
+        let (app, broker, _cloud) = relay_with_cloud(vec![
+            Answer::Sign {
+                after: Duration::from_millis(400),
+            },
+            Answer::Sign {
+                after: Duration::ZERO,
+            },
+        ])
+        .await;
+
+        let slow = {
+            let app = app.clone();
+            let broker = broker.clone();
+            tokio::spawn(async move { app.start_pairing_with(&broker, start_input()).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let fast = app
+            .start_pairing_with(&broker, start_input())
+            .await
+            .expect("the newer start is signed first");
+        let slow = slow.await.expect("slow start should finish");
+
+        assert!(
+            slow.is_err(),
+            "the older start must not hand out a link the newer QR retired"
+        );
+        let relay = app.relay.read().await;
+        assert_eq!(
+            relay.pending_pairings.keys().collect::<Vec<_>>(),
+            vec![&fast.pairing_id]
+        );
+    }
+
+    fn phone_was_approved(relay: &RelayState, peer_id: &str) -> bool {
+        relay.pending_broker_messages.iter().any(|message| {
+            matches!(
+                message,
+                crate::state::relay::BrokerPendingMessage::PairingResult(result)
+                    if result.target_peer_id == peer_id
+                        && result.device.is_some()
+                        && result.error.is_none()
+            )
+        })
+    }
+
+    fn approve(
+        app: &AppState,
+        broker: &crate::broker::BrokerConfig,
+        pairing_id: &str,
+    ) -> tokio::task::JoinHandle<Result<crate::protocol::PairingDecisionReceipt, String>> {
+        let (app, broker, pairing_id) = (app.clone(), broker.clone(), pairing_id.to_string());
+        tokio::spawn(async move {
+            app.decide_pairing_request_with(
+                &broker,
+                &pairing_id,
+                PairingDecisionInput {
+                    decision: PairingDecision::Approve,
+                },
+            )
+            .await
+        })
+    }
+
+    /// An old QR with a phone waiting, and an approval for it parked inside Cloud.
+    async fn approval_parked_in_cloud() -> (
+        AppState,
+        crate::broker::BrokerConfig,
+        Arc<MockCloud>,
+        String,
+        tokio::task::JoinHandle<Result<crate::protocol::PairingDecisionReceipt, String>>,
+    ) {
+        let now = Duration::ZERO;
+        let (app, broker, cloud) = relay_with_cloud(vec![
+            Answer::Sign { after: now },
+            Answer::Sign { after: now },
+        ])
+        .await;
+        let old = app
+            .start_pairing_with(&broker, start_input())
+            .await
+            .expect("old QR is signed");
+        app.complete_pairing(
+            &old.pairing_id,
+            Some("waiting-phone".to_string()),
+            None,
+            "vk-waiting".to_string(),
+            "surface-waiting",
+        )
+        .await
+        .expect("a phone waits on the old QR");
+        cloud.pause_grants.store(true, Ordering::SeqCst);
+        let approval = approve(&app, &broker, &old.pairing_id);
+        cloud
+            .grant_entered
+            .acquire()
+            .await
+            .expect("the approval reaches Cloud")
+            .forget();
+        (app, broker, cloud, old.pairing_id, approval)
+    }
+
+    /// Replacing the QR mid-approval used to revoke what Cloud had just granted, by device
+    /// id, which also cut off an existing device re-pairing under that id.
+    #[tokio::test]
+    async fn a_new_qr_waits_for_an_approval_in_flight_to_settle() {
+        let (app, broker, cloud, old_pairing_id, approval) = approval_parked_in_cloud().await;
+
+        let mut refresh = {
+            let (app, broker) = (app.clone(), broker.clone());
+            tokio::spawn(async move { app.start_pairing_with(&broker, start_input()).await })
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut refresh)
+                .await
+                .is_err(),
+            "the new QR was handed out while the approval was still in Cloud"
+        );
+        assert!(app
+            .relay
+            .read()
+            .await
+            .pending_pairings
+            .contains_key(&old_pairing_id));
+        cloud.grant_release.add_permits(1);
+        let approval = approval.await.expect("approval should finish");
+        let new = refresh
+            .await
+            .expect("refresh should finish")
+            .expect("the new QR installs once the approval settles");
+
+        approval.expect("the approval in flight completes");
+        assert_eq!(cloud.device_grants.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            cloud.revokes.load(Ordering::SeqCst),
+            0,
+            "nothing Cloud granted may be revoked"
+        );
+        let relay = app.relay.read().await;
+        assert!(phone_was_approved(&relay, "surface-waiting"));
+        assert_eq!(
+            relay.pending_pairings.keys().collect::<Vec<_>>(),
+            vec![&new.pairing_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_phone_or_tap_cannot_take_a_qr_whose_approval_is_in_flight() {
+        let (app, broker, cloud, old_pairing_id, approval) = approval_parked_in_cloud().await;
+
+        let intruder = app
+            .complete_pairing(
+                &old_pairing_id,
+                Some("other-phone".to_string()),
+                None,
+                "vk-other".to_string(),
+                "surface-other",
+            )
+            .await;
+        let second_tap = approve(&app, &broker, &old_pairing_id);
+        cloud.grant_release.add_permits(1);
+        let approval = approval.await.expect("approval should finish");
+        let second_tap = second_tap.await.expect("second tap should finish");
+
+        assert!(
+            intruder.is_err(),
+            "a second phone registered on a claimed QR"
+        );
+        approval.expect("the first approval completes");
+        assert!(second_tap.is_err(), "a second approval must still fail");
+        assert_eq!(cloud.device_grants.load(Ordering::SeqCst), 1);
+        assert_eq!(cloud.revokes.load(Ordering::SeqCst), 0);
+        let relay = app.relay.read().await;
+        assert!(phone_was_approved(&relay, "surface-waiting"));
+        assert!(!phone_was_approved(&relay, "surface-other"));
     }
 }
