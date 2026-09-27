@@ -73,6 +73,7 @@ import {
 } from "./session-options.mjs";
 import { createProgressTracker } from "./progress-tracker.mjs";
 import { checkInstalledClaudeBinary } from "./native-binary-check.mjs";
+import { readClaudeCliAccount } from "./cli-account.mjs";
 import { claudeProjectsDir, moveForkIntoFolder } from "./fork-folder.mjs";
 import {
   findLocalSessionFile,
@@ -360,6 +361,18 @@ function ensureClaudeBinaryHealthy() {
     checkPathOverride ? { resolve: () => checkPathOverride } : {},
   );
   claudeBinaryHealthy = true;
+}
+
+// A custom SDK module ships no native binary, so there is nothing to ask.
+async function readBundledCliAccount() {
+  const checkPathOverride = process.env.CLAUDE_WORKER_CHECK_BINARY_PATH;
+  if (!checkPathOverride && process.env.CLAUDE_WORKER_SDK_MODULE) {
+    throw new Error("no bundled Claude Code binary with a custom SDK module");
+  }
+  const { path } = checkInstalledClaudeBinary(
+    checkPathOverride ? { resolve: () => checkPathOverride } : {},
+  );
+  return readClaudeCliAccount({ binaryPath: path });
 }
 
 // Preflight, the other half: the SDK spawns that binary WITH `cwd` set to the
@@ -1681,6 +1694,15 @@ async function main() {
         } catch (err) {
           emitErrorResponse(cmd.id, String(err));
         }
+        break;
+      }
+
+      case "account/read": {
+        // Detached: two CLI spawns take a second or more, and sends queue behind this loop.
+        void readBundledCliAccount().then(
+          (account) => emitResponse(cmd.id, account),
+          (err) => emitErrorResponse(cmd.id, String(err)),
+        );
         break;
       }
 

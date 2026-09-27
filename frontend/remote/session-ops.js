@@ -2423,6 +2423,15 @@ export async function fetchRemoteWorkflows() {
   return result?.workflows || null;
 }
 
+// The relay answers at once; a changed row arrives on a later snapshot.
+export async function recheckRemoteSignedOutProviders() {
+  try {
+    await dispatchOrRecover("recheck_signed_out_providers", {});
+  } catch (error) {
+    renderLog(`Provider sign-in recheck failed: ${error.message}`);
+  }
+}
+
 export async function fetchRemoteDevices() {
   const result = await dispatchOrRecover("fetch_devices", {});
   return result?.devices || null;

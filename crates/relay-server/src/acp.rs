@@ -1876,6 +1876,27 @@ impl ProviderBridge for AcpBridge {
     fn provider_name(&self) -> &'static str {
         self.provider_name
     }
+
+    /// Only cursor-agent is known to answer `about` / `status`; other ACP agents stay unknown.
+    async fn account(&self) -> Result<crate::provider::account::ProviderAccount, String> {
+        use crate::provider::account;
+        if self.binary_name != "cursor-agent" {
+            return Ok(account::ProviderAccount::default());
+        }
+        let program = || crate::provider::resolve_binary(self.binary_name);
+        let (about, status) = tokio::join!(
+            account::run_cli(program(), &["about", "--format", "json"]),
+            account::run_cli(program(), &["status", "--format", "json"]),
+        );
+        let parse = |out: Result<String, String>| {
+            out.ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        };
+        Ok(account::cursor_account(
+            parse(about).as_ref(),
+            parse(status).as_ref(),
+        ))
+    }
 }
 
 impl AcpBridge {

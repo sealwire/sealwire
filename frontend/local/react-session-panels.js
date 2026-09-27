@@ -2,10 +2,6 @@ import React from "react";
 
 const h = React.createElement;
 
-export function TextContent({ children }) {
-  return children || "";
-}
-
 export function OverviewBadges({ badges = [] }) {
   return h(
     React.Fragment,
@@ -62,35 +58,6 @@ export function SurfaceCards({ surfaces = [] }) {
         )
       )
     )
-  );
-}
-
-export function AuditList({ entries = [], emptyMessage = "No relay events yet." }) {
-  if (!entries.length) {
-    return h("p", { className: "sidebar-empty" }, emptyMessage);
-  }
-
-  return h(
-    React.Fragment,
-    null,
-    ...entries.map((entry, index) => {
-      const toneClass = entry.tone === "alert"
-        ? " is-alert"
-        : entry.tone === "ready"
-          ? " is-ready"
-          : "";
-      return h(
-        "article",
-        { className: `audit-item${toneClass}`, key: entry.key || `${entry.kind}:${index}` },
-        h(
-          "div",
-          { className: "audit-item-header" },
-          h("span", { className: "audit-item-kind" }, entry.kind),
-          h("time", { className: "audit-item-time" }, entry.time)
-        ),
-        h("p", { className: "audit-item-message" }, entry.message || "")
-      );
-    })
   );
 }
 

@@ -1232,6 +1232,73 @@ fn set_provider_connection_false_flips_provider_status_to_disconnected() {
 }
 
 #[test]
+fn provider_status_shows_the_login_command_only_while_signed_out() {
+    use crate::provider::account::ProviderAccount;
+    let mut relay = test_state();
+    relay.set_provider_status_base(vec![crate::provider::ProviderStatusBase {
+        provider_key: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        spawn_error: None,
+    }]);
+    let check = |signed_in| ProviderAccount {
+        version: Some("0.156.1".to_string()),
+        signed_in,
+        plan: signed_in.filter(|in_| *in_).map(|_| "Pro".to_string()),
+        login_command: Some("codex login"),
+    };
+
+    relay.set_provider_account("codex", check(Some(false)));
+    let row = &relay.snapshot().provider_status[0];
+    assert_eq!(row.signed_in, Some(false));
+    assert_eq!(row.login_command.as_deref(), Some("codex login"));
+
+    relay.set_provider_account("codex", check(Some(true)));
+    let row = &relay.snapshot().provider_status[0];
+    assert_eq!(row.login_command, None);
+    assert_eq!(row.plan.as_deref(), Some("Pro"));
+    assert_eq!(row.version.as_deref(), Some("0.156.1"));
+}
+
+// Bridges report a failed check as "cannot tell"; that must not erase a known "signed out".
+#[test]
+fn an_answer_that_cannot_tell_keeps_the_last_sign_in_state() {
+    use crate::provider::account::ProviderAccount;
+    let mut relay = test_state();
+    relay.set_provider_status_base(vec![crate::provider::ProviderStatusBase {
+        provider_key: "claude_code".to_string(),
+        display_name: "Claude Code".to_string(),
+        spawn_error: None,
+    }]);
+    relay.set_provider_account(
+        "claude_code",
+        ProviderAccount {
+            version: Some("2.1.281".to_string()),
+            signed_in: Some(false),
+            plan: None,
+            login_command: Some("claude auth login"),
+        },
+    );
+    relay.set_provider_account(
+        "claude_code",
+        ProviderAccount {
+            version: Some("2.1.281".to_string()),
+            signed_in: None,
+            plan: None,
+            login_command: Some("claude auth login"),
+        },
+    );
+
+    let row = &relay.snapshot().provider_status[0];
+    assert_eq!(row.signed_in, Some(false));
+    assert_eq!(row.login_command.as_deref(), Some("claude auth login"));
+    assert_eq!(
+        relay.begin_signed_out_recheck(),
+        vec!["claude_code".to_string()],
+        "so the next opening of Settings still asks"
+    );
+}
+
+#[test]
 fn snapshot_exposes_private_security_mode_defaults() {
     let relay = test_state();
     let snapshot = relay.snapshot();
@@ -3303,6 +3370,80 @@ fn revoking_paired_device_prunes_its_push_subscriptions() {
         relay.push_subscriptions_vec().is_empty(),
         "revoking a device must prune its push subscriptions"
     );
+}
+
+#[test]
+fn clearing_device_history_drops_only_revoked_and_rejected_records() {
+    let mut relay = test_state();
+    let mut pair = |relay: &mut RelayState, id: &str| {
+        let ticket =
+            issue_test_pairing_ticket(relay, "ws://127.0.0.1:8789", "room-a", "relay-a", Some(60));
+        relay
+            .consume_pairing_ticket(
+                &ticket.pairing_id,
+                &ticket.pairing_secret,
+                Some(id.to_string()),
+                Some(id.to_string()),
+                TEST_VERIFY_KEY_B64.to_string(),
+                None,
+                &format!("surface-{id}"),
+                100,
+            )
+            .expect("pairing should succeed")
+            .0
+    };
+    let tablet = pair(&mut relay, "tablet");
+    let phone = pair(&mut relay, "phone");
+    assert!(relay.revoke_paired_device(&tablet.device_id, 101));
+
+    assert_eq!(relay.clear_device_history(), vec![tablet.device_id.clone()]);
+    let ids: Vec<String> = relay
+        .devices_response()
+        .device_records
+        .into_iter()
+        .map(|record| record.device_id)
+        .collect();
+    assert_eq!(
+        ids,
+        vec![phone.device_id.clone()],
+        "the paired phone stays listed"
+    );
+    assert!(
+        relay.paired_devices.contains_key(&phone.device_id),
+        "and stays paired"
+    );
+    assert!(
+        relay.clear_device_history().is_empty(),
+        "a second clear finds nothing"
+    );
+}
+
+#[test]
+fn clearing_device_history_drops_a_stale_orchestrator_pin_and_is_saved() {
+    let mut relay = test_state();
+    relay.test_set_orchestrator_pin("orch-thread", "old-phone", "persona");
+    relay.device_records.insert(
+        "old-phone".to_string(),
+        DeviceRecord {
+            device_id: "old-phone".to_string(),
+            label: "Phone".to_string(),
+            lifecycle_state: DeviceLifecycleState::Revoked,
+            created_at: 1,
+            state_changed_at: 100,
+            last_seen_at: None,
+            last_peer_id: None,
+            device_verify_key: String::new(),
+            broker_join_ticket_expires_at: None,
+            path_scope: Vec::new(),
+        },
+    );
+
+    assert_eq!(relay.clear_device_history(), vec!["old-phone".to_string()]);
+    // Without the revoked record nothing would stop the pin acting as that device.
+    assert_eq!(relay.orchestrator_device_id, None);
+    assert!(!PersistedRelayState::from_relay(&relay)
+        .device_records
+        .contains_key("old-phone"));
 }
 
 #[test]

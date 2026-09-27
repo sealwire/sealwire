@@ -11,7 +11,6 @@ import React, {
 } from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
-import { fetchBuildInfo } from "../shared/build-badge.js";
 import { scopeApprovalsToActiveThread } from "../shared/session-view-model.js";
 import {
   composerWorkspaceKey,
@@ -55,7 +54,6 @@ import { selectWorkspaceSuggestionsModel } from "../shared/workspace-suggestions
 import { createProjectAndSelect } from "../shared/project-create.js";
 import { createVerbCycler } from "../progress-verbs.js";
 import {
-  buildProviderStatusModel,
   selectDeviceChromeRenderModel,
   selectResetChromeRenderModel,
   selectSessionChromeRenderModel,
@@ -181,7 +179,6 @@ import { createCommandSubmit } from "./composer-command-submit.js";
 import {
   Composer,
   ControlBanner,
-  DeviceMetaPanel,
   RelayDirectoryList,
   SessionMetaPanel,
   SessionPanel,
@@ -264,6 +261,8 @@ import { selectThreadSheet } from "../shared/thread-actions-model.js";
 import { runThreadSheetAction } from "./thread-sheet-action.js";
 import { ManagedDialog } from "../shared/managed-dialog.js";
 import { RemoteSettingsModal } from "./settings-modal.js";
+import { fetchBuildInfo } from "../shared/build-badge.js";
+import { buildProviderStatusModel } from "../shared/provider-status.js";
 import { renderLog } from "./session-surface.js";
 import { formatRelativeTime, formatTimestamp, shortId } from "./utils.js";
 import { SessionTabStrip, buildSessionTabItems } from "../shared/session-tab-strip.js";
@@ -2302,7 +2301,7 @@ function RemoteApp() {
     await requestAndStorePermission();
     const started = await handlers.onBeginPairing(rawValue, remoteUi.deviceLabelDraft);
     if (started) {
-      remoteUiStore.getState().setPairingModalOpen(false);
+      remoteUiStore.getState().setSettingsModalOpen(false);
       remoteUiStore.getState().resetPairingInput();
     }
     return started;
@@ -2331,7 +2330,8 @@ function RemoteApp() {
           remoteUiStore.getState().setRemoteInfoModalOpen(true);
         },
         onOpenPairing() {
-          remoteUiStore.getState().setPairingModalOpen(true);
+          closeRemoteNavigation();
+          remoteUiStore.getState().setSettingsModalOpen(true, "device");
         },
         onOpenSettings() {
           // Closes the drawer first on phones: the modal renders over the shell,
@@ -2704,32 +2704,35 @@ function RemoteApp() {
       onClose: closeActionsSheet,
       onSelect: (item) => void handleThreadSheetAction(item),
     }),
-    h(PairingModal, {
-      deviceChromeModel,
-      deviceLabel: remoteUi.deviceLabelDraft,
-      pairingInputValue: remoteUi.pairingInputValue,
-      pairingModalOpen: remoteUi.pairingModalOpen,
-      onBeginPairing(rawValue) {
-        void handleBeginPairing(rawValue);
-      },
-      onClose() {
-        remoteUiStore.getState().setPairingModalOpen(false);
-      },
-      onDeviceLabelChange(value) {
-        remoteUiStore.getState().setDeviceLabelDraft(value);
-      },
-      onForgetDevice() {
-        handlers.onForgetDevice();
-      },
-      onPairingInputChange(value) {
-        remoteUiStore.getState().setPairingInputValue(value);
-      },
-    }),
     h(RemoteSettingsModal, {
       open: remoteUi.settingsModalOpen,
+      tab: remoteUi.settingsTab,
+      loadBuildInfo: loadRemoteBuildInfo,
+      onRecheckSignedOut: () => void handlers.onRecheckSignedOutProviders(),
       providerModel: buildProviderStatusModel(session),
+      device: {
+        chromeModel: deviceChromeModel,
+        deviceLabel: remoteUi.deviceLabelDraft,
+        pairingInputValue: remoteUi.pairingInputValue,
+        ...remoteDeviceStatus(currentState),
+        onBeginPairing(rawValue) {
+          void handleBeginPairing(rawValue);
+        },
+        onDeviceLabelChange(value) {
+          remoteUiStore.getState().setDeviceLabelDraft(value);
+        },
+        onForget() {
+          handlers.onForgetDevice();
+        },
+        onPairingInputChange(value) {
+          remoteUiStore.getState().setPairingInputValue(value);
+        },
+      },
       onClose() {
         remoteUiStore.getState().setSettingsModalOpen(false);
+      },
+      onSelectTab(tab) {
+        remoteUiStore.getState().setSettingsTab(tab);
       },
     }),
     h(RemoteInfoModal, {
@@ -2747,6 +2750,18 @@ function RemoteApp() {
       },
     })
   );
+}
+
+// Stable identity: the footer's effect refetches whenever this function changes.
+const loadRemoteBuildInfo = () => fetchBuildInfo("remote");
+
+function remoteDeviceStatus(currentState) {
+  if (!currentState.remoteAuth) {
+    return { paired: false, statusLabel: "Not paired", statusTone: "alert" };
+  }
+  return selectedRelayNeedsRepair(currentState)
+    ? { paired: true, statusLabel: "Re-pair", statusTone: "alert" }
+    : { paired: true, statusLabel: "Paired", statusTone: "" };
 }
 
 function findThreadNameInGroups(groups, threadId) {
@@ -3149,7 +3164,7 @@ function RemoteSidebar({
     // Footer, matching local's: what you are connected to on the left, the way
     // into Settings on the right. The theme picker used to be the footer's only
     // occupant — one preference, permanently on screen, with no home to belong
-    // to. It is now the Appearance tab.
+    // to. It now sits at the foot of the Settings nav.
     h(
       "div",
       { className: "sidebar-bottom-bar" },
@@ -3558,136 +3573,6 @@ function RemoteThreadPanel({
         },
         stopButtonId: "remote-stop-button",
       })
-    )
-  );
-}
-
-function BuildInfoLine({ surface = "remote" }) {
-  const [info, setInfo] = useState(null);
-
-  useEffect(() => {
-    fetchBuildInfo(surface).then(setInfo);
-  }, [surface]);
-
-  if (!info) {
-    return null;
-  }
-
-  return h(
-    "p",
-    { className: "build-info-inline", title: info.title },
-    info.label
-  );
-}
-
-function PairingModal({
-  deviceChromeModel,
-  deviceLabel,
-  onBeginPairing,
-  onClose,
-  onDeviceLabelChange,
-  onForgetDevice,
-  onPairingInputChange,
-  pairingInputValue,
-  pairingModalOpen,
-}) {
-  return h(
-    ManagedDialog,
-    {
-      className: "security-modal",
-      id: "pairing-modal",
-      open: pairingModalOpen,
-      onRequestClose: onClose,
-    },
-    h(
-      "div",
-      { className: "modal-header" },
-      h("h2", null, "Remote Surface"),
-      h(
-        "button",
-        {
-          className: "header-button close-modal-btn",
-          id: "close-pairing-modal",
-          onClick: onClose,
-          type: "button",
-        },
-        "\u00d7"
-      )
-    ),
-    h(
-      "section",
-      { className: "remote-access-shell remote-surface-shell" },
-      h(
-        "form",
-        {
-          className: "workspace-form",
-          id: "pairing-form",
-          onSubmit: (event) => {
-            event.preventDefault();
-            onBeginPairing(pairingInputValue);
-          },
-        },
-        h(
-          "label",
-          { className: "sidebar-label", htmlFor: "pairing-input" },
-          "Pairing Link Or Code"
-        ),
-        h("textarea", {
-          id: "pairing-input",
-          onChange: (event) => onPairingInputChange?.(event.target.value),
-          placeholder: "Paste the full pairing URL, or only the pairing payload.",
-          readOnly: deviceChromeModel.pairingControls.pairingInputReadOnly,
-          rows: 4,
-          value: pairingInputValue,
-        }),
-        h(
-          "label",
-          { className: "sidebar-label", htmlFor: "device-label-input" },
-          "Device Label"
-        ),
-        h(
-          "div",
-          { className: "workspace-picker" },
-          h("input", {
-            id: "device-label-input",
-            onChange: (event) => onDeviceLabelChange?.(event.target.value),
-            placeholder: "iPhone, Pixel, Safari on iPad",
-            type: "text",
-            value: deviceLabel,
-          }),
-          h(
-            "button",
-            {
-              className: "load-button",
-              disabled: deviceChromeModel.pairingControls.connectDisabled,
-              id: "connect-button",
-              type: "submit",
-            },
-            deviceChromeModel.pairingControls.connectLabel
-          )
-        )
-      ),
-      h(
-        "div",
-        { className: "sidebar-row" },
-        h("p", { className: "sidebar-caption" }, "Current Device"),
-        h(
-          "button",
-          {
-            className: "sidebar-link-button",
-            id: "forget-device-button",
-            onClick: onForgetDevice,
-            type: "button",
-          },
-          "Forget"
-        )
-      ),
-      h(
-        "div",
-        { className: "paired-devices-list", id: "device-meta" },
-        h(DeviceMetaPanel, { model: deviceChromeModel.deviceMeta })
-      ),
-      h(BuildInfoLine, { surface: "remote" })
     )
   );
 }

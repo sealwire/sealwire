@@ -14,164 +14,8 @@ export function PairingQrImage({ alt = "Pairing QR code", src = "" }) {
   });
 }
 
-export function EmptyPanelMessage({ children }) {
+function EmptyPanelMessage({ children }) {
   return h("p", { className: "sidebar-empty" }, children);
-}
-
-export function AllowedRootsList({
-  roots = [],
-  workspaceBasename = (value) => String(value || ""),
-}) {
-  if (!roots.length) {
-    return h(EmptyPanelMessage, null, "No workspace restrictions are configured.");
-  }
-
-  return h(
-    React.Fragment,
-    null,
-    ...roots.map((root) => {
-      const name = workspaceBasename(root) || root;
-      return h(
-        "article",
-        { className: "paired-device-card", key: root },
-        h(
-          "div",
-          { className: "paired-device-copy" },
-          h(
-            "div",
-            { className: "paired-device-heading" },
-            h("strong", null, name),
-            h("span", { className: "device-state-badge device-state-approved" }, "Allowed root")
-          ),
-          h("p", { className: "paired-device-meta paired-device-id" }, root)
-        )
-      );
-    })
-  );
-}
-
-export function DeviceRecordsList({
-  formatTimestamp = (value) => String(value || ""),
-  records = [],
-  shortId = (value) => String(value || ""),
-}) {
-  if (!records.length) {
-    return h(EmptyPanelMessage, null, "No remote devices have touched this relay yet.");
-  }
-
-  const activeRecords = records.filter((record) => record.lifecycle_state !== "revoked");
-  const revokedRecords = records.filter((record) => record.lifecycle_state === "revoked");
-
-  return h(
-    React.Fragment,
-    null,
-    activeRecords.length
-      ? activeRecords.map((record) =>
-          h(DeviceRecordCard, {
-            formatTimestamp,
-            key: record.device_id,
-            record,
-            shortId,
-          })
-        )
-      : !revokedRecords.length
-        ? h(EmptyPanelMessage, null, "No active devices.")
-        : null,
-    revokedRecords.length
-      ? h(
-          "details",
-          { className: "revoked-drawer" },
-          h(
-            "summary",
-            null,
-            `${revokedRecords.length} Revoked Device${revokedRecords.length === 1 ? "" : "s"}`
-          ),
-          h(
-            "div",
-            { className: "revoked-devices-nested" },
-            ...revokedRecords.map((record) =>
-              h(DeviceRecordCard, {
-                formatTimestamp,
-                key: record.device_id,
-                record,
-                shortId,
-              })
-            )
-          )
-        )
-      : null
-  );
-}
-
-function DeviceRecordCard({ formatTimestamp, record, shortId }) {
-  const lastSeen = record.last_seen_at ? formatTimestamp(record.last_seen_at) : "Never";
-  const lastPeer = record.last_peer_id ? shortId(record.last_peer_id) : "None";
-  const fingerprint = record.fingerprint || "Unavailable";
-  const canManage = record.lifecycle_state === "approved";
-  const ticketExpiry = formatBrokerJoinTicketExpiry(
-    record.lifecycle_state,
-    record.broker_join_ticket_expires_at,
-    formatTimestamp
-  );
-
-  return h(
-    "article",
-    { className: "paired-device-card" },
-    h(
-      "div",
-      { className: "paired-device-copy" },
-      h(
-        "div",
-        { className: "paired-device-heading" },
-        h("strong", null, record.label),
-        h(
-          "span",
-          { className: `device-state-badge ${deviceLifecycleBadgeClass(record.lifecycle_state)}` },
-          deviceLifecycleLabel(record.lifecycle_state)
-        )
-      ),
-      h("p", { className: "paired-device-meta paired-device-id" }, record.device_id),
-      h(
-        "dl",
-        { className: "paired-device-fields" },
-        hDeviceField("Last Seen", lastSeen),
-        hDeviceField("Last Peer", lastPeer),
-        hDeviceField("Broker Ticket", ticketExpiry),
-        hDeviceField("Fingerprint", fingerprint, "paired-device-fingerprint"),
-        hDeviceField("State Updated", formatTimestamp(record.state_changed_at)),
-        hDeviceField(
-          "Path Scope",
-          Array.isArray(record.path_scope) && record.path_scope.length
-            ? record.path_scope.join(", ")
-            : "Unrestricted (relay roots only)"
-        )
-      )
-    ),
-    canManage
-      ? h(
-          "div",
-          { className: "paired-device-actions" },
-          h(
-            "button",
-            {
-              className: "approval-button",
-              "data-revoke-others-except-device-id": record.device_id,
-              type: "button",
-            },
-            "Keep Only This"
-          ),
-          h(
-            "button",
-            {
-              className: "approval-button approval-button-danger",
-              "data-revoke-device-id": record.device_id,
-              type: "button",
-            },
-            "Revoke"
-          )
-        )
-      : null
-  );
 }
 
 export function PendingPairingRequestsList({
@@ -254,16 +98,7 @@ export function PendingPairingRequestsList({
   );
 }
 
-function hDeviceField(label, value, valueClassName = "") {
-  return h(
-    "div",
-    { className: "paired-device-field" },
-    h("dt", null, label),
-    h("dd", valueClassName ? { className: valueClassName } : null, value)
-  );
-}
-
-export function deviceLifecycleLabel(state) {
+function deviceLifecycleLabel(state) {
   switch (state) {
     case "pending":
       return "Pending";
@@ -278,7 +113,7 @@ export function deviceLifecycleLabel(state) {
   }
 }
 
-export function deviceLifecycleBadgeClass(state) {
+function deviceLifecycleBadgeClass(state) {
   switch (state) {
     case "pending":
       return "device-state-pending";
@@ -291,16 +126,4 @@ export function deviceLifecycleBadgeClass(state) {
     default:
       return "device-state-neutral";
   }
-}
-
-function formatBrokerJoinTicketExpiry(state, expiresAt, formatTimestamp) {
-  if (state !== "approved") {
-    return "Not active";
-  }
-
-  if (!expiresAt) {
-    return "Until revoked";
-  }
-
-  return formatTimestamp(expiresAt);
 }

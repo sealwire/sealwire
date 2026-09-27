@@ -768,6 +768,29 @@ impl RelayState {
         true
     }
 
+    /// Forget revoked and rejected devices. Safe because access is decided by
+    /// `paired_devices` and the broker credential was already revoked; these are history.
+    pub fn clear_device_history(&mut self) -> Vec<String> {
+        let mut removed: Vec<String> = self
+            .device_records
+            .values()
+            .filter(|record| {
+                matches!(
+                    record.lifecycle_state,
+                    DeviceLifecycleState::Revoked | DeviceLifecycleState::Rejected
+                )
+            })
+            .map(|record| record.device_id.clone())
+            .collect();
+        removed.sort();
+        for device_id in &removed {
+            self.device_records.remove(device_id);
+            // The revoked record is what blocks a stale orchestrator pin; drop the pin with it.
+            self.clear_orchestrator_pin_if_device(device_id);
+        }
+        removed
+    }
+
     pub fn revoke_all_other_paired_devices(
         &mut self,
         keep_device_id: &str,

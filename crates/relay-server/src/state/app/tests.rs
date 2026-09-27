@@ -36936,3 +36936,92 @@ mod pairing_qr_replacement {
         assert!(!phone_was_approved(&relay, "surface-other"));
     }
 }
+
+mod provider_account_tests {
+    use super::path_scope_tests::build_app_with_bridge;
+
+    #[tokio::test]
+    async fn checking_providers_publishes_version_and_sign_in() {
+        let (app, _bridge, _project, _outside) =
+            build_app_with_bridge(&std::env::temp_dir().to_string_lossy()).await;
+
+        app.check_provider_accounts().await;
+        let fake = app
+            .snapshot()
+            .await
+            .provider_status
+            .into_iter()
+            .find(|row| row.provider == "fake")
+            .expect("fake row in the snapshot");
+        assert_eq!(fake.version.as_deref(), Some("0.0.0-fake"));
+        assert_eq!(fake.signed_in, Some(true));
+        assert_eq!(
+            fake.login_command, None,
+            "a signed-in provider needs no login hint"
+        );
+    }
+
+    async fn fake_row(app: &super::super::AppState) -> crate::protocol::ProviderStatusView {
+        app.snapshot()
+            .await
+            .provider_status
+            .into_iter()
+            .find(|row| row.provider == "fake")
+            .expect("fake row in the snapshot")
+    }
+
+    // Signing in takes effect without a restart, so a signed-out row must be able to catch up.
+    #[tokio::test]
+    async fn a_provider_that_panics_does_not_block_later_rechecks() {
+        let (app, bridge, _project, _outside) =
+            build_app_with_bridge(&std::env::temp_dir().to_string_lossy()).await;
+        bridge.set_account_signed_in(false);
+        app.check_provider_accounts().await;
+
+        // Detached, like the real trigger: the panic must not leave the recheck marked running.
+        bridge.set_account_panics(true);
+        app.spawn_signed_out_recheck();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while bridge.account_calls() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the recheck reached the provider");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        bridge.set_account_panics(false);
+        bridge.set_account_signed_in(true);
+        app.recheck_signed_out_providers().await;
+        assert_eq!(
+            bridge.account_calls(),
+            3,
+            "the next opening of Settings still asks"
+        );
+    }
+
+    #[tokio::test]
+    async fn rechecking_asks_only_a_provider_that_was_signed_out() {
+        let (app, bridge, _project, _outside) =
+            build_app_with_bridge(&std::env::temp_dir().to_string_lossy()).await;
+        bridge.set_account_signed_in(false);
+        app.check_provider_accounts().await;
+        let row = fake_row(&app).await;
+        assert_eq!(row.signed_in, Some(false));
+        assert_eq!(row.login_command.as_deref(), Some("fake login"));
+
+        bridge.set_account_signed_in(true);
+        app.recheck_signed_out_providers().await;
+        let row = fake_row(&app).await;
+        assert_eq!(row.signed_in, Some(true));
+        assert_eq!(row.login_command, None);
+        assert_eq!(bridge.account_calls(), 2);
+
+        app.recheck_signed_out_providers().await;
+        assert_eq!(
+            bridge.account_calls(),
+            2,
+            "a provider already signed in is not asked again"
+        );
+    }
+}

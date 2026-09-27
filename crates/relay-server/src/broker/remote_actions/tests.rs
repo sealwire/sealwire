@@ -2451,3 +2451,15 @@ async fn fetch_thread_rows_answers_the_named_rows_and_names_the_missing() {
     assert_eq!(rows.entries[0].text.as_deref(), Some("recovered body"));
     assert_eq!(rows.missing_rows, vec!["gone".to_string()]);
 }
+
+#[test]
+fn recheck_signed_out_providers_is_a_claim_free_remote_action() {
+    let request: RemoteActionRequest =
+        serde_json::from_value(serde_json::json!({ "type": "recheck_signed_out_providers" }))
+            .expect("recheck_signed_out_providers should parse");
+    assert_eq!(request.kind(), RemoteActionKind::RecheckSignedOutProviders);
+    // Opening Settings on a phone must not steal the session from another device.
+    assert!(!requires_session_claim(
+        RemoteActionKind::RecheckSignedOutProviders
+    ));
+}

@@ -1,135 +1,148 @@
-// Remote's consolidated Settings modal.
-//
-// Remote had no Settings surface at all, so the chrome that local files under
-// Settings was scattered across the sidebar instead: a labelled "Providers"
-// health section pinned between "New session" and the relay list, and a lone
-// theme picker in the footer. Both are things you set once and then never look
-// at, occupying the column you scan constantly.
-//
-// This is the same shape as local's SettingsModal (react-shell.js) and reuses
-// its CSS wholesale — `.settings-modal`, `.settings-tabs`, `.settings-tab`,
-// `.settings-panel` — so the two shells cannot drift apart visually.
-//
-// The one deliberate difference is how a tab is selected. Local's SETTINGS PANELS
-// are always mounted and toggled with `hidden`, because every id inside them has to
-// resolve at `dom.js` import time; remote has no such constraint, so the inactive
-// panel is simply not rendered.
-//
-// Read that as a fact about these panels, not as a rule about local. It used to be
-// both — but the sidebar's search field was migrated out of exactly this pattern
-// (see `shared/sidebar-chrome.js`): its ids were retired, and local now renders it
-// conditionally, like remote. The panels are simply next in line rather than
-// permanently exempt.
-//
-// Device pairing is NOT here. It stays behind its own modal off the sidebar's
-// "Manage" row: pairing is a task you perform, not a preference you set, and it
-// owns a QR code, an approval list and a live expiry. Folding it in would make
-// this modal the third thing it is, and give pairing two entry points.
+// Remote's Settings window: same frame as local, but this browser only sees its own pairing.
+// Devices and Access are relay-side controls, so they stay on the local surface.
 
 import React from "react";
 import { ManagedDialog } from "../shared/managed-dialog.js";
-import { ThemePickerRow } from "../shared/theme-picker.js";
-import { ProviderStatusSection } from "./provider-status-section.js";
+import { SettingsFooter, SettingsFrame, SettingsPage, SettingsSection } from "../shared/settings-frame.js";
+import { ProvidersPage } from "../shared/settings-providers.js";
+import { DeviceMetaPanel } from "./react-renderer.js";
 
 const h = React.createElement;
 
-const TABS = [
-  { key: "providers", label: "Providers" },
-  { key: "appearance", label: "Appearance" },
-];
-
-export function RemoteSettingsModal({ onClose, open, providerModel }) {
-  const [tab, setTab] = React.useState("providers");
-
-  // Reopening lands on Providers rather than wherever the last visit ended.
-  // The tab you left is a detail of a session that is over; the tab that
-  // answers "is my agent actually reachable" is the reason to open this at all.
+export function RemoteSettingsModal({
+  open,
+  tab,
+  onSelectTab,
+  onClose,
+  providerModel,
+  device,
+  loadBuildInfo,
+  onRecheckSignedOut,
+}) {
+  const providers = providerModel || [];
+  // Read at the moment Settings opens, so re-renders while open never re-ask.
+  const latest = React.useRef(null);
+  latest.current = { signedOut: providers.some((row) => row.signedIn === false), onRecheckSignedOut };
   React.useEffect(() => {
-    if (open) {
-      setTab("providers");
+    if (open && latest.current.signedOut) {
+      latest.current.onRecheckSignedOut?.();
     }
   }, [open]);
-
+  const connected = providers.filter((row) => row.connected && row.signedIn !== false).length;
+  const nav = [
+    {
+      key: "providers",
+      label: "Providers",
+      meta: providers.length ? `${connected}/${providers.length}` : "",
+      metaTone: connected < providers.length ? "alert" : "",
+    },
+    { key: "device", label: "This device", meta: device.statusLabel, metaTone: device.statusTone },
+  ];
+  const active = nav.some((item) => item.key === tab) ? tab : "providers";
   return h(
     ManagedDialog,
     {
-      className: "settings-modal panel-modal panel-modal-wide",
+      className: "settings-modal panel-modal",
       id: "remote-settings-modal",
       open,
       onRequestClose: onClose,
     },
     h(
-      "div",
-      { className: "modal-header" },
-      h("h2", null, "Settings"),
-      h(
-        "button",
-        {
-          className: "header-button close-modal-btn",
-          id: "close-remote-settings-modal",
-          onClick: onClose,
-          type: "button",
-        },
-        "×"
-      )
-    ),
+      SettingsFrame,
+      {
+        active,
+        closeId: "close-remote-settings-modal",
+        footer: h(SettingsFooter, { loadBuildInfo }),
+        nav,
+        onClose,
+        onSelect: onSelectTab,
+        tabIdPrefix: "remote-",
+      },
+      h(ProvidersPage, {
+        active: active === "providers",
+        footnote:
+          "A session's agent is chosen when you start it and cannot change afterwards — fork the session to hand it to another agent.",
+        listId: "remote-provider-status-list",
+        model: providers,
+      }),
+      h(DevicePage, { active: active === "device", device })
+    )
+  );
+}
+
+function DevicePage({ active, device }) {
+  const controls = device.chromeModel.pairingControls;
+  return h(
+    SettingsPage,
+    { pageKey: "device", active, title: "This device" },
     h(
-      "div",
-      { className: "settings-tabs", role: "tablist", "aria-label": "Settings sections" },
-      ...TABS.map((entry) =>
-        h(
-          "button",
-          {
-            key: entry.key,
-            className: `settings-tab${tab === entry.key ? " is-active" : ""}`,
-            id: `remote-settings-tab-${entry.key}`,
-            type: "button",
-            role: "tab",
-            "aria-selected": tab === entry.key ? "true" : "false",
-            "data-settings-tab": entry.key,
-            onClick: () => setTab(entry.key),
-          },
-          entry.label
-        )
-      )
-    ),
-    h(
-      "section",
-      { className: "panel-modal-body settings-body" },
-      tab === "providers"
+      SettingsSection,
+      null,
+      h("div", { className: "paired-devices-list", id: "device-meta" }, h(DeviceMetaPanel, { model: device.chromeModel.deviceMeta })),
+      device.paired
         ? h(
             "div",
-            { className: "settings-panel", "data-settings-panel": "providers" },
-            // The empty case is decided HERE, not by letting ProviderStatusSection
-            // return null: `h()` builds an element object either way, so `h(...) ||
-            // fallback` is always the element and the fallback is unreachable.
-            //
-            // In the sidebar an empty panel could just vanish. In a tab you opened
-            // on purpose, vanishing is indistinguishable from a broken screen.
-            providerModel?.length
-              ? // `.provider-status-panel`, not the sidebar's wrapper:
-                // `.remote-access-shell` carries sidebar padding that is
-                // neutralised only while it is inside `.sidebar`.
-                h(ProviderStatusSection, {
-                  caption: null,
-                  className: "provider-status-panel",
-                  model: providerModel,
-                })
-              : h("p", { className: "provider-status-empty" }, "No providers are configured on this relay."),
+            { className: "settings-row-actions" },
             h(
-              "p",
-              { className: "sidebar-hint" },
-              "Which agent a session uses is chosen when you start it, and cannot be changed afterwards — fork the session to hand it to another agent."
+              "button",
+              {
+                className: "settings-button is-danger",
+                id: "forget-device-button",
+                onClick: device.onForget,
+                type: "button",
+              },
+              "Forget this device"
             )
           )
-        : null,
-      tab === "appearance"
-        ? h(
-            "div",
-            { className: "settings-panel", "data-settings-panel": "appearance" },
-            h("section", { className: "details-section" }, h(ThemePickerRow))
-          )
         : null
+    ),
+    h(
+      SettingsSection,
+      { title: "Pair with a relay" },
+      h(
+        "form",
+        {
+          className: "settings-form",
+          id: "pairing-form",
+          onSubmit: (event) => {
+            event.preventDefault();
+            device.onBeginPairing(device.pairingInputValue);
+          },
+        },
+        h("label", { className: "settings-label", htmlFor: "pairing-input" }, "Pairing link or code"),
+        h("textarea", {
+          className: "settings-input",
+          id: "pairing-input",
+          onChange: (event) => device.onPairingInputChange(event.target.value),
+          placeholder: "Paste the pairing link from the relay's Settings › Devices.",
+          readOnly: controls.pairingInputReadOnly,
+          rows: 3,
+          value: device.pairingInputValue,
+        }),
+        h("label", { className: "settings-label", htmlFor: "device-label-input" }, "Name this device"),
+        h(
+          "div",
+          { className: "settings-inline-form" },
+          h("input", {
+            className: "settings-input",
+            id: "device-label-input",
+            onChange: (event) => device.onDeviceLabelChange(event.target.value),
+            placeholder: "iPhone, Pixel, Safari on iPad",
+            type: "text",
+            value: device.deviceLabel,
+          }),
+          h(
+            "button",
+            {
+              className: "settings-button is-primary",
+              disabled: controls.connectDisabled,
+              id: "connect-button",
+              type: "submit",
+            },
+            controls.connectLabel
+          )
+        )
+      )
     )
   );
 }

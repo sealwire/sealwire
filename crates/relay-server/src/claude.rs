@@ -1303,6 +1303,13 @@ impl ProviderBridge for ClaudeCodeBridge {
         "claude_code"
     }
 
+    async fn account(&self) -> Result<crate::provider::account::ProviderAccount, String> {
+        let result = self.send_request("account/read", json!({})).await?;
+        Ok(crate::provider::account::claude_account_from_worker(
+            &result,
+        ))
+    }
+
     fn read_thread_reports_activity_time(&self) -> bool {
         // `read_session` overrides `updated_at` with the transcript's last real
         // message time (worker.mjs), so it is resume-safe and can be max-folded.

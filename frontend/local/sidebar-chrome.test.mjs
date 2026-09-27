@@ -367,11 +367,11 @@ test("all three Settings gears are wired to the modal", () => {
   for (const id of ["sidebar-settings", "open-settings-header"]) {
     assert.match(
       appJs,
-      new RegExp(`getElementById\\("${id}"\\)[\\s\\S]{0,80}?openSettingsModal\\(\\)`),
+      new RegExp(`getElementById\\("${id}"\\)[\\s\\S]{0,80}?settings\\.open\\(\\)`),
       `#${id} must open the Settings modal`
     );
   }
-  assert.match(appJs, /iconRailSettingsButton\?\.addEventListener\([\s\S]{0,60}?openSettingsModal\(\)/);
+  assert.match(appJs, /iconRailSettingsButton\?\.addEventListener\([\s\S]{0,60}?settings\.open\(\)/);
 });
 
 // Every one of those gears is a bare glyph in a button, and the glyph is injected

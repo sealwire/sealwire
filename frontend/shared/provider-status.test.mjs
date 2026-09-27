@@ -37,3 +37,32 @@ test("providerStatusMeta falls back to starting for an unknown status", () => {
   assert.deepEqual(providerStatusMeta("wat"), providerStatusMeta("starting"));
   assert.deepEqual(providerStatusMeta(undefined), providerStatusMeta("starting"));
 });
+
+test("a running provider that is signed out reads as Not signed in, with its login command", async () => {
+  const { buildProviderStatusModel } = await import("./provider-status.js");
+  const [row] = buildProviderStatusModel({
+    provider_status: [
+      {
+        provider: "codex",
+        display_name: "Codex",
+        status: "connected",
+        connected: true,
+        version: "0.156.1",
+        signed_in: false,
+        login_command: "codex login",
+      },
+    ],
+  });
+  assert.equal(row.statusLabel, "Not signed in");
+  assert.equal(row.loginCommand, "codex login");
+  assert.equal(row.version, "0.156.1");
+});
+
+test("an unknown sign-in state leaves the status alone", async () => {
+  const { buildProviderStatusModel } = await import("./provider-status.js");
+  const [row] = buildProviderStatusModel({
+    provider_status: [{ provider: "codex", status: "connected", connected: true }],
+  });
+  assert.equal(row.statusLabel, "Connected");
+  assert.equal(row.signedIn, null);
+});

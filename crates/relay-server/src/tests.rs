@@ -1257,6 +1257,8 @@ async fn body_less_revoke_routes_reject_a_cross_origin_form_post() {
     for route in [
         "/api/devices/iphone/revoke",
         "/api/devices/iphone/revoke-others",
+        "/api/devices/clear-history",
+        "/api/providers/recheck-signed-out",
     ] {
         let (context, _project) = test_context(no_auth(), HostPolicy::loopback_only());
         let router = build_router(context, WebAssets::Embedded);

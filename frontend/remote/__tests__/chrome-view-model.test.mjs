@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { buildProviderStatusModel } from "../../shared/provider-status.js";
 import {
-  buildProviderStatusModel,
   selectDeviceChromeRenderModel,
   selectSessionChromeRenderModel,
   selectStatusBadgeRenderModel,

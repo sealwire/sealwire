@@ -629,6 +629,11 @@ pub trait ProviderBridge: Send + Sync {
     fn read_thread_reports_activity_time(&self) -> bool {
         false
     }
+
+    /// Version, sign-in and plan for Settings > Providers. The default knows nothing.
+    async fn account(&self) -> Result<account::ProviderAccount, String> {
+        Ok(account::ProviderAccount::default())
+    }
 }
 
 /// Which bridge implementation backs a provider entry.
@@ -1015,6 +1020,8 @@ where
 }
 
 /// The provider-event boundary checklist, plus its tripwire scan.
+pub mod account;
+
 #[cfg(test)]
 mod event_ingress_audit;
 

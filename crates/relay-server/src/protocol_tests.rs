@@ -358,6 +358,10 @@ fn remote_compaction_strips_provider_status_reason_but_keeps_status() {
             "failed to start `/Users/someone/private/path/codex app-server`: handshake rejected"
                 .to_string(),
         ),
+        version: None,
+        signed_in: None,
+        plan: None,
+        login_command: None,
     }];
 
     let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
@@ -373,6 +377,31 @@ fn remote_compaction_strips_provider_status_reason_but_keeps_status() {
 }
 
 #[test]
+fn remote_compaction_keeps_the_provider_account_fields() {
+    use crate::protocol::{ProviderStatusKind, ProviderStatusView};
+    let mut snapshot = make_snapshot();
+    snapshot.provider_status = vec![ProviderStatusView {
+        provider: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status: ProviderStatusKind::Connected,
+        connected: true,
+        reason: None,
+        version: Some("0.156.1".to_string()),
+        signed_in: Some(false),
+        plan: Some("Pro".to_string()),
+        login_command: Some("codex login".to_string()),
+    }];
+
+    let row = &snapshot
+        .compact_for(SessionSnapshotCompactProfile::RemoteSurface)
+        .provider_status[0];
+    assert_eq!(row.version.as_deref(), Some("0.156.1"));
+    assert_eq!(row.signed_in, Some(false));
+    assert_eq!(row.plan.as_deref(), Some("Pro"));
+    assert_eq!(row.login_command.as_deref(), Some("codex login"));
+}
+
+#[test]
 fn local_compaction_keeps_provider_status_reason_but_bounds_its_length() {
     use crate::protocol::{ProviderStatusKind, ProviderStatusView};
     let mut snapshot = make_snapshot();
@@ -382,6 +411,10 @@ fn local_compaction_keeps_provider_status_reason_but_bounds_its_length() {
         status: ProviderStatusKind::NotInstalled,
         connected: false,
         reason: Some("x".repeat(5_000)),
+        version: None,
+        signed_in: None,
+        plan: None,
+        login_command: None,
     }];
 
     let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);

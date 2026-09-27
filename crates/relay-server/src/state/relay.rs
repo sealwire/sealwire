@@ -418,6 +418,10 @@ pub struct RelayState {
     /// snapshot time to derive the live `provider_status` panel — including
     /// providers that failed to launch, which never enter the providers map.
     pub(super) provider_status_base: Vec<crate::provider::ProviderStatusBase>,
+    /// What each provider's CLI said at startup, folded into `provider_status`.
+    pub(super) provider_accounts: HashMap<String, crate::provider::account::ProviderAccount>,
+    /// One signed-out recheck at a time, however often Settings is opened.
+    pub(super) provider_recheck_running: bool,
     /// Honest "last real activity" timestamp per thread (unix secs), used as
     /// the thread-list sort/display key INSTEAD of the provider's raw
     /// `updated_at`. A no-prompt resume/selection spins up a live SDK session
@@ -743,6 +747,8 @@ impl RelayState {
             provider_archive_capabilities: Vec::new(),
             beta_features_enabled: false,
             provider_status_base: Vec::new(),
+            provider_accounts: HashMap::new(),
+            provider_recheck_running: false,
             thread_last_activity_at: HashMap::new(),
             projects: HashMap::new(),
             thread_project_id: HashMap::new(),
@@ -5190,6 +5196,51 @@ so {} never got it — hand over again when you are ready.",
         self.provider_status_base = base;
     }
 
+    /// An answer that cannot tell (a timed-out or failed CLI) keeps what the last one
+    /// knew; dropping a "signed out" would also stop the rechecks for that provider.
+    pub fn set_provider_account(
+        &mut self,
+        provider_key: &str,
+        account: crate::provider::account::ProviderAccount,
+    ) {
+        let merged = match self.provider_accounts.remove(provider_key) {
+            Some(previous) if account.signed_in.is_none() => {
+                crate::provider::account::ProviderAccount {
+                    version: account.version.or(previous.version),
+                    signed_in: previous.signed_in,
+                    plan: account.plan.or(previous.plan),
+                    login_command: account.login_command.or(previous.login_command),
+                }
+            }
+            Some(previous) => crate::provider::account::ProviderAccount {
+                version: account.version.or(previous.version),
+                ..account
+            },
+            None => account,
+        };
+        self.provider_accounts
+            .insert(provider_key.to_string(), merged);
+    }
+
+    /// Claims the providers last seen signed out; empty if none, or a recheck is already running.
+    pub fn begin_signed_out_recheck(&mut self) -> Vec<String> {
+        if self.provider_recheck_running {
+            return Vec::new();
+        }
+        let keys: Vec<String> = self
+            .provider_accounts
+            .iter()
+            .filter(|(_, account)| account.signed_in == Some(false))
+            .map(|(key, _)| key.clone())
+            .collect();
+        self.provider_recheck_running = !keys.is_empty();
+        keys
+    }
+
+    pub fn finish_signed_out_recheck(&mut self) {
+        self.provider_recheck_running = false;
+    }
+
     pub fn set_beta_features_enabled(&mut self, enabled: bool) {
         self.beta_features_enabled = enabled;
     }
@@ -5201,7 +5252,7 @@ so {} never got it — hand over again when you are ready.",
     /// Derive the live per-provider status panel: static spawn outcome folded
     /// with the current connection map. Recomputed on every snapshot so a
     /// disconnect/reconnect streams to clients without any extra plumbing.
-    fn provider_status_view(&self) -> Vec<crate::protocol::ProviderStatusView> {
+    pub(crate) fn provider_status_view(&self) -> Vec<crate::protocol::ProviderStatusView> {
         use crate::protocol::{ProviderStatusKind, ProviderStatusView};
         self.provider_status_base
             .iter()
@@ -5220,12 +5271,21 @@ so {} never got it — hand over again when you are ready.",
                         None => (ProviderStatusKind::Starting, false, None),
                     },
                 };
+                let account = self.provider_accounts.get(&base.provider_key);
+                let signed_in = account.and_then(|account| account.signed_in);
                 ProviderStatusView {
                     provider: base.provider_key.clone(),
                     display_name: base.display_name.clone(),
                     status,
                     connected,
                     reason,
+                    version: account.and_then(|account| account.version.clone()),
+                    signed_in,
+                    plan: account.and_then(|account| account.plan.clone()),
+                    login_command: account
+                        .filter(|_| signed_in == Some(false))
+                        .and_then(|account| account.login_command)
+                        .map(str::to_string),
                 }
             })
             .collect()

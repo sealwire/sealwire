@@ -2,8 +2,6 @@ import { pendingApprovalForThread } from "../shared/session-view-model.js";
 import { transcriptPageIsFromAnotherGeneration } from "../shared/transcript-generation.js";
 import {
   appShell,
-  auditSummary,
-  auditTimeline,
   chatShell,
   composerError,
   composerHeld,
@@ -19,7 +17,6 @@ import {
   pairingApprovalHint,
   pairingApprovalModal,
   pendingActionBanner,
-  providerStatusList,
   sendButton,
   sessionHistoryDrawer,
   sessionMeta,
@@ -62,7 +59,6 @@ import {
   summarizeThreadGroups,
 } from "../shared/thread-groups.js";
 import { selectOwningContext } from "../shared/session-view-state.js";
-import { shouldShowAuditEntry } from "../shared/audit-log.js";
 import { composerErrorFor, syncComposerError } from "./composer-error.js";
 import { selectWorkspaceSuggestionsModel } from "../shared/workspace-suggestions.js";
 import { isUnknownWorkspace } from "../shared/thread-groups.js";
@@ -104,7 +100,6 @@ import {
   readLocalUiState,
 } from "./ui-store.js";
 import { providerLabel, selectModelBadge } from "../shared/provider-labels.js";
-import { providerStatusMeta } from "../shared/provider-status.js";
 import { isProgressStalled } from "../progress-verbs.js";
 import {
   earliestPairingExpiry,
@@ -192,11 +187,9 @@ import {
 import { stopPendingResolveFromSession, stopPendingOverlayFromPin } from "../shared/stop-pending-session.js";
 import { saveLastEffort } from "../shared/last-used-settings.js";
 import {
-  AuditList,
   ControlBannerContent,
   OverviewBadges,
   SessionMetaPanel,
-  TextContent,
 } from "./react-session-panels.js";
 import { ThreadGroupList } from "../shared/thread-list-react.js";
 import { buildThreadActivityMap, threadActivityFor } from "../shared/thread-activity.js";
@@ -267,10 +260,7 @@ function renderConversationContent(content) {
 
 export function createSessionRenderer({
   state,
-  renderAllowedRoots,
-  renderPairingPanel,
-  renderDeviceRecords,
-  renderPendingPairingRequests,
+  renderSettings = () => {},
   renderPairingApprovalModal,
   resolveActiveThread,
   setSelectedCwd,
@@ -297,7 +287,6 @@ export function createSessionRenderer({
   escapeHtml,
   formatTimestamp,
   formatRelativeTime,
-  humanizeLabel,
   shortId,
   workspaceBasename,
   canCurrentDeviceWrite,
@@ -519,9 +508,6 @@ export function createSessionRenderer({
       ? session.current_cwd || ""
       : session.current_cwd || state.selectedCwd || "";
     const viewingSessionDetails = Boolean(sessionMeta?.closest("dialog")?.open);
-    const viewingSecurityDetails = Boolean(
-      document.querySelector("#settings-modal")?.open
-    );
     const threadListUi = readThreadListUi(state.threadListStore);
     state.currentApprovalId = approval?.request_id || null;
 
@@ -642,17 +628,13 @@ export function createSessionRenderer({
     statusBadge.textContent = statusBadgeModel.text;
     statusBadge.className = `status-badge status-badge-${statusBadgeModel.tone}`;
     renderHeaderModelBadge(session);
-    // Provider status is relay-global; read the real session, not the
-    // (possibly view-only) projection above.
-    renderProviderStatus(state.session);
+    // Settings reads the relay-global state.session, not the view-only projection above.
+    renderSettings();
     renderHostStatus();
 
     if (!viewingConversation) {
       renderOverviewState(session);
     }
-    // "Recent events" now lives in the Settings > Log tab; keep it fresh in every
-    // view (including while a conversation is open) so opening Settings shows current data.
-    renderAuditTimeline(session.logs || []);
     if (showProjectOverview) {
       renderProjectOverview();
     }
@@ -737,14 +719,6 @@ export function createSessionRenderer({
     }
     if (!viewingConversation || viewingSessionDetails) {
       renderSessionMeta(session);
-    }
-    if (!viewingConversation || viewingSecurityDetails) {
-      renderAllowedRoots(session.allowed_roots || [], {
-        draftDirty: readLocalUiState(state.localUiStore).allowedRootsDraftDirty,
-      });
-      renderPairingPanel(state.currentPairing);
-      renderDeviceRecords(session.device_records || []);
-      renderPendingPairingRequests(pendingPairings, state.pendingPairingDecisions || {});
     }
     renderPairingApprovalModal(pendingPairings, state.pendingPairingDecisions || {});
     announceNewPendingPairings(pendingPairings);
@@ -869,7 +843,7 @@ export function createSessionRenderer({
     renderOverviewState(null, message);
     renderWorkspaceSuggestions(null);
     renderHeaderModelBadge(null);
-    renderProviderStatus(null);
+    renderSettings();
     renderHostStatus();
     statusBadge.textContent = "Offline";
     statusBadge.className = "status-badge status-badge-offline";
@@ -919,7 +893,7 @@ export function createSessionRenderer({
     renderWorkspaceSuggestions(null);
     renderThreadListMessage("Sign in", "Enter RELAY_API_TOKEN to load sessions.");
     renderHeaderModelBadge(null);
-    renderProviderStatus(null);
+    renderSettings();
     statusBadge.textContent = "Sign in";
     statusBadge.className = "status-badge status-badge-offline";
     if (sessionDetailsPath) {
@@ -1061,98 +1035,6 @@ export function createSessionRenderer({
           ? "Local relay · Live"
           : "Local relay · Polling";
     }
-  }
-
-  function renderProviderStatus(session) {
-    if (!providerStatusList) {
-      return;
-    }
-    const rows = Array.isArray(session?.provider_status)
-      ? session.provider_status
-      : [];
-    // The Settings tab strip owns panel visibility now, so never hide the panel;
-    // show an empty-state row instead of a blank tab when no providers are reported.
-    providerStatusList.replaceChildren();
-    if (rows.length === 0) {
-      const empty = document.createElement("li");
-      empty.className = "provider-status-row provider-status-empty";
-      empty.textContent = "No providers connected.";
-      providerStatusList.append(empty);
-      return;
-    }
-    for (const row of rows) {
-      const meta = providerStatusMeta(row.status);
-      const item = document.createElement("li");
-      item.className = "provider-status-row";
-      item.dataset.provider = row.provider || "";
-      item.dataset.status = row.status || "";
-      if (row.reason) {
-        item.title = row.reason;
-      }
-
-      const dot = document.createElement("span");
-      dot.className = `provider-status-dot ${meta.dotClass}`;
-      dot.setAttribute("aria-hidden", "true");
-
-      const name = document.createElement("span");
-      name.className = "provider-status-name";
-      name.textContent =
-        providerLabel(row.provider) || row.display_name || row.provider || "";
-
-      const statusEl = document.createElement("span");
-      statusEl.className = "provider-status-state";
-      statusEl.textContent = meta.label;
-
-      item.append(dot, name, statusEl);
-      providerStatusList.append(item);
-    }
-  }
-
-  function renderAuditTimeline(entries) {
-    if (!auditTimeline || !auditSummary) {
-      return;
-    }
-
-    if (!entries.length) {
-      renderReactContent(auditSummary, h(TextContent, null, ""));
-      renderReactContent(auditTimeline, h(AuditList));
-      return;
-    }
-
-    const filteredEntries = entries.filter((entry) => shouldShowAuditEntry(entry));
-    const visibleEntries = filteredEntries.slice(0, 8);
-    const hiddenDebugCount = entries.length - filteredEntries.length;
-    const significantCount = visibleEntries.filter(
-      (entry) => classifyAuditEntry(entry) !== "neutral"
-    ).length;
-    const summaryParts = [`${visibleEntries.length} events`];
-    if (significantCount > 0) summaryParts.push(`${significantCount} notable`);
-    if (hiddenDebugCount > 0) summaryParts.push(`${hiddenDebugCount} hidden`);
-    renderReactContent(
-      auditSummary,
-      h(TextContent, null, summaryParts.join(" · "))
-    );
-
-    if (!visibleEntries.length) {
-      renderReactContent(
-        auditTimeline,
-        h(AuditList, { emptyMessage: "No relay-level audit events yet." })
-      );
-      return;
-    }
-
-    renderReactContent(
-      auditTimeline,
-      h(AuditList, {
-        entries: visibleEntries.map((entry, index) => ({
-          key: `${entry.created_at || index}:${entry.kind || "relay"}:${entry.message || ""}`,
-          kind: humanizeLabel(entry.kind || "relay"),
-          message: entry.message || "",
-          time: formatTimestamp(entry.created_at),
-          tone: classifyAuditEntry(entry),
-        })),
-      })
-    );
   }
 
   function renderSessionMeta(session) {
@@ -3323,50 +3205,6 @@ export function createSessionRenderer({
 
   function overviewBadge(label, value) {
     return { label, value };
-  }
-
-  function classifyAuditEntry(entry) {
-    const text = `${entry?.kind || ""} ${entry?.message || ""}`.toLowerCase();
-
-    if (
-      text.includes("failed") ||
-      text.includes("denied") ||
-      text.includes("rejected") ||
-      text.includes("revoked") ||
-      text.includes("offline") ||
-      text.includes("disconnected")
-    ) {
-      return "alert";
-    }
-
-    if (
-      text.includes("pairing approval required") ||
-      text.includes("approval required for")
-    ) {
-      return "alert";
-    }
-
-    if (text.includes("approval") && text.includes("requested")) {
-      return "alert";
-    }
-
-    if (
-      text.includes("approved") ||
-      text.includes("accepted") ||
-      text.includes("started") ||
-      text.includes("resumed") ||
-      text.includes("connected") ||
-      text.includes("saved") ||
-      (text.includes("responded to approval") && text.includes("approve"))
-    ) {
-      return "ready";
-    }
-
-    if (text.includes("responded to approval") && text.includes("deny")) {
-      return "alert";
-    }
-
-    return "neutral";
   }
 
   return {

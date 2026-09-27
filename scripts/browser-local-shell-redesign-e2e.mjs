@@ -1,5 +1,5 @@
 // Drives the local web UI to verify the shell redesign: the far-left icon rail, the
-// consolidated Settings modal (Providers/Devices/Log/Appearance), Settings reachability
+// consolidated Settings modal (Providers/Devices/Access/Log), Settings reachability
 // on a narrow (mobile) viewport, the project actions menu (visible button + right-click),
 // the icon-rail folder re-expanding a collapsed sidebar, and the live footer status.
 // Run: AGENT_PROVIDERS=fake node scripts/browser-local-shell-redesign-e2e.mjs
@@ -261,7 +261,7 @@ async function run() {
     // --- Settings modal + tabs (desktop entry: sidebar footer gear) ---
     await page.click("#sidebar-settings");
     await page.waitForFunction(() => document.querySelector("#settings-modal")?.open, { timeout: TIMEOUT_MS });
-    for (const tab of ["providers", "devices", "log", "appearance"]) {
+    for (const tab of ["providers", "devices", "access", "log"]) {
       await page.click(`#settings-tab-${tab}`);
       const ok = await page.evaluate((t) => {
         const panel = document.querySelector(`[data-settings-panel="${t}"]`);
@@ -272,14 +272,13 @@ async function run() {
       }, tab);
       assert.ok(ok, `settings tab "${tab}" activates its panel`);
     }
-    // Devices tab carries the pairing controls the harness relies on.
-    await page.click("#settings-tab-devices");
-    const devicesOk = await page.evaluate(() =>
-      ["#pending-pairings-list", "#allowed-roots-form", "#paired-devices-list", "#start-pairing-button"].every(
+    // The controls the pairing and allowed-roots harnesses drive.
+    const controlsOk = await page.evaluate(() =>
+      ["#paired-devices-list", "#start-pairing-button", "#allowed-roots-list", "#add-allowed-root-button"].every(
         (s) => !!document.querySelector(s)
       )
     );
-    assert.ok(devicesOk, "Devices tab exposes pairing/roots/devices controls");
+    assert.ok(controlsOk, "Devices and Access expose the pairing / roots controls");
     await page.click("#close-settings-modal");
     await page.waitForFunction(() => !document.querySelector("#settings-modal")?.open);
 
@@ -671,11 +670,11 @@ async function run() {
     await page.waitForFunction(() => document.querySelector("#settings-modal")?.open, { timeout: TIMEOUT_MS });
     const narrow = await page.evaluate(() => {
       const modal = document.querySelector("#settings-modal");
-      const tabs = document.querySelector(".settings-tabs");
+      const tabs = document.querySelector(".settings-nav-items");
       return {
         modalOverflowsX: modal.scrollWidth > modal.clientWidth + 2,
         modalWithinViewport: Math.ceil(modal.getBoundingClientRect().right) <= window.innerWidth,
-        // tabs wrap rather than scroll, so all four stay reachable without overflow
+        // the section nav wraps rather than scrolls, so every section stays reachable
         tabsOverflowX: tabs ? tabs.scrollWidth > tabs.clientWidth + 2 : true,
       };
     });

@@ -75,6 +75,7 @@ pub struct CodexBridge {
     next_request_id: AtomicU64,
     state: Arc<RwLock<RelayState>>,
     provider_name: &'static str,
+    binary_name: &'static str,
     /// Test-only per-bridge JSON-RPC timeout override (milliseconds). Zero = default.
     #[cfg(test)]
     test_request_timeout_ms: AtomicU64,
@@ -273,6 +274,28 @@ impl ProviderBridge for CodexBridge {
 
     fn provider_name(&self) -> &'static str {
         self.provider_name
+    }
+
+    async fn account(&self) -> Result<crate::provider::account::ProviderAccount, String> {
+        use crate::provider::account;
+        let (banner, read) = tokio::join!(
+            account::run_cli(
+                crate::provider::resolve_binary(self.binary_name),
+                &["--version"]
+            ),
+            self.send_request("account/read", json!({})),
+        );
+        let (signed_in, plan) = read
+            .map(|result| account::codex_account_from_read(&result))
+            .unwrap_or((None, None));
+        Ok(account::ProviderAccount {
+            version: banner
+                .ok()
+                .and_then(|out| account::version_from_banner(&out)),
+            signed_in,
+            plan,
+            login_command: Some("codex login"),
+        })
     }
 }
 
@@ -476,6 +499,7 @@ impl CodexBridge {
             next_request_id: AtomicU64::new(1),
             state,
             provider_name: provider_key,
+            binary_name,
             #[cfg(test)]
             test_request_timeout_ms: AtomicU64::new(0),
         };

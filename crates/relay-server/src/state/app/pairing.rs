@@ -90,6 +90,24 @@ impl AppState {
         })
     }
 
+    pub async fn clear_device_history(&self) -> crate::protocol::ClearDeviceHistoryReceipt {
+        let mut relay = self.relay.write().await;
+        let removed = relay.clear_device_history();
+        if !removed.is_empty() {
+            relay.push_log(
+                "info",
+                format!(
+                    "Cleared {} revoked or rejected device(s) from the device list.",
+                    removed.len()
+                ),
+            );
+            relay.notify();
+        }
+        crate::protocol::ClearDeviceHistoryReceipt {
+            removed_count: removed.len(),
+        }
+    }
+
     pub async fn revoke_other_devices(
         &self,
         keep_device_id: &str,

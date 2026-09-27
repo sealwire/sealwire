@@ -9,13 +9,11 @@ import {
 test("local UI store owns transient UI controls", () => {
   const store = createLocalUiStore();
 
-  store.getState().setAllowedRootsDraftDirty(true);
   store.getState().setPendingPairingIds(["pair-1", "pair-2"]);
   store.getState().toggleTranscriptExpandedItem("entry:item-1");
   store.getState().startTranscriptDetailLoading("item-1");
 
   let state = readLocalUiState(store);
-  assert.equal(state.allowedRootsDraftDirty, true);
   assert.deepEqual(state.pendingPairingIds, ["pair-1", "pair-2"]);
   assert.deepEqual([...state.transcriptExpandedItemIds], ["entry:item-1"]);
   assert.deepEqual([...state.transcriptLoadingItemIds], ["item-1"]);

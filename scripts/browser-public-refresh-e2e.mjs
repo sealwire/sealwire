@@ -249,18 +249,18 @@ async function waitForMobileDrawerState(page, state) {
   );
 }
 
+// Pairing lives on the remote Settings window's "This device" page.
 async function openPairingModal(page) {
   const isOpen = await page.evaluate(() =>
-    Boolean(document.querySelector("#pairing-modal")?.open)
+    Boolean(document.querySelector("#remote-settings-modal")?.open)
   );
-  if (isOpen) {
-    return;
+  if (!isOpen) {
+    await page.click("#open-pairing-modal");
   }
-
-  await page.click("#open-pairing-modal");
   await page.waitForFunction(() => {
-    const dialog = document.querySelector("#pairing-modal");
-    return Boolean(dialog?.open);
+    const dialog = document.querySelector("#remote-settings-modal");
+    const panel = document.querySelector('#remote-settings-modal [data-settings-panel="device"]');
+    return Boolean(dialog?.open) && Boolean(panel) && !panel.hidden;
   }, null, { timeout: TIMEOUT_MS });
 }
 

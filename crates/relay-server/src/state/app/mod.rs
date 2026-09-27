@@ -717,6 +717,7 @@ impl AppState {
         // Re-pull catalogs on a slow cadence so a long-running relay still picks
         // up model changes (e.g. a CLI upgrade) without a restart.
         state.spawn_periodic_model_catalog_refresh();
+        state.spawn_provider_account_check();
 
         if let Some(persisted) = restored_state {
             state.restore_persisted_session(persisted).await;

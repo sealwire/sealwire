@@ -9,9 +9,7 @@ import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
 import { launchBrowser } from "./e2e/harness/browser.mjs";
 import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
 import { startLocalSession } from "./e2e/harness/local-session.mjs";
-// Devices/allowed-roots now live in the Settings modal's Devices tab; the pairing
-// harness helper opens Settings + activates that tab.
-import { openSecurityModal, closeSecurityModal } from "./e2e/harness/pairing.mjs";
+import { openSettingsTab, closeSecurityModal } from "./e2e/harness/pairing.mjs";
 import { getFreePort } from "./e2e/harness/ports.mjs";
 import {
   dumpProcessLogs,
@@ -81,9 +79,10 @@ async function main() {
       "outside session should start before restrictions are configured"
     );
 
-    await openSecurityModal(page);
-    await page.fill("#allowed-roots-input", toTildePath(ROOT));
-    await page.click("#save-allowed-roots-button");
+    await openSettingsTab(page, "access");
+    await page.click("#add-allowed-root-button");
+    await page.fill("#allowed-root-input", toTildePath(ROOT));
+    await page.click("#save-allowed-root-button");
 
     await page.waitForFunction(
       (expectedRoot) => {

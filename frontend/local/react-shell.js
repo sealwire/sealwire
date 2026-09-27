@@ -1,8 +1,6 @@
 import React from "react";
-import { ClientLog } from "../shared/client-log.js";
 import { ConversationComposer } from "../shared/composer.js";
 import { RefreshButton } from "../shared/refresh-button.js";
-import { ThemePickerRow } from "../shared/theme-picker.js";
 import { SidebarBrand, SidebarCollapseToggle, SidebarResizeHandle } from "../shared/sidebar-chrome.js";
 import { ConversationHeader, ConversationHeadingBody } from "../shared/conversation-header.js";
 // The back arrow, the compose mark and the left-panel toggle moved into
@@ -388,7 +386,7 @@ function ChatHeader() {
       }),
       h("span", { className: "status-badge", id: "status-badge" }, "Idle"),
       // Mobile-only Settings entry: the icon rail (which holds the gear) is hidden
-      // <=960px, so this keeps Providers/Devices/Log/Appearance reachable in every
+      // <=960px, so this keeps every Settings page reachable in every
       // view (the header is always present, even in conversation where the sidebar
       // collapses). Hidden on desktop via CSS.
       h(
@@ -430,34 +428,6 @@ function ConsoleGrid() {
     "section",
     { className: "console-grid" },
     h(ThreadPanel)
-  );
-}
-
-// "Recent events" audit — moved out of the retired console home into the
-// Settings > Log tab. Keeps ids #audit-timeline / #audit-summary so the
-// render-session.js populate path is unchanged.
-function AuditTimelineCard() {
-  return h(
-    "details",
-    // Collapsed by default: Recent events is a curated subset of the relay log
-    // above, so it starts folded to avoid duplicating the same stream on open.
-    { className: "console-card console-card-audit console-card-collapsible" },
-    h(
-      "summary",
-      { className: "console-card-summary" },
-      h("span", { className: "console-card-title" }, "Recent events"),
-      h("span", { className: "console-card-hint", id: "audit-summary" }),
-      h("span", {
-        className: "console-card-summary-chevron",
-        "aria-hidden": "true",
-        dangerouslySetInnerHTML: { __html: CHEVRON_RIGHT_SVG },
-      })
-    ),
-    h(
-      "div",
-      { className: "audit-list", id: "audit-timeline" },
-      h("p", { className: "sidebar-empty" }, "No events yet.")
-    )
   );
 }
 
@@ -690,186 +660,14 @@ function WorkspaceDiffModal() {
   );
 }
 
-// The devices/security surface \u2014 extracted from the old standalone SecurityModal
-// so it can be embedded in the Settings modal's Devices tab. Keeps every id
-// (#pending-pairings-list, #pairing-panel, allowed-roots, #paired-devices-list\u2026)
-// so dom.js/render-security.js/app.js wiring resolves unchanged.
-function DevicesPanelBody() {
-  return h(
-    "section",
-    { className: "remote-access-shell" },
-    hSecuritySection("Pending Pairing Requests", "Approve or reject devices that are asking to pair."),
-      h(
-        "div",
-        { className: "paired-devices-list", id: "pending-pairings-list" },
-        h("p", { className: "sidebar-empty" }, "No devices are waiting for local approval.")
-      ),
-      h(
-        "div",
-        { className: "sidebar-row" },
-        h(
-          "div",
-          null,
-          h("p", { className: "sidebar-caption" }, "Remote Pairing"),
-          h("p", { className: "sidebar-hint" }, "Create a QR link for the broker-hosted mobile surface.")
-        ),
-        h("button", { className: "sidebar-link-button", id: "start-pairing-button", type: "button" }, "New QR")
-      ),
-      h(
-        "div",
-        { className: "pairing-scope-row" },
-        h("label", { className: "sidebar-label", htmlFor: "pairing-path-scope-input" }, "Pairing path scope (optional)"),
-        h("input", {
-          autoComplete: "off",
-          id: "pairing-path-scope-input",
-          list: "workspace-suggestions",
-          placeholder: "/Users/me/projects/specific-repo",
-          type: "text",
-        }),
-        h("p", { className: "sidebar-hint" }, "Limit the next QR's paired device to this path. Empty = no per-device restriction (relay roots still apply).")
-      ),
-      h(
-        "section",
-        { className: "pairing-panel", hidden: true, id: "pairing-panel" },
-        h("div", { "aria-live": "polite", className: "pairing-qr", id: "pairing-qr" }),
-        h("p", { className: "pairing-copy", id: "pairing-expiry" }, "Pairing ticket not created yet."),
-        h("p", { className: "pairing-copy", id: "pairing-scope-summary" }),
-        h("label", { className: "sidebar-label", htmlFor: "pairing-link-input" }, "Pairing Link"),
-        h(
-          "div",
-          { className: "workspace-picker" },
-          h("input", { id: "pairing-link-input", readOnly: true, type: "text" }),
-          h("button", { className: "load-button", id: "copy-pairing-link-button", type: "button" }, "Copy")
-        )
-      ),
-      hSecuritySection("Workspace Roots", "Limit every device on this relay to specific root directories. Leave empty for unrestricted access."),
-      hAllowedRootsForm(),
-      h(
-        "div",
-        { className: "paired-devices-list", id: "allowed-roots-list" },
-        h("p", { className: "sidebar-empty" }, "No workspace restrictions are configured.")
-      ),
-      hSecuritySection("Device Security", "Review known devices, fingerprints, and broker access."),
-      h(
-        "div",
-        { className: "paired-devices-list", id: "paired-devices-list" },
-        h("p", { className: "sidebar-empty" }, "No remote devices have touched this relay yet.")
-      )
-  );
-}
-
-function hSecuritySection(caption, hint) {
-  return h(
-    "div",
-    { className: "sidebar-row" },
-    h(
-      "div",
-      null,
-      h("p", { className: "sidebar-caption" }, caption),
-      h("p", { className: "sidebar-hint" }, hint)
-    )
-  );
-}
-
-function hAllowedRootsForm() {
-  return h(
-    "form",
-    { className: "workspace-form", id: "allowed-roots-form" },
-    h("label", { className: "sidebar-label", htmlFor: "allowed-roots-input" }, "Allowed Roots"),
-    h("textarea", {
-      id: "allowed-roots-input",
-      placeholder: "~/projects\n~/Documents/projects",
-      rows: "4",
-    }),
-    h(
-      "div",
-      { className: "workspace-picker" },
-      h("button", { className: "load-button", id: "save-allowed-roots-button", type: "submit" }, "Save roots")
-    ),
-    h("p", { className: "sidebar-hint", id: "allowed-roots-summary" }, "This relay is currently unrestricted.")
-  );
-}
-
-// Consolidated Settings modal opened from the icon-rail gear. Four always-mounted
-// tab panels (toggled by `hidden`, never conditionally rendered) so every id inside
-// resolves at dom.js import time. Tab switching is wired imperatively in app.js
-// (setSettingsTab) by the #settings-tab-* / data-settings-panel ids.
+// Settings is data-driven (settings-controller.js renders into #settings-root); the shell only
+// owns the dialog and the datalist the folder inputs suggest from.
 function SettingsModal() {
-  const tab = (key, label, active = false) =>
-    h(
-      "button",
-      {
-        className: `settings-tab${active ? " is-active" : ""}`,
-        id: `settings-tab-${key}`,
-        type: "button",
-        role: "tab",
-        "aria-selected": active ? "true" : "false",
-        "data-settings-tab": key,
-      },
-      label
-    );
-  const panel = (key, active, ...children) =>
-    h(
-      "div",
-      { className: "settings-panel", "data-settings-panel": key, hidden: !active },
-      ...children
-    );
   return h(
     "dialog",
-    { className: "settings-modal panel-modal panel-modal-wide", id: "settings-modal" },
-    h(
-      "div",
-      { className: "modal-header" },
-      h("h2", null, "Settings"),
-      h("button", {
-        className: "header-button close-modal-btn",
-        id: "close-settings-modal",
-        type: "button",
-      }, "×")
-    ),
-    h(
-      "div",
-      { className: "settings-tabs", role: "tablist", "aria-label": "Settings sections" },
-      tab("providers", "Providers", true),
-      tab("devices", "Devices"),
-      tab("log", "Log"),
-      tab("appearance", "Appearance")
-    ),
-    h(
-      "section",
-      { className: "panel-modal-body settings-body" },
-      panel(
-        "providers",
-        true,
-        h(
-          "section",
-          { className: "provider-status-panel", id: "provider-status-panel" },
-          h("p", { className: "sidebar-caption" }, "Providers"),
-          h("ul", { className: "provider-status-list", id: "provider-status-list" })
-        )
-      ),
-      panel("devices", false, h(DevicesPanelBody)),
-      panel(
-        "log",
-        false,
-        h(
-          "section",
-          { className: "details-section" },
-          h("h3", { className: "details-heading" }, "Relay log"),
-          h(
-            "div",
-            { id: "client-log-root" },
-            h(ClientLog, { lines: ["Booting web client..."] })
-          )
-        ),
-        h("section", { className: "details-section" }, h(AuditTimelineCard))
-      ),
-      panel(
-        "appearance",
-        false,
-        h("section", { className: "details-section" }, h(ThemePickerRow))
-      )
-    )
+    { className: "settings-modal panel-modal", id: "settings-modal", "aria-label": "Settings" },
+    h("div", { className: "settings-root", id: "settings-root" }),
+    h("datalist", { id: "workspace-suggestions" })
   );
 }
 

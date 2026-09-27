@@ -2485,6 +2485,17 @@ pub struct ProviderStatusView {
     /// Populated only for `NotInstalled` / `Failed` — the raw spawn error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Asked once when the relay starts; every one of these is best-effort.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_in: Option<bool>,
+    /// Subscription as a person says it: "Max", "Pro Lite", "API key".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// What to run in a terminal to sign in; present only while signed out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2683,6 +2694,11 @@ pub struct PairingDecisionReceipt {
 pub struct RevokeDeviceReceipt {
     pub device_id: String,
     pub revoked: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClearDeviceHistoryReceipt {
+    pub removed_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]

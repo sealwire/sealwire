@@ -1,8 +1,4 @@
 import {
-  allowedRootsForm,
-  allowedRootsInput,
-  allowedRootsList,
-  allowedRootsSummary,
   apiTokenInput,
   apiTokenLabel,
   appShell,
@@ -11,14 +7,11 @@ import {
   renameThreadButton,
   flagThreadButton,
   approvalPolicyInput,
-  auditSummary,
-  auditTimeline,
   chatShell,
-  clientLogRoot,
   closeLaunchSettingsModalButton,
   closeSessionDetailsModalButton,
-  closeSettingsModalButton,
   settingsModal,
+  settingsRoot,
   iconRailSettingsButton,
   sidebarTaskListMount,
   startTaskDialogMount,
@@ -27,7 +20,6 @@ import {
   composerError,
   connectionForm,
   controlBanner,
-  copyPairingLinkButton,
   cwdInput,
   deleteThreadButton,
   projectContextMenu,
@@ -48,22 +40,18 @@ import {
   openLaunchSettingsButton,
   openSessionDetailsButton,
   overviewSecurityBadges,
-  pairedDevicesList,
   pairingApprovalList,
   pairingApprovalModal,
   closePairingApprovalModalBtn,
   pendingActionBanner,
-  pendingPairingsList,
   providerInput,
   sandboxInput,
-  saveAllowedRootsButton,
   sendButton,
   sessionDetailsModal,
   sessionHistoryDrawer,
   sessionMeta,
   startEffortInput,
   startEffortLabel,
-  startPairingButton,
   startPromptInput,
   startSessionButton,
   statusBadge,
@@ -151,12 +139,9 @@ import {
 } from "./progress-verbs.js";
 import {
   configureSecurityRenderers,
-  renderAllowedRoots,
-  renderDeviceRecords,
   renderPairingApprovalModal,
-  renderPairingPanel,
-  renderPendingPairingRequests,
 } from "./local/render-security.js";
+import { createSettingsController } from "./local/settings-controller.js";
 import { createSessionRenderer } from "./local/render-session.js";
 import { createSessionController } from "./local/session-controller.js";
 import {
@@ -287,8 +272,7 @@ import {
   projectViewOnlySession,
 } from "./local/view-only-thread.js";
 import { createWatchedThreadsSync } from "./local/watched-threads.js";
-import { ClientLog } from "./shared/client-log.js";
-import { mapRelayLogEntries, mergeLogEntries } from "./shared/client-log-merge.js";
+import { mapRelayLogEntries } from "./shared/client-log-merge.js";
 import { SessionTabStrip, buildSessionTabItems } from "./shared/session-tab-strip.js";
 import { ProjectSwitcher } from "./shared/project-switcher.js";
 import { StartSessionDialog } from "./shared/start-session-dialog.js";
@@ -540,6 +524,28 @@ const state = {
   threadsPollTimer: null,
 };
 
+const devicesCache = createDevicesCache();
+// Created right after `state`: logLine renders it, and logLine can run during module load.
+const settings = createSettingsController({
+  state,
+  dialog: settingsModal,
+  mount: settingsRoot,
+  actions: {
+    startPairing: (...args) => controller.startPairing(...args),
+    copyPairingLink: (...args) => controller.copyPairingLink(...args),
+    revokePairedDevice: (...args) => controller.revokePairedDevice(...args),
+    revokeOtherDevices: (...args) => controller.revokeOtherDevices(...args),
+    decidePairingRequest: (...args) => controller.decidePairingRequest(...args),
+    saveAllowedRoots: (...args) => controller.saveAllowedRoots(...args),
+    clearDeviceHistory: (...args) => controller.clearDeviceHistory(...args),
+    recheckSignedOutProviders: (...args) => controller.recheckSignedOutProviders(...args),
+  },
+  formatTimestamp,
+  shortId,
+  loadBuildInfo: () => fetchBuildInfo("relay"),
+  readDevices: () => devicesCache.current(),
+});
+
 // Archive/delete remove a row from the authoritative list; the search slice holds its
 // own copy and has to be swept too.
 function dropThreadFromSearchResults(threadId) {
@@ -673,7 +679,6 @@ const apiFetch = createApiFetch({
   },
 });
 
-const devicesCache = createDevicesCache();
 const reviewsCache = createReviewsCache();
 const workflowsCache = createWorkflowsCache();
 const teamsCache = createTeamsCache();
@@ -781,8 +786,6 @@ projectsStore.subscribe((projectsState) => {
   // let Rename/Delete act on a now-stale target and clobber a concurrent change.
   closeProjectContextMenu();
 });
-let clientLogRootHandle = null;
-let clientLogRootElement = null;
 let forkSessionRoot = null;
 
 // Reviewer-tab actions. Bound late through `state.controller` (assigned after
@@ -1025,13 +1028,13 @@ function refreshWorkspaceDiffIfChanged() {
 }
 
 configureSecurityRenderers({
-  escapeHtml,
   formatTimestamp,
   shortId,
-  workspaceBasename,
 });
 
 let controller;
+
+
 
 fetchBuildInfo("relay").then((info) => {
   const el = document.querySelector("#build-info-local");
@@ -1108,10 +1111,7 @@ function refreshAgentWorkingIndicator() {
 
 const renderer = createSessionRenderer({
   state,
-  renderAllowedRoots,
-  renderPairingPanel,
-  renderDeviceRecords,
-  renderPendingPairingRequests,
+  renderSettings: () => settings.render(),
   renderPairingApprovalModal,
   resolveActiveThread,
   setSelectedCwd,
@@ -1143,12 +1143,10 @@ const renderer = createSessionRenderer({
     return controller?.cancelPendingTranscriptFlush?.();
   },
   logLine,
-  renderClientLogLines,
   ingestRelayLogs,
   escapeHtml,
   formatTimestamp,
   formatRelativeTime,
-  humanizeLabel,
   shortId,
   workspaceBasename,
   canCurrentDeviceWrite,
@@ -1571,6 +1569,7 @@ controller = createSessionController({
   renderAuthRequiredState: renderer.renderAuthRequiredState,
   runViewTransition: renderer.runViewTransition,
   handleUnauthorized,
+  renderSettings: () => settings.render(),
 });
 // Stash on state so React render paths (e.g. transcript-react.js's
 // AskUserEntry onClick) can call back into the controller without an
@@ -1616,20 +1615,15 @@ const {
   cancelStreamReconnect,
   cancelThreadsPoll,
   connectSessionStream,
-  copyPairingLink,
   decidePairingRequest,
   forkSession,
   loadSession,
   loadThreads,
   searchThreads,
   resumeSession,
-  revokeOtherDevices,
-  revokePairedDevice,
-  saveAllowedRoots,
   scheduleThreadsPoll,
   sendMessage,
   stopActiveTurn,
-  startPairing,
   startSession,
   submitDecision,
   takeOverControl,
@@ -1660,45 +1654,6 @@ connectionForm.addEventListener("submit", (event) => {
   void submitAuthSession();
 });
 
-startPairingButton.addEventListener("click", () => {
-  void startPairing();
-});
-
-const SETTINGS_TABS = ["providers", "devices", "log", "appearance"];
-
-// Toggle which Settings tab is active (button `is-active` + panel `hidden`).
-// Panels are all mounted up front so their ids resolve at dom.js import time.
-function setSettingsTab(tab = "providers") {
-  const active = SETTINGS_TABS.includes(tab) ? tab : "providers";
-  for (const key of SETTINGS_TABS) {
-    const btn = document.getElementById(`settings-tab-${key}`);
-    btn?.classList.toggle("is-active", key === active);
-    btn?.setAttribute("aria-selected", key === active ? "true" : "false");
-    const panel = document.querySelector(`[data-settings-panel="${key}"]`);
-    if (panel) {
-      panel.hidden = key !== active;
-    }
-  }
-}
-
-function openSettingsModal(tab = "providers") {
-  // Devices sub-panels are also refreshed on every snapshot, but re-render on open
-  // so the modal reflects the latest state immediately. Providers + audit (Log tab)
-  // are kept fresh by the render loop (renderProviderStatus / renderAuditTimeline).
-  state.localUiStore.getState().setAllowedRootsDraftDirty(false);
-  renderAllowedRoots(state.session?.allowed_roots || [], {
-    draftDirty: readLocalUiState(state.localUiStore).allowedRootsDraftDirty,
-  });
-  renderPairingPanel(state.currentPairing);
-  renderDeviceRecords(state.session?.device_records || []);
-  renderPendingPairingRequests(
-    state.session?.pending_pairing_requests || [],
-    state.pendingPairingDecisions || {}
-  );
-  setSettingsTab(tab);
-  settingsModal?.showModal();
-}
-
 // Three gears, one modal, each owning a state the others cannot reach:
 //   #sidebar-settings      — sidebar footer; the desktop entry while expanded
 //   #icon-rail-settings    — icon rail; only rendered while the sidebar is collapsed
@@ -1706,16 +1661,11 @@ function openSettingsModal(tab = "providers") {
 // Every one of them is optional (`?.`) because no single view mounts all three.
 document
   .getElementById("sidebar-settings")
-  ?.addEventListener("click", () => openSettingsModal());
-iconRailSettingsButton?.addEventListener("click", () => openSettingsModal());
+  ?.addEventListener("click", () => settings.open());
+iconRailSettingsButton?.addEventListener("click", () => settings.open());
 document
   .getElementById("open-settings-header")
-  ?.addEventListener("click", () => openSettingsModal());
-for (const key of SETTINGS_TABS) {
-  document
-    .getElementById(`settings-tab-${key}`)
-    ?.addEventListener("click", () => setSettingsTab(key));
-}
+  ?.addEventListener("click", () => settings.open());
 
 // Keeps the sidebar's pinned selection in step with the routed context. There is no
 // grouping mode to sync any more — the context IS the selection.
@@ -2266,16 +2216,6 @@ threadContextMenu?.addEventListener("mouseover", (event) => {
   closeThreadProjectSubmenu();
 });
 
-closeSettingsModalButton?.addEventListener("click", () => {
-  settingsModal?.close();
-});
-
-settingsModal?.addEventListener("click", (event) => {
-  if (event.target === settingsModal) {
-    settingsModal.close();
-  }
-});
-
 closePairingApprovalModalBtn?.addEventListener("click", () => {
   pairingApprovalModal?.close();
 });
@@ -2326,19 +2266,6 @@ sessionDetailsModal?.addEventListener("click", (event) => {
   if (event.target === sessionDetailsModal) {
     sessionDetailsModal.close();
   }
-});
-
-copyPairingLinkButton.addEventListener("click", () => {
-  void copyPairingLink();
-});
-
-allowedRootsInput?.addEventListener("input", () => {
-  state.localUiStore.getState().setAllowedRootsDraftDirty(true);
-});
-
-allowedRootsForm?.addEventListener("submit", (event) => {
-  event.preventDefault();
-  void saveAllowedRoots();
 });
 
 // Exit the current session back to the list/overview. Bound to the in-conversation
@@ -3325,35 +3252,8 @@ pendingActionBanner?.addEventListener("click", (event) => {
 
   const openSecurity = event.target.closest("[data-open-security]");
   if (openSecurity) {
-    openSettingsModal("devices");
+    settings.open("devices");
   }
-});
-
-pairedDevicesList.addEventListener("click", (event) => {
-  const revokeOthersButton = event.target.closest("[data-revoke-others-except-device-id]");
-  if (revokeOthersButton) {
-    void revokeOtherDevices(revokeOthersButton.dataset.revokeOthersExceptDeviceId);
-    return;
-  }
-
-  const revokeButton = event.target.closest("[data-revoke-device-id]");
-  if (!revokeButton) {
-    return;
-  }
-
-  void revokePairedDevice(revokeButton.dataset.revokeDeviceId);
-});
-
-pendingPairingsList.addEventListener("click", (event) => {
-  const decisionButton = event.target.closest("[data-pairing-id][data-pairing-decision]");
-  if (!decisionButton) {
-    return;
-  }
-
-  void decidePairingRequest(
-    decisionButton.dataset.pairingId,
-    decisionButton.dataset.pairingDecision
-  );
 });
 
 // Paint the sidebar's chrome BEFORE boot awaits anything.
@@ -5087,40 +4987,6 @@ function formatRelativeTime(seconds) {
   return `${Math.floor(diffSeconds / 31536000)}y`;
 }
 
-function humanizeLabel(value) {
-  return String(value)
-    .replaceAll(/[_-]+/g, " ")
-    .replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-function classifyAuditEntry(entry) {
-  const text = `${entry?.kind || ""} ${entry?.message || ""}`.toLowerCase();
-
-  if (
-    text.includes("failed") ||
-    text.includes("denied") ||
-    text.includes("rejected") ||
-    text.includes("revoked") ||
-    text.includes("offline") ||
-    text.includes("disconnected")
-  ) {
-    return "alert";
-  }
-
-  if (
-    text.includes("approved") ||
-    text.includes("accepted") ||
-    text.includes("started") ||
-    text.includes("resumed") ||
-    text.includes("connected") ||
-    text.includes("saved")
-  ) {
-    return "ready";
-  }
-
-  return "neutral";
-}
-
 function isCurrentDeviceActiveController(session) {
   if (!session?.active_thread_id || !session.active_controller_device_id) {
     return false;
@@ -5258,32 +5124,9 @@ function ingestRelayLogs(entries) {
   renderClientLog();
 }
 
-// Merge client + server log entries into the single #client-log surface, newest
-// first. Server-log refreshes and client status lines previously clobbered each
-// other (last writer won); merging keeps both visible. The merge/cap logic lives
-// in client-log-merge.js (unit-tested); only the locale-dependent timestamp
-// formatting stays here.
+// The Log page merges client and relay lines itself (settings-controller.js).
 function renderClientLog() {
-  const combined = mergeLogEntries(state.clientLogLines, state.relayLogLines).map(
-    (entry) => `${new Date(entry.at).toLocaleTimeString()}  ${entry.text}`
-  );
-  renderClientLogLines(combined);
-}
-
-function renderClientLogLines(lines) {
-  if (!clientLogRoot) {
-    return;
-  }
-
-  if (clientLogRootElement !== clientLogRoot) {
-    clientLogRootHandle?.unmount();
-    clientLogRootHandle = createRoot(clientLogRoot);
-    clientLogRootElement = clientLogRoot;
-  }
-
-  flushSync(() => {
-    clientLogRootHandle.render(React.createElement(ClientLog, { lines }));
-  });
+  settings.render();
 }
 
 // ── Session tabs ────────────────────────────────────────────────────────────

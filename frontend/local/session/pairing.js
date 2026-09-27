@@ -1,12 +1,4 @@
-import {
-  messageInput,
-  pairingLinkInput,
-  pairingPathScopeInput,
-  startPairingButton,
-  takeOverButton,
-} from "../dom.js";
-import { parsePairingPathScope } from "../pairing-scope-parse.js";
-import { renderPairingPanel } from "../render-security.js";
+import { messageInput, takeOverButton } from "../dom.js";
 
 export function createPairingController(ctx) {
   const {
@@ -15,25 +7,19 @@ export function createPairingController(ctx) {
     shortId,
     logLine,
     renderSession,
-    liveElement,
   } = ctx;
   const applySessionSnapshot = (...args) => ctx.applySessionSnapshot(...args);
   const loadSession = (...args) => ctx.loadSession(...args);
 
-  async function startPairing() {
-    startPairingButton.disabled = true;
-    logLine("Creating a broker pairing ticket.");
-
-    const liveScopeInput = liveElement("pairing-path-scope-input", pairingPathScopeInput);
-    const rawScope = liveScopeInput?.value ?? "";
-    const path_scope = parsePairingPathScope(rawScope);
-    if (rawScope.trim() && path_scope.length === 0) {
-      logLine(`Path scope "${rawScope.trim()}" was empty after parsing; sending unscoped.`);
-    }
+  /**
+   * Returns the new ticket and keeps nothing: Settings decides whether it is still wanted.
+   * @param {string[]} pathScope empty = the relay roots decide
+   */
+  async function startPairing(pathScope = []) {
     logLine(
-      path_scope.length
-        ? `Pairing scope: ${path_scope.join(", ")}`
-        : "Pairing scope: (unrestricted; relay roots only)"
+      pathScope.length
+        ? `Creating a pairing code limited to ${pathScope.join(", ")}.`
+        : "Creating a pairing code (relay roots only)."
     );
 
     try {
@@ -42,7 +28,7 @@ export function createPairingController(ctx) {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(path_scope.length > 0 ? { path_scope } : {}),
+        body: JSON.stringify(pathScope.length > 0 ? { path_scope: pathScope } : {}),
       });
       const payload = await response.json();
 
@@ -50,13 +36,11 @@ export function createPairingController(ctx) {
         throw new Error(payload?.error?.message || "Failed to start pairing");
       }
 
-      state.currentPairing = payload.data;
-      renderPairingPanel(state.currentPairing);
       logLine(`Pairing ticket ${payload.data.pairing_id} is ready.`);
+      return payload.data;
     } catch (error) {
       logLine(`Pairing failed: ${error.message}`);
-    } finally {
-      startPairingButton.disabled = false;
+      throw error;
     }
   }
 
@@ -64,16 +48,16 @@ export function createPairingController(ctx) {
     const pairingUrl = state.currentPairing?.pairing_url;
     if (!pairingUrl) {
       logLine("No pairing link is available yet.");
-      return;
+      return false;
     }
 
     try {
       await navigator.clipboard.writeText(pairingUrl);
       logLine("Copied pairing link to clipboard.");
+      return true;
     } catch (error) {
-      pairingLinkInput.focus();
-      pairingLinkInput.select();
       logLine(`Clipboard copy failed: ${error.message}`);
+      return false;
     }
   }
 
@@ -102,6 +86,27 @@ export function createPairingController(ctx) {
       logLine(`Revoked paired device ${shortId(deviceId)}.`);
     } catch (error) {
       logLine(`Revoke failed: ${error.message}`);
+    }
+  }
+
+  async function clearDeviceHistory(count) {
+    const noun = count === 1 ? "device" : "devices";
+    if (!window.confirm(`Remove ${count} old ${noun} from the list? None of them can connect without pairing again.`)) {
+      return;
+    }
+
+    try {
+      const response = await apiFetch("/api/devices/clear-history", { method: "POST" });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to clear device history");
+      }
+
+      await loadSession("post-device-history-clear refresh");
+      logLine(`Removed ${payload.data.removed_count} old device(s) from the list.`);
+    } catch (error) {
+      logLine(`Clearing device history failed: ${error.message}`);
     }
   }
 
@@ -315,6 +320,7 @@ export function createPairingController(ctx) {
     copyPairingLink,
     revokePairedDevice,
     revokeOtherDevices,
+    clearDeviceHistory,
     decidePairingRequest,
     takeOverControl,
     submitDecision,

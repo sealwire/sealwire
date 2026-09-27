@@ -43,12 +43,3 @@ export function ThemePicker({ onChange } = {}) {
     )
   );
 }
-
-export function ThemePickerRow() {
-  return h(
-    "div",
-    { className: "overflow-menu-row" },
-    h("span", { className: "overflow-menu-row-label" }, "Theme"),
-    h(ThemePicker)
-  );
-}

@@ -218,6 +218,11 @@ pub(super) enum RemoteActionRequest {
         #[serde(default)]
         device_id: Option<String>,
     },
+    /// Sent when Settings opens; asks again only the providers last seen signed out.
+    RecheckSignedOutProviders {
+        #[serde(default)]
+        device_id: Option<String>,
+    },
     /// Manual Projects read (list + membership). Not session-scoped; mirrors
     /// FetchReviews. `device_id` is stamped for path-scope/logging only.
     FetchProjects {
@@ -359,6 +364,7 @@ impl RemoteActionRequest {
             Self::FetchReviews { .. } => RemoteActionKind::FetchReviews,
             Self::FetchWorkflows { .. } => RemoteActionKind::FetchWorkflows,
             Self::FetchDevices { .. } => RemoteActionKind::FetchDevices,
+            Self::RecheckSignedOutProviders { .. } => RemoteActionKind::RecheckSignedOutProviders,
             Self::FetchProjects { .. } => RemoteActionKind::FetchProjects,
             Self::FetchAskUserQuestionDetail { .. } => RemoteActionKind::FetchAskUserQuestionDetail,
             Self::FetchAsk { .. } => RemoteActionKind::FetchAsk,
@@ -531,6 +537,9 @@ impl RemoteActionRequest {
             Self::FetchDevices { .. } => Self::FetchDevices {
                 device_id: Some(device_id),
             },
+            Self::RecheckSignedOutProviders { .. } => Self::RecheckSignedOutProviders {
+                device_id: Some(device_id),
+            },
             Self::FetchProjects { .. } => Self::FetchProjects {
                 device_id: Some(device_id),
             },
@@ -673,6 +682,7 @@ pub(super) enum RemoteActionKind {
     FetchReviews,
     FetchWorkflows,
     FetchDevices,
+    RecheckSignedOutProviders,
     FetchProjects,
     FetchAskUserQuestionDetail,
     FetchAsk,
@@ -726,6 +736,7 @@ impl RemoteActionKind {
             Self::FetchReviews => "fetch_reviews",
             Self::FetchWorkflows => "fetch_workflows",
             Self::FetchDevices => "fetch_devices",
+            Self::RecheckSignedOutProviders => "recheck_signed_out_providers",
             Self::FetchProjects => "fetch_projects",
             Self::FetchAskUserQuestionDetail => "fetch_ask_user_question_detail",
             Self::FetchAsk => "fetch_ask",
@@ -1946,6 +1957,10 @@ async fn execute_remote_action(
             devices: Some(state.devices().await),
             ..RemoteActionOutcome::default()
         }),
+        RemoteActionRequest::RecheckSignedOutProviders { device_id: _ } => {
+            state.spawn_signed_out_recheck();
+            Ok(RemoteActionOutcome::default())
+        }
         RemoteActionRequest::FetchProjects { device_id: _ } => Ok(RemoteActionOutcome {
             // The dedicated Projects payload (list + membership + revision). Read-only;
             // Projects are global (not device-scoped) and not gated on a session claim.
@@ -2031,6 +2046,7 @@ fn remote_action_emits_info_log(action: RemoteActionKind) -> bool {
             | RemoteActionKind::FetchReviews
             | RemoteActionKind::FetchWorkflows
             | RemoteActionKind::FetchDevices
+            | RemoteActionKind::RecheckSignedOutProviders
             | RemoteActionKind::FetchProjects
             | RemoteActionKind::FetchAskUserQuestionDetail
             | RemoteActionKind::FetchAsk
@@ -3461,6 +3477,7 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         | RemoteActionKind::FetchReviews
         | RemoteActionKind::FetchWorkflows
         | RemoteActionKind::FetchDevices
+        | RemoteActionKind::RecheckSignedOutProviders
         | RemoteActionKind::FetchProjects
         | RemoteActionKind::FetchAskUserQuestionDetail
         | RemoteActionKind::FetchAsk => RemoteActionResultKind::RemoteTranscriptResult,

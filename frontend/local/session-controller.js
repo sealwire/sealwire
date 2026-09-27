@@ -1,18 +1,15 @@
 import {
-  allowedRootsInput,
   approvalPolicyInput,
   cwdInput,
   loadDirectoryButton,
   modelInput,
   openLaunchSettingsButton,
   providerInput,
-  saveAllowedRootsButton,
   sandboxInput,
   startEffortInput,
   startPromptInput,
   startSessionButton,
 } from "./dom.js";
-import { renderAllowedRoots } from "./render-security.js";
 import { readLocalUiState } from "./ui-store.js";
 import { createPollingController } from "./session/polling.js";
 import { createStreamController } from "./session/stream.js";
@@ -41,6 +38,7 @@ export function createSessionController({
   renderAuthRequiredState,
   runViewTransition,
   handleUnauthorized,
+  renderSettings = () => {},
 }) {
   function setStartControlsBusy(busy) {
     [
@@ -77,19 +75,10 @@ export function createSessionController({
     return session.active_controller_device_id === state.deviceId;
   }
 
-  async function saveAllowedRoots() {
-    const allowed_roots = (allowedRootsInput?.value || "")
-      .split(/\r?\n/)
-      .map((value) => value.trim())
-      .filter(Boolean);
-
-    if (saveAllowedRootsButton) {
-      saveAllowedRootsButton.disabled = true;
-    }
-    if (allowedRootsInput) {
-      allowedRootsInput.disabled = true;
-    }
-
+  /** @param {string[]} allowed_roots the whole list; empty lifts every limit */
+  async function saveAllowedRoots(allowed_roots) {
+    state.allowedRootsSaving = true;
+    renderSettings();
     logLine(
       allowed_roots.length
         ? `Saving ${allowed_roots.length} allowed workspace root${allowed_roots.length === 1 ? "" : "s"}.`
@@ -112,24 +101,19 @@ export function createSessionController({
         throw new Error(payload?.error?.message || "Failed to save allowed roots");
       }
 
-      state.localUiStore.getState().setAllowedRootsDraftDirty(false);
-      renderAllowedRoots(payload.data.allowed_roots || [], {
-        draftDirty: readLocalUiState(state.localUiStore).allowedRootsDraftDirty,
-      });
       await ctx.loadSession("post-allowed-roots refresh");
       await ctx.loadThreads("post-allowed-roots refresh");
       logLine(payload.data?.message || "Relay workspace restrictions saved.");
+      return true;
     } catch (error) {
       logLine(`Allowed roots update failed: ${error.message}`);
+      return false;
     } finally {
-      if (saveAllowedRootsButton) {
-        saveAllowedRootsButton.disabled = false;
-      }
-      if (allowedRootsInput) {
-        allowedRootsInput.disabled = false;
-      }
+      state.allowedRootsSaving = false;
+      renderSettings();
     }
   }
+
 
   // One pending-render slot shared by the delta stream (session/stream.js) and
   // the snapshot path (session/lifecycle.js) — two instances would leave the
@@ -179,6 +163,7 @@ export function createSessionController({
     renderAuthRequiredState,
     runViewTransition,
     handleUnauthorized,
+    renderSettings,
     setStartControlsBusy,
     liveElement,
     // The launch dialog's field values. The dialog is controlled, so the draft
@@ -189,6 +174,19 @@ export function createSessionController({
     isViewingConversation,
     isCurrentDeviceActiveController,
   };
+
+  // Answers at once; a changed row arrives on the stream when the relay has asked.
+  async function recheckSignedOutProviders() {
+    try {
+      const response = await apiFetch("/api/providers/recheck-signed-out", { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to recheck providers");
+      }
+    } catch (error) {
+      logLine(`Provider sign-in recheck failed: ${error.message}`);
+    }
+  }
 
   const polling = createPollingController(ctx);
   const stream = createStreamController(ctx);
@@ -202,6 +200,7 @@ export function createSessionController({
     ...pairing,
     ...lifecycle,
     saveAllowedRoots,
+    recheckSignedOutProviders,
   };
   Object.assign(ctx, controller);
 
@@ -211,6 +210,8 @@ export function createSessionController({
     cancelSessionPoll: controller.cancelSessionPoll,
     cancelStreamReconnect: controller.cancelStreamReconnect,
     cancelThreadsPoll: controller.cancelThreadsPoll,
+    clearDeviceHistory: controller.clearDeviceHistory,
+    recheckSignedOutProviders: controller.recheckSignedOutProviders,
     // Narrow escape hatch for app.js's `renderer.renderSession` wrap
     // (frontend/app.js:1184) and for render-session.js's own `renderSession`
     // (which calls this directly too, so its internal closures — teamsCache

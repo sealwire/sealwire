@@ -9,6 +9,8 @@ use crate::state::PendingApproval;
 /// a restart (each pass only adopts non-empty results, never blanking the cache).
 const MODEL_CATALOG_REFRESH_SECS: u64 = 30 * 60;
 
+const PROVIDER_ACCOUNT_CHECK_TIMEOUT_SECS: u64 = 20;
+
 impl AppState {
     /// API ingress compatibility: a known provider handle is a legacy alias for
     /// its stable relay session id. Canonicalize before any domain lookup or write.
@@ -435,6 +437,77 @@ impl AppState {
                 let _ = state.load_provider_model_catalog(&name, &bridge).await;
             });
         }
+    }
+
+    /// Ask every provider once, at startup, for its version, sign-in and plan. Not
+    /// repeated: an upgraded CLI only takes effect after a relay restart anyway.
+    pub(super) async fn check_provider_accounts(&self) {
+        let all: Vec<String> = self.providers.keys().cloned().collect();
+        self.ask_provider_accounts(&all).await;
+    }
+
+    /// Signing in, unlike upgrading, works without a restart, so a signed-out row is
+    /// the one answer that can go stale. Asks only those providers.
+    pub async fn recheck_signed_out_providers(&self) {
+        let signed_out = self.relay.write().await.begin_signed_out_recheck();
+        if signed_out.is_empty() {
+            return;
+        }
+        self.ask_provider_accounts(&signed_out).await;
+        self.relay.write().await.finish_signed_out_recheck();
+    }
+
+    /// Detached so a dropped request cannot leave the recheck marked as running.
+    pub fn spawn_signed_out_recheck(&self) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            state.recheck_signed_out_providers().await;
+        });
+    }
+
+    /// A failed answer keeps the previous one: forgetting "signed out" would stop the rechecks.
+    async fn ask_provider_accounts(&self, keys: &[String]) {
+        let asked = self
+            .providers
+            .iter()
+            .filter(|(name, _)| keys.contains(name));
+        let checks = futures_util::future::join_all(asked.map(|(name, bridge)| async move {
+            use futures_util::FutureExt;
+            let limit = Duration::from_secs(PROVIDER_ACCOUNT_CHECK_TIMEOUT_SECS);
+            // A panicking bridge must not skip the caller's cleanup, or rechecks stop for good.
+            let asked = std::panic::AssertUnwindSafe(bridge.account()).catch_unwind();
+            let account = match tokio::time::timeout(limit, asked).await {
+                Ok(Ok(Ok(account))) => Some(account),
+                Ok(Err(_)) => {
+                    warn!(provider = name.as_str(), "provider account check panicked");
+                    None
+                }
+                Ok(Ok(Err(error))) => {
+                    warn!(provider = name.as_str(), %error, "provider account check failed");
+                    None
+                }
+                Err(_) => {
+                    warn!(provider = name.as_str(), "provider account check timed out");
+                    None
+                }
+            };
+            (name.clone(), account)
+        }))
+        .await;
+        let mut relay = self.relay.write().await;
+        for (name, account) in checks {
+            if let Some(account) = account {
+                relay.set_provider_account(&name, account);
+            }
+        }
+        relay.notify();
+    }
+
+    pub(super) fn spawn_provider_account_check(&self) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            state.check_provider_accounts().await;
+        });
     }
 
     /// Keep every provider's catalog fresh on a slow cadence, so a relay that

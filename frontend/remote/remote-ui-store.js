@@ -43,7 +43,6 @@ export function createRemoteUiStore(initialState = {}) {
     composerModel: "",
     deviceLabelDraft: loadDeviceLabel(),
     pairingInputValue: "",
-    pairingModalOpen: false,
     forkDialog: {
       open: false,
       pending: false,
@@ -53,6 +52,7 @@ export function createRemoteUiStore(initialState = {}) {
     },
     remoteInfoModalOpen: false,
     settingsModalOpen: false,
+    settingsTab: "providers",
     // Git standing of the launch dialog's chosen directory; null when unknown or
     // when the directory is not a repo.
     launchGitContext: null,
@@ -108,11 +108,6 @@ export function createRemoteUiStore(initialState = {}) {
         pairingInputValue: value || "",
       });
     },
-    setPairingModalOpen(open) {
-      set({
-        pairingModalOpen: Boolean(open),
-      });
-    },
     setForkDialog(next) {
       set((state) => ({
         forkDialog: {
@@ -137,10 +132,12 @@ export function createRemoteUiStore(initialState = {}) {
         remoteInfoModalOpen: Boolean(open),
       });
     },
-    setSettingsModalOpen(open) {
-      set({
-        settingsModalOpen: Boolean(open),
-      });
+    // Opening always names a page: the one you left last time is not why you came back.
+    setSettingsModalOpen(open, tab = "providers") {
+      set(open ? { settingsModalOpen: true, settingsTab: tab } : { settingsModalOpen: false });
+    },
+    setSettingsTab(tab) {
+      set({ settingsTab: tab });
     },
     // Called by the open paths, not inferred inside setForkDialog: reopening on a
     // different thread while one is already showing is still a new opening.

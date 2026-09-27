@@ -1,17 +1,14 @@
 import assert from "node:assert/strict";
 
-// Devices/pairing now lives in the consolidated Settings modal's "Devices" tab
-// (#settings-modal). There are three gears and no view mounts all of them:
+// Pairing lives on Settings > Devices, relay roots on Settings > Access (#settings-modal).
+// There are three gears and no view mounts all of them:
 //
 //   #sidebar-settings     sidebar footer — desktop, sidebar expanded
 //   #icon-rail-settings   icon rail      — desktop, sidebar collapsed
 //   #open-settings-header chat header    — ≤960px, where neither of the above shows
 //
 // Probing in that order (rather than assuming one) is what keeps this helper
-// working across every caller's viewport and collapse state. This helper opens
-// Settings and activates the Devices tab so the pairing controls
-// (#start-pairing-button, #pairing-link-input, …) are visible — same contract the
-// callers relied on with the old #security-modal.
+// working across every caller's viewport and collapse state.
 const SETTINGS_ENTRIES = ["#sidebar-settings", "#icon-rail-settings", "#open-settings-header"];
 
 async function ensureSettingsEntryClicked(page) {
@@ -25,13 +22,13 @@ async function ensureSettingsEntryClicked(page) {
   assert.fail(`no visible Settings entry among ${SETTINGS_ENTRIES.join(", ")}`);
 }
 
-export async function openSecurityModal(page) {
-  const onDevices = await page.evaluate(() => {
+export async function openSettingsTab(page, tab) {
+  const onTab = await page.evaluate((key) => {
     const modal = document.querySelector("#settings-modal");
-    const panel = document.querySelector('[data-settings-panel="devices"]');
+    const panel = document.querySelector(`[data-settings-panel="${key}"]`);
     return Boolean(modal?.open) && Boolean(panel) && !panel.hidden;
-  });
-  if (onDevices) {
+  }, tab);
+  if (onTab) {
     return;
   }
 
@@ -45,11 +42,11 @@ export async function openSecurityModal(page) {
     );
   }
 
-  await page.click("#settings-tab-devices");
-  await page.waitForFunction(() => {
-    const panel = document.querySelector('[data-settings-panel="devices"]');
+  await page.click(`#settings-tab-${tab}`);
+  await page.waitForFunction((key) => {
+    const panel = document.querySelector(`[data-settings-panel="${key}"]`);
     return Boolean(panel) && !panel.hidden;
-  });
+  }, tab);
 }
 
 export async function closeSecurityModal(page, timeoutMs) {
@@ -72,7 +69,11 @@ export async function startPairingFromLocalPage(
   localPage,
   { lanIp, brokerPort, timeoutMs, previousUrl = "" }
 ) {
-  await openSecurityModal(localPage);
+  await openSettingsTab(localPage, "devices");
+  // A previous code's page may still be open; its crumb leads back to the Devices list.
+  if (!(await localPage.$("#start-pairing-button"))) {
+    await localPage.click('[data-settings-panel="devices"] .settings-crumb');
+  }
   await localPage.click("#start-pairing-button");
   await localPage.waitForFunction(
     (previous) => {

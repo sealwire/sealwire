@@ -92,7 +92,7 @@ async function main() {
     await remotePage.goto(pairingUrl, { waitUntil: "domcontentloaded" });
     await remotePage.waitForFunction(
       () => {
-        const modal = document.querySelector("#pairing-modal");
+        const modal = document.querySelector("#remote-settings-modal");
         if (!modal) {
           return false;
         }

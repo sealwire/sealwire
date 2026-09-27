@@ -503,6 +503,11 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
             "/api/pairings/:pairing_id/decision",
             post(decide_pairing_request),
         )
+        .route("/api/devices/clear-history", post(clear_device_history))
+        .route(
+            "/api/providers/recheck-signed-out",
+            post(recheck_signed_out_providers),
+        )
         .route("/api/devices/:device_id/revoke", post(revoke_device))
         .route(
             "/api/devices/:device_id/revoke-others",
@@ -2446,6 +2451,31 @@ async fn revoke_device(
         .await
         .map(|receipt| Json(ApiEnvelope::ok(receipt)))
         .map_err(bad_request)
+}
+
+async fn clear_device_history(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<
+    Json<ApiEnvelope<crate::protocol::ClearDeviceHistoryReceipt>>,
+    (StatusCode, Json<ApiError>),
+> {
+    authorize_api(&context, &headers, &uri)?;
+    Ok(Json(ApiEnvelope::ok(
+        context.app.clear_device_history().await,
+    )))
+}
+
+/// Answers at once; any change reaches clients on the next snapshot.
+async fn recheck_signed_out_providers(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<ApiEnvelope<()>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    context.app.spawn_signed_out_recheck();
+    Ok(Json(ApiEnvelope::ok(())))
 }
 
 async fn revoke_other_devices(

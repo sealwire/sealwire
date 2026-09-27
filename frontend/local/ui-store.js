@@ -31,7 +31,6 @@ const MAX_ASK_USER_ERRORS = 16;
 export function createLocalUiStore(initialState = {}) {
   return createStore((set) => ({
     ...initialState,
-    allowedRootsDraftDirty: false,
     pendingPairingIds: [],
     sessionDraft: {
       approvalPolicy: loadLastApprovalPolicy("codex") || "untrusted",
@@ -127,11 +126,6 @@ export function createLocalUiStore(initialState = {}) {
         };
       });
     },
-    setAllowedRootsDraftDirty(value) {
-      set({
-        allowedRootsDraftDirty: Boolean(value),
-      });
-    },
     setPendingPairingIds(ids) {
       set({
         pendingPairingIds: copyStringList(ids),
@@ -155,7 +149,6 @@ export function createLocalUiStore(initialState = {}) {
 export function readLocalUiState(store) {
   const state = store?.getState?.() || {};
   return {
-    allowedRootsDraftDirty: Boolean(state.allowedRootsDraftDirty),
     pendingPairingIds: copyStringList(state.pendingPairingIds),
     sessionDraft: state.sessionDraft ? { ...state.sessionDraft } : null,
     transcriptExpandedItemIds: copyStringSet(state.transcriptExpandedItemIds),

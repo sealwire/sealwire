@@ -484,6 +484,10 @@ pub struct FakeProviderBridge {
     materialize_on_start: Arc<Mutex<HashMap<String, String>>>,
     /// One-shot: the next `start_thread` hands back a `claude-pending-…` placeholder.
     defer_next_start: Arc<AtomicBool>,
+    /// What `account` answers for sign-in, and how many times it was asked.
+    account_signed_in: Arc<AtomicBool>,
+    account_calls: Arc<AtomicU64>,
+    account_panics: Arc<AtomicBool>,
     stopped_turns: Arc<Mutex<HashSet<String>>>,
     /// Every stop ASKED for, whatever the configured behaviour did with it.
     stop_requests: Arc<Mutex<HashSet<String>>>,
@@ -551,6 +555,21 @@ impl FakeProviderBridge {
     /// ever yielding lets them take turns instead.
     pub(crate) fn set_start_thread_delay_ms(&self, ms: u64) {
         self.start_thread_delay_ms.store(ms, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_account_signed_in(&self, signed_in: bool) {
+        self.account_signed_in.store(signed_in, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_account_panics(&self, panics: bool) {
+        self.account_panics.store(panics, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn account_calls(&self) -> u64 {
+        self.account_calls.load(Ordering::Relaxed)
     }
 
     /// Park every turn just before its terminal — the reply row and the settle
@@ -710,6 +729,9 @@ impl FakeProviderBridge {
             turn_stop_behaviors: Arc::new(Mutex::new(HashMap::new())),
             materialize_on_start: Arc::new(Mutex::new(HashMap::new())),
             defer_next_start: Arc::new(AtomicBool::new(false)),
+            account_signed_in: Arc::new(AtomicBool::new(true)),
+            account_calls: Arc::new(AtomicU64::new(0)),
+            account_panics: Arc::new(AtomicBool::new(false)),
             stopped_turns: Arc::new(Mutex::new(HashSet::new())),
             stop_requests: Arc::new(Mutex::new(HashSet::new())),
             scenario_harness,
@@ -2373,6 +2395,19 @@ impl ProviderBridge for FakeProviderBridge {
 
     fn provider_name(&self) -> &'static str {
         "fake"
+    }
+
+    async fn account(&self) -> Result<crate::provider::account::ProviderAccount, String> {
+        self.account_calls.fetch_add(1, Ordering::Relaxed);
+        if self.account_panics.load(Ordering::Relaxed) {
+            panic!("fake provider account check panicked");
+        }
+        Ok(crate::provider::account::ProviderAccount {
+            version: Some("0.0.0-fake".to_string()),
+            signed_in: Some(self.account_signed_in.load(Ordering::Relaxed)),
+            plan: None,
+            login_command: Some("fake login"),
+        })
     }
 }
 
