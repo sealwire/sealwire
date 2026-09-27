@@ -319,6 +319,7 @@ import {
 } from "./shared/session-view-persistence.js";
 import {
   selectContextAfterProjectDelete,
+  selectOwningContext,
   sessionViewContextKey,
 } from "./shared/session-view-state.js";
 import {
@@ -791,7 +792,10 @@ const reviewerActions = {
   onRequestReview: (values) => state.controller?.requestReview(values),
   // The Agents card's Open button. Without it the card's whole point — that you
   // can go and read the other side — is a dead control.
-  onOpenThread: (threadId) => void sessionViewController.openThread(threadId),
+  onOpenThread: (threadId) =>
+    void sessionViewController.openThread(threadId, {
+      context: selectOwningContext({ threadId, threadProjectId: state.threadProjectId || {} }),
+    }),
   // Stop and "Keep going" both write an objective; `createGoalActions` is the same
   // seam remote mounts, so the two surfaces cannot drift on what those buttons mean.
   ...createGoalActions({
@@ -3290,7 +3294,10 @@ transcript.addEventListener(
       // click, not a browse. Without the explicit `false` a session that was
       // already peeked would stay in the disposable slot and be thrown away by
       // the next sidebar click.
-      void viewThreadById(threadId, { preview: false });
+      void viewThreadById(threadId, {
+        context: selectOwningContext({ threadId, threadProjectId: state.threadProjectId || {} }),
+        preview: false,
+      });
     },
     goHome: () => void runViewTransition(() => clearThreadRoute()),
   })

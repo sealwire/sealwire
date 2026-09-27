@@ -402,7 +402,9 @@ export function createSessionRenderer({
     },
     onActivateThread: (threadId) => {
       if (typeof viewThread === "function") {
-        viewThread(threadId);
+        viewThread(threadId, {
+          context: selectOwningContext({ threadId, threadProjectId: state.threadProjectId || {} }),
+        });
       }
     },
   });
