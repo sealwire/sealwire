@@ -959,8 +959,18 @@ impl SessionSnapshot {
                 }
             }
             if let Some(tool) = &mut entry.tool {
-                if let Some(detail) = &mut tool.detail {
-                    entry_previewed |= truncate_with_ellipsis(detail, budget.max_transcript_chars);
+                entry_previewed |=
+                    truncate_with_ellipsis(&mut tool.title, budget.max_transcript_chars);
+                for field in [
+                    &mut tool.detail,
+                    &mut tool.command,
+                    &mut tool.query,
+                    &mut tool.url,
+                ] {
+                    if let Some(value) = field {
+                        entry_previewed |=
+                            truncate_with_ellipsis(value, budget.max_transcript_chars);
+                    }
                 }
                 if let Some(input_preview) = &mut tool.input_preview {
                     entry_previewed |=
@@ -1878,6 +1888,31 @@ pub struct ToolCallView {
     /// authoritative read/detail paths, which still carry the real diff).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub can_apply: Option<bool>,
+}
+
+impl ToolCallView {
+    /// A shell command row's command on its own. The row's text joins command and
+    /// output with no boundary, so a multi-line command is only separable here.
+    pub(crate) fn command_execution(command: Option<String>) -> Self {
+        Self {
+            item_type: "commandExecution".to_string(),
+            name: "Shell".to_string(),
+            title: "Shell".to_string(),
+            kind: None,
+            detail: None,
+            query: None,
+            path: None,
+            url: None,
+            command,
+            input_preview: None,
+            result_preview: None,
+            diff: None,
+            file_changes: Vec::new(),
+            apply_state: None,
+            file_changes_omitted: false,
+            can_apply: None,
+        }
+    }
 }
 
 /// The single patch an Undo/Reapply would hand to `git apply` for this entry: the

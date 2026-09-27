@@ -3352,3 +3352,55 @@ mod can_apply_flag_tests {
         );
     }
 }
+
+// Now that command rows carry `tool.command`, a heredoc that writes a whole file
+// rides in every snapshot unless the budget cuts it like the other tool fields.
+#[test]
+fn compaction_cuts_a_long_command_and_says_so() {
+    let mut snapshot = make_snapshot();
+    snapshot.logs.clear();
+    snapshot.pending_approvals.clear();
+    let command = format!("cat > big.txt <<'EOF'\n{}\nEOF", "x".repeat(8_000));
+    snapshot.transcript = vec![TranscriptEntryView {
+        row_id: None,
+        order_seq: None,
+        withdrawn: false,
+        item_id: Some("cmd-big".to_string()),
+        kind: TranscriptEntryKind::Command,
+        text: Some(command.clone()),
+        status: "completed".to_string(),
+        turn_id: Some("turn-1".to_string()),
+        tool: Some(ToolCallView {
+            item_type: "commandExecution".to_string(),
+            name: "Shell".to_string(),
+            title: "Shell".to_string(),
+            kind: None,
+            detail: None,
+            query: None,
+            path: None,
+            url: None,
+            command: Some(command.clone()),
+            input_preview: None,
+            result_preview: None,
+            diff: None,
+            file_changes: Vec::new(),
+            apply_state: None,
+            file_changes_omitted: false,
+            can_apply: None,
+        }),
+        content_state: TranscriptContentState::Full,
+    }];
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);
+    let entry = &compacted.transcript[0];
+    let shipped = entry
+        .tool
+        .as_ref()
+        .and_then(|tool| tool.command.as_deref())
+        .unwrap_or_default();
+    assert!(
+        shipped.chars().count() < command.chars().count(),
+        "the command is cut"
+    );
+    assert_ne!(entry.content_state, TranscriptContentState::Full);
+}

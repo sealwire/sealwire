@@ -114,7 +114,7 @@ function positions(markup) {
   return {
     question: markup.indexOf(QUESTION_TEXT),
     trailing: markup.indexOf(TRAILING_TEXT),
-    cards: markup.split("message-card-ask-user").length - 1,
+    cards: (markup.match(/chat-message-ask-user[" ]/g) || []).length,
   };
 }
 

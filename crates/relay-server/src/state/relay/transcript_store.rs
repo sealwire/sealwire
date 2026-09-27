@@ -515,6 +515,7 @@ mod tests {
             order_seq: 0,
             withdrawn: false,
             last_live_upsert_revision: None,
+            cut: false,
         }
     }
 

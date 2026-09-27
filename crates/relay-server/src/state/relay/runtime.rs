@@ -375,6 +375,7 @@ impl ThreadRuntime {
                 order_seq: 0,
                 withdrawn: false,
                 last_live_upsert_revision: None,
+                cut: entry.view.content_state != crate::protocol::TranscriptContentState::Full,
             })
             .collect::<Vec<_>>();
         // One provider read can name an id twice — a tool's request and its result
@@ -688,6 +689,7 @@ impl ThreadRuntime {
                 order_seq: 0,
                 withdrawn: false,
                 last_live_upsert_revision: None,
+                cut: entry.view.content_state != crate::protocol::TranscriptContentState::Full,
             })
             .collect::<Vec<_>>();
         // One provider page can name an id twice (a tool's request and its result).
@@ -740,6 +742,8 @@ impl ThreadRuntime {
             self.transcript.update_row(&row_id, |existing| {
                 let _ = merge_tool_call_into(&mut existing.tool, record.tool.clone());
                 existing.withdrawn |= record.withdrawn;
+                // Conservative, as in `merge_runtime_entry`.
+                existing.cut |= record.cut;
             });
         }
         // Numbered AFTER the merge-away pass, so merged duplicates consume no keys.
@@ -1081,7 +1085,17 @@ fn merge_duplicate_provider_rows(records: Vec<TranscriptRecord>) -> Vec<Transcri
     merged
 }
 
+/// Conservative about `cut`: which copy's body survived varies by branch, and calling
+/// a whole body cut only costs a provider re-read, while the reverse serves a stub.
 fn merge_runtime_entry(existing: &mut TranscriptRecord, incoming: TranscriptRecord) -> bool {
+    let cut = existing.cut || incoming.cut;
+    let changed = merge_runtime_entry_body(existing, incoming);
+    let cut_changed = existing.cut != cut;
+    existing.cut = cut;
+    changed || cut_changed
+}
+
+fn merge_runtime_entry_body(existing: &mut TranscriptRecord, incoming: TranscriptRecord) -> bool {
     let before = existing.clone();
     let mut incoming = incoming;
     if existing.kind == incoming.kind
@@ -1335,6 +1349,7 @@ mod tests {
                 file_changes_omitted: false,
                 can_apply: None,
             }),
+            cut: false,
         }
     }
 
@@ -1550,6 +1565,7 @@ mod tests {
             order_seq: 0,
             withdrawn: false,
             last_live_upsert_revision: None,
+            cut: false,
         });
         let older = vec![TranscriptEntryView {
             row_id: None,
@@ -1630,6 +1646,7 @@ mod tests {
             order_seq: issued,
             withdrawn: false,
             last_live_upsert_revision: None,
+            cut: false,
         });
         let issued_tail = issued;
 
@@ -1674,6 +1691,28 @@ mod tests {
         assert_eq!(seqs.len(), unique, "order keys must be unique");
     }
 
+    // An older page can land on a row already held; if its copy was cut, the row can
+    // no longer vouch for being whole.
+    #[test]
+    fn a_cut_page_copy_landing_on_a_held_row_marks_it_cut() {
+        let mut rt = runtime("t1", "idle");
+        let mut held = tool_record("tool-x", None);
+        held.provider_item_id = Some("tool-x".to_string());
+        rt.transcript.push(held.clone());
+
+        let mut page = held.to_view();
+        page.row_id = None;
+        page.content_state = crate::protocol::TranscriptContentState::Preview;
+        rt.prepend_provider_history(entries(vec![page]), Some(10), None);
+
+        let row = rt
+            .transcript
+            .iter()
+            .find(|record| record.provider_item_id.as_deref() == Some("tool-x"))
+            .expect("row");
+        assert!(row.cut);
+    }
+
     /// A history merge replaces record content wholesale; the issued key survives, and
     /// unmatched rows are renumbered by THIS runtime, not the fresh read's counters.
     #[test]
@@ -1692,6 +1731,7 @@ mod tests {
             order_seq: issued,
             withdrawn: false,
             last_live_upsert_revision: None,
+            cut: false,
         });
 
         let incoming = vec![
@@ -1708,6 +1748,7 @@ mod tests {
                 order_seq: 0,
                 withdrawn: false,
                 last_live_upsert_revision: None,
+                cut: false,
             },
             TranscriptRecord {
                 row_id: "row-2".to_string(),
@@ -1721,6 +1762,7 @@ mod tests {
                 order_seq: 0,
                 withdrawn: false,
                 last_live_upsert_revision: None,
+                cut: false,
             },
         ];
         assert!(rt.merge_transcript_records(incoming));
@@ -1749,6 +1791,7 @@ mod tests {
             order_seq: 0,
             withdrawn: false,
             last_live_upsert_revision: None,
+            cut: false,
         };
 
         // Prefix: runtime holds only C; fresh history is [A, B, C].
@@ -1812,6 +1855,7 @@ mod tests {
             order_seq: 0,
             withdrawn: false,
             last_live_upsert_revision: None,
+            cut: false,
         };
 
         let mut rt = runtime("t1", "idle");
@@ -1895,6 +1939,7 @@ mod tests {
             order_seq: 0,
             withdrawn: false,
             last_live_upsert_revision: None,
+            cut: false,
         };
 
         // Left anchor, no right anchor: runtime [A(hist), D(live)], fresh [A, B, C].
@@ -2102,6 +2147,7 @@ mod tests {
             order_seq,
             withdrawn: false,
             last_live_upsert_revision: None,
+            cut: false,
         }
     }
 

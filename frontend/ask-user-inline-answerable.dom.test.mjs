@@ -209,7 +209,7 @@ const toolEntry = (toolUseId, questions) => ({
 });
 
 const headerOrder = (container) =>
-  [...container.querySelectorAll(".ask-user-question-header")].map((el) => el.textContent);
+  [...container.querySelectorAll(".ask-user-topic")].map((el) => el.textContent);
 
 test("parked questions keep the order the relay asked them in, however they hydrate", async () => {
   const { container, root } = mount();
@@ -258,7 +258,7 @@ test("an answer given before the row hydrates survives the row arriving", async 
     firstOptions()[0].dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
   });
   assert.equal(
-    firstOptions()[0].getAttribute("aria-pressed"),
+    firstOptions()[0].getAttribute("aria-checked"),
     "true",
     "precondition: the pick registers on the request-backed card"
   );
@@ -271,7 +271,7 @@ test("an answer given before the row hydrates survives the row arriving", async 
     options({ pendingAskUserQuestions: pending })
   );
   assert.equal(
-    firstOptions()[0].getAttribute("aria-pressed"),
+    firstOptions()[0].getAttribute("aria-checked"),
     "true",
     "the pick made before the row loaded is still made after it does"
   );

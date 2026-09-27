@@ -1630,47 +1630,53 @@ fn upsert_transcript_item_from_value(
     let Some(item_id) = entry.item_id else {
         return false;
     };
+    let cut = entry.content_state != crate::protocol::TranscriptContentState::Full;
 
     relay.upsert_transcript_item(
-        item_id,
+        item_id.clone(),
         entry.kind,
         entry.text,
         entry.status,
         entry.turn_id,
         entry.tool,
     );
+    relay.mark_transcript_row_cut(&item_id, cut);
     if let Some(turn_id) = refresh_turn_id {
         refresh_turn_diff_entry(relay, &turn_id);
     }
     true
 }
 
+/// The relay's copy of a Codex row. History is read whole on every thread open, so
+/// big bodies are kept short here, and a cut copy says so; its detail is re-read.
 fn parse_transcript_item(
     item: &Value,
     turn_id: Option<String>,
     default_status: &str,
 ) -> Option<TranscriptEntryView> {
-    let item_id = string_at(item, &["id"])?;
+    let detail = parse_transcript_detail_item(item, turn_id, default_status)?;
     let item_type = string_at(item, &["type"])?;
-    let status = transcript_item_status(item, default_status);
-    let kind = transcript_item_kind(&item_type);
-    let tool =
-        (kind == TranscriptEntryKind::ToolCall).then(|| build_tool_call_view(item, &item_type));
+    let tool = match detail.kind {
+        TranscriptEntryKind::ToolCall => Some(build_tool_call_view(item, &item_type)),
+        TranscriptEntryKind::Command => Some(ToolCallView::command_execution(
+            string_at(item, &["command"])
+                .map(|command| truncate_owned(command, MAX_COMMAND_TEXT_CHARS)),
+        )),
+        _ => None,
+    };
     let text = transcript_item_text(item, &item_type, tool.as_ref());
-
+    // A tool row's text is a label, never its body, so only its tool is compared.
+    let cut = tool != detail.tool
+        || (detail.kind != TranscriptEntryKind::ToolCall && text != detail.text);
     Some(TranscriptEntryView {
-        // A raw provider read: not a relay row until the relay numbers it.
-        row_id: None,
-        // Numbered when it becomes a runtime record; raw provider parses carry none.
-        order_seq: None,
-        withdrawn: false,
-        item_id: Some(item_id),
-        kind,
         text,
-        status,
-        turn_id,
         tool,
-        content_state: crate::protocol::TranscriptContentState::Full,
+        content_state: if cut {
+            crate::protocol::TranscriptContentState::Preview
+        } else {
+            crate::protocol::TranscriptContentState::Full
+        },
+        ..detail
     })
 }
 
@@ -1683,8 +1689,14 @@ fn parse_transcript_detail_item(
     let item_type = string_at(item, &["type"])?;
     let status = transcript_item_status(item, default_status);
     let kind = transcript_item_kind(&item_type);
-    let tool = (kind == TranscriptEntryKind::ToolCall)
-        .then(|| build_tool_call_detail_view(item, &item_type));
+    let tool = match kind {
+        TranscriptEntryKind::ToolCall => Some(build_tool_call_detail_view(item, &item_type)),
+        TranscriptEntryKind::Command => Some(ToolCallView::command_execution(string_at(
+            item,
+            &["command"],
+        ))),
+        _ => None,
+    };
     let text = transcript_item_detail_text(item, &item_type);
 
     Some(TranscriptEntryView {
@@ -1721,6 +1733,18 @@ fn transcript_item_status(item: &Value, default_status: &str) -> String {
     }
 }
 
+fn transcript_item_detail_text(item: &Value, item_type: &str) -> Option<String> {
+    match item_type {
+        "userMessage" => parse_user_text(Some(item)),
+        "agentMessage" => string_at(item, &["text"]).or_else(|| parse_text_content(item)),
+        "commandExecution" => Some(command_execution_detail_text(item)),
+        _ if is_reasoning_item_type(item_type) => {
+            string_at(item, &["text"]).or_else(|| parse_text_content(item))
+        }
+        _ => None,
+    }
+}
+
 fn transcript_item_text(
     item: &Value,
     item_type: &str,
@@ -1739,18 +1763,6 @@ fn transcript_item_text(
     }
 }
 
-fn transcript_item_detail_text(item: &Value, item_type: &str) -> Option<String> {
-    match item_type {
-        "userMessage" => parse_user_text(Some(item)),
-        "agentMessage" => string_at(item, &["text"]).or_else(|| parse_text_content(item)),
-        "commandExecution" => Some(command_execution_detail_text(item)),
-        _ if is_reasoning_item_type(item_type) => {
-            string_at(item, &["text"]).or_else(|| parse_text_content(item))
-        }
-        _ => None,
-    }
-}
-
 fn command_execution_text(item: &Value) -> String {
     let mut text = truncate_owned(
         string_at(item, &["command"]).unwrap_or_else(|| "Command".to_string()),
@@ -1761,15 +1773,6 @@ fn command_execution_text(item: &Value) -> String {
         text.push_str(&truncate_owned(output, MAX_COMMAND_OUTPUT_CHARS));
     }
     truncate_owned(text, MAX_COMMAND_ENTRY_CHARS)
-}
-
-fn command_execution_detail_text(item: &Value) -> String {
-    let mut text = string_at(item, &["command"]).unwrap_or_else(|| "Command".to_string());
-    if let Some(output) = non_empty_string(string_at(item, &["aggregatedOutput"])) {
-        text.push('\n');
-        text.push_str(&output);
-    }
-    text
 }
 
 fn build_tool_call_view(item: &Value, item_type: &str) -> ToolCallView {
@@ -1837,6 +1840,15 @@ fn build_tool_call_view(item: &Value, item_type: &str) -> ToolCallView {
         file_changes_omitted: false,
         can_apply: None,
     }
+}
+
+fn command_execution_detail_text(item: &Value) -> String {
+    let mut text = string_at(item, &["command"]).unwrap_or_else(|| "Command".to_string());
+    if let Some(output) = non_empty_string(string_at(item, &["aggregatedOutput"])) {
+        text.push('\n');
+        text.push_str(&output);
+    }
+    text
 }
 
 fn build_tool_call_detail_view(item: &Value, item_type: &str) -> ToolCallView {

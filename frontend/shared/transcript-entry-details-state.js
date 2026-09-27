@@ -77,9 +77,12 @@ function buildPreviewEntry(entry) {
     return entry;
   }
 
+  const text = truncateCommandPreview(entry.text || "");
   return {
     ...entry,
-    text: truncateCommandPreview(entry.text || ""),
+    text,
+    // Squeezed to one line, so it is not the body: say so, or it is shown as one.
+    ...(text !== (entry.text || "") ? { content_state: "preview" } : {}),
   };
 }
 
@@ -137,17 +140,29 @@ function mergeToolDetail(existing, incoming) {
   };
 }
 
-function mergeTranscriptEntryDetail(existing, incoming) {
+const RUNNING_STATUSES = new Set(["", "running", "in_progress", "inProgress", "pending", "streaming"]);
+
+// Only a body fetched from the detail endpoint is known complete. A snapshot copy's
+// "full" is only as of that snapshot, so a later cut copy must not inherit it.
+function mergeTranscriptEntryDetail(existing, incoming, { fetched = false } = {}) {
   if (!existing) {
-    return incoming;
+    return fetched ? { ...incoming, detail_fetched: true } : incoming;
   }
   if (!incoming) {
     return existing;
   }
+  // A fetched body outlives re-syncs of a settled row; a running row keeps growing.
+  const keepsFetched =
+    !fetched
+    && Boolean(existing.detail_fetched)
+    && existing.status === incoming.status
+    && !RUNNING_STATUSES.has(incoming.status || "");
 
   return {
     ...existing,
     ...incoming,
+    content_state: keepsFetched ? existing.content_state : incoming.content_state,
+    detail_fetched: fetched || keepsFetched,
     text: selectLongerString(existing.text, incoming.text),
     status: incoming.status || existing.status,
     turn_id: incoming.turn_id || existing.turn_id || null,
@@ -257,7 +272,7 @@ export function setLiveTranscriptEntryDetail(state, threadId, entry) {
   const base = rebasedDetailStores(state, generation);
   const nextDetails = base.liveThreadId === threadId ? new Map(base.live) : new Map();
   const previousEntry = nextDetails.get(itemId);
-  nextDetails.set(itemId, mergeTranscriptEntryDetail(previousEntry, entry));
+  nextDetails.set(itemId, mergeTranscriptEntryDetail(previousEntry, entry, { fetched: true }));
 
   return {
     stored: true,
@@ -287,6 +302,14 @@ export function syncLiveTranscriptEntryDetailsFromSnapshot(state, snapshot) {
 
   for (const entry of snapshot.transcript || []) {
     if (!shouldRetainLiveTranscriptEntry(entry)) {
+      // Parked while running; once it finishes that copy has no output and would
+      // be served as the body. A fetched completed body carries the same status.
+      const parkedId = transcriptRowKey(entry);
+      const parked = parkedId ? nextDetails.get(parkedId) : null;
+      if (parked && parked.status !== entry.status) {
+        nextDetails.delete(parkedId);
+        changed = true;
+      }
       continue;
     }
     const itemId = transcriptRowKey(entry);
@@ -340,6 +363,32 @@ export function isOmittedFileChangeDetail(entry) {
   return Boolean(entry?.tool?.file_changes_omitted);
 }
 
+/** Whether this copy of a row is missing part of its body. */
+export function isPartialTranscriptEntry(entry) {
+  return (
+    isOmittedFileChangeDetail(entry)
+    || entry?.content_state === "preview"
+    || entry?.content_state === "omitted"
+  );
+}
+
+export function isFailedTranscriptEntry(entry) {
+  return entry?.status === "failed" || entry?.status === "error";
+}
+
+/** The fetched full body of a row, or null — never the snapshot's cut copy. */
+export function getFullTranscriptEntryDetail(state, threadId, itemId) {
+  for (const candidate of [
+    getCachedTranscriptEntryDetail(state, threadId, itemId),
+    getLiveTranscriptEntryDetail(state, threadId, itemId),
+  ]) {
+    if (candidate && !isPartialTranscriptEntry(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 // Visible file-change entries whose transport projection only carries the
 // summary. Once a user expands one and its detail is fetched, these ids let the
 // renderer fold the cached full detail back in without expanding the whole tool
@@ -369,26 +418,16 @@ export function buildExpandedTranscriptDetailEntries(
   } = {}
 ) {
   const detailEntries = new Map();
-  // `requireFull` is for the auto (file-change summary) pass: a stripped summary
-  // parked in the live/cache store is NOT the fetched full diff, so skip it and
-  // keep looking — if only a summary exists, set nothing so the renderer's
-  // effect keeps fetching.
+  // A cut copy parked by snapshot sync must never shadow a fetched full body; the
+  // file-change pass takes nothing rather than a summary, so opening a file fetches.
   const pickDetail = (itemId, { requireFull = false } = {}) => {
     const candidates = [
       transientDetails?.get?.(itemId) || null,
       getLiveTranscriptEntryDetail(state, threadId, itemId),
       getCachedTranscriptEntryDetail(state, threadId, itemId),
-    ];
-    for (const candidate of candidates) {
-      if (!candidate) {
-        continue;
-      }
-      if (requireFull && isOmittedFileChangeDetail(candidate)) {
-        continue;
-      }
-      return candidate;
-    }
-    return null;
+    ].filter(Boolean);
+    const full = candidates.find((candidate) => !isPartialTranscriptEntry(candidate));
+    return full || (requireFull ? null : candidates[0] || null);
   };
   const resolveInto = (itemId, opts) => {
     if (!itemId || detailEntries.has(itemId)) {

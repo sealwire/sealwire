@@ -107,7 +107,7 @@ test("a pick survives the question card being torn down and rebuilt", async () =
     optionButtons()[0].dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
   });
   assert.equal(
-    optionButtons()[0].getAttribute("aria-pressed"),
+    optionButtons()[0].getAttribute("aria-checked"),
     "true",
     "precondition: the click marks the option chosen"
   );
@@ -124,7 +124,7 @@ test("a pick survives the question card being torn down and rebuilt", async () =
   // The next snapshot puts the question back, and the reader is still mid-answer.
   await paint(pendingList());
   assert.equal(
-    optionButtons()[0].getAttribute("aria-pressed"),
+    optionButtons()[0].getAttribute("aria-checked"),
     "true",
     "the option the reader picked must still be picked"
   );

@@ -187,7 +187,7 @@ async function main() {
           // Set on the live node right after the click: gone means the card was
           // unmounted and rebuilt, which is what loses the pick.
           sameCardNode: card?.__askUserCardProbe === true,
-          pressed: buttons.map((button) => button.getAttribute("aria-pressed")),
+          pressed: buttons.map((button) => button.getAttribute("aria-checked")),
           continueDisabled: card?.querySelector(".ask-user-wizard-next")?.disabled ?? null,
         };
       });

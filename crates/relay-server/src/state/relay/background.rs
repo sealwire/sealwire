@@ -244,6 +244,7 @@ impl RelayState {
         if self.drop_bg_event_for_deleted_thread(thread_id) {
             return;
         }
+        let tool = crate::protocol::ToolCallView::command_execution(Some(command.clone()));
         let mut text = command;
         if let Some(output) = super::super::non_empty(Some(output.unwrap_or_default())) {
             text.push('\n');
@@ -251,13 +252,14 @@ impl RelayState {
         }
         self.upsert_transcript_item_for_thread(
             thread_id,
-            item_id,
+            item_id.clone(),
             TranscriptEntryKind::Command,
             Some(text),
             status,
             Some(turn_id),
-            None,
+            Some(tool),
         );
+        self.mark_transcript_row_cut_for_thread(thread_id, &item_id, false);
         self.touch_bg_progress_at(thread_id, now);
     }
 

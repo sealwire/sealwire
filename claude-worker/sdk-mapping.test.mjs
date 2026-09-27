@@ -1411,3 +1411,21 @@ test("mapSkillCommands turns Claude Code's description tags into scopes", () => 
     { name: "odd", description: "Unknown provenance", scope: "session", origin: null, argument_hint: null },
   ]);
 });
+
+// Design 20c: a tool row leads with what the call is FOR, not its source.
+test("a tool call carries the model's own description as its detail, live and on reload", () => {
+  const block = {
+    type: "tool_use",
+    id: "tool-bash",
+    name: "Bash",
+    input: { command: "awk '/^:root/' frontend/styles.css", description: "Read light-theme tokens" },
+  };
+  const live = mapSdkMessage({ type: "assistant", message: { content: [block] } });
+  const liveEvent = (Array.isArray(live) ? live : [live]).find((e) => e?.type === "tool_call_requested");
+  assert.equal(liveEvent.tool.detail, "Read light-theme tokens");
+
+  const [reloaded] = mapSessionMessages([
+    { type: "assistant", uuid: "a-1", message: { content: [block] } },
+  ]).filter((entry) => entry.kind === "tool_call");
+  assert.equal(reloaded.tool.detail, "Read light-theme tokens");
+});

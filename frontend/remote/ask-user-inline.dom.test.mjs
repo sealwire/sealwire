@@ -174,11 +174,11 @@ test("the phone holds the pick across the snapshots that keep arriving", () => {
   act(() => {
     buttons()[0].dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
   });
-  assert.equal(buttons()[0].getAttribute("aria-pressed"), "true");
+  assert.equal(buttons()[0].getAttribute("aria-checked"), "true");
 
   render();
   assert.equal(
-    buttons()[0].getAttribute("aria-pressed"),
+    buttons()[0].getAttribute("aria-checked"),
     "true",
     "the pick survives the re-render"
   );

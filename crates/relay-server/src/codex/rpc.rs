@@ -886,10 +886,12 @@ async fn handle_notification_for_provider(
                         parse_transcript_item(item, string_at(&params, &["turnId"]), "running")
                     }) {
                         if let Some(item_id) = entry.item_id {
+                            let cut = entry.content_state
+                                != crate::protocol::TranscriptContentState::Full;
                             relay.bg_upsert_transcript_item(
                                 &bg_thread_id,
                                 crate::state::IdSpace::Provider,
-                                item_id,
+                                item_id.clone(),
                                 entry.kind,
                                 entry.text,
                                 entry.status,
@@ -897,6 +899,7 @@ async fn handle_notification_for_provider(
                                 entry.tool,
                                 crate::state::unix_now(),
                             );
+                            relay.mark_transcript_row_cut_for_thread(&bg_thread_id, &item_id, cut);
                             changed = true;
                         }
                     }
@@ -1079,10 +1082,12 @@ async fn handle_notification_for_provider(
                         parse_transcript_item(item, string_at(&params, &["turnId"]), "completed")
                     }) {
                         if let Some(item_id) = entry.item_id {
+                            let cut = entry.content_state
+                                != crate::protocol::TranscriptContentState::Full;
                             relay.bg_upsert_transcript_item(
                                 &bg_thread_id,
                                 crate::state::IdSpace::Provider,
-                                item_id,
+                                item_id.clone(),
                                 entry.kind,
                                 entry.text,
                                 entry.status,
@@ -1090,6 +1095,7 @@ async fn handle_notification_for_provider(
                                 entry.tool,
                                 crate::state::unix_now(),
                             );
+                            relay.mark_transcript_row_cut_for_thread(&bg_thread_id, &item_id, cut);
                             changed = true;
                         }
                     }

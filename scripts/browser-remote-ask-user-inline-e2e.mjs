@@ -632,7 +632,7 @@ async function main() {
       () =>
         document
           .querySelector(".transcript-ask-user-pinned .ask-user-option-button")
-          ?.getAttribute("aria-pressed") === "true",
+          ?.getAttribute("aria-checked") === "true",
       null,
       { timeout: TIMEOUT_MS }
     );

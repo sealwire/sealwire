@@ -4,6 +4,7 @@ import {
   collectFileChangeDetailItemIds,
   createClearedTranscriptEntryDetailsPatch,
   getCachedTranscriptEntryDetail,
+  getFullTranscriptEntryDetail,
   getLiveTranscriptEntryDetail,
   isOmittedFileChangeDetail,
   setLiveTranscriptEntryDetail as setLiveTranscriptEntryDetailPatch,
@@ -22,6 +23,7 @@ export {
   buildExpandedTranscriptDetailEntries,
   collectFileChangeDetailItemIds,
   getCachedTranscriptEntryDetail,
+  getFullTranscriptEntryDetail,
   getLiveTranscriptEntryDetail,
   isOmittedFileChangeDetail,
 };

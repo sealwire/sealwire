@@ -121,7 +121,7 @@ async function main() {
         if (!chip.textContent.includes(`${count} commands`)) return false;
         // Collapsed: members must not be mounted.
         if (document.querySelector('[data-transcript-entry-kind="command"]')) return false;
-        if (document.querySelector(".command-preview")) return false;
+        if (document.querySelector(".chat-message-tool-run")) return false;
         return true;
       },
       COMMAND_COUNT,
@@ -131,7 +131,7 @@ async function main() {
     const chips = await page.locator(".work-group-chip").count();
     assert.equal(chips, 1, "the command run must collapse into exactly one group chip");
     assert.equal(
-      await page.locator(".command-preview").count(),
+      await page.locator(".chat-message-tool-run").count(),
       0,
       "collapsed group must not mount any command previews"
     );
@@ -139,7 +139,7 @@ async function main() {
     // 3. Expand the group; every command card mounts and shows its preview text.
     await page.click(".work-group-chip");
     await page.waitForFunction(
-      (count) => document.querySelectorAll(".command-preview").length === count,
+      (count) => document.querySelectorAll(".chat-message-tool-run").length === count,
       COMMAND_COUNT,
       { timeout: TIMEOUT_MS }
     );

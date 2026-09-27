@@ -928,7 +928,12 @@ fn entry_label(entry: &TranscriptEntryView) -> &'static str {
 }
 
 fn entry_summary_text(entry: &TranscriptEntryView) -> String {
-    if let Some(tool) = entry.tool.as_ref() {
+    // A command row's text is command plus output; its tool only names the command.
+    let tool = entry
+        .tool
+        .as_ref()
+        .filter(|_| entry.kind != TranscriptEntryKind::Command);
+    if let Some(tool) = tool {
         let mut parts = Vec::new();
         if !tool.title.is_empty() {
             parts.push(format!(
@@ -1036,6 +1041,42 @@ mod tests {
             active_flags: Vec::new(),
             transcript: crate::provider::ProviderTranscriptEntry::all_provider_named(transcript),
         }
+    }
+
+    // A command row names its command in `tool`, but what it printed lives in
+    // `text`; a replayed context without the output loses why the next step happened.
+    #[test]
+    fn a_command_summary_keeps_what_the_command_printed() {
+        let entry = TranscriptEntryView {
+            row_id: None,
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some("cmd-1".to_string()),
+            kind: TranscriptEntryKind::Command,
+            text: Some("npm test\n1 failing: expected 2".to_string()),
+            status: "failed".to_string(),
+            turn_id: None,
+            tool: Some(crate::protocol::ToolCallView {
+                item_type: "commandExecution".to_string(),
+                name: "Shell".to_string(),
+                title: "Shell".to_string(),
+                kind: None,
+                detail: None,
+                query: None,
+                path: None,
+                url: None,
+                command: Some("npm test".to_string()),
+                input_preview: None,
+                result_preview: None,
+                diff: None,
+                file_changes: Vec::new(),
+                apply_state: None,
+                file_changes_omitted: false,
+                can_apply: None,
+            }),
+            content_state: crate::protocol::TranscriptContentState::Full,
+        };
+        assert!(entry_summary_text(&entry).contains("1 failing: expected 2"));
     }
 
     #[test]
@@ -1205,6 +1246,7 @@ mod fork_point_resolution_tests {
             order_seq: 0,
             withdrawn: false,
             last_live_upsert_revision: None,
+            cut: false,
         }
     }
 

@@ -1993,6 +1993,7 @@ fn persisted_state_round_trip_drops_ephemeral_fields() {
         order_seq: 0,
         withdrawn: false,
         last_live_upsert_revision: None,
+        cut: false,
     });
     relay
         .pending_approvals
@@ -7743,6 +7744,7 @@ mod row_identity_tests {
                     order_seq,
                     withdrawn: false,
                     last_live_upsert_revision: None,
+                    cut: false,
                 });
             runtime
                 .transcript
@@ -7790,6 +7792,7 @@ mod row_identity_tests {
                     order_seq: 0,
                     withdrawn: false,
                     last_live_upsert_revision: None,
+                    cut: false,
                 });
             runtime.transcript.bind_provider_item_id(&row_id, "prov-1");
             runtime
@@ -8162,6 +8165,7 @@ mod row_identity_tests {
             order_seq: 0,
             withdrawn: false,
             last_live_upsert_revision: None,
+            cut: false,
         };
         {
             let runtime = relay.runtimes.get_mut(thread).expect("runtime");
@@ -8485,6 +8489,7 @@ mod row_identity_tests {
                 order_seq: 0,
                 withdrawn: false,
                 last_live_upsert_revision: None,
+                cut: false,
             }]);
         }
 
@@ -8631,6 +8636,7 @@ mod row_identity_tests {
             withdrawn: false,
             // Never live-upserted: this row only ever came from a history read.
             last_live_upsert_revision: None,
+            cut: false,
         };
 
         let changed = {

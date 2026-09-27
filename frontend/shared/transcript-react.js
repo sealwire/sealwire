@@ -30,6 +30,7 @@ import {
   parseUnifiedDiffRows,
 } from "./file-change-diff.js";
 import { transcriptRowKey } from "./transcript-row-key.js";
+import { isFailedTranscriptEntry, isPartialTranscriptEntry } from "./transcript-entry-details-state.js";
 import { renderMarkdown, renderStreamingMarkdown } from "./markdown.js";
 import { didPrependOlderTranscript } from "./transcript-scroll.js";
 
@@ -86,10 +87,6 @@ function renderToolPreviewText(value) {
     return text;
   }
   return `${text.slice(0, 179).trimEnd()}…`;
-}
-
-function commandExpandKey(itemId) {
-  return itemId ? `command:${itemId}` : "";
 }
 
 // `inGroup` marks an entry that is being shown because the user opened a tool
@@ -325,45 +322,200 @@ function AgentEntryImpl({ entry, isJustPrepended = false, isForkable = false, pr
 
 const AgentEntry = React.memo(AgentEntryImpl);
 
+// Codex joins command and output with no boundary; the command field is what
+// tells a multi-line command apart from what it printed.
+function splitCommandText(text, command) {
+  if (command) {
+    if (text.startsWith(command)) {
+      return { command, output: text.slice(command.length).replace(/^\n/, "") };
+    }
+    if (command.startsWith(text.replace(/(\.\.\.|…)$/, ""))) {
+      return { command, output: "" };
+    }
+  }
+  const newline = text.indexOf("\n");
+  return newline === -1
+    ? { command: text, output: "" }
+    : { command: text.slice(0, newline), output: text.slice(newline + 1) };
+}
+
 function CommandEntry({ entry, isJustPrepended = false, options = null, inGroup = false }) {
   const itemId = transcriptRowKey(entry) || "";
-  const expandKey = itemId ? `entry:${itemId}` : commandExpandKey(itemId);
-  const expanded = Boolean(expandKey && options?.expandedKeys?.has(expandKey));
+  const expanded = Boolean(itemId && options?.expandedKeys?.has(`entry:${itemId}`));
   const loading = Boolean(itemId && options?.loadingItemIds?.has(itemId));
   const detailEntry = resolveTranscriptDetailEntry(entry, options);
-  const preview = renderCommandPreviewText(entry.text || "(empty)");
-  const fullText = detailEntry?.text || entry.text || preview;
+  const source = detailEntry || entry;
+  const { command, output } = splitCommandText(
+    String(source.text || ""),
+    source.tool?.command || entry.tool?.command || ""
+  );
 
   return h(
     "article",
-    transcriptEntryDomAttrs(entry, "chat-message chat-message-system", null, {
+    transcriptEntryDomAttrs(entry, "chat-message chat-message-system chat-message-tool-run", null, {
       justPrepended: isJustPrepended,
       inGroup,
     }),
     h(
       "div",
       { className: "message-card message-card-system message-card-command" },
+      h(ToolRunRow, {
+        itemId,
+        expanded,
+        status: entry.status,
+        title: renderCommandPreviewText(command || "(empty)"),
+        titleIsCode: true,
+        output,
+      }),
+      expanded && itemId
+        ? h(
+            React.Fragment,
+            null,
+            h("pre", { className: "command-detail" }, String(source.text || "")),
+            isPartialTranscriptEntry(source) && !loading
+              ? h(CutCopyNote)
+              : null
+          )
+        : h(ToolRunFailureTail, {
+            itemId,
+            status: entry.status,
+            output,
+            command,
+            cut: isPartialTranscriptEntry(source),
+          }),
+      expanded && loading && (!detailEntry || isPartialTranscriptEntry(source))
+        ? h("p", { className: "command-detail-note" }, "Loading full command output…")
+        : null
+    )
+  );
+}
+
+const TOOL_RUN_TAIL_LINES = 4;
+
+// The row is marked cut when ANY field was; the output itself was cut only if its
+// body was dropped or it ends in the ellipsis every cut appends.
+function isOutputCut(entry, output) {
+  if (!isPartialTranscriptEntry(entry)) {
+    return false;
+  }
+  const text = String(output || "");
+  return entry.content_state === "omitted" || !text || /(\.\.\.|…)$/.test(text);
+}
+
+// An opened row whose full body could not be fetched still holds only the start.
+function CutCopyNote() {
+  return h("div", { className: "tool-run-cut-note" }, "Only the start of this output is here.");
+}
+
+function isRunningStatus(status) {
+  return status === "running" || status === "in_progress" || status === "inProgress";
+}
+
+// Success, running and not-yet-started are silent; a failure is red, any other end grey.
+// `exitLine` only where the harness writes that line itself (Claude's Bash); anywhere
+// else the output is the program's own and can print anything.
+function toolRunStatusTag(status, output, { exitLine = false } = {}) {
+  const value = status || "completed";
+  if (value === "completed" || value === "pending" || isRunningStatus(value)) {
+    return null;
+  }
+  if (isFailedTranscriptEntry({ status: value })) {
+    const exit = exitLine ? /^\s*Exit code (\d+)/.exec(String(output || "")) : null;
+    return { label: exit ? `exit ${exit[1]}` : "failed", failed: true };
+  }
+  return { label: value, failed: false };
+}
+
+function ToolRunRow({
+  itemId,
+  expanded,
+  status,
+  title,
+  titleIsCode = false,
+  secondary = "",
+  output = "",
+  exitLine = false,
+}) {
+  const running = isRunningStatus(status);
+  const pending = status === "pending";
+  const tag = toolRunStatusTag(status, output, { exitLine });
+  const tailShown = Boolean(tag?.failed);
+  const className = [
+    "tool-run-row",
+    running ? "is-running" : "",
+    pending ? "is-pending" : "",
+    tag?.failed ? "is-failed" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return h(
+    itemId ? "button" : "div",
+    {
+      className,
+      ...(itemId
+        ? {
+            type: "button",
+            "aria-expanded": expanded ? "true" : "false",
+            "data-item-id": itemId,
+            "data-transcript-toggle": "entry",
+          }
+        : {}),
+    },
+    running || pending
+      ? h(
+          "span",
+          { className: "tool-run-marker", "aria-hidden": "true" },
+          h("span", { className: running ? "tool-run-live" : "tool-run-waiting" })
+        )
+      : h("span", { className: "tool-run-marker", "aria-hidden": "true" }, expanded || tailShown ? "▾" : "▸"),
+    h("span", { className: titleIsCode ? "tool-run-title tool-run-title-mono" : "tool-run-title" }, title),
+    secondary ? h("span", { className: "tool-run-command" }, secondary) : null,
+    tag
+      ? h(
+          "span",
+          { className: tag.failed ? "tool-run-status" : "tool-run-status is-neutral", "data-status": status },
+          tag.label
+        )
+      : null
+  );
+}
+
+// A failure shows its last lines unasked. A cut copy has only the start, so its last
+// lines are not the end: say so and leave the rest to "Full output".
+function ToolRunFailureTail({ itemId, status, output, command, cut = false }) {
+  if (!toolRunStatusTag(status, output)?.failed) {
+    return null;
+  }
+  const lines = String(output || "").replace(/\s+$/, "").split("\n");
+  const hasOutput = !(lines.length === 1 && !lines[0]);
+  if (!cut && !hasOutput) {
+    return null;
+  }
+  const hidden = Math.max(0, lines.length - TOOL_RUN_TAIL_LINES);
+  return h(
+    "div",
+    { className: "tool-run-output" },
+    cut
+      ? h("span", { className: "tool-run-output-note" }, "Only the start of the output is here.")
+      : h(
+          React.Fragment,
+          null,
+          hidden ? h("span", { className: "tool-run-output-more" }, `… ${hidden} lines`) : null,
+          h("pre", { className: "tool-run-output-tail" }, lines.slice(hidden).join("\n"))
+        ),
+    h(
+      "div",
+      { className: "tool-run-output-actions" },
       itemId
         ? h(
-            "div",
-            { className: "command-entry-controls" },
-            h(
-              "button",
-              {
-                className: "command-toggle-button",
-                "data-item-id": itemId,
-                "data-transcript-toggle": "entry",
-                type: "button",
-              },
-              expanded ? "▴" : "▾"
-            )
+            "button",
+            { type: "button", "data-item-id": itemId, "data-transcript-toggle": "entry" },
+            "Full output"
           )
         : null,
-      expanded && itemId
-        ? h("pre", { className: "command-detail" }, fullText)
-        : h("div", { className: "command-preview", title: preview }, preview),
-      expanded && loading && !detailEntry
-        ? h("p", { className: "command-detail-note" }, "Loading full command output…")
+      // A cut copy's command may be cut as well; copying half a heredoc is worse than none.
+      command && !cut
+        ? h("button", { type: "button", "data-copy-message": command }, "Copy command")
         : null
     )
   );
@@ -937,21 +1089,17 @@ function AskUserPendingCard({ request, entry = null, isJustPrepended = false, op
   });
 }
 
-// Build the answer value the SDK should see for a single question. We support
-// three shapes (the SDK accepts string | string[] | free-text):
-//   - label only          → "<label>"
-//   - labels (multi)      → ["<label1>", "<label2>"]
-//   - notes only          → "<notes>"            (pure free-text)
-//   - label + notes       → "<label> — <notes>"  (joined free-text)
-//   - labels + notes      → "<label1>, <label2> — <notes>"
-// We collapse label+notes into a single free-text string because the SDK's
-// downstream consumer (Claude) reads answers as plain text it can quote back.
-// Joining preserves both the structured pick and the user's elaboration.
+// One question's answer: single choice sends the pick, else the typed text;
+// multiple choice sends the picks, joined with typed text as "a, b — text".
 export function buildAskUserAnswerValue({ labels = [], notes = "", multiSelect = false } = {}) {
   const cleanLabels = (labels || []).map((l) => String(l).trim()).filter(Boolean);
   const cleanNotes = String(notes || "").trim();
   if (!cleanLabels.length && !cleanNotes) {
     return null;
+  }
+  // Single choice: a picked option and "Something else" are rival answers.
+  if (!multiSelect && cleanLabels.length) {
+    return cleanLabels[0];
   }
   if (cleanNotes) {
     const joinedLabels = cleanLabels.join(", ");
@@ -1016,6 +1164,7 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
     questions,
     answers: parseAskUserAnswers(tool.result_preview),
     status: entry.status || "running",
+    expanded: Boolean(itemId && options?.expandedKeys?.has(askUserExpandKey(itemId))),
   });
 }
 
@@ -1046,123 +1195,186 @@ export function AskUserDetailPendingCard({
       { className: "message-card message-card-system message-card-ask-user" },
       h(
         "div",
-        { className: "ask-user-meta" },
-        h("span", { className: "ask-user-tag" }, "Claude asked"),
-        h("span", { className: "ask-user-status" }, status)
-      ),
-      h(
-        "section",
-        {
-          className: "ask-user-question",
-          key: itemId ? `${itemId}:detail-pending` : "ask-user:detail-pending",
-        },
+        { className: "ask-user-main" },
         h(
-          "p",
-          { className: "ask-user-question-text" },
-          questionCount > 1
-            ? `${questionCount} questions are loading.`
-            : "The question is loading."
+          "div",
+          { className: "ask-user-meta" },
+          h("span", { className: "ask-user-tag" }, "Claude asks"),
+          h("span", { className: "ask-user-topic" }),
+          h("span", { className: "ask-user-status" }, status)
         ),
-        detailError
-          ? h("div", { className: "ask-user-error", role: "alert" }, detailError)
-          : null,
-        // Nothing else will ever trigger this fetch again: the surface re-syncs
-        // on the pending list, and a failure does not change the list.
-        detailError && onRetryDetail
-          ? h(
-              "button",
-              {
-                type: "button",
-                className: "ask-user-detail-retry",
-                disabled: detailLoading,
-                onClick: () => onRetryDetail(),
-              },
-              detailLoading ? "Loading…" : "Try again"
-            )
-          : null
+        h(
+          "section",
+          {
+            className: "ask-user-question",
+            key: itemId ? `${itemId}:detail-pending` : "ask-user:detail-pending",
+          },
+          h(
+            "p",
+            { className: "ask-user-question-text" },
+            questionCount > 1
+              ? `${questionCount} questions are loading.`
+              : "The question is loading."
+          ),
+          detailError
+            ? h("div", { className: "ask-user-error", role: "alert" }, detailError)
+            : null,
+          // Nothing else will ever trigger this fetch again: the surface re-syncs
+          // on the pending list, and a failure does not change the list.
+          detailError && onRetryDetail
+            ? h(
+                "button",
+                {
+                  type: "button",
+                  className: "ask-user-detail-retry",
+                  disabled: detailLoading,
+                  onClick: () => onRetryDetail(),
+                },
+                detailLoading ? "Loading…" : "Try again"
+              )
+            : null
+        )
       )
     )
   );
 }
 
-function AskUserReadOnlyCard({ entry, isJustPrepended, itemId, questions, answers, status }) {
+export function askUserExpandKey(itemId) {
+  return itemId ? `ask:${itemId}` : "";
+}
+
+const RECOMMENDED_SUFFIX = /\s*\(recommended\)\s*$/i;
+
+// Claude marks its pick by suffixing the label; the tag carries that instead.
+function splitRecommended(label) {
+  const text = String(label || "");
+  return RECOMMENDED_SUFFIX.test(text)
+    ? { text: text.replace(RECOMMENDED_SUFFIX, ""), recommended: true }
+    : { text, recommended: false };
+}
+
+function askUserOptionLabel(label) {
+  const { text, recommended } = splitRecommended(label);
+  return h(
+    "div",
+    { className: "ask-user-option-label" },
+    text || "(no label)",
+    recommended ? h("span", { className: "ask-user-recommended" }, "Recommended") : null
+  );
+}
+
+function askUserAnswerSummary(questions, answers, status) {
+  const picked = questions
+    .map((q) => answers.get(q.question) || "")
+    .filter(Boolean)
+    .map((answer) => splitRecommended(answer).text);
+  if (picked.length) {
+    return picked.join(" · ");
+  }
+  return status === "completed" ? "Answered" : "Waiting for answer";
+}
+
+function AskUserReadOnlyCard({ entry, isJustPrepended, itemId, questions, answers, status, expanded = false }) {
   const headerStatus = answers.size > 0 || status === "completed"
     ? "Answered"
     : "Waiting for answer";
+  const expandKey = askUserExpandKey(itemId);
+  const topic = questions.length > 1
+    ? `${questions.length} questions`
+    : questions[0].header || questions[0].question;
   return h(
     "article",
     transcriptEntryDomAttrs(
       entry,
-      "chat-message chat-message-system chat-message-ask-user",
+      "chat-message chat-message-system chat-message-ask-user chat-message-ask-user-answered",
       null,
       { justPrepended: isJustPrepended }
     ),
     h(
-      "div",
-      { className: "message-card message-card-system message-card-ask-user" },
-      h(
-        "div",
-        { className: "ask-user-meta" },
-        h("span", { className: "ask-user-tag" }, "Claude asked"),
-        h("span", { className: "ask-user-status" }, headerStatus)
-      ),
-      ...questions.map((q, qIndex) => {
-        const answerLabel = answers.get(q.question) || "";
-        const matchedOption = answerLabel
-          ? q.options.find((opt) => opt.label === answerLabel)
-          : null;
-        return h(
-          "section",
-          {
-            className: "ask-user-question",
-            key: itemId ? `${itemId}:q:${qIndex}` : `ask-user:q:${qIndex}`,
-          },
-          q.header
-            ? h("div", { className: "ask-user-question-header" }, q.header)
-            : null,
-          h("p", { className: "ask-user-question-text" }, q.question || "(no question)"),
-          q.options.length
-            ? h(
-                "div",
-                { className: "ask-user-options" },
-                ...q.options.map((opt, oIndex) => {
-                  const isChosen = answerLabel && opt.label === answerLabel;
-                  return h(
+      expandKey ? "button" : "div",
+      {
+        className: "ask-user-summary",
+        title: questions.map((q) => q.question).filter(Boolean).join("\n"),
+        ...(expandKey
+          ? {
+              type: "button",
+              "aria-expanded": expanded ? "true" : "false",
+              "data-expand-key": expandKey,
+              "data-transcript-toggle": "group",
+            }
+          : {}),
+      },
+      h("span", { "aria-hidden": "true", className: "ask-user-summary-chevron" }, expanded ? "▾" : "▸"),
+      h("span", { className: "ask-user-summary-verb" }, "Asked"),
+      h("span", { className: "ask-user-summary-topic" }, topic),
+      h("span", { "aria-hidden": "true", className: "ask-user-summary-arrow" }, "→"),
+      h("span", { className: "ask-user-summary-answer" }, askUserAnswerSummary(questions, answers, status))
+    ),
+    expanded || !expandKey
+      ? h(
+          "div",
+          { className: "ask-user-answered-detail" },
+          h(
+            "div",
+            { className: "ask-user-meta" },
+            h("span", { className: "ask-user-tag" }, "Claude asked"),
+            h("span", { className: "ask-user-status" }, headerStatus)
+          ),
+          ...questions.map((q, qIndex) => {
+            const answerLabel = answers.get(q.question) || "";
+            const matchedOption = answerLabel
+              ? q.options.find((opt) => opt.label === answerLabel)
+              : null;
+            return h(
+              "section",
+              {
+                className: "ask-user-question",
+                key: itemId ? `${itemId}:q:${qIndex}` : `ask-user:q:${qIndex}`,
+              },
+              q.header
+                ? h("div", { className: "ask-user-question-header" }, q.header)
+                : null,
+              h("p", { className: "ask-user-question-text" }, q.question || "(no question)"),
+              q.options.length
+                ? h(
                     "div",
-                    {
-                      className: `ask-user-option${isChosen ? " is-chosen" : ""}`,
-                      key: `${qIndex}:opt:${oIndex}`,
-                    },
-                    h(
-                      "div",
-                      { className: "ask-user-option-label" },
-                      isChosen
-                        ? h("span", { className: "ask-user-option-check", "aria-hidden": "true" }, "✓ ")
-                        : null,
-                      opt.label || "(no label)"
-                    ),
-                    opt.description
-                      ? h(
+                    { className: "ask-user-options" },
+                    ...q.options.map((opt, oIndex) => {
+                      const isChosen = answerLabel && opt.label === answerLabel;
+                      return h(
+                        "div",
+                        {
+                          className: `ask-user-option${isChosen ? " is-chosen" : ""}`,
+                          key: `${qIndex}:opt:${oIndex}`,
+                        },
+                        h("span", {
+                          "aria-hidden": "true",
+                          className: `ask-user-option-mark${q.multiSelect ? " is-multi" : ""}`,
+                        }),
+                        h(
                           "div",
-                          { className: "ask-user-option-description" },
+                          { className: "ask-user-option-copy" },
+                          askUserOptionLabel(opt.label),
                           opt.description
+                            ? h("div", { className: "ask-user-option-description" }, opt.description)
+                            : null
                         )
-                      : null
-                  );
-                })
-              )
-            : null,
-          answerLabel && !matchedOption
-            ? h(
-                "div",
-                { className: "ask-user-freeform-answer" },
-                h("span", { className: "ask-user-freeform-answer-label" }, "Answer: "),
-                answerLabel
-              )
-            : null
-        );
-      })
-    )
+                      );
+                    })
+                  )
+                : null,
+              answerLabel && !matchedOption
+                ? h(
+                    "div",
+                    { className: "ask-user-freeform-answer" },
+                    h("span", { className: "ask-user-freeform-answer-label" }, "Answer: "),
+                    answerLabel
+                  )
+                : null
+            );
+          })
+        )
+      : null
   );
 }
 
@@ -1226,12 +1438,15 @@ export function AskUserWizard({
     writeAskUserDraft(draftKey, { perQuestion, currentIndex: next });
   }
 
-  function updateNotes(questionText, value) {
+  // "Something else" is one more radio row on a single-choice question: typing
+  // into it takes the pick away from the options.
+  function updateNotes(question, value) {
     commitPerQuestion((prev) => {
       const next = new Map(prev);
-      const existing = getQuestionState(prev, questionText);
-      next.set(questionText, {
-        labels: new Set(existing.labels),
+      const existing = getQuestionState(prev, question.question);
+      const keepsPick = question.multiSelect || !value.trim();
+      next.set(question.question, {
+        labels: keepsPick ? new Set(existing.labels) : new Set(),
         notes: value,
       });
       return next;
@@ -1283,6 +1498,35 @@ export function AskUserWizard({
     submitAnswers(requestId, payload);
   }
 
+  // Unanswered questions go back as a hand-off rather than blocking the turn.
+  function letClaudeDecide() {
+    if (!submitAnswers || isSubmitting) return;
+    const payload = {};
+    for (const q of questions) {
+      const state = getQuestionState(perQuestion, q.question);
+      payload[q.question] = buildAskUserAnswerValue({
+        labels: Array.from(state.labels),
+        notes: state.notes,
+        multiSelect: Boolean(q.multiSelect),
+      }) ?? LET_CLAUDE_DECIDE_ANSWER;
+    }
+    submitAnswers(requestId, payload);
+  }
+
+  // A pick can send the answer, so only a deliberate digit on a focused option counts.
+  function onKeyDown(event) {
+    if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+    // React's synthetic event has no isComposing; the native one does.
+    if (event.nativeEvent?.isComposing || event.keyCode === 229 || event.repeat) return;
+    if (!event.target?.closest?.(".ask-user-option-button")) return;
+    const index = Number(event.key) - 1;
+    const option = Number.isInteger(index) ? currentQuestion.options[index] : null;
+    if (option) {
+      event.preventDefault();
+      clickOption(currentQuestion, option.label);
+    }
+  }
+
   // A question is "answerable" once it has either a picked option or notes.
   const currentAnswerable =
     currentState.labels.size > 0 || (currentState.notes || "").trim().length > 0;
@@ -1293,47 +1537,70 @@ export function AskUserWizard({
 
   return h(
     "article",
-    transcriptEntryDomAttrs(
-      entry,
-      "chat-message chat-message-system chat-message-ask-user chat-message-ask-user-interactive",
-      null,
-      { justPrepended: isJustPrepended }
-    ),
+    {
+      ...transcriptEntryDomAttrs(
+        entry,
+        "chat-message chat-message-system chat-message-ask-user chat-message-ask-user-interactive",
+        null,
+        { justPrepended: isJustPrepended }
+      ),
+      onKeyDown,
+    },
     h(
       "div",
       { className: "message-card message-card-system message-card-ask-user" },
       h(
         "div",
-        { className: "ask-user-meta" },
-        h("span", { className: "ask-user-tag" }, "Claude asked"),
+        { className: "ask-user-main" },
         h(
-          "span",
-          { className: "ask-user-status" },
-          isSubmitting
-            ? "Sending answer…"
-            : questions.length > 1
-              ? `Question ${safeIndex + 1} of ${questions.length}`
-              : "Tap an option or add a note"
-        )
+          "div",
+          { className: "ask-user-meta" },
+          h("span", { className: "ask-user-tag" }, "Claude asks"),
+          h("span", { className: "ask-user-topic" }, currentQuestion.header || ""),
+          h(
+            "span",
+            { className: "ask-user-status" },
+            isSubmitting ? "Sending answer…" : `${safeIndex + 1} of ${questions.length}`
+          )
+        ),
+        h(AskUserQuestionStep, {
+          key: itemId ? `${itemId}:q:${safeIndex}` : `ask-user:q:${safeIndex}`,
+          // Several questions can be pending at once and two of them can be worded
+          // identically, so the notes control is identified by the card it is in.
+          notesId: `ask-user-notes-${draftKey || itemId || "card"}-${safeIndex}`,
+          question: currentQuestion,
+          currentState,
+          isSubmitting,
+          onToggleOption: (label) => clickOption(currentQuestion, label),
+          onNotesChange: (value) => updateNotes(currentQuestion, value),
+        })
       ),
-      h(AskUserQuestionStep, {
-        key: itemId ? `${itemId}:q:${safeIndex}` : `ask-user:q:${safeIndex}`,
-        // Several questions can be pending at once and two of them can be worded
-        // identically, so the notes control is identified by the card it is in.
-        notesId: `ask-user-notes-${draftKey || itemId || "card"}-${safeIndex}`,
-        question: currentQuestion,
-        currentState,
-        isSubmitting,
-        onToggleOption: (label) => clickOption(currentQuestion, label),
-        onNotesChange: (value) => updateNotes(currentQuestion.question, value),
-      }),
-      // Wizard footer: omitted on the quick-path so the card stays compact.
-      isQuickPath
-        ? null
-        : h(
-            "div",
-            { className: "ask-user-wizard-footer" },
-            h(
+      h(
+        "div",
+        { className: "ask-user-wizard-footer" },
+        isLastQuestion
+          ? h(
+              "button",
+              {
+                type: "button",
+                className: "ask-user-submit-button",
+                disabled: isSubmitting || !everyQuestionAnswerable,
+                onClick: sendAll,
+              },
+              isSubmitting ? "Sending…" : "Answer"
+            )
+          : h(
+              "button",
+              {
+                type: "button",
+                className: "ask-user-wizard-next",
+                disabled: !currentAnswerable || isSubmitting,
+                onClick: goNext,
+              },
+              "Continue"
+            ),
+        questions.length > 1
+          ? h(
               "button",
               {
                 type: "button",
@@ -1342,35 +1609,28 @@ export function AskUserWizard({
                 onClick: goPrev,
               },
               "Back"
-            ),
-            isLastQuestion
-              ? h(
-                  "button",
-                  {
-                    type: "button",
-                    className: "ask-user-submit-button",
-                    disabled: isSubmitting || !everyQuestionAnswerable,
-                    onClick: sendAll,
-                  },
-                  isSubmitting ? "Sending…" : "Send to Claude"
-                )
-              : h(
-                  "button",
-                  {
-                    type: "button",
-                    className: "ask-user-wizard-next",
-                    disabled: !currentAnswerable || isSubmitting,
-                    onClick: goNext,
-                  },
-                  "Continue"
-                )
-          ),
+            )
+          : null,
+        h("span", { className: "ask-user-footer-spacer" }),
+        h(
+          "button",
+          {
+            type: "button",
+            className: "ask-user-decide",
+            disabled: isSubmitting || !submitAnswers,
+            onClick: letClaudeDecide,
+          },
+          "Let Claude decide"
+        )
+      ),
       askUserError
         ? h("div", { className: "ask-user-error", role: "alert" }, askUserError)
         : null
     )
   );
 }
+
+const LET_CLAUDE_DECIDE_ANSWER = "No preference — use your best judgment.";
 
 function AskUserQuestionStep({
   question,
@@ -1386,62 +1646,72 @@ function AskUserQuestionStep({
   return h(
     "section",
     { className: "ask-user-question" },
-    q.header
-      ? h("div", { className: "ask-user-question-header" }, q.header)
-      : null,
     h("p", { className: "ask-user-question-text" }, q.question || "(no question)"),
-    q.options.length
-      ? h(
-          "div",
-          { className: "ask-user-options" },
-          ...q.options.map((opt, oIndex) => {
-            const isPicked = selectedLabels.has(opt.label);
-            return h(
-              "button",
-              {
-                type: "button",
-                className: `ask-user-option ask-user-option-button${isPicked ? " is-chosen" : ""}`,
-                key: `opt:${oIndex}`,
-                disabled: isSubmitting,
-                "aria-pressed": isPicked,
-                onClick: () => onToggleOption(opt.label),
-              },
-              h(
-                "div",
-                { className: "ask-user-option-label" },
-                isPicked
-                  ? h("span", { className: "ask-user-option-check", "aria-hidden": "true" }, "✓ ")
-                  : null,
-                opt.label || "(no label)"
-              ),
-              opt.description
-                ? h(
-                    "div",
-                    { className: "ask-user-option-description" },
-                    opt.description
-                  )
-                : null
-            );
-          })
-        )
-      : null,
     h(
       "div",
-      { className: "ask-user-notes-row" },
+      {
+        className: "ask-user-options",
+        role: q.multiSelect ? "group" : "radiogroup",
+        "aria-label": q.header || q.question || "Options",
+      },
+      ...q.options.map((opt, oIndex) => {
+        const isPicked = selectedLabels.has(opt.label);
+        return h(
+          "button",
+          {
+            type: "button",
+            className: `ask-user-option ask-user-option-button${isPicked ? " is-chosen" : ""}`,
+            key: `opt:${oIndex}`,
+            role: q.multiSelect ? "checkbox" : "radio",
+            "aria-checked": isPicked ? "true" : "false",
+            ...(oIndex < 9 ? { "data-key": String(oIndex + 1) } : {}),
+            disabled: isSubmitting,
+            onClick: () => onToggleOption(opt.label),
+          },
+          h("span", {
+            "aria-hidden": "true",
+            className: `ask-user-option-mark${q.multiSelect ? " is-multi" : ""}`,
+          }),
+          h(
+            "div",
+            { className: "ask-user-option-copy" },
+            askUserOptionLabel(opt.label),
+            opt.description
+              ? h("div", { className: "ask-user-option-description" }, opt.description)
+              : null
+          ),
+        );
+      }),
       h(
         "label",
-        { className: "ask-user-notes-label", htmlFor: notesId },
-        "Add a note (optional)"
-      ),
-      h("textarea", {
-        className: "ask-user-notes-input",
-        id: notesId,
-        rows: 2,
-        placeholder: "Optional: type more context, an \"Other\" answer, or specifics about your pick.",
-        value: notesValue,
-        disabled: isSubmitting,
-        onChange: (event) => onNotesChange(event.target.value),
-      })
+        {
+          className: [
+            "ask-user-other",
+            notesValue.trim() ? "is-filled" : "",
+            notesValue.trim() && (q.multiSelect || !selectedLabels.size) ? "is-chosen" : "",
+          ]
+            .filter(Boolean)
+            .join(" "),
+          htmlFor: notesId,
+        },
+        h("span", { "aria-hidden": "true", className: "ask-user-option-mark is-other" }),
+        h("span", { className: "ask-user-notes-label" }, "Something else"),
+        h("textarea", {
+          className: "ask-user-notes-input",
+          id: notesId,
+          rows: 1,
+          placeholder: "Something else…",
+          value: notesValue,
+          disabled: isSubmitting,
+          onChange: (event) => onNotesChange(event.target.value),
+          // Back in the typed answer: on a single choice, that is picking it again.
+          onFocus: () => {
+            if (!q.multiSelect && notesValue.trim() && selectedLabels.size) {
+              onNotesChange(notesValue);
+            }
+          },
+        })
+      )
     )
   );
 }
@@ -1479,6 +1749,9 @@ function GenericToolEntry({ entry, isJustPrepended = false, options = null, inGr
     && tool.detail !== nameLabel
       ? tool.detail
       : "";
+  const description = tool.detail && tool.detail !== primary && tool.detail !== nameLabel
+    ? tool.detail
+    : "";
   const inputPreviewText = String(tool.input_preview || "").trim();
   const showInputPreview = Boolean(
     inputPreviewText
@@ -1487,7 +1760,6 @@ function GenericToolEntry({ entry, isJustPrepended = false, options = null, inGr
   );
   const inputExpandKey = itemId ? `tool:${itemId}:input` : "";
   const resultExpandKey = itemId ? `tool:${itemId}:result` : "";
-  const collapsedSummary = primary || title || fallbackTitle;
 
   return h(
     "article",
@@ -1500,22 +1772,6 @@ function GenericToolEntry({ entry, isJustPrepended = false, options = null, inGr
     h(
       "div",
       { className: "message-card message-card-system message-card-tool" },
-      itemId && !isFileChange
-        ? h(
-            "div",
-            { className: "tool-entry-controls" },
-            h(
-              "button",
-              {
-                className: "tool-toggle-button",
-                "data-item-id": itemId,
-                "data-transcript-toggle": "entry",
-                type: "button",
-              },
-              expanded ? "▴" : "▾"
-            )
-          )
-        : null,
       isFileChange
         ? h(
             React.Fragment,
@@ -1541,56 +1797,66 @@ function GenericToolEntry({ entry, isJustPrepended = false, options = null, inGr
               return turnDiffUndoAction(itemId, tool.apply_state);
             })()
           )
-        : !expanded
-          ? h(
-              "div",
-              { className: "tool-log-row" },
-              h("span", { className: "tool-log-name" }, nameLabel),
-              h(
-                "span",
-                { className: "tool-log-primary" },
-                renderToolPreviewText(collapsedSummary)
-              ),
-              h("span", { className: "tool-log-status" }, status)
-            )
-          : h(
-              React.Fragment,
-              null,
-              h(
-                "div",
-                { className: "tool-log-row" },
-                h("span", { className: "tool-log-name" }, nameLabel),
-                primary
-                  ? h("span", { className: "tool-log-primary" }, primary)
-                  : title
-                    ? h("span", { className: "tool-log-primary" }, title)
+        : h(
+            React.Fragment,
+            null,
+            h(ToolRunRow, {
+              itemId,
+              expanded,
+              status,
+              title: description || nameLabel,
+              secondary: primary || (title !== description ? title : "")
+                ? renderToolPreviewText(primary || title)
+                : "",
+              output: tool.result_preview,
+              exitLine: tool.name === "Bash",
+            }),
+            expanded
+              ? h(
+                  React.Fragment,
+                  null,
+                  // The row line is clipped; opened, it has to say everything it cut.
+                  h(
+                    "div",
+                    { className: "tool-run-detail" },
+                    description ? h("span", { className: "tool-run-name" }, nameLabel) : null,
+                    title && title !== description
+                      ? h("div", { className: "tool-run-subtitle" }, title)
+                      : null,
+                    primary ? h("pre", { className: "tool-run-full-command" }, primary) : null
+                  ),
+                  showInputPreview
+                    ? h(ToolLogBlock, {
+                        expandKey: inputExpandKey,
+                        expanded: Boolean(inputExpandKey && options?.expandedKeys?.has(inputExpandKey)),
+                        label: "input",
+                        value: tool.input_preview,
+                      })
                     : null,
-                h("span", { className: "tool-log-status" }, status)
-              ),
-              title && primary
-                ? h("div", { className: "tool-log-subtitle" }, title)
-                : null,
-              detail
-                ? h("div", { className: "tool-log-subtitle" }, detail)
-                : null,
-              showInputPreview
-                ? h(ToolLogBlock, {
-                    expandKey: inputExpandKey,
-                    expanded: Boolean(inputExpandKey && options?.expandedKeys?.has(inputExpandKey)),
-                    label: "input",
-                    value: tool.input_preview,
-                  })
-                : null,
-              h(ToolLogBlock, {
-                expandKey: resultExpandKey,
-                expanded: Boolean(resultExpandKey && options?.expandedKeys?.has(resultExpandKey)),
-                label: "",
-                value: tool.result_preview,
-              }),
-              loading && !detailEntry
-                ? h("div", { className: "tool-log-note" }, "Loading full item details…")
-                : null
-            )
+                  h(ToolLogBlock, {
+                    expandKey: resultExpandKey,
+                    // Opened from a failure's "Full output": the output is the point.
+                    expanded:
+                      isFailedTranscriptEntry(entry)
+                      || Boolean(resultExpandKey && options?.expandedKeys?.has(resultExpandKey)),
+                    label: "",
+                    value: tool.result_preview,
+                  }),
+                  loading && (!detailEntry || isPartialTranscriptEntry(toolEntry))
+                    ? h("div", { className: "tool-log-note" }, "Loading full item details…")
+                    : null,
+                  isPartialTranscriptEntry(toolEntry) && !loading
+                    ? h(CutCopyNote)
+                    : null
+                )
+              : h(ToolRunFailureTail, {
+                  itemId,
+                  status,
+                  output: tool.result_preview,
+                  command: tool.command || "",
+                  cut: isOutputCut(toolEntry, tool.result_preview),
+                })
+          )
     )
   );
 }
@@ -1735,21 +2001,35 @@ export function toolKindOf(tool) {
   return TOOL_NAME_KINDS[name] || null;
 }
 
-const KIND_NOUNS = {
-  read: ["read", "reads"],
-  edit: ["edit", "edits"],
-  search: ["search", "searches"],
-  run: ["command", "commands"],
-  fetch: ["fetch", "fetches"],
-  think: ["thought", "thoughts"],
-  other: ["tool", "tools"],
+// [one, many] for the lead ("Ran 2 commands") and for the summary after it.
+const KIND_LEADS = {
+  run: ["Ran 1 command", "Ran N commands"],
+  edit: ["Edited 1 file", "Edited N files"],
+  read: ["Read 1 file", "Read N files"],
+  search: ["Searched once", "Searched N times"],
+  fetch: ["Fetched 1 page", "Fetched N pages"],
+  other: ["Used 1 tool", "Used N tools"],
+  think: ["Thought once", "Thought N times"],
 };
-// Fixed order so the label does not reshuffle between renders.
-const KIND_ORDER = ["read", "edit", "search", "run", "fetch", "other", "think"];
-// Beyond this the chip stops being scannable and starts being a list.
-const MAX_LABEL_PARTS = 4;
+const KIND_TAILS = {
+  run: ["1 command", "N commands"],
+  edit: ["1 file edited", "N files edited"],
+  read: ["1 file read", "N files read"],
+  search: ["1 search", "N searches"],
+  fetch: ["1 fetch", "N fetches"],
+  other: ["1 tool", "N tools"],
+  think: ["1 thought", "N thoughts"],
+};
+// Fixed order so the line does not reshuffle between renders; the first kind present leads.
+const KIND_ORDER = ["run", "edit", "read", "search", "fetch", "other", "think"];
+const MAX_SUMMARY_PARTS = 3;
 
-export function workGroupLabel(group) {
+function kindPhrase(table, kind, count) {
+  const [one, many] = table[kind];
+  return count === 1 ? one : many.replace("N", String(count));
+}
+
+export function workGroupSummary(group) {
   const entries = group?.entries || [];
   const counts = new Map();
   const bump = (kind) => counts.set(kind, (counts.get(kind) || 0) + 1);
@@ -1757,36 +2037,26 @@ export function workGroupLabel(group) {
   for (const entry of entries) {
     if (entry?.kind === "reasoning") {
       bump("think");
-      continue;
-    }
-    if (entry?.kind === "command") {
+    } else if (entry?.kind === "command") {
       bump(toolKindOf(entry?.tool) || "run");
-      continue;
+    } else {
+      bump(toolKindOf(entry?.tool) || "other");
     }
-    bump(toolKindOf(entry?.tool) || "other");
   }
 
-  const parts = [];
-  let dropped = 0;
-  for (const kind of KIND_ORDER) {
-    const count = counts.get(kind);
-    if (!count) {
-      continue;
-    }
-    if (parts.length >= MAX_LABEL_PARTS) {
-      dropped += count;
-      continue;
-    }
-    const [one, many] = KIND_NOUNS[kind];
-    parts.push(`${count} ${count === 1 ? one : many}`);
+  const present = KIND_ORDER.filter((kind) => counts.get(kind));
+  if (!present.length) {
+    return { lead: `${entries.length} steps`, rest: [] };
   }
+  const [leadKind, ...others] = present;
+  const rest = others
+    .slice(0, MAX_SUMMARY_PARTS)
+    .map((kind) => kindPhrase(KIND_TAILS, kind, counts.get(kind)));
+  const dropped = others.slice(MAX_SUMMARY_PARTS).reduce((sum, kind) => sum + counts.get(kind), 0);
   if (dropped > 0) {
-    parts.push(`+${dropped} more`);
+    rest.push(`+${dropped} more`);
   }
-  if (!parts.length) {
-    return `··· ${entries.length} steps`;
-  }
-  return `··· ${parts.join(" · ")}`;
+  return { lead: kindPhrase(KIND_LEADS, leadKind, counts.get(leadKind)), rest };
 }
 
 // One shared run, not one per kind: Cursor and Codex interleave reasoning with
@@ -2000,7 +2270,7 @@ function WorkGroupEntry({ group, options = null }) {
   const expandKey = groupExpandKey(group);
   const expanded = Boolean(expandKey && options?.expandedKeys?.has(expandKey));
   const { added, removed } = aggregateGroupDiffStats(group, options);
-  const label = workGroupLabel(group);
+  const { lead, rest } = workGroupSummary(group);
   const hasReasoning = (group?.entries || []).some(
     (entry) => entry?.kind === "reasoning"
   );
@@ -2030,7 +2300,10 @@ function WorkGroupEntry({ group, options = null }) {
         { "aria-hidden": "true", className: "work-group-chevron" },
         expanded ? "▾" : "▸"
       ),
-      h("span", { className: "work-group-count" }, label),
+      h("span", { className: "work-group-lead" }, lead),
+      rest.length
+        ? h("span", { className: "work-group-rest" }, rest.map((part) => ` · ${part}`).join(""))
+        : null,
       added > 0
         ? h("span", { className: "work-group-chip-add" }, `+${added}`)
         : null,

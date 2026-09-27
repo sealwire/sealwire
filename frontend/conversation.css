@@ -625,21 +625,237 @@
   background: transparent;
 }
 
-.message-card-tool {
+/* Tool runs (design 20c): a log line, not a card. File-change cards keep theirs. */
+.message-card-tool,
+.message-card-command {
   position: relative;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
   background: transparent;
   border: 0;
-  border-left: 2px solid var(--accent);
   border-radius: 0;
-  padding: 3px 60px 3px 12px;
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
+  font-size: var(--text-ui);
   line-height: var(--leading-relaxed);
   color: var(--text-primary);
 }
 
-.message-card-command {
-  border-left: 2px solid var(--text-3);
+.chat-message-file-change .message-card-tool {
+  border-left: 2px solid var(--accent);
+  padding: 3px 12px;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.tool-run-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 8px;
+  margin-left: -8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  text-align: left;
+}
+
+button.tool-run-row {
+  cursor: pointer;
+}
+
+button.tool-run-row:hover {
+  background: var(--surface-2);
+}
+
+button.tool-run-row:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 1px;
+}
+
+.tool-run-marker {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 10px;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.tool-run-live {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+/* Never squeezed by the command beside it; only a very long title clips itself. */
+.tool-run-title {
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+}
+
+.tool-run-title-mono {
+  max-width: none;
+  flex: 1 1 auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+.tool-run-command {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.tool-run-waiting {
+  box-sizing: border-box;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--text-3);
+}
+
+.tool-run-row.is-running .tool-run-title {
+  font-weight: var(--weight-medium);
+}
+
+.tool-run-row.is-running .tool-run-command {
+  color: var(--accent);
+}
+
+.tool-run-status {
+  flex: none;
+  align-self: center;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--err-bg);
+  color: var(--err-fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-strong);
+}
+
+.tool-run-status.is-neutral {
+  background: var(--status-neutral-bg);
+  color: var(--text-2);
+  font-weight: var(--weight-medium);
+}
+
+.tool-run-output {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 4px 18px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-0);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--leading-relaxed);
+  color: var(--text-2);
+}
+
+.tool-run-output-more,
+.tool-run-output-note {
+  color: var(--text-3);
+}
+
+.tool-run-cut-note {
+  margin: 2px 0 4px 18px;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+
+/* Opened: what the one-line row had to clip. */
+.tool-run-detail {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin: 2px 0 4px 18px;
+  min-width: 0;
+}
+
+.tool-run-detail:empty {
+  display: none;
+}
+
+.tool-run-name {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-strong);
+  color: var(--text-3);
+}
+
+.tool-run-subtitle {
+  font-size: var(--text-ui);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.tool-run-full-command {
+  align-self: stretch;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-0);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+  color: var(--text-1);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.tool-run-output-tail {
+  margin: 0;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-run-output-actions {
+  display: flex;
+  gap: 14px;
+  padding-top: 6px;
+}
+
+.tool-run-output-actions button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.tool-run-output-actions button:hover {
+  text-decoration: underline;
+}
+
+.message-card-tool > .tool-log-block,
+.message-card-tool > .tool-log-note {
+  margin-left: 18px;
 }
 
 /* Reasoning (design 20a): process, not an answer. One grey line folded; opened,
@@ -1202,64 +1418,10 @@
   margin: 12px 0;
 }
 
-.message-card-command {
-  position: relative;
-  padding: 10px 14px;
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-}
-
-.command-entry-controls {
-  position: absolute;
-  top: 8px;
-  right: 10px;
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-
-/* Small pill toggles inside tool/command cards — lighter than the regular button system. */
-.command-toggle-button,
-.tool-toggle-button {
-  padding: 2px 9px;
-  border-radius: var(--r-pill);
-  border: 1px solid var(--border-faint);
-  background: transparent;
-  color: var(--text-3);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-medium);
-  line-height: var(--leading-tight);
-}
-
-.command-toggle-button:hover:not(:disabled),
-.tool-toggle-button:hover:not(:disabled) {
-  background: var(--surface-2);
-  border-color: var(--border-soft);
-  color: var(--text-1);
-}
-
-.command-preview {
-  margin: 0;
-  padding: 0;
-  padding-right: 60px;
-  width: 100%;
-  min-width: 0;
-  max-width: 100%;
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  line-height: var(--leading-normal);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .command-detail {
   display: block;
-  margin: 0;
-  width: 100%;
+  margin: 2px 0 4px 18px;
+  width: auto;
   min-width: 0;
   max-width: 100%;
   padding: 8px 0;
@@ -1281,39 +1443,10 @@
 
 /* Tool entry: log-style layout. */
 
-.tool-log-row {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
-}
-
-.tool-log-name {
-  flex-shrink: 0;
-  font-weight: var(--weight-strong);
-  color: var(--text-primary);
-}
-
-.tool-log-primary {
-  flex: 1;
-  min-width: 0;
-  color: var(--text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.message-card-tool > * + .tool-log-row,
 .tool-log-subtitle,
 .tool-log-block,
 .tool-log-note {
   margin-top: 3px;
-}
-
-.tool-log-status {
-  flex-shrink: 0;
-  font-size: var(--text-xs);
-  color: var(--text-tertiary);
 }
 
 .tool-log-subtitle {
@@ -1351,13 +1484,23 @@
   color: var(--text-tertiary);
 }
 
-.tool-entry-controls {
-  position: absolute;
-  top: 2px;
-  right: 4px;
-  display: flex;
-  gap: 6px;
-  align-items: center;
+/* Undo / Reapply on the last turn diff: a small pill, not a full-size button. */
+.tool-toggle-button {
+  padding: 2px 9px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border-faint);
+  background: transparent;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+}
+
+.tool-toggle-button:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--border-soft);
+  color: var(--text-1);
 }
 
 /* .tool-action-button inherits the unified secondary archetype. */
@@ -1366,12 +1509,17 @@
  * default tool log row would just show the tool name + a JSON blob; instead
  * we render the questions and options as their own card so users can scan
  * planning decisions in the transcript. */
+/* Design 20b: the approval card's shape without the amber — a question is not a permission. */
 .message-card-ask-user {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  border-left: 2px solid var(--accent);
+  width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
   background: var(--surface-1);
+  box-shadow: var(--shadow-sm);
 }
 
 .composer-dock-stack {
@@ -1397,25 +1545,53 @@
   gap: 8px;
 }
 
+.ask-user-main {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px 12px;
+}
+
 .ask-user-meta {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: var(--text-xs);
-  color: var(--text-tertiary);
+  gap: 10px;
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--text-3);
 }
 
 .ask-user-tag {
+  flex: none;
+  font-size: var(--text-xs);
   font-weight: var(--weight-strong);
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-secondary);
+  color: var(--accent);
+}
+
+.ask-user-topic {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ask-user-status {
+  flex: none;
+  font-size: var(--text-xs);
+}
+
+.ask-user-question {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .ask-user-question + .ask-user-question {
   border-top: 1px solid var(--border-faint);
-  padding-top: 10px;
+  padding-top: 12px;
 }
 
 .ask-user-question-header {
@@ -1423,16 +1599,16 @@
   font-weight: var(--weight-strong);
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--text-tertiary);
-  margin-bottom: 4px;
+  color: var(--text-3);
 }
 
 .ask-user-question-text {
-  margin: 0 0 8px;
+  margin: 0;
   font-size: var(--text-body);
   font-weight: var(--weight-strong);
-  color: var(--text-primary);
-  line-height: var(--leading-normal);
+  line-height: var(--leading-relaxed);
+  color: var(--text-1);
+  overflow-wrap: anywhere;
 }
 
 .ask-user-options {
@@ -1442,36 +1618,27 @@
 }
 
 .ask-user-option {
-  padding: 8px 10px;
-  border-radius: 8px;
-  border: 1px solid var(--border-faint);
-  background: var(--bg-surface);
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border-soft);
+  background: transparent;
+  color: var(--text-1);
 }
 
-/* Interactive variant: each option is a tappable button. Mobile-first sizing
- * — minimum 44pt target per Apple HIG so options stay comfortably tappable
- * on phones. On desktop the same buttons stay full-width inside the card
- * column, which makes scanning planning questions easy. */
 .ask-user-option-button {
   appearance: none;
-  display: block;
   width: 100%;
-  text-align: left;
-  font: inherit;
-  color: var(--text-primary);
-  cursor: pointer;
   min-height: 44px;
-  padding: 10px 12px;
-  transition: border-color 120ms ease, background 120ms ease, transform 80ms ease;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .ask-user-option-button:hover:not(:disabled) {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 6%, var(--bg-surface));
-}
-
-.ask-user-option-button:active:not(:disabled) {
-  transform: scale(0.99);
+  background: var(--surface-2);
 }
 
 .ask-user-option-button:focus-visible {
@@ -1484,88 +1651,150 @@
   opacity: 0.6;
 }
 
-/* Wizard footer: Back on the left, Continue/Send on the right. Keep buttons
- * comfortably tappable on phones. */
-.ask-user-wizard-footer {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-  margin-top: 4px;
-}
-
-.ask-user-wizard-back,
-.ask-user-wizard-next {
-  appearance: none;
-  font: inherit;
-  font-weight: var(--weight-medium);
-  padding: 10px 14px;
-  min-height: 44px;
-  border-radius: 8px;
-  border: 1px solid var(--border-faint);
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease;
-}
-
-.ask-user-wizard-back:hover:not(:disabled),
-.ask-user-wizard-next:hover:not(:disabled) {
+.ask-user-option.is-chosen {
   border-color: var(--accent);
 }
 
-.ask-user-wizard-next {
-  font-weight: var(--weight-strong);
-  border-color: var(--accent);
-  color: var(--accent);
+/* Radio circle; a rounded square when several can be picked. */
+.ask-user-option-mark {
+  flex: none;
+  box-sizing: border-box;
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+  border-radius: var(--r-pill);
+  border: 1.5px solid var(--text-faint);
 }
 
-.ask-user-wizard-back:disabled,
-.ask-user-wizard-next:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.ask-user-option-mark.is-multi {
+  border-radius: 4px;
 }
 
-/* Per-question notes input — lets users elaborate on a pick or supply a
- * free-text "Other" answer when the predefined options don't fit. */
-.ask-user-notes-row {
+.ask-user-option.is-chosen .ask-user-option-mark {
+  border: 4px solid var(--accent);
+}
+
+.ask-user-option.is-chosen .ask-user-option-mark.is-multi {
+  border-width: 1.5px;
+  background: var(--accent);
+}
+
+.ask-user-option-copy {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-top: 4px;
+  gap: 3px;
+}
+
+.ask-user-option-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-ui);
+  font-weight: var(--weight-medium);
+  color: var(--text-1);
+}
+
+.ask-user-option.is-chosen .ask-user-option-label {
+  font-weight: var(--weight-strong);
+}
+
+.ask-user-recommended {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--accent-soft-bg);
+  color: var(--accent);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-strong);
+}
+
+.ask-user-option-description {
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+  color: var(--text-3);
+}
+
+.ask-user-option-button[data-key]::after {
+  content: attr(data-key);
+  flex: none;
+  margin-top: 1px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+/* The free answer is the last row, dashed until something is typed. */
+.ask-user-other {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 8px 12px;
+  border-radius: 9px;
+  border: 1px dashed var(--border-soft);
+  cursor: text;
+}
+
+/* Text kept but not picked reads as a plain, unpicked row. */
+.ask-user-other.is-filled {
+  border-style: solid;
+}
+
+.ask-user-other.is-filled:not(.is-chosen) .ask-user-notes-input {
+  color: var(--text-3);
+}
+
+.ask-user-other.is-chosen,
+.ask-user-other:focus-within {
+  border-style: solid;
+  border-color: var(--accent);
+}
+
+.ask-user-other .ask-user-option-mark {
+  border-color: var(--border-soft);
+}
+
+.ask-user-other.is-chosen .ask-user-option-mark {
+  border: 4px solid var(--accent);
+}
+
+.ask-user-other.is-chosen .ask-user-option-mark.is-multi {
+  border-width: 1.5px;
+  background: var(--accent);
 }
 
 .ask-user-notes-label {
-  font-size: var(--text-xs);
-  font-weight: var(--weight-strong);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-tertiary);
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 
 .ask-user-notes-input {
-  appearance: none;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 20px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-1);
   font: inherit;
-  width: 100%;
-  min-height: 44px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  border: 1px solid var(--border-faint);
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  resize: vertical;
-  line-height: var(--leading-normal);
+  font-size: var(--text-ui);
+  line-height: var(--leading-relaxed);
+  resize: none;
+  field-sizing: content;
 }
 
-.ask-user-notes-input:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-color: var(--accent);
+.ask-user-notes-input:focus {
+  outline: none;
 }
 
 .ask-user-notes-input::placeholder {
-  color: var(--text-tertiary);
-  opacity: 0.85;
+  color: var(--text-3);
 }
 
 .ask-user-notes-input:disabled {
@@ -1573,124 +1802,207 @@
   cursor: progress;
 }
 
-.ask-user-submit-row {
+.ask-user-wizard-footer {
   display: flex;
-  justify-content: flex-end;
-  margin-top: 4px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px 12px;
+  border-top: 1px solid var(--border-faint);
 }
 
-.ask-user-submit-button {
+.ask-user-footer-spacer {
+  flex: 1 1 0;
+}
+
+.ask-user-submit-button,
+.ask-user-wizard-next,
+.ask-user-wizard-back,
+.ask-user-decide,
+.ask-user-detail-retry {
   appearance: none;
-  font: inherit;
-  font-weight: var(--weight-strong);
-  padding: 10px 16px;
-  min-height: 44px;
+  height: 32px;
+  padding: 0 14px;
   border-radius: 8px;
-  border: 1px solid var(--accent);
-  background: var(--accent);
-  color: var(--bg-surface);
+  border: 1px solid var(--border-soft);
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--text-ui);
+  font-weight: var(--weight-medium);
   cursor: pointer;
-  transition: filter 120ms ease;
 }
 
-.ask-user-submit-button:hover:not(:disabled) {
-  filter: brightness(1.08);
+/* Ink, like Approve: answering is the decision. */
+.ask-user-submit-button,
+.ask-user-wizard-next {
+  padding: 0 16px;
+  border-color: transparent;
+  background: var(--text-1);
+  color: var(--surface-1);
+  font-weight: var(--weight-strong);
 }
 
-.ask-user-submit-button:disabled {
-  opacity: 0.55;
+.ask-user-submit-button:hover:not(:disabled),
+.ask-user-wizard-next:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text-1) 86%, var(--surface-1));
+}
+
+.ask-user-wizard-back:hover:not(:disabled),
+.ask-user-detail-retry:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.ask-user-decide {
+  padding: 0 12px;
+  border-color: transparent;
+  color: var(--text-3);
+}
+
+.ask-user-decide:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text-1);
+}
+
+.ask-user-submit-button:disabled,
+.ask-user-wizard-next:disabled,
+.ask-user-wizard-back:disabled,
+.ask-user-decide:disabled {
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
 .ask-user-error {
+  margin: 0 16px 12px;
   padding: 8px 10px;
   border-radius: 6px;
-  background: color-mix(in srgb, var(--err-fg) 12%, var(--bg-surface));
-  border: 1px solid color-mix(in srgb, var(--err-fg) 30%, var(--border-faint));
+  background: var(--err-bg);
   font-size: var(--text-sm);
-  color: var(--text-primary);
+  color: var(--text-1);
 }
 
-/* On narrow viewports, give the card a touch more breathing room and stack
- * everything full-width. The card already lives inside the transcript
- * column so we mostly need to enforce ≥44pt tap targets here. */
 @media (max-width: 640px) {
-  .message-card-ask-user {
-    gap: 14px;
-    padding: 12px;
+  .ask-user-main {
+    padding: 12px 12px 10px;
   }
-  .ask-user-question-text {
-    font-size: var(--text-body);
+  .ask-user-wizard-footer {
+    padding: 10px 12px 12px;
   }
   .ask-user-option-button {
     min-height: 48px;
-    padding: 12px 14px;
   }
-  .ask-user-option-description {
-    font-size: var(--text-sm);
-  }
-  .ask-user-submit-row {
-    justify-content: stretch;
-  }
-  .ask-user-submit-button {
-    width: 100%;
-    min-height: 48px;
-  }
-  .ask-user-wizard-footer {
-    gap: 10px;
-  }
+  .ask-user-submit-button,
+  .ask-user-wizard-next,
   .ask-user-wizard-back,
+  .ask-user-decide {
+    height: 40px;
+  }
+  .ask-user-submit-button,
   .ask-user-wizard-next {
-    min-height: 48px;
-    flex: 1;
+    flex: 1 1 auto;
+  }
+  .ask-user-footer-spacer {
+    display: none;
   }
   .ask-user-notes-input {
-    min-height: 56px;
-    font-size: var(--text-md); /* iOS zooms in on inputs <16px on focus; keep 16+ */
+    font-size: var(--text-md); /* iOS zooms into inputs under 16px */
   }
 }
 
-.ask-user-option.is-chosen {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, var(--bg-surface));
-  box-shadow: inset 3px 0 0 var(--accent);
-  padding-left: 12px;
+/* Answered: one line at the level of a tool row; opened, the options it chose from. */
+.chat-message-ask-user-answered {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
 }
 
-.ask-user-option-label {
+.ask-user-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  width: 100%;
+  min-width: 0;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
   font-size: var(--text-ui);
+  text-align: left;
+}
+
+button.ask-user-summary {
+  cursor: pointer;
+}
+
+button.ask-user-summary:hover {
+  color: var(--text-1);
+}
+
+button.ask-user-summary:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+.ask-user-summary-chevron {
+  flex: none;
+  width: 10px;
+  font-size: var(--text-xs);
+}
+
+.ask-user-summary-verb {
+  flex: none;
   font-weight: var(--weight-strong);
-  color: var(--text-primary);
+  color: var(--text-2);
 }
 
-.ask-user-option.is-chosen .ask-user-option-label {
-  color: var(--accent);
+.ask-user-summary-topic {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.ask-user-option-check {
-  font-weight: var(--weight-strong);
+.ask-user-summary-arrow {
+  flex: none;
+  color: var(--text-faint);
 }
 
-.ask-user-option-description {
-  margin-top: 2px;
-  font-size: var(--text-sm);
-  line-height: var(--leading-normal);
-  color: var(--text-secondary);
+.ask-user-summary-answer {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+}
+
+.ask-user-answered-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 6px 0 0 4px;
+  padding-left: 14px;
+  border-left: 1px solid var(--border-soft);
+}
+
+.ask-user-answered-detail .ask-user-tag {
+  color: var(--text-3);
 }
 
 .ask-user-freeform-answer {
-  margin-top: 6px;
   font-size: var(--text-sm);
-  color: var(--text-primary);
+  color: var(--text-1);
   padding: 6px 8px;
   border-radius: 6px;
-  background: color-mix(in srgb, var(--accent) 10%, var(--bg-surface));
-  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border-faint));
+  background: var(--accent-soft-bg);
 }
 
 .ask-user-freeform-answer-label {
   font-weight: var(--weight-strong);
-  color: var(--text-secondary);
+  color: var(--text-2);
   margin-right: 4px;
 }
 
@@ -1854,53 +2166,66 @@
   align-self: stretch;
 }
 
+/* A plain line (design 20c): bold lead, grey summary. Not a pill. */
 .work-group-chip {
   display: inline-flex;
   align-self: flex-start;
-  align-items: center;
+  align-items: baseline;
   gap: 8px;
-  padding: 4px 10px;
+  min-height: 28px;
+  padding: 4px 0;
   margin: 0;
-  border: 1px solid var(--border-faint);
-  border-radius: 999px;
-  background: var(--surface-1);
-  color: var(--text-tertiary);
-  font-size: var(--text-sm);
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  font-family: inherit;
+  font-size: var(--text-ui);
   line-height: var(--leading-normal);
   cursor: pointer;
-  font-family: inherit;
-  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
   max-width: 100%;
+  min-width: 0;
+  text-align: left;
 }
 
 .work-group-chip:hover,
 .work-group-chip-open {
-  color: var(--text-secondary);
-  background: var(--bg-elevated);
-  border-color: var(--border-subtle);
+  color: var(--text-1);
 }
 
-.work-group-chip-thinking {
-  padding-left: 12px;
-}
-
-.work-group-chip-thinking::before {
-  content: "";
-  width: 5px;
-  height: 5px;
-  flex-shrink: 0;
-  border-radius: 999px;
-  background: var(--warn-fg);
+.work-group-chip:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
 }
 
 .work-group-chevron {
   display: inline-block;
   width: 10px;
   flex-shrink: 0;
+  font-size: var(--text-xs);
   text-align: center;
 }
 
-.work-group-count {
+/* The group holds thinking as well as tool runs. */
+.work-group-chip-thinking::after {
+  content: "";
+  order: 99;
+  align-self: center;
+  width: 5px;
+  height: 5px;
+  flex-shrink: 0;
+  border-radius: var(--r-pill);
+  background: var(--warn-fg);
+}
+
+.work-group-lead {
+  flex: none;
+  font-weight: var(--weight-strong);
+  color: var(--text-2);
+}
+
+.work-group-rest {
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2139,4 +2464,13 @@
   .message-card {
     max-width: 100%;
   }
+}
+
+/* Inside an opened group the dot column already marks each row. */
+.chat-message.is-group-member .tool-run-row:not(.is-running) .tool-run-marker {
+  visibility: hidden;
+}
+
+.ask-user-question .ask-user-error {
+  margin: 0;
 }

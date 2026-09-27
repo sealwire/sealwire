@@ -216,6 +216,11 @@ fn parse_transcript_truncates_large_tool_payloads() {
         .as_deref()
         .unwrap_or_default()
         .contains("..."));
+    assert_eq!(
+        tool_entry.content_state,
+        crate::protocol::TranscriptContentState::Preview,
+        "a cut copy says it is one"
+    );
     assert!(tool_entry
         .text
         .as_deref()
@@ -475,10 +480,7 @@ fn parse_transcript_preserves_full_agent_messages() {
 
     assert_eq!(transcript.len(), 1);
     assert_eq!(transcript[0].kind, TranscriptEntryKind::AgentText);
-    assert_eq!(
-        transcript[0].text.as_deref().map(str::len),
-        Some(MAX_COMMAND_ENTRY_CHARS * 3)
-    );
+    assert_eq!(transcript[0].text.as_deref().map(str::len), Some(4_200));
     assert!(!transcript[0]
         .text
         .as_deref()
@@ -486,20 +488,97 @@ fn parse_transcript_preserves_full_agent_messages() {
         .contains("..."));
 }
 
+// History is read whole on every thread open, so the relay keeps a short copy of
+// big bodies. The cut has to say so, or it is served as the full output.
 #[test]
-fn command_execution_text_truncates_large_output() {
+fn a_command_read_from_history_is_kept_short_and_says_it_was_cut() {
+    let output = "B".repeat(20_000);
     let item = json!({
+        "id": "item-long",
         "type": "commandExecution",
         "command": "rg --files",
-        "aggregatedOutput": "B".repeat(MAX_COMMAND_OUTPUT_CHARS * 3)
+        "aggregatedOutput": output,
+        "status": "failed"
     });
 
-    let text = command_execution_text(&item);
+    let kept = parse_transcript_item(&item, Some("turn-1".to_string()), "completed").unwrap();
+    assert!(kept.text.as_deref().unwrap().chars().count() < 2_000);
+    assert_eq!(
+        kept.content_state,
+        crate::protocol::TranscriptContentState::Preview
+    );
 
-    assert!(text.starts_with("rg --files"));
-    assert!(text.chars().count() <= MAX_COMMAND_ENTRY_CHARS);
-    assert!(text.contains("..."));
-    assert!(!text.contains(&"B".repeat(MAX_COMMAND_OUTPUT_CHARS * 2)));
+    let detail =
+        parse_transcript_detail_item(&item, Some("turn-1".to_string()), "completed").unwrap();
+    assert_eq!(
+        detail.text.as_deref(),
+        Some(format!("rg --files\n{output}").as_str())
+    );
+}
+
+#[test]
+fn a_tool_call_read_from_history_is_kept_short_and_says_it_was_cut() {
+    let result = "C".repeat(20_000);
+    let item = json!({
+        "id": "item-mcp",
+        "type": "mcpToolCall",
+        "name": "search",
+        "result": result,
+        "status": "failed"
+    });
+
+    let kept = parse_transcript_item(&item, Some("turn-1".to_string()), "completed").unwrap();
+    assert_eq!(
+        kept.content_state,
+        crate::protocol::TranscriptContentState::Preview
+    );
+
+    let small = json!({ "id": "item-ok", "type": "commandExecution", "command": "ls", "aggregatedOutput": "a\n" });
+    let whole = parse_transcript_item(&small, None, "completed").unwrap();
+    assert_eq!(
+        whole.content_state,
+        crate::protocol::TranscriptContentState::Full,
+        "nothing cut, nothing claimed"
+    );
+}
+
+// A live tool call is parsed the same way; its cut copy must reach the snapshot as cut.
+#[tokio::test]
+async fn a_live_tool_call_with_a_huge_result_is_marked_cut() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-1".to_string());
+    }
+    handle_notification(
+        json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": { "id": "item-mcp", "type": "mcpToolCall", "name": "search", "result": "D".repeat(20_000), "status": "failed" }
+            }
+        }),
+        &state,
+    )
+    .await;
+    let relay = state.read().await;
+    let runtime = relay.runtime_for_thread("thread-1").expect("runtime");
+    let view = runtime
+        .transcript
+        .iter()
+        .find(|entry| entry.provider_item_id.as_deref() == Some("item-mcp"))
+        .expect("row")
+        .to_view();
+    assert_eq!(
+        view.content_state,
+        crate::protocol::TranscriptContentState::Preview
+    );
 }
 
 #[tokio::test]
@@ -6059,4 +6138,107 @@ fn codex_skills_rows_are_only_read_from_the_asked_folder() {
     assert!(parse_codex_skills(&blank, "/").is_none());
     let root = json!({ "data": [{ "cwd": "/", "skills": [] }] });
     assert!(parse_codex_skills(&root, "/").is_some());
+}
+
+// Codex joins command and output into one text with no boundary, so a
+// multi-line command (a heredoc) is only separable if the command rides alone.
+#[test]
+fn a_command_entry_carries_its_command_apart_from_the_output() {
+    let command = "cat <<EOF\nhello\nEOF";
+    let item = json!({
+        "id": "item-heredoc",
+        "type": "commandExecution",
+        "command": command,
+        "aggregatedOutput": "hello\n",
+        "status": "failed",
+        "exitCode": 1
+    });
+    for entry in [
+        parse_transcript_item(&item, Some("turn-1".to_string()), "completed").unwrap(),
+        parse_transcript_detail_item(&item, Some("turn-1".to_string()), "completed").unwrap(),
+    ] {
+        assert_eq!(entry.kind, TranscriptEntryKind::Command);
+        let tool = entry.tool.expect("a command entry names its command");
+        assert_eq!(tool.command.as_deref(), Some(command));
+        assert!(entry.text.as_deref().unwrap().starts_with(command));
+    }
+}
+
+// The live path builds command rows itself; it has to carry the command too, or a
+// multi-line command is split at its first newline on every surface.
+#[tokio::test]
+async fn a_live_command_row_names_its_command_from_start_to_finish() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-1".to_string());
+    }
+    let command = "cat <<EOF\nhello\nEOF";
+    let command_of = |relay: &RelayState| {
+        relay
+            .snapshot()
+            .transcript
+            .iter()
+            .find(|entry| entry.item_id.as_deref() == Some("item-heredoc"))
+            .and_then(|entry| entry.tool.as_ref())
+            .and_then(|tool| tool.command.clone())
+    };
+
+    handle_notification(
+        json!({
+            "method": "item/started",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": { "id": "item-heredoc", "type": "commandExecution", "command": command, "status": "inProgress" }
+            }
+        }),
+        &state,
+    )
+    .await;
+    assert_eq!(
+        command_of(&*state.read().await).as_deref(),
+        Some(command),
+        "started"
+    );
+
+    handle_notification(
+        json!({
+            "method": "item/commandExecution/outputDelta",
+            "params": { "threadId": "thread-1", "itemId": "item-heredoc", "delta": "hello\n" }
+        }),
+        &state,
+    )
+    .await;
+    assert_eq!(
+        command_of(&*state.read().await).as_deref(),
+        Some(command),
+        "streaming"
+    );
+
+    handle_notification(
+        json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "id": "item-heredoc", "type": "commandExecution", "command": command,
+                    "aggregatedOutput": "hello\n", "status": "failed", "exitCode": 1
+                }
+            }
+        }),
+        &state,
+    )
+    .await;
+    assert_eq!(
+        command_of(&*state.read().await).as_deref(),
+        Some(command),
+        "completed"
+    );
 }

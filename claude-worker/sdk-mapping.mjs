@@ -408,7 +408,9 @@ function mapToolCall(
       item_type: "toolCall",
       name: block.name || "unknown",
       title: toolTitle(block.name),
-      detail: null,
+      detail: typeof block.input?.description === "string" && block.input.description.trim()
+        ? block.input.description.trim()
+        : null,
       query: null,
       path: typeof block.input?.file_path === "string" ? block.input.file_path : null,
       url: typeof block.input?.url === "string" ? block.input.url : null,

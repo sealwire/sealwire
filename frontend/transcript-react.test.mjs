@@ -18,7 +18,7 @@ import {
   parseAskUserAnswers,
   shouldAutoLoadFileChangeDiffs,
   toolKindOf,
-  workGroupLabel,
+  workGroupSummary,
 } from "./shared/transcript-react.js";
 
 test("transcript virtualization stays off for short lists and server rendering", () => {
@@ -154,10 +154,10 @@ test("renderEntryMarkup renders typed session items safely", () => {
   assert.match(commandMarkup, /data-transcript-entry-kind="command"/);
   assert.match(commandMarkup, /data-transcript-toggle="entry"/);
   assert.match(commandMarkup, /data-item-id="cmd-1"/);
-  assert.match(commandMarkup, /<div class="command-preview"[^>]*>npm test<\/div>/);
-  assert.match(toolMarkup, /tool-log-name">Read</);
+  assert.match(commandMarkup, /class="tool-run-title tool-run-title-mono">npm test</);
+  assert.match(toolMarkup, /tool-run-title">Read</);
   assert.match(toolMarkup, /message-card-tool/);
-  assert.match(toolMarkup, /tool-log-primary">frontend\/remote\/main\.js</);
+  assert.match(toolMarkup, /tool-run-command">frontend\/remote\/main\.js</);
 });
 
 // A running agent entry renders through renderStreamingMarkdown (a stable
@@ -558,12 +558,12 @@ test("renderEntryMarkup collapses long command and tool previews without collaps
   });
 
   assert.match(commandMarkup, /data-transcript-toggle="entry"/);
-  assert.match(commandMarkup, />\s*▾\s*<\/button>/);
-  assert.match(commandMarkup, /class="command-preview"/);
-  assert.match(commandMarkup, /line 1 line 2 line 3/);
-  assert.doesNotMatch(commandMarkup, /line 1\nline 2/);
+  assert.match(commandMarkup, /aria-expanded="false"/);
+  assert.match(commandMarkup, /class="tool-run-title tool-run-title-mono"/);
+  assert.match(commandMarkup, /tool-run-title-mono">line 1</);
+  assert.doesNotMatch(commandMarkup, /line 2/);
   assert.match(toolMarkup, /data-transcript-toggle="entry"/);
-  assert.match(toolMarkup, /class="tool-log-primary"/);
+  assert.match(toolMarkup, /class="tool-run-command"/);
   assert.match(toolMarkup, /Search result payload/);
   assert.doesNotMatch(assistantMarkup, /message-collapsible/);
   assert.match(assistantMarkup, new RegExp(`A{1200}`));
@@ -1241,7 +1241,7 @@ test("renderEntryMarkup shows expanded command detail and loading note when requ
     loadingItemIds: new Set(["cmd-3"]),
   });
 
-  assert.match(expandedMarkup, />\s*▴\s*<\/button>/);
+  assert.match(expandedMarkup, /aria-expanded="true"/);
   assert.match(expandedMarkup, /class="command-detail"/);
   assert.match(expandedMarkup, /full command output/);
   assert.match(loadingMarkup, /Loading full command output/);
@@ -1280,7 +1280,7 @@ test("renderEntryMarkup expands tool details from fetched entry data", () => {
     loadingItemIds: new Set(),
   });
 
-  assert.match(expandedMarkup, />\s*▴\s*<\/button>/);
+  assert.match(expandedMarkup, /aria-expanded="true"/);
   assert.match(expandedMarkup, /Loaded the requested file\./);
   assert.match(expandedMarkup, /tool-log-block-label">input</);
   assert.match(expandedMarkup, /tool-log-pre">{&quot;text&quot;:&quot;file contents&quot;}/);
@@ -1793,7 +1793,7 @@ test("groupToolEntries keeps diff entries out of the work group", () => {
 });
 
 
-test("workGroupLabel names what the group actually did", () => {
+test("workGroupSummary names what the group actually did", () => {
   const group = {
     type: "work-group",
     entries: [
@@ -1804,10 +1804,13 @@ test("workGroupLabel names what the group actually did", () => {
       makeReasoning("r1"),
     ],
   };
-  assert.equal(workGroupLabel(group), "··· 2 reads · 1 search · 1 command · 1 thought");
+  assert.deepEqual(workGroupSummary(group), {
+    lead: "Ran 1 command",
+    rest: ["2 files read", "1 search", "1 thought"],
+  });
 });
 
-test("workGroupLabel falls back to a plain step count when nothing is classifiable", () => {
+test("workGroupSummary names unclassifiable tools as tools", () => {
   const group = {
     type: "work-group",
     entries: [
@@ -1815,10 +1818,10 @@ test("workGroupLabel falls back to a plain step count when nothing is classifiab
       makeTool("b", { tool: { name: "MysteryTool", item_type: "toolCall" } }),
     ],
   };
-  assert.equal(workGroupLabel(group), "··· 2 tools");
+  assert.deepEqual(workGroupSummary(group), { lead: "Used 2 tools", rest: [] });
 });
 
-test("workGroupLabel uses the ACP kind Cursor sends, not a guess from the title", () => {
+test("workGroupSummary uses the ACP kind Cursor sends, not a guess from the title", () => {
   const group = {
     type: "work-group",
     entries: [
@@ -1826,15 +1829,15 @@ test("workGroupLabel uses the ACP kind Cursor sends, not a guess from the title"
       makeTool("b", { tool: { name: "Running cargo test", kind: "execute" } }),
     ],
   };
-  assert.equal(workGroupLabel(group), "··· 1 read · 1 command");
+  assert.deepEqual(workGroupSummary(group), { lead: "Ran 1 command", rest: ["1 file read"] });
 });
 
-test("workGroupLabel reads Codex shell runs as commands, not generic tools", () => {
+test("workGroupSummary reads Codex shell runs as commands, not generic tools", () => {
   const group = {
     type: "work-group",
     entries: [makeCommand("c1"), makeCommand("c2"), makeCommand("c3")],
   };
-  assert.equal(workGroupLabel(group), "··· 3 commands");
+  assert.deepEqual(workGroupSummary(group), { lead: "Ran 3 commands", rest: [] });
 });
 
 test("toolKindOf classifies Claude, Codex and Cursor tools alike", () => {
@@ -1859,7 +1862,7 @@ test("TranscriptContent renders a collapsed group chip for consecutive completed
   assert.match(markup, /chat-message-work-group/);
   assert.match(markup, /data-expand-key="group:a"/);
   assert.match(markup, /data-transcript-toggle="group"/);
-  assert.match(markup, /··· 3 commands/);
+  assert.match(markup, /work-group-lead">Ran 3 commands</);
   // Members should NOT render when the group is collapsed.
   assert.doesNotMatch(markup, /chat-message-system[^>]*>(?:(?!chat-message-work-group)[\s\S])*?Bash/);
 });
@@ -1875,9 +1878,9 @@ test("TranscriptContent collapses consecutive Codex commands into one group chip
   ]);
   assert.match(markup, /chat-message-work-group/);
   assert.match(markup, /data-expand-key="group:cmd-a"/);
-  assert.match(markup, /··· 3 commands/);
+  assert.match(markup, /work-group-lead">Ran 3 commands</);
   // Collapsed: the individual command previews must not be visible yet.
-  assert.doesNotMatch(markup, /command-preview/);
+  assert.doesNotMatch(markup, /tool-run-row/);
   assert.doesNotMatch(markup, /data-transcript-entry-kind="command"/);
 });
 
@@ -1888,7 +1891,7 @@ test("TranscriptContent renders Codex command group members when expanded", () =
     { expandedKeys: new Set(["group:cmd-a"]) }
   );
   assert.match(markup, /work-group-chip-open/);
-  const previewCount = (markup.match(/command-preview/g) || []).length;
+  const previewCount = (markup.match(/class="tool-run-row/g) || []).length;
   assert.equal(previewCount, 2);
 });
 
@@ -1901,7 +1904,7 @@ test("TranscriptContent renders a collapsed work chip for reasoning and hides em
   assert.match(markup, /chat-message-work-group/);
   assert.match(markup, /data-expand-key="group:r0"/);
   assert.match(markup, /data-transcript-toggle="group"/);
-  assert.match(markup, /··· 2 thoughts/);
+  assert.match(markup, /work-group-lead">Thought 2 times</);
   // Collapsed: the member reasoning bodies must not be visible yet.
   assert.doesNotMatch(markup, /message-card-reasoning">/);
 });
@@ -1957,7 +1960,7 @@ test("TranscriptContent renders group members when the group is expanded", () =>
   assert.match(markup, /chat-message-work-group/);
   assert.match(markup, /work-group-chip-open/);
   // Each member should render its compact log row when the group is open.
-  const collapsedRowCount = (markup.match(/tool-log-row/g) || []).length;
+  const collapsedRowCount = (markup.match(/class="tool-run-row/g) || []).length;
   assert.equal(collapsedRowCount, 2);
 });
 
@@ -2376,14 +2379,14 @@ function makeAskUserEntry(overrides = {}) {
 }
 
 test("renderEntryMarkup renders AskUserQuestion as a structured card with questions and options", () => {
-  const markup = renderEntryMarkup(makeAskUserEntry());
-  assert.match(markup, /message-card-ask-user/);
+  const markup = renderEntryMarkup(makeAskUserEntry(), { expandedKeys: new Set(["ask:tool:askuser-1"]) });
+  assert.match(markup, /chat-message-ask-user/);
   assert.match(markup, /Claude asked/);
   // Question header + text
   assert.match(markup, /ask-user-question-header[^>]*>Approach</);
   assert.match(markup, /Which approach should we take\?/);
   // Both options rendered
-  assert.match(markup, /ask-user-option-label[^>]*>(?:[^<]|<span[^>]*>[^<]*<\/span>\s*)*Option A</);
+  assert.match(markup, /ask-user-option-label[^>]*>Option A</);
   assert.match(markup, /Do A because reasons/);
   assert.match(markup, /Do B because &lt;other&gt; reasons/);
   // Should NOT render the raw JSON preview block (the symptom we're fixing)
@@ -2391,10 +2394,9 @@ test("renderEntryMarkup renders AskUserQuestion as a structured card with questi
 });
 
 test("renderEntryMarkup highlights the chosen option for an answered AskUserQuestion", () => {
-  const markup = renderEntryMarkup(makeAskUserEntry());
-  // The chosen option carries the is-chosen modifier and the check glyph
+  const markup = renderEntryMarkup(makeAskUserEntry(), { expandedKeys: new Set(["ask:tool:askuser-1"]) });
+  // The chosen option carries the is-chosen modifier
   assert.match(markup, /ask-user-option is-chosen[^>]*>[\s\S]*?Option B/);
-  assert.match(markup, /ask-user-option-check[^>]*>✓/);
   assert.match(markup, /ask-user-status[^>]*>Answered</);
   // The non-chosen option must NOT carry is-chosen
   assert.doesNotMatch(markup, /ask-user-option is-chosen[^>]*>[\s\S]*?Option A/);
@@ -2420,7 +2422,7 @@ test("renderEntryMarkup shows free-form answer text when the user typed a custom
         'Your questions have been answered: "How often should we refresh?"="Only when I click the button manually".',
     },
   });
-  const markup = renderEntryMarkup(entry);
+  const markup = renderEntryMarkup(entry, { expandedKeys: new Set(["ask:tool:askuser-1"]) });
   assert.match(markup, /ask-user-freeform-answer/);
   assert.match(markup, /Only when I click the button manually/);
   // None of the structured options should be marked chosen
@@ -2433,7 +2435,7 @@ test("renderEntryMarkup marks running AskUserQuestion as waiting for an answer",
     tool: { result_preview: null },
   });
   const markup = renderEntryMarkup(entry);
-  assert.match(markup, /ask-user-status[^>]*>Waiting for answer</);
+  assert.match(markup, /ask-user-summary-answer[^>]*>Waiting for answer</);
   assert.doesNotMatch(markup, /ask-user-option is-chosen/);
 });
 
@@ -2452,14 +2454,12 @@ test("the pinned question card switches AskUserQuestion to interactive buttons +
   assert.match(markup, /chat-message-ask-user chat-message-ask-user-interactive/);
   // Each option becomes a <button>, not a <div>
   assert.match(markup, /<button[^>]*class="ask-user-option[^"]*ask-user-option-button[^"]*"[^>]*>/);
-  // Quick-path: a single single-select question with no notes typed keeps
-  // the wizard footer hidden — clicks submit immediately.
-  assert.doesNotMatch(markup, /ask-user-wizard-footer/);
-  assert.doesNotMatch(markup, /ask-user-submit-button/);
+  // Quick-path: a click answers a lone single-select question; Answer waits for typed text.
+  assert.match(markup, /ask-user-submit-button[^>]*disabled=""[^>]*>Answer</);
   // The notes textarea is always present so the user can elaborate.
   assert.match(markup, /<textarea[^>]*class="ask-user-notes-input"/);
   // Header status reflects interactive readiness for a single-question card
-  assert.match(markup, /ask-user-status[^>]*>Tap an option or add a note</);
+  assert.match(markup, /ask-user-status[^>]*>1 of 1</);
 });
 
 test("the pinned question card stays interactive when a pending request matches even if the entry status is completed (status can desync on the remote surface)", () => {
@@ -2514,7 +2514,7 @@ test("the pinned question card surfaces ask-user submission errors keyed by requ
   assert.match(markup, /ask-user-error[^>]*>Server said: no pending question</);
 });
 
-test("the pinned question card shows the wizard footer with Send to Claude on a multi-select question", () => {
+test("the pinned question card shows the wizard footer with Answer on a multi-select question", () => {
   const entry = makeAskUserEntry({
     item_id: "tool:toolu_abc",
     status: "running",
@@ -2542,12 +2542,10 @@ test("the pinned question card shows the wizard footer with Send to Claude on a 
   });
   // Multi-select can never use the quick path; wizard footer renders
   assert.match(markup, /ask-user-wizard-footer/);
-  // Last (and only) question gets the Send button — disabled until an answer is provided
-  assert.match(markup, /ask-user-submit-button[^>]*disabled=""[^>]*>Send to Claude</);
-  // Back is disabled on the first question
-  assert.match(markup, /ask-user-wizard-back[^>]*disabled=""/);
-  // Option buttons advertise aria-pressed for accessibility
-  assert.match(markup, /aria-pressed="false"/);
+  // Last (and only) question gets Answer — disabled until an answer is provided
+  assert.match(markup, /ask-user-submit-button[^>]*disabled=""[^>]*>Answer</);
+  // Multi-select options are checkboxes
+  assert.match(markup, /role="checkbox"[^>]*aria-checked="false"/);
 });
 
 test("the pinned question card wizard shows one question at a time with progress + Back/Continue for multi-question prompts", () => {
@@ -2571,15 +2569,15 @@ test("the pinned question card wizard shows one question at a time with progress
     ],
   });
   // Wizard renders Q1 first, with progress text and the Continue button
-  assert.match(markup, /ask-user-status[^>]*>Question 1 of 3</);
+  assert.match(markup, /ask-user-status[^>]*>1 of 3</);
   assert.match(markup, /Q1\?/);
   // Q2 and Q3 are NOT visible on the first step — only the active question
   assert.doesNotMatch(markup, /Q2\?/);
   assert.doesNotMatch(markup, /Q3\?/);
   // Continue button on a non-last question, disabled until the user answers
   assert.match(markup, /ask-user-wizard-next[^>]*disabled=""[^>]*>Continue</);
-  // Send button does NOT render on a non-last question
-  assert.doesNotMatch(markup, /Send to Claude/);
+  // Answer does NOT render on a non-last question
+  assert.doesNotMatch(markup, /ask-user-submit-button/);
   // Back is disabled on the first question
   assert.match(markup, /ask-user-wizard-back[^>]*disabled=""[^>]*>Back</);
 });
@@ -2602,7 +2600,7 @@ test("the pinned question card wizard renders a notes textarea on every interact
       { request_id: "ask:1", tool_use_id: "toolu_abc", thread_id: "t" },
     ],
   });
-  assert.match(markup, /<label[^>]*class="ask-user-notes-label"[^>]*>Add a note \(optional\)</);
+  assert.match(markup, /class="ask-user-notes-label"[^>]*>Something else</);
   assert.match(markup, /<textarea[^>]*class="ask-user-notes-input"[^>]*placeholder=/);
 });
 
@@ -2620,7 +2618,7 @@ test("renderEntryMarkup keeps the read-only card when no pending request matches
   });
   assert.doesNotMatch(markup, /chat-message-ask-user-interactive/);
   assert.doesNotMatch(markup, /ask-user-option-button/);
-  assert.match(markup, /ask-user-status[^>]*>Waiting for answer</);
+  assert.match(markup, /ask-user-summary-answer[^>]*>Waiting for answer</);
 });
 
 test("renderEntryMarkup falls back to generic tool rendering when AskUserQuestion JSON is truncated", () => {
@@ -2635,7 +2633,7 @@ test("renderEntryMarkup falls back to generic tool rendering when AskUserQuestio
   assert.doesNotMatch(markup, /message-card-ask-user/);
   // Should fall back to the generic tool layout
   assert.match(markup, /message-card-tool/);
-  assert.match(markup, /tool-log-name[^>]*>AskUserQuestion</);
+  assert.match(markup, /tool-run-title[^>]*>AskUserQuestion</);
 });
 
 test("the pinned question card uses pending AskUserQuestion data when the tool input preview is truncated", () => {
@@ -2682,7 +2680,7 @@ test("the pinned question card uses pending AskUserQuestion data when the tool i
   assert.match(markup, /What brand name should the visible title use\?/);
   assert.match(markup, /Sealwire/);
   assert.match(markup, /Capitalized/);
-  assert.match(markup, /ask-user-status[^>]*>Question 1 of 2</);
+  assert.match(markup, /ask-user-status[^>]*>1 of 2</);
   assert.match(markup, /ask-user-wizard-next[^>]*disabled=""[^>]*>Continue</);
 });
 
@@ -2790,12 +2788,10 @@ test("buildAskUserAnswerValue returns the array for a multi-select pick with no 
   );
 });
 
-test("buildAskUserAnswerValue joins label and notes into a free-text string", () => {
-  // Notes elevate the answer to free-form so Claude reads both the structured
-  // pick AND the user's elaboration.
+test("buildAskUserAnswerValue: a single-choice pick beats typed text; multiple choice joins them", () => {
   assert.equal(
     buildAskUserAnswerValue({ labels: ["Option A"], notes: "specifically variant X" }),
-    "Option A — specifically variant X"
+    "Option A"
   );
   assert.equal(
     buildAskUserAnswerValue({ labels: ["A", "B"], notes: "but ignore C", multiSelect: true }),
@@ -2900,7 +2896,7 @@ test("a PENDING question renders at the bottom, below entries that follow its to
     { pendingAskUserQuestions: [PENDING_ASK] }
   );
 
-  const askIndex = markup.indexOf("message-card-ask-user");
+  const askIndex = markup.indexOf("chat-message-ask-user");
   const trailingIndex = markup.indexOf("Meanwhile here is some context");
   assert.ok(askIndex >= 0, "the question must render");
   assert.ok(trailingIndex >= 0, "the trailing entry must render");
@@ -2934,7 +2930,7 @@ test("an ANSWERED question stays in its original position", () => {
     { pendingAskUserQuestions: [] }
   );
 
-  const askIndex = markup.indexOf("message-card-ask-user");
+  const askIndex = markup.indexOf("chat-message-ask-user");
   const trailingIndex = markup.indexOf("trailing");
   assert.ok(askIndex >= 0 && trailingIndex >= 0);
   assert.ok(
@@ -2952,7 +2948,7 @@ test("a pending question already at the tail is left where it is", () => {
     { pendingAskUserQuestions: [PENDING_ASK] }
   );
   const userIndex = markup.indexOf("Investigate this bug");
-  const askIndex = markup.indexOf("message-card-ask-user");
+  const askIndex = markup.indexOf("chat-message-ask-user");
   assert.ok(userIndex >= 0 && askIndex > userIndex);
   assert.equal(markup.split("message-card-ask-user").length - 1, 1);
 });

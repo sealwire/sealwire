@@ -112,6 +112,7 @@ import {
   cacheTranscriptEntryDetail,
   collectFileChangeDetailItemIds,
   getCachedTranscriptEntryDetail,
+  getFullTranscriptEntryDetail,
   getLiveTranscriptEntryDetail,
   isOmittedFileChangeDetail,
   setLiveTranscriptEntryDetail,
@@ -2155,7 +2156,11 @@ function RemoteApp() {
       type: "transcript/expand",
       itemId: expandKey,
     });
-    if (cachedDetail || liveDetail || transcriptUiState.transcriptExpandedDetails.has(itemId)) {
+    // A failed run's snapshot copy is parked live but cut; opening it must fetch.
+    if (
+      getFullTranscriptEntryDetail(currentState, session.active_thread_id, itemId)
+      || transcriptUiState.transcriptExpandedDetails.has(itemId)
+    ) {
       return;
     }
 
@@ -2164,28 +2169,26 @@ function RemoteApp() {
       itemId,
     });
 
+    const threadId = session.active_thread_id;
     try {
-      const detail = await fetchRemoteTranscriptEntryDetail(
-        session.active_thread_id,
-        itemId
-      );
-      if (!detail) {
+      const detail = await fetchRemoteTranscriptEntryDetail(threadId, itemId);
+      // `currentState` is the live store; the closed-over `session` is not.
+      if (!detail || currentState.session?.active_thread_id !== threadId) {
         return;
       }
 
-      const { cached } = cacheTranscriptEntryDetail(
-        currentState,
-        session.active_thread_id,
-        detail
-      );
+      const { cached } = cacheTranscriptEntryDetail(currentState, threadId, detail);
       if (!cached) {
-        setLiveTranscriptEntryDetail(currentState, session.active_thread_id, detail);
+        setLiveTranscriptEntryDetail(currentState, threadId, detail);
       }
       dispatchTranscriptUi({
         type: "transcript/setExpandedDetail",
         detail: null,
         itemId,
       });
+    } catch (error) {
+      // Called from a click handler that does not await it.
+      console.warn(`[transcript] detail load failed for ${itemId}:`, error);
     } finally {
       dispatchTranscriptUi({
         type: "transcript/finishLoadingDetail",

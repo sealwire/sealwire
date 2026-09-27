@@ -19,6 +19,7 @@ import { readLocalUiState } from "../ui-store.js";
 import {
   cacheTranscriptEntryDetail,
   getCachedTranscriptEntryDetail,
+  getFullTranscriptEntryDetail,
   getLiveTranscriptEntryDetail,
   isOmittedFileChangeDetail,
   setLiveTranscriptEntryDetail,
@@ -286,8 +287,8 @@ export function createTranscriptController(ctx) {
     if (
       !localUi.transcriptExpandedItemIds.has(expandKey)
       || !threadId
-      || getCachedTranscriptEntryDetail(state, threadId, itemId)
-      || getLiveTranscriptEntryDetail(state, threadId, itemId)
+      // A failed run's snapshot copy is parked live but cut; opening it must fetch.
+      || getFullTranscriptEntryDetail(state, threadId, itemId)
       || localUi.transcriptLoadingItemIds.has(itemId)
     ) {
       return;

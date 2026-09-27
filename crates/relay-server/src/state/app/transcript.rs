@@ -409,22 +409,13 @@ impl AppState {
                     &device_scope,
                     &relay.allowed_roots,
                 )?;
+                // A whole copy is the detail (Claude cannot answer per row at all); a
+                // cut one (Codex history) is re-read from the provider below.
                 runtime
                     .transcript
                     .iter()
                     .find(|entry| entry.row_id == input.item_id)
-                    .filter(|entry| {
-                        if entry.kind != crate::protocol::TranscriptEntryKind::ToolCall {
-                            return true;
-                        }
-                        entry.tool.as_ref().is_some_and(|tool| {
-                            tool.diff.is_some()
-                                || tool
-                                    .file_changes
-                                    .iter()
-                                    .any(|change| !change.diff.is_empty())
-                        })
-                    })
+                    .filter(|entry| !entry.cut)
                     .map(|entry| entry.to_view())
             } else {
                 None

@@ -104,6 +104,21 @@ pub(crate) struct TranscriptRecord {
     /// unset, and delta/status writes do NOT touch it — it is not a general write stamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) last_live_upsert_revision: Option<u64>,
+    /// The body here is a short copy (Codex keeps big history bodies short). Shipped
+    /// as `preview`, and its detail is re-read from the provider rather than served.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) cut: bool,
+}
+
+/// A row turned into a command keeps the command it names and nothing else.
+fn keep_only_command_tool(entry: &mut TranscriptRecord) {
+    if entry
+        .tool
+        .as_ref()
+        .is_some_and(|tool| tool.item_type != "commandExecution")
+    {
+        entry.tool = None;
+    }
 }
 
 impl TranscriptRecord {
@@ -121,9 +136,13 @@ impl TranscriptRecord {
             status: self.status.clone(),
             turn_id: self.turn_id.clone(),
             tool: self.tool.clone(),
-            // The runtime holds authoritative, complete content. Snapshot
-            // compaction is the only place that downgrades this.
-            content_state: crate::protocol::TranscriptContentState::Full,
+            // Complete unless the row was stored cut; snapshot compaction may
+            // downgrade it further.
+            content_state: if self.cut {
+                crate::protocol::TranscriptContentState::Preview
+            } else {
+                crate::protocol::TranscriptContentState::Full
+            },
         }
     }
 }
@@ -144,6 +163,38 @@ impl RelayState {
         self.upsert_transcript_item_for_thread(
             &thread_id, item_id, kind, text, status, turn_id, tool,
         )
+    }
+
+    /// Whether a provider row's stored body is a short copy; see `TranscriptRecord::cut`.
+    pub fn mark_transcript_row_cut(&mut self, item_id: &str, cut: bool) {
+        if let Some(thread_id) = self.active_thread_id.clone() {
+            self.mark_transcript_row_cut_for_thread(&thread_id, item_id, cut);
+        } else if let Some(row_id) = self
+            .transcript
+            .resolve_in(IdSpace::Provider, item_id)
+            .map(str::to_string)
+        {
+            self.transcript.update_row(&row_id, |entry| entry.cut = cut);
+        }
+    }
+
+    pub fn mark_transcript_row_cut_for_thread(
+        &mut self,
+        thread_id: &str,
+        item_id: &str,
+        cut: bool,
+    ) {
+        if let Some(runtime) = self.runtimes.get_mut(thread_id) {
+            if let Some(row_id) = runtime
+                .transcript
+                .resolve_in(IdSpace::Provider, item_id)
+                .map(str::to_string)
+            {
+                runtime
+                    .transcript
+                    .update_row(&row_id, |entry| entry.cut = cut);
+            }
+        }
     }
 
     /// `row_id` is a ROW key — `update_row` resolves in that namespace only. Callers
@@ -409,6 +460,7 @@ impl RelayState {
                     order_seq,
                     withdrawn: false,
                     last_live_upsert_revision: None,
+                    cut: false,
                 });
                 (row_id, entry_seq, order_seq)
             }
@@ -476,6 +528,7 @@ impl RelayState {
             order_seq,
             withdrawn: false,
             last_live_upsert_revision: Some(revision),
+            cut: false,
         });
         transcript_mutation_meta(base_revision, revision, entry_seq, order_seq, row_id)
     }
@@ -619,6 +672,7 @@ impl RelayState {
                     order_seq,
                     withdrawn: false,
                     last_live_upsert_revision: None,
+                    cut: false,
                 });
                 (row_id, entry_seq, order_seq, 0)
             }
@@ -1060,6 +1114,7 @@ impl RelayState {
         status: String,
         turn_id: String,
     ) {
+        let tool = ToolCallView::command_execution(Some(command.clone()));
         let mut text = command;
         if let Some(output) = super::super::non_empty(Some(output.unwrap_or_default())) {
             text.push_str("\n");
@@ -1069,13 +1124,14 @@ impl RelayState {
         if let Some(thread_id) = self.active_thread_id.clone() {
             self.upsert_transcript_item_for_thread(
                 &thread_id,
-                item_id,
+                item_id.clone(),
                 TranscriptEntryKind::Command,
                 Some(text),
                 status,
                 Some(turn_id),
-                None,
+                Some(tool),
             );
+            self.mark_transcript_row_cut_for_thread(&thread_id, &item_id, false);
             return;
         }
 
@@ -1089,7 +1145,8 @@ impl RelayState {
                 entry.kind = TranscriptEntryKind::Command;
                 entry.text = Some(text);
                 entry.status = status;
-                entry.tool = None;
+                entry.tool = Some(tool);
+                entry.cut = false;
             });
             return;
         }
@@ -1100,7 +1157,7 @@ impl RelayState {
             Some(text),
             status,
             Some(turn_id),
-            None,
+            Some(tool),
         );
     }
 
@@ -1126,6 +1183,7 @@ impl RelayState {
         status: String,
         turn_id: String,
     ) {
+        let tool = ToolCallView::command_execution(Some(command.clone()));
         self.upsert_transcript_item_for_thread(
             thread_id,
             item_id,
@@ -1133,7 +1191,7 @@ impl RelayState {
             Some(command),
             status,
             Some(turn_id),
-            None,
+            Some(tool),
         );
     }
 
@@ -1150,23 +1208,25 @@ impl RelayState {
             .map(str::to_string)
         {
             self.bump_transcript_revision();
+            let tool = ToolCallView::command_execution(Some(command.clone()));
             self.transcript.update_row(&row_id, |entry| {
                 entry.kind = TranscriptEntryKind::Command;
                 entry.text = Some(command);
                 entry.status = status;
                 entry.turn_id = Some(turn_id);
-                entry.tool = None;
+                entry.tool = Some(tool);
             });
             return;
         }
 
+        let tool = ToolCallView::command_execution(Some(command.clone()));
         self.upsert_transcript_item(
             item_id,
             TranscriptEntryKind::Command,
             Some(command),
             status,
             Some(turn_id),
-            None,
+            Some(tool),
         );
     }
 
@@ -1206,7 +1266,7 @@ impl RelayState {
                         if entry.status.trim().is_empty() || entry.status == "completed" {
                             entry.status = "running".to_string();
                         }
-                        entry.tool = None;
+                        keep_only_command_tool(entry);
                         inserted
                     })
                     .unwrap_or(false);
@@ -1226,6 +1286,7 @@ impl RelayState {
                     order_seq,
                     withdrawn: false,
                     last_live_upsert_revision: None,
+                    cut: false,
                 });
                 (row_id, entry_seq, order_seq)
             }
@@ -1262,7 +1323,7 @@ impl RelayState {
                 if entry.status.trim().is_empty() || entry.status == "completed" {
                     entry.status = "running".to_string();
                 }
-                entry.tool = None;
+                keep_only_command_tool(entry);
             });
             return transcript_mutation_meta(
                 base_revision,

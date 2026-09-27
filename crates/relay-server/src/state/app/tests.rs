@@ -3216,6 +3216,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     order_seq: 0,
                     withdrawn: false,
                     last_live_upsert_revision: None,
+                    cut: false,
                 });
         }
     }
@@ -3241,6 +3242,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     order_seq: 0,
                     withdrawn: false,
                     last_live_upsert_revision: None,
+                    cut: false,
                 });
         }
     }
@@ -3596,6 +3598,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                         order_seq: 0,
                         withdrawn: false,
                         last_live_upsert_revision: None,
+                        cut: false,
                     });
             }
             relay.observe_thread_cwd("thread-a", &linked_cwd);
@@ -3872,6 +3875,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     order_seq: 0,
                     withdrawn: false,
                     last_live_upsert_revision: Some(20),
+                    cut: false,
                 });
             runtime
                 .transcript
@@ -3887,6 +3891,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     order_seq: 0,
                     withdrawn: false,
                     last_live_upsert_revision: Some(10),
+                    cut: false,
                 });
         }
 
@@ -4236,6 +4241,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                         order_seq: 0,
                         withdrawn: false,
                         last_live_upsert_revision: None,
+                        cut: false,
                     });
             }
         }
@@ -6627,6 +6633,92 @@ tree; got {}",
         assert_eq!(
             chunk.transcript_generation, expected_generation,
             "the chunk response must be stamped too — a chunk loop can span the restart"
+        );
+    }
+
+    // The relay's own copy of a row is complete; a provider that cannot answer
+    // per row (Claude) must not turn a failed tool's full output into "not found".
+    #[tokio::test]
+    async fn a_tool_row_detail_is_served_from_the_relays_complete_copy() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_string_lossy().into_owned();
+        let (app, _, _) = build_app(&cwd).await;
+        let thread_id = "detail-tool-thread";
+        let item_id = "tool:bash-1";
+        let output = format!("Exit code 1\n{}", "line\n".repeat(2_000));
+        {
+            let mut relay = app.relay.write().await;
+            relay.activate_thread(
+                ThreadSummaryView {
+                    workspace_trusted: false,
+                    id: thread_id.to_string(),
+                    name: None,
+                    preview: String::new(),
+                    cwd: cwd.clone(),
+                    updated_at: unix_now(),
+                    source: "fake".to_string(),
+                    status: "idle".to_string(),
+                    model_provider: "fake".to_string(),
+                    provider: "fake".to_string(),
+                    forked_from: None,
+                    renamed: false,
+                    flagged: false,
+                },
+                &cwd,
+                DEFAULT_MODEL,
+                DEFAULT_APPROVAL_POLICY,
+                DEFAULT_SANDBOX,
+                DEFAULT_EFFORT,
+                "device-a",
+            );
+            relay.upsert_transcript_item(
+                item_id.to_string(),
+                crate::protocol::TranscriptEntryKind::ToolCall,
+                None,
+                "failed".to_string(),
+                Some("turn-1".to_string()),
+                Some(crate::protocol::ToolCallView {
+                    item_type: "toolCall".to_string(),
+                    name: "Bash".to_string(),
+                    title: "Bash".to_string(),
+                    kind: None,
+                    detail: Some("Run the tests".to_string()),
+                    query: None,
+                    path: None,
+                    url: None,
+                    command: Some("npm test".to_string()),
+                    input_preview: None,
+                    result_preview: Some(output.clone()),
+                    diff: None,
+                    file_changes: Vec::new(),
+                    apply_state: None,
+                    file_changes_omitted: false,
+                    can_apply: None,
+                }),
+            );
+        }
+
+        let detail = app
+            .read_thread_entry_detail(crate::protocol::ReadThreadEntryDetailInput {
+                thread_id: thread_id.to_string(),
+                item_id: item_id.to_string(),
+                field: None,
+                cursor: None,
+                device_id: None,
+            })
+            .await
+            .expect("the relay holds this row, so its detail is readable");
+        let entry = detail.entry.expect("detail entry");
+        let tool = entry.tool.expect("tool");
+        let served = tool.result_preview.unwrap_or_default();
+        let pending: usize = detail
+            .pending_fields
+            .iter()
+            .filter(|field| field.field == "tool.result_preview")
+            .count();
+        assert!(
+            served == output || pending == 1,
+            "the full output is served, inline or in chunks"
         );
     }
 
@@ -9161,6 +9253,7 @@ tree; got {}",
                         order_seq,
                         withdrawn: false,
                         last_live_upsert_revision: None,
+                        cut: false,
                     });
             }
         }
@@ -12574,6 +12667,7 @@ tree; got {}",
                 Some("turn-1".to_string()),
                 None,
             );
+            relay.mark_transcript_row_cut_for_thread(&source.id, "prov-1", true);
             let runtime = relay.runtime_for_thread(&source.id).expect("runtime");
             runtime
                 .transcript
@@ -12620,7 +12714,7 @@ tree; got {}",
         assert_eq!(
             codex.detail_requests.lock().await.clone(),
             vec!["prov-1".to_string()],
-            "the provider must be asked under ITS name"
+            "a row the relay holds only cut is asked of the provider, under ITS name"
         );
         assert_eq!(
             detail.row_id, row_id,
@@ -23010,6 +23104,7 @@ settings update: {error}"
                 order_seq: 0,
                 withdrawn: false,
                 last_live_upsert_revision: None,
+                cut: false,
             });
     }
 
@@ -23047,6 +23142,7 @@ settings update: {error}"
                     order_seq: 0,
                     withdrawn: false,
                     last_live_upsert_revision: None,
+                    cut: false,
                 });
         }
     }

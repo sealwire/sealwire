@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   buildExpandedTranscriptDetailEntries,
   cacheTranscriptEntryDetail,
+  getFullTranscriptEntryDetail,
   getCachedTranscriptEntryDetail,
   getLiveTranscriptEntryDetail,
   isOmittedFileChangeDetail,
@@ -171,4 +172,51 @@ test("local transcript details prefer live entries for running expanded items", 
 
   assert.equal(detailEntries.get("tool-1")?.status, "running");
   assert.equal(detailEntries.get("tool-1")?.tool?.title, "Codex changed frontend/app.js.");
+});
+
+// A failed row's output in the snapshot is only its head; the snapshot copy
+// parked in the live store must not stand in for the full body.
+function failedPreviewSnapshot() {
+  return {
+    active_thread_id: "thread-1",
+    transcript: [
+      {
+        item_id: "tool:bash-1",
+        kind: "tool_call",
+        status: "failed",
+        content_state: "preview",
+        tool: { item_type: "toolCall", name: "Bash", command: "npm test", result_preview: "Exit code 1\nhead..." },
+      },
+    ],
+  };
+}
+
+test("a failed row's cut snapshot copy never counts as full, and a fetched body survives re-syncs", () => {
+  const state = createState();
+  const snapshot = failedPreviewSnapshot();
+
+  syncLiveTranscriptEntryDetailsFromSnapshot(state, snapshot);
+  assert.equal(getFullTranscriptEntryDetail(state, "thread-1", "tool:bash-1"), null);
+  assert.equal(
+    buildExpandedTranscriptDetailEntries(state, { expandedItemIds: new Set(["entry:tool:bash-1"]), threadId: "thread-1" })
+      .get("tool:bash-1")?.content_state,
+    "preview",
+    "with nothing better, an opened row still shows what it has"
+  );
+
+  const full = {
+    ...snapshot.transcript[0],
+    content_state: "full",
+    tool: { ...snapshot.transcript[0].tool, result_preview: "Exit code 1\nhead\n...\ntail" },
+  };
+  setLiveTranscriptEntryDetail(state, "thread-1", full);
+  // The next snapshot carries the same cut copy again; it must not demote the full body.
+  syncLiveTranscriptEntryDetailsFromSnapshot(state, failedPreviewSnapshot());
+  const kept = getFullTranscriptEntryDetail(state, "thread-1", "tool:bash-1");
+  assert.equal(kept?.tool?.result_preview, "Exit code 1\nhead\n...\ntail");
+  assert.equal(
+    buildExpandedTranscriptDetailEntries(state, { autoDetailItemIds: ["tool:bash-1"], threadId: "thread-1" })
+      .get("tool:bash-1")?.tool?.result_preview,
+    "Exit code 1\nhead\n...\ntail"
+  );
 });
