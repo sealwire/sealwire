@@ -2186,6 +2186,13 @@ fn server_message_name(message: &ServerMessage) -> &'static str {
 }
 
 async fn publish_snapshot(writer: &BrokerWriter, state: &AppState) -> Result<(), String> {
+    // Checked before building: nobody live could read it, and a paired phone's arrival
+    // (welcome or presence join) binds it first and then wakes the loop to publish again.
+    let targets = state.broker_targets().await;
+    if targets.is_empty() {
+        debug!("no live paired surface; skipping broker session snapshot");
+        return Ok(());
+    }
     let snapshot = state.snapshot().await;
     let broker_can_read_content = state.broker_can_read_content().await;
     let compacted = snapshot
@@ -2219,17 +2226,11 @@ async fn publish_snapshot(writer: &BrokerWriter, state: &AppState) -> Result<(),
         return Ok(());
     }
 
-    let targets = state.broker_targets().await;
     let target_summary = targets
         .iter()
         .map(|target| format!("{}:{}", target.device_id, target.peer_id))
         .collect::<Vec<_>>()
         .join(",");
-    let target_summary = if target_summary.is_empty() {
-        "-".to_string()
-    } else {
-        target_summary
-    };
     info!(
         scope = "session_snapshot",
         target_count = targets.len(),
@@ -2237,13 +2238,6 @@ async fn publish_snapshot(writer: &BrokerWriter, state: &AppState) -> Result<(),
         delivery_mode = "e2ee_targeted",
         "resolved encrypted broker surface targets"
     );
-    if targets.is_empty() {
-        debug!(
-            active_thread_id = compacted.active_thread_id.as_deref().unwrap_or("-"),
-            transcript_entries = compacted.transcript.len(),
-            "broker session snapshot has no online surface targets"
-        );
-    }
     let mut messages = Vec::new();
     for target in targets {
         let envelope = encrypt_json(&target.payload_secret, &compacted)?;

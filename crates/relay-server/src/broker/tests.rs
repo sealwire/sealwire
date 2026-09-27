@@ -6193,3 +6193,127 @@ async fn already_linked_discards_oneshot_file_input() {
     assert_eq!(code, 1, "override while linked must fail");
     assert!(!oneshot.exists(), "oneshot file must be consumed/unlinked");
 }
+
+/// A phone paired earlier but not in the room now, next to an online surface that is
+/// still mid-pairing: history and presence alone, with no live approved target.
+async fn snapshot_publish_state(security: SecurityProfile) -> AppState {
+    let (change_tx, _) = watch::channel(0_u64);
+    let relay = Arc::new(RwLock::new(RelayState::new(
+        "/tmp/broker-snapshot-publish".to_string(),
+        change_tx.clone(),
+        security,
+    )));
+    relay.write().await.paired_devices.insert(
+        "phone-1".to_string(),
+        crate::state::PairedDevice {
+            device_id: "phone-1".to_string(),
+            label: "phone-1".to_string(),
+            payload_secret: "secret".to_string(),
+            device_verify_key: "verify".to_string(),
+            created_at: 1,
+            last_seen_at: Some(1),
+            last_peer_id: Some("surface-yesterday".to_string()),
+            broker_join_ticket_expires_at: None,
+            path_scope: Vec::new(),
+        },
+    );
+    let state = AppState::from_parts(relay, HashMap::new(), change_tx);
+    state
+        .replace_online_surface_peers(["surface-pairing".to_string()])
+        .await;
+    state
+}
+
+async fn bring_paired_phone_online(state: &AppState) {
+    state
+        .replace_online_surface_peers(["surface-pairing".to_string(), "surface-a".to_string()])
+        .await;
+    state
+        .mark_remote_device_seen("phone-1", "surface-a", None)
+        .await
+        .expect("paired phone should bind to its peer");
+}
+
+async fn published_snapshot_payloads(state: &AppState) -> Vec<serde_json::Value> {
+    let (writer, mut now_rx, _train_rx) = super::writer::test_writer();
+    publish_snapshot(&writer, state)
+        .await
+        .expect("snapshot publish should succeed");
+    let mut payloads = Vec::new();
+    while let Ok(message) = now_rx.try_recv() {
+        let Message::Text(text) = message else {
+            panic!("broker frames are text, got {message:?}");
+        };
+        let frame: serde_json::Value = serde_json::from_str(&text).expect("frame is json");
+        assert_eq!(frame["type"], "publish");
+        payloads.push(frame["payload"].clone());
+    }
+    payloads
+}
+
+#[tokio::test]
+async fn managed_snapshot_is_not_published_without_a_live_paired_surface() {
+    let state = snapshot_publish_state(SecurityProfile::managed()).await;
+
+    let payloads = published_snapshot_payloads(&state).await;
+
+    assert!(
+        payloads.is_empty(),
+        "nobody live can read a managed snapshot, so none may be broadcast; got {payloads:?}"
+    );
+}
+
+#[tokio::test]
+async fn private_snapshot_is_not_published_without_a_live_paired_surface() {
+    let state = snapshot_publish_state(SecurityProfile::private()).await;
+
+    let payloads = published_snapshot_payloads(&state).await;
+
+    assert!(
+        payloads.is_empty(),
+        "nobody live can open a private snapshot, so none may be sent; got {payloads:?}"
+    );
+}
+
+#[tokio::test]
+async fn managed_snapshot_is_still_one_broadcast_once_a_paired_surface_is_live() {
+    let state = snapshot_publish_state(SecurityProfile::managed()).await;
+    bring_paired_phone_online(&state).await;
+
+    let payloads = published_snapshot_payloads(&state).await;
+
+    assert_eq!(payloads.len(), 1, "expected one frame, got {payloads:?}");
+    let payload = &payloads[0];
+    assert_eq!(payload["kind"], "session_snapshot");
+    assert!(
+        payload.get("target_peer_id").is_none() && payload.get("messages").is_none(),
+        "managed snapshots stay an un-addressed broadcast; got {payload}"
+    );
+    assert_eq!(payload["snapshot"]["broker_can_read_content"], true);
+}
+
+#[tokio::test]
+async fn private_snapshot_is_sealed_for_the_live_paired_surface_only() {
+    let state = snapshot_publish_state(SecurityProfile::private()).await;
+    bring_paired_phone_online(&state).await;
+
+    let payloads = published_snapshot_payloads(&state).await;
+
+    assert_eq!(payloads.len(), 1, "expected one frame, got {payloads:?}");
+    assert_eq!(payloads[0]["kind"], "targeted_messages");
+    let messages = payloads[0]["messages"]
+        .as_array()
+        .expect("targeted frame carries messages");
+    assert_eq!(messages.len(), 1, "only the live phone is a target");
+    let message = &messages[0];
+    assert_eq!(message["target_peer_id"], "surface-a");
+    assert_eq!(message["payload"]["kind"], "encrypted_session_snapshot");
+    assert_eq!(message["payload"]["target_peer_id"], "surface-a");
+    assert_eq!(message["payload"]["device_id"], "phone-1");
+    let envelope: EncryptedEnvelope =
+        serde_json::from_value(message["payload"]["envelope"].clone())
+            .expect("envelope deserializes");
+    let snapshot: serde_json::Value =
+        decrypt_json("secret", &envelope).expect("the phone's own secret opens the snapshot");
+    assert_eq!(snapshot["broker_can_read_content"], false);
+}
