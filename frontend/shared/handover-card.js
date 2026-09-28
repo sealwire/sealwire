@@ -1,6 +1,15 @@
 // Design 23a/23b: both ends of a /handover as one card each, drawn from the same summary.
-import React, { useEffect, useRef, useState } from "react";
+import React, { useState } from "react";
 
+import {
+  avatar,
+  CardIcon,
+  clockTime,
+  OpenThreadLink,
+  ShowAllButton,
+  Spinner,
+  useFold,
+} from "./card-parts.js";
 import { renderMarkdown } from "./markdown.js";
 import { providerLabel } from "./provider-labels.js";
 import { transcriptRowKey } from "./transcript-row-key.js";
@@ -79,87 +88,30 @@ export function briefSummary(text, instruction) {
     : value;
 }
 
-function clockTime(seconds) {
-  if (!Number.isFinite(seconds) || seconds <= 0) {
-    return "";
-  }
-  const date = new Date(seconds * 1000);
-  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
-
 function agentName(provider) {
   return providerLabel(provider) || "the other agent";
-}
-
-function Icon({ paths }) {
-  return h(
-    "svg",
-    {
-      width: 15,
-      height: 15,
-      viewBox: "0 0 16 16",
-      fill: "none",
-      stroke: "currentColor",
-      strokeWidth: 1.5,
-      strokeLinecap: "round",
-      strokeLinejoin: "round",
-      "aria-hidden": "true",
-    },
-    ...paths.map((d) => h("path", { key: d, d }))
-  );
 }
 
 const HANDED_OVER_ICON = ["M2 8h9M8 4.5 11.5 8 8 11.5", "M14 3v10"];
 const PICKED_UP_ICON = ["M2 3v10", "M5 8h9M8.5 4.5 5 8l3.5 3.5"];
 
-function Caret({ open }) {
-  return h(
-    "svg",
-    {
-      className: `handover-caret${open ? " is-open" : ""}`,
-      width: 9,
-      height: 9,
-      viewBox: "0 0 10 10",
-      fill: "currentColor",
-      "aria-hidden": "true",
-    },
-    h("path", { d: "M3 1.5 7 5 3 8.5z" })
-  );
-}
-
-// Folded to a couple of lines; its heading or text toggles it, but only once the browser
-// says the text is cut off, since widths differ per screen.
+// Folded to a couple of lines; its heading or its text opens it.
 function SummarySection({ section, body }) {
-  const [open, setOpen] = useState(false);
-  const [cutOff, setCutOff] = useState(false);
-  const valueRef = useRef(null);
-  const folds = Boolean(section.title);
-  useEffect(() => {
-    const node = valueRef.current;
-    if (!folds || open || !node) {
-      return undefined;
-    }
-    const measure = () => setCutOff(node.scrollHeight > node.clientHeight + 1);
-    measure();
-    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(measure) : null;
-    observer?.observe(node);
-    return () => observer?.disconnect();
-  }, [folds, open, body]);
+  const fold = useFold(body, Boolean(section.title));
   const label = !section.title
     ? null
-    : open || cutOff
+    : fold.togglable
       ? h(
           "button",
           {
             type: "button",
             className: "handover-section-label",
-            "aria-expanded": open ? "true" : "false",
-            onClick: () => setOpen((value) => !value),
+            "aria-expanded": fold.open ? "true" : "false",
+            onClick: fold.toggle,
           },
           section.title
         )
       : h("span", { className: "handover-section-label" }, section.title);
-  const togglable = folds && (open || cutOff);
   return h(
     "div",
     { className: `handover-section${section.title ? "" : " is-untitled"}` },
@@ -167,18 +119,9 @@ function SummarySection({ section, body }) {
     h(
       "div",
       {
-        ref: valueRef,
-        className: `handover-section-value message-body${folds && !open ? " is-clamped" : ""}${
-          togglable ? " is-togglable" : ""
-        }`,
-        // A link still goes where it points, and a drag to select text is not a press.
-        onClick: togglable
-          ? (event) => {
-              if (!event.target.closest?.("a") && !String(globalThis.getSelection?.() || "")) {
-                setOpen((value) => !value);
-              }
-            }
-          : undefined,
+        ref: fold.ref,
+        className: `handover-section-value message-body ${fold.className}`,
+        onClick: fold.onClick,
       },
       renderMarkdown(body || "—")
     )
@@ -209,17 +152,11 @@ function SummarySections({ text }) {
       })
     ),
     more
-      ? h(
-          "button",
-          {
-            type: "button",
-            className: "handover-card-more",
-            "aria-expanded": expanded ? "true" : "false",
-            onClick: () => setExpanded((value) => !value),
-          },
-          h(Caret, { open: expanded }),
-          expanded ? "Show less" : more
-        )
+      ? h(ShowAllButton, {
+          open: expanded,
+          onToggle: () => setExpanded((value) => !value),
+          label: more,
+        })
       : null
   );
 }
@@ -231,7 +168,7 @@ function HandoverCard({ icon, kicker, title, time, summary, footerStart, link })
     h(
       "div",
       { className: "handover-card-head" },
-      h("span", { className: "handover-card-icon" }, h(Icon, { paths: icon })),
+      h("span", { className: "handover-card-icon" }, h(CardIcon, { paths: icon })),
       h(
         "div",
         { className: "handover-card-heading" },
@@ -248,17 +185,6 @@ function HandoverCard({ icon, kicker, title, time, summary, footerStart, link })
       h("span", { className: "handover-card-spacer" }),
       link
     )
-  );
-}
-
-function OpenThreadLink({ threadId, label }) {
-  if (!threadId) {
-    return null;
-  }
-  return h(
-    "button",
-    { type: "button", className: "handover-card-link", "data-open-thread-id": threadId },
-    label
   );
 }
 
@@ -294,15 +220,6 @@ function SourceCard({ handover, members }) {
   });
 }
 
-function avatar(markup, provider) {
-  return h("span", {
-    className: "message-avatar",
-    "aria-hidden": "true",
-    ...(markup ? { "data-provider": provider } : null),
-    dangerouslySetInnerHTML: { __html: markup },
-  });
-}
-
 /**
  * The source's `/handover` turn: what was typed, then a progress line or the card.
  * A failure leaves the turn's rows as they are, so nothing already written is hidden.
@@ -334,7 +251,7 @@ export function HandoverSourceEntry({
     outcome = h(
       "div",
       { className: "handover-line", role: "status" },
-      h("span", { className: "handover-spinner", "aria-hidden": "true" }),
+      h(Spinner),
       h("span", { className: "handover-line-label" }, "Preparing handover"),
       h("span", { className: "handover-line-detail" }, `${sourceAgent} is summarizing this thread for ${target}`)
     );

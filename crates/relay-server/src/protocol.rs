@@ -1206,6 +1206,18 @@ impl SessionSnapshot {
                             truncate_with_ellipsis(text, EMERGENCY_TRANSCRIPT_SHELL_CHARS);
                         }
                     }
+                    // An omitted row is drawn from its hydrated copy, card included.
+                    if let Some(InjectionView {
+                        card: InjectionCard::Review(review),
+                        ..
+                    }) = &mut entry.injection
+                    {
+                        for round in &mut review.rounds {
+                            round.findings.clear();
+                            round.fixed.clear();
+                            round.change = None;
+                        }
+                    }
                     if let Some(tool) = &mut entry.tool {
                         if !tool.file_changes.is_empty() || tool.diff.is_some() {
                             tool.file_changes_omitted = true;
@@ -2163,19 +2175,137 @@ pub struct TranscriptEntryView {
 }
 
 /// What an injected user row was for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InjectionKind {
     /// The source was asked to write a handover; its reply is the summary.
     HandoverRequest,
     /// The target was given the summary, followed by `HandoverCardView::instruction`.
     HandoverBrief,
+    /// The reviewed thread was asked to recap its change for the reviewer.
+    ReviewRecap,
+    /// The reviewer was given the change to review.
+    ReviewBrief,
+    /// A round's findings, handed back to the reviewed thread.
+    ReviewResult,
+    /// The reviewed thread was asked to commit before the next round.
+    ReviewCommit,
+    /// The reviewer approved; the last row of the review.
+    ReviewApproved,
+    /// The review ended without approval and needs the person.
+    ReviewEscalated,
+}
+
+impl InjectionKind {
+    pub fn is_review(self) -> bool {
+        !matches!(self, Self::HandoverRequest | Self::HandoverBrief)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InjectionView {
     pub kind: InjectionKind,
-    pub handover: HandoverCardView,
+    #[serde(flatten)]
+    pub card: InjectionCard,
+}
+
+impl InjectionView {
+    pub fn handover(&self) -> Option<&HandoverCardView> {
+        match &self.card {
+            InjectionCard::Handover(handover) => Some(handover),
+            InjectionCard::Review(_) => None,
+        }
+    }
+
+    pub fn review(&self) -> Option<&ReviewCardView> {
+        match &self.card {
+            InjectionCard::Review(review) => Some(review),
+            InjectionCard::Handover(_) => None,
+        }
+    }
+}
+
+/// Serialized as a field named after the variant, beside `kind`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InjectionCard {
+    Handover(HandoverCardView),
+    Review(ReviewCardView),
+}
+
+/// One review as the row it rides on needs it: only the rounds that row's card draws.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewCardView {
+    pub id: String,
+    /// The round this row belongs to; 0 for the recap asked before the first.
+    pub round: u32,
+    pub max_rounds: u32,
+    pub parent_thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_title: Option<String>,
+    pub parent_provider: String,
+    /// The reviewer of this row's round.
+    pub reviewer_thread_id: String,
+    pub reviewer_provider: String,
+    /// The job's status, as `ReviewJobView::status` spells it.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// `accepted` once the person took an escalated review as it stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
+    pub rounds: Vec<ReviewRoundView>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewRoundView {
+    pub round: u32,
+    pub reviewer_thread_id: String,
+    /// `approve`, `needs_changes`, `unsure` or `unknown`; absent while the reviewer works.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
+    /// What still stands after this round, most severe first.
+    #[serde(default)]
+    pub findings: Vec<ReviewFindingView>,
+    #[serde(default)]
+    pub findings_total: usize,
+    /// Earlier findings this round's reviewer found fixed.
+    #[serde(default)]
+    pub fixed: Vec<ReviewFindingView>,
+    #[serde(default)]
+    pub fixed_total: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_sha: Option<String>,
+    /// `candidate_sha` is a snapshot of uncommitted work, not a commit anyone can name.
+    #[serde(default)]
+    pub checkpoint: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insertions: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<u32>,
+    /// The opening line of what the reviewed thread said it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<String>,
+    pub started_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
+    /// The reviewed thread was handed this round's result.
+    #[serde(default)]
+    pub delivered: bool,
+}
+
+/// One line of the reviewer's `## Findings`, in the form its prompt asks for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewFindingView {
+    /// `high`, `medium` or `low`.
+    pub severity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    pub text: String,
 }
 
 /// Both ends of one handover, as its two cards show it.
@@ -3449,6 +3579,9 @@ pub struct RequestReviewInput {
     /// to 1..=10 server-side.
     #[serde(default)]
     pub max_rounds: Option<u32>,
+    /// The review that needed the person and that this one carries on from.
+    #[serde(default)]
+    pub continues_review_id: Option<String>,
     pub device_id: Option<String>,
 }
 
@@ -3895,6 +4028,12 @@ pub struct ReviewDeleteReceipt {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewAcceptReceipt {
+    pub review_id: String,
+    pub decision: String,
+}
+
 /// Compact view of a review job for snapshots and the reviews listing.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReviewJobView {
@@ -3927,6 +4066,9 @@ pub struct ReviewJobView {
     /// that `git show` cannot find.
     pub candidate_is_checkpoint: bool,
     pub verdict_candidate_sha: Option<String>,
+    /// When the reviewer began the round it is reading; 0 while it is not reading one.
+    pub reviewing_since: u64,
+    pub files: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]

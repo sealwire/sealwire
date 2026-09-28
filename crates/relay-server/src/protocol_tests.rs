@@ -198,6 +198,8 @@ fn review_job_view(
         candidate_sha: None,
         candidate_is_checkpoint: false,
         verdict_candidate_sha: None,
+        reviewing_since: 0,
+        files: None,
     }
 }
 
@@ -849,6 +851,8 @@ fn local_web_control_plane_metadata_does_not_shell_normal_live_transcript() {
             candidate_sha: None,
             candidate_is_checkpoint: false,
             verdict_candidate_sha: None,
+            reviewing_since: 0,
+            files: None,
         })
         .collect();
     snapshot.reviewer_threads = (0..17)
@@ -1581,6 +1585,8 @@ fn control_plane_flood_keeps_both_surfaces_bounded_without_shelling_live_text() 
                 candidate_sha: None,
                 candidate_is_checkpoint: false,
                 verdict_candidate_sha: None,
+                reviewing_since: 0,
+                files: None,
             })
             .collect();
         snapshot.reviewer_threads = (0..120)

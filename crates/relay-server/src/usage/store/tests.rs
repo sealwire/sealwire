@@ -747,21 +747,19 @@ fn handover_mark(id: &str, status: &str) -> crate::state::HandoverMark {
 #[test]
 fn handover_marks_survive_a_reopen() {
     use crate::protocol::InjectionKind;
-    use crate::state::{InjectedMessage, MessageAnchor};
+    use crate::state::{InjectedMessage, InjectionTag, MessageAnchor};
     let dir = TempDir::new().expect("tempdir");
     let done = handover_mark("handover-done", "done");
     let request = InjectedMessage {
         thread_id: "source".to_string(),
         anchor: MessageAnchor::Item("user:abc".to_string()),
-        kind: InjectionKind::HandoverRequest,
-        handover_id: done.id.clone(),
+        tag: InjectionTag::handover(InjectionKind::HandoverRequest, &done.id),
         created_at: 10,
     };
     let brief = InjectedMessage {
         thread_id: "target".to_string(),
         anchor: MessageAnchor::Turn("turn-9".to_string()),
-        kind: InjectionKind::HandoverBrief,
-        handover_id: done.id.clone(),
+        tag: InjectionTag::handover(InjectionKind::HandoverBrief, &done.id),
         created_at: 11,
     };
     {
@@ -772,14 +770,14 @@ fn handover_marks_survive_a_reopen() {
         store.record_injected_message(&brief);
     }
 
-    let (handovers, messages) = open_in(&dir).load_injections("restarted");
+    let loaded = open_in(&dir).load_injections("restarted");
 
     assert_eq!(
-        handovers,
+        loaded.handovers,
         vec![done],
         "a later save replaces the earlier one"
     );
-    assert_eq!(messages, vec![request, brief]);
+    assert_eq!(loaded.messages, vec![request, brief]);
 }
 
 /// Nothing drives a handover across a restart, so one still under way when the
@@ -789,25 +787,27 @@ fn a_handover_left_working_is_failed_on_load() {
     let dir = TempDir::new().expect("tempdir");
     open_in(&dir).save_handover_mark(&handover_mark("handover-1", "working"));
 
-    let (handovers, _) = open_in(&dir).load_injections("the relay restarted");
+    let loaded = open_in(&dir).load_injections("the relay restarted");
 
-    assert_eq!(handovers[0].status, "failed");
-    assert_eq!(handovers[0].error.as_deref(), Some("the relay restarted"));
+    assert_eq!(loaded.handovers[0].status, "failed");
+    assert_eq!(
+        loaded.handovers[0].error.as_deref(),
+        Some("the relay restarted")
+    );
 }
 
-/// A deleted session's rows are gone, so are its marks; a handover neither end still
-/// points at goes with them.
+/// A deleted session's rows are gone, and so is each mark the relay found only they
+/// carried.
 #[test]
-fn forgetting_a_thread_drops_its_marks_and_orphaned_handovers() {
+fn forgetting_a_thread_drops_its_rows_and_the_marks_named() {
     use crate::protocol::InjectionKind;
-    use crate::state::{InjectedMessage, MessageAnchor};
+    use crate::state::{InjectedMessage, InjectionTag, MessageAnchor};
     let dir = TempDir::new().expect("tempdir");
     let store = open_in(&dir);
     let message = |thread: &str, handover: &str| InjectedMessage {
         thread_id: thread.to_string(),
         anchor: MessageAnchor::Item(format!("user:{thread}")),
-        kind: InjectionKind::HandoverRequest,
-        handover_id: handover.to_string(),
+        tag: InjectionTag::handover(InjectionKind::HandoverRequest, handover),
         created_at: 1,
     };
     store.save_handover_mark(&handover_mark("shared", "done"));
@@ -816,14 +816,144 @@ fn forgetting_a_thread_drops_its_marks_and_orphaned_handovers() {
     store.record_injected_message(&message("kept", "shared"));
     store.record_injected_message(&message("gone", "alone"));
 
-    store.forget_thread_injections("gone");
+    store.forget_thread_injections("gone", &["alone".to_string()]);
 
-    let (handovers, messages) = store.load_injections("restarted");
+    let loaded = store.load_injections("restarted");
     assert_eq!(
-        handovers.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+        loaded
+            .handovers
+            .iter()
+            .map(|h| h.id.as_str())
+            .collect::<Vec<_>>(),
         vec!["shared"]
     );
-    assert_eq!(messages, vec![message("kept", "shared")]);
+    assert_eq!(loaded.messages, vec![message("kept", "shared")]);
+}
+
+/// Handover cards written under schema 11 must still be drawn after the upgrade.
+#[test]
+fn rows_marked_under_schema_eleven_keep_their_handover() {
+    use crate::protocol::InjectionKind;
+    use crate::state::{InjectionTag, MessageAnchor};
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("sealwire.db");
+    open_in(&dir).save_handover_mark(&handover_mark("handover-1", "done"));
+    Connection::open(&path)
+        .expect("open")
+        .execute_batch(
+            "DROP TABLE injected_message;
+             DROP TABLE review;
+             CREATE TABLE injected_message (
+                 thread_id   TEXT NOT NULL,
+                 anchor      TEXT NOT NULL,
+                 kind        TEXT NOT NULL,
+                 handover_id TEXT NOT NULL,
+                 created_at  INTEGER NOT NULL,
+                 PRIMARY KEY (thread_id, anchor)
+             );
+             INSERT INTO injected_message VALUES
+                 ('source', 'item:user:abc', 'handover_request', 'handover-1', 7);
+             PRAGMA user_version = 11;",
+        )
+        .expect("rewind to schema 11");
+
+    let loaded = open_in(&dir).load_injections("restarted");
+
+    assert_eq!(loaded.handovers.len(), 1);
+    assert_eq!(loaded.messages.len(), 1);
+    assert_eq!(
+        loaded.messages[0].anchor,
+        MessageAnchor::Item("user:abc".to_string())
+    );
+    assert_eq!(
+        loaded.messages[0].tag,
+        InjectionTag::handover(InjectionKind::HandoverRequest, "handover-1")
+    );
+}
+
+/// A review's rounds are what its cards draw, so they come back whole; one the last
+/// run left under way is over, since nothing drives a review across a restart.
+#[test]
+fn review_marks_survive_a_reopen_and_an_unfinished_one_fails() {
+    use crate::protocol::{InjectionKind, ReviewFindingView, ReviewRoundView};
+    use crate::state::{InjectedMessage, InjectionTag, MessageAnchor, ReviewMark};
+    let dir = TempDir::new().expect("tempdir");
+    let finished = ReviewMark {
+        id: "review-1".to_string(),
+        parent_thread_id: "parent".to_string(),
+        parent_provider: "claude_code".to_string(),
+        reviewer_provider: "codex".to_string(),
+        max_rounds: 3,
+        status: "escalated".to_string(),
+        rounds: vec![ReviewRoundView {
+            round: 1,
+            reviewer_thread_id: "reviewer".to_string(),
+            verdict: Some("needs_changes".to_string()),
+            findings: vec![ReviewFindingView {
+                severity: "high".to_string(),
+                location: Some("gate.rs:88".to_string()),
+                text: "The gate is not a lifetime invariant.".to_string(),
+            }],
+            findings_total: 1,
+            started_at: 5,
+            finished_at: Some(9),
+            ..ReviewRoundView::default()
+        }],
+        created_at: 1,
+        updated_at: 9,
+        ..ReviewMark::default()
+    };
+    let running = ReviewMark {
+        id: "review-2".to_string(),
+        status: "waiting_for_reviewer".to_string(),
+        ..finished.clone()
+    };
+    // Taken up by review-2, which the restart ends before it reached the author.
+    let taken_up = ReviewMark {
+        id: "review-0".to_string(),
+        decision: Some("continued".to_string()),
+        continued_by: Some("review-2".to_string()),
+        created_at: 0,
+        updated_at: 0,
+        ..finished.clone()
+    };
+    let result = InjectedMessage {
+        thread_id: "parent".to_string(),
+        anchor: MessageAnchor::Item("user:fix".to_string()),
+        tag: InjectionTag::review(InjectionKind::ReviewResult, "review-1", 1),
+        created_at: 10,
+    };
+    {
+        let store = open_in(&dir);
+        store.save_review_mark(&taken_up);
+        store.save_review_mark(&finished);
+        store.save_review_mark(&running);
+        store.record_injected_message(&result);
+    }
+
+    let loaded = open_in(&dir).load_injections("the relay restarted");
+
+    let by_id = |id: &str| loaded.reviews.iter().find(|r| r.id == id).cloned().unwrap();
+    assert_eq!(by_id("review-1"), finished);
+    assert_eq!(by_id("review-2").status, "failed");
+    assert_eq!(
+        by_id("review-2").error.as_deref(),
+        Some("the relay restarted")
+    );
+    assert_eq!(
+        (by_id("review-0").decision, by_id("review-0").continued_by),
+        (None, None),
+        "what took it up never reached the author, so it still asks"
+    );
+    assert_eq!(loaded.messages, vec![result]);
+    let again = open_in(&dir).load_injections("again");
+    assert!(
+        again
+            .reviews
+            .iter()
+            .any(|r| r.id == "review-2" && r.status == "failed"),
+        "the failure is written back, not re-derived on every start"
+    );
 }
 
 /// A sidecar that cannot be removed is a step that failed, so the old name stays.

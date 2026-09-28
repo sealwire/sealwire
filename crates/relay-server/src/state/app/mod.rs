@@ -272,6 +272,9 @@ pub struct AppState {
     /// `run_review_job`'s `workspace_retries` retry path.
     #[cfg(test)]
     force_reviewer_creation_workspace_gone_once: Arc<std::sync::atomic::AtomicBool>,
+    /// Test-only: the person presses Stop while the next round is being recorded.
+    #[cfg(test)]
+    cancel_while_recording_round_once: Arc<std::sync::atomic::AtomicBool>,
     /// How long (ms) to watch a thread for signs of a turn after a start request
     /// failed, before concluding the provider never began one. Overridable in
     /// tests.
@@ -318,6 +321,7 @@ mod git_context;
 mod goal;
 mod handover;
 mod handover_marks;
+mod injection_marks;
 mod orchestrator;
 pub(crate) mod orchestrator_dispatch;
 pub(crate) mod orchestrator_proposals;
@@ -327,6 +331,7 @@ mod projects;
 mod providers;
 mod review;
 mod review_comments;
+mod review_marks;
 mod review_ticks;
 mod sessions;
 mod skills;
@@ -502,6 +507,8 @@ impl AppState {
             force_reviewer_creation_workspace_gone_once: Arc::new(
                 std::sync::atomic::AtomicBool::new(false),
             ),
+            #[cfg(test)]
+            cancel_while_recording_round_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             team_step_stall_ms: Arc::new(std::sync::atomic::AtomicU64::new(600_000)),
             scheduled_proposal_tick_ms: Arc::new(std::sync::atomic::AtomicU64::new(
                 SCHEDULED_PROPOSAL_TICK_MS,
@@ -699,6 +706,8 @@ impl AppState {
             force_reviewer_creation_workspace_gone_once: Arc::new(
                 std::sync::atomic::AtomicBool::new(false),
             ),
+            #[cfg(test)]
+            cancel_while_recording_round_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             team_step_stall_ms: Arc::new(std::sync::atomic::AtomicU64::new(600_000)),
             scheduled_proposal_tick_ms: Arc::new(std::sync::atomic::AtomicU64::new(
                 SCHEDULED_PROPOSAL_TICK_MS,

@@ -102,6 +102,19 @@ export function resolveTranscriptAction(target) {
     };
   }
 
+  const reviewButton = closest("[data-review-action]");
+  if (reviewButton) {
+    return {
+      kind: "reviewAction",
+      element: reviewButton,
+      action: reviewButton.dataset.reviewAction || "",
+      reviewId: reviewButton.dataset.reviewId || "",
+      parentThreadId: reviewButton.dataset.parentThreadId || "",
+      reviewerThreadId: reviewButton.dataset.reviewerThreadId || "",
+      reviewerProvider: reviewButton.dataset.reviewerProvider || "",
+    };
+  }
+
   const openThreadButton = closest("[data-open-thread-id]");
   if (openThreadButton) {
     return {

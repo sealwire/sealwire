@@ -3,9 +3,14 @@
 //! Keyed by what the provider hands back, never the relay's row id: a restart
 //! rebuilds every transcript from provider history.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::protocol::{HandoverCardView, InjectionKind, InjectionView, TranscriptEntryKind};
+use serde::{Deserialize, Serialize};
+
+use crate::protocol::{
+    HandoverCardView, InjectionCard, InjectionKind, InjectionView, ReviewCardView,
+    ReviewFindingView, ReviewRoundView, TranscriptEntryKind,
+};
 
 use super::transcript::TranscriptRecord;
 use super::transcript_store::ThreadTranscript;
@@ -37,18 +42,56 @@ impl MessageAnchor {
     }
 }
 
+const KIND_NAMES: [(InjectionKind, &str); 8] = [
+    (InjectionKind::HandoverRequest, "handover_request"),
+    (InjectionKind::HandoverBrief, "handover_brief"),
+    (InjectionKind::ReviewRecap, "review_recap"),
+    (InjectionKind::ReviewBrief, "review_brief"),
+    (InjectionKind::ReviewResult, "review_result"),
+    (InjectionKind::ReviewCommit, "review_commit"),
+    (InjectionKind::ReviewApproved, "review_approved"),
+    (InjectionKind::ReviewEscalated, "review_escalated"),
+];
+
 pub(crate) fn injection_kind_name(kind: InjectionKind) -> &'static str {
-    match kind {
-        InjectionKind::HandoverRequest => "handover_request",
-        InjectionKind::HandoverBrief => "handover_brief",
-    }
+    KIND_NAMES
+        .iter()
+        .find(|(known, _)| *known == kind)
+        .map(|(_, name)| *name)
+        .unwrap_or_default()
 }
 
 pub(crate) fn injection_kind_from_name(name: &str) -> Option<InjectionKind> {
-    match name {
-        "handover_request" => Some(InjectionKind::HandoverRequest),
-        "handover_brief" => Some(InjectionKind::HandoverBrief),
-        _ => None,
+    KIND_NAMES
+        .iter()
+        .find(|(_, known)| *known == name)
+        .map(|(kind, _)| *kind)
+}
+
+/// What a sent row was for: the handover or review it belongs to, and for a review
+/// the round.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InjectionTag {
+    pub(crate) kind: InjectionKind,
+    pub(crate) ref_id: String,
+    pub(crate) round: u32,
+}
+
+impl InjectionTag {
+    pub(crate) fn handover(kind: InjectionKind, handover_id: &str) -> Self {
+        Self {
+            kind,
+            ref_id: handover_id.to_string(),
+            round: 0,
+        }
+    }
+
+    pub(crate) fn review(kind: InjectionKind, review_id: &str, round: u32) -> Self {
+        Self {
+            kind,
+            ref_id: review_id.to_string(),
+            round,
+        }
     }
 }
 
@@ -56,8 +99,7 @@ pub(crate) fn injection_kind_from_name(name: &str) -> Option<InjectionKind> {
 pub(crate) struct InjectedMessage {
     pub(crate) thread_id: String,
     pub(crate) anchor: MessageAnchor,
-    pub(crate) kind: InjectionKind,
-    pub(crate) handover_id: String,
+    pub(crate) tag: InjectionTag,
     pub(crate) created_at: u64,
 }
 
@@ -78,6 +120,48 @@ pub(crate) struct HandoverMark {
     pub(crate) updated_at: u64,
 }
 
+/// The lasting side of a review. `ReviewJob` is pruned and keeps only its latest
+/// round; the cards need every round for as long as their rows exist.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ReviewMark {
+    pub(crate) id: String,
+    pub(crate) parent_thread_id: String,
+    pub(crate) parent_provider: String,
+    pub(crate) reviewer_provider: String,
+    pub(crate) max_rounds: u32,
+    pub(crate) status: String,
+    pub(crate) error: Option<String>,
+    pub(crate) decision: Option<String>,
+    /// The review that took this one up with "One more round".
+    #[serde(default)]
+    pub(crate) continued_by: Option<String>,
+    pub(crate) rounds: Vec<ReviewRoundView>,
+    pub(crate) created_at: u64,
+    pub(crate) updated_at: u64,
+}
+
+impl ReviewMark {
+    pub(crate) fn is_settled(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "complete" | "failed" | "escalated" | "cancelled"
+        )
+    }
+
+    /// Replaces the round a retry began again, so a round is only ever listed once.
+    pub(crate) fn begin_round(&mut self, round: ReviewRoundView) {
+        self.rounds.retain(|existing| existing.round != round.round);
+        self.rounds.push(round);
+        self.rounds.sort_by_key(|existing| existing.round);
+    }
+
+    pub(crate) fn round_mut(&mut self, round: u32) -> Option<&mut ReviewRoundView> {
+        self.rounds
+            .iter_mut()
+            .find(|existing| existing.round == round)
+    }
+}
+
 #[derive(Clone, Debug)]
 enum Match {
     Anchor(MessageAnchor),
@@ -89,15 +173,23 @@ enum Match {
 #[derive(Debug, Default)]
 pub(crate) struct Injections {
     handovers: HashMap<String, HandoverMark>,
+    reviews: HashMap<String, ReviewMark>,
     anchored: HashMap<String, Vec<InjectedMessage>>,
-    pending: HashMap<String, Vec<(String, InjectionKind, String)>>,
+    pending: HashMap<String, Vec<(String, InjectionTag)>>,
 }
 
 impl Injections {
-    pub(crate) fn load(handovers: Vec<HandoverMark>, messages: Vec<InjectedMessage>) -> Self {
+    pub(crate) fn load(
+        handovers: Vec<HandoverMark>,
+        reviews: Vec<ReviewMark>,
+        messages: Vec<InjectedMessage>,
+    ) -> Self {
         let mut injections = Self::default();
         for handover in handovers {
             injections.put_handover(handover);
+        }
+        for review in reviews {
+            injections.put_review(review);
         }
         for message in messages {
             injections.anchor(message);
@@ -113,16 +205,32 @@ impl Injections {
         self.handovers.insert(handover.id.clone(), handover);
     }
 
-    pub(crate) fn expect(&mut self, thread_id: &str, text: &str, kind: InjectionKind, id: &str) {
+    pub(crate) fn review(&self, id: &str) -> Option<&ReviewMark> {
+        self.reviews.get(id)
+    }
+
+    pub(crate) fn put_review(&mut self, review: ReviewMark) {
+        self.reviews.insert(review.id.clone(), review);
+    }
+
+    pub(crate) fn reviews_continued_by(&self, review_id: &str) -> Vec<String> {
+        self.reviews
+            .values()
+            .filter(|review| review.continued_by.as_deref() == Some(review_id))
+            .map(|review| review.id.clone())
+            .collect()
+    }
+
+    pub(crate) fn expect(&mut self, thread_id: &str, text: &str, tag: InjectionTag) {
         self.pending
             .entry(thread_id.to_string())
             .or_default()
-            .push((text.to_string(), kind, id.to_string()));
+            .push((text.to_string(), tag));
     }
 
-    pub(crate) fn forget_pending(&mut self, thread_id: &str, kind: InjectionKind, id: &str) {
+    pub(crate) fn forget_pending(&mut self, thread_id: &str, tag: &InjectionTag) {
         if let Some(pending) = self.pending.get_mut(thread_id) {
-            pending.retain(|(_, k, handover)| !(*k == kind && handover == id));
+            pending.retain(|(_, existing)| existing != tag);
             if pending.is_empty() {
                 self.pending.remove(thread_id);
             }
@@ -130,50 +238,71 @@ impl Injections {
     }
 
     pub(crate) fn anchor(&mut self, message: InjectedMessage) {
-        self.forget_pending(&message.thread_id, message.kind, &message.handover_id);
+        self.forget_pending(&message.thread_id, &message.tag);
         let messages = self.anchored.entry(message.thread_id.clone()).or_default();
         messages.retain(|existing| existing.anchor != message.anchor);
         messages.push(message);
     }
 
-    /// Whether any row carries, or is about to carry, this handover.
-    pub(crate) fn marks_any_row(&self, handover_id: &str) -> bool {
+    #[cfg(test)]
+    pub(crate) fn anchored_rows(&self, thread_id: &str) -> usize {
+        self.anchored.get(thread_id).map_or(0, Vec::len)
+    }
+
+    fn referenced(&self) -> HashSet<&str> {
         self.anchored
             .values()
             .flatten()
-            .any(|message| message.handover_id == handover_id)
-            || self
-                .pending
-                .values()
-                .flatten()
-                .any(|(_, _, id)| id == handover_id)
-    }
-
-    pub(crate) fn forget_handover(&mut self, handover_id: &str) {
-        self.handovers.remove(handover_id);
-    }
-
-    pub(crate) fn forget_thread(&mut self, thread_id: &str) {
-        self.anchored.remove(thread_id);
-        self.pending.remove(thread_id);
-        let referenced: std::collections::HashSet<&str> = self
-            .anchored
-            .values()
-            .flatten()
-            .map(|message| message.handover_id.as_str())
+            .map(|message| message.tag.ref_id.as_str())
             .chain(
                 self.pending
                     .values()
                     .flatten()
-                    .map(|(_, _, id)| id.as_str()),
+                    .map(|(_, tag)| tag.ref_id.as_str()),
             )
-            .collect();
-        self.handovers
-            .retain(|id, _| referenced.contains(id.as_str()));
+            .collect()
     }
 
-    /// Every mark `thread_id`'s rows could carry. The error can name either end and the
-    /// note was typed into the source, so each goes wherever its end is hidden.
+    /// Whether any row carries, or is about to carry, this handover or review.
+    pub(crate) fn marks_any_row(&self, ref_id: &str) -> bool {
+        self.referenced().contains(ref_id)
+    }
+
+    pub(crate) fn forget_mark(&mut self, ref_id: &str) {
+        self.handovers.remove(ref_id);
+        self.reviews.remove(ref_id);
+    }
+
+    /// Drops the thread's rows, and every mark only they carried. Returns those marks'
+    /// ids; a mark no row has reached yet is left alone.
+    pub(crate) fn forget_thread(&mut self, thread_id: &str) -> Vec<String> {
+        let carried: HashSet<String> = self
+            .anchored
+            .remove(thread_id)
+            .into_iter()
+            .flatten()
+            .map(|message| message.tag.ref_id)
+            .chain(
+                self.pending
+                    .remove(thread_id)
+                    .into_iter()
+                    .flatten()
+                    .map(|(_, tag)| tag.ref_id),
+            )
+            .collect();
+        let referenced = self.referenced();
+        let orphaned: Vec<String> = carried
+            .into_iter()
+            .filter(|id| !referenced.contains(id.as_str()))
+            .collect();
+        for id in &orphaned {
+            self.forget_mark(id);
+        }
+        orphaned
+    }
+
+    /// Every mark `thread_id`'s rows could carry. What names another thread, or could
+    /// (an error), is left out wherever that thread is hidden from the reader.
     pub(crate) fn for_thread(
         &self,
         thread_id: &str,
@@ -181,53 +310,191 @@ impl Injections {
         may_see: impl Fn(&str) -> bool,
     ) -> ThreadInjections {
         let named = |id: &str| id == thread_id || may_see(id);
-        let view = |kind: InjectionKind, handover_id: &str| {
-            let handover = self.handovers.get(handover_id)?;
-            let (source, target) = (
-                named(&handover.source_thread_id),
-                named(&handover.target_thread_id),
-            );
-            let side = |visible: bool, id: &str| match visible {
-                true => (id.to_string(), title(id)),
-                false => (String::new(), None),
+        let view = |tag: &InjectionTag| {
+            let card = if tag.kind.is_review() {
+                InjectionCard::Review(self.review_card(tag, &named, &title)?)
+            } else {
+                InjectionCard::Handover(self.handover_card(&tag.ref_id, &named, &title)?)
             };
-            let (source_thread_id, source_title) = side(source, &handover.source_thread_id);
-            let (target_thread_id, target_title) = side(target, &handover.target_thread_id);
             Some(InjectionView {
-                kind,
-                handover: HandoverCardView {
-                    id: handover.id.clone(),
-                    source_thread_id,
-                    source_title,
-                    source_provider: handover.source_provider.clone(),
-                    target_thread_id,
-                    target_title,
-                    target_provider: handover.target_provider.clone(),
-                    note: if source {
-                        card_note(&handover.note)
-                    } else {
-                        String::new()
-                    },
-                    instruction: handover.instruction.clone(),
-                    status: handover.status.clone(),
-                    error: handover.error.clone().filter(|_| source && target),
-                    created_at: handover.created_at,
-                    updated_at: handover.updated_at,
-                },
+                kind: tag.kind,
+                card,
             })
         };
         let anchored = self.anchored.get(thread_id).into_iter().flatten();
         let pending = self.pending.get(thread_id).into_iter().flatten();
-        let marks = anchored
-            .filter_map(|message| {
-                view(message.kind, &message.handover_id)
-                    .map(|view| (Match::Anchor(message.anchor.clone()), view))
-            })
-            .chain(pending.filter_map(|(text, kind, id)| {
-                view(*kind, id).map(|view| (Match::Text(text.clone()), view))
-            }))
-            .collect();
+        let marks =
+            anchored
+                .filter_map(|message| {
+                    view(&message.tag).map(|view| (Match::Anchor(message.anchor.clone()), view))
+                })
+                .chain(pending.filter_map(|(text, tag)| {
+                    view(tag).map(|view| (Match::Text(text.clone()), view))
+                }))
+                .collect();
         ThreadInjections { marks }
+    }
+
+    fn handover_card(
+        &self,
+        handover_id: &str,
+        named: &impl Fn(&str) -> bool,
+        title: &impl Fn(&str) -> Option<String>,
+    ) -> Option<HandoverCardView> {
+        let handover = self.handovers.get(handover_id)?;
+        let (source, target) = (
+            named(&handover.source_thread_id),
+            named(&handover.target_thread_id),
+        );
+        let side = |visible: bool, id: &str| match visible {
+            true => (id.to_string(), title(id)),
+            false => (String::new(), None),
+        };
+        let (source_thread_id, source_title) = side(source, &handover.source_thread_id);
+        let (target_thread_id, target_title) = side(target, &handover.target_thread_id);
+        Some(HandoverCardView {
+            id: handover.id.clone(),
+            source_thread_id,
+            source_title,
+            source_provider: handover.source_provider.clone(),
+            target_thread_id,
+            target_title,
+            target_provider: handover.target_provider.clone(),
+            // Typed into the source, so it stays wherever the source is hidden.
+            note: if source {
+                card_note(&handover.note)
+            } else {
+                String::new()
+            },
+            instruction: handover.instruction.clone(),
+            status: handover.status.clone(),
+            error: handover.error.clone().filter(|_| source && target),
+            created_at: handover.created_at,
+            updated_at: handover.updated_at,
+        })
+    }
+
+    fn review_card(
+        &self,
+        tag: &InjectionTag,
+        named: &impl Fn(&str) -> bool,
+        title: &impl Fn(&str) -> Option<String>,
+    ) -> Option<ReviewCardView> {
+        let review = self.reviews.get(&tag.ref_id)?;
+        let visible = |id: &str| !id.is_empty() && named(id);
+        let parent = visible(&review.parent_thread_id);
+        let reviewer = review
+            .rounds
+            .iter()
+            .find(|round| round.round == tag.round)
+            .or(review.rounds.last())
+            .map(|round| round.reviewer_thread_id.as_str())
+            .unwrap_or_default();
+        let reviewers_visible = review
+            .rounds
+            .iter()
+            .all(|round| visible(&round.reviewer_thread_id));
+        let rounds = card_rounds(tag.kind, tag.round, &review.rounds)
+            .into_iter()
+            .map(|mut round| {
+                if !visible(&round.reviewer_thread_id) {
+                    round.reviewer_thread_id.clear();
+                }
+                round
+            })
+            .collect();
+        Some(ReviewCardView {
+            id: review.id.clone(),
+            round: tag.round,
+            max_rounds: review.max_rounds,
+            parent_thread_id: if parent {
+                review.parent_thread_id.clone()
+            } else {
+                String::new()
+            },
+            parent_title: parent.then(|| title(&review.parent_thread_id)).flatten(),
+            parent_provider: review.parent_provider.clone(),
+            reviewer_thread_id: if visible(reviewer) {
+                reviewer.to_string()
+            } else {
+                String::new()
+            },
+            reviewer_provider: review.reviewer_provider.clone(),
+            status: review.status.clone(),
+            error: review.error.clone().filter(|_| parent && reviewers_visible),
+            decision: review.decision.clone(),
+            rounds,
+        })
+    }
+}
+
+/// Every marked row carries its copy, snapshots included, so a card gets only what it
+/// draws: its own round's findings, and for the last card what each round fixed.
+const CARD_FINDINGS: usize = 12;
+const CARD_FINDING_CHARS: usize = 200;
+
+fn card_rounds(
+    kind: InjectionKind,
+    row_round: u32,
+    rounds: &[ReviewRoundView],
+) -> Vec<ReviewRoundView> {
+    let last = rounds.last().map_or(0, |round| round.round);
+    let mut budget = CARD_FINDINGS;
+    let mut take = |findings: &[ReviewFindingView]| -> Vec<ReviewFindingView> {
+        let kept: Vec<_> = findings
+            .iter()
+            .take(budget)
+            .map(|finding| ReviewFindingView {
+                text: clip_chars(&finding.text, CARD_FINDING_CHARS),
+                ..finding.clone()
+            })
+            .collect();
+        budget -= kept.len();
+        kept
+    };
+    let bare = |round: &ReviewRoundView| ReviewRoundView {
+        findings: Vec::new(),
+        fixed: Vec::new(),
+        change: None,
+        ..round.clone()
+    };
+    rounds
+        .iter()
+        .filter_map(|round| {
+            let mut kept = bare(round);
+            match kind {
+                InjectionKind::ReviewBrief if round.round == row_round => {
+                    kept.findings = take(&round.findings);
+                    kept.change = round.change.clone();
+                }
+                InjectionKind::ReviewResult if round.round == row_round => {
+                    kept.findings = take(&round.findings);
+                }
+                // Read only for how many of the card's findings the next round fixed.
+                InjectionKind::ReviewResult if round.round == row_round + 1 => {}
+                InjectionKind::ReviewApproved => {
+                    kept.fixed = take(&round.fixed);
+                    if round.round == last {
+                        kept.findings = take(&round.findings);
+                    }
+                }
+                // What still stands; what got fixed is only counted.
+                InjectionKind::ReviewEscalated => {
+                    if round.round == last {
+                        kept.findings = take(&round.findings);
+                    }
+                }
+                _ => return None,
+            }
+            Some(kept)
+        })
+        .collect()
+}
+
+pub(crate) fn clip_chars(text: &str, limit: usize) -> String {
+    match text.char_indices().nth(limit) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_string(),
     }
 }
 
@@ -236,10 +503,7 @@ impl Injections {
 const CARD_NOTE_CHARS: usize = 500;
 
 fn card_note(note: &str) -> String {
-    match note.char_indices().nth(CARD_NOTE_CHARS) {
-        Some((end, _)) => format!("{}…", &note[..end]),
-        None => note.to_string(),
-    }
+    clip_chars(note, CARD_NOTE_CHARS)
 }
 
 /// One thread's marks, resolved once per read and applied row by row.
@@ -289,5 +553,175 @@ fn matches(matcher: &Match, transcript: &ThreadTranscript, record: &TranscriptRe
                     .last()
                     .is_some_and(|last| last.row_id == record.row_id)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn review(id: &str) -> ReviewMark {
+        ReviewMark {
+            id: id.to_string(),
+            parent_thread_id: "parent".to_string(),
+            reviewer_provider: "codex".to_string(),
+            max_rounds: 2,
+            status: "waiting_for_reviewer".to_string(),
+            rounds: vec![ReviewRoundView {
+                round: 1,
+                reviewer_thread_id: "reviewer".to_string(),
+                ..ReviewRoundView::default()
+            }],
+            ..ReviewMark::default()
+        }
+    }
+
+    fn row(thread_id: &str, id: &str, kind: InjectionKind) -> InjectedMessage {
+        InjectedMessage {
+            thread_id: thread_id.to_string(),
+            anchor: MessageAnchor::Item(format!("user:{thread_id}")),
+            tag: InjectionTag::review(kind, id, 1),
+            created_at: 1,
+        }
+    }
+
+    /// A review is recorded when it is asked for, well before its first prompt lands.
+    #[test]
+    fn deleting_a_thread_keeps_a_review_no_row_has_reached_yet() {
+        let mut injections = Injections::load(
+            Vec::new(),
+            vec![review("carried"), review("waiting")],
+            vec![row("gone", "carried", InjectionKind::ReviewResult)],
+        );
+
+        assert_eq!(
+            injections.forget_thread("gone"),
+            vec!["carried".to_string()]
+        );
+        assert!(injections.review("carried").is_none());
+        assert!(injections.review("waiting").is_some());
+    }
+
+    fn found(text: &str) -> ReviewFindingView {
+        ReviewFindingView {
+            severity: "high".to_string(),
+            location: None,
+            text: text.to_string(),
+        }
+    }
+
+    /// Each row ships its own copy, so a card carries the text it draws and nothing else.
+    #[test]
+    fn a_card_carries_only_the_findings_it_draws() {
+        let rounds = vec![
+            ReviewRoundView {
+                round: 1,
+                findings: vec![found("first"), found("second")],
+                findings_total: 2,
+                change: Some("the change".to_string()),
+                ..ReviewRoundView::default()
+            },
+            ReviewRoundView {
+                round: 2,
+                findings: vec![found("still")],
+                findings_total: 1,
+                fixed: vec![found("first")],
+                fixed_total: 1,
+                ..ReviewRoundView::default()
+            },
+        ];
+        let texts = |rounds: &[ReviewRoundView]| {
+            rounds
+                .iter()
+                .map(|round| {
+                    let open: Vec<_> = round.findings.iter().map(|f| f.text.as_str()).collect();
+                    let fixed: Vec<_> = round.fixed.iter().map(|f| f.text.as_str()).collect();
+                    (round.round, open.join(","), fixed.join(","))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let result = card_rounds(InjectionKind::ReviewResult, 1, &rounds);
+        assert_eq!(
+            texts(&result),
+            vec![
+                (1, "first,second".into(), "".into()),
+                (2, "".into(), "".into())
+            ]
+        );
+        assert_eq!(
+            result[1].fixed_total, 1,
+            "the count survives for the folded line"
+        );
+        assert_eq!(result[0].change, None);
+
+        let approved = card_rounds(InjectionKind::ReviewApproved, 2, &rounds);
+        assert_eq!(
+            texts(&approved),
+            vec![
+                (1, "".into(), "".into()),
+                (2, "still".into(), "first".into())
+            ]
+        );
+        let escalated = card_rounds(InjectionKind::ReviewEscalated, 2, &rounds);
+        assert_eq!(
+            texts(&escalated),
+            vec![(1, "".into(), "".into()), (2, "still".into(), "".into())]
+        );
+        let brief = card_rounds(InjectionKind::ReviewBrief, 1, &rounds);
+        assert_eq!(brief.len(), 1);
+        assert_eq!(brief[0].change.as_deref(), Some("the change"));
+        assert!(card_rounds(InjectionKind::ReviewRecap, 0, &rounds).is_empty());
+
+        let many: Vec<_> = (0..30).map(|i| found(&"x".repeat(i * 20))).collect();
+        let flood = card_rounds(
+            InjectionKind::ReviewResult,
+            1,
+            &[ReviewRoundView {
+                round: 1,
+                findings: many,
+                findings_total: 30,
+                ..ReviewRoundView::default()
+            }],
+        );
+        assert_eq!(flood[0].findings.len(), CARD_FINDINGS);
+        assert!(flood[0]
+            .findings
+            .iter()
+            .all(|f| f.text.chars().count() <= CARD_FINDING_CHARS + 1));
+    }
+
+    #[test]
+    fn a_review_card_names_no_thread_its_reader_cannot_see() {
+        let injections = Injections::load(
+            Vec::new(),
+            vec![ReviewMark {
+                error: Some("failed in /elsewhere".to_string()),
+                ..review("r")
+            }],
+            vec![row("parent", "r", InjectionKind::ReviewResult)],
+        );
+        let card = |may_see: bool| {
+            injections
+                .for_thread("parent", |_| Some("title".to_string()), |_| may_see)
+                .marks
+                .pop()
+                .and_then(|(_, view)| view.review().cloned())
+                .expect("the row is marked")
+        };
+
+        let open = card(true);
+        assert_eq!(open.reviewer_thread_id, "reviewer");
+        assert_eq!(open.rounds[0].reviewer_thread_id, "reviewer");
+        assert!(open.error.is_some());
+
+        let hidden = card(false);
+        assert_eq!(
+            hidden.parent_thread_id, "parent",
+            "its own thread is always named"
+        );
+        assert_eq!(hidden.reviewer_thread_id, "");
+        assert_eq!(hidden.rounds[0].reviewer_thread_id, "");
+        assert_eq!(hidden.error, None);
     }
 }

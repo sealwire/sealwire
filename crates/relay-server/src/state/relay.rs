@@ -4,6 +4,7 @@ mod background;
 mod device;
 mod injections;
 mod push;
+mod review_marks;
 mod runtime;
 mod session_binding;
 mod transcript;
@@ -40,8 +41,8 @@ pub(crate) use self::device::{
     PendingPairingResult, PendingTranscriptDelta, TranscriptDeltaKind,
 };
 pub(crate) use self::injections::{
-    injection_kind_from_name, injection_kind_name, HandoverMark, InjectedMessage, Injections,
-    MessageAnchor, ThreadInjections,
+    clip_chars, injection_kind_from_name, injection_kind_name, HandoverMark, InjectedMessage,
+    InjectionTag, Injections, MessageAnchor, ReviewMark, ThreadInjections,
 };
 pub(crate) use self::push::{
     is_acceptable_push_endpoint, load_or_generate_vapid, vapid_key_path, PushAttentionTracker,
@@ -1023,10 +1024,8 @@ impl RelayState {
 
     /// The database beside `session.json`, and what it remembers.
     pub(crate) fn install_database(&mut self, store: crate::usage::store::UsageStore) {
-        let (handovers, messages) = store.load_injections(
-            "the relay restarted while this handover was under way — hand over again",
-        );
-        self.injections = Injections::load(handovers, messages);
+        let loaded = store.load_injections("the relay restarted before this finished");
+        self.injections = Injections::load(loaded.handovers, loaded.reviews, loaded.messages);
         self.usage_store = store;
     }
 
@@ -3202,6 +3201,7 @@ happened, then hand over again."
         match self.review_jobs.get_mut(id) {
             Some(job) => {
                 update(job);
+                self.sync_review_mark(id);
                 true
             }
             None => false,
@@ -3648,7 +3648,7 @@ so {} never got it — hand over again when you are ready.",
             .values()
             .copied()
             .chain(unbound)
-            .map(|job| job.view())
+            .map(|job| self.review_job_view(job))
             .collect();
         views.sort_by(|left, right| {
             right
@@ -3657,6 +3657,23 @@ so {} never got it — hand over again when you are ready.",
                 .then_with(|| right.id.cmp(&left.id))
         });
         views
+    }
+
+    /// The round the reviewer is reading, off the review's cards. Rides the per-device
+    /// reviews channel: the snapshot goes to devices that may not see this folder.
+    fn review_job_view(&self, job: &ReviewJob) -> crate::protocol::ReviewJobView {
+        let mut view = job.view();
+        let reading = self
+            .injections
+            .review(&job.id)
+            .and_then(|mark| mark.rounds.last())
+            .filter(|round| round.finished_at.is_none() && !job.status.is_terminal());
+        if let Some(round) = reading {
+            view.round = round.round;
+            view.reviewing_since = round.started_at;
+            view.files = round.files;
+        }
+        view
     }
 
     /// Content revision of the reviewer-panel data (review jobs + reviewer threads). A
@@ -3684,6 +3701,8 @@ so {} never got it — hand over again when you are ready.",
             job.verdict.hash(&mut h);
             job.reviewer_thread_id.hash(&mut h);
             job.reviewer_provider.hash(&mut h);
+            job.reviewing_since.hash(&mut h);
+            job.files.hash(&mut h);
             acc ^= h.finish();
         }
         for view in self.reviewer_thread_views() {
@@ -5519,8 +5538,9 @@ so {} never got it — hand over again when you are ready.",
             self.bump_projects_revision();
         }
         // Permanent only: an archived session can come back with its cards.
-        self.injections.forget_thread(thread_id);
-        self.usage_store.forget_thread_injections(thread_id);
+        let orphaned = self.injections.forget_thread(thread_id);
+        self.usage_store
+            .forget_thread_injections(thread_id, &orphaned);
         // The user's title is cleared by `remove_thread` below, which archive shares —
         // unlike project membership above, it needs no permanent-delete-only placement.
         self.remove_thread(thread_id);

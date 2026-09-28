@@ -73,7 +73,7 @@ test("the source shows what was typed and a Handed over card instead of the prom
   assert.doesNotMatch(markup, /Sent to/, "what the relay sent is never shown");
   assert.match(
     markup,
-    /class="handover-section-value message-body is-clamped"/,
+    /class="handover-section-value message-body card-fold is-clamped"/,
     "each section starts folded to a couple of lines"
   );
   assert.match(markup, /data-open-thread-id="tgt"/);

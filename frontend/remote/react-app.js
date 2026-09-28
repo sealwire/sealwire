@@ -80,6 +80,7 @@ import {
 } from "./state.js";
 import { useRelayNicknames } from "./use-relay-nicknames.js";
 import { RemoteTranscriptPanel } from "./remote-transcript-panel.js";
+import { dispatchReviewAction } from "../shared/review-card.js";
 import { retainAskUserDraftsForPending } from "../shared/ask-user-draft-store.js";
 import {
   selectEmptyStateRenderModel,
@@ -2493,6 +2494,13 @@ function RemoteApp() {
           onForkFromMessage: handleOpenForkDialog,
           // A handover card names its other end; opening it is a deliberate keep.
           onOpenThread: (threadId) => void handleResumeThread(threadId, { preview: false }),
+          reviewJobs: remoteReviews?.review_jobs || null,
+          onReviewAction: (action) =>
+            void dispatchReviewAction(action, {
+              stop: reviewerActions.onResolveReview,
+              accept: (reviewId) => handlersRef.current.onAcceptReview?.(reviewId),
+              rerun: reviewerActions.onRequestReview,
+            }),
           composerModel,
           composerDraft,
           composerScope,
@@ -3341,6 +3349,8 @@ function RemoteHeader({
 function RemoteThreadPanel({
   onForkFromMessage,
   onOpenThread = null,
+  onReviewAction = null,
+  reviewJobs = null,
   agentWorkingIndicatorModel,
   composerModel,
   composerDraft,
@@ -3446,6 +3456,8 @@ function RemoteThreadPanel({
         onApplyFileChange,
         onForkFromMessage,
         onOpenThread,
+        onReviewAction,
+        reviewJobs,
         onAskMessage: askAboutMessage,
         onSelectRelay,
         onToggleExpandableBlock,

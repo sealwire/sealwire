@@ -247,6 +247,7 @@ export function createSessionController({
     resolveReview: controller.resolveReview,
     resolveWorkflow: controller.resolveWorkflow,
     deleteReview: controller.deleteReview,
+    acceptReview: controller.acceptReview,
     repairWorkspace: controller.repairWorkspace,
     fetchTranscriptPage: controller.fetchTranscriptPage,
     stopActiveTurn: controller.stopActiveTurn,

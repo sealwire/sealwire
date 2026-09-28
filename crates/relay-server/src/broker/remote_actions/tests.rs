@@ -1023,11 +1023,29 @@ fn resolve_and_delete_review_actions_round_trip_and_bind_device() {
         other => panic!("unexpected: {other:?}"),
     }
 
-    // Both are ack-style and gated behind a session claim.
+    let accept: RemoteActionRequest = serde_json::from_value(
+        serde_json::json!({ "type": "accept_review", "review_id": "review-1" }),
+    )
+    .expect("accept_review should parse");
+    assert_eq!(accept.kind(), RemoteActionKind::AcceptReview);
+    assert_eq!(RemoteActionKind::AcceptReview.as_str(), "accept_review");
+    match accept.bind_device("device-9".to_string(), "surface-test", test_origin()) {
+        RemoteActionRequest::AcceptReview {
+            review_id,
+            device_id,
+        } => {
+            assert_eq!(review_id, "review-1");
+            assert_eq!(device_id.as_deref(), Some("device-9"));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // All are ack-style and gated behind a session claim.
     for kind in [
         RemoteActionKind::ResolveReview,
         RemoteActionKind::ResolveWorkflow,
         RemoteActionKind::DeleteReview,
+        RemoteActionKind::AcceptReview,
     ] {
         assert!(matches!(
             remote_action_result_kind(kind),

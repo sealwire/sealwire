@@ -184,6 +184,7 @@ import {
   skillForSend,
 } from "./shared/thread-skills.js";
 import { canRequestReview, selectReviewLaunchModel } from "./shared/review-state.js";
+import { dispatchReviewAction } from "./shared/review-card.js";
 import { createGoalActions } from "./shared/goal-actions.js";
 import { createDelegateAuthor } from "./local/delegate-authoring.js";
 import { createHandoverAuthor } from "./local/handover-authoring.js";
@@ -3257,6 +3258,12 @@ transcript.addEventListener(
         preview: false,
       });
     },
+    reviewAction: (action) =>
+      void dispatchReviewAction(action, {
+        stop: (reviewId) => state.controller?.resolveReview(reviewId),
+        accept: (reviewId) => state.controller?.acceptReview(reviewId),
+        rerun: (values) => state.controller?.requestReview(values),
+      }),
     goHome: () => void runViewTransition(() => clearThreadRoute()),
   })
 );

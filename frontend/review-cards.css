@@ -1,0 +1,272 @@
+/* Design 24a–24c. The skeleton is the handover card's; only the tone differs, and the
+   tone is the verdict: red a blocker, green approved, amber waiting on you, blue a request. */
+.handover-card.review-card,
+.review-strip {
+  --review-tone: var(--accent);
+}
+.review-card.is-blocker,
+.review-strip.is-blocker {
+  --review-tone: var(--err-fg);
+}
+.review-card.is-pass,
+.review-strip.is-pass {
+  --review-tone: var(--ok-fg);
+}
+.review-card.is-needs-you,
+.review-strip.is-needs-you {
+  --review-tone: var(--warn-fg);
+}
+.handover-card.review-card {
+  border-color: color-mix(in srgb, var(--review-tone) 22%, var(--border-soft));
+}
+.review-card .handover-card-head {
+  background: color-mix(in srgb, var(--review-tone) 8%, var(--bg-surface));
+}
+.review-card .handover-card-icon {
+  border-color: color-mix(in srgb, var(--review-tone) 22%, var(--border-soft));
+  color: var(--review-tone);
+}
+.review-card .handover-card-kicker {
+  color: var(--review-tone);
+}
+.review-card-fold {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.review-card-fold:hover {
+  background: color-mix(in srgb, var(--review-tone) 14%, transparent);
+  color: var(--text-primary);
+}
+
+.review-card-body {
+  gap: 10px;
+}
+.review-finding {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  column-gap: 8px;
+  row-gap: 2px;
+  min-width: 0;
+  font-size: var(--text-ui);
+  line-height: var(--leading-normal);
+}
+.review-finding-meta {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+/* On a phone the text gets the row; where it is and what became of it go under it. */
+@container handover-card (max-width: 420px) {
+  .review-finding {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .review-finding-meta {
+    grid-column: 2;
+  }
+  /* The title is the verdict, so it wraps rather than losing its end. */
+  .review-card .handover-card-title {
+    white-space: normal;
+  }
+}
+.review-finding-tag {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--surface-muted);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-strong);
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+.review-finding-tag.is-high {
+  background: var(--err-bg);
+  color: var(--err-fg);
+}
+.review-finding-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.review-finding-state {
+  flex: none;
+  font-size: var(--text-sm);
+}
+.review-finding-state.is-fixed {
+  color: var(--ok-fg);
+}
+.review-finding-state.is-open {
+  color: var(--warn-fg);
+}
+.review-finding-where {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--accent);
+}
+.review-finding-more {
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+}
+.review-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 4px;
+}
+.review-card-primary,
+.review-card-secondary {
+  height: 32px;
+  padding: 0 16px;
+  border-radius: 8px;
+  font: inherit;
+  font-size: var(--text-ui);
+  font-weight: var(--weight-strong);
+  cursor: pointer;
+}
+.review-card-primary {
+  border: 0;
+  background: var(--text-primary);
+  color: var(--bg-surface);
+}
+.review-card-primary:hover {
+  background: color-mix(in srgb, var(--text-primary) 86%, var(--bg-surface));
+}
+.review-card-secondary {
+  border: 1px solid var(--border-firm);
+  background: none;
+  color: var(--text-primary);
+}
+.review-card-secondary:hover {
+  background: var(--surface-muted);
+}
+.review-card-decided {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+.review-card-next {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+.review-card-next code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+.review-fact-code {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* A round a later one replaced (24b): one line, opened on demand. */
+.review-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  padding: 0 12px 0 8px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--review-tone) 22%, var(--border-soft));
+  background: color-mix(in srgb, var(--review-tone) 8%, var(--bg-surface));
+  font: inherit;
+  font-size: var(--text-ui);
+  text-align: left;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.review-strip:hover {
+  background: color-mix(in srgb, var(--review-tone) 13%, var(--bg-surface));
+}
+.review-strip-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  border: 1px solid color-mix(in srgb, var(--review-tone) 22%, var(--border-soft));
+  background: var(--bg-surface);
+  color: var(--review-tone);
+}
+.review-strip-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.review-strip-text b {
+  font-weight: var(--weight-strong);
+}
+.review-strip-trailing {
+  flex: none;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.review-message .review-strip {
+  flex: 1;
+}
+
+/* The reviewer thread's close of a round (24c). */
+.review-result-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  padding-left: var(--assistant-text-inset);
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+}
+.review-result-outcome.is-blocker {
+  color: var(--err-fg);
+}
+.review-result-outcome.is-pass {
+  color: var(--ok-fg);
+}
+.review-result-outcome.is-needs-you {
+  color: var(--warn-fg);
+}
+
+/* The reviewed thread's live line (24a). */
+.review-progress {
+  align-items: center;
+}
+.review-progress-detail {
+  flex: 1;
+  min-width: 0;
+}
+@media (max-width: 600px) {
+  .review-progress-detail {
+    order: 1;
+    flex-basis: 100%;
+  }
+}

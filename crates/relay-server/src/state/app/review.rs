@@ -18,8 +18,8 @@ use tokio::time::{Duration, Instant};
 #[cfg(test)]
 use crate::protocol::ReviewJobView;
 use crate::protocol::{
-    RequestReviewInput, RequestReviewReceipt, ReviewDeleteReceipt, TranscriptEntryKind,
-    TranscriptEntryView,
+    InjectionKind, RequestReviewInput, RequestReviewReceipt, ReviewDeleteReceipt,
+    TranscriptEntryKind, TranscriptEntryView,
 };
 use crate::state::{
     handoff_review_prompt, handoff_review_prompt_for_checkpoint, handoff_review_prompt_for_target,
@@ -27,10 +27,12 @@ use crate::state::{
     re_review_prompt, re_review_prompt_for_checkpoint, re_review_prompt_for_target,
     review_approved_message, review_escalated_message, reviewer_prompt,
     reviewer_prompt_for_checkpoint, reviewer_prompt_for_no_change, reviewer_prompt_for_target,
-    ReviewJob, ReviewJobStatus, ReviewMode, ReviewRecapSource, MAX_REVIEWERS_PER_PARENT,
+    InjectionTag, ReviewJob, ReviewJobStatus, ReviewMode, ReviewRecapSource,
+    MAX_REVIEWERS_PER_PARENT,
 };
 
 use super::checkpoint::{build_review_checkpoint, checkpoint_ref_name};
+use super::review_marks::RoundStart;
 use super::*;
 
 /// How often to re-issue an interrupt while draining a turn that wouldn't stop.
@@ -548,7 +550,11 @@ reviewer thread"
 
         {
             let mut relay = self.relay.write().await;
+            relay.record_review_mark(&job);
             relay.insert_review_job(job);
+            if let Some(previous) = non_empty(input.continues_review_id.clone()) {
+                relay.continue_review_mark(&previous, &parent_thread_id, &job_id);
+            }
             relay.push_log(
                 "info",
                 format!("Review {job_id} requested for thread {parent_thread_id}."),
@@ -1260,13 +1266,32 @@ reviewer ({error}); re-resolving the workspace and retrying the round."
                 .latest_assistant_entry(&this_reviewer_id)
                 .await
                 .map(|(item_id, _)| item_id);
-            // `collect_workspace_diff` + reviewer prep ran outside any wait checkpoint;
+            let (target, checkpoint, head_sha) = match &evidence {
+                RoundEvidence::Committed(target) => (Some(target), false, None),
+                RoundEvidence::Checkpoint(target) => (Some(target), true, None),
+                RoundEvidence::NoChange { head_sha, .. } => (None, false, Some(head_sha.as_str())),
+                RoundEvidence::WorkspaceDiff(_) => (None, false, None),
+            };
+            self.begin_review_round(
+                &job_id,
+                RoundStart {
+                    round,
+                    reviewer_thread_id: &this_reviewer_id,
+                    target,
+                    checkpoint,
+                    head_sha,
+                    recap: &recap,
+                },
+            )
+            .await;
+            // The diff, reviewer prep and recording the round ran outside any wait checkpoint;
             // re-check for a cancel so we never dispatch an orphaned reviewer turn.
             if self.review_aborted(&job_id).await {
                 return;
             }
             match self
-                .send_message_to_thread(
+                .send_injected(
+                    InjectionTag::review(InjectionKind::ReviewBrief, &job_id, round),
                     &this_reviewer_id,
                     &prompt,
                     reviewer_turn_model.as_deref(),
@@ -1390,6 +1415,8 @@ the new `HEAD` must be reviewed as a fresh committed candidate.\n\n{review}"
             // Remembered for a possible REPLACEMENT reviewer next round: a fresh thread has
             // none of this in its transcript.
             previous_review = Some(review.clone());
+            self.finish_review_round(&job_id, round, verdict.as_str(), &review)
+                .await;
             {
                 let review = review.clone();
                 let verdict_str = verdict.as_str().to_string();
@@ -1426,6 +1453,7 @@ the new `HEAD` must be reviewed as a fresh committed candidate.\n\n{review}"
                     &job_id,
                     &parent_thread_id,
                     message,
+                    InjectionKind::ReviewResult,
                     ReviewJobStatus::Complete,
                 )
                 .await;
@@ -1437,6 +1465,7 @@ the new `HEAD` must be reviewed as a fresh committed candidate.\n\n{review}"
                     &job_id,
                     &parent_thread_id,
                     message,
+                    InjectionKind::ReviewApproved,
                     ReviewJobStatus::Complete,
                 )
                 .await;
@@ -1448,6 +1477,7 @@ the new `HEAD` must be reviewed as a fresh committed candidate.\n\n{review}"
                     &job_id,
                     &parent_thread_id,
                     message,
+                    InjectionKind::ReviewEscalated,
                     ReviewJobStatus::Escalated,
                 )
                 .await;
@@ -1485,10 +1515,19 @@ reviewer prompt; starting another review round for the current committed candida
                 return;
             }
             let fix_thread_id = match self
-                .send_message_to_thread(&parent_thread_id, &fix_prompt, None, None)
+                .send_injected(
+                    InjectionTag::review(InjectionKind::ReviewResult, &job_id, round),
+                    &parent_thread_id,
+                    &fix_prompt,
+                    None,
+                    None,
+                )
                 .await
             {
-                Ok(dispatched) if dispatched.turn_id.is_some() => parent_thread_id.clone(),
+                Ok(dispatched) if dispatched.turn_id.is_some() => {
+                    self.review_round_delivered(&job_id, round).await;
+                    parent_thread_id.clone()
+                }
                 Ok(_) => {
                     self.fail_after_uncertain_turn_start(
                         &job_id,
@@ -1512,6 +1551,7 @@ started ({error}); finishing with round {round}'s findings."
                         &job_id,
                         &parent_thread_id,
                         message,
+                        InjectionKind::ReviewResult,
                         ReviewJobStatus::Complete,
                     )
                     .await;
@@ -1544,6 +1584,7 @@ started ({error}); finishing with round {round}'s findings."
                             &job_id,
                             &fix_thread_id,
                             message,
+                            InjectionKind::ReviewEscalated,
                             ReviewJobStatus::Escalated,
                         )
                         .await;
@@ -1593,22 +1634,29 @@ started ({error}); finishing with round {round}'s findings."
         job_id: &str,
         parent_thread_id: &str,
         message: String,
+        kind: InjectionKind,
         status: ReviewJobStatus,
     ) {
         // Only a review an AGENT went and started: a person who asked for one is present
         // and already bounded it with `max_rounds`, so charging its turns to the goal would
         // double up two caps that exist for different reasons.
-        let started_by = {
+        let (started_by, round) = {
             let relay = self.relay.read().await;
             relay
                 .review_job(job_id)
-                .map(|job| job.started_by)
+                .map(|job| (job.started_by, job.round))
                 .unwrap_or_default()
         };
         let charged =
             started_by.is_agent() && self.charge_goal_for_driven_turn(parent_thread_id).await;
         let post_turn = match self
-            .send_message_to_thread(parent_thread_id, &message, None, None)
+            .send_injected(
+                InjectionTag::review(kind, job_id, round),
+                parent_thread_id,
+                &message,
+                None,
+                None,
+            )
             .await
         {
             Ok(dispatched) => {
@@ -1616,6 +1664,7 @@ started ({error}); finishing with round {round}'s findings."
                     self.goal_dispatch_landed(parent_thread_id, dispatched.turn_id.clone())
                         .await;
                 }
+                self.review_round_delivered(job_id, round).await;
                 dispatched.turn_id
             }
             Err(error) if error.is_workspace_gone() => {
@@ -1697,7 +1746,13 @@ started ({error}); finishing with round {round}'s findings."
         // nowhere, it is a briefing the review asked for. Only turns that advance the work
         // unattended come out of the budget.
         let recap_turn = match self
-            .send_message_to_thread(parent_thread_id, parent_recap_prompt(), None, None)
+            .send_injected(
+                InjectionTag::review(InjectionKind::ReviewRecap, job_id, 0),
+                parent_thread_id,
+                parent_recap_prompt(),
+                None,
+                None,
+            )
             .await
         {
             Ok(dispatched) if dispatched.turn_id.is_some() => dispatched.turn_id,
@@ -2188,8 +2243,18 @@ available; pick another one under Working tree to review"
         round_base_sha: &str,
     ) -> AuthorTurnOutcome {
         let prompt = parent_commit_prompt(round_base_sha);
+        let round = {
+            let relay = self.relay.read().await;
+            relay.review_job(job_id).map(|job| job.round).unwrap_or(0)
+        };
         match self
-            .send_message_to_thread(parent_thread_id, &prompt, None, None)
+            .send_injected(
+                InjectionTag::review(InjectionKind::ReviewCommit, job_id, round),
+                parent_thread_id,
+                &prompt,
+                None,
+                None,
+            )
             .await
         {
             Ok(dispatched) if dispatched.turn_id.is_some() => {}

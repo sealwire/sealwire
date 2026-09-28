@@ -18002,6 +18002,7 @@ mod review_tests {
             // default is now "last_message"; that path has its own dedicated tests).
             recap_source: Some("recap".to_string()),
             max_rounds: None,
+            continues_review_id: None,
             device_id: Some("device-1".to_string()),
         }
     }
@@ -22725,6 +22726,402 @@ settings update: {error}"
         assert_eq!(count_turns_with(&turns, "Address the findings below"), 1);
     }
 
+    /// Each prompt a review sends, read back with the mark that draws it as a card.
+    async fn review_marks_on(
+        app: &AppState,
+        thread_id: &str,
+        expected: usize,
+    ) -> Vec<crate::protocol::InjectionView> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let page = app
+                .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+                    thread_id: thread_id.to_string(),
+                    before: None,
+                    device_id: None,
+                })
+                .await
+                .expect("tail read");
+            let marks: Vec<_> = page
+                .entries
+                .into_iter()
+                .filter_map(|row| row.injection)
+                .collect();
+            // Rows are named in the background, so the last one can lag the job.
+            let anchored = {
+                let relay = app.relay.read().await;
+                relay.injections.anchored_rows(thread_id)
+            };
+            if (marks.len() >= expected && anchored >= expected)
+                || tokio::time::Instant::now() >= deadline
+            {
+                return marks;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    fn kinds_and_rounds(
+        marks: &[crate::protocol::InjectionView],
+    ) -> Vec<(crate::protocol::InjectionKind, u32)> {
+        marks
+            .iter()
+            .map(|mark| (mark.kind, mark.review().expect("a review card").round))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn every_prompt_a_review_sends_is_marked_with_its_round() {
+        use crate::protocol::InjectionKind;
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        let codex = providers.get("codex").unwrap();
+        queue_verdicts(codex, &["NEEDS_CHANGES", "APPROVE"]).await;
+        codex.reviewer_notes.lock().await.extend([
+            "## Findings\n\
+- [high] `src/gate.rs:88` The gate is checked only once.\n\
+- [medium] Archive drops the goal."
+                .to_string(),
+            "## Fixed since the last review\n\
+- [high] `src/gate.rs:88` The gate is checked only once.\n\n\
+## Findings\nNone."
+                .to_string(),
+        ]);
+
+        let mut input = review_input("codex");
+        input.max_rounds = Some(3);
+        let receipt = app.request_review(input).await.expect("review starts");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete");
+        let reviewer = job.reviewer_thread_id.clone().expect("reviewer thread");
+
+        let parent_marks = review_marks_on(&app, &parent.id, 3).await;
+        assert_eq!(
+            kinds_and_rounds(&parent_marks),
+            vec![
+                (InjectionKind::ReviewRecap, 0),
+                (InjectionKind::ReviewResult, 1),
+                (InjectionKind::ReviewApproved, 2)
+            ]
+        );
+        assert!(
+            parent_marks[0].review().unwrap().rounds.is_empty(),
+            "a hidden row carries no rounds"
+        );
+        let result = parent_marks[1].review().unwrap();
+        assert_eq!(result.reviewer_thread_id, reviewer);
+        assert_eq!(result.status, "complete");
+        assert_eq!(
+            result
+                .rounds
+                .iter()
+                .map(|round| round.round)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "a result card reads the next round, for how many of its findings got fixed"
+        );
+        let first = &result.rounds[0];
+        assert_eq!(first.verdict.as_deref(), Some("needs_changes"));
+        assert_eq!(
+            first
+                .findings
+                .iter()
+                .map(|f| (f.severity.as_str(), f.location.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![("high", Some("src/gate.rs:88")), ("medium", None)]
+        );
+        assert_eq!(result.rounds[1].fixed_total, 1);
+        assert!(result.rounds[1].findings.is_empty());
+
+        let approved = parent_marks[2].review().unwrap();
+        assert_eq!(
+            approved.rounds.len(),
+            2,
+            "the last card tells the whole story"
+        );
+
+        let reviewer_marks = review_marks_on(&app, &reviewer, 2).await;
+        assert_eq!(
+            kinds_and_rounds(&reviewer_marks),
+            vec![
+                (InjectionKind::ReviewBrief, 1),
+                (InjectionKind::ReviewBrief, 2)
+            ]
+        );
+        for (mark, round) in reviewer_marks.iter().zip(1..) {
+            let brief = mark.review().unwrap();
+            assert_eq!(brief.parent_thread_id, parent.id);
+            assert_eq!(
+                brief.rounds.iter().map(|r| r.round).collect::<Vec<_>>(),
+                vec![round],
+                "a brief card draws only its own round"
+            );
+            assert!(brief.rounds[0].started_at > 0);
+            assert!(
+                brief.rounds[0].delivered,
+                "round {round}'s result reached the author"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_review_that_needs_the_person_can_be_accepted_as_it_stands() {
+        use crate::protocol::InjectionKind;
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        queue_verdicts(
+            providers.get("codex").unwrap(),
+            &["NEEDS_CHANGES", "NEEDS_CHANGES"],
+        )
+        .await;
+        let mut input = review_input("codex");
+        input.max_rounds = Some(2);
+        let receipt = app.request_review(input).await.expect("review starts");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "escalated");
+
+        let marks = review_marks_on(&app, &parent.id, 3).await;
+        assert_eq!(
+            kinds_and_rounds(&marks),
+            vec![
+                (InjectionKind::ReviewRecap, 0),
+                (InjectionKind::ReviewResult, 1),
+                (InjectionKind::ReviewEscalated, 2)
+            ]
+        );
+        assert_eq!(marks[2].review().unwrap().decision, None);
+
+        let receipt = app
+            .accept_review(job.id.clone(), Some("device-1".to_string()))
+            .await
+            .expect("an escalated review can be accepted");
+        assert_eq!(receipt.decision, "accepted");
+        let marks = review_marks_on(&app, &parent.id, 3).await;
+        assert!(
+            marks
+                .iter()
+                .all(|mark| mark.review().unwrap().decision.as_deref() == Some("accepted")),
+            "{marks:?}"
+        );
+        assert!(
+            app.accept_review(job.id.clone(), None).await.is_err(),
+            "a device must say who it is"
+        );
+    }
+
+    async fn wait_until_thread_idle(app: &AppState, thread_id: &str) {
+        for _ in 0..400 {
+            let busy = {
+                let relay = app.relay.read().await;
+                relay
+                    .runtime_for_thread(thread_id)
+                    .is_some_and(|runtime| runtime.has_live_turn() || runtime.is_working())
+            };
+            if !busy {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("thread {thread_id} never went idle");
+    }
+
+    #[tokio::test]
+    async fn one_more_round_that_never_gets_going_leaves_the_old_card_asking() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        let codex = providers.get("codex").unwrap();
+        queue_verdicts(codex, &["NEEDS_CHANGES", "NEEDS_CHANGES"]).await;
+        let mut input = review_input("codex");
+        input.max_rounds = Some(2);
+        let first = app.request_review(input).await.expect("review starts");
+        let escalated = wait_for_review(&app, &first.review_job_id).await;
+        assert_eq!(escalated.status, "escalated");
+        wait_until_thread_idle(&app, &parent.id).await;
+
+        codex
+            .fail_next_turn_with
+            .lock()
+            .await
+            .push_back("the provider refused the turn".to_string());
+        let mut again = review_input("codex");
+        again.parent_thread_id = Some(parent.id.clone());
+        again.reviewer_thread_id = escalated.reviewer_thread_id.clone();
+        again.continues_review_id = Some(first.review_job_id.clone());
+        let second = app
+            .request_review(again)
+            .await
+            .expect("one more round starts");
+        let failed = wait_for_review(&app, &second.review_job_id).await;
+        assert_eq!(failed.status, "failed");
+
+        let decision = {
+            let relay = app.relay.read().await;
+            relay
+                .injections
+                .review(&first.review_job_id)
+                .and_then(|mark| mark.decision.clone())
+        };
+        assert_eq!(
+            decision, None,
+            "nothing came of the next round, so the old card still asks"
+        );
+        app.accept_review(first.review_job_id.clone(), Some("device-1".to_string()))
+            .await
+            .expect("the person can still take it as it stood");
+    }
+
+    #[tokio::test]
+    async fn one_more_round_settles_the_review_it_carries_on_from() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        queue_verdicts(
+            providers.get("codex").unwrap(),
+            &["NEEDS_CHANGES", "NEEDS_CHANGES", "APPROVE"],
+        )
+        .await;
+        let mut input = review_input("codex");
+        input.max_rounds = Some(2);
+        let first = app.request_review(input).await.expect("review starts");
+        let escalated = wait_for_review(&app, &first.review_job_id).await;
+        assert_eq!(escalated.status, "escalated");
+        // The author is still answering the escalation; a review needs it idle.
+        wait_until_thread_idle(&app, &parent.id).await;
+
+        let mut again = review_input("codex");
+        again.parent_thread_id = Some(parent.id.clone());
+        again.reviewer_thread_id = escalated.reviewer_thread_id.clone();
+        again.continues_review_id = Some(first.review_job_id.clone());
+        let second = app
+            .request_review(again)
+            .await
+            .expect("one more round starts");
+        wait_for_review(&app, &second.review_job_id).await;
+
+        let decision = {
+            let relay = app.relay.read().await;
+            relay
+                .injections
+                .review(&first.review_job_id)
+                .and_then(|mark| mark.decision.clone())
+        };
+        assert_eq!(decision.as_deref(), Some("continued"));
+        assert!(
+            app.accept_review(first.review_job_id.clone(), Some("device-1".to_string()))
+                .await
+                .is_err(),
+            "a review already carried on is not accepted as it stood"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_approved_review_is_not_accepted_as_it_stands() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+        queue_verdicts(providers.get("codex").unwrap(), &["APPROVE"]).await;
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review starts");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete");
+        let error = app
+            .accept_review(job.id, Some("device-1".to_string()))
+            .await
+            .expect_err("nothing is waiting on the person");
+        assert!(error.contains("waiting on you"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_stop_while_the_round_is_recorded_sends_the_reviewer_nothing() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+        app.cancel_while_recording_round_once
+            .store(true, Ordering::Relaxed);
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review starts");
+        wait_for_review_status(&app, &receipt.review_job_id, &["cancelled"]).await;
+        // Long enough for a dispatch that should not happen to land.
+        sleep(Duration::from_millis(300)).await;
+
+        let turns = providers.get("codex").unwrap().turns.lock().await.clone();
+        assert_eq!(
+            count_turns_with(&turns, "Workspace diff collected by the relay"),
+            0,
+            "the reviewer was asked after the review was stopped"
+        );
+    }
+
+    /// The snapshot goes to every paired device, whatever folders each may see.
+    #[tokio::test]
+    async fn the_snapshot_says_only_that_a_review_runs() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["claude_code", "codex"]).await;
+        start_parent(&app, cwd, "claude_code").await;
+        providers
+            .get("codex")
+            .unwrap()
+            .complete_turns
+            .store(false, Ordering::Relaxed);
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review starts");
+        wait_for_review_status(&app, &receipt.review_job_id, &["waiting_for_reviewer"]).await;
+
+        let snapshot = app.snapshot().await;
+        let line = serde_json::to_value(&snapshot.review_activity[0]).expect("encodes");
+        let mut keys: Vec<_> = line.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["id", "parent_thread_id", "reviewer_thread_id", "status"],
+            "{line}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_reviewing_line_knows_when_the_reviewer_began() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["claude_code", "codex"]).await;
+        let parent = start_parent(&app, cwd, "claude_code").await;
+        // The recap lands; the reviewer never finishes reading.
+        providers
+            .get("codex")
+            .unwrap()
+            .complete_turns
+            .store(false, Ordering::Relaxed);
+        let mut input = review_input("codex");
+        input.max_rounds = Some(3);
+        let receipt = app.request_review(input).await.expect("review starts");
+        wait_for_review_status(&app, &receipt.review_job_id, &["waiting_for_reviewer"]).await;
+
+        let reviews = app.reviews(Some("device-1".to_string())).await;
+        let line = reviews
+            .review_jobs
+            .iter()
+            .find(|job| job.parent_thread_id == parent.id)
+            .expect("the running review is on this device's reviews");
+        assert_eq!(line.reviewer_provider, "codex");
+        assert_eq!((line.round, line.max_rounds), (1, 3));
+        assert!(line.reviewing_since > 0, "{line:?}");
+    }
+
     #[tokio::test]
     async fn review_loop_continues_when_claude_author_fix_emits_no_text() {
         // Regression: a Codex reviewer reviewing a Claude author. Round 1 is
@@ -23728,6 +24125,18 @@ settings update: {error}"
         assert!(
             stored.is_some_and(|text| text.contains(REVIEW_REPLY)),
             "the review text must survive an undeliverable post-back"
+        );
+        let delivered = {
+            let relay = app.relay.read().await;
+            relay
+                .injections
+                .review(&receipt.review_job_id)
+                .map(|mark| mark.rounds.iter().map(|r| r.delivered).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            delivered,
+            Some(vec![false]),
+            "the reviewer thread must not say a result reached the author that never did"
         );
     }
 
@@ -35318,10 +35727,10 @@ mod handover_tests {
         let (row, request) = &asked[0];
         assert_eq!(row.kind, TranscriptEntryKind::UserText);
         assert_eq!(request.kind, InjectionKind::HandoverRequest);
-        assert_eq!(request.handover.target_thread_id, target);
-        assert_eq!(request.handover.target_provider, "fake");
-        assert_eq!(request.handover.note, "mind the parser");
-        assert_eq!(request.handover.status, "done");
+        assert_eq!(request.handover().unwrap().target_thread_id, target);
+        assert_eq!(request.handover().unwrap().target_provider, "fake");
+        assert_eq!(request.handover().unwrap().note, "mind the parser");
+        assert_eq!(request.handover().unwrap().status, "done");
 
         let snapshot = app.snapshot().await;
         assert!(
@@ -35337,12 +35746,14 @@ mod handover_tests {
         let (row, brief) = &given[0];
         assert_eq!(brief.kind, InjectionKind::HandoverBrief);
         assert_eq!(
-            brief.handover, request.handover,
+            brief.handover().unwrap(),
+            request.handover().unwrap(),
             "one handover, seen from both ends"
         );
         let text = row.text.as_deref().unwrap_or_default();
         assert!(
-            !brief.handover.instruction.is_empty() && text.ends_with(&brief.handover.instruction),
+            !brief.handover().unwrap().instruction.is_empty()
+                && text.ends_with(&brief.handover().unwrap().instruction),
             "a client strips the instruction to show the summary alone: {text}"
         );
     }
@@ -36419,7 +36830,9 @@ exists: {message}",
                 .next()
                 .expect("the prompt is marked")
                 .1
-                .handover
+                .handover()
+                .cloned()
+                .unwrap()
         };
         let local = card(injected_rows(&app, &source).await);
         assert_eq!(local.target_thread_id, target, "this machine may see both");
@@ -36437,7 +36850,9 @@ exists: {message}",
             .into_iter()
             .find_map(|row| row.injection)
             .expect("still a card")
-            .handover;
+            .handover()
+            .cloned()
+            .unwrap();
         assert_eq!(scoped.target_thread_id, "", "{scoped:?}");
         assert_eq!(scoped.target_title, None);
 
@@ -36447,7 +36862,9 @@ exists: {message}",
             .iter()
             .find_map(|row| row.injection.clone())
             .expect("the open target's brief is a card")
-            .handover;
+            .handover()
+            .cloned()
+            .unwrap();
         assert_eq!(
             broadcast.source_thread_id, "",
             "the snapshot goes to every device, and the source is in another folder"
@@ -36488,7 +36905,14 @@ exists: {message}",
             .into_iter()
             .find(|row| row.injection.is_some())
             .expect("the prompt is marked");
-        let shown = row.injection.clone().expect("marked").handover.note;
+        let shown = row
+            .injection
+            .clone()
+            .expect("marked")
+            .handover()
+            .unwrap()
+            .note
+            .clone();
         assert!(
             shown.chars().count() <= 501,
             "{} chars",
@@ -36596,7 +37020,9 @@ exists: {message}",
                 .next()
                 .expect("the prompt is marked")
                 .1
-                .handover;
+                .handover()
+                .cloned()
+                .unwrap();
             (handover.status, handover.error)
         };
         assert_eq!(

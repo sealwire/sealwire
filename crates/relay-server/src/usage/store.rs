@@ -15,7 +15,7 @@ use super::{pricing, TokenUsage};
 
 /// Bumped only by adding a numbered migration below. `user_version` is a plain
 /// integer SQLite keeps in the file header, so this needs no table of its own.
-const LEDGER_SCHEMA_VERSION: i64 = 11;
+const LEDGER_SCHEMA_VERSION: i64 = 12;
 
 /// The relay's one database, beside `session.json`.
 pub(crate) fn database_path(state_path: &Path) -> PathBuf {
@@ -1902,6 +1902,40 @@ fn migrate(conn: &Connection) -> Result<(), String> {
              COMMIT;",
         )
         .map_err(|error| format!("migrate to 11: {error}"))?;
+    }
+
+    if version < 12 {
+        // A row now names a handover or a review, and its round. ALTER has no
+        // IF NOT EXISTS, so each column change checks first.
+        let has_column = |name: &str| -> Result<bool, String> {
+            conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('injected_message') WHERE name = ?1",
+                [name],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .map_err(|error| format!("migrate to 12: {error}"))
+        };
+        let mut batch = String::from("BEGIN;\n");
+        if has_column("handover_id")? {
+            batch.push_str("ALTER TABLE injected_message RENAME COLUMN handover_id TO ref_id;\n");
+        }
+        if !has_column("round")? {
+            batch.push_str(
+                "ALTER TABLE injected_message ADD COLUMN round INTEGER NOT NULL DEFAULT 0;\n",
+            );
+        }
+        batch.push_str(
+            "CREATE TABLE IF NOT EXISTS review (
+                 id         TEXT PRIMARY KEY,
+                 body       TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL
+             );
+             PRAGMA user_version = 12;
+             COMMIT;",
+        );
+        conn.execute_batch(&batch)
+            .map_err(|error| format!("migrate to 12: {error}"))?;
     }
 
     Ok(())

@@ -17,7 +17,7 @@ use super::super::delegation::{brief_from_reply, peer_thread_settings};
 use super::delegation::{PeerLiveness, BRIEF_WAIT_BUDGET};
 use crate::protocol::InjectionKind;
 use crate::provider::StartThreadRequest;
-use crate::state::AppState;
+use crate::state::{AppState, InjectionTag};
 
 /// Appended to the summary the target is given.
 ///
@@ -533,6 +533,7 @@ finished"
         // The gate is dropped the instant the turn is dispatched. It is never held while
         // waiting for a model to finish: that is minutes, and it would stop every other
         // session in the relay.
+        let request_tag = InjectionTag::handover(InjectionKind::HandoverRequest, handover_id);
         let dispatched = loop {
             self.wait_for_asker_idle(&source_thread_id, deadline)
                 .await
@@ -566,25 +567,15 @@ finished"
                 .map(|(item_id, _)| item_id);
             let prompt = handover_summary_prompt(&note);
             self.record_handover_mark(handover_id, &note).await;
-            self.expect_injection(
-                handover_id,
-                &source_thread_id,
-                &prompt,
-                InjectionKind::HandoverRequest,
-            )
-            .await;
+            self.expect_injection(&request_tag, &source_thread_id, &prompt)
+                .await;
             let sent = self
                 .send_message_to_thread(&source_thread_id, &prompt, None, None)
                 .await;
             let dispatched = match sent {
                 Ok(dispatched) => dispatched,
                 Err(error) => {
-                    self.forget_injection(
-                        handover_id,
-                        &source_thread_id,
-                        InjectionKind::HandoverRequest,
-                    )
-                    .await;
+                    self.forget_injection(&request_tag, &source_thread_id).await;
                     self.log_handover_detail(handover_id, format!("summary turn failed: {error}"));
                     return Err(HandoverError::Failed(
                         "this session could not be asked to write the handover — try again"
@@ -597,10 +588,9 @@ finished"
         };
         let (dispatched, baseline) = dispatched;
         self.anchor_injection(
-            handover_id,
+            &request_tag,
             &source_thread_id,
             dispatched.turn_id.as_deref(),
-            InjectionKind::HandoverRequest,
         )
         .await;
 
@@ -695,13 +685,9 @@ no longer the session this was meant for — hand over again"
         }
 
         let brief = format!("{summary}{}", continue_instruction());
-        self.expect_injection(
-            handover_id,
-            &target_thread_id,
-            &brief,
-            InjectionKind::HandoverBrief,
-        )
-        .await;
+        let brief_tag = InjectionTag::handover(InjectionKind::HandoverBrief, handover_id);
+        self.expect_injection(&brief_tag, &target_thread_id, &brief)
+            .await;
         let sent = self
             .send_message_to_thread(
                 &target_thread_id,
@@ -713,20 +699,14 @@ no longer the session this was meant for — hand over again"
         drop(gate);
         match sent {
             Ok(dispatched) => {
-                self.anchor_injection(
-                    handover_id,
-                    &target_thread_id,
-                    dispatched.turn_id.as_deref(),
-                    InjectionKind::HandoverBrief,
-                )
-                .await;
+                self.anchor_injection(&brief_tag, &target_thread_id, dispatched.turn_id.as_deref())
+                    .await;
                 Ok(())
             }
             // The provider's own words are not repeated: this reason is shown to a person
             // and, unlike the relay's log, it is a channel a paired device reads.
             Err(error) => {
-                self.forget_injection(handover_id, &target_thread_id, InjectionKind::HandoverBrief)
-                    .await;
+                self.forget_injection(&brief_tag, &target_thread_id).await;
                 self.log_handover_detail(handover_id, format!("delivery failed: {error}"));
                 Err(HandoverError::Failed(
                     "that agent could not be given the handover; its session may have gone \

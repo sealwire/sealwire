@@ -267,6 +267,11 @@ pub(super) enum RemoteActionRequest {
         #[serde(default)]
         device_id: Option<String>,
     },
+    AcceptReview {
+        review_id: String,
+        #[serde(default)]
+        device_id: Option<String>,
+    },
     Delegate {
         thread_id: String,
         message: String,
@@ -374,6 +379,7 @@ impl RemoteActionRequest {
             Self::ResolveReview { .. } => RemoteActionKind::ResolveReview,
             Self::ResolveWorkflow { .. } => RemoteActionKind::ResolveWorkflow,
             Self::DeleteReview { .. } => RemoteActionKind::DeleteReview,
+            Self::AcceptReview { .. } => RemoteActionKind::AcceptReview,
             Self::Delegate { .. } => RemoteActionKind::Delegate,
             Self::Handover { .. } => RemoteActionKind::Handover,
             Self::AckHandover { .. } => RemoteActionKind::AckHandover,
@@ -582,6 +588,10 @@ impl RemoteActionRequest {
                 review_id,
                 device_id: Some(device_id),
             },
+            Self::AcceptReview { review_id, .. } => Self::AcceptReview {
+                review_id,
+                device_id: Some(device_id),
+            },
             Self::Delegate {
                 thread_id,
                 message,
@@ -692,6 +702,7 @@ pub(super) enum RemoteActionKind {
     ResolveReview,
     ResolveWorkflow,
     DeleteReview,
+    AcceptReview,
     Delegate,
     Handover,
     AckHandover,
@@ -746,6 +757,7 @@ impl RemoteActionKind {
             Self::ResolveReview => "resolve_review",
             Self::ResolveWorkflow => "resolve_workflow",
             Self::DeleteReview => "delete_review",
+            Self::AcceptReview => "accept_review",
             Self::Delegate => "delegate",
             Self::Handover => "handover",
             Self::AckHandover => "ack_handover",
@@ -1643,6 +1655,13 @@ async fn execute_remote_action(
             .delete_review(review_id, device_id)
             .await
             .map(|_| RemoteActionOutcome::default()),
+        RemoteActionRequest::AcceptReview {
+            review_id,
+            device_id,
+        } => state
+            .accept_review(review_id, device_id)
+            .await
+            .map(|_| RemoteActionOutcome::default()),
         RemoteActionRequest::StopTurn { input } => state
             .stop_active_turn(input)
             .await
@@ -2020,6 +2039,7 @@ fn requires_session_claim(action: RemoteActionKind) -> bool {
             | RemoteActionKind::ResolveReview
             | RemoteActionKind::ResolveWorkflow
             | RemoteActionKind::DeleteReview
+            | RemoteActionKind::AcceptReview
             // The stop too: unlike `stop_turn` it settles the goal Cancelled and takes the
             // card away, so an unclaimed device could erase the controller's objective.
             | RemoteActionKind::Delegate
@@ -3495,6 +3515,7 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         | RemoteActionKind::ResolveReview
         | RemoteActionKind::ResolveWorkflow
         | RemoteActionKind::DeleteReview
+        | RemoteActionKind::AcceptReview
         | RemoteActionKind::Delegate
         | RemoteActionKind::Handover
         | RemoteActionKind::AckHandover

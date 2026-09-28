@@ -2711,14 +2711,20 @@ button.ask-user-summary:focus-visible {
   color: var(--text-primary);
   overflow-wrap: anywhere;
 }
-.handover-section-value.is-clamped {
+/* Two lines until pressed: `useFold` in shared/card-parts.js, on handover and review cards. */
+.card-fold.is-clamped {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   overflow: hidden;
 }
-.handover-section-value.is-togglable {
+.card-fold.is-togglable {
   cursor: pointer;
+}
+.card-fold.is-togglable:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: 4px;
 }
 button.handover-section-label {
   align-self: start;

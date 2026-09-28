@@ -16,6 +16,8 @@ import { shortId } from "./utils.js";
 import { useRemoteTranscriptScrollBookkeeping } from "./use-transcript-scroll-bookkeeping.js";
 import { useRelayNicknames } from "./use-relay-nicknames.js";
 import { visibleTranscriptEntries } from "../shared/withdrawn-transcript.js";
+import { reviewProgressFor } from "../shared/review-card.js";
+import { reviewActivity } from "../shared/review-state.js";
 
 const h = React.createElement;
 
@@ -25,6 +27,8 @@ export function RemoteTranscriptPanel({
   onApplyFileChange,
   onForkFromMessage,
   onOpenThread = null,
+  onReviewAction = null,
+  reviewJobs = null,
   onAskMessage = null,
   onSelectRelay,
   onToggleExpandableBlock,
@@ -86,6 +90,11 @@ export function RemoteTranscriptPanel({
     provider: session?.provider || "",
     canAsk: canAskInThread(session) && typeof onAskMessage === "function",
     turnRunning: Boolean(session?.active_turn_id),
+    reviewProgress: reviewProgressFor(
+      reviewActivity(session),
+      reviewJobs,
+      session?.active_thread_id || null
+    ),
     onEnsureFileChangeDetail,
     pendingAskUserQuestions,
     onSubmitAskUserAnswers: handleSubmitAskUserAnswers,
@@ -191,6 +200,10 @@ export function RemoteTranscriptPanel({
         openThread: ({ threadId }, event) => {
           event.preventDefault();
           if (threadId) onOpenThread?.(threadId);
+        },
+        reviewAction: (action, event) => {
+          event.preventDefault();
+          onReviewAction?.(action);
         },
       }),
     });

@@ -165,6 +165,7 @@ import {
   canRequestReview,
   isReviewBlocked,
   isReviewInProgressForThread,
+  reviewActivity,
   reviewStatusLabel,
   selectReviewLaunchModel,
 } from "../shared/review-state.js";
@@ -229,6 +230,7 @@ import { retainAskUserDraftsForPending } from "../shared/ask-user-draft-store.js
 import { publishLocalTranscriptSlotContent } from "./transcript-slot.js";
 import { syncComposerHeld } from "./composer-held.js";
 import { goalErrorFor } from "./goal-error.js";
+import { reviewProgressFor } from "../shared/review-card.js";
 
 const h = React.createElement;
 const reactRoots = new WeakMap();
@@ -1405,6 +1407,11 @@ export function createSessionRenderer({
         !isWorkflowInProgressForThread(session, session.active_thread_id),
       canAsk: canAskInThread(session),
       turnRunning: Boolean(session.active_turn_id),
+      reviewProgress: reviewProgressFor(
+        reviewActivity(session),
+        reviewsCache.current()?.review_jobs,
+        session.active_thread_id || null
+      ),
       expandedKeys: localUi.transcriptExpandedItemIds,
       loadingItemIds: localUi.transcriptLoadingItemIds,
       // Enables the per-message "Fork from here" affordance on turn-final

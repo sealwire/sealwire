@@ -31,6 +31,7 @@ import {
   resolveReview as resolveReviewApi,
   resolveWorkflow as resolveWorkflowApi,
   deleteReview as deleteReviewApi,
+  acceptReview as acceptReviewApi,
 } from "../api.js";
 import { loadLastEffort, saveLastApprovalPolicy } from "../../shared/last-used-settings.js";
 import { resolveOutgoingEffort } from "../../shared/reasoning-efforts.js";
@@ -707,6 +708,7 @@ export function createLifecycleController(ctx) {
     parentThreadId,
     maxRounds,
     recapSource,
+    continuesReviewId,
   } = {}) {
     if (!reviewerProvider) {
       logLine("Pick a reviewer provider before starting a review.");
@@ -737,6 +739,7 @@ export function createLifecycleController(ctx) {
           recap_source: recapSource || "last_message",
           // Phase 5: round budget for the iterative reviewer↔author loop.
           max_rounds: maxRounds || 1,
+          continues_review_id: continuesReviewId || null,
         },
         state.deviceId
       );
@@ -822,6 +825,15 @@ export function createLifecycleController(ctx) {
       return receipt;
     } catch (error) {
       logLine(`Code Flow resolve failed: ${error.message}`);
+      return null;
+    }
+  }
+
+  async function acceptReview(reviewId) {
+    try {
+      return await acceptReviewApi(apiFetch, reviewId, state.deviceId);
+    } catch (error) {
+      logLine(`Accept failed: ${error.message}`);
       return null;
     }
   }
@@ -1324,6 +1336,7 @@ export function createLifecycleController(ctx) {
     resolveReview,
     resolveWorkflow,
     deleteReview,
+    acceptReview,
     stopActiveTurn,
     repairWorkspace,
     applySessionSnapshot,

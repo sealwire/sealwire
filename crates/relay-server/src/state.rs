@@ -26,7 +26,8 @@ pub(crate) use self::relay::IdSpace;
 #[cfg(test)]
 use self::relay::TranscriptRecord;
 pub(crate) use self::relay::{
-    injection_kind_from_name, injection_kind_name, HandoverMark, InjectedMessage, MessageAnchor,
+    clip_chars, injection_kind_from_name, injection_kind_name, HandoverMark, InjectedMessage,
+    InjectionTag, MessageAnchor, ReviewMark,
 };
 pub(crate) use self::relay::{
     load_or_generate_vapid, next_relay_ingress, parse_ask_user_questions, thread_status_is_working,
@@ -55,11 +56,11 @@ pub(crate) fn goal_max_turns() -> u32 {
 pub(crate) use self::relay::PushKind;
 pub(crate) use self::review::{
     handoff_review_prompt, handoff_review_prompt_for_checkpoint, handoff_review_prompt_for_target,
-    parent_commit_prompt, parent_fix_prompt, parent_recap_prompt, parse_verdict, post_back_message,
-    re_review_prompt, re_review_prompt_for_checkpoint, re_review_prompt_for_target,
-    review_approved_message, review_escalated_message, reviewer_prompt,
-    reviewer_prompt_for_checkpoint, reviewer_prompt_for_no_change, reviewer_prompt_for_target,
-    ReviewJob, ReviewJobStatus, ReviewMode, ReviewRecapSource,
+    parent_commit_prompt, parent_fix_prompt, parent_recap_prompt, parse_review_findings,
+    parse_verdict, post_back_message, re_review_prompt, re_review_prompt_for_checkpoint,
+    re_review_prompt_for_target, review_approved_message, review_escalated_message,
+    reviewer_prompt, reviewer_prompt_for_checkpoint, reviewer_prompt_for_no_change,
+    reviewer_prompt_for_target, ReviewJob, ReviewJobStatus, ReviewMode, ReviewRecapSource,
 };
 // `Verdict` is consumed only by tests today; the workflow runner that will use it in
 // a live path isn't wired up yet, so keep the re-export without an unused-import

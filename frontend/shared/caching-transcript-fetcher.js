@@ -78,9 +78,21 @@ const VOLATILE_ENTRY_STATUSES = new Set([
   "streaming",
 ]);
 
+const SETTLED_REVIEW_STATUSES = new Set(["complete", "failed", "escalated", "cancelled"]);
+
 export function isVolatileEntry(entry) {
   // The card on this row still changes when the handover ends.
   if (entry?.injection?.handover?.status === "working") {
+    return true;
+  }
+  // A review card changes until the review ends, and a review waiting on the person
+  // until they decide.
+  const review = entry?.injection?.review;
+  if (
+    review
+    && (!SETTLED_REVIEW_STATUSES.has(review.status)
+      || (review.status === "escalated" && !review.decision))
+  ) {
     return true;
   }
   const status = typeof entry?.status === "string" ? entry.status.trim().toLowerCase() : "";

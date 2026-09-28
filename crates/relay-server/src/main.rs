@@ -56,18 +56,19 @@ use protocol::{
     PairingDecisionReceipt, PairingStartInput, PairingTicketView, ProjectActionInput,
     ProjectActionReceipt, ProjectsResponse, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
     RenameThreadInput, RepairWorkspaceInput, RequestReviewInput, RequestReviewReceipt,
-    ResolvedWorkspace, ResumeSessionInput, ReviewActionInput, ReviewDeleteReceipt, ReviewsResponse,
-    RevokeDeviceReceipt, SendMessageInput, SessionSnapshot, SessionSnapshotCompactProfile,
-    SetThreadFlagInput, SkillInvocationInput, StartSessionInput, StartTeamInput, StartTeamReceipt,
-    StartWorkflowInput, StartWorkflowReceipt, StopTurnInput, SubmitAskUserAnswerInput,
-    TakeOverInput, TeamActionInput, TeamActionReceipt, TeamFileResponse, TeamMarkInput,
-    TeamsResponse, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse,
-    ThreadFlagReceipt, ThreadRenameReceipt, ThreadSettingsView, ThreadSkillsView,
-    ThreadTranscriptResponse, ThreadWorkspaceInput, ThreadsQuery, ThreadsResponse,
-    TickReviewFileInput, TranscriptCursorToken, TranscriptDeltaEvent, TranscriptResyncEvent,
-    UpdateSessionSettingsInput, WatchThreadsInput, WorkflowActionInput, WorkflowActionReceipt,
-    WorkflowsResponse, WorkspaceDiffResponse, WorkspaceGitContextView, WorkspaceTrustInput,
-    WorkspaceTrustReceipt, TRANSCRIPT_RESYNC_EVENT_KIND, TRANSCRIPT_STREAM_LAGGED_EVENT_KIND,
+    ResolvedWorkspace, ResumeSessionInput, ReviewAcceptReceipt, ReviewActionInput,
+    ReviewDeleteReceipt, ReviewsResponse, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
+    SessionSnapshotCompactProfile, SetThreadFlagInput, SkillInvocationInput, StartSessionInput,
+    StartTeamInput, StartTeamReceipt, StartWorkflowInput, StartWorkflowReceipt, StopTurnInput,
+    SubmitAskUserAnswerInput, TakeOverInput, TeamActionInput, TeamActionReceipt, TeamFileResponse,
+    TeamMarkInput, TeamsResponse, ThreadArchiveReceipt, ThreadDeleteReceipt,
+    ThreadEntryDetailResponse, ThreadFlagReceipt, ThreadRenameReceipt, ThreadSettingsView,
+    ThreadSkillsView, ThreadTranscriptResponse, ThreadWorkspaceInput, ThreadsQuery,
+    ThreadsResponse, TickReviewFileInput, TranscriptCursorToken, TranscriptDeltaEvent,
+    TranscriptResyncEvent, UpdateSessionSettingsInput, WatchThreadsInput, WorkflowActionInput,
+    WorkflowActionReceipt, WorkflowsResponse, WorkspaceDiffResponse, WorkspaceGitContextView,
+    WorkspaceTrustInput, WorkspaceTrustReceipt, TRANSCRIPT_RESYNC_EVENT_KIND,
+    TRANSCRIPT_STREAM_LAGGED_EVENT_KIND,
 };
 use provider::ProviderImage;
 use relay_http::{
@@ -497,6 +498,10 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route(
             "/api/session/reviews/:review_id/delete",
             post(delete_review),
+        )
+        .route(
+            "/api/session/reviews/:review_id/accept",
+            post(accept_review),
         )
         .route("/api/pairing/start", post(start_pairing))
         .route(
@@ -2292,6 +2297,22 @@ async fn delete_review(
     context
         .app
         .delete_review(review_id, input.device_id)
+        .await
+        .map(|receipt| Json(ApiEnvelope::ok(receipt)))
+        .map_err(bad_request)
+}
+
+async fn accept_review(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(review_id): Path<String>,
+    Json(input): Json<ReviewActionInput>,
+) -> Result<Json<ApiEnvelope<ReviewAcceptReceipt>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    context
+        .app
+        .accept_review(review_id, input.device_id)
         .await
         .map(|receipt| Json(ApiEnvelope::ok(receipt)))
         .map_err(bad_request)

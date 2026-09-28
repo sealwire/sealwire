@@ -8,9 +8,9 @@ import { registerTypeScaleRatchet } from "./type-scale-guard.mjs";
 // of it; this file is just the public call site.
 //
 // All five baselines are 0 (fully migrated): one new raw literal anywhere in
-// these three files fails.
+// these files fails.
 
 registerTypeScaleRatchet({
   baseDir: dirname(fileURLToPath(import.meta.url)),
-  files: ["styles.css", "conversation.css", "desktop/desktop.css"],
+  files: ["styles.css", "conversation.css", "review-cards.css", "desktop/desktop.css"],
 });

@@ -22,6 +22,14 @@ import {
 import { providerIconSvg } from "./provider-icons.js";
 import { foldHandoverTurns, HandoverSourceEntry, HandoverTargetEntry } from "./handover-card.js";
 import {
+  foldReviewInjections,
+  opensReviewedTurn,
+  REVIEW_RESULT_LINE_KIND,
+  ReviewEntry,
+  ReviewProgressLine,
+  ReviewResultLine,
+} from "./review-card.js";
+import {
   computeForkableItemIds,
   computeSettledTurnFinalIds,
   isForkableEntry,
@@ -2770,14 +2778,26 @@ export function TranscriptEntry({
   const kind = entry.kind || "reasoning";
 
   if (kind === "user_text") {
-    const injection = entry.injection?.handover ? entry.injection : null;
+    const injection = entry.injection?.handover || entry.injection?.review ? entry.injection : null;
     if (injection) {
       const attrs = transcriptEntryDomAttrs(
         entry,
-        "chat-message chat-message-user",
+        // A review result opens the agent's turn, so it sits in the agent's column.
+        opensReviewedTurn(entry)
+          ? "chat-message chat-message-assistant"
+          : "chat-message chat-message-user",
         isLatestUser ? { "data-latest-user-message": "true" } : null,
         { justPrepended: isJustPrepended }
       );
+      if (injection.review) {
+        return h(ReviewEntry, {
+          attrs,
+          entry,
+          folded: Boolean(options?.reviewFolded?.has(rowKey)),
+          provider,
+          providerIcon: providerIconSvg(provider) || SPARKLES_SVG,
+        });
+      }
       if (injection.kind === "handover_request") {
         return h(HandoverSourceEntry, {
           attrs,
@@ -2792,6 +2812,9 @@ export function TranscriptEntry({
       }
     }
     return h(UserEntry, { entry, isJustPrepended, isLatestUser });
+  }
+  if (kind === REVIEW_RESULT_LINE_KIND) {
+    return h(ReviewResultLine, { entry });
   }
   if (kind === "agent_text") {
     return h(AgentEntry, {
@@ -3222,7 +3245,7 @@ function computeTurnOpenerIds(entries) {
   let opened = false;
   for (const entry of entries) {
     if (entry?.kind === "user_text") {
-      opened = false;
+      opened = opensReviewedTurn(entry);
     } else if (entry?.kind === "agent_text" && !opened) {
       opened = true;
       const id = transcriptRowKey(entry);
@@ -3244,9 +3267,13 @@ export function TranscriptContent({
   );
   // A delivered handover's turn is drawn as its card, so its rows leave the list.
   const handoverFold = React.useMemo(() => foldHandoverTurns(entries), [entries]);
-  const groupedItems = React.useMemo(
-    () => groupToolEntries(handoverFold.entries),
+  const reviewFold = React.useMemo(
+    () => foldReviewInjections(handoverFold.entries),
     [handoverFold]
+  );
+  const groupedItems = React.useMemo(
+    () => groupToolEntries(reviewFold.entries),
+    [reviewFold]
   );
   const latestUserEntryId = React.useMemo(() => {
     for (let index = entries.length - 1; index >= 0; index -= 1) {
@@ -3278,6 +3305,7 @@ export function TranscriptContent({
   );
   const turnOpenerItemIds = React.useMemo(() => computeTurnOpenerIds(entries), [entries]);
   const handoverMembers = handoverFold.members;
+  const reviewFolded = reviewFold.folded;
   const effectiveOptions = React.useMemo(() => {
     const derived = {
       lastTurnDiffItemId,
@@ -3285,9 +3313,18 @@ export function TranscriptContent({
       settledFinalItemIds,
       turnOpenerItemIds,
       handoverMembers,
+      reviewFolded,
     };
     return options ? { ...options, ...derived } : derived;
-  }, [options, lastTurnDiffItemId, forkableItemIds, settledFinalItemIds, turnOpenerItemIds, handoverMembers]);
+  }, [
+    options,
+    lastTurnDiffItemId,
+    forkableItemIds,
+    settledFinalItemIds,
+    turnOpenerItemIds,
+    handoverMembers,
+    reviewFolded,
+  ]);
   const justPrependedItemIds = useJustPrependedItemIds(entries);
   // An UNANSWERED question is the one thing the session is waiting on, so it
   // belongs at the bottom of the transcript wherever its tool call actually
@@ -3407,6 +3444,16 @@ export function TranscriptContent({
       })
     );
   });
+
+  if (options?.reviewProgress) {
+    nodes.push(
+      h(ReviewProgressLine, {
+        activity: options.reviewProgress,
+        key: `review-progress:${options.reviewProgress.id}`,
+        provider: options.provider || "",
+      })
+    );
+  }
 
   if (approval) {
     nodes.push(h(ApprovalCard, { approval, key: "approval", options: effectiveOptions }));

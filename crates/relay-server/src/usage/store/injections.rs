@@ -1,4 +1,4 @@
-//! Handover marks: which user rows were sent on the person's behalf.
+//! Handover and review marks: which user rows were sent on the person's behalf.
 //!
 //! Best-effort like the rest of the store: a failed write costs a card, never a turn.
 
@@ -6,7 +6,8 @@ use rusqlite::{params, Connection};
 use tracing::warn;
 
 use crate::state::{
-    injection_kind_from_name, injection_kind_name, HandoverMark, InjectedMessage, MessageAnchor,
+    injection_kind_from_name, injection_kind_name, HandoverMark, InjectedMessage, InjectionTag,
+    MessageAnchor, ReviewMark,
 };
 
 use super::UsageStore;
@@ -51,30 +52,44 @@ impl UsageStore {
         });
     }
 
+    pub(crate) fn save_review_mark(&self, review: &ReviewMark) {
+        let body = match serde_json::to_string(review) {
+            Ok(body) => body,
+            Err(error) => {
+                warn!(%error, "database: could not encode review {}", review.id);
+                return;
+            }
+        };
+        self.with_conn("save review", |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO review (id, body, updated_at) VALUES (?1, ?2, ?3)",
+                params![review.id, body, review.updated_at as i64],
+            )
+        });
+    }
+
     pub(crate) fn record_injected_message(&self, message: &InjectedMessage) {
         self.with_conn("record injected message", |conn| {
             conn.execute(
-                "INSERT OR REPLACE INTO injected_message (thread_id, anchor, kind, handover_id,
-                     created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT OR REPLACE INTO injected_message (thread_id, anchor, kind, ref_id,
+                     round, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     message.thread_id,
                     message.anchor.encode(),
-                    injection_kind_name(message.kind),
-                    message.handover_id,
+                    injection_kind_name(message.tag.kind),
+                    message.tag.ref_id,
+                    message.tag.round,
                     message.created_at as i64,
                 ],
             )
         });
     }
 
-    /// Everything recorded, after failing any handover the last run left under way:
-    /// nothing drives one across a restart.
-    pub(crate) fn load_injections(
-        &self,
-        restart_reason: &str,
-    ) -> (Vec<HandoverMark>, Vec<InjectedMessage>) {
-        self.with_conn("load injections", |conn| {
+    /// Everything recorded, after failing any handover or review the last run left
+    /// under way: nothing drives one across a restart.
+    pub(crate) fn load_injections(&self, restart_reason: &str) -> LoadedInjections {
+        let loaded = self.with_conn("load injections", |conn| {
             conn.execute(
                 "UPDATE handover SET status = 'failed', error = ?1 WHERE status = 'working'",
                 [restart_reason],
@@ -102,9 +117,26 @@ impl UsageStore {
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
+            let reviews = conn
+                .prepare("SELECT id, body FROM review ORDER BY updated_at, id")?
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .filter_map(
+                    |(id, body)| match serde_json::from_str::<ReviewMark>(&body) {
+                        Ok(review) => Some(review),
+                        Err(error) => {
+                            warn!(%error, "database: skipping unreadable review {id}");
+                            None
+                        }
+                    },
+                )
+                .collect();
             let messages = conn
                 .prepare(
-                    "SELECT thread_id, anchor, kind, handover_id, created_at
+                    "SELECT thread_id, anchor, kind, ref_id, round, created_at
                      FROM injected_message ORDER BY created_at, thread_id",
                 )?
                 .query_map([], |row| {
@@ -113,43 +145,83 @@ impl UsageStore {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
+                        row.get::<_, u32>(4)?,
+                        row.get::<_, i64>(5)?,
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
                 .into_iter()
-                .filter_map(|(thread_id, anchor, kind, handover_id, created_at)| {
+                .filter_map(|(thread_id, anchor, kind, ref_id, round, created_at)| {
                     Some(InjectedMessage {
                         thread_id,
                         anchor: MessageAnchor::decode(&anchor)?,
-                        kind: injection_kind_from_name(&kind)?,
-                        handover_id,
+                        tag: InjectionTag {
+                            kind: injection_kind_from_name(&kind)?,
+                            ref_id,
+                            round,
+                        },
                         created_at: created_at as u64,
                     })
                 })
                 .collect();
-            Ok((handovers, messages))
-        })
-        .unwrap_or_default()
+            Ok(LoadedInjections {
+                handovers,
+                reviews,
+                messages,
+            })
+        });
+        let mut loaded = loaded.unwrap_or_default();
+        let mut ended_undelivered = Vec::new();
+        for review in loaded
+            .reviews
+            .iter_mut()
+            .filter(|review| !review.is_settled())
+        {
+            review.status = "failed".to_string();
+            review.error = Some(restart_reason.to_string());
+            self.save_review_mark(review);
+            if !review.rounds.iter().any(|round| round.delivered) {
+                ended_undelivered.push(review.id.clone());
+            }
+        }
+        // Same as a live one ending with nothing handed back: the card it took up asks again.
+        for review in loaded.reviews.iter_mut().filter(|review| {
+            review
+                .continued_by
+                .as_ref()
+                .is_some_and(|by| ended_undelivered.contains(by))
+        }) {
+            review.decision = None;
+            review.continued_by = None;
+            self.save_review_mark(review);
+        }
+        loaded
     }
 
-    pub(crate) fn forget_handover_mark(&self, handover_id: &str) {
-        self.with_conn("forget handover", |conn| {
-            conn.execute("DELETE FROM handover WHERE id = ?1", [handover_id])
+    pub(crate) fn forget_mark(&self, ref_id: &str) {
+        self.with_conn("forget mark", |conn| {
+            conn.execute("DELETE FROM handover WHERE id = ?1", [ref_id])?;
+            conn.execute("DELETE FROM review WHERE id = ?1", [ref_id])
         });
     }
 
-    pub(crate) fn forget_thread_injections(&self, thread_id: &str) {
+    /// `orphaned`: the marks only this thread's rows carried.
+    pub(crate) fn forget_thread_injections(&self, thread_id: &str, orphaned: &[String]) {
         self.with_conn("forget thread injections", |conn| {
             conn.execute(
                 "DELETE FROM injected_message WHERE thread_id = ?1",
                 [thread_id],
-            )?;
-            conn.execute(
-                "DELETE FROM handover
-                 WHERE id NOT IN (SELECT handover_id FROM injected_message)",
-                [],
             )
         });
+        for id in orphaned {
+            self.forget_mark(id);
+        }
     }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct LoadedInjections {
+    pub(crate) handovers: Vec<HandoverMark>,
+    pub(crate) reviews: Vec<ReviewMark>,
+    pub(crate) messages: Vec<InjectedMessage>,
 }

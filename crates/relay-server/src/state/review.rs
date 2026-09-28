@@ -9,7 +9,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{ReviewJobStatusView, ReviewJobView, WorkspaceDiffResponse};
+use crate::protocol::{
+    ReviewFindingView, ReviewJobStatusView, ReviewJobView, WorkspaceDiffResponse,
+};
 use relay_api::GitReviewTarget;
 
 use super::unix_now;
@@ -284,6 +286,8 @@ impl ReviewJob {
             candidate_sha: self.candidate_sha.clone(),
             candidate_is_checkpoint: self.candidate_is_checkpoint,
             verdict_candidate_sha: self.verdict_candidate_sha.clone(),
+            reviewing_since: 0,
+            files: None,
         }
     }
 }
@@ -332,6 +336,7 @@ pub(crate) fn reviewer_prompt(
         diff,
         instructions,
         workspace,
+        false,
     )
 }
 
@@ -348,6 +353,7 @@ pub(crate) fn reviewer_prompt_for_target(
         instructions,
         workspace,
         None,
+        false,
     )
 }
 
@@ -369,6 +375,7 @@ review and whether earlier findings were addressed.",
         diff,
         instructions,
         workspace,
+        true,
     )
 }
 
@@ -387,6 +394,7 @@ your last review and whether earlier findings were addressed.",
         instructions,
         workspace,
         None,
+        true,
     )
 }
 
@@ -413,7 +421,7 @@ add anything new you see.\n\n\
 Findings from the previous reviewer:\n{}",
         previous_review.trim()
     );
-    build_review_prompt(&intro, recap, diff, instructions, workspace)
+    build_review_prompt(&intro, recap, diff, instructions, workspace, true)
 }
 
 pub(crate) fn handoff_review_prompt_for_target(
@@ -430,7 +438,15 @@ pub(crate) fn handoff_review_prompt_for_target(
     let intro = "You are taking over a code review from another reviewer. Re-review the \
 CURRENT committed candidate: for each earlier finding say whether it is addressed, and \
 add anything new you see.";
-    build_committed_review_prompt(intro, recap, target, instructions, workspace, Some(&prior))
+    build_committed_review_prompt(
+        intro,
+        recap,
+        target,
+        instructions,
+        workspace,
+        Some(&prior),
+        true,
+    )
 }
 
 /// Review a turn that produced no repository diff. The author's fresh reply is
@@ -498,16 +514,13 @@ verification-only completion report, an unsupported assertion, or an honest \
 failure report.\n\n\
 <author-report>\n{report}\n</author-report>{prior}\n\n\
 Additional user instructions:\n{instructions}\n\n\
-Return:\n\
-1. What you independently verified.\n\
-2. Findings or missing evidence, highest severity first.\n\
-3. A short verdict.\n\n\
-End your reply with exactly one line, on its own, one of:\n\
-VERDICT: APPROVE\n\
-VERDICT: NEEDS_CHANGES\n\
-VERDICT: UNSURE\n\
+{format}\
 Use APPROVE only if no repository change was actually required and the reported \
-result is sufficiently supported. Use NEEDS_CHANGES for incomplete or unsupported work."
+result is sufficiently supported. Use NEEDS_CHANGES for incomplete or unsupported work.",
+        format = reply_format(
+            Some(("Verified", "What you independently verified.")),
+            reused_reviewer || previous_review.is_some(),
+        ),
     )
 }
 
@@ -529,6 +542,7 @@ pub(crate) fn reviewer_prompt_for_checkpoint(
         instructions,
         workspace,
         None,
+        false,
     )
 }
 
@@ -547,6 +561,7 @@ since your last review and whether earlier findings were addressed.",
         instructions,
         workspace,
         None,
+        true,
     )
 }
 
@@ -564,7 +579,15 @@ pub(crate) fn handoff_review_prompt_for_checkpoint(
     let intro = "You are taking over a code review from another reviewer. Re-review the \
 CURRENT uncommitted worktree snapshot: for each earlier finding say whether it is \
 addressed, and add anything new you see.";
-    build_checkpoint_review_prompt(intro, recap, target, instructions, workspace, Some(&prior))
+    build_checkpoint_review_prompt(
+        intro,
+        recap,
+        target,
+        instructions,
+        workspace,
+        Some(&prior),
+        true,
+    )
 }
 
 fn build_committed_review_prompt(
@@ -574,6 +597,7 @@ fn build_committed_review_prompt(
     instructions: Option<&str>,
     workspace: &str,
     prior_context: Option<&str>,
+    earlier_findings: bool,
 ) -> String {
     let recap = if recap.trim().is_empty() {
         "(the parent agent did not provide a recap)"
@@ -632,16 +656,9 @@ for the full patch, `git show {candidate}:<path>` for candidate contents, and \
 old side with `git show {base}:<path>`; for renames, compare the old and new paths \
 reported in the manifest.\n\n\
 Additional user instructions:\n{instructions}\n\n\
-Return:\n\
-1. Findings, highest severity first, with file/line references where possible.\n\
-2. Open questions or assumptions.\n\
-3. Test gaps or checks you recommend.\n\
-4. A short verdict.\n\n\
-End your reply with exactly one line, on its own, one of:\n\
-VERDICT: APPROVE\n\
-VERDICT: NEEDS_CHANGES\n\
-VERDICT: UNSURE\n\
+{format}\
 Use APPROVE only if the committed candidate is good to merge as-is.",
+        format = reply_format(None, earlier_findings),
         generated_at = target.generated_at,
         cwd = target.cwd,
         base = target.base_sha,
@@ -660,6 +677,7 @@ fn build_checkpoint_review_prompt(
     instructions: Option<&str>,
     workspace: &str,
     prior_context: Option<&str>,
+    earlier_findings: bool,
 ) -> String {
     let recap = if recap.trim().is_empty() {
         "(the parent agent did not provide a recap)"
@@ -719,16 +737,9 @@ for the full patch, `git show {candidate}:<path>` for the snapshot's contents, a
 old side with `git show {base}:<path>`; for renames, compare the old and new paths \
 reported in the manifest.\n\n\
 Additional user instructions:\n{instructions}\n\n\
-Return:\n\
-1. Findings, highest severity first, with file/line references where possible.\n\
-2. Open questions or assumptions.\n\
-3. Test gaps or checks you recommend.\n\
-4. A short verdict.\n\n\
-End your reply with exactly one line, on its own, one of:\n\
-VERDICT: APPROVE\n\
-VERDICT: NEEDS_CHANGES\n\
-VERDICT: UNSURE\n\
+{format}\
 Use APPROVE only if this uncommitted snapshot is good to merge as-is.",
+        format = reply_format(None, earlier_findings),
         generated_at = target.generated_at,
         cwd = target.cwd,
         base = target.base_sha,
@@ -744,6 +755,7 @@ fn build_review_prompt(
     diff: &WorkspaceDiffResponse,
     instructions: Option<&str>,
     workspace: &str,
+    earlier_findings: bool,
 ) -> String {
     let recap = if recap.trim().is_empty() {
         "(the parent agent did not provide a recap)"
@@ -786,16 +798,9 @@ real bug.\n\n\
 Parent agent recap:\n{recap}\n\n\
 Workspace diff collected by the relay at {generated_at}:\n{diff_section}\n\n\
 Additional user instructions:\n{instructions}\n\n\
-Return:\n\
-1. Findings, highest severity first, with file/line references where possible.\n\
-2. Open questions or assumptions.\n\
-3. Test gaps or checks you recommend.\n\
-4. A short verdict.\n\n\
-End your reply with exactly one line, on its own, one of:\n\
-VERDICT: APPROVE\n\
-VERDICT: NEEDS_CHANGES\n\
-VERDICT: UNSURE\n\
+{format}\
 Use APPROVE only if the changes are good to merge as-is.",
+        format = reply_format(None, earlier_findings),
         generated_at = diff.generated_at,
     );
 
@@ -807,6 +812,155 @@ Inspect the affected files directly to see the full changes.",
     }
 
     prompt
+}
+
+pub(crate) const FINDINGS_HEADING: &str = "Findings";
+pub(crate) const FIXED_HEADING: &str = "Fixed since the last review";
+
+/// How every reviewer prompt asks for the reply. `parse_review_findings` reads only
+/// this form, so the two change together.
+fn reply_format(lead: Option<(&str, &str)>, earlier_findings: bool) -> String {
+    let lead = lead
+        .map(|(heading, ask)| format!("## {heading}\n{ask}\n\n"))
+        .unwrap_or_default();
+    let fixed = if earlier_findings {
+        format!(
+            "## {FIXED_HEADING}\n\
+Each earlier finding this change now addresses, one line each, in the same form. One that \
+still stands goes under {FINDINGS_HEADING} again instead.\n\n"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "Write your reply under these markdown headings, in this order:\n\n\
+{lead}\
+## {FINDINGS_HEADING}\n\
+One line per finding, most severe first, in exactly this form:\n\
+- [high] `path/to/file.rs:88` What is wrong, in one sentence.\n\
+The severity is high (must be fixed before this merges), medium (a real problem that can \
+wait) or low (minor). Leave out the backticked location when a finding has no single place. \
+Put any detail on indented lines under its finding. Write None. when there are no findings.\n\n\
+{fixed}\
+## Open questions\n\
+Assumptions you made, or questions for the author.\n\n\
+## Test gaps\n\
+Checks you recommend.\n\n\
+## Verdict\n\
+A short verdict.\n\n\
+End your reply with exactly one line, on its own, one of:\n\
+VERDICT: APPROVE\n\
+VERDICT: NEEDS_CHANGES\n\
+VERDICT: UNSURE\n"
+    )
+}
+
+/// What the reviewer listed under `## Findings` and `## Fixed since the last review`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ReviewFindings {
+    pub(crate) findings: Vec<ReviewFindingView>,
+    pub(crate) fixed: Vec<ReviewFindingView>,
+}
+
+/// Reads only the form `reply_format` asks for. A line written any other way stays
+/// prose in the review, rather than being guessed into a finding.
+pub(crate) fn parse_review_findings(review: &str) -> ReviewFindings {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Section {
+        Findings,
+        Fixed,
+        Other,
+    }
+    let mut parsed = ReviewFindings::default();
+    let mut section = Section::Other;
+    let mut fence: Option<String> = None;
+    for line in review.lines() {
+        let trimmed = line.trim_start();
+        let marker: String = trimmed
+            .chars()
+            .take_while(|c| *c == '`' || *c == '~')
+            .collect();
+        if marker.len() >= 3 && (marker.starts_with('`') || marker.starts_with('~')) {
+            match &fence {
+                Some(open) if marker.starts_with(open.as_str()) => fence = None,
+                Some(_) => {}
+                None => fence = Some(marker),
+            }
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
+        if let Some(title) = markdown_heading(line) {
+            section = if title.eq_ignore_ascii_case(FINDINGS_HEADING) {
+                Section::Findings
+            } else if title.eq_ignore_ascii_case(FIXED_HEADING) {
+                Section::Fixed
+            } else {
+                Section::Other
+            };
+            continue;
+        }
+        let list = match section {
+            Section::Findings => &mut parsed.findings,
+            Section::Fixed => &mut parsed.fixed,
+            Section::Other => continue,
+        };
+        if let Some(finding) = finding_line(line) {
+            list.push(finding);
+        }
+    }
+    parsed
+}
+
+fn markdown_heading(line: &str) -> Option<&str> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let hashes = rest.len() - rest.trim_start_matches('#').len();
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+    let title = rest[hashes..].strip_prefix(' ')?;
+    Some(title.trim().trim_end_matches('#').trim())
+}
+
+/// `- [high] \`path:line\` text`, with the location optional.
+fn finding_line(line: &str) -> Option<ReviewFindingView> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let rest = line[indent..].strip_prefix("- [")?;
+    let (severity, rest) = rest.split_once(']')?;
+    let severity = severity.trim().to_ascii_lowercase();
+    if !matches!(severity.as_str(), "high" | "medium" | "low") {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let (location, rest) = match rest.strip_prefix('`') {
+        Some(quoted) => {
+            let (location, rest) = quoted.split_once('`')?;
+            (
+                Some(location.trim().to_string()).filter(|l| !l.is_empty()),
+                rest,
+            )
+        }
+        None => (None, rest),
+    };
+    let text = rest
+        .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '—' | '–' | '-' | ':'))
+        .trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(ReviewFindingView {
+        severity,
+        location,
+        text: text.to_string(),
+    })
 }
 
 /// Message posted back into the parent thread carrying the review (doc §Review
@@ -1023,6 +1177,116 @@ mod tests {
         // Guard the specific things we deliberately removed.
         assert!(!message.contains("over to you"));
         assert!(!message.to_lowercase().contains("round"));
+    }
+
+    fn finding(severity: &str, location: Option<&str>, text: &str) -> ReviewFindingView {
+        ReviewFindingView {
+            severity: severity.to_string(),
+            location: location.map(str::to_string),
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn findings_are_read_from_their_two_headings_only() {
+        let review = "Looked at the gate.\n\
+- [high] `x.rs:1` Not under a heading, so not a finding.\n\n\
+## Findings\n\
+- [high] `src/goal/gate.rs:88` The gate is checked only at creation.\n\
+  It should hold for the goal's whole life.\n\
+- [MEDIUM] Archive deletes the goal with the turn.\n\
+* [low] A star bullet is not the asked-for form.\n\
+- **HIGH** Bold is not the asked-for form either.\n\
+```\n\
+## Findings\n\
+- [high] Inside a code block.\n\
+```\n\n\
+### Fixed since the last review\n\
+- [low] `a.rs` — Typo in the log line.\n\n\
+## Verdict\n\
+- [high] Under another heading.\n\
+VERDICT: NEEDS_CHANGES";
+        let parsed = parse_review_findings(review);
+        assert_eq!(
+            parsed.findings,
+            vec![
+                finding(
+                    "high",
+                    Some("src/goal/gate.rs:88"),
+                    "The gate is checked only at creation."
+                ),
+                finding("medium", None, "Archive deletes the goal with the turn."),
+            ]
+        );
+        assert_eq!(
+            parsed.fixed,
+            vec![finding("low", Some("a.rs"), "Typo in the log line.")]
+        );
+    }
+
+    /// The prompt's own example is the contract: whatever it shows must parse.
+    #[test]
+    fn the_example_every_prompt_shows_is_read_back_as_a_finding() {
+        let target = GitReviewTarget {
+            cwd: "/tmp/wt".to_string(),
+            base_sha: "a".repeat(40),
+            candidate_sha: "b".repeat(40),
+            generated_at: 1,
+            manifest: "M\tsrc/lib.rs".to_string(),
+            stat: " src/lib.rs | 2 +-".to_string(),
+        };
+        let diff = WorkspaceDiffResponse::unavailable();
+        let prompts = [
+            (reviewer_prompt("recap", &diff, None, ""), false),
+            (
+                reviewer_prompt_for_target("recap", &target, None, ""),
+                false,
+            ),
+            (
+                reviewer_prompt_for_checkpoint("recap", &target, None, ""),
+                false,
+            ),
+            (re_review_prompt("recap", &diff, None, ""), true),
+            (
+                re_review_prompt_for_target("recap", &target, None, ""),
+                true,
+            ),
+            (
+                re_review_prompt_for_checkpoint("recap", &target, None, ""),
+                true,
+            ),
+            (handoff_review_prompt("recap", &diff, None, "", "old"), true),
+            (
+                handoff_review_prompt_for_target("recap", &target, None, "", "old"),
+                true,
+            ),
+            (
+                handoff_review_prompt_for_checkpoint("recap", &target, None, "", "old"),
+                true,
+            ),
+            (
+                reviewer_prompt_for_no_change("report", None, "", false, None),
+                false,
+            ),
+            (
+                reviewer_prompt_for_no_change("report", None, "", true, None),
+                true,
+            ),
+        ];
+        for (prompt, earlier) in prompts {
+            let shown = prompt
+                .lines()
+                .find(|line| line.starts_with("- [high]"))
+                .unwrap_or_else(|| panic!("no example finding in: {prompt}"));
+            let parsed = parse_review_findings(&format!("## {FINDINGS_HEADING}\n{shown}"));
+            assert_eq!(parsed.findings.len(), 1, "{shown}");
+            assert_eq!(
+                prompt.contains(&format!("## {FIXED_HEADING}")),
+                earlier,
+                "only a reviewer with earlier findings is asked which got fixed: {prompt}"
+            );
+            assert!(prompt.trim_end().ends_with("as-is.") || prompt.contains("Use NEEDS_CHANGES"));
+        }
     }
 
     #[test]

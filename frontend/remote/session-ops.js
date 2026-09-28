@@ -2331,6 +2331,7 @@ export async function requestRemoteReview({
   parentThreadId,
   maxRounds,
   recapSource,
+  continuesReviewId,
 } = {}) {
   if (!reviewerProvider) {
     renderLog("Pick a reviewer provider before starting a review.");
@@ -2357,6 +2358,7 @@ export async function requestRemoteReview({
         recap_source: recapSource || "last_message",
         // Phase 5: round budget for the iterative reviewer↔author loop.
         max_rounds: maxRounds || 1,
+        continues_review_id: continuesReviewId || null,
       },
     });
     await syncRemoteSnapshot("post-review-request", true);
@@ -2564,6 +2566,19 @@ export async function deleteRemoteReview(reviewId) {
     return true;
   } catch (error) {
     renderLog(`Remote delete failed: ${error.message}`);
+    return false;
+  }
+}
+
+export async function acceptRemoteReview(reviewId) {
+  if (!reviewId) {
+    return false;
+  }
+  try {
+    await dispatchOrRecover("accept_review", { review_id: reviewId });
+    return true;
+  } catch (error) {
+    renderLog(`Remote accept failed: ${error.message}`);
     return false;
   }
 }

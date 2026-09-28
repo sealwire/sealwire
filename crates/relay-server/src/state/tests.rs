@@ -8870,8 +8870,7 @@ fn rows_rebuilt_after_a_restart_are_marked_from_the_database() {
             store.record_injected_message(&InjectedMessage {
                 thread_id: thread_id.to_string(),
                 anchor,
-                kind,
-                handover_id: "handover-1".to_string(),
+                tag: crate::state::InjectionTag::handover(kind, "handover-1"),
                 created_at: 1,
             });
         }

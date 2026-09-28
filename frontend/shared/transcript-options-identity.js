@@ -20,6 +20,13 @@ export function transcriptOptionValueEqual(a, b) {
     }
     return true;
   }
+  if (isPlainObject(a) && isPlainObject(b)) {
+    const keys = Object.keys(a);
+    return (
+      keys.length === Object.keys(b).length
+      && keys.every((key) => Object.prototype.hasOwnProperty.call(b, key) && Object.is(a[key], b[key]))
+    );
+  }
   if (a instanceof Map && b instanceof Map) {
     if (a.size !== b.size) {
       return false;
@@ -32,6 +39,10 @@ export function transcriptOptionValueEqual(a, b) {
     return true;
   }
   return false;
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype;
 }
 
 // Reuses the PREVIOUS transcriptOptions object when every field is
