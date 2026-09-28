@@ -203,3 +203,45 @@ async function isVisible(page, selector) {
     return style.visibility !== "hidden" && style.display !== "none";
   }, selector);
 }
+
+// Waits for the dialog's refusal alert and proves a person can read it: on screen,
+// not covered, not clipped. Text alone is not evidence (see AGENTS.md).
+export async function waitForVisibleStartRefusal(
+  page,
+  { dialogId, text, timeout = DEFAULT_TIMEOUT } = {}
+) {
+  const handle = await page.waitForFunction(
+    ({ id, expected }) => {
+      const dialog = document.getElementById(id);
+      const alert = dialog?.querySelector("[role=alert]");
+      if (!alert || !alert.textContent.includes(expected)) {
+        return null;
+      }
+      const box = alert.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return {
+        dialogOpen: dialog.open,
+        text: alert.textContent,
+        box: { top: box.top, bottom: box.bottom, left: box.left, right: box.right },
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        hitsAlert: Boolean(hit && alert.contains(hit)),
+        clipped:
+          alert.scrollWidth > alert.clientWidth + 1 || alert.scrollHeight > alert.clientHeight + 1,
+      };
+    },
+    { id: dialogId, expected: text },
+    { timeout }
+  );
+  const refusal = await handle.jsonValue();
+  assert.equal(refusal.dialogOpen, true, "a refused start must leave the dialog open");
+  assert.ok(
+    refusal.box.top >= 0
+      && refusal.box.left >= 0
+      && refusal.box.bottom <= refusal.viewport.height
+      && refusal.box.right <= refusal.viewport.width,
+    `the refusal must sit inside the viewport, got ${JSON.stringify(refusal)}`
+  );
+  assert.ok(refusal.hitsAlert, `the refusal must not be covered, got ${JSON.stringify(refusal)}`);
+  assert.equal(refusal.clipped, false, `the refusal must not be clipped, got ${JSON.stringify(refusal)}`);
+  return refusal;
+}

@@ -9,6 +9,7 @@ import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
 import { launchBrowser } from "./e2e/harness/browser.mjs";
 import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
 import { startLocalSession } from "./e2e/harness/local-session.mjs";
+import { waitForVisibleStartRefusal } from "./e2e/harness/start-session-dialog.mjs";
 import { openSettingsTab, closeSecurityModal } from "./e2e/harness/pairing.mjs";
 import { getFreePort } from "./e2e/harness/ports.mjs";
 import {
@@ -146,10 +147,15 @@ async function main() {
       provider: USE_FAKE_PROVIDER ? "fake" : undefined,
       timeoutMs: LOCAL_TIMEOUT_MS,
     });
-    await waitForLogLine(
-      page,
-      `Session start failed: workspace ${normalizedOutsideWorkspace} is outside this relay's allowed roots`
-    );
+    // The refusal must be on screen, in the dialog — it used to reach only the hidden log.
+    await waitForVisibleStartRefusal(page, {
+      dialogId: "launch-start-session-dialog",
+      text: `workspace ${normalizedOutsideWorkspace} is outside this relay's allowed roots`,
+      timeout: LOCAL_TIMEOUT_MS,
+    });
+    const refusalShot = path.join(os.tmpdir(), "local-start-refusal.png");
+    await page.screenshot({ path: refusalShot });
+    console.log(`[local-allowed-roots-e2e] refusal screenshot: ${refusalShot}`);
 
     await startLocalSession(page, {
       cwd: toTildePath(ROOT),
@@ -169,6 +175,12 @@ async function main() {
       },
       null,
       { timeout: LOCAL_TIMEOUT_MS }
+    );
+
+    assert.equal(
+      await page.evaluate(() => document.getElementById("launch-start-session-dialog")?.open),
+      false,
+      "an accepted start must close the dialog it was refused in"
     );
 
     relaySession = await fetchSession(relayPort);

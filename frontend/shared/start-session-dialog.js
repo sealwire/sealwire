@@ -33,6 +33,7 @@ export function StartSessionDialog({
   // move together, and the second of two sequential calls reads a stale render.
   onSelectModel = null,
   onRequestClose = null,
+  // Resolves `{ ok, error }`. Only `ok` closes the dialog; anything else shows why.
   onStart = null,
   projects = [],
   providerModels = {},
@@ -62,14 +63,53 @@ export function StartSessionDialog({
     selectedProvider: provider,
   });
 
-  const submit = () => {
-    if (startDisabled) {
+  const [startError, setStartError] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+  // The request is already built, so an edit now would not be what gets started.
+  const locked = startPending || submitting;
+  // Bumped on every close, so a result for an earlier opening cannot land on this one.
+  const openingRef = React.useRef(0);
+  // A ref, not startPending: the host only flips that on a later render.
+  const inFlightRef = React.useRef(false);
+
+  const requestClose = () => {
+    openingRef.current += 1;
+    setStartError("");
+    onRequestClose?.();
+  };
+  const changeField = (field, value) => {
+    if (locked || inFlightRef.current) {
       return;
     }
-    // Close optimistically so the user immediately sees the (possibly pending)
-    // session view, then let the host fire the actual start.
-    document.getElementById(id)?.close?.();
-    onStart?.();
+    setStartError("");
+    onFieldChange?.(field, value);
+  };
+
+  const submit = async () => {
+    if (startDisabled || inFlightRef.current) {
+      return;
+    }
+    inFlightRef.current = true;
+    const opening = openingRef.current;
+    setStartError("");
+    setSubmitting(true);
+    let result;
+    try {
+      result = await onStart?.();
+    } catch (error) {
+      result = { ok: false, error: error?.message };
+    } finally {
+      inFlightRef.current = false;
+      setSubmitting(false);
+    }
+    if (openingRef.current !== opening) {
+      return;
+    }
+    if (result?.ok) {
+      document.getElementById(id)?.close?.();
+      return;
+    }
+    setStartError(result?.error || "Couldn't start the session.");
   };
 
   const selectedApproval = approvalOptions.find((option) => option.value === fields.approvalPolicy);
@@ -85,7 +125,7 @@ export function StartSessionDialog({
             className: "session-dialog-cancel",
             key: "cancel",
             onClick: () => {
-              onRequestClose?.();
+              requestClose();
               document.getElementById(id)?.close?.();
             },
             type: "button",
@@ -96,29 +136,31 @@ export function StartSessionDialog({
           "button",
           {
             className: "session-dialog-submit",
-            disabled: startDisabled,
+            disabled: startDisabled || locked,
             id: `${id}-start`,
             key: "start",
             onClick: submit,
             type: "button",
           },
-          startPending ? "Starting…" : "Start session",
+          locked ? "Starting…" : "Start session",
           h(SubmitShortcutHint)
         ),
       ],
+      alert: startError || null,
       // Sessions do NOT get a worktree — only Task-team runs provision one — so
       // this must not promise isolation the session does not have.
       footerHint: cwd ? `Runs in ${abbreviateHomePath(cwd)}` : "Choose a directory to run in",
       id,
-      onRequestClose,
+      onRequestClose: requestClose,
       title: "New session",
     },
     h(SessionContextBar, {
       key: "context",
       project: h(ProjectPicker, {
         activeProjectId: fields.projectId || null,
+        disabled: locked,
         onCreateProject,
-        onSelectProject: (projectId) => onFieldChange?.("projectId", projectId),
+        onSelectProject: (projectId) => changeField("projectId", projectId),
         projects,
         threadActivity,
         threadAttention,
@@ -127,9 +169,10 @@ export function StartSessionDialog({
         threads,
       }),
       workspace: h(WorkspacePicker, {
+        disabled: locked,
         gitContext,
         inputId: `${id}-cwd`,
-        onChange: (next) => onFieldChange?.("cwd", next),
+        onChange: (next) => changeField("cwd", next),
         suggestions: workspaceSuggestions,
         value: cwd,
       }),
@@ -150,11 +193,12 @@ export function StartSessionDialog({
         : "Leave empty to start idle",
       id: `${id}-start-prompt`,
       key: "prompt",
-      onChange: (next) => onFieldChange?.("initialPrompt", next),
+      onChange: (next) => changeField("initialPrompt", next),
       onSubmit: submit,
       placeholder: initialPromptAttachmentsId
         ? "What should it work on? Paste an image to attach it."
         : "What should it work on?",
+      readOnly: locked,
       value: fields.initialPrompt ?? "",
     }),
     h(
@@ -171,17 +215,23 @@ export function StartSessionDialog({
         key: "model",
         label: "Model",
         onOpen: onOpenModelPicker,
+        disabled: locked,
         onSelect: (value, option) => {
+          if (locked || inFlightRef.current) {
+            return;
+          }
+          setStartError("");
           onSelectModel?.({ model: value, provider: option.provider || provider });
         },
         tag: modelChip.tag,
         value: modelChip.value,
       }),
       h(SettingPill, {
+        disabled: locked,
         id: `${id}-effort`,
         key: "effort",
         label: "Effort",
-        onSelect: (value) => onFieldChange?.("effort", value),
+        onSelect: (value) => changeField("effort", value),
         options: effortOptions.map((option) => ({
           ...option,
           selected: option.value === fields.effort,
@@ -189,10 +239,11 @@ export function StartSessionDialog({
         value: selectedEffort?.label || fields.effort || "default",
       }),
       h(SettingPill, {
+        disabled: locked,
         id: `${id}-approval`,
         key: "approval",
         label: "Permissions",
-        onSelect: (value) => onFieldChange?.("approvalPolicy", value),
+        onSelect: (value) => changeField("approvalPolicy", value),
         options: approvalOptions.map((option) => ({
           ...option,
           selected: option.value === fields.approvalPolicy,

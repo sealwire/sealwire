@@ -9,6 +9,8 @@ const h = React.createElement;
 // the least-changed decision first.
 export function SessionDialogShell({
   actions = null,
+  // Outside the body: the body scrolls on phones, and this must stay in view.
+  alert = null,
   badge = null,
   children,
   footerHint = null,
@@ -55,6 +57,9 @@ export function SessionDialogShell({
       )
     ),
     h("section", { className: "session-dialog-body" }, children),
+    alert
+      ? h("p", { className: "session-dialog-note is-error session-dialog-alert", role: "alert" }, alert)
+      : null,
     h(
       "div",
       { className: "session-dialog-footer" },
@@ -88,6 +93,7 @@ export function PromptCard({
   onChange = null,
   onSubmit = null,
   placeholder = "",
+  readOnly = false,
   value,
 }) {
   return h(
@@ -96,6 +102,7 @@ export function PromptCard({
     h("textarea", {
       className: "session-prompt-input",
       id,
+      readOnly,
       onChange: (event) => onChange?.(event.target.value),
       // Plain Enter stays a newline: this is a task description, not a message.
       onKeyDown: (event) => {

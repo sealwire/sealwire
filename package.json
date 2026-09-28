@@ -111,6 +111,7 @@
     "test:browser:local-drawer-scroll": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-local-drawer-scroll-e2e.mjs",
     "test:browser:local-transcript-load": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-local-transcript-load-e2e.mjs",
     "test:browser:local-allowed-roots": "npm run build && node scripts/browser-local-allowed-roots-e2e.mjs",
+    "test:browser:local-start-in-flight": "npm run build && node scripts/browser-local-start-in-flight-e2e.mjs",
     "test:browser:local-file-diff": "npm run build && node scripts/browser-local-file-diff-e2e.mjs",
     "test:browser:local-file-diff-cards": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-local-file-diff-cards-e2e.mjs",
     "test:browser:local-file-diff-path": "npm run build && node scripts/browser-local-file-diff-path-e2e.mjs",

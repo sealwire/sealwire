@@ -10,14 +10,22 @@
 // The workspace panel must not take the caret on a touch device, where doing so
 // raises the software keyboard over the rows it just opened.
 //
+// A start the relay refuses must leave the dialog open with the relay's reason on
+// screen. It used to close on click and log the reason where nobody looks.
+//
 // Deliberately lightweight: it serves the built web/ bundle over a static server
 // and stubs the relay WebSocket — no relay / broker / worker process.
 import assert from "node:assert/strict";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
 import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
 import { attachPageDebugLogging, launchBrowser } from "./e2e/harness/browser.mjs";
+import {
+  fillStartSessionDialog,
+  waitForVisibleStartRefusal,
+} from "./e2e/harness/start-session-dialog.mjs";
 import { startStaticServer } from "./e2e/harness/static-server.mjs";
 
 const ROOT = process.cwd();
@@ -28,6 +36,8 @@ const TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 30000);
 // the socket opens, which is the state this spec puts the page in.
 const SOCKET_OPEN_DELAY_MS = Number(process.env.FAKE_SOCKET_OPEN_DELAY_MS || 300);
 const RELAY_ID = "relay-e2e";
+const REFUSED_CWD = "/tmp/e2e-outside-roots";
+const REFUSAL = `workspace ${REFUSED_CWD} is outside this relay's allowed roots; choose a directory under /tmp/e2e-model-picker`;
 const THREAD_ID = "thread-model-picker-e2e";
 
 const CODEX_MODELS = [
@@ -157,7 +167,7 @@ async function main() {
       ({ context, page } = await runPass(browser, profile, name));
 
       await page.addInitScript(
-        ({ claudeModels, codexModels, openDelayMs, relayId, threadId }) => {
+        ({ claudeModels, codexModels, openDelayMs, refusal, relayId, threadId }) => {
           const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state";
           const REMOTE_STATE_SCHEMA_VERSION = 1;
           const REMOTE_SECRET_DB_NAME = "agent-relay-secrets";
@@ -342,6 +352,10 @@ async function main() {
                   snapshot,
                   projects: { projects_revision: 1, projects: [], thread_project_id: {} },
                 });
+                return;
+              }
+              if (request.type === "start_session") {
+                respond({ action: "start_session", ok: false, error: refusal });
               }
             }
             close() {
@@ -374,6 +388,7 @@ async function main() {
           claudeModels: CLAUDE_MODELS,
           codexModels: CODEX_MODELS,
           openDelayMs: SOCKET_OPEN_DELAY_MS,
+          refusal: REFUSAL,
           relayId: RELAY_ID,
           threadId: THREAD_ID,
         }
@@ -442,6 +457,22 @@ async function main() {
         !profile.isMobile,
         `[${name}] a touch device must not take the caret on open (and a mouse must), got ${JSON.stringify(workspace)}`
       );
+
+      // The workspace panel is still open with its field showing, so this types into it.
+      await fillStartSessionDialog(page, {
+        dialogId: "remote-start-session-dialog",
+        cwd: REFUSED_CWD,
+        approvalPolicy: null,
+        timeout: TIMEOUT_MS,
+      });
+      const refusal = await waitForVisibleStartRefusal(page, {
+        dialogId: "remote-start-session-dialog",
+        text: REFUSAL,
+        timeout: TIMEOUT_MS,
+      });
+      const shot = path.join(os.tmpdir(), `remote-start-refusal-${name}.png`);
+      await page.screenshot({ path: shot });
+      logStep(`${name} refused start`, { box: refusal.box, shot });
 
       logStep(`${name} PASS`);
       await page.close();

@@ -288,7 +288,8 @@ test("an empty workspace refuses to submit and focuses the field instead", async
 
   const result = await controller.startSession();
 
-  assert.equal(result, null, "no session is started");
+  assert.equal(result.ok, false, "no session is started");
+  assert.match(result.error, /Choose a directory/);
   assert.equal(startRequests().length, 0, "nothing is sent to the relay");
   assert.deepEqual(
     focused,
@@ -301,15 +302,59 @@ test("a successful start returns the new thread id", async () => {
   // app.js uses the id to clear the image attachments that were actually sent.
   const { controller } = buildController({ respond: () => acceptance() });
 
-  assert.equal(await controller.startSession(), "thread-new");
+  assert.deepEqual(await controller.startSession(), { ok: true, threadId: "thread-new" });
 });
 
-test("a rejected start returns null and does not throw", async () => {
-  const { controller, logged } = buildController({ respond: rejection });
+const ROOTS_ERROR =
+  "workspace /Users/luchi/git/other is outside this relay's allowed roots; choose a directory under /Users/luchi/git/agent-relay";
 
-  assert.equal(await controller.startSession(), null);
-  assert.ok(
-    logged.some((line) => /Session start failed/.test(line)),
-    "the failure is reported to the client log"
-  );
+test("a refused start resolves with the relay's reason so the dialog can show it", async () => {
+  // It used to resolve null and only log, so the dialog had nothing to say.
+  const { controller, logged } = buildController({
+    respond: () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({ ok: false, error: { code: "bad_request", message: ROOTS_ERROR } }),
+    }),
+  });
+
+  assert.deepEqual(await controller.startSession(), { ok: false, error: ROOTS_ERROR });
+  assert.ok(logged.some((line) => line === `Session start failed: ${ROOTS_ERROR}`));
+});
+
+test("an accepted start stays successful when opening the new session fails", async () => {
+  // Reporting it as failed would keep the dialog open and invite a duplicate session.
+  const { controller, startRequests, logged } = buildController({
+    respond: () => acceptance(),
+    runViewTransition: async () => {
+      throw new Error("transcript load failed");
+    },
+  });
+
+  assert.deepEqual(await controller.startSession(), { ok: true, threadId: "thread-new" });
+  assert.equal(startRequests().length, 1);
+  assert.ok(logged.some((line) => line.includes("opening it failed")));
+  assert.ok(!logged.some((line) => line.startsWith("Session start failed:")));
+});
+
+test("onAccepted fires as soon as the relay accepts, before the new session opens", async () => {
+  // So the dialog can close then, not hang over a session that has already begun.
+  const order = [];
+  const { controller } = buildController({
+    respond: () => acceptance(),
+    runViewTransition: async () => order.push("open"),
+  });
+
+  await controller.startSession([], { onAccepted: () => order.push("accepted") });
+
+  assert.deepEqual(order, ["accepted", "open"]);
+});
+
+test("onAccepted does not fire for a refused start", async () => {
+  let accepted = false;
+  const { controller } = buildController({ respond: rejection });
+
+  await controller.startSession([], { onAccepted: () => (accepted = true) });
+
+  assert.equal(accepted, false);
 });

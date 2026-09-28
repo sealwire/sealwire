@@ -2257,7 +2257,70 @@ test("startRemoteSession re-enables the start button when the relay does not rep
   const pending = startRemoteSession(sessionDraft);
 
   browser.runTimers();
-  assert.equal(await pending, false);
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.match(result.error, /timed out waiting for relay response/);
+});
+
+test("startRemoteSession resolves with the relay's reason when the relay refuses", async () => {
+  // It used to resolve a bare false, so the phone's dialog had nothing to show.
+  activeBrowser || installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { startRemoteSession } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+
+  const reason =
+    "workspace /tmp/demo is outside this relay's allowed roots; choose a directory under /Users/luchi/git";
+  state.socket = {
+    readyState: 1,
+    send(raw) {
+      const frame = JSON.parse(raw);
+      if (frame.payload?.request?.type !== "start_session") {
+        return;
+      }
+      setImmediate(() =>
+        handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "start_session",
+          ok: false,
+          error: reason,
+        })
+      );
+    },
+  };
+
+  const result = await startRemoteSession({
+    approvalPolicy: "on-request",
+    cwd: "/tmp/demo",
+    effort: "medium",
+    initialPrompt: "",
+    model: "gpt-5.4",
+    projectId: null,
+    sandbox: "workspace-write",
+  });
+
+  assert.deepEqual(result, { ok: false, error: reason });
 });
 
 test("startRemoteSession carries the chosen project so a phone can file a session too", async () => {

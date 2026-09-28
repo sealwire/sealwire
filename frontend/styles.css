@@ -10128,6 +10128,18 @@ button.team-role-name.is-link {
 .session-dialog-note[data-models-status="error"],
 .session-dialog-note.is-error { color: var(--err-fg); }
 
+/* A refused start: boxed and next to the button, so it cannot be missed. */
+.session-dialog-alert {
+  flex: none;
+  margin: 0 20px 14px;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--err-bg);
+  border: 1px solid color-mix(in srgb, var(--err-fg) 32%, transparent);
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+
 /* --- fork source card ----------------------------------------------------- */
 
 .fork-source-card {

@@ -1447,8 +1447,9 @@ export async function startRemoteSession(sessionDraftOverride = null) {
   }
   const cwd = sessionDraft.cwd.trim();
   if (!cwd) {
-    renderLog("Choose a workspace before starting a remote session.");
-    return false;
+    const error = "Choose a workspace before starting a remote session.";
+    renderLog(error);
+    return { ok: false, error };
   }
 
   renderLog(`Starting remote session in ${cwd}.`);
@@ -1468,10 +1469,11 @@ export async function startRemoteSession(sessionDraftOverride = null) {
         project_id: sessionDraft.projectId || null,
       },
     });
-    return true;
+    return { ok: true };
   } catch (error) {
     renderLog(`Remote start failed: ${error.message}`);
-    return false;
+    // The dialog shows this; a bare false left it nothing to say.
+    return { ok: false, error: error.message };
   }
 }
 

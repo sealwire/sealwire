@@ -2563,22 +2563,33 @@ window.addEventListener("popstate", (event) => {
   );
 });
 
+// The dialog shows a refusal from what this resolves, so it must always resolve one.
 async function submitStartSession() {
   if (state.newSessionSubmitInFlight) {
-    return;
+    return { ok: false, error: "A session is already starting." };
   }
   const imageAttachments = state.newSessionImageAttachments.slice();
+  const opening = state.launchDialogGeneration;
   state.newSessionSubmitInFlight = true;
   renderNewSessionImageAttachments();
   renderLaunchSessionDialogIfOpen();
   try {
-    const newThreadId = await startSession(imageAttachments);
-    if (newThreadId) {
+    const result = await startSession(imageAttachments, {
+      // Closed before the new session opens beneath it — but only the opening that
+      // submitted it: one cancelled and reopened meanwhile belongs to the user.
+      onAccepted: () => {
+        if (state.launchDialogGeneration === opening) {
+          document.getElementById("launch-start-session-dialog")?.close();
+        }
+      },
+    });
+    if (result.ok) {
       const sentIds = new Set(imageAttachments.map((attachment) => attachment.id));
       state.newSessionImageAttachments = state.newSessionImageAttachments.filter(
         (attachment) => !sentIds.has(attachment.id)
       );
     }
+    return result;
   } finally {
     state.newSessionSubmitInFlight = false;
     renderNewSessionImageAttachments();
@@ -2760,6 +2771,9 @@ document.addEventListener("paste", (event) => {
   if (!target?.closest("#launch-start-session-dialog-start-prompt")) {
     return;
   }
+  // Frozen like the fork's: the request has already gone, and the close on success
+  // clears whatever is still attached.
+  if (state.newSessionSubmitInFlight) return;
   const files = pastedImageFiles(event.clipboardData);
   if (files.length === 0) return;
   event.preventDefault();
@@ -5207,9 +5221,7 @@ function renderLaunchSessionDialog() {
       onRequestClose() {
         clearNewSessionImageAttachments();
       },
-      onStart() {
-        void submitStartSession();
-      },
+      onStart: submitStartSession,
       projects: state.projects || [],
       providerModels: state.providerModels,
       providers: state.providers || [],

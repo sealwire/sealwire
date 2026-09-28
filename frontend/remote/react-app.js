@@ -1777,20 +1777,22 @@ function RemoteApp() {
     }
   }
 
+  // Resolves `{ ok, error }` for StartSessionDialog, which closes itself only on ok.
   async function handleStartSession() {
     remoteUiStore.getState().setSessionStartPending(true);
-    // StartSessionDialog auto-closes itself on Start click; no manual close needed here.
+    let result;
     try {
-      const started = await handlers.onStartSession(remoteUi.sessionDraft);
-      if (started) {
-        closeRemoteNavigation();
-        remoteUiStore.getState().setSessionPanelOpen(false);
-        await runThreadRefresh("post-start refresh", { silent: true });
-      }
-      return started;
+      result = await handlers.onStartSession(remoteUi.sessionDraft);
     } finally {
       remoteUiStore.getState().setSessionStartPending(false);
     }
+    if (result.ok) {
+      closeRemoteNavigation();
+      remoteUiStore.getState().setSessionPanelOpen(false);
+      // Not awaited: the dialog waits on this promise, and the session already exists.
+      void runThreadRefresh("post-start refresh", { silent: true }).catch(() => {});
+    }
+    return result;
   }
 
   function handleOpenForkDialog(threadId, upToItemId = "") {
@@ -2376,7 +2378,7 @@ function RemoteApp() {
           void handlers.onSelectRelay(relayId);
         },
         onStartSession() {
-          void handleStartSession();
+          return handleStartSession();
         },
         onOpenStartSessionDialog(projectId = null) {
           openRemoteStartSessionDialog(remoteUiStore, projectId);

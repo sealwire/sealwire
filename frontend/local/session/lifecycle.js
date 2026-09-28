@@ -314,16 +314,19 @@ export function createLifecycleController(ctx) {
     }
   }
 
-  async function startSession(imageAttachments = []) {
+  // Resolves `{ ok: true, threadId }` or `{ ok: false, error }` for the dialog to show.
+  // `onAccepted` fires once the relay has started it, before the new session opens.
+  async function startSession(imageAttachments = [], { onAccepted = null } = {}) {
     // Read the DRAFT, not the DOM. `start-session-payload.test.mjs` pins the
     // resulting request across that change.
     const draft = readSessionDraft();
     const cwd = String(draft.cwd || "").trim();
 
     if (!cwd) {
-      logLine("Choose a directory before starting a session.");
+      const error = "Choose a directory before starting a session.";
+      logLine(error);
       focusWorkspaceField();
-      return null;
+      return { ok: false, error };
     }
     setSelectedCwd(cwd);
     setStartControlsBusy(true);
@@ -332,58 +335,66 @@ export function createLifecycleController(ctx) {
     logLine(`Starting a new ${agentName} session in ${cwd}`);
 
     try {
-      const images = await Promise.all(
-        imageAttachments.map(async (attachment) => ({
-          data_url: await imageFileToDataUrl(attachment.file),
-        }))
-      );
-      const response = await apiFetch("/api/session/start", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          cwd,
-          initial_prompt: String(draft.initialPrompt || "").trim() || null,
-          model: String(draft.model || "").trim() || null,
-          approval_policy: draft.approvalPolicy,
-          // The file-access dropdown was collapsed into the permission level; the
-          // draft still carries the value so the start protocol is unchanged.
-          sandbox: draft.sandbox || "workspace-write",
-          effort: draft.effort,
-          device_id: state.deviceId,
-          provider: draft.provider || null,
-          // Filed server-side as part of the start, so local and remote reach the
-          // same place. Explicit null means the Default Workspace.
-          project_id: draft.projectId || null,
-          images,
-        }),
-      });
-      const payload = await response.json();
+      let payload;
+      try {
+        const images = await Promise.all(
+          imageAttachments.map(async (attachment) => ({
+            data_url: await imageFileToDataUrl(attachment.file),
+          }))
+        );
+        const response = await apiFetch("/api/session/start", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            cwd,
+            initial_prompt: String(draft.initialPrompt || "").trim() || null,
+            model: String(draft.model || "").trim() || null,
+            approval_policy: draft.approvalPolicy,
+            // The file-access dropdown was collapsed into the permission level; the
+            // draft still carries the value so the start protocol is unchanged.
+            sandbox: draft.sandbox || "workspace-write",
+            effort: draft.effort,
+            device_id: state.deviceId,
+            provider: draft.provider || null,
+            // Filed server-side as part of the start, so local and remote reach the
+            // same place. Explicit null means the Default Workspace.
+            project_id: draft.projectId || null,
+            images,
+          }),
+        });
+        payload = await response.json();
 
-      if (!response.ok || !payload.ok) {
-        throw new Error(payload?.error?.message || "Failed to start session");
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload?.error?.message || "Failed to start session");
+        }
+      } catch (error) {
+        logLine(`Session start failed: ${error.message}`);
+        return { ok: false, error: error.message };
       }
 
       const newThreadId = payload.data.active_thread_id || null;
-      state.defaultsSeeded = false;
-      await runViewTransition(async () => {
-        setSelectedCwd(payload.data.current_cwd || cwd);
-        await setThreadRoute(newThreadId);
-        seedDefaults(payload.data);
-        applySessionSnapshot(payload.data);
-      });
-      if (canCurrentDeviceWrite(payload.data)) {
-        messageInput.focus();
-      }
-      await loadThreads("post-start refresh");
       logLine(`Started a new ${agentName} session`);
-      // Return the new thread id so callers (e.g. "New agent" from a project
-      // overview) can act on the freshly-created session.
-      return newThreadId;
-    } catch (error) {
-      logLine(`Session start failed: ${error.message}`);
-      return null;
+      onAccepted?.();
+      // The session exists from here on. A failure below must not read as a failed
+      // start, or the still-open dialog invites a second, duplicate one.
+      try {
+        state.defaultsSeeded = false;
+        await runViewTransition(async () => {
+          setSelectedCwd(payload.data.current_cwd || cwd);
+          await setThreadRoute(newThreadId);
+          seedDefaults(payload.data);
+          applySessionSnapshot(payload.data);
+        });
+        if (canCurrentDeviceWrite(payload.data)) {
+          messageInput.focus();
+        }
+        await loadThreads("post-start refresh");
+      } catch (error) {
+        logLine(`Session started, but opening it failed: ${error.message}`);
+      }
+      return { ok: true, threadId: newThreadId };
     } finally {
       setStartControlsBusy(false);
     }

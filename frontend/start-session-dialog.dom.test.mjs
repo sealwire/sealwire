@@ -256,20 +256,199 @@ test("an empty workspace blocks the start", () => {
   view.cleanup();
 });
 
-test("Start closes the dialog BEFORE invoking onStart", () => {
-  // The host's start is async and re-renders underneath; closing afterwards left
-  // the dialog hanging over a session that had already begun.
-  const order = [];
-  const view = mount({
-    fields: baseFields({ initialPrompt: "go" }),
-    onStart: () => order.push("onStart"),
+const ROOTS_ERROR =
+  "workspace /Users/luchi/git/other is outside this relay's allowed roots; choose a directory under /Users/luchi/git/agent-relay";
+
+// Resolves after React has applied what the awaited onStart result caused.
+const clickAndSettle = (node) =>
+  act(async () => {
+    node.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
   });
-  const dialog = view.host.querySelector("dialog");
-  dialog.close = () => order.push("close");
 
-  click(view.host.querySelector("#test-dialog-start"));
+function mountWithStart(onStart) {
+  const view = mount({ fields: baseFields({ initialPrompt: "go" }), onStart });
+  view.closes = 0;
+  view.host.querySelector("dialog").close = () => {
+    view.closes += 1;
+  };
+  view.start = () => clickAndSettle(view.host.querySelector("#test-dialog-start"));
+  view.alert = () => view.host.querySelector("dialog [role=alert]");
+  return view;
+}
 
-  assert.deepEqual(order, ["close", "onStart"]);
+test("a start the relay refuses keeps the dialog open and shows the relay's reason", async () => {
+  // The bug: the dialog closed itself on click, so a refused start looked like a
+  // button that did nothing — the reason only reached the hidden client log.
+  const view = mountWithStart(async () => ({ ok: false, error: ROOTS_ERROR }));
+
+  await view.start();
+
+  assert.equal(view.closes, 0, "the dialog must stay open so the reason has somewhere to show");
+  assert.equal(view.alert()?.textContent, ROOTS_ERROR);
+  assert.equal(
+    view.alert().closest(".session-dialog-body"),
+    null,
+    "the body scrolls on phones; the reason must not be scrolled out of view"
+  );
+  view.cleanup();
+});
+
+test("a start that throws shows what was thrown", async () => {
+  const view = mountWithStart(async () => {
+    throw new Error("broker socket is not connected");
+  });
+
+  await view.start();
+
+  assert.equal(view.closes, 0);
+  assert.equal(view.alert()?.textContent, "broker socket is not connected");
+  view.cleanup();
+});
+
+test("an accepted start closes the dialog", async () => {
+  const view = mountWithStart(async () => ({ ok: true }));
+
+  await view.start();
+
+  assert.equal(view.closes, 1);
+  assert.equal(view.alert(), null);
+  view.cleanup();
+});
+
+test("editing the draft clears a shown start error", async () => {
+  // The reason describes the draft that was sent; once the user changes it, it is stale.
+  const view = mountWithStart(async () => ({ ok: false, error: ROOTS_ERROR }));
+  await view.start();
+  assert.ok(view.alert());
+
+  act(() => {
+    const prompt = view.host.querySelector("#test-dialog-start-prompt");
+    const setter = Object.getOwnPropertyDescriptor(
+      dom.window.HTMLTextAreaElement.prototype,
+      "value"
+    ).set;
+    setter.call(prompt, "go again");
+    prompt.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+  });
+
+  assert.equal(view.alert(), null);
+  view.cleanup();
+});
+
+test("a start that fails after the dialog was dismissed does not ambush the next opening", async () => {
+  let settle;
+  const view = mountWithStart(
+    () =>
+      new Promise((resolve) => {
+        settle = resolve;
+      })
+  );
+
+  await view.start();
+  click(view.host.querySelector(".session-dialog-cancel"));
+  await act(async () => settle({ ok: false, error: ROOTS_ERROR }));
+
+  assert.equal(view.alert(), null);
+  assert.equal(view.closes, 1, "only the Cancel click closes it");
+  view.cleanup();
+});
+
+test("a start accepted after the dialog was dismissed does not close the next opening", async () => {
+  let settle;
+  const view = mountWithStart(
+    () =>
+      new Promise((resolve) => {
+        settle = resolve;
+      })
+  );
+
+  await view.start();
+  click(view.host.querySelector(".session-dialog-cancel"));
+  view.render();
+  await act(async () => settle({ ok: true }));
+
+  assert.equal(view.closes, 1, "only the Cancel click closes it");
+  view.cleanup();
+});
+
+test("a second Start while the first is in flight does not start a second session", async () => {
+  // Hosts flip startPending on a later render, so a fast double submit sees it unset.
+  let calls = 0;
+  const view = mountWithStart(() => {
+    calls += 1;
+    return new Promise(() => {});
+  });
+
+  await view.start();
+  await view.start();
+
+  assert.equal(calls, 1);
+  view.cleanup();
+});
+
+function draftControls(host) {
+  return {
+    prompt: host.querySelector("#test-dialog-start-prompt").readOnly,
+    project: host.querySelector(".project-picker-trigger").disabled,
+    workspace: host.querySelector(".workspace-picker-trigger").disabled,
+    model: pill(host, "model").disabled,
+    effort: pill(host, "effort").disabled,
+    approval: pill(host, "approval").disabled,
+  };
+}
+
+const LOCKED = {
+  prompt: true,
+  project: true,
+  workspace: true,
+  model: true,
+  effort: true,
+  approval: true,
+};
+
+test("while a start is in flight the draft is locked, but Cancel still works", async () => {
+  // The request has already been built; an edit now would not be what gets started,
+  // and a refusal arriving later would describe values the dialog no longer shows.
+  const view = mountWithStart(() => new Promise(() => {}));
+
+  await view.start();
+
+  assert.deepEqual(draftControls(view.host), LOCKED);
+  assert.equal(view.host.querySelector(".session-dialog-cancel").disabled, false);
+  view.cleanup();
+});
+
+test("an edit that slips in before the lock renders does not reach the draft", async () => {
+  const view = mountWithStart(() => new Promise(() => {}));
+  await view.start();
+
+  act(() => {
+    const prompt = view.host.querySelector("#test-dialog-start-prompt");
+    const setter = Object.getOwnPropertyDescriptor(
+      dom.window.HTMLTextAreaElement.prototype,
+      "value"
+    ).set;
+    setter.call(prompt, "changed after Start");
+    prompt.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+  });
+
+  assert.deepEqual(view.changes, []);
+  view.cleanup();
+});
+
+test("a dialog reopened while its host is still starting is locked too", () => {
+  const view = mount({ fields: baseFields({ initialPrompt: "go" }), startPending: true });
+  assert.deepEqual(draftControls(view.host), LOCKED);
+  view.cleanup();
+});
+
+test("a refused start unlocks the draft so it can be fixed", async () => {
+  const view = mountWithStart(async () => ({ ok: false, error: ROOTS_ERROR }));
+  await view.start();
+  assert.deepEqual(
+    draftControls(view.host),
+    Object.fromEntries(Object.keys(LOCKED).map((key) => [key, false]))
+  );
   view.cleanup();
 });
 
