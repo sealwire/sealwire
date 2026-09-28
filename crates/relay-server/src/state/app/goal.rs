@@ -41,7 +41,9 @@ fn continuation(objective: &str, turns: u32, max_turns: u32) -> String {
         "This session is working toward a goal the user set. It is theirs, not \
 yours to change or narrow:\n\n{objective}\n\nThat is still the whole of it. \
 Look at where things actually stand against every part of it, and carry on — \
-bring in another agent if that helps.\n\nStop only by calling one of \
+bring in another agent if that helps.\n\nThe user set this goal in Sealwire and wants \
+it run through Sealwire's tools, not a goal tool of your own such as `create_goal`. \
+Stop only by calling one of \
 `goal_complete` (with what you did and how you know), `goal_blocked` (with what \
 stopped you), or `goal_needs_you` (with the decision you need). Saying you are \
 done in prose does not end it. Turn {next} of {max_turns}.",
