@@ -231,13 +231,36 @@ function GoalErrorLine({ error, onDismiss = null }) {
   );
 }
 
+function expandToggleProps(expanded, setExpanded, showMoreTitle) {
+  const toggle = () => setExpanded((open) => !open);
+  return {
+    onClick: toggle,
+    onKeyDown: (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      toggle();
+    },
+    role: "button",
+    tabIndex: 0,
+    "aria-expanded": expanded,
+    title: expanded ? "Show less" : showMoreTitle,
+  };
+}
+
 // Above the review slot, because it outranks it: a review judges one commit, the goal is
 // the standing objective every commit — and every review — is in service of.
 function GoalSlot({ goal, error = "", onDismissError = null, onStop = null, onResume = null }) {
   const working = goal.status === "active";
   const status = GOAL_STATUS_LABEL[goal.status] || goal.status;
   const [expanded, setExpanded] = React.useState(false);
-  const toggleExpanded = () => setExpanded((open) => !open);
+  // Keyed to the text, so a later report starts clamped instead of inheriting "open".
+  const [expandedReport, setExpandedReport] = React.useState(null);
+  const reportExpanded = expandedReport !== null && expandedReport === goal.outcome;
+  const setReportExpanded = (next) =>
+    setExpandedReport(next(reportExpanded) ? goal.outcome : null);
+  // "complete_claimed" still needs the user, but its outcome is a report, not a question.
+  const outcomeIsQuestion =
+    GOAL_STATES_NEEDING_USER.has(goal.status) && goal.status !== "complete_claimed";
   return h(
     React.Fragment,
     null,
@@ -259,20 +282,7 @@ function GoalSlot({ goal, error = "", onDismissError = null, onStop = null, onRe
         {
           className: `reviewer-card-title reviewer-goal-title${expanded ? " is-expanded" : ""}`,
           // Clamped by default so a dump cannot push the panel; click expands in place.
-          onClick: toggleExpanded,
-          onKeyDown: (event) => {
-            if (event.key !== "Enter" && event.key !== " ") return;
-            event.preventDefault();
-            toggleExpanded();
-          },
-          role: "button",
-          tabIndex: 0,
-          "aria-expanded": expanded,
-          title: expanded
-            ? "Show less"
-            : goal.objective
-              ? "Show full goal"
-              : undefined,
+          ...expandToggleProps(expanded, setExpanded, goal.objective ? "Show full goal" : undefined),
         },
         goal.objective
       ),
@@ -291,13 +301,16 @@ function GoalSlot({ goal, error = "", onDismissError = null, onStop = null, onRe
       goal.outcome
         ? h(
             "p",
-            {
-              // A goal stopped for the user has put its QUESTION here, not a summary.
-              // Two clamped lines of it is a decision nobody can make.
-              className: `reviewer-card-result${
-                GOAL_STATES_NEEDING_USER.has(goal.status) ? " is-question" : ""
-              }`,
-            },
+            // A QUESTION the run is stopped on is shown whole: two clamped lines of it is
+            // a decision nobody can make. A report is a preview, like the title.
+            outcomeIsQuestion
+              ? { className: "reviewer-card-result is-question" }
+              : {
+                  className: `reviewer-card-result reviewer-goal-report${
+                    reportExpanded ? " is-expanded" : ""
+                  }`,
+                  ...expandToggleProps(reportExpanded, setReportExpanded, "Show full report"),
+                },
             goal.outcome
           )
         : null,

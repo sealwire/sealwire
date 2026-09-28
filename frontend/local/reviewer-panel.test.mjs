@@ -885,6 +885,25 @@ test("a long goal objective is clamped on the Agents card, and can be expanded",
   assert.doesNotMatch(html, /is-expanded/);
 });
 
+// Reported as "the goal card is always this long": a finished goal's report was shown
+// in full because "complete_claimed" needs the user, yet its text is a report, not a question.
+test("a finished goal's report is clamped and expandable; a question is not", () => {
+  const card = (status) =>
+    renderToStaticMarkup(
+      h(ReviewerPanel, {
+        goal: { objective: "ship it", status, outcome: "a long report", turns: 7, max_turns: 20 },
+        reviewJobs: [],
+        canRequest: false,
+      })
+    );
+  const report = card("complete_claimed").match(/<p[^>]*reviewer-card-result[^>]*>/)?.[0] || "";
+  assert.doesNotMatch(report, /is-question/, "a report is a preview, not something to answer");
+  assert.match(report, /aria-expanded="false"/, "the full report is one click away");
+  for (const status of ["awaiting_user", "blocked"]) {
+    assert.match(card(status), /reviewer-card-result is-question/, `${status} is read in full`);
+  }
+});
+
 test("goal title focus ring uses box-shadow like other controls", () => {
   // --focus-ring is `0 0 0 2px …`; using it as `outline` computes to none.
   const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");

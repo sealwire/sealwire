@@ -7328,8 +7328,8 @@ body.is-resizing-panel {
 /* One line of result. The full text lives in the session the card opens, so this is
    clamped rather than scrolled — a card that grows to fit an agent's answer pushes
    every other delegation out of the panel. */
-/* A question the run is stopped on is read in full and acted on; only a finished
-   goal's summary is a preview worth clamping. */
+/* A question the run is stopped on is read in full and acted on; a finished goal's
+   report is a preview, clamped until clicked (.reviewer-goal-report). */
 .reviewer-card-result.is-question {
   display: block;
   overflow: visible;
@@ -7466,12 +7466,15 @@ body.is-resizing-panel {
   border-color: var(--border-subtle);
   background: var(--surface-1);
 }
-/* Standing aim — clamp by default; click the title to expand in place. */
+/* Standing aim and finished report — clamped by default; click to expand in place. */
 .reviewer-goal-title {
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+.reviewer-goal-title,
+.reviewer-goal-report {
   cursor: pointer;
   border-radius: var(--r-sm);
 }
@@ -7513,11 +7516,13 @@ body.is-resizing-panel {
   font-size: var(--text-xs);
   color: var(--text-tertiary);
 }
-.reviewer-goal-title.is-expanded {
+.reviewer-goal-title.is-expanded,
+.reviewer-goal-report.is-expanded {
   display: block;
   -webkit-line-clamp: unset;
   overflow: visible;
 }
+.reviewer-goal-report:focus-visible,
 .reviewer-goal-title:focus-visible {
   /* --focus-ring is a box-shadow value, not an outline shorthand. */
   outline: none;

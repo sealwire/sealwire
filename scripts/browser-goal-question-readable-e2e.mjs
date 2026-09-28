@@ -54,7 +54,19 @@ async function main() {
       `a question the run is stopped on must be readable in full, not clipped to a preview — ${JSON.stringify(question)}`
     );
 
-    console.log(`goal-question-readable-e2e OK ${JSON.stringify({ clamped, question })}`);
+    // A finished goal's report is a preview: clamped until clicked, whole once expanded.
+    const report = await measure(page, "reviewer-card-result reviewer-goal-report");
+    assert.ok(
+      report.scrollHeight > report.clientHeight + 4,
+      `a finished goal's report must be clamped, not grow the card to fit it — ${JSON.stringify(report)}`
+    );
+    const expanded = await measure(page, "reviewer-card-result reviewer-goal-report is-expanded");
+    assert.ok(
+      expanded.scrollHeight <= expanded.clientHeight + 4,
+      `an expanded report must be readable in full — ${JSON.stringify(expanded)}`
+    );
+
+    console.log(`goal-question-readable-e2e OK ${JSON.stringify({ clamped, question, report, expanded })}`);
   } finally {
     await context.close().catch(() => {});
     await browser.close().catch(() => {});
