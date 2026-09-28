@@ -40,6 +40,15 @@ a change breaks an old shape, change it; do not write a shim or a fallback. A
 review finding that only bites an old shape is not a bug to fix. Existing
 compatibility code is not a reason to add more of it.
 
+## Rare failures: log them, don't engineer around them
+
+When a failure case is very unlikely (a crash inside a millisecond window, a
+disk-full write, a race nobody has seen), do not add recovery machinery for it.
+Log it where you can, so it is visible if it ever happens, and let it fail. Extra
+state, retries and fallbacks for such cases cost more than the failure does. A
+review finding that only bites such a case is not a bug to fix. This does not
+cover cases that lose or corrupt data, or break security.
+
 ## Driving the relay from a script
 
 **Do not stop, kill, or restart the user's relay** (`relay-server` on port 8787
