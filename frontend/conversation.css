@@ -2623,6 +2623,7 @@ button.ask-user-summary:focus-visible {
   justify-content: stretch;
 }
 .handover-card {
+  container: handover-card / inline-size;
   flex: 1;
   min-width: 0;
   display: flex;
@@ -2695,6 +2696,13 @@ button.ask-user-summary:focus-visible {
 .handover-section.is-untitled {
   grid-template-columns: minmax(0, 1fr);
 }
+/* On a phone the label column leaves the text a handful of characters a line. */
+@container handover-card (max-width: 400px) {
+  .handover-section {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+}
 .handover-section-label {
   color: var(--text-tertiary);
 }
@@ -2703,10 +2711,33 @@ button.ask-user-summary:focus-visible {
   color: var(--text-primary);
   overflow-wrap: anywhere;
 }
+.handover-section-value.is-clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.handover-section-value.is-togglable {
+  cursor: pointer;
+}
+button.handover-section-label {
+  align-self: start;
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
 .handover-section-value > :first-child { margin-top: 0; }
 .handover-section-value > :last-child { margin-bottom: 0; }
 .handover-card-more,
-.handover-card-sent,
 .handover-card-link {
   display: inline-flex;
   align-items: center;
@@ -2724,8 +2755,14 @@ button.ask-user-summary:focus-visible {
   padding-top: 2px;
 }
 .handover-card-more:hover,
-.handover-card-sent:hover {
+button.handover-section-label:hover {
   color: var(--text-primary);
+}
+/* The global button:hover paints a fill these text-only buttons must not get. */
+.handover-card-more:hover,
+.handover-card-link:hover,
+button.handover-section-label:hover {
+  background: none;
 }
 .handover-card-link {
   color: var(--accent);
@@ -2763,16 +2800,4 @@ button.ask-user-summary:focus-visible {
   border-radius: 999px;
   background: currentColor;
 }
-.handover-sent-body {
-  margin: 0;
-  padding: 12px 16px 14px;
-  border-top: 1px solid var(--border-faint);
-  max-height: 320px;
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  line-height: var(--leading-relaxed);
-  color: var(--text-secondary);
-}
+

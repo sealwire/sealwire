@@ -1,5 +1,5 @@
 // Design 23a/23b: both ends of a /handover as one card each, drawn from the same summary.
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import { renderMarkdown } from "./markdown.js";
 import { providerLabel } from "./provider-labels.js";
@@ -127,6 +127,64 @@ function Caret({ open }) {
   );
 }
 
+// Folded to a couple of lines; its heading or text toggles it, but only once the browser
+// says the text is cut off, since widths differ per screen.
+function SummarySection({ section, body }) {
+  const [open, setOpen] = useState(false);
+  const [cutOff, setCutOff] = useState(false);
+  const valueRef = useRef(null);
+  const folds = Boolean(section.title);
+  useEffect(() => {
+    const node = valueRef.current;
+    if (!folds || open || !node) {
+      return undefined;
+    }
+    const measure = () => setCutOff(node.scrollHeight > node.clientHeight + 1);
+    measure();
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(measure) : null;
+    observer?.observe(node);
+    return () => observer?.disconnect();
+  }, [folds, open, body]);
+  const label = !section.title
+    ? null
+    : open || cutOff
+      ? h(
+          "button",
+          {
+            type: "button",
+            className: "handover-section-label",
+            "aria-expanded": open ? "true" : "false",
+            onClick: () => setOpen((value) => !value),
+          },
+          section.title
+        )
+      : h("span", { className: "handover-section-label" }, section.title);
+  const togglable = folds && (open || cutOff);
+  return h(
+    "div",
+    { className: `handover-section${section.title ? "" : " is-untitled"}` },
+    label,
+    h(
+      "div",
+      {
+        ref: valueRef,
+        className: `handover-section-value message-body${folds && !open ? " is-clamped" : ""}${
+          togglable ? " is-togglable" : ""
+        }`,
+        // A link still goes where it points, and a drag to select text is not a press.
+        onClick: togglable
+          ? (event) => {
+              if (!event.target.closest?.("a") && !String(globalThis.getSelection?.() || "")) {
+                setOpen((value) => !value);
+              }
+            }
+          : undefined,
+      },
+      renderMarkdown(body || "—")
+    )
+  );
+}
+
 function SummarySections({ text }) {
   const [expanded, setExpanded] = useState(false);
   const sections = parseHandoverSections(text);
@@ -139,26 +197,16 @@ function SummarySections({ text }) {
   const preview = titled ? null : summaryPreview(sections[0].body);
   const hidden = titled ? Math.max(0, titled - SECTIONS_SHOWN) : 0;
   const shown = expanded || !titled ? sections : sections.slice(0, lead + SECTIONS_SHOWN);
-  const more = hidden
-    ? `Show full summary · ${hidden} more section${hidden === 1 ? "" : "s"}`
-    : preview ? "Show full summary" : null;
+  const more = hidden || preview ? "Show full summary" : null;
   return h(
     "div",
     { className: "handover-card-body" },
     ...shown.map((section, index) =>
-      h(
-        "div",
-        {
-          key: `${index}:${section.title}`,
-          className: `handover-section${section.title ? "" : " is-untitled"}`,
-        },
-        section.title ? h("span", { className: "handover-section-label" }, section.title) : null,
-        h(
-          "div",
-          { className: "handover-section-value message-body" },
-          renderMarkdown((!expanded && preview) || section.body || "—")
-        )
-      )
+      h(SummarySection, {
+        key: `${index}:${section.title}`,
+        section,
+        body: (!expanded && preview) || section.body,
+      })
     ),
     more
       ? h(
@@ -176,26 +224,7 @@ function SummarySections({ text }) {
   );
 }
 
-// What the relay actually sent, one click away and never in the conversation.
-function useSentDisclosure({ agent, text }) {
-  const [open, setOpen] = useState(false);
-  return {
-    toggle: h(
-      "button",
-      {
-        type: "button",
-        className: "handover-card-sent",
-        "aria-expanded": open ? "true" : "false",
-        onClick: () => setOpen((value) => !value),
-      },
-      h(Caret, { open }),
-      `Sent to ${agent}`
-    ),
-    panel: open ? h("pre", { className: "handover-sent-body" }, String(text || "").trim()) : null,
-  };
-}
-
-function HandoverCard({ icon, kicker, title, time, summary, footerStart, link, sent }) {
+function HandoverCard({ icon, kicker, title, time, summary, footerStart, link }) {
   return h(
     "div",
     { className: "handover-card" },
@@ -217,10 +246,8 @@ function HandoverCard({ icon, kicker, title, time, summary, footerStart, link, s
       { className: "handover-card-foot" },
       footerStart,
       h("span", { className: "handover-card-spacer" }),
-      link,
-      sent.toggle
-    ),
-    sent.panel
+      link
+    )
   );
 }
 
@@ -249,9 +276,8 @@ function settledSummary(members) {
   return "";
 }
 
-function SourceCard({ entry, handover, members, sourceAgent }) {
+function SourceCard({ handover, members }) {
   const target = agentName(handover.target_provider);
-  const sent = useSentDisclosure({ agent: sourceAgent, text: entry.text });
   return h(HandoverCard, {
     icon: HANDED_OVER_ICON,
     kicker: "Handed over",
@@ -265,7 +291,6 @@ function SourceCard({ entry, handover, members, sourceAgent }) {
       `${target} picked it up`
     ),
     link: h(OpenThreadLink, { threadId: handover.target_thread_id, label: "Open thread" }),
-    sent,
   });
 }
 
@@ -321,7 +346,7 @@ export function HandoverSourceEntry({
         "data-handover-id": handover.id,
       },
       avatar(providerIcon, provider),
-      h(SourceCard, { entry, handover, members, sourceAgent })
+      h(SourceCard, { handover, members })
     );
   }
   return h("div", { className: "handover-turn", "data-handover-row": transcriptRowKey(entry) || "" }, bubble, outcome);
@@ -331,11 +356,6 @@ export function HandoverSourceEntry({
 export function HandoverTargetEntry({ attrs, entry }) {
   const handover = entry.injection.handover;
   const sourceAgent = agentName(handover.source_provider);
-  const targetAgent = agentName(handover.target_provider);
-  const sent = useSentDisclosure({
-    agent: targetAgent,
-    text: String(handover.instruction || "").replace(/^\s*-{3,}\s*/, ""),
-  });
   return h(
     "article",
     { ...attrs, className: `${attrs.className} handover-brief`, "data-handover-id": handover.id },
@@ -347,7 +367,6 @@ export function HandoverTargetEntry({ attrs, entry }) {
       summary: briefSummary(entry.text, handover.instruction),
       footerStart: null,
       link: h(OpenThreadLink, { threadId: handover.source_thread_id, label: "Source thread" }),
-      sent,
     })
   );
 }

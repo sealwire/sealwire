@@ -67,8 +67,15 @@ test("the source shows what was typed and a Handed over card instead of the prom
   }
   assert.match(markup, /Selection Ask quoting\./);
   assert.doesNotMatch(markup, /HIDDEN-REMAINING/, "past the first three headings is folded");
-  assert.match(markup, /Show full summary · 2 more sections/);
+  assert.match(markup, /Show full summary</);
+  assert.doesNotMatch(markup, /more section/, "the count says nothing the button does not");
   assert.match(markup, /Codex picked it up/);
+  assert.doesNotMatch(markup, /Sent to/, "what the relay sent is never shown");
+  assert.match(
+    markup,
+    /class="handover-section-value message-body is-clamped"/,
+    "each section starts folded to a couple of lines"
+  );
   assert.match(markup, /data-open-thread-id="tgt"/);
   assert.doesNotMatch(
     markup,
@@ -102,8 +109,8 @@ test("the target shows a Picked up card with the summary and not the instruction
   assert.match(markup, /Picked up from Claude/);
   assert.match(markup, /Fix goal gate/);
   assert.match(markup, /Selection Ask quoting\./);
-  assert.doesNotMatch(markup, /CONTINUE-INSTRUCTION/, "the instruction is only in Sent to Codex");
-  assert.match(markup, /Sent to Codex/);
+  assert.doesNotMatch(markup, /CONTINUE-INSTRUCTION/, "the instruction is not the person's business");
+  assert.doesNotMatch(markup, /Sent to/, "what the relay sent is never shown");
   assert.match(markup, /data-open-thread-id="src"/);
   assert.match(markup, /Taking it from here\./, "the agent's own reply follows as usual");
 });
@@ -169,7 +176,8 @@ test("a line before the first heading does not use up one of the three shown", (
   for (const heading of ["Goal", "Current state", "Completed work"]) {
     assert.match(markup, new RegExp(`>${heading}<`));
   }
-  assert.match(markup, /Show full summary · 2 more sections/);
+  assert.match(markup, /Show full summary</);
+  assert.doesNotMatch(markup, /more section/, "the count says nothing the button does not");
 });
 
 const sections = (text) => parseHandoverSections(text).map(({ title, body }) => [title, body]);
