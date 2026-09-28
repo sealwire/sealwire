@@ -119,3 +119,19 @@ test("clicking a group of one opens its tool; a larger group opens as a group", 
   const pair = chipAction([agent("a1", "Checking."), bash("c1"), bash("c2"), agent("a2", "Done.")]);
   assert.deepEqual([pair?.kind, pair?.expandKey], ["toggleGroup", "group:c1"]);
 });
+
+test("a failure folds in with the run and the group line says so in red", () => {
+  const failed = {
+    ...bash("c2", "failed"),
+    tool: { ...bash("c2").tool, detail: "Read merge_runtime_entry", result_preview: "Exit code 1\nbad math expression" },
+  };
+  const entries = [agent("a1", "Looking."), bash("c1"), failed, bash("c3"), agent("a2", "Found it.")];
+  const folded = render(entries);
+  assert.match(folded, /class="work-group-lead">Ran 3 commands</);
+  assert.match(folded, /class="work-group-failed">[^<]*1 failed</);
+  assert.doesNotMatch(folded, /bad math expression/, "folded, the failure's output waits");
+
+  const opened = render(entries, { expandedKeys: new Set(["group:c1"]) });
+  assert.match(article(opened, "c2"), /class="tool-run-status"[^>]*>exit 1</);
+  assert.match(article(opened, "c2"), /bad math expression/, "opened, its last lines show");
+});

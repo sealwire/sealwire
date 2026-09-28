@@ -1445,12 +1445,19 @@ test("groupToolEntries keeps a still-running command inline (renders live)", () 
   assert.equal(result[0].item_id, "cmd-run");
 });
 
-test("groupToolEntries keeps a failed command inline (stays visible)", () => {
-  const failed = makeCommand("cmd-fail", { status: "failed" });
-  const result = groupToolEntries([failed]);
-  assert.equal(result.length, 1);
-  assert.equal(result[0].kind, "command");
-  assert.equal(result[0].item_id, "cmd-fail");
+// A failure mid-run is mostly the agent trying something; the group line counts it.
+test("groupToolEntries folds a failed command into the run around it", () => {
+  const result = groupToolEntries([
+    makeCommand("ok-1"),
+    makeCommand("cmd-fail", { status: "failed" }),
+    makeTool("ok-2", { status: "error" }),
+  ]);
+  assert.deepEqual(groupShape(result), ["work-group[ok-1,cmd-fail,ok-2]"]);
+});
+
+test("groupToolEntries keeps a declined tool on its own line", () => {
+  const result = groupToolEntries([makeTool("a"), makeTool("no", { status: "declined" }), makeTool("b")]);
+  assert.deepEqual(groupShape(result), ["work-group[a]", "no", "work-group[b]"]);
 });
 
 test("groupToolEntries splits on text, but no longer on reasoning", () => {

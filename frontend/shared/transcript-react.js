@@ -2347,10 +2347,10 @@ export function workGroupSummary(group) {
 // One shared run, not one per kind: Cursor and Codex interleave reasoning with
 // tool calls, so splitting by kind fragments a single stretch of work.
 function isGroupableWork(entry) {
-  return isGroupableCompletedTool(entry) || isGroupableReasoning(entry);
+  return isGroupableFinishedTool(entry) || isGroupableReasoning(entry);
 }
 
-function isGroupableCompletedTool(entry) {
+function isGroupableFinishedTool(entry) {
   // Claude routes every tool use through kind "tool_call"; Codex routes shell
   // commands through kind "command" (its file edits are tool_call/fileChange).
   // Fold both into the same collapsible work-group so Codex command runs
@@ -2358,8 +2358,10 @@ function isGroupableCompletedTool(entry) {
   if (!entry || (entry.kind !== "tool_call" && entry.kind !== "command")) {
     return false;
   }
+  // A failure folds too: mid-run it is mostly the agent trying something, and the
+  // group line counts it. A declined tool was the reader's own call and stays out.
   const status = entry.status || "completed";
-  if (status !== "completed") {
+  if (status !== "completed" && !isFailedTranscriptEntry(entry)) {
     return false;
   }
   const itemType = entry?.tool?.item_type || "";
@@ -2571,6 +2573,7 @@ function WorkGroupEntry({ group, options = null }) {
   }, [expanded, loneItemId]);
   const { added, removed } = aggregateGroupDiffStats(group, options);
   const { lead, rest } = workGroupSummary(group);
+  const failed = (group?.entries || []).filter((entry) => isFailedTranscriptEntry(entry)).length;
   const hasReasoning = (group?.entries || []).some(
     (entry) => entry?.kind === "reasoning"
   );
@@ -2607,6 +2610,7 @@ function WorkGroupEntry({ group, options = null }) {
       rest.length
         ? h("span", { className: "work-group-rest" }, rest.map((part) => ` · ${part}`).join(""))
         : null,
+      failed ? h("span", { className: "work-group-failed" }, ` · ${failed} failed`) : null,
       added > 0
         ? h("span", { className: "work-group-chip-add" }, `+${added}`)
         : null,
@@ -3255,7 +3259,7 @@ export function TranscriptContent({
   // live question dialogs on screen at once. Answering it clears the pending
   // request, which un-pins it back to its original position in the
   // conversation. (Ask-user tool calls are never folded into a group —
-  // `isGroupableCompletedTool` excludes them — so the pinned entry is always a
+  // `isGroupableFinishedTool` excludes them — so the pinned entry is always a
   // plain item in `groupedItems`; if that ever changed, the id simply would not
   // match and it would render in place, which is the safe degradation.)
   const pinnedAskUserItemIds = React.useMemo(

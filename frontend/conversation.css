@@ -807,8 +807,9 @@ button.tool-run-row:focus-visible {
   font-size: var(--text-xs);
 }
 
+/* Only as wide as it is, so a status tag sits by the row's text, not at the far edge. */
 .tool-run-command {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2312,6 +2313,13 @@ button.ask-user-summary:focus-visible {
 
 .work-group-lead {
   flex: none;
+}
+
+/* Failures fold with the run; the line still says how many, in red. */
+.work-group-failed {
+  flex: none;
+  white-space: nowrap;
+  color: var(--err-fg);
 }
 
 .work-group-rest {
