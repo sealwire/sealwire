@@ -198,15 +198,16 @@ function keepSelection(event) {
   event.preventDefault();
 }
 
-function messageCopyButton(value, labelled) {
+function messageCopyButton(value, labelled, title = "Copy response", onMouseDown = undefined) {
   return h(
     "button",
     {
       type: "button",
       className: "message-copy-button",
       "data-copy-message": value,
-      title: "Copy response",
-      "aria-label": "Copy response",
+      title,
+      "aria-label": title,
+      onMouseDown,
     },
     h("span", {
       className: "message-copy-icon message-copy-icon-default",
@@ -282,6 +283,166 @@ function renderMessageActions(entry, { showFork = false, canAsk = false, settled
     ask && hasText ? h("span", { className: "message-toolbar-sep", "aria-hidden": "true" }) : null,
     hasText ? messageCopyButton(value, false) : null,
     fork
+  );
+}
+
+// Selecting part of a reply offers Ask and Copy beside the selection; that reply's own
+// toolbar stands down meanwhile (`data-selecting`). Touch selections belong to the system menu.
+export const SELECTION_TOOLBAR_WIDTH = 96;
+export const SELECTION_COPY_WIDTH = 40;
+
+// Ask is used up by asking; Copy leaves the selection for whatever comes next.
+// Without `onAsk` (a thread you can only read) the toolbar is Copy alone.
+export function renderSelectionToolbar(popover, onAsk = null) {
+  return h(
+    "div",
+    {
+      className: "selection-toolbar",
+      role: "toolbar",
+      "aria-label": "Selection actions",
+      style: { left: `${popover.left}px`, top: `${popover.top}px` },
+    },
+    onAsk
+      ? h(
+          "button",
+          {
+            type: "button",
+            className: "message-ask-button",
+            "data-ask-message": popover.text,
+            title: "Ask about the selection",
+            onMouseDown: keepSelection,
+            onClick: onAsk,
+          },
+          h("span", {
+            className: "message-ask-icon",
+            "aria-hidden": "true",
+            dangerouslySetInnerHTML: { __html: ASK_SVG },
+          }),
+          h("span", { className: "message-action-label" }, "Ask")
+        )
+      : null,
+    onAsk ? h("span", { className: "message-toolbar-sep", "aria-hidden": "true" }) : null,
+    messageCopyButton(popover.text, false, "Copy selection", keepSelection)
+  );
+}
+
+function replyBodyOf(node) {
+  const element = node?.nodeType === 1 ? node : node?.parentElement;
+  return element?.closest?.(".chat-message-assistant .message-body") || null;
+}
+
+function SelectionToolbar({ entries, canAsk = false }) {
+  const anchorRef = React.useRef(null);
+  const canAskRef = React.useRef(canAsk);
+  canAskRef.current = canAsk;
+  const recheckRef = React.useRef(null);
+  const [popover, setPopover] = React.useState(null);
+  React.useEffect(() => {
+    let marked = null;
+    let pointerType = "mouse";
+    let dragging = false;
+    // Esc puts the toolbar away until the selection itself changes.
+    let dismissed = false;
+    const mark = (article) => {
+      if (marked === article) return;
+      marked?.removeAttribute("data-selecting");
+      marked = article;
+      marked?.setAttribute("data-selecting", "true");
+    };
+    const inspect = () => {
+      const root = anchorRef.current?.parentElement;
+      const selection = window.getSelection?.();
+      if (!root || !selection || selection.isCollapsed || !selection.rangeCount || pointerType === "touch") {
+        return null;
+      }
+      const body = replyBodyOf(selection.anchorNode);
+      if (!body || body !== replyBodyOf(selection.focusNode) || !root.contains(body)) {
+        return null;
+      }
+      const text = selection.toString().trim();
+      return text ? { root, body, text, range: selection.getRangeAt(0) } : null;
+    };
+    const place = () => {
+      const hit = inspect();
+      mark(hit ? hit.body.closest(".chat-message-assistant") : null);
+      if (!hit || dragging || dismissed) {
+        setPopover(null);
+        return;
+      }
+      const rects = hit.range.getClientRects?.() || [];
+      const last = rects.length ? rects[rects.length - 1] : hit.body.getBoundingClientRect();
+      const frame = hit.root.getBoundingClientRect();
+      const width = canAskRef.current ? SELECTION_TOOLBAR_WIDTH : SELECTION_COPY_WIDTH;
+      const left = Math.max(0, Math.min(last.right - frame.left, frame.width - width));
+      setPopover({ text: hit.text, left, top: last.bottom - frame.top + 6 });
+    };
+    const later = (fn) => (window.requestAnimationFrame ? window.requestAnimationFrame(fn) : setTimeout(fn, 0));
+    const onSelectionChange = () => {
+      dismissed = false;
+      place();
+    };
+    const onPointerDown = (event) => {
+      if (event.target?.closest?.(".selection-toolbar")) return;
+      dismissed = false;
+      pointerType = event.pointerType || "mouse";
+      dragging = pointerType !== "touch" && event.button === 0;
+    };
+    const onPointerUp = (event) => {
+      dragging = false;
+      if (!event.target?.closest?.(".selection-toolbar")) later(place);
+    };
+    // Unmounting a selected row (a scroll, a thread switch) empties the selection
+    // without a selectionchange.
+    let rechecking = false;
+    const recheck = () => {
+      if (!marked || rechecking) return;
+      rechecking = true;
+      later(() => {
+        rechecking = false;
+        place();
+      });
+    };
+    recheckRef.current = recheck;
+    const onKeyUp = (event) => {
+      if (event.key === "Escape") {
+        dismissed = true;
+        setPopover(null);
+        return;
+      }
+      pointerType = "keyboard";
+      later(place);
+    };
+    document.addEventListener("selectionchange", onSelectionChange);
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("pointerup", onPointerUp, true);
+    document.addEventListener("keyup", onKeyUp, true);
+    document.addEventListener("scroll", recheck, true);
+    return () => {
+      document.removeEventListener("selectionchange", onSelectionChange);
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("pointerup", onPointerUp, true);
+      document.removeEventListener("keyup", onKeyUp, true);
+      document.removeEventListener("scroll", recheck, true);
+      recheckRef.current = null;
+      mark(null);
+    };
+  }, []);
+  React.useEffect(() => recheckRef.current?.(), [entries, canAsk]);
+  return h(
+    React.Fragment,
+    null,
+    h("span", { ref: anchorRef, hidden: true, className: "selection-toolbar-anchor" }),
+    popover
+      ? renderSelectionToolbar(
+          popover,
+          canAsk
+            ? () => {
+                setPopover(null);
+                window.getSelection?.()?.removeAllRanges();
+              }
+            : null
+        )
+      : null
   );
 }
 
@@ -3228,8 +3389,14 @@ export function TranscriptContent({
       )
     : null;
 
+  const selectionToolbar = h(SelectionToolbar, {
+    key: "selection-toolbar",
+    entries,
+    canAsk: Boolean(effectiveOptions?.canAsk),
+  });
+
   if (!virtualized) {
-    return h("div", contentProps, sentinel, ...nodes, askUserFooter);
+    return h("div", contentProps, sentinel, ...nodes, askUserFooter, selectionToolbar);
   }
 
   return h(
@@ -3263,7 +3430,8 @@ export function TranscriptContent({
         );
       })
     ),
-    askUserFooter
+    askUserFooter,
+    selectionToolbar
   );
 }
 

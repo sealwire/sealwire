@@ -42,6 +42,15 @@ function copyViaTextarea(value) {
   if (typeof document === "undefined") {
     return false;
   }
+  // Selecting the textarea takes over the page's selection; put the reader's back after,
+  // anchor and focus included, since Shift+arrow grows it from the focus end.
+  const selection = document.getSelection?.();
+  const saved = selection
+    ? Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index).cloneRange())
+    : [];
+  const ends = selection?.rangeCount === 1
+    ? [selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset]
+    : null;
   try {
     const textarea = document.createElement("textarea");
     textarea.value = value;
@@ -56,6 +65,13 @@ function copyViaTextarea(value) {
     return copied;
   } catch {
     return false;
+  } finally {
+    if (ends && typeof selection.setBaseAndExtent === "function") {
+      selection.setBaseAndExtent(...ends);
+    } else if (selection && saved.length) {
+      selection.removeAllRanges();
+      saved.forEach((range) => selection.addRange(range));
+    }
   }
 }
 

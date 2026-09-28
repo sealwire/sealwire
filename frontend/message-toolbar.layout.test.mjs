@@ -7,7 +7,12 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { chromium } from "playwright";
 
-import { TranscriptContent } from "./shared/transcript-react.js";
+import {
+  renderSelectionToolbar,
+  SELECTION_COPY_WIDTH,
+  SELECTION_TOOLBAR_WIDTH,
+  TranscriptContent,
+} from "./shared/transcript-react.js";
 
 const css =
   readFileSync(new URL("./conversation.css", import.meta.url), "utf8")
@@ -64,6 +69,61 @@ test("a mid-turn reply holds no action row, and its toolbar floats over its top 
       .locator('[data-transcript-entry-id="a2"] .message-actions')
       .evaluate((node) => getComputedStyle(node.querySelector(".message-ask-button")).opacity);
     assert.equal(lastRow, "1", "the last reply's row shows without hover");
+  } finally {
+    await browser.close();
+  }
+});
+
+// The selection logic runs in selection-toolbar.dom.test.mjs; this is what its marks look like.
+test("with part of a reply selected, its toolbar stays away and Ask and Copy float without taking room", async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    const markup = renderToStaticMarkup(
+      React.createElement(TranscriptContent, { entries, options: { canAsk: true } })
+    );
+    const toolbar = renderToStaticMarkup(renderSelectionToolbar({ text: "first", left: 40, top: 30 }, () => {}));
+    await page.setContent(
+      `<!doctype html><html><head><style>${css}${STILL}</style></head><body>
+        <div class="chat-thread" style="width:800px">${markup}</div></body></html>`,
+      { waitUntil: "load" }
+    );
+    const heightBefore = await page.evaluate(() => {
+      document.querySelector('[data-transcript-entry-id="a1"]').setAttribute("data-selecting", "true");
+      return document.querySelector(".thread-content").getBoundingClientRect().height;
+    });
+    const target = await page.locator('[data-transcript-entry-id="a1"] .message-body').boundingBox();
+    await page.mouse.move(target.x + 10, target.y + target.height / 2);
+    const hidden = await page
+      .locator('[data-transcript-entry-id="a1"] .message-toolbar')
+      .evaluate((node) => getComputedStyle(node).opacity);
+    assert.equal(hidden, "0", "the hovered reply's toolbar stays hidden while selecting");
+
+    const placed = await page.evaluate((html) => {
+      const content = document.querySelector(".thread-content");
+      content.insertAdjacentHTML("beforeend", html);
+      const frame = content.getBoundingClientRect();
+      const box = content.querySelector(".selection-toolbar").getBoundingClientRect();
+      return {
+        height: frame.height,
+        left: Math.round(box.left - frame.left),
+        top: Math.round(box.top - frame.top),
+        width: box.width,
+        buttons: [...content.querySelectorAll(".selection-toolbar button")].map((b) => b.getBoundingClientRect().height),
+      };
+    }, toolbar);
+    assert.equal(placed.height, heightBefore, "the toolbar takes no room in the list");
+    assert.deepEqual([placed.left, placed.top], [40, 30], "and is placed against the list itself");
+    assert.ok(placed.width <= SELECTION_TOOLBAR_WIDTH, `${placed.width}px fits the ${SELECTION_TOOLBAR_WIDTH}px kept at the edge`);
+    assert.equal(placed.buttons.length, 2);
+
+    const copyOnly = await page.evaluate((html) => {
+      const content = document.querySelector(".thread-content");
+      content.querySelector(".selection-toolbar").remove();
+      content.insertAdjacentHTML("beforeend", html);
+      return content.querySelector(".selection-toolbar").getBoundingClientRect().width;
+    }, renderToStaticMarkup(renderSelectionToolbar({ text: "first", left: 40, top: 30 })));
+    assert.ok(copyOnly <= SELECTION_COPY_WIDTH, `Copy alone is ${copyOnly}px, ${SELECTION_COPY_WIDTH}px kept at the edge`);
   } finally {
     await browser.close();
   }

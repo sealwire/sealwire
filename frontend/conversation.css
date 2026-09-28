@@ -583,6 +583,35 @@
   pointer-events: auto;
 }
 
+/* A selection is being made in this reply: its actions sit beside the selection instead, so
+ * the whole-message toolbar and its wash stand down (after the rules they override). */
+.chat-message-assistant.has-message-toolbar[data-selecting="true"] .message-toolbar {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chat-message-assistant.has-message-toolbar[data-selecting="true"] .message-card {
+  background: transparent;
+}
+
+.thread-content:has(> .selection-toolbar) {
+  position: relative;
+}
+
+.selection-toolbar {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  height: 30px;
+  padding: 0 2px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-sm);
+}
+
 /* System / approval / tool / reasoning / command — contained cards with semantic left stripe */
 .chat-message-system {
   align-self: stretch;
