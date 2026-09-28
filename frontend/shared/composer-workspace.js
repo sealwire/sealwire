@@ -34,6 +34,8 @@ export const EMPTY_COMPOSER_WORKSPACE = Object.freeze({
   commandDismissedAt: null,
   // The token of the submit or "/" command still out on this workspace, or null.
   pendingOperationId: null,
+  // What Ask put above the box; it goes out with the next message.
+  quote: "",
 });
 
 /// The local surface has no relay id of its own; "local" keeps its keys the same shape
@@ -63,6 +65,7 @@ export function isEmptyComposerWorkspace(workspace) {
     && !(current.commandPills || []).length
     && !current.commandDismissedAt
     && !current.pendingOperationId
+    && !current.quote
   );
 }
 
@@ -84,6 +87,7 @@ function normalize(patch) {
     // and keeps an otherwise-empty slot alive for the life of the tab.
     commandDismissedAt: text && dismissed === text ? dismissed : null,
     pendingOperationId: patch.pendingOperationId || null,
+    quote: typeof patch.quote === "string" ? patch.quote : "",
   });
 }
 
@@ -98,6 +102,7 @@ function sameWorkspace(a, b) {
     a.text === b.text
     && a.commandDismissedAt === b.commandDismissedAt
     && a.pendingOperationId === b.pendingOperationId
+    && a.quote === b.quote
     && sameList(a.imageAttachments, b.imageAttachments)
     && sameList(a.commandPills, b.commandPills)
   );

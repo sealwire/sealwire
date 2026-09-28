@@ -118,13 +118,17 @@ test("agent message renders a fork button carrying its own item id", () => {
   const markup = renderToStaticMarkup(
     React.createElement(TranscriptEntry, {
       entry: { item_id: "a2", kind: "agent_text", text: "done", turn_id: "t1" },
-      options: { canFork: true, forkableItemIds: new Set(["a2"]) },
+      options: {
+        canFork: true,
+        forkableItemIds: new Set(["a2"]),
+        settledFinalItemIds: new Set(["a2"]),
+      },
     })
   );
 
   assert.match(markup, /data-fork-from-item="a2"/);
-  // The fork affordance must sit in the same action row as copy so it is
-  // reachable by tap on iOS, where the thread-list contextmenu never fires.
+  // Beside copy in the finished turn's standing row, so a tap on iOS reaches it
+  // (the thread-list contextmenu never fires there).
   assert.match(markup, /message-actions/);
   assert.match(markup, /message-copy-button/);
 });

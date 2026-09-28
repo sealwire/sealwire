@@ -6,16 +6,18 @@
 // resolves to nothing once the thread is deleted — which is the difference between
 // finishing the right conversation, leaving the real one frozen forever, and writing a
 // ghost under an id nobody can reach.
+import { quoteToSend } from "../shared/message-quote.js";
 import { withoutSentSkill } from "../shared/thread-skills.js";
 
 export function createRemoteComposerSend({ workspaces, getScope, send }) {
   return async ({ skill = null } = {}) => {
     const scope = getScope();
     if (workspaces.isPending(scope)) return false;
-    const draft = workspaces.read(scope).text;
+    const { text: draft, quote: staged } = workspaces.read(scope);
+    const quote = quoteToSend(draft, staged);
     const operationId = workspaces.beginOperation(scope);
     try {
-      const sent = await send(draft, { skill });
+      const sent = await send(draft, { skill, quote });
       const target = workspaces.operationScope(operationId);
       if (sent && target) {
         const now = workspaces.read(target);
@@ -25,6 +27,7 @@ export function createRemoteComposerSend({ workspaces, getScope, send }) {
         workspaces.write(target, {
           ...(now.text === draft ? { text: "" } : {}),
           ...(pills !== now.commandPills ? { commandPills: pills } : {}),
+          ...(quote && now.quote === quote ? { quote: "" } : {}),
         });
       }
       return sent;

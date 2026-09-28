@@ -21,6 +21,7 @@ import {
   sessionHistoryDrawer,
   sessionMeta,
   sessionDetailsPath,
+  composerQuoteMount,
   composerSettingsMount,
   reviewIdleNudge,
   messageEffort,
@@ -117,6 +118,7 @@ import {
   ConversationEmptyState,
 } from "../shared/conversation.js";
 import { SessionSettingsButton } from "../shared/session-settings-panel.js";
+import { ComposerQuoteStrip } from "../shared/composer-quote.js";
 import {
   ReviewLauncher,
 } from "../shared/review-panel.js";
@@ -179,7 +181,7 @@ import {
 } from "./view-only-thread.js";
 import { selectControlBannerModel } from "./control-banner.js";
 import { readWorkspaceRepair } from "./workspace-repair.js";
-import { canComposeThread, composerButtonState } from "../shared/thread-compose.js";
+import { canAskInThread, canComposeThread, composerButtonState } from "../shared/thread-compose.js";
 import {
   isStopPending,
   reconcileAllStopPending,
@@ -274,6 +276,8 @@ export function createSessionRenderer({
   scheduleControllerLeaseRefresh,
   cancelControllerHeartbeat,
   cancelControllerLeaseRefresh,
+  // The composer's workspace key, owned by app.js's binding; Ask's quote lives there.
+  getComposerScope = () => "",
   // Late-bound like the two above: the flush scheduler is owned by
   // session-controller.js, built from a `controller` app.js assigns after
   // this renderer. renderSession calls this itself (not just app.js's wrap
@@ -726,6 +730,7 @@ export function createSessionRenderer({
     schedulePairingExpiryTick(pendingPairings);
     renderControlBanner(session);
     renderSessionSettingsPanel(session);
+    renderComposerQuote();
     renderReviewSlice(session);
     renderReviewIdleNudge(session);
     renderPendingActionBanner(pendingPairings, session);
@@ -1109,6 +1114,12 @@ export function createSessionRenderer({
     renderReactContent(overviewSecurityBadges, h(OverviewBadges, { badges: securityBadges }));
   }
 
+  function renderComposerQuote() {
+    if (composerQuoteMount) {
+      renderReactContent(composerQuoteMount, h(ComposerQuoteStrip, { scope: getComposerScope() }));
+    }
+  }
+
   function renderSessionSettingsPanel(session) {
     if (!composerSettingsMount) {
       return;
@@ -1392,6 +1403,8 @@ export function createSessionRenderer({
         !session.view_only &&
         !isReviewInProgressForThread(session, session.active_thread_id) &&
         !isWorkflowInProgressForThread(session, session.active_thread_id),
+      canAsk: canAskInThread(session),
+      turnRunning: Boolean(session.active_turn_id),
       expandedKeys: localUi.transcriptExpandedItemIds,
       loadingItemIds: localUi.transcriptLoadingItemIds,
       // Enables the per-message "Fork from here" affordance on turn-final

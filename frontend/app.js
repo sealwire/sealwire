@@ -335,6 +335,7 @@ import {
 } from "./shared/provider-settings.js";
 import { localQueryClient } from "./local/query-client.js";
 import { copyTextToClipboard } from "./shared/clipboard.js";
+import { quoteForMessage, quoteToSend, withQuote } from "./shared/message-quote.js";
 import {
   countReviewerThreadsForParent,
   reviewerChoiceRequestInit,
@@ -1111,6 +1112,7 @@ function refreshAgentWorkingIndicator() {
 
 const renderer = createSessionRenderer({
   state,
+  getComposerScope: composerScopeKey,
   renderSettings: () => settings.render(),
   renderPairingApprovalModal,
   resolveActiveThread,
@@ -1426,6 +1428,7 @@ renderer.renderSession = function wrappedRenderSession(session) {
       cwd: summary?.cwd ?? previousLiveSession.current_cwd ?? null,
       threadWorkspaceCwd: previousLiveSession.thread_workspace_cwd ?? null,
       provider: summary?.provider ?? previousLiveSession.provider ?? null,
+      taskReviewer: Boolean(previousLiveSession.active_thread_task_reviewer),
       status: previousLiveSession.current_status || "idle",
       lastRefreshAt: Date.now(),
       lastRefreshServerTime: previousLiveSession.server_time ?? null,
@@ -3075,6 +3078,7 @@ async function runComposerSubmit() {
   syncComposerWorkspace();
   const scope = composerWorkspace.scope();
   const text = messageInput.value;
+  const quote = quoteToSend(text, composerWorkspaces.read(scope).quote);
   const imageAttachments = state.composerImageAttachments.slice();
   const pin = state.viewOnlyThread;
   if (pin?.review) {
@@ -3124,7 +3128,7 @@ async function runComposerSubmit() {
         data_url: await imageFileToDataUrl(attachment.file),
       }))
     );
-    const sent = await sendMessage(text, targetThreadId, images, {
+    const sent = await sendMessage(withQuote(quote, text), targetThreadId, images, {
       skill: skillForSend(stagedSkill),
     });
     if (sent) {
@@ -3135,6 +3139,7 @@ async function runComposerSubmit() {
         text,
         attachmentIds: imageAttachments.map((attachment) => attachment.id),
         skill: stagedSkill,
+        quote,
       });
     }
   } catch (error) {
@@ -3143,6 +3148,17 @@ async function runComposerSubmit() {
     composerWorkspaces.endOperation(operationId);
     renderComposerImageAttachments();
     if (state.session) renderer.renderSession(state.session); // unfreeze
+  }
+}
+
+// Ask never sends: the quote waits above the box, the caret after what is typed.
+function askAboutMessage(quote) {
+  const scope = composerScopeKey();
+  if (!scope || !quote) return;
+  composerWorkspaces.write(scope, { quote });
+  if (messageInput && !messageInput.disabled) {
+    messageInput.focus();
+    messageInput.setSelectionRange(messageInput.value.length, messageInput.value.length);
   }
 }
 
@@ -3186,6 +3202,7 @@ transcript.addEventListener(
   "click",
   createTranscriptInteractionHandler({
     copyMessage: ({ text, element }) => void copyTextToClipboard(text, element),
+    askMessage: ({ text, element }) => askAboutMessage(quoteForMessage(element.closest("article"), text)),
     forkFromItem: ({ itemId }) => {
       const threadId = state.viewThreadId || state.session?.active_thread_id || null;
       openForkDialogForThread(threadId, itemId);

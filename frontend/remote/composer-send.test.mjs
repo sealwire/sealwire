@@ -19,8 +19,8 @@ function harness({ send } = {}) {
   const submit = createRemoteComposerSend({
     workspaces,
     getScope: () => scope,
-    send: async (draft) => {
-      sentDrafts.push(draft);
+    send: async (draft, { quote = "" } = {}) => {
+      sentDrafts.push(quote ? { draft, quote } : draft);
       return send ? send(draft) : true;
     },
   });
@@ -142,7 +142,7 @@ test("a sent skill leaves with its own thread's draft, and reaches the send", as
 
   assert.equal(await submit({ skill }), true);
 
-  assert.deepEqual(calls, [["the parser", { skill }]]);
+  assert.deepEqual(calls, [["the parser", { skill, quote: "" }]]);
   assert.equal(workspaces.read(A).text, "");
   assert.deepEqual(workspaces.read(A).commandPills, [], "the skill went, so its pill goes");
 });
@@ -156,4 +156,29 @@ test("an ordinary send leaves a staged skill pill alone", async () => {
   await submit();
 
   assert.deepEqual(workspaces.read(A).commandPills, [pill]);
+});
+
+// Ask's quote rides the send it was attached for, and only that send consumes it.
+test("a quote goes out with the draft and is cleared by the send that took it", async () => {
+  const ui = harness();
+  ui.workspaces.write(A, { text: "why?", quote: "the grace window" });
+  await ui.submit();
+  assert.deepEqual(ui.sentDrafts, [{ draft: "why?", quote: "the grace window" }]);
+  assert.equal(ui.workspaces.read(A).quote, "");
+});
+
+test("a refused send keeps its quote with its draft", async () => {
+  const ui = harness({ send: () => false });
+  ui.workspaces.write(A, { text: "why?", quote: "the grace window" });
+  await ui.submit();
+  assert.equal(ui.workspaces.read(A).quote, "the grace window");
+});
+
+// A quote is context for a question, not a message: with nothing typed it stays put.
+test("a quote alone is not sent and stays above the box", async () => {
+  const ui = harness();
+  ui.workspaces.write(A, { quote: "the grace window" });
+  await ui.submit();
+  assert.deepEqual(ui.sentDrafts, [""], "the empty draft goes the way it always did");
+  assert.equal(ui.workspaces.read(A).quote, "the grace window");
 });

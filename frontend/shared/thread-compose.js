@@ -1,3 +1,6 @@
+import { isReviewInProgressForThread } from "./review-state.js";
+import { isWorkflowInProgressForThread } from "./workflow-state.js";
+
 // `taskReviewer` is unlike the other gates here: it never lifts. The seat is a
 // record of what the reviewer judged, so the relay refuses user turns into it for
 // as long as it exists (TASK_REVIEWER_READ_ONLY_MSG).
@@ -13,6 +16,18 @@ export function canComposeThread({
     && !reviewLocked
     && !taskReviewer
     && (hasControllerLease || !activeTurnId)
+  );
+}
+
+/// Ask only puts a quote above the box, so it is offered wherever the thread takes
+/// messages at all; whose turn or lease it is right now does not matter.
+export function canAskInThread(session) {
+  const threadId = session?.active_thread_id;
+  return Boolean(
+    threadId
+    && !session.active_thread_task_reviewer
+    && !isReviewInProgressForThread(session, threadId)
+    && !isWorkflowInProgressForThread(session, threadId)
   );
 }
 

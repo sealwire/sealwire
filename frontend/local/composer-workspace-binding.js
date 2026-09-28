@@ -77,9 +77,11 @@ export function createComposerWorkspaceBinding({
     /// Takes the submit's OPERATION TOKEN, not the key it started under. A deferred
     /// Claude thread is renamed by the very send that is still in flight here, and a key
     /// captured before that lands names a thread that no longer exists.
-    clearSubmitted(operationId, { text = "", attachmentIds = [], skill = null } = {}) {
+    clearSubmitted(operationId, { text = "", attachmentIds = [], skill = null, quote = "" } = {}) {
       const key = workspaces.operationScope(operationId);
       if (!key) return;
+      // The quote went with the message; one put there since did not.
+      if (quote && workspaces.read(key).quote === quote) workspaces.write(key, { quote: "" });
       const sent = new Set(attachmentIds);
       // The staged skill went with the message; a different one staged since did not.
       const pills = workspaces.read(key).commandPills || [];

@@ -581,3 +581,13 @@ test("a resync during a load is judged by the page that load returns", () => {
     "no notice arrived during the load"
   );
 });
+
+// A task reviewer's seat is read-only for good; viewing it as history must say so, or
+// the composer and Ask offer to write into a thread the relay will refuse.
+test("a viewed task-reviewer thread projects as a task reviewer", () => {
+  const projected = projectViewOnlySession(realSession(), {
+    viewThreadId: "A",
+    viewOnlyThread: buildViewOnlyPin({ threadId: "A", taskReviewer: true }),
+  });
+  assert.equal(projected.active_thread_task_reviewer, true);
+});

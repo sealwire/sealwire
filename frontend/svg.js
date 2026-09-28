@@ -17,6 +17,8 @@ export const PLUS_SVG = `<svg ${ICON_ATTRS}><path d="M5 12h14"/><path d="M12 5v1
 
 export const ARROW_RETURN_SVG = `<svg ${ICON_ATTRS}><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>`;
 
+export const ASK_SVG = `<svg viewBox="0 0 14 14" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true"><path d="M2 3.5A1.5 1.5 0 0 1 3.5 2h7A1.5 1.5 0 0 1 12 3.5v5A1.5 1.5 0 0 1 10.5 10H6l-3 2.2V10A1.5 1.5 0 0 1 2 8.5z"/><path d="M5 5h4M5 7h2.5"/></svg>`;
+
 export const COPY_SVG = `<svg ${ICON_ATTRS}><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>`;
 
 // Git-branch glyph: one trunk, one branch splitting off — the fork affordance

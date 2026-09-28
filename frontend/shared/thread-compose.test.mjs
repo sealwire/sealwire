@@ -154,3 +154,14 @@ test("a pending stop keeps Stop visible and disabled while the turn is still wor
   assert.equal(state.stopPending, true);
   assert.equal(state.sendHidden, true);
 });
+
+// Ask only fills the box, so whose turn or lease it is right now does not matter.
+test("Ask is offered wherever the thread takes messages at all", async () => {
+  const { canAskInThread } = await import("./thread-compose.js");
+  const idle = { active_thread_id: "t", active_turn_id: null };
+  assert.equal(canAskInThread(idle), true);
+  assert.equal(canAskInThread({ ...idle, active_turn_id: "turn-1" }), true, "mid-turn too");
+  assert.equal(canAskInThread({ ...idle, active_thread_task_reviewer: true }), false);
+  assert.equal(canAskInThread({ active_thread_id: null }), false);
+  assert.equal(canAskInThread(null), false);
+});

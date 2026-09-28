@@ -11,7 +11,7 @@ import {
   observeElementRect,
 } from "@tanstack/virtual-core";
 import { createTranscriptScrollAdjuster } from "./transcript-scroll-adjust.js";
-import { CHECK_SVG, COPY_SVG, FORK_SVG, SPARKLES_SVG } from "../svg.js";
+import { ASK_SVG, CHECK_SVG, COPY_SVG, FORK_SVG, SPARKLES_SVG } from "../svg.js";
 import { approvalKindLabel } from "./approval-labels.js";
 import { approvalTitle } from "./approval-view.js";
 import {
@@ -20,7 +20,11 @@ import {
   writeAskUserDraft,
 } from "./ask-user-draft-store.js";
 import { providerIconSvg } from "./provider-icons.js";
-import { computeForkableItemIds, isForkableEntry } from "./transcript-fork.js";
+import {
+  computeForkableItemIds,
+  computeSettledTurnFinalIds,
+  isForkableEntry,
+} from "./transcript-fork.js";
 import {
   buildFileDisplayPathMap,
   diffStats,
@@ -189,55 +193,149 @@ function renderMessageBody(text, isStreaming = false) {
 // menu because contextmenu never fires for touch long-press on iOS, which
 // would leave the phone — the surface fork matters most on — with no way in.
 // Both copy icons are rendered up front and toggled by CSS off `data-copied`.
-function renderMessageActions(entry, showFork) {
+// Keeps a text selection alive through the click: Ask quotes only what is selected.
+function keepSelection(event) {
+  event.preventDefault();
+}
+
+function messageCopyButton(value, labelled) {
+  return h(
+    "button",
+    {
+      type: "button",
+      className: "message-copy-button",
+      "data-copy-message": value,
+      title: "Copy response",
+      "aria-label": "Copy response",
+    },
+    h("span", {
+      className: "message-copy-icon message-copy-icon-default",
+      "aria-hidden": "true",
+      dangerouslySetInnerHTML: { __html: COPY_SVG },
+    }),
+    h("span", {
+      className: "message-copy-icon message-copy-icon-done",
+      "aria-hidden": "true",
+      dangerouslySetInnerHTML: { __html: CHECK_SVG },
+    }),
+    labelled ? h("span", { className: "message-action-label" }, "Copy") : null
+  );
+}
+
+// Design 20c-2: a reply's actions float over its top edge and hold no row; the last
+// reply of a finished turn keeps a row, since that is the one people copy.
+function renderMessageActions(entry, { showFork = false, canAsk = false, settled = false } = {}) {
   const value = String(entry?.text ?? "");
-  const showCopy = Boolean(value.trim());
-  if (!showCopy && !showFork) {
+  const hasText = Boolean(value.trim());
+  const showAsk = canAsk && hasText;
+  if (!hasText && !showFork) {
     return null;
+  }
+  const ask = showAsk
+    ? h(
+        "button",
+        {
+          type: "button",
+          className: "message-ask-button",
+          "data-ask-message": value,
+          title: "Ask about this message",
+          onMouseDown: keepSelection,
+        },
+        h("span", {
+          className: "message-ask-icon",
+          "aria-hidden": "true",
+          dangerouslySetInnerHTML: { __html: ASK_SVG },
+        }),
+        h("span", { className: "message-action-label" }, "Ask")
+      )
+    : null;
+  const fork = showFork
+    ? h(
+        "button",
+        {
+          type: "button",
+          className: "message-fork-button",
+          "data-fork-from-item": transcriptRowKey(entry) || "",
+          title: "Fork from here",
+          "aria-label": "Fork conversation from this message",
+        },
+        h("span", {
+          className: "message-fork-icon",
+          "aria-hidden": "true",
+          dangerouslySetInnerHTML: { __html: FORK_SVG },
+        })
+      )
+    : null;
+  if (settled) {
+    return h(
+      "div",
+      { className: "message-actions" },
+      ask,
+      hasText ? messageCopyButton(value, true) : null,
+      fork
+    );
   }
   return h(
     "div",
-    { className: "message-actions" },
-    showCopy
-      ? h(
-          "button",
-          {
-            type: "button",
-            className: "message-copy-button",
-            "data-copy-message": value,
-            title: "Copy response",
-            "aria-label": "Copy response",
-          },
-          h("span", {
-            className: "message-copy-icon message-copy-icon-default",
-            "aria-hidden": "true",
-            dangerouslySetInnerHTML: { __html: COPY_SVG },
-          }),
-          h("span", {
-            className: "message-copy-icon message-copy-icon-done",
-            "aria-hidden": "true",
-            dangerouslySetInnerHTML: { __html: CHECK_SVG },
-          })
-        )
-      : null,
-    showFork
-      ? h(
-          "button",
-          {
-            type: "button",
-            className: "message-fork-button",
-            "data-fork-from-item": transcriptRowKey(entry) || "",
-            title: "Fork from here",
-            "aria-label": "Fork conversation from this message",
-          },
-          h("span", {
-            className: "message-fork-icon",
-            "aria-hidden": "true",
-            dangerouslySetInnerHTML: { __html: FORK_SVG },
-          })
-        )
-      : null
+    { className: "message-toolbar", role: "toolbar", "aria-label": "Message actions" },
+    ask,
+    ask && hasText ? h("span", { className: "message-toolbar-sep", "aria-hidden": "true" }) : null,
+    hasText ? messageCopyButton(value, false) : null,
+    fork
   );
+}
+
+// Touch has no hover: a long press opens the same toolbar, a tap anywhere else closes it.
+const LONG_PRESS_MS = 450;
+const LONG_PRESS_SLOP_PX = 8;
+
+function useLongPressToolbar() {
+  const [open, setOpen] = React.useState(false);
+  const articleRef = React.useRef(null);
+  const press = React.useRef(null);
+  const cancel = () => {
+    if (press.current) {
+      clearTimeout(press.current.timer);
+      press.current = null;
+    }
+  };
+  React.useEffect(() => cancel, []);
+  React.useEffect(() => {
+    if (!open) return undefined;
+    const close = (event) => {
+      if (!articleRef.current?.querySelector(".message-toolbar")?.contains(event.target)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", close, true);
+    return () => document.removeEventListener("pointerdown", close, true);
+  }, [open]);
+  return {
+    open,
+    handlers: {
+      ref: articleRef,
+      onPointerDown(event) {
+        if (event.pointerType !== "touch") return;
+        cancel();
+        press.current = {
+          x: event.clientX,
+          y: event.clientY,
+          timer: setTimeout(() => {
+            press.current = null;
+            setOpen(true);
+          }, LONG_PRESS_MS),
+        };
+      },
+      onPointerMove(event) {
+        const start = press.current;
+        if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > LONG_PRESS_SLOP_PX) {
+          cancel();
+        }
+      },
+      onPointerUp: cancel,
+      onPointerCancel: cancel,
+    },
+  };
 }
 
 // Test-only render observer. Unlike transcriptFullRebuildCount
@@ -299,13 +397,30 @@ function messageAvatar(provider) {
 // off `options` inside the component: options gets a fresh identity on every
 // transcript change, which would defeat React.memo for every agent message in
 // a long thread.
-function AgentEntryImpl({ entry, isJustPrepended = false, isForkable = false, provider = "" }) {
+function AgentEntryImpl({
+  entry,
+  isJustPrepended = false,
+  isForkable = false,
+  isSettledFinal = false,
+  canAsk = false,
+  provider = "",
+}) {
   recordTranscriptEntryImplRender(transcriptRowKey(entry));
+  const toolbar = useLongPressToolbar();
+  const className = isSettledFinal
+    ? "chat-message chat-message-assistant"
+    : "chat-message chat-message-assistant has-message-toolbar";
   return h(
     "article",
-    transcriptEntryDomAttrs(entry, "chat-message chat-message-assistant", null, {
-      justPrepended: isJustPrepended,
-    }),
+    {
+      ...transcriptEntryDomAttrs(
+        entry,
+        className,
+        toolbar.open ? { "data-toolbar-open": "true" } : null,
+        { justPrepended: isJustPrepended }
+      ),
+      ...toolbar.handlers,
+    },
     messageAvatar(provider),
     h(
       "div",
@@ -315,7 +430,7 @@ function AgentEntryImpl({ entry, isJustPrepended = false, isForkable = false, pr
         { className: "message-body" },
         renderMessageBody(entry.text, entry.status === "running")
       ),
-      renderMessageActions(entry, isForkable)
+      renderMessageActions(entry, { showFork: isForkable, canAsk, settled: isSettledFinal })
     )
   );
 }
@@ -2465,6 +2580,8 @@ export function TranscriptEntry({
       entry,
       isJustPrepended,
       isForkable: isForkableEntry(entry, options),
+      isSettledFinal: Boolean(options?.settledFinalItemIds?.has?.(transcriptRowKey(entry) || "")),
+      canAsk: Boolean(options?.canAsk),
       provider,
     });
   }
@@ -2915,10 +3032,14 @@ export function TranscriptContent({
     () => (options?.canFork ? computeForkableItemIds(entries) : EMPTY_FORKABLE_IDS),
     [entries, options?.canFork]
   );
+  const settledFinalItemIds = React.useMemo(
+    () => computeSettledTurnFinalIds(entries, Boolean(options?.turnRunning)),
+    [entries, options?.turnRunning]
+  );
   const effectiveOptions = React.useMemo(() => {
-    if (!options) return { lastTurnDiffItemId, forkableItemIds };
-    return { ...options, lastTurnDiffItemId, forkableItemIds };
-  }, [options, lastTurnDiffItemId, forkableItemIds]);
+    if (!options) return { lastTurnDiffItemId, forkableItemIds, settledFinalItemIds };
+    return { ...options, lastTurnDiffItemId, forkableItemIds, settledFinalItemIds };
+  }, [options, lastTurnDiffItemId, forkableItemIds, settledFinalItemIds]);
   const justPrependedItemIds = useJustPrependedItemIds(entries);
   // An UNANSWERED question is the one thing the session is waiting on, so it
   // belongs at the bottom of the transcript wherever its tool call actually

@@ -30,6 +30,11 @@ export function resolveTranscriptAction(target) {
     return { kind: "copyMessage", element: copyButton, text: copyButton.dataset.copyMessage || "" };
   }
 
+  const askButton = closest("[data-ask-message]");
+  if (askButton) {
+    return { kind: "askMessage", element: askButton, text: askButton.dataset.askMessage || "" };
+  }
+
   const forkButton = closest("[data-fork-from-item]");
   if (forkButton) {
     return { kind: "forkFromItem", element: forkButton, itemId: forkButton.dataset.forkFromItem || "" };

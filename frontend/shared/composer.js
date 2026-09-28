@@ -62,6 +62,8 @@ export function buildModelOptions(models = [], currentModelValue = "") {
 export function ConversationComposer({
   actionsBeforeSend = null,
   attachmentArea = null,
+  // What Ask put above the box; the caller owns which thread's it is.
+  quoteArea = null,
   composerDisabled = false,
   currentDraft,
   currentModelValue,
@@ -193,6 +195,7 @@ export function ConversationComposer({
     { className: `composer-inner${sendPending ? " is-frozen" : ""}` },
     errorRegion,
     heldRegion,
+    quoteArea,
     attachmentArea,
     h("textarea", textareaProps),
     h(

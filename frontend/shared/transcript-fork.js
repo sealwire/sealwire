@@ -42,6 +42,25 @@ export function computeForkableItemIds(entries = []) {
   return forkable;
 }
 
+/// The last reply of each finished turn: the one that keeps a visible action row.
+/// With a turn still running, its latest reply is only the latest so far.
+export function computeSettledTurnFinalIds(entries = [], turnRunning = false) {
+  const finals = computeForkableItemIds(entries);
+  if (!turnRunning) {
+    return finals;
+  }
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.kind === "user_text") break;
+    if (entry?.kind === "agent_text") {
+      const settled = new Set(finals);
+      settled.delete(transcriptRowKey(entry) || "");
+      return settled;
+    }
+  }
+  return finals;
+}
+
 export function isForkableEntry(entry, options) {
   if (!options?.canFork) return false;
   const itemId = transcriptRowKey(entry) || "";

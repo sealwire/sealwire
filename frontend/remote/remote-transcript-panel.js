@@ -7,7 +7,9 @@ import { stableTranscriptOptions } from "../shared/transcript-options-identity.j
 import { createTranscriptInteractionHandler } from "../shared/transcript-interactions.js";
 import { attachTranscriptHistoryLoader } from "../shared/transcript-history-loader.js";
 import { canForkInSession } from "../shared/fork-fields.js";
+import { canAskInThread } from "../shared/thread-compose.js";
 import { copyTextToClipboard } from "../shared/clipboard.js";
+import { quoteForMessage } from "../shared/message-quote.js";
 import { saveRelayNickname } from "./relay-nicknames.js";
 import { maybeLoadOlderTranscriptHistory } from "./session-ops.js";
 import { shortId } from "./utils.js";
@@ -22,6 +24,7 @@ export function RemoteTranscriptPanel({
   emptyStateModel,
   onApplyFileChange,
   onForkFromMessage,
+  onAskMessage = null,
   onSelectRelay,
   onToggleExpandableBlock,
   onSubmitDecision,
@@ -80,6 +83,8 @@ export function RemoteTranscriptPanel({
     canFork: canForkInSession(session),
     // Stamps each agent message with the mark of whoever wrote it.
     provider: session?.provider || "",
+    canAsk: canAskInThread(session) && typeof onAskMessage === "function",
+    turnRunning: Boolean(session?.active_turn_id),
     onEnsureFileChangeDetail,
     pendingAskUserQuestions,
     onSubmitAskUserAnswers: handleSubmitAskUserAnswers,
@@ -159,6 +164,10 @@ export function RemoteTranscriptPanel({
         forkFromItem: ({ itemId }, event) => {
           event.preventDefault();
           onForkFromMessage?.(session?.active_thread_id || "", itemId);
+        },
+        askMessage: ({ text, element }, event) => {
+          event.preventDefault();
+          onAskMessage?.(quoteForMessage(element.closest("article"), text));
         },
         fileChangeAction: ({ itemId, action }, event) => {
           event.preventDefault();

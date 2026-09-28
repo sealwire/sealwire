@@ -226,3 +226,14 @@ test("one scope's keystrokes do not change what another scope reads back", () =>
   assert.equal(store.read("local::a"), before, "A's snapshot must be identical, not merely equal");
   assert.equal(store.read("local::nobody"), store.read("local::also-nobody"));
 });
+
+// Ask puts a quote on the thread's composer; it belongs to that thread like the draft.
+test("a quote is kept per scope and alone keeps the slot alive", () => {
+  const store = createComposerWorkspaceStore();
+  store.write("local::a", { quote: "the grace window is not consulted" });
+  assert.equal(store.read("local::a").quote, "the grace window is not consulted");
+  assert.equal(store.read("local::b").quote, "");
+  assert.equal(isEmptyComposerWorkspace(store.read("local::a")), false);
+  store.write("local::a", { quote: "" });
+  assert.equal(isEmptyComposerWorkspace(store.read("local::a")), true);
+});

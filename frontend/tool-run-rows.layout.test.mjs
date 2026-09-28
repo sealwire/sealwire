@@ -126,7 +126,67 @@ test("the hairline stays one piece when the transcript is virtualized", async ()
       };
     });
     assert.equal(m.seam, 0, "members touch");
-    assert.equal(m.afterGap, 24, "the next message keeps its spacing");
+    assert.equal(m.afterGap, 8, "the next message sits a process line's distance below");
+  } finally {
+    await browser.close();
+  }
+});
+
+// Tool runs are process, not conversation: they sit close to the messages around
+// them instead of taking a full message gap on each side.
+const agent = (id, text) => ({ item_id: id, kind: "agent_text", status: "completed", text });
+const SPACING_ENTRIES = [
+  agent("a1", "Checking first."),
+  bash("c1", "completed"),
+  agent("a2", "Now the group."),
+  cursorTool("g1", "grep"),
+  cursorTool("g2", "Find"),
+  agent("a3", "Done."),
+  agent("a4", "Anything else?"),
+];
+
+function measureSpacing() {
+  const box = (selector) => document.querySelector(selector).getBoundingClientRect();
+  const byId = (id) => box(`[data-transcript-entry-id="${id}"]`);
+  const group = box(".chat-message-work-group");
+  return {
+    aboveTool: Math.round(byId("c1").top - byId("a1").bottom),
+    belowTool: Math.round(byId("a2").top - byId("c1").bottom),
+    aboveGroup: Math.round(group.top - byId("a2").bottom),
+    belowGroup: Math.round(byId("a3").top - group.bottom),
+    betweenMessages: Math.round(byId("a4").top - byId("a3").bottom),
+  };
+}
+
+test("tool rows and group lines sit close to the messages around them", async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await render(page, SPACING_ENTRIES);
+    assert.deepEqual(await page.evaluate(measureSpacing), {
+      aboveTool: 8,
+      belowTool: 8,
+      aboveGroup: 8,
+      belowGroup: 8,
+      betweenMessages: 24,
+    });
+
+    await page.evaluate(() => {
+      const content = document.querySelector(".thread-content");
+      for (const node of [...content.children]) {
+        const wrapper = document.createElement("div");
+        wrapper.className = "transcript-virtual-row";
+        wrapper.style.position = "static";
+        node.replaceWith(wrapper);
+        wrapper.append(node);
+      }
+      content.style.gap = "0";
+    });
+    assert.deepEqual(
+      await page.evaluate(measureSpacing),
+      { aboveTool: 8, belowTool: 8, aboveGroup: 8, belowGroup: 8, betweenMessages: 24 },
+      "the same when virtualized"
+    );
   } finally {
     await browser.close();
   }

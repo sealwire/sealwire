@@ -16,6 +16,8 @@ import {
   composerWorkspaceKey,
   getComposerWorkspaceStore,
 } from "../shared/composer-workspace.js";
+import { ComposerQuoteStrip } from "../shared/composer-quote.js";
+import { withQuote } from "../shared/message-quote.js";
 import { createRemoteComposerSend } from "./composer-send.js";
 import { StartSessionSplitButton } from "../shared/start-session-split-button.js";
 import { ConversationHeader } from "../shared/conversation-header.js";
@@ -2105,9 +2107,9 @@ function RemoteApp() {
   const handleSendMessage = createRemoteComposerSend({
     workspaces: composerWorkspaces,
     getScope: () => composerScope,
-    send: (draft, { skill = null } = {}) =>
+    send: (draft, { skill = null, quote = "" } = {}) =>
       handlers.onSendMessage(
-        draft,
+        withQuote(quote, draft),
         remoteUi.composerEffort || session?.reasoning_effort || "",
         remoteUi.composerModel || session?.model || "",
         skillForSend(skill)
@@ -3378,6 +3380,19 @@ function RemoteThreadPanel({
   // `sendPending`, so the two cannot disagree.
   const composerScopeRef = useRef(composerScope);
   composerScopeRef.current = composerScope;
+  const commandInputRef = useRef(null);
+  commandInputRef.current = commandInput;
+  // Ask never sends: the quote waits above the box, the caret after what is typed.
+  const askAboutMessage = useCallback((quote) => {
+    const scope = composerScopeRef.current;
+    if (!scope || !quote) return;
+    composerWorkspaces.write(scope, { quote });
+    const input = commandInputRef.current;
+    if (input && !input.disabled) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+  }, []);
   const onSendMessageRef = useRef(onSendMessage);
   onSendMessageRef.current = onSendMessage;
   // The token each scope's freeze was claimed with. A token, not a key: it survives the
@@ -3425,6 +3440,7 @@ function RemoteThreadPanel({
         emptyStateModel,
         onApplyFileChange,
         onForkFromMessage,
+        onAskMessage: askAboutMessage,
         onSelectRelay,
         onToggleExpandableBlock,
         onToggleTranscriptItem,
@@ -3530,6 +3546,7 @@ function RemoteThreadPanel({
       },
       h(Composer, {
         ...composerModel,
+        quoteArea: h(ComposerQuoteStrip, { scope: composerScope }),
         // Two things share the pre-textarea slot on the desktop too: the "/" host
         // belongs INSIDE the box so its pills read as part of the field.
         attachmentArea: composerCommandsModel

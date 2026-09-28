@@ -485,6 +485,7 @@ function ComposerShell() {
         attachmentArea: h(
           React.Fragment,
           null,
+          h("div", { className: "composer-quote-host", id: "composer-quote-mount" }),
           h("div", {
             className: "composer-attachments",
             hidden: true,

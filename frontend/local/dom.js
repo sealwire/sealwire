@@ -21,6 +21,7 @@ export const messageForm = document.querySelector("#message-form");
 export const messageInput = document.querySelector("#message-input");
 export const composerAttachments = document.querySelector("#composer-attachments");
 export const composerCommandMount = document.querySelector("#composer-command-mount");
+export const composerQuoteMount = document.querySelector("#composer-quote-mount");
 export const composerError = document.querySelector("#composer-error");
 export const composerHeld = document.querySelector("#composer-held");
 export const messageModel = document.querySelector("#message-model");
