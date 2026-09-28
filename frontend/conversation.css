@@ -393,6 +393,25 @@
   grid-template-columns: 22px minmax(0, 1fr);
   gap: 12px;
 }
+
+/* Where a reply's text starts: the 18px mark plus the 16px gap styles.css's
+ * `.chat-message` flex puts after it (that rule wins over the grid above). */
+.thread-content {
+  --assistant-text-inset: 34px;
+  /* Process lines sit a shade under the text; the dark theme's faintest grey is too dim for it. */
+  --process-line-fg: var(--text-3);
+  --process-line-title-fg: var(--text-2);
+}
+
+:root[data-theme="light"] .thread-content {
+  --process-line-fg: var(--text-faint);
+  --process-line-title-fg: var(--text-3);
+}
+
+/* Only a turn's first reply wears the mark (design 20c-3); the rest keep its text edge. */
+.chat-message-assistant.is-turn-continued {
+  padding-left: var(--assistant-text-inset);
+}
 .chat-message-assistant .message-avatar {
   width: 18px;
   height: 18px;
@@ -431,7 +450,7 @@
   background: transparent;
   border: none;
   font-size: var(--text-body);
-  line-height: var(--leading-relaxed);
+  line-height: var(--leading-prose);
 }
 
 /* Reply actions (design 20c-2). The last reply of a finished turn keeps this row;
@@ -651,11 +670,16 @@
   padding-bottom: 8px;
 }
 
+/* A turn's work sits on its text's left edge, under the one mark (design 20c-3). */
+.thread-content :is(.chat-message-tool-run, .chat-message-tool, .chat-message-work-group, .chat-message-diff-group, .chat-message-reasoning, .chat-message-ask-user-answered) {
+  margin-left: var(--assistant-text-inset);
+}
+
 /* Members of an opened group (design 20c): one hairline threads them, text in line
  * with the group's own. The gaps between members are closed so the line is one
  * piece; per-row segments only join when nothing sits between them. */
-.chat-message.is-group-member {
-  margin-left: 4px;
+.thread-content .chat-message.is-group-member {
+  margin-left: calc(var(--assistant-text-inset) + 4px);
   padding-left: 14px;
   border-left: 1px solid var(--border-soft);
 }
@@ -678,7 +702,8 @@
   background: transparent;
 }
 
-/* Tool runs (design 20c): a log line, not a card. File-change cards keep theirs. */
+/* Tool runs (design 20c): a log line, not a card. File-change cards keep theirs.
+ * 20c-3: a size below the text and faint, so the replies are what the eye reads. */
 .message-card-tool,
 .message-card-command {
   position: relative;
@@ -688,7 +713,7 @@
   background: transparent;
   border: 0;
   border-radius: 0;
-  font-size: var(--text-ui);
+  font-size: var(--text-sm);
   line-height: var(--leading-relaxed);
   color: var(--text-primary);
 }
@@ -706,16 +731,16 @@
   display: flex;
   justify-content: flex-start;
   align-items: baseline;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
   min-width: 0;
-  min-height: 30px;
-  padding: 5px 8px;
+  min-height: 24px;
+  padding: 3px 8px;
   margin-left: -8px;
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: var(--text-2);
+  color: var(--process-line-fg);
   font: inherit;
   text-align: left;
 }
@@ -726,6 +751,7 @@ button.tool-run-row {
 
 button.tool-run-row:hover {
   background: var(--surface-2);
+  color: var(--text-2);
 }
 
 button.tool-run-row:focus-visible {
@@ -772,15 +798,13 @@ button.tool-run-row:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-1);
 }
 
 .tool-run-title-mono {
   max-width: none;
   flex: 1 1 auto;
   font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  color: var(--text-2);
+  font-size: var(--text-xs);
 }
 
 .tool-run-command {
@@ -790,8 +814,8 @@ button.tool-run-row:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  color: var(--text-3);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
 }
 
 .tool-run-waiting {
@@ -803,10 +827,6 @@ button.tool-run-row:focus-visible {
 }
 
 .tool-run-row.is-running .tool-run-title {
-  font-weight: var(--weight-medium);
-}
-
-.tool-run-row.is-running .tool-run-command {
   color: var(--text-2);
 }
 
@@ -946,9 +966,9 @@ button.tool-run-row:focus-visible {
   padding: 2px 0;
   border: 0;
   background: transparent;
-  color: var(--text-3);
+  color: var(--process-line-fg);
   font: inherit;
-  font-size: var(--text-ui);
+  font-size: var(--text-sm);
   line-height: var(--leading-normal);
   text-align: left;
 }
@@ -958,7 +978,7 @@ button.tool-run-row:focus-visible {
 }
 
 .reasoning-toggle:hover {
-  color: var(--text-1);
+  color: var(--text-2);
 }
 
 .reasoning-toggle:focus-visible {
@@ -2243,14 +2263,15 @@ button.ask-user-summary:focus-visible {
   align-self: flex-start;
   align-items: baseline;
   gap: 8px;
-  min-height: 28px;
-  padding: 4px 0;
+  min-height: 24px;
+  padding: 3px 0;
   margin: 0;
   border: 0;
   background: transparent;
-  color: var(--text-3);
+  color: var(--process-line-fg);
   font-family: inherit;
-  font-size: var(--text-ui);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-regular);
   line-height: var(--leading-normal);
   cursor: pointer;
   max-width: 100%;
@@ -2260,7 +2281,7 @@ button.ask-user-summary:focus-visible {
 
 .work-group-chip:hover,
 .work-group-chip-open {
-  color: var(--text-1);
+  color: var(--text-2);
 }
 
 .work-group-chip:focus-visible {
@@ -2291,8 +2312,6 @@ button.ask-user-summary:focus-visible {
 
 .work-group-lead {
   flex: none;
-  font-weight: var(--weight-strong);
-  color: var(--text-2);
 }
 
 .work-group-rest {
@@ -2544,4 +2563,9 @@ button.ask-user-summary:focus-visible {
 
 .ask-user-question .ask-user-error {
   margin: 0;
+}
+
+/* An opened group's rows: what each did reads a shade above the command beside it. */
+.chat-message.is-group-member .tool-run-title {
+  color: var(--process-line-title-fg);
 }

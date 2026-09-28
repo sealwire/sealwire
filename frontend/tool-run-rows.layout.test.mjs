@@ -76,7 +76,8 @@ test("a running row wears a pulsing green dot in the chevron's slot, text still 
     const page = await browser.newPage();
     await render(page, [bash("r1", "running"), { item_id: "u", kind: "agent_text", status: "completed", text: "x" }, bash("c1", "completed")]);
     const m = await page.evaluate(() => {
-      const rows = [...document.querySelectorAll(".tool-run-row")];
+      const running = document.querySelector(".tool-run-row .tool-run-title").getBoundingClientRect().left;
+      const done = document.querySelector(".work-group-lead").getBoundingClientRect().left;
       const dot = document.querySelector(".tool-run-live");
       const probe = document.createElement("span");
       probe.style.color = "var(--ok-fg)";
@@ -84,7 +85,7 @@ test("a running row wears a pulsing green dot in the chevron's slot, text still 
       const green = getComputedStyle(probe).color;
       const dotStyle = getComputedStyle(dot);
       return {
-        titles: rows.map((row) => row.querySelector(".tool-run-title").getBoundingClientRect().left),
+        titles: [running, done],
         dotColor: dotStyle.backgroundColor,
         green,
         animation: dotStyle.animationName,
@@ -135,9 +136,10 @@ test("the hairline stays one piece when the transcript is virtualized", async ()
 // Tool runs are process, not conversation: they sit close to the messages around
 // them instead of taking a full message gap on each side.
 const agent = (id, text) => ({ item_id: id, kind: "agent_text", status: "completed", text });
+// A finished lone tool folds into a group (20c-3); a running one is still a row of its own.
 const SPACING_ENTRIES = [
   agent("a1", "Checking first."),
-  bash("c1", "completed"),
+  bash("c1", "running"),
   agent("a2", "Now the group."),
   cursorTool("g1", "grep"),
   cursorTool("g2", "Find"),

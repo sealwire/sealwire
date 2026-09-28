@@ -31,12 +31,15 @@ function bash(id, { status = "completed", description = "", command = "echo hi",
   };
 }
 
-test("a tool row leads with its description and demotes the command to secondary text", () => {
-  const markup = entryMarkup(
-    bash("t1", { description: "Read light-theme tokens", command: "awk '/^:root/' styles.css" })
-  );
-  assert.match(markup, /class="tool-run-title">Read light-theme tokens</);
-  assert.match(markup, /class="tool-run-command">awk &#x27;\/\^:root\/&#x27; styles.css</);
+// Design 20c-3: the raw command waits until the row is among an opened group's.
+test("a tool row leads with its description; its command shows once its group is open", () => {
+  const entry = bash("t1", { description: "Read light-theme tokens", command: "awk '/^:root/' styles.css" });
+  const alone = entryMarkup(entry);
+  assert.match(alone, /class="tool-run-title">Read light-theme tokens</);
+  assert.doesNotMatch(alone, /tool-run-command/);
+
+  const member = renderToStaticMarkup(h(TranscriptEntry, { entry, inGroup: true }));
+  assert.match(member, /class="tool-run-command">awk &#x27;\/\^:root\/&#x27; styles.css</);
 });
 
 test("a tool with no description falls back to its name, with the path as secondary text", () => {

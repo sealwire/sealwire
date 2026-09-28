@@ -544,7 +544,10 @@ const UserEntry = React.memo(UserEntryImpl);
 // would mislabel who wrote the message. `data-provider` is what lets CSS theme
 // the mark: the OpenAI knot is monochrome black and has to flip to white on the
 // dark theme.
-function messageAvatar(provider) {
+function messageAvatar(provider, show = true) {
+  if (!show) {
+    return null;
+  }
   const icon = providerIconSvg(provider);
   return h("span", {
     className: "message-avatar",
@@ -565,12 +568,17 @@ function AgentEntryImpl({
   isSettledFinal = false,
   canAsk = false,
   provider = "",
+  showAvatar = true,
 }) {
   recordTranscriptEntryImplRender(transcriptRowKey(entry));
   const toolbar = useLongPressToolbar();
-  const className = isSettledFinal
-    ? "chat-message chat-message-assistant"
-    : "chat-message chat-message-assistant has-message-toolbar";
+  const className = [
+    "chat-message chat-message-assistant",
+    isSettledFinal ? "" : "has-message-toolbar",
+    showAvatar ? "" : "is-turn-continued",
+  ]
+    .filter(Boolean)
+    .join(" ");
   return h(
     "article",
     {
@@ -582,7 +590,7 @@ function AgentEntryImpl({
       ),
       ...toolbar.handlers,
     },
-    messageAvatar(provider),
+    messageAvatar(provider, showAvatar),
     h(
       "div",
       { className: "message-card" },
@@ -2081,7 +2089,8 @@ function GenericToolEntry({ entry, isJustPrepended = false, options = null, inGr
               expanded,
               status,
               title: description || nameLabel,
-              secondary: primary || (title !== description ? title : "")
+              // Design 20c-3: on its own the row says what it does; the command waits for the open row.
+              secondary: (primary || (title !== description ? title : "")) && (inGroup || !(tool.command && description))
                 ? renderToolPreviewText(primary || title)
                 : "",
               output: tool.result_preview,
@@ -2465,18 +2474,21 @@ export function groupToolEntries(entries) {
     }
   }
 
-  // A group of one costs a click and hides nothing the chip could have told
-  // you. diff-groups are exempt: the chip carries their +N/−N badge and Undo.
+  // Design 20c-3: a lone tool folds too, so no raw command shows until opened.
+  // A lone thought stays a line: its preview says more than "Thought once".
   return merged.map((item) =>
-    item?.type === "work-group" && item.entries.length === 1
+    item?.type === "work-group" && item.entries.length === 1 && item.entries[0]?.kind === "reasoning"
       ? item.entries[0]
       : item
   );
 }
 
+// A work group of one shares its tool's own key, so a tool opened while it ran stays
+// open once it finishes and folds into a group.
 function groupExpandKey(group) {
   const firstId = transcriptRowKey(group?.entries?.[0]) || "";
-  return firstId ? `group:${firstId}` : "";
+  if (!firstId) return "";
+  return group.type === "work-group" && group.entries.length === 1 ? `entry:${firstId}` : `group:${firstId}`;
 }
 
 function aggregateGroupDiffStats(group, options = null) {
@@ -2544,7 +2556,19 @@ function aggregateDiffGroupStats(group, options = null) {
 
 function WorkGroupEntry({ group, options = null }) {
   const expandKey = groupExpandKey(group);
+  // A group of one opens its tool, and opening a tool is what fetches its full detail.
+  const loneItemId = group?.entries?.length === 1 ? transcriptRowKey(group.entries[0]) || "" : "";
   const expanded = Boolean(expandKey && options?.expandedKeys?.has(expandKey));
+  const chipRef = React.useRef(null);
+  const wasExpanded = React.useRef(expanded);
+  // Closed from its tool's own row, a group of one unmounts the focused row; the line stays.
+  React.useLayoutEffect(() => {
+    const focusLost = !document.activeElement || document.activeElement === document.body;
+    if (wasExpanded.current && !expanded && loneItemId && focusLost) {
+      chipRef.current?.focus({ preventScroll: true });
+    }
+    wasExpanded.current = expanded;
+  }, [expanded, loneItemId]);
   const { added, removed } = aggregateGroupDiffStats(group, options);
   const { lead, rest } = workGroupSummary(group);
   const hasReasoning = (group?.entries || []).some(
@@ -2567,8 +2591,11 @@ function WorkGroupEntry({ group, options = null }) {
         ]
           .filter(Boolean)
           .join(" "),
-        ...(expandKey ? { "data-expand-key": expandKey } : {}),
-        "data-transcript-toggle": "group",
+        ...(loneItemId
+          ? { "data-item-id": loneItemId, "data-transcript-toggle": "entry" }
+          : { ...(expandKey ? { "data-expand-key": expandKey } : {}), "data-transcript-toggle": "group" }),
+        "aria-expanded": expanded ? "true" : "false",
+        ref: chipRef,
         type: "button",
       },
       h(
@@ -2681,13 +2708,13 @@ function DiffGroupEntry({ group, options = null }) {
 // keep the entry's slot/identity/role styling but render a loading indicator
 // instead of the clipped 24-character shell text or an "(empty)" body; the
 // authoritative body replaces it in place after hydration.
-function OmittedEntryImpl({ entry, isJustPrepended = false, provider = "" }) {
+function OmittedEntryImpl({ entry, isJustPrepended = false, provider = "", showAvatar = true }) {
   const kind = entry?.kind || "agent_text";
   const className =
     kind === "user_text"
       ? "chat-message chat-message-user"
       : kind === "agent_text"
-        ? "chat-message chat-message-assistant"
+        ? `chat-message chat-message-assistant${showAvatar ? "" : " is-turn-continued"}`
         : "chat-message chat-message-system";
   return h(
     "article",
@@ -2697,7 +2724,7 @@ function OmittedEntryImpl({ entry, isJustPrepended = false, provider = "" }) {
       { "data-transcript-pending": "true", "aria-busy": "true" },
       { justPrepended: isJustPrepended }
     ),
-    kind === "agent_text" ? messageAvatar(provider) : null,
+    kind === "agent_text" ? messageAvatar(provider, showAvatar) : null,
     h(
       "div",
       { className: "message-card" },
@@ -2726,9 +2753,11 @@ export function TranscriptEntry({
   // Plain scalar, pulled out of `options` here so the memoized entries below
   // never take `options` as a prop (see AgentEntryImpl).
   const provider = options?.provider || "";
+  const rowKey = transcriptRowKey(entry) || "";
+  const showAvatar = !options?.turnOpenerItemIds || !rowKey || options.turnOpenerItemIds.has(rowKey);
 
   if (entry?.content_state === "omitted") {
-    return h(OmittedEntry, { entry, isJustPrepended, provider });
+    return h(OmittedEntry, { entry, isJustPrepended, provider, showAvatar });
   }
 
   const kind = entry.kind || "reasoning";
@@ -2741,9 +2770,10 @@ export function TranscriptEntry({
       entry,
       isJustPrepended,
       isForkable: isForkableEntry(entry, options),
-      isSettledFinal: Boolean(options?.settledFinalItemIds?.has?.(transcriptRowKey(entry) || "")),
+      isSettledFinal: Boolean(options?.settledFinalItemIds?.has?.(rowKey)),
       canAsk: Boolean(options?.canAsk),
       provider,
+      showAvatar,
     });
   }
   if (kind === "command") {
@@ -3158,6 +3188,22 @@ export function collapseDuplicateTranscriptRows(entries) {
   return collapsed || entries;
 }
 
+// Design 20c-3: the logo marks where a turn's replies start; your message ends a turn.
+function computeTurnOpenerIds(entries) {
+  const openers = new Set();
+  let opened = false;
+  for (const entry of entries) {
+    if (entry?.kind === "user_text") {
+      opened = false;
+    } else if (entry?.kind === "agent_text" && !opened) {
+      opened = true;
+      const id = transcriptRowKey(entry);
+      if (id) openers.add(id);
+    }
+  }
+  return openers;
+}
+
 export function TranscriptContent({
   approval = null,
   entries: rawEntries = [],
@@ -3197,10 +3243,11 @@ export function TranscriptContent({
     () => computeSettledTurnFinalIds(entries, Boolean(options?.turnRunning)),
     [entries, options?.turnRunning]
   );
+  const turnOpenerItemIds = React.useMemo(() => computeTurnOpenerIds(entries), [entries]);
   const effectiveOptions = React.useMemo(() => {
-    if (!options) return { lastTurnDiffItemId, forkableItemIds, settledFinalItemIds };
-    return { ...options, lastTurnDiffItemId, forkableItemIds, settledFinalItemIds };
-  }, [options, lastTurnDiffItemId, forkableItemIds, settledFinalItemIds]);
+    const derived = { lastTurnDiffItemId, forkableItemIds, settledFinalItemIds, turnOpenerItemIds };
+    return options ? { ...options, ...derived } : derived;
+  }, [options, lastTurnDiffItemId, forkableItemIds, settledFinalItemIds, turnOpenerItemIds]);
   const justPrependedItemIds = useJustPrependedItemIds(entries);
   // An UNANSWERED question is the one thing the session is waiting on, so it
   // belongs at the bottom of the transcript wherever its tool call actually

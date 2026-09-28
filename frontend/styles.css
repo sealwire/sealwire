@@ -121,11 +121,12 @@
   --weight-medium: 500;
   --weight-strong: 600;
 
-  /* Line-heights — 4 steps (none = icons / single-line). */
+  /* Line-heights — 5 steps (none = icons / single-line; prose = a reply's paragraphs). */
   --leading-none: 1;
   --leading-tight: 1.2;
   --leading-normal: 1.4;
   --leading-relaxed: 1.5;
+  --leading-prose: 1.65;
 
   --focus-ring: 0 0 0 2px var(--accent);
 

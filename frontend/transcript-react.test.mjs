@@ -1384,6 +1384,13 @@ function makeCommand(id, overrides = {}) {
   };
 }
 
+// Groups by their members, lone entries by id: a lone finished tool is a group of one (20c-3).
+function groupShape(result) {
+  return result.map((item) =>
+    item?.type ? `${item.type}[${item.entries.map((entry) => entry.item_id).join(",")}]` : item.item_id
+  );
+}
+
 test("groupToolEntries returns empty for empty or missing input", () => {
   assert.deepEqual(groupToolEntries([]), []);
   assert.deepEqual(groupToolEntries(undefined), []);
@@ -1517,11 +1524,8 @@ test("groupToolEntries keeps an EMPTY running reasoning inline and never merges 
   // once the text streams in. It stays inline and breaks the tool run.
   const runningEmpty = { item_id: "live", kind: "reasoning", status: "running", text: "" };
   const result = groupToolEntries([makeTool("a"), runningEmpty, makeTool("b")]);
-  assert.equal(result.length, 3);
-  assert.equal(result[0].item_id, "a");
-  assert.equal(result[1].kind, "reasoning");
+  assert.deepEqual(groupShape(result), ["work-group[a]", "live", "work-group[b]"]);
   assert.equal(result[1].status, "running");
-  assert.equal(result[2].item_id, "b");
 });
 
 test("groupToolEntries keeps a failed/cancelled empty reasoning inline (only completed is discarded)", () => {
@@ -1551,22 +1555,14 @@ test("groupToolEntries never drops or groups omitted reasoning (keeps its loadin
     content_state: "omitted",
   };
   const result = groupToolEntries([makeTool("a"), omittedNull, omittedShell, makeTool("b")]);
-  assert.deepEqual(
-    result.map((item) => item.type || item.kind),
-    ["tool_call", "reasoning", "reasoning", "tool_call"]
-  );
-  assert.equal(result[1].item_id, "o1");
-  assert.equal(result[2].item_id, "o2");
+  assert.deepEqual(groupShape(result), ["work-group[a]", "o1", "o2", "work-group[b]"]);
 });
 
 test("groupToolEntries leaves running tools ungrouped and breaks the run", () => {
   const running = { ...makeTool("b"), status: "running" };
   const result = groupToolEntries([makeTool("a"), running, makeTool("c")]);
-  assert.equal(result.length, 3);
-  assert.equal(result[0].item_id, "a");
-  assert.equal(result[1].kind, "tool_call");
+  assert.deepEqual(groupShape(result), ["work-group[a]", "b", "work-group[c]"]);
   assert.equal(result[1].status, "running");
-  assert.equal(result[2].item_id, "c");
 });
 
 test("groupToolEntries puts fileChange/turnDiff in their own diff-group, separate from work", () => {
@@ -1583,14 +1579,13 @@ test("groupToolEntries puts fileChange/turnDiff in their own diff-group, separat
     turnDiff,
     makeTool("c"),
   ]);
-  assert.equal(result.length, 5);
-  assert.equal(result[0].item_id, "a");
-  assert.equal(result[1].type, "diff-group");
-  assert.deepEqual(result[1].entries.map((e) => e.item_id), ["fc"]);
-  assert.equal(result[2].item_id, "b");
-  assert.equal(result[3].type, "diff-group");
-  assert.deepEqual(result[3].entries.map((e) => e.item_id), ["td"]);
-  assert.equal(result[4].item_id, "c");
+  assert.deepEqual(groupShape(result), [
+    "work-group[a]",
+    "diff-group[fc]",
+    "work-group[b]",
+    "diff-group[td]",
+    "work-group[c]",
+  ]);
 });
 
 test("groupToolEntries fuses a turn's fileChange and turnDiff into one diff-group", () => {
@@ -1636,10 +1631,7 @@ test("groupToolEntries consolidates per turn even when a tool call sits between 
   const bash = makeTool("bash", { turn_id: "t1" });
   const td = makeTool("td", { tool: { item_type: "turnDiff", name: "TurnDiff" }, turn_id: "t1" });
   const result = groupToolEntries([fc, bash, td]);
-  assert.equal(result.length, 2);
-  assert.equal(result[0].item_id, "bash");
-  assert.equal(result[1].type, "diff-group");
-  assert.deepEqual(result[1].entries.map((e) => e.item_id), ["fc", "td"]);
+  assert.deepEqual(groupShape(result), ["work-group[bash]", "diff-group[fc,td]"]);
 });
 
 test("groupToolEntries consolidates a turn's edits even without a turnDiff (still streaming)", () => {
@@ -1735,11 +1727,9 @@ test("groupToolEntries folds a densely interleaved Cursor turn into one chip", (
   assert.equal(result[0].entries.length, 23);
 });
 
-test("groupToolEntries keeps a lone tool inline instead of chipping it", () => {
-  const result = groupToolEntries([makeTool("only")]);
-  assert.equal(result.length, 1);
-  assert.equal(result[0].type, undefined, "a single tool must not become a group");
-  assert.equal(result[0].item_id, "only");
+// Design 20c-3: folded, no row shows a raw command, so a lone tool folds too.
+test("groupToolEntries folds a lone tool into a group of one", () => {
+  assert.deepEqual(groupShape(groupToolEntries([makeTool("only")])), ["work-group[only]"]);
 });
 
 test("groupToolEntries keeps a lone reasoning inline instead of chipping it", () => {
@@ -1749,11 +1739,8 @@ test("groupToolEntries keeps a lone reasoning inline instead of chipping it", ()
   assert.equal(result[0].item_id, "solo");
 });
 
-test("groupToolEntries keeps a lone command inline instead of chipping it", () => {
-  const result = groupToolEntries([makeCommand("cmd-solo")]);
-  assert.equal(result.length, 1);
-  assert.equal(result[0].type, undefined);
-  assert.equal(result[0].item_id, "cmd-solo");
+test("groupToolEntries folds a lone command into a group of one", () => {
+  assert.deepEqual(groupShape(groupToolEntries([makeCommand("cmd-solo")])), ["work-group[cmd-solo]"]);
 });
 
 test("groupToolEntries still lets assistant text break a work run", () => {
@@ -2755,11 +2742,8 @@ test("groupToolEntries keeps AskUserQuestion ungrouped so the card stays visible
     ask,
     makeTool("b"),
   ]);
-  assert.equal(result.length, 3);
-  assert.equal(result[0].item_id, "a");
-  assert.equal(result[1].kind, "tool_call");
+  assert.deepEqual(groupShape(result), ["work-group[a]", "tool:askuser-1", "work-group[b]"]);
   assert.equal(result[1].tool.name, "AskUserQuestion");
-  assert.equal(result[2].item_id, "b");
 });
 
 test("parseAskUserAnswers extracts per-question answers from a Claude result_preview", () => {
