@@ -1357,6 +1357,7 @@ fn summarize_thread_transcript_response_reports_entry_and_char_counts() {
                 turn_id: Some("turn-1".to_string()),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
+                injection: None,
             },
             TranscriptEntryView {
                 row_id: None,
@@ -1369,6 +1370,7 @@ fn summarize_thread_transcript_response_reports_entry_and_char_counts() {
                 turn_id: Some("turn-1".to_string()),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
+                injection: None,
             },
         ],
         prev_cursor: Some(crate::protocol::TranscriptCursorToken::new(

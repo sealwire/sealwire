@@ -1,6 +1,8 @@
 use super::*;
 use crate::protocol::{ClientErrorCode, TranscriptCursorToken};
-use crate::state::relay::{TranscriptCursor, TranscriptCursorRejection, TranscriptKeySpace};
+use crate::state::relay::{
+    InjectionReader, TranscriptCursor, TranscriptCursorRejection, TranscriptKeySpace,
+};
 
 /// Provider pages one older-page request may read through when they add no rows.
 const MAX_PROVIDER_HISTORY_PAGES_PER_REQUEST: usize = 32;
@@ -86,7 +88,14 @@ impl AppState {
             .unwrap_or_default();
         ensure_path_within_device_scope(&runtime.current_cwd, &device_scope, &relay.allowed_roots)?;
         let rows = runtime
-            .transcript_rows(&input.thread_id, &input.row_ids)
+            .transcript_rows(
+                &input.thread_id,
+                &input.row_ids,
+                &relay.thread_injections(
+                    &input.thread_id,
+                    InjectionReader::for_device(input.device_id.as_deref()),
+                ),
+            )
             .stamp_generation(relay.transcript_generation.clone());
         rows.debug_assert_within_budget();
         Ok(rows)
@@ -123,7 +132,14 @@ impl AppState {
             .map(|id| relay.device_path_scope(id))
             .unwrap_or_default();
         ensure_path_within_device_scope(&runtime.current_cwd, &device_scope, &relay.allowed_roots)?;
-        Ok(runtime.transcript_page(&input.thread_id, Some(cursor)))
+        Ok(runtime.transcript_page(
+            &input.thread_id,
+            Some(cursor),
+            &relay.thread_injections(
+                &input.thread_id,
+                InjectionReader::for_device(input.device_id.as_deref()),
+            ),
+        ))
     }
 
     async fn read_latest_transcript_page(
@@ -216,10 +232,14 @@ impl AppState {
                         settings.is_some(),
                         read_started_at_revision,
                     );
+                    let marks = relay.thread_injections(
+                        &input.thread_id,
+                        InjectionReader::for_device(input.device_id.as_deref()),
+                    );
                     let runtime = relay.ensure_runtime_for_thread(&input.thread_id);
                     runtime.provider_history_paged = paged;
                     runtime.provider_history_cursor = prev_cursor;
-                    runtime.transcript_page(&input.thread_id, None)
+                    runtime.transcript_page(&input.thread_id, None, &marks)
                 };
                 response.thread_state =
                     Some(self.read_loaded_thread_state(&input.thread_id).await?);
@@ -240,7 +260,14 @@ impl AppState {
             .map(|id| relay.device_path_scope(id))
             .unwrap_or_default();
         ensure_path_within_device_scope(&runtime.current_cwd, &device_scope, &relay.allowed_roots)?;
-        let mut response = runtime.transcript_page(&input.thread_id, None);
+        let mut response = runtime.transcript_page(
+            &input.thread_id,
+            None,
+            &relay.thread_injections(
+                &input.thread_id,
+                InjectionReader::for_device(input.device_id.as_deref()),
+            ),
+        );
         response.thread_state = Some(thread_state);
         Ok(response)
     }
@@ -411,12 +438,16 @@ impl AppState {
                 )?;
                 // A whole copy is the detail (Claude cannot answer per row at all); a
                 // cut one (Codex history) is re-read from the provider below.
+                let marks = relay.thread_injections(
+                    &input.thread_id,
+                    InjectionReader::for_device(input.device_id.as_deref()),
+                );
                 runtime
                     .transcript
                     .iter()
                     .find(|entry| entry.row_id == input.item_id)
                     .filter(|entry| !entry.cut)
-                    .map(|entry| entry.to_view())
+                    .map(|entry| runtime.page_view(entry, &marks))
             } else {
                 None
             }
@@ -480,6 +511,17 @@ impl AppState {
             // translating out is the relay's job, and so is translating back.
             entry.row_id = Some(input.item_id.clone());
             entry.item_id = Some(input.item_id.clone());
+            let relay = self.relay.read().await;
+            if let Some(runtime) = relay.runtime_for_thread(&input.thread_id) {
+                let marks = relay.thread_injections(
+                    &input.thread_id,
+                    InjectionReader::for_device(input.device_id.as_deref()),
+                );
+                entry.injection = runtime
+                    .transcript
+                    .get_row(&input.item_id)
+                    .and_then(|record| marks.mark_for(&runtime.transcript, record));
+            }
             entry
         };
 

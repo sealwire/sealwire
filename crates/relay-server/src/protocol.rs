@@ -2156,6 +2156,50 @@ pub struct TranscriptEntryView {
     /// serialize `Full`.
     #[serde(default)]
     pub content_state: TranscriptContentState,
+    /// Set on a user row the relay sent on the person's behalf, so it is drawn as
+    /// what it was for rather than as something they typed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub injection: Option<InjectionView>,
+}
+
+/// What an injected user row was for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InjectionKind {
+    /// The source was asked to write a handover; its reply is the summary.
+    HandoverRequest,
+    /// The target was given the summary, followed by `HandoverCardView::instruction`.
+    HandoverBrief,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InjectionView {
+    pub kind: InjectionKind,
+    pub handover: HandoverCardView,
+}
+
+/// Both ends of one handover, as its two cards show it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoverCardView {
+    pub id: String,
+    pub source_thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_title: Option<String>,
+    pub source_provider: String,
+    pub target_thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_title: Option<String>,
+    pub target_provider: String,
+    /// What the person typed after `/handover`.
+    pub note: String,
+    /// Appended to the summary in the brief; a client strips it to show the summary alone.
+    pub instruction: String,
+    /// `working`, `done` or `failed`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

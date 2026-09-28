@@ -15,6 +15,7 @@ use relay_api::handover::{HandoverError, HandoverRequest};
 
 use super::super::delegation::{brief_from_reply, peer_thread_settings};
 use super::delegation::{PeerLiveness, BRIEF_WAIT_BUDGET};
+use crate::protocol::InjectionKind;
 use crate::provider::StartThreadRequest;
 use crate::state::AppState;
 
@@ -24,7 +25,7 @@ use crate::state::AppState;
 /// agent to report back to a session that is not waiting and will never be
 /// woken — and, worse, `report_back` finds its ask from the caller, so it would
 /// answer some unrelated delegate that happened to be open on that thread.
-fn continue_instruction() -> &'static str {
+pub(super) fn continue_instruction() -> &'static str {
     "\n\n---\nThat work is now yours. Nobody is waiting on a reply and there is \
 nothing to report back: carry on from where the handover leaves off and do what \
 is left, starting with the next action above. If something is unclear, decide it \
@@ -48,7 +49,8 @@ fn handover_summary_prompt(note: &str) -> String {
         "This work is being handed over to another agent, in a session that \
 cannot see any of this conversation. Write the handover itself — everything \
 that agent needs in order to pick the work up and carry it on.\n\n\
-Use these headings, and drop one only if there is genuinely nothing under it:\n\n\
+Use these headings, each written as a markdown `## ` heading, and drop one only if \
+there is genuinely nothing under it:\n\n\
 Goal — what this work is trying to achieve.\n\
 Current state — where things stand right now.\n\
 Completed work — what has already been done.\n\
@@ -312,14 +314,18 @@ started, so the handover was not recorded. The session that was created is \
     ) -> Result<(), HandoverError> {
         match self.deliver_handover(&handover_id, prepared).await {
             Ok(()) => {
-                let mut relay = self.relay.write().await;
-                relay.update_handover(&handover_id, |handover| handover.finish());
-                relay.notify();
+                {
+                    let mut relay = self.relay.write().await;
+                    relay.update_handover(&handover_id, |handover| handover.finish());
+                    relay.notify();
+                }
+                self.sync_handover_mark(&handover_id).await;
                 Ok(())
             }
             Err(error) => {
                 self.settle_handover_failure(&handover_id, error.message())
                     .await;
+                self.sync_handover_mark(&handover_id).await;
                 Err(error)
             }
         }
@@ -558,25 +564,45 @@ finished"
                 .latest_assistant_entry(&source_thread_id)
                 .await
                 .map(|(item_id, _)| item_id);
-            let dispatched = self
-                .send_message_to_thread(
-                    &source_thread_id,
-                    &handover_summary_prompt(&note),
-                    None,
-                    None,
-                )
-                .await
-                .map_err(|error| {
+            let prompt = handover_summary_prompt(&note);
+            self.record_handover_mark(handover_id, &note).await;
+            self.expect_injection(
+                handover_id,
+                &source_thread_id,
+                &prompt,
+                InjectionKind::HandoverRequest,
+            )
+            .await;
+            let sent = self
+                .send_message_to_thread(&source_thread_id, &prompt, None, None)
+                .await;
+            let dispatched = match sent {
+                Ok(dispatched) => dispatched,
+                Err(error) => {
+                    self.forget_injection(
+                        handover_id,
+                        &source_thread_id,
+                        InjectionKind::HandoverRequest,
+                    )
+                    .await;
                     self.log_handover_detail(handover_id, format!("summary turn failed: {error}"));
-                    HandoverError::Failed(
+                    return Err(HandoverError::Failed(
                         "this session could not be asked to write the handover — try again"
                             .to_string(),
-                    )
-                })?;
+                    ));
+                }
+            };
             drop(gate);
             break (dispatched, baseline);
         };
         let (dispatched, baseline) = dispatched;
+        self.anchor_injection(
+            handover_id,
+            &source_thread_id,
+            dispatched.turn_id.as_deref(),
+            InjectionKind::HandoverRequest,
+        )
+        .await;
 
         // An UNCERTAIN start: the provider may be working, but nothing it writes could
         // be matched to what we asked, so there is no handover to wait for.
@@ -623,7 +649,7 @@ finished"
         // and our send, and the handover lands in the middle of it. The gate is taken
         // here and not around the summary turn: holding a relay-wide lock across minutes
         // of somebody's model would stop every other session in the relay.
-        let _gate = self.wait_for_drive_gate().await?;
+        let gate = self.wait_for_drive_gate().await?;
 
         // The FULL admission again, fresh target included. An earlier version skipped it
         // for a fresh one on the grounds that nobody else had it — which is false the
@@ -668,24 +694,47 @@ no longer the session this was meant for — hand over again"
             }
         }
 
-        self.send_message_to_thread(
+        let brief = format!("{summary}{}", continue_instruction());
+        self.expect_injection(
+            handover_id,
             &target_thread_id,
-            &format!("{summary}{}", continue_instruction()),
-            model.as_deref(),
-            effort.as_deref(),
+            &brief,
+            InjectionKind::HandoverBrief,
         )
-        .await
-        // The provider's own words are not repeated: this reason is shown to a person
-        // and, unlike the relay's log, it is a channel a paired device reads.
-        .map_err(|error| {
-            self.log_handover_detail(handover_id, format!("delivery failed: {error}"));
-            HandoverError::Failed(
-                "that agent could not be given the handover; its session may have gone \
-— hand over again"
-                    .to_string(),
+        .await;
+        let sent = self
+            .send_message_to_thread(
+                &target_thread_id,
+                &brief,
+                model.as_deref(),
+                effort.as_deref(),
             )
-        })?;
-        Ok(())
+            .await;
+        drop(gate);
+        match sent {
+            Ok(dispatched) => {
+                self.anchor_injection(
+                    handover_id,
+                    &target_thread_id,
+                    dispatched.turn_id.as_deref(),
+                    InjectionKind::HandoverBrief,
+                )
+                .await;
+                Ok(())
+            }
+            // The provider's own words are not repeated: this reason is shown to a person
+            // and, unlike the relay's log, it is a channel a paired device reads.
+            Err(error) => {
+                self.forget_injection(handover_id, &target_thread_id, InjectionKind::HandoverBrief)
+                    .await;
+                self.log_handover_detail(handover_id, format!("delivery failed: {error}"));
+                Err(HandoverError::Failed(
+                    "that agent could not be given the handover; its session may have gone \
+— hand over again"
+                        .to_string(),
+                ))
+            }
+        }
     }
 
     /// The gate every session-mutating op takes for its check-then-act window.
@@ -842,6 +891,10 @@ mod prompt_tests {
         assert!(
             prompt.contains("next action"),
             "the next action is the one thing a handover is for"
+        );
+        assert!(
+            prompt.contains("`## `"),
+            "both cards split the summary at its headings, so their form is fixed"
         );
         assert!(
             prompt.contains("Do NOT do any of the remaining work now"),

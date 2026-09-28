@@ -3556,6 +3556,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                             turn_id: Some("turn-old".to_string()),
                             tool: Some(file_tool(&[&edited])),
                             content_state: crate::protocol::TranscriptContentState::Full,
+                            injection: None,
                         },
                     ]),
                     Some(1),
@@ -3637,6 +3638,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                             turn_id: Some("turn-tail".to_string()),
                             tool: None,
                             content_state: crate::protocol::TranscriptContentState::Full,
+                            injection: None,
                         },
                     ]),
                 },
@@ -7580,7 +7582,7 @@ tree; got {}",
         // the store rather than stubbed, because the gate reads the same query
         // the Usage screen does and a stub would not exercise the day boundary.
         let ledger = TempDir::new().expect("ledger tempdir");
-        let store = crate::usage::store::UsageStore::open(&ledger.path().join("token-usage.db"));
+        let store = crate::usage::store::UsageStore::open(&ledger.path().join("sealwire.db"));
         store.record(&crate::usage::store::TokenEvent {
             at: crate::state::unix_now(),
             provider: "fake".to_string(),
@@ -7648,7 +7650,7 @@ tree; got {}",
         wait_for_completed_agent_text(&app).await;
 
         let ledger = TempDir::new().expect("ledger tempdir");
-        let store = crate::usage::store::UsageStore::open(&ledger.path().join("token-usage.db"));
+        let store = crate::usage::store::UsageStore::open(&ledger.path().join("sealwire.db"));
         store.record(&crate::usage::store::TokenEvent {
             at: crate::state::unix_now(),
             provider: "fake".to_string(),
@@ -8738,6 +8740,7 @@ tree; got {}",
             turn_id: None,
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         };
         {
             let mut pages = claude.transcript_pages.lock().await;
@@ -8859,6 +8862,7 @@ tree; got {}",
             turn_id: Some(item_id.to_string()),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         };
         {
             let mut pages = claude.transcript_pages.lock().await;
@@ -8978,6 +8982,7 @@ tree; got {}",
                                 turn_id: Some("tail".to_string()),
                                 tool: None,
                                 content_state: crate::protocol::TranscriptContentState::Full,
+                                injection: None,
                             }],
                         ),
                     },
@@ -9061,6 +9066,7 @@ tree; got {}",
                                 turn_id: Some("stale-tail".to_string()),
                                 tool: None,
                                 content_state: crate::protocol::TranscriptContentState::Full,
+                                injection: None,
                             }],
                         ),
                     },
@@ -9178,6 +9184,7 @@ tree; got {}",
             turn_id: Some(item_id.to_string()),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         };
         let page = |entries, prev_cursor| crate::provider::ThreadTranscriptPageData {
             sync: crate::provider::ThreadSyncData {
@@ -9444,6 +9451,7 @@ tree; got {}",
                         turn_id: Some(id.to_string()),
                         tool: None,
                         content_state: crate::protocol::TranscriptContentState::Full,
+                        injection: None,
                     })
                     .collect();
                 stored.insert(
@@ -10211,6 +10219,7 @@ tree; got {}",
             turn_id: Some(format!("turn-{id}")),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         };
         claude
             .thread_transcripts
@@ -11722,6 +11731,7 @@ tree; got {}",
                     turn_id: Some("turn:provider-initial".to_string()),
                     tool: None,
                     content_state: crate::protocol::TranscriptContentState::Full,
+                    injection: None,
                 });
             let mut transcript = Vec::new();
             if let Some(entry) = initial_user_message.clone() {
@@ -11737,6 +11747,7 @@ tree; got {}",
                     turn_id: Some("turn:provider-initial".to_string()),
                     tool: None,
                     content_state: crate::protocol::TranscriptContentState::Full,
+                    injection: None,
                 });
             }
 
@@ -12696,6 +12707,7 @@ tree; got {}",
                     turn_id: Some("turn-1".to_string()),
                     tool: None,
                     content_state: crate::protocol::TranscriptContentState::Full,
+                    injection: None,
                 },
             );
         }
@@ -12764,6 +12776,7 @@ tree; got {}",
             turn_id: Some("turn-1".to_string()),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         };
         {
             let mut transcripts = codex.thread_transcripts.lock().await;
@@ -12851,6 +12864,7 @@ tree; got {}",
             turn_id: Some("turn-1".to_string()),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         };
         let synthetic =
             crate::provider::ProviderTranscriptEntry::relay_named(view("x", "the relay's summary"));
@@ -13006,6 +13020,7 @@ tree; got {}",
             turn_id: Some("turn-1".to_string()),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         };
         {
             let mut transcripts = codex.thread_transcripts.lock().await;
@@ -13123,6 +13138,7 @@ tree; got {}",
             turn_id: Some("turn-1".to_string()),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         };
         // The read names every item positionally. `msg_live` appears NOWHERE in it,
         // which is the whole point: the fixtures cannot match by accident.
@@ -13261,6 +13277,7 @@ tree; got {}",
             turn_id: Some("turn-1".to_string()),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         };
         {
             let mut transcripts = codex.thread_transcripts.lock().await;
@@ -13366,6 +13383,7 @@ tree; got {}",
             turn_id: Some("turn-1".to_string()),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         };
         // `item-2` is the streamed message renumbered; `item-3` landed afterwards and
         // this runtime never learned it.
@@ -13498,6 +13516,7 @@ tree; got {}",
             turn_id: Some(format!("turn-{id}")),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         };
         codex.thread_transcripts.lock().await.insert(
             forked_thread_id.clone(),
@@ -17482,6 +17501,7 @@ mod review_tests {
                     turn_id: Some(turn.clone()),
                     tool: None,
                     content_state: crate::protocol::TranscriptContentState::Full,
+                    injection: None,
                 });
                 entries.push(TranscriptEntryView {
                     row_id: None,
@@ -17494,6 +17514,7 @@ mod review_tests {
                     turn_id: Some(turn),
                     tool: None,
                     content_state: crate::protocol::TranscriptContentState::Full,
+                    injection: None,
                 });
                 return Ok(Some(turn_id));
             }
@@ -17729,6 +17750,7 @@ mod review_tests {
                     turn_id: Some(turn.clone()),
                     tool: None,
                     content_state: crate::protocol::TranscriptContentState::Full,
+                    injection: None,
                 });
                 if emit_assistant && fail_completed_turn.is_none() {
                     entries.push(TranscriptEntryView {
@@ -17742,6 +17764,7 @@ mod review_tests {
                         turn_id: Some(turn),
                         tool: None,
                         content_state: crate::protocol::TranscriptContentState::Full,
+                        injection: None,
                     });
                 }
             });
@@ -35243,6 +35266,87 @@ mod handover_tests {
         );
     }
 
+    /// Every row of `thread_id` a client is told was injected, as a page serves it.
+    async fn injected_rows(
+        app: &crate::state::AppState,
+        thread_id: &str,
+    ) -> Vec<(
+        crate::protocol::TranscriptEntryView,
+        crate::protocol::InjectionView,
+    )> {
+        let page = app
+            .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+                thread_id: thread_id.to_string(),
+                before: None,
+                device_id: None,
+            })
+            .await
+            .expect("tail read");
+        page.entries
+            .into_iter()
+            .filter_map(|row| row.injection.clone().map(|injection| (row, injection)))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn both_injected_prompts_come_back_marked_as_one_handover() {
+        use crate::protocol::InjectionKind;
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        let target = app
+            .handover(
+                &source,
+                HandoverRequest {
+                    note: "mind the parser".to_string(),
+                    ..request()
+                },
+            )
+            .await
+            .expect("the handover goes through");
+        delivered(&app, &target).await;
+
+        let asked = injected_rows(&app, &source).await;
+        assert_eq!(
+            asked.len(),
+            1,
+            "only the summary prompt is injected: {asked:?}"
+        );
+        let (row, request) = &asked[0];
+        assert_eq!(row.kind, TranscriptEntryKind::UserText);
+        assert_eq!(request.kind, InjectionKind::HandoverRequest);
+        assert_eq!(request.handover.target_thread_id, target);
+        assert_eq!(request.handover.target_provider, "fake");
+        assert_eq!(request.handover.note, "mind the parser");
+        assert_eq!(request.handover.status, "done");
+
+        let snapshot = app.snapshot().await;
+        assert!(
+            snapshot
+                .transcript
+                .iter()
+                .any(|row| row.injection.as_ref() == Some(request)),
+            "the snapshot of the open thread must carry the same mark as a page"
+        );
+
+        let given = injected_rows(&app, &target).await;
+        assert_eq!(given.len(), 1, "{given:?}");
+        let (row, brief) = &given[0];
+        assert_eq!(brief.kind, InjectionKind::HandoverBrief);
+        assert_eq!(
+            brief.handover, request.handover,
+            "one handover, seen from both ends"
+        );
+        let text = row.text.as_deref().unwrap_or_default();
+        assert!(
+            !brief.handover.instruction.is_empty() && text.ends_with(&brief.handover.instruction),
+            "a client strips the instruction to show the summary alone: {text}"
+        );
+    }
+
     /// Poll the record until it has an outcome. The delivery is detached on purpose.
     async fn settled(app: &crate::state::AppState, handover_id: &str) -> crate::state::Handover {
         for _ in 0..400 {
@@ -36281,6 +36385,235 @@ exists: {message}",
         assert!(
             !reason.contains("is empty"),
             "we did not start this one, so there is no orphan to report: {reason}"
+        );
+    }
+
+    /// A card names the session on its other end. A device scoped away from that
+    /// session, or the snapshot every device is sent, must not learn it from here.
+    #[tokio::test]
+    async fn a_card_names_the_other_session_only_to_whoever_may_see_it() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let elsewhere = TempDir::new().expect("other tempdir");
+        let outside = elsewhere.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        grant_workspace(&app, &outside).await;
+        let source = session(&app, &cwd, "never").await;
+        let target = session(&app, &outside, "never").await;
+        app.handover(
+            &source,
+            HandoverRequest {
+                target_thread_id: Some(target.clone()),
+                note: "the source's own words".to_string(),
+                ..request()
+            },
+        )
+        .await
+        .expect("the handover goes through");
+        delivered(&app, &target).await;
+        pair_device(&app, "phone", vec![cwd.clone()]).await;
+
+        let card = |rows: Vec<(_, crate::protocol::InjectionView)>| {
+            rows.into_iter()
+                .next()
+                .expect("the prompt is marked")
+                .1
+                .handover
+        };
+        let local = card(injected_rows(&app, &source).await);
+        assert_eq!(local.target_thread_id, target, "this machine may see both");
+
+        let page = app
+            .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+                thread_id: source.clone(),
+                before: None,
+                device_id: Some("phone".to_string()),
+            })
+            .await
+            .expect("the phone may read the source");
+        let scoped = page
+            .entries
+            .into_iter()
+            .find_map(|row| row.injection)
+            .expect("still a card")
+            .handover;
+        assert_eq!(scoped.target_thread_id, "", "{scoped:?}");
+        assert_eq!(scoped.target_title, None);
+
+        let snapshot = app.snapshot().await;
+        let broadcast = snapshot
+            .transcript
+            .iter()
+            .find_map(|row| row.injection.clone())
+            .expect("the open target's brief is a card")
+            .handover;
+        assert_eq!(
+            broadcast.source_thread_id, "",
+            "the snapshot goes to every device, and the source is in another folder"
+        );
+        assert_eq!(local.note, "the source's own words");
+        assert_eq!(broadcast.note, "", "the note was typed into the source");
+    }
+
+    /// The note rides on every marked row, and snapshot compaction never looks there,
+    /// so a pasted essay must not travel with the card.
+    #[tokio::test]
+    async fn a_long_note_is_cut_short_on_the_card() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+        let note = "mind the parser ".repeat(5_000);
+
+        let target = app
+            .handover(
+                &source,
+                HandoverRequest {
+                    note: note.clone(),
+                    ..request()
+                },
+            )
+            .await
+            .expect("the handover goes through");
+        delivered(&app, &target).await;
+
+        let relay = app.relay.read().await;
+        let runtime = relay.runtime_for_thread(&source).expect("source runtime");
+        let marks =
+            relay.thread_injections(&source, crate::state::relay::InjectionReader::Operator);
+        let row = runtime
+            .client_transcript_views(&marks)
+            .into_iter()
+            .find(|row| row.injection.is_some())
+            .expect("the prompt is marked");
+        let shown = row.injection.clone().expect("marked").handover.note;
+        assert!(
+            shown.chars().count() <= 501,
+            "{} chars",
+            shown.chars().count()
+        );
+        assert!(shown.starts_with("mind the parser"));
+        assert!(
+            row.text.unwrap_or_default().contains(note.trim()),
+            "the source is still asked with the whole note"
+        );
+    }
+
+    /// A cut row's detail is re-read from the provider, which knows nothing of marks.
+    #[tokio::test]
+    async fn a_detail_read_from_the_provider_keeps_its_mark() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+        let target = app
+            .handover(&source, request())
+            .await
+            .expect("the handover goes through");
+        delivered(&app, &target).await;
+        let (row, _) = injected_rows(&app, &source).await.remove(0);
+        let row_id = row.row_id.expect("a relay row");
+        {
+            let mut relay = app.relay.write().await;
+            let provider_id = relay
+                .runtime_for_thread(&source)
+                .and_then(|runtime| runtime.transcript.provider_item_id(&row_id))
+                .expect("bound to the provider")
+                .to_string();
+            relay.mark_transcript_row_cut_for_thread(&source, &provider_id, true);
+        }
+
+        let detail = app
+            .read_thread_entry_detail(crate::protocol::ReadThreadEntryDetailInput {
+                thread_id: source.clone(),
+                item_id: row_id,
+                field: None,
+                cursor: None,
+                device_id: None,
+            })
+            .await
+            .expect("the provider has it");
+
+        assert!(
+            detail.entry.and_then(|entry| entry.injection).is_some(),
+            "a detail replaces the row it is for, so it must say what the row is"
+        );
+    }
+
+    /// A handover that never got a prompt into either session has no card to draw,
+    /// so it must not be kept for ever on the chance one appears.
+    #[tokio::test]
+    async fn a_handover_that_marked_nothing_leaves_nothing_behind() {
+        let root = TempDir::new().expect("tempdir");
+        let project = root.path().join("work");
+        std::fs::create_dir(&project).expect("mkdir");
+        let cwd = project.to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+        std::fs::remove_dir_all(&project).expect("the folder goes away");
+
+        let outcome = app.handover(&source, request()).await;
+
+        assert!(
+            outcome.is_err(),
+            "the source could not be asked: {outcome:?}"
+        );
+        let relay = app.relay.read().await;
+        let handover_id = relay
+            .handovers_for(&crate::state::HandoverActor::LocalOperator)
+            .first()
+            .map(|view| view.id.clone())
+            .expect("the failure is still reported the usual way");
+        assert!(
+            relay.injections.handover(&handover_id).is_none(),
+            "no row was ever marked, so there is no card to keep"
+        );
+    }
+
+    /// The source card is the person's only view of the handover while it is written,
+    /// so it has to say it is under way, and then how it ended.
+    #[tokio::test]
+    async fn the_source_card_follows_the_handover_to_its_failure() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, provider, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        provider.hold_terminals();
+        let (handover_id, target) = app
+            .handover_detached(&source, request())
+            .await
+            .expect("accepted");
+        provider.wait_for_held_turn().await;
+        let status = |rows: Vec<(_, crate::protocol::InjectionView)>| {
+            let handover = rows
+                .into_iter()
+                .next()
+                .expect("the prompt is marked")
+                .1
+                .handover;
+            (handover.status, handover.error)
+        };
+        assert_eq!(
+            status(injected_rows(&app, &source).await),
+            ("working".to_string(), None)
+        );
+
+        {
+            let mut relay = app.relay.write().await;
+            relay.remove_thread(&target);
+        }
+        provider.release_terminals();
+        let record = settled(&app, &handover_id).await;
+
+        assert_eq!(
+            status(injected_rows(&app, &source).await),
+            ("failed".to_string(), record.error.clone())
         );
     }
 

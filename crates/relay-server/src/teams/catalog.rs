@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn a_fresh_store_seeds_the_builtin_default_team() {
         let dir = TempDir::new().expect("tempdir");
-        let store = UsageStore::open(&dir.path().join("token-usage.db"));
+        let store = UsageStore::open(&dir.path().join("sealwire.db"));
         let report = build_catalog(&store, 1_700_000_000);
         assert!(report.enabled);
         assert_eq!(report.teams.len(), 2);
@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn seven_day_stats_come_from_the_ledger_not_invention() {
         let dir = TempDir::new().expect("tempdir");
-        let store = UsageStore::open(&dir.path().join("token-usage.db"));
+        let store = UsageStore::open(&dir.path().join("sealwire.db"));
         let now = 1_700_000_000_u64;
         store.record(&TokenEvent {
             at: now - 60,

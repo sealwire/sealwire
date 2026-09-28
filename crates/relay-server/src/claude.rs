@@ -5171,6 +5171,7 @@ for await (const line of rl) {
                     can_apply: None,
                 }),
                 content_state: crate::protocol::TranscriptContentState::Full,
+                injection: None,
             }
         }
 

@@ -67,6 +67,7 @@ fn make_snapshot() -> SessionSnapshot {
                 turn_id: Some(format!("turn-{index}")),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
+                injection: None,
             })
             .collect(),
         logs: vec![],
@@ -599,6 +600,7 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
             turn_id: Some("turn-large".to_string()),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         }],
         prev_cursor: Some(crate::protocol::TranscriptCursorToken::new(
             "tc1.test.1".to_string(),
@@ -682,6 +684,7 @@ fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
                 turn_id: Some("turn-large".to_string()),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
+                injection: None,
             }],
             prev_cursor: Some(crate::protocol::TranscriptCursorToken::new(
                 "tc1.test.1".to_string(),

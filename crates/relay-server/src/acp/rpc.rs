@@ -639,6 +639,7 @@ pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp
             turn_id: None,
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         },
         TranscriptOp::AgentChunk { item_id, text, .. } => TranscriptEntryView {
             // A raw provider read: not a relay row until the relay numbers it.
@@ -653,6 +654,7 @@ pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp
             turn_id: None,
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         },
         TranscriptOp::ThoughtChunk { item_id, text, .. } => TranscriptEntryView {
             // A raw provider read: not a relay row until the relay numbers it.
@@ -667,6 +669,7 @@ pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp
             turn_id: None,
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         },
         TranscriptOp::Tool {
             item_id,
@@ -695,6 +698,7 @@ pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp
                 path.as_deref(),
             )),
             content_state: TranscriptContentState::Full,
+            injection: None,
         },
         TranscriptOp::Title(_) | TranscriptOp::ModeChanged(_) | TranscriptOp::Ignore => return,
     };

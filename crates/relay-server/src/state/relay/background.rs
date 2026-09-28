@@ -166,6 +166,18 @@ impl RelayState {
         self.touch_bg_progress_at(thread_id, now);
     }
 
+    /// A row changed with nothing to stream (its injection mark): have every holder re-read.
+    pub(crate) fn republish_thread_rows(&mut self, thread_id: &str) {
+        if !self.runtimes.contains_key(thread_id) {
+            return;
+        }
+        self.bump_thread_transcript_revision(thread_id);
+        // The active thread rides on snapshots.
+        if self.active_thread_id.as_deref() != Some(thread_id) {
+            self.queue_transcript_resync(thread_id, TranscriptResyncReason::RowsNotStreamed);
+        }
+    }
+
     /// Carries the THREAD's own revision: watchers compare it with their copy of this thread,
     /// never with the active thread they may also hold.
     fn queue_transcript_resync(&mut self, thread_id: &str, reason: TranscriptResyncReason) {

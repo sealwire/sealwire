@@ -1075,6 +1075,7 @@ mod tests {
                 can_apply: None,
             }),
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         };
         assert!(entry_summary_text(&entry).contains("1 failing: expected 2"));
     }
@@ -1093,6 +1094,7 @@ mod tests {
                 turn_id: Some(format!("turn-{index}")),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
+                injection: None,
             })
             .collect();
         let source = source_with_transcript(transcript);
@@ -1119,6 +1121,7 @@ mod tests {
             turn_id: Some(format!("turn-{item_id}")),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         }
     }
 
@@ -1271,6 +1274,7 @@ mod fork_point_resolution_tests {
             turn_id: Some("turn-1".to_string()),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         }
     }
 

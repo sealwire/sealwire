@@ -1285,6 +1285,7 @@ impl ProviderBridge for FakeProviderBridge {
                 turn_id: Some(turn_id_for_task.clone()),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
+                injection: None,
             };
             if let Some(harness) = scenario_harness.as_ref() {
                 harness
@@ -1309,6 +1310,7 @@ impl ProviderBridge for FakeProviderBridge {
                 turn_id: Some(turn_id_for_task.clone()),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
+                injection: None,
             };
 
             // 1. Record the user's turn.
@@ -1691,6 +1693,7 @@ impl ProviderBridge for FakeProviderBridge {
                         turn_id: Some(turn_id_for_task.clone()),
                         tool: Some(answered_tool),
                         content_state: crate::protocol::TranscriptContentState::Full,
+                        injection: None,
                     });
                     if let Some(text) = ask_user_trailing_text.clone() {
                         ask_user_entries.push(TranscriptEntryView {
@@ -1706,6 +1709,7 @@ impl ProviderBridge for FakeProviderBridge {
                             turn_id: Some(turn_id_for_task.clone()),
                             tool: None,
                             content_state: crate::protocol::TranscriptContentState::Full,
+                            injection: None,
                         });
                     }
                 }
@@ -1852,6 +1856,7 @@ impl ProviderBridge for FakeProviderBridge {
                         Some(completed_tool)
                     },
                     content_state: crate::protocol::TranscriptContentState::Full,
+                    injection: None,
                 });
                 // After the tool in both arrays, or a reload reorders the turn.
                 if reasoning_between_tools {
@@ -1884,6 +1889,7 @@ impl ProviderBridge for FakeProviderBridge {
                         turn_id: Some(turn_id_for_task.clone()),
                         tool: None,
                         content_state: crate::protocol::TranscriptContentState::Full,
+                        injection: None,
                     });
                 }
             }
@@ -2076,6 +2082,7 @@ impl ProviderBridge for FakeProviderBridge {
                         turn_id: Some(turn_id_for_task.clone()),
                         tool: None,
                         content_state: crate::protocol::TranscriptContentState::Full,
+                        injection: None,
                     };
                     {
                         let mut relay = state.write().await;

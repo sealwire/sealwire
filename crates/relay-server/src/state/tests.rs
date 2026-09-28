@@ -1719,6 +1719,7 @@ fn thread_switch_back_keeps_single_user_message_when_ids_agree() {
                 turn_id: Some("7b3c1d04-1111-4222-8333-444455556666".to_string()),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
+                injection: None,
             }]),
         },
         DEFAULT_APPROVAL_POLICY,
@@ -2842,6 +2843,7 @@ fn restore_thread_data_keeps_persisted_controller_and_settings() {
                 turn_id: Some("turn-2".to_string()),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
+                injection: None,
             }]),
         },
         &persisted,
@@ -5537,6 +5539,7 @@ mod paged_history_merge_tests {
             turn_id: Some("turn-1".to_string()),
             tool: Some(tool),
             content_state: TranscriptContentState::Full,
+            injection: None,
         }
     }
 
@@ -7060,6 +7063,7 @@ fn rehydrating_a_thread_does_not_rewind_its_transcript_revision() {
                 turn_id: Some("turn-1".to_string()),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
+                injection: None,
             }]),
         },
         DEFAULT_APPROVAL_POLICY,
@@ -7115,6 +7119,7 @@ fn merging_fresh_history_draws_from_the_shared_revision_clock() {
                 turn_id: Some("turn-2".to_string()),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
+                injection: None,
             }]),
         },
         DEFAULT_APPROVAL_POLICY,
@@ -7538,11 +7543,12 @@ fn order_seq_rides_snapshot_page_and_delta_meta() {
         "snapshot view carries the key"
     );
 
-    let page = relay
-        .runtimes
-        .get(thread)
-        .unwrap()
-        .transcript_page(thread, None);
+    let page =
+        relay
+            .runtimes
+            .get(thread)
+            .unwrap()
+            .transcript_page(thread, None, &Default::default());
     assert_eq!(
         page.entries[0].order_seq,
         Some(record_seq),
@@ -7628,6 +7634,7 @@ fn delta_birth_stale_history() -> ThreadSyncData {
                 turn_id: Some("turn-old".to_string()),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
+                injection: None,
             })
             .map(crate::provider::ProviderTranscriptEntry::provider_named)
             .collect(),
@@ -8828,4 +8835,106 @@ record exists to prevent",
     relay
         .reserve_handover(record("now-there-is-room", false))
         .expect("reading one frees a slot");
+}
+
+/// After a restart every row is rebuilt from provider history, so the marks come
+/// from the database and have to find their rows by the provider's own keys.
+#[test]
+fn rows_rebuilt_after_a_restart_are_marked_from_the_database() {
+    use crate::protocol::InjectionKind;
+    use crate::state::{HandoverMark, InjectedMessage, MessageAnchor};
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("sealwire.db");
+    {
+        let store = crate::usage::store::UsageStore::open(&path);
+        store.save_handover_mark(&HandoverMark {
+            id: "handover-1".to_string(),
+            source_thread_id: "claude-thread".to_string(),
+            target_thread_id: "codex-thread".to_string(),
+            status: "done".to_string(),
+            ..HandoverMark::default()
+        });
+        for (thread_id, anchor, kind) in [
+            (
+                "claude-thread",
+                MessageAnchor::Item("user:abc".to_string()),
+                InjectionKind::HandoverRequest,
+            ),
+            (
+                "codex-thread",
+                MessageAnchor::Turn("turn-9".to_string()),
+                InjectionKind::HandoverBrief,
+            ),
+        ] {
+            store.record_injected_message(&InjectedMessage {
+                thread_id: thread_id.to_string(),
+                anchor,
+                kind,
+                handover_id: "handover-1".to_string(),
+                created_at: 1,
+            });
+        }
+    }
+
+    let mut relay = test_state();
+    relay.install_database(crate::usage::store::UsageStore::open(&path));
+    relay.bg_upsert_user_message(
+        "claude-thread",
+        "user:abc".into(),
+        "prompt".into(),
+        "claude-turn-1".into(),
+        1,
+    );
+    relay.bg_upsert_user_message(
+        "claude-thread",
+        "user:def".into(),
+        "mine".into(),
+        "claude-turn-2".into(),
+        2,
+    );
+    relay.bg_upsert_user_message(
+        "codex-thread",
+        "item-1".into(),
+        "brief".into(),
+        "turn-9".into(),
+        1,
+    );
+    relay.bg_upsert_user_message(
+        "codex-thread",
+        "item-2".into(),
+        "mine".into(),
+        "turn-10".into(),
+        2,
+    );
+
+    let marked = |thread_id: &str| {
+        let runtime = relay.runtime_for_thread(thread_id).expect("runtime");
+        runtime
+            .client_transcript_views(
+                &relay.thread_injections(thread_id, super::relay::InjectionReader::Operator),
+            )
+            .into_iter()
+            .map(|row| {
+                (
+                    row.text.unwrap_or_default(),
+                    row.injection.map(|mark| mark.kind),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        marked("claude-thread"),
+        vec![
+            ("prompt".to_string(), Some(InjectionKind::HandoverRequest)),
+            ("mine".to_string(), None),
+        ]
+    );
+    assert_eq!(
+        marked("codex-thread"),
+        vec![
+            ("brief".to_string(), Some(InjectionKind::HandoverBrief)),
+            ("mine".to_string(), None),
+        ]
+    );
 }

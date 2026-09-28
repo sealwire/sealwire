@@ -732,7 +732,7 @@ mod tests {
 
     fn open() -> (TempDir, UsageStore) {
         let dir = TempDir::new().unwrap();
-        let store = UsageStore::open(&dir.path().join("token-usage.db"));
+        let store = UsageStore::open(&dir.path().join("sealwire.db"));
         (dir, store)
     }
 

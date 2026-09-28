@@ -3559,6 +3559,7 @@ mod latest_agent_entry_tests {
             turn_id: Some(turn.to_string()),
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         };
 
         let views = vec![
@@ -3596,6 +3597,7 @@ mod latest_agent_entry_tests {
             turn_id: turn_id.map(str::to_string),
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         };
         let first = vec![entry(Some("turn-1"), "same reply")];
         let second = vec![
@@ -3635,6 +3637,7 @@ mod latest_agent_entry_tests {
             turn_id: Some("turn-1".to_string()),
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         }];
 
         assert_eq!(
@@ -3659,6 +3662,7 @@ mod latest_agent_entry_tests {
             turn_id: Some("turn-1".to_string()),
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         }];
 
         assert_eq!(latest_agent_entry(&views).expect("a reply").0, "item-7");

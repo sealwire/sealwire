@@ -462,6 +462,9 @@ function snapshotRowTellsSomethingNew(existing, incoming) {
   ) {
     return true;
   }
+  if (JSON.stringify(existing.injection ?? null) !== JSON.stringify(incoming.injection ?? null)) {
+    return true;
+  }
   if (contentStateOf(incoming) !== CONTENT_STATE_FULL) {
     return false;
   }
@@ -1358,6 +1361,8 @@ function toTranscriptEntry(entry) {
     ...(typeof entry.row_id === "string" && entry.row_id ? { row_id: entry.row_id } : {}),
     ...(Number.isSafeInteger(entry.order_seq) ? { order_seq: entry.order_seq } : {}),
     ...(entry.withdrawn === true ? { withdrawn: true } : {}),
+    // Which injected prompt this row is; without it the row renders as a user bubble.
+    ...(entry.injection ? { injection: entry.injection } : {}),
   };
 }
 

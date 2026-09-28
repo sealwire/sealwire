@@ -2,6 +2,7 @@ mod approval;
 mod ask_user_question;
 mod background;
 mod device;
+mod injections;
 mod push;
 mod runtime;
 mod session_binding;
@@ -37,6 +38,10 @@ pub(crate) use self::device::{
     BrokerPendingMessage, ClaimChallenge, CompletedPairing, CompletedRemoteClaim, DeviceRecord,
     IssuedClaimChallenge, PairedDevice, PendingPairing, PendingPairingRequest,
     PendingPairingResult, PendingTranscriptDelta, TranscriptDeltaKind,
+};
+pub(crate) use self::injections::{
+    injection_kind_from_name, injection_kind_name, HandoverMark, InjectedMessage, Injections,
+    MessageAnchor, ThreadInjections,
 };
 pub(crate) use self::push::{
     is_acceptable_push_endpoint, load_or_generate_vapid, vapid_key_path, PushAttentionTracker,
@@ -79,6 +84,23 @@ const MAX_ASKS: usize = 64;
 /// ceiling and is reported WITHOUT a count, because the pressure behind it is other
 /// actors' and telling anyone about it is the leak the fence exists to prevent.
 const MAX_HANDOVERS: usize = 64;
+/// Who a transcript is being served to, which decides what a handover card may name.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum InjectionReader<'a> {
+    Operator,
+    Device(&'a str),
+    /// The session snapshot, sent to every paired device alike.
+    Everyone,
+}
+
+impl<'a> InjectionReader<'a> {
+    pub(crate) fn for_device(device_id: Option<&'a str>) -> Self {
+        device_id
+            .filter(|id| !id.is_empty())
+            .map_or(Self::Operator, Self::Device)
+    }
+}
+
 /// How many unread outcomes ONE actor may have before it is refused a new handover.
 ///
 /// Per actor, not global, because the records are per actor: a device cannot see or
@@ -587,6 +609,8 @@ pub struct RelayState {
     /// Never persisted: lost on relay restart, which resets entries to the default
     /// "applied" state.
     pub(super) apply_states: HashMap<String, FileChangeApplyState>,
+    /// User rows the relay sent on the person's behalf. Loaded from the database.
+    pub(crate) injections: Injections,
     recent_remote_actions: HashMap<String, CachedRemoteActionState>,
     /// Relay-owned cross-agent review jobs, keyed by job id. TERMINAL jobs are
     /// persisted whole — including their recap/review text — so the Reviewer panel's
@@ -802,6 +826,7 @@ impl RelayState {
             transcript: ThreadTranscript::new(),
             logs: Vec::new(),
             apply_states: HashMap::new(),
+            injections: Injections::default(),
             recent_remote_actions: HashMap::new(),
             review_jobs: HashMap::new(),
             asks: HashMap::new(),
@@ -994,6 +1019,44 @@ impl RelayState {
             .filter(|(device_id, _)| self.paired_devices.contains_key(device_id.as_str()))
             .flat_map(|(_, subs)| subs.iter().cloned())
             .collect()
+    }
+
+    /// The database beside `session.json`, and what it remembers.
+    pub(crate) fn install_database(&mut self, store: crate::usage::store::UsageStore) {
+        let (handovers, messages) = store.load_injections(
+            "the relay restarted while this handover was under way — hand over again",
+        );
+        self.injections = Injections::load(handovers, messages);
+        self.usage_store = store;
+    }
+
+    /// The marks `thread_id`'s rows can carry for `reader`, ready to apply as served.
+    pub(crate) fn thread_injections(
+        &self,
+        thread_id: &str,
+        reader: InjectionReader<'_>,
+    ) -> ThreadInjections {
+        let may_see = |peer: &str| {
+            if matches!(reader, InjectionReader::Operator) {
+                return true;
+            }
+            let Some(peer_cwd) = self.thread_cwd(peer) else {
+                return false;
+            };
+            match reader {
+                InjectionReader::Operator => true,
+                InjectionReader::Device(device_id) => super::path_within_device_scope(
+                    &peer_cwd,
+                    &self.device_path_scope(device_id),
+                    &self.allowed_roots,
+                ),
+                // One payload for every device: only a peer in the same folder is
+                // visible to exactly whoever can see this thread.
+                InjectionReader::Everyone => self.thread_cwd(thread_id) == Some(peer_cwd),
+            }
+        };
+        self.injections
+            .for_thread(thread_id, |id| self.thread_display_name(id), may_see)
     }
 
     /// Best-effort human label for a thread, for push notification copy.
@@ -4347,14 +4410,20 @@ so {} never got it — hand over again when you are ready.",
         let reasoning_effort = selected
             .map(|runtime| runtime.reasoning_effort.clone())
             .unwrap_or_else(|| self.reasoning_effort.clone());
+        let marks = self
+            .active_thread_id
+            .as_deref()
+            .map(|thread_id| self.thread_injections(thread_id, InjectionReader::Everyone))
+            .unwrap_or_default();
         let mut transcript = selected
-            .map(|runtime| runtime.transcript_views())
+            .map(|runtime| runtime.client_transcript_views(&marks))
             .unwrap_or_else(|| {
                 self.transcript
                     .iter()
                     .map(|record| {
                         let mut view = record.to_view();
                         runtime::overlay_apply_state(record, &mut view, &self.apply_states);
+                        view.injection = marks.mark_for(&self.transcript, record);
                         view
                     })
                     .collect()
@@ -5449,6 +5518,9 @@ so {} never got it — hand over again when you are ready.",
         if self.thread_project_id.remove(thread_id).is_some() {
             self.bump_projects_revision();
         }
+        // Permanent only: an archived session can come back with its cards.
+        self.injections.forget_thread(thread_id);
+        self.usage_store.forget_thread_injections(thread_id);
         // The user's title is cleared by `remove_thread` below, which archive shares —
         // unlike project membership above, it needs no permanent-delete-only placement.
         self.remove_thread(thread_id);
@@ -8732,13 +8804,13 @@ mod tests {
             ),
         ]);
         let runtime = relay.runtime_for_thread("t1").expect("runtime");
-        let page = runtime.transcript_page("t1", None);
+        let page = runtime.transcript_page("t1", None, &Default::default());
         assert_eq!(page.entries.len(), 4);
         let mut wanted = page.entries.iter().map(row_key).collect::<Vec<_>>();
         wanted.reverse();
         wanted.push("gone".to_string());
 
-        let rows = runtime.transcript_rows("t1", &wanted);
+        let rows = runtime.transcript_rows("t1", &wanted, &Default::default());
 
         let mut expected = page.entries.clone();
         expected.reverse();
@@ -8783,11 +8855,11 @@ mod tests {
         };
         let both = ids(&["a", "b"]);
 
-        let rows = runtime.transcript_rows("t1", &both);
+        let rows = runtime.transcript_rows("t1", &both, &Default::default());
         assert_eq!(rows.entries.len(), 1, "two 15KB rows do not share one page");
         assert_eq!(rows.deferred_rows, vec![both[1].clone()]);
 
-        let alone = runtime.transcript_rows("t1", &ids(&["huge"]));
+        let alone = runtime.transcript_rows("t1", &ids(&["huge"]), &Default::default());
         assert_eq!(
             alone.entries.len(),
             1,

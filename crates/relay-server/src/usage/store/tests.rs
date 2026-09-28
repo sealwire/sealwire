@@ -679,3 +679,166 @@ fn migration_six_drops_legacy_integer_tick_column() {
         .expect("query tick column");
     assert_eq!(legacy_tick_column, 0, "integer tick column must be removed");
 }
+
+/// The database used to be `token-usage.db`. A relay that was killed leaves
+/// committed rows only in the `-wal` file, so the rename must carry it along.
+#[test]
+fn the_old_token_usage_database_is_adopted_with_its_wal() {
+    let dir = TempDir::new().expect("tempdir");
+    let old = dir.path().join("token-usage.db");
+    let conn = Connection::open(&old).expect("open old");
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+         CREATE TABLE kept (v TEXT); INSERT INTO kept VALUES ('from the wal');",
+    )
+    .expect("seed");
+    // A clean close checkpoints the WAL away; a killed relay does not.
+    std::mem::forget(conn);
+    assert!(dir.path().join("token-usage.db-wal").exists());
+
+    let path = database_path(&dir.path().join("session.json"));
+
+    assert_eq!(path, dir.path().join("sealwire.db"));
+    assert!(!old.exists(), "the old database must be moved, not copied");
+    assert!(
+        !dir.path().join("sealwire.db-wal").exists(),
+        "the WAL must be folded in before the move, so only one file is renamed"
+    );
+    let kept: String = Connection::open(&path)
+        .expect("open new")
+        .query_row("SELECT v FROM kept", [], |row| row.get(0))
+        .expect("the row that was only in the WAL");
+    assert_eq!(kept, "from the wal");
+}
+
+/// A move that cannot be made safely is not made: the old file stays put and is
+/// used, rather than leaving a fresh empty database beside it.
+#[test]
+fn an_old_database_that_cannot_be_checkpointed_keeps_its_name() {
+    let dir = TempDir::new().expect("tempdir");
+    let old = dir.path().join("token-usage.db");
+    std::fs::write(&old, b"not a database").expect("write");
+
+    let path = database_path(&dir.path().join("session.json"));
+
+    assert_eq!(path, old);
+    assert!(old.exists());
+    assert!(!dir.path().join("sealwire.db").exists());
+}
+
+fn handover_mark(id: &str, status: &str) -> crate::state::HandoverMark {
+    crate::state::HandoverMark {
+        id: id.to_string(),
+        source_thread_id: "source".to_string(),
+        target_thread_id: "target".to_string(),
+        source_provider: "claude_code".to_string(),
+        target_provider: "codex".to_string(),
+        note: "mind the parser".to_string(),
+        instruction: "\n\n---\nThat work is now yours.".to_string(),
+        status: status.to_string(),
+        error: None,
+        created_at: 10,
+        updated_at: 20,
+    }
+}
+
+/// The marks are what turn an injected prompt back into a card after a restart, so
+/// they have to come back exactly as they were written.
+#[test]
+fn handover_marks_survive_a_reopen() {
+    use crate::protocol::InjectionKind;
+    use crate::state::{InjectedMessage, MessageAnchor};
+    let dir = TempDir::new().expect("tempdir");
+    let done = handover_mark("handover-done", "done");
+    let request = InjectedMessage {
+        thread_id: "source".to_string(),
+        anchor: MessageAnchor::Item("user:abc".to_string()),
+        kind: InjectionKind::HandoverRequest,
+        handover_id: done.id.clone(),
+        created_at: 10,
+    };
+    let brief = InjectedMessage {
+        thread_id: "target".to_string(),
+        anchor: MessageAnchor::Turn("turn-9".to_string()),
+        kind: InjectionKind::HandoverBrief,
+        handover_id: done.id.clone(),
+        created_at: 11,
+    };
+    {
+        let store = open_in(&dir);
+        store.save_handover_mark(&handover_mark("handover-done", "working"));
+        store.save_handover_mark(&done);
+        store.record_injected_message(&request);
+        store.record_injected_message(&brief);
+    }
+
+    let (handovers, messages) = open_in(&dir).load_injections("restarted");
+
+    assert_eq!(
+        handovers,
+        vec![done],
+        "a later save replaces the earlier one"
+    );
+    assert_eq!(messages, vec![request, brief]);
+}
+
+/// Nothing drives a handover across a restart, so one still under way when the
+/// relay stopped is over, and its card must say so rather than spin for ever.
+#[test]
+fn a_handover_left_working_is_failed_on_load() {
+    let dir = TempDir::new().expect("tempdir");
+    open_in(&dir).save_handover_mark(&handover_mark("handover-1", "working"));
+
+    let (handovers, _) = open_in(&dir).load_injections("the relay restarted");
+
+    assert_eq!(handovers[0].status, "failed");
+    assert_eq!(handovers[0].error.as_deref(), Some("the relay restarted"));
+}
+
+/// A deleted session's rows are gone, so are its marks; a handover neither end still
+/// points at goes with them.
+#[test]
+fn forgetting_a_thread_drops_its_marks_and_orphaned_handovers() {
+    use crate::protocol::InjectionKind;
+    use crate::state::{InjectedMessage, MessageAnchor};
+    let dir = TempDir::new().expect("tempdir");
+    let store = open_in(&dir);
+    let message = |thread: &str, handover: &str| InjectedMessage {
+        thread_id: thread.to_string(),
+        anchor: MessageAnchor::Item(format!("user:{thread}")),
+        kind: InjectionKind::HandoverRequest,
+        handover_id: handover.to_string(),
+        created_at: 1,
+    };
+    store.save_handover_mark(&handover_mark("shared", "done"));
+    store.save_handover_mark(&handover_mark("alone", "done"));
+    store.record_injected_message(&message("gone", "shared"));
+    store.record_injected_message(&message("kept", "shared"));
+    store.record_injected_message(&message("gone", "alone"));
+
+    store.forget_thread_injections("gone");
+
+    let (handovers, messages) = store.load_injections("restarted");
+    assert_eq!(
+        handovers.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+        vec!["shared"]
+    );
+    assert_eq!(messages, vec![message("kept", "shared")]);
+}
+
+/// A sidecar that cannot be removed is a step that failed, so the old name stays.
+#[test]
+fn an_old_database_whose_sidecar_cannot_be_removed_keeps_its_name() {
+    let dir = TempDir::new().expect("tempdir");
+    let old = dir.path().join("token-usage.db");
+    Connection::open(&old)
+        .expect("open old")
+        .execute_batch("CREATE TABLE kept (v TEXT);")
+        .expect("seed");
+    std::fs::create_dir(dir.path().join("token-usage.db-shm")).expect("an unremovable sidecar");
+
+    let path = database_path(&dir.path().join("session.json"));
+
+    assert_eq!(path, old);
+    assert!(!dir.path().join("sealwire.db").exists());
+}

@@ -9,8 +9,9 @@ use crate::{
 };
 
 use super::{
-    thread_status_is_working, PendingApproval, PendingAskUserQuestion, ThreadSessionSettings,
-    ThreadTranscript, TranscriptCursor, TranscriptKeySpace, TranscriptRecord,
+    thread_status_is_working, PendingApproval, PendingAskUserQuestion, ThreadInjections,
+    ThreadSessionSettings, ThreadTranscript, TranscriptCursor, TranscriptKeySpace,
+    TranscriptRecord,
 };
 
 /// A terminal, sanitized record of the last failed turn on this thread — never
@@ -543,10 +544,26 @@ impl ThreadRuntime {
             .is_some_and(|row| row.order_seq < cursor.order_key())
     }
 
+    /// Every row as a client is sent it, marks included.
+    pub(crate) fn client_transcript_views(
+        &self,
+        marks: &ThreadInjections,
+    ) -> Vec<TranscriptEntryView> {
+        self.transcript
+            .iter()
+            .map(|record| self.page_view(record, marks))
+            .collect()
+    }
+
     /// One row exactly as a transcript page carries it.
-    fn page_view(&self, record: &TranscriptRecord) -> TranscriptEntryView {
+    pub(crate) fn page_view(
+        &self,
+        record: &TranscriptRecord,
+        marks: &ThreadInjections,
+    ) -> TranscriptEntryView {
         let mut view = record.to_view();
         overlay_apply_state(record, &mut view, &self.apply_states);
+        view.injection = marks.mark_for(&self.transcript, record);
         view
     }
 
@@ -555,6 +572,7 @@ impl ThreadRuntime {
         &self,
         thread_id: &str,
         row_ids: &[String],
+        marks: &ThreadInjections,
     ) -> ThreadTranscriptResponse {
         let mut seen = std::collections::HashSet::new();
         let requested = row_ids
@@ -564,7 +582,7 @@ impl ThreadRuntime {
                 let view = self
                     .transcript
                     .get_row(row_id)
-                    .map(|record| self.page_view(record));
+                    .map(|record| self.page_view(record, marks));
                 (row_id.clone(), view)
             })
             .collect();
@@ -575,6 +593,7 @@ impl ThreadRuntime {
         &self,
         thread_id: &str,
         before: Option<TranscriptCursor>,
+        marks: &ThreadInjections,
     ) -> ThreadTranscriptResponse {
         let upper_bound = before.map_or(self.transcript.len(), |cursor| {
             self.transcript
@@ -584,7 +603,7 @@ impl ThreadRuntime {
             thread_id.to_string(),
             upper_bound,
             self.transcript_revision,
-            |index| self.page_view(&self.transcript[index]),
+            |index| self.page_view(&self.transcript[index], marks),
         );
         let mut page = window.page;
         let next_older_key = match self.transcript.get(window.start) {
@@ -1376,7 +1395,9 @@ mod tests {
             ("transcript_views", rt.transcript_views().remove(0)),
             (
                 "transcript_page",
-                rt.transcript_page("t1", None).entries.remove(0),
+                rt.transcript_page("t1", None, &Default::default())
+                    .entries
+                    .remove(0),
             ),
         ] {
             assert_eq!(
@@ -1578,6 +1599,7 @@ mod tests {
             turn_id: None,
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         }];
 
         rt.prepend_provider_history(entries(older.clone()), Some(4096), Some(2048));
@@ -1661,6 +1683,7 @@ mod tests {
             turn_id: None,
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         };
 
         rt.prepend_provider_history(
@@ -1900,6 +1923,7 @@ mod tests {
             turn_id: None,
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         };
         let views = rt.prepend_provider_history(
             entries(vec![
@@ -2004,6 +2028,7 @@ mod tests {
             turn_id: None,
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         };
         rt.prepend_provider_history(
             entries(vec![
@@ -2082,6 +2107,7 @@ mod tests {
             turn_id: Some("turn-1".to_string()),
             tool: Some(tool),
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         };
 
         let views = rt.prepend_provider_history(
@@ -2163,6 +2189,7 @@ mod tests {
             turn_id: None,
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         }
     }
 
@@ -2540,6 +2567,7 @@ mod cold_import_tests {
             turn_id: Some("turn-1".to_string()),
             tool: Some(tool),
             content_state: TranscriptContentState::Full,
+            injection: None,
         }
     }
 

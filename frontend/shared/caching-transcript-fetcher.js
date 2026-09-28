@@ -79,6 +79,10 @@ const VOLATILE_ENTRY_STATUSES = new Set([
 ]);
 
 export function isVolatileEntry(entry) {
+  // The card on this row still changes when the handover ends.
+  if (entry?.injection?.handover?.status === "working") {
+    return true;
+  }
   const status = typeof entry?.status === "string" ? entry.status.trim().toLowerCase() : "";
   return VOLATILE_ENTRY_STATUSES.has(status);
 }

@@ -20,6 +20,7 @@ import {
   writeAskUserDraft,
 } from "./ask-user-draft-store.js";
 import { providerIconSvg } from "./provider-icons.js";
+import { foldHandoverTurns, HandoverSourceEntry, HandoverTargetEntry } from "./handover-card.js";
 import {
   computeForkableItemIds,
   computeSettledTurnFinalIds,
@@ -2744,6 +2745,8 @@ function OmittedEntryImpl({ entry, isJustPrepended = false, provider = "", showA
 
 const OmittedEntry = React.memo(OmittedEntryImpl);
 
+const EMPTY_HANDOVER_MEMBERS = [];
+
 export function TranscriptEntry({
   entry,
   isJustPrepended = false,
@@ -2767,6 +2770,27 @@ export function TranscriptEntry({
   const kind = entry.kind || "reasoning";
 
   if (kind === "user_text") {
+    const injection = entry.injection?.handover ? entry.injection : null;
+    if (injection) {
+      const attrs = transcriptEntryDomAttrs(
+        entry,
+        "chat-message chat-message-user",
+        isLatestUser ? { "data-latest-user-message": "true" } : null,
+        { justPrepended: isJustPrepended }
+      );
+      if (injection.kind === "handover_request") {
+        return h(HandoverSourceEntry, {
+          attrs,
+          entry,
+          members: options?.handoverMembers?.get(rowKey) || EMPTY_HANDOVER_MEMBERS,
+          provider,
+          providerIcon: providerIconSvg(provider) || SPARKLES_SVG,
+        });
+      }
+      if (injection.kind === "handover_brief") {
+        return h(HandoverTargetEntry, { attrs, entry });
+      }
+    }
     return h(UserEntry, { entry, isJustPrepended, isLatestUser });
   }
   if (kind === "agent_text") {
@@ -3218,7 +3242,12 @@ export function TranscriptContent({
     () => collapseDuplicateTranscriptRows(rawEntries),
     [rawEntries]
   );
-  const groupedItems = React.useMemo(() => groupToolEntries(entries), [entries]);
+  // A delivered handover's turn is drawn as its card, so its rows leave the list.
+  const handoverFold = React.useMemo(() => foldHandoverTurns(entries), [entries]);
+  const groupedItems = React.useMemo(
+    () => groupToolEntries(handoverFold.entries),
+    [handoverFold]
+  );
   const latestUserEntryId = React.useMemo(() => {
     for (let index = entries.length - 1; index >= 0; index -= 1) {
       const entry = entries[index];
@@ -3248,10 +3277,17 @@ export function TranscriptContent({
     [entries, options?.turnRunning]
   );
   const turnOpenerItemIds = React.useMemo(() => computeTurnOpenerIds(entries), [entries]);
+  const handoverMembers = handoverFold.members;
   const effectiveOptions = React.useMemo(() => {
-    const derived = { lastTurnDiffItemId, forkableItemIds, settledFinalItemIds, turnOpenerItemIds };
+    const derived = {
+      lastTurnDiffItemId,
+      forkableItemIds,
+      settledFinalItemIds,
+      turnOpenerItemIds,
+      handoverMembers,
+    };
     return options ? { ...options, ...derived } : derived;
-  }, [options, lastTurnDiffItemId, forkableItemIds, settledFinalItemIds, turnOpenerItemIds]);
+  }, [options, lastTurnDiffItemId, forkableItemIds, settledFinalItemIds, turnOpenerItemIds, handoverMembers]);
   const justPrependedItemIds = useJustPrependedItemIds(entries);
   // An UNANSWERED question is the one thing the session is waiting on, so it
   // belongs at the bottom of the transcript wherever its tool call actually

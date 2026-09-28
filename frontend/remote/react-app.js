@@ -2491,6 +2491,8 @@ function RemoteApp() {
         h(RemoteThreadPanel, {
           agentWorkingIndicatorModel,
           onForkFromMessage: handleOpenForkDialog,
+          // A handover card names its other end; opening it is a deliberate keep.
+          onOpenThread: (threadId) => void handleResumeThread(threadId, { preview: false }),
           composerModel,
           composerDraft,
           composerScope,
@@ -3338,6 +3340,7 @@ function RemoteHeader({
 
 function RemoteThreadPanel({
   onForkFromMessage,
+  onOpenThread = null,
   agentWorkingIndicatorModel,
   composerModel,
   composerDraft,
@@ -3442,6 +3445,7 @@ function RemoteThreadPanel({
         emptyStateModel,
         onApplyFileChange,
         onForkFromMessage,
+        onOpenThread,
         onAskMessage: askAboutMessage,
         onSelectRelay,
         onToggleExpandableBlock,

@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -15,7 +15,56 @@ use super::{pricing, TokenUsage};
 
 /// Bumped only by adding a numbered migration below. `user_version` is a plain
 /// integer SQLite keeps in the file header, so this needs no table of its own.
-const LEDGER_SCHEMA_VERSION: i64 = 10;
+const LEDGER_SCHEMA_VERSION: i64 = 11;
+
+/// The relay's one database, beside `session.json`.
+pub(crate) fn database_path(state_path: &Path) -> PathBuf {
+    if let Some(kept) = adopt_token_usage_db(state_path) {
+        return kept;
+    }
+    state_path.with_file_name("sealwire.db")
+}
+
+/// The database used to be `token-usage.db`. Returns the old path when it could
+/// not be moved safely, so its history stays in use rather than orphaned.
+///
+/// TODO(2026-12): delete this, its call and its two tests once the rename has run.
+fn adopt_token_usage_db(state_path: &Path) -> Option<PathBuf> {
+    let path = state_path.with_file_name("sealwire.db");
+    let old = state_path.with_file_name("token-usage.db");
+    if path.exists() || !old.exists() {
+        return None;
+    }
+    // Folding the WAL in first leaves one file, so the move is a single atomic rename.
+    let moved = (|| -> Result<(), String> {
+        let conn = Connection::open_with_flags(&old, OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .map_err(|error| format!("open: {error}"))?;
+        let busy: i64 = conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+            .map_err(|error| format!("checkpoint: {error}"))?;
+        if busy != 0 {
+            return Err("checkpoint: the old database is still in use".to_string());
+        }
+        conn.close()
+            .map_err(|(_, error)| format!("close: {error}"))?;
+        for suffix in ["-wal", "-shm"] {
+            match std::fs::remove_file(format!("{}{suffix}", old.display())) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(format!("remove {suffix}: {error}"));
+                }
+                _ => {}
+            }
+        }
+        std::fs::rename(&old, &path).map_err(|error| format!("rename: {error}"))
+    })();
+    match moved {
+        Ok(()) => None,
+        Err(error) => {
+            warn!(path = %old.display(), %error, "kept the old database name");
+            Some(old)
+        }
+    }
+}
 
 /// A single billable observation, ready to be written.
 #[derive(Debug, Clone, Default)]
@@ -1823,6 +1872,38 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         .map_err(|error| format!("migrate to 10: {error}"))?;
     }
 
+    if version < 11 {
+        // Handover cards: the handover itself, and the user rows it injected, keyed by
+        // what the provider gives back after a restart (see `MessageAnchor`).
+        conn.execute_batch(
+            "BEGIN;
+             CREATE TABLE IF NOT EXISTS handover (
+                 id               TEXT PRIMARY KEY,
+                 source_thread_id TEXT NOT NULL,
+                 target_thread_id TEXT NOT NULL,
+                 source_provider  TEXT NOT NULL,
+                 target_provider  TEXT NOT NULL,
+                 note             TEXT NOT NULL,
+                 instruction      TEXT NOT NULL,
+                 status           TEXT NOT NULL,
+                 error            TEXT,
+                 created_at       INTEGER NOT NULL,
+                 updated_at       INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS injected_message (
+                 thread_id   TEXT NOT NULL,
+                 anchor      TEXT NOT NULL,
+                 kind        TEXT NOT NULL,
+                 handover_id TEXT NOT NULL,
+                 created_at  INTEGER NOT NULL,
+                 PRIMARY KEY (thread_id, anchor)
+             );
+             PRAGMA user_version = 11;
+             COMMIT;",
+        )
+        .map_err(|error| format!("migrate to 11: {error}"))?;
+    }
+
     Ok(())
 }
 
@@ -1833,6 +1914,8 @@ fn runtime_role_from_catalog_seat(seat: Option<&str>) -> String {
         _ => relay_api::team::TeamRole::Dev.as_str().to_string(),
     }
 }
+
+mod injections;
 
 #[cfg(test)]
 mod tests;

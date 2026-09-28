@@ -24,6 +24,7 @@ export function RemoteTranscriptPanel({
   emptyStateModel,
   onApplyFileChange,
   onForkFromMessage,
+  onOpenThread = null,
   onAskMessage = null,
   onSelectRelay,
   onToggleExpandableBlock,
@@ -187,6 +188,10 @@ export function RemoteTranscriptPanel({
           onToggleExpandableBlock?.(expandKey);
         },
         toggleEntry: ({ itemId }) => void onToggleTranscriptItem?.(itemId),
+        openThread: ({ threadId }, event) => {
+          event.preventDefault();
+          if (threadId) onOpenThread?.(threadId);
+        },
       }),
     });
   }

@@ -143,6 +143,7 @@ impl TranscriptRecord {
             } else {
                 crate::protocol::TranscriptContentState::Full
             },
+            injection: None,
         }
     }
 }

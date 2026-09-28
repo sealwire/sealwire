@@ -2577,3 +2577,202 @@ button.ask-user-summary:focus-visible {
 .chat-message.is-group-member .tool-run-title {
   color: var(--process-line-title-fg);
 }
+
+/* Handover (design 23a/23b): the injected prompts are drawn as one card at each end. */
+.handover-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+}
+.handover-line {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 9px;
+  padding-left: var(--assistant-text-inset);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+.handover-line-label {
+  font-weight: var(--weight-strong);
+  color: var(--text-primary);
+}
+.handover-failed .handover-line-label {
+  color: var(--err-fg);
+}
+.handover-spinner {
+  flex: none;
+  align-self: center;
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  border: 1.5px solid var(--border-firm);
+  border-top-color: var(--accent);
+  animation: handover-spin 0.9s linear infinite;
+}
+@keyframes handover-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .handover-spinner { animation: none; }
+}
+.chat-message.handover-brief {
+  align-self: stretch;
+  max-width: 100%;
+  justify-content: stretch;
+}
+.handover-card {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-soft));
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-1);
+  font-size: var(--text-ui);
+  line-height: var(--leading-relaxed);
+}
+.handover-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-surface));
+}
+.handover-card-icon {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-soft));
+  background: var(--bg-surface);
+  color: var(--accent);
+}
+.handover-card-heading {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.handover-card-kicker {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-strong);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.handover-card-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-body);
+  font-weight: var(--weight-strong);
+  color: var(--text-primary);
+}
+.handover-card-time {
+  flex: none;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.handover-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 14px 16px;
+}
+.handover-section {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 12px;
+}
+.handover-section.is-untitled {
+  grid-template-columns: minmax(0, 1fr);
+}
+.handover-section-label {
+  color: var(--text-tertiary);
+}
+.handover-section-value {
+  min-width: 0;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.handover-section-value > :first-child { margin-top: 0; }
+.handover-section-value > :last-child { margin-bottom: 0; }
+.handover-card-more,
+.handover-card-sent,
+.handover-card-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.handover-card-more {
+  align-self: flex-start;
+  padding-top: 2px;
+}
+.handover-card-more:hover,
+.handover-card-sent:hover {
+  color: var(--text-primary);
+}
+.handover-card-link {
+  color: var(--accent);
+}
+.handover-card-link:hover {
+  text-decoration: underline;
+}
+.handover-caret {
+  flex: none;
+  transition: transform 120ms ease;
+}
+.handover-caret.is-open {
+  transform: rotate(90deg);
+}
+.handover-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 9px 16px;
+  border-top: 1px solid var(--border-faint);
+}
+.handover-card-spacer {
+  flex: 1;
+}
+.handover-card-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  color: var(--ok-fg);
+}
+.handover-card-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+}
+.handover-sent-body {
+  margin: 0;
+  padding: 12px 16px 14px;
+  border-top: 1px solid var(--border-faint);
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--leading-relaxed);
+  color: var(--text-secondary);
+}

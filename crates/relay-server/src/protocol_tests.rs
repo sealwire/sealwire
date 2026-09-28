@@ -137,6 +137,7 @@ fn make_snapshot() -> SessionSnapshot {
                 turn_id: Some(format!("turn-{index}")),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
+                injection: None,
             })
             .collect(),
         logs: (0..30)
@@ -528,6 +529,7 @@ fn compact_for_broker_drops_legacy_workflow_card_before_conversation_content() {
             turn_id: Some(format!("turn-{index}")),
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         })
         .collect();
 
@@ -576,6 +578,7 @@ fn compact_for_broker_keeps_the_teams_cache_key_under_maximum_pressure() {
             turn_id: Some(format!("turn-{index}")),
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         })
         .collect();
 
@@ -825,6 +828,7 @@ fn local_web_control_plane_metadata_does_not_shell_normal_live_transcript() {
             turn_id: Some("turn-live".to_string()),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         })
         .collect();
     snapshot.active_review_jobs = (0..15)
@@ -930,6 +934,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
             turn_id: Some("turn-omitted".to_string()),
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         },
         TranscriptEntryView {
             row_id: None,
@@ -942,6 +947,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
             turn_id: Some("turn-omitted".to_string()),
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         },
         TranscriptEntryView {
             row_id: None,
@@ -957,6 +963,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
             turn_id: Some("turn-omitted".to_string()),
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         },
     ];
 
@@ -1012,6 +1019,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
             turn_id: Some("turn-preview".to_string()),
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         },
         TranscriptEntryView {
             row_id: None,
@@ -1024,6 +1032,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
             turn_id: Some("turn-preview".to_string()),
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         },
         TranscriptEntryView {
             row_id: None,
@@ -1036,6 +1045,7 @@ fn emit_cross_layer_compacted_snapshot_fixture() {
             turn_id: Some("turn-preview".to_string()),
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         },
     ];
     local.transcript_truncated = false;
@@ -1094,6 +1104,7 @@ fn long_session_snapshot_stays_bounded_in_bytes_and_entry_count() {
                 turn_id: Some(format!("turn-{index}")),
                 tool: None,
                 content_state: TranscriptContentState::Full,
+                injection: None,
             })
             .collect();
         snapshot.reviewer_threads = (0..200)
@@ -1175,6 +1186,7 @@ fn compact_shelled_entries_are_marked_omitted_not_inferred_from_ellipsis() {
             turn_id: Some(format!("turn-{index}")),
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         })
         .collect();
 
@@ -1218,6 +1230,7 @@ fn compact_emergency_shell_only_exempts_settled_empty_reasoning() {
         turn_id: Some("turn-1".to_string()),
         tool: None,
         content_state: TranscriptContentState::Full,
+        injection: None,
     };
     let compact_target = |target: TranscriptEntryView| {
         let mut snapshot = make_snapshot();
@@ -1322,6 +1335,7 @@ fn compact_local_emergency_shell_keeps_empty_reasoning_full() {
         turn_id: Some("turn-1".to_string()),
         tool: None,
         content_state: TranscriptContentState::Full,
+        injection: None,
     }];
     snapshot
         .transcript
@@ -1363,6 +1377,7 @@ fn compact_local_emergency_shell_keeps_empty_reasoning_full() {
                 can_apply: None,
             }),
             content_state: TranscriptContentState::Full,
+            injection: None,
         }));
 
     let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);
@@ -1425,6 +1440,7 @@ fn compact_emergency_shell_preserves_bodyless_entries_existing_states() {
             turn_id: Some("turn-1".to_string()),
             tool: None,
             content_state: TranscriptContentState::Preview,
+            injection: None,
         },
         TranscriptEntryView {
             row_id: None,
@@ -1437,6 +1453,7 @@ fn compact_emergency_shell_preserves_bodyless_entries_existing_states() {
             turn_id: Some("turn-1".to_string()),
             tool: None,
             content_state: TranscriptContentState::Omitted,
+            injection: None,
         },
     ];
 
@@ -1476,6 +1493,7 @@ fn compact_marks_ellipsis_truncated_entry_preview_and_leaves_short_full() {
             turn_id: Some("turn-1".to_string()),
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         },
         TranscriptEntryView {
             row_id: None,
@@ -1488,6 +1506,7 @@ fn compact_marks_ellipsis_truncated_entry_preview_and_leaves_short_full() {
             turn_id: Some("turn-1".to_string()),
             tool: None,
             content_state: TranscriptContentState::Full,
+            injection: None,
         },
     ];
 
@@ -1538,6 +1557,7 @@ fn control_plane_flood_keeps_both_surfaces_bounded_without_shelling_live_text() 
                 turn_id: Some("turn-live".to_string()),
                 tool: None,
                 content_state: TranscriptContentState::Full,
+                injection: None,
             })
             .collect();
         snapshot.active_review_jobs = (0..120)
@@ -1754,6 +1774,7 @@ fn compact_for_broker_stays_under_budget_even_with_oversized_cwd() {
         turn_id: Some("turn-1".to_string()),
         tool: None,
         content_state: TranscriptContentState::Full,
+        injection: None,
     }];
     snapshot.current_cwd = "/tmp/".to_string() + &"超长路径".repeat(4_000);
 
@@ -1919,6 +1940,7 @@ fn compact_for_surfaces_truncates_a_single_oversized_agent_message() {
                 turn_id: Some("turn-1".to_string()),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
+                injection: None,
             },
             TranscriptEntryView {
                 row_id: None,
@@ -1931,6 +1953,7 @@ fn compact_for_surfaces_truncates_a_single_oversized_agent_message() {
                 turn_id: Some("turn-1".to_string()),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
+                injection: None,
             },
         ];
 
@@ -2225,6 +2248,7 @@ fn compact_for_broker_shells_transcript_tail_as_last_resort_without_clearing() {
             turn_id: Some(format!("turn-{index}")),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         })
         .collect();
 
@@ -2300,6 +2324,7 @@ fn compact_for_broker_shells_tool_entries_dropping_heavy_content() {
             can_apply: None,
         }),
         content_state: crate::protocol::TranscriptContentState::Full,
+        injection: None,
     }];
 
     let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
@@ -2361,6 +2386,7 @@ fn strip_file_change_diffs_keeps_summary_and_flags_entry() {
                 can_apply: None,
             }),
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         },
         // A plain agent-text entry with no diff body — must be left untouched.
         TranscriptEntryView {
@@ -2374,6 +2400,7 @@ fn strip_file_change_diffs_keeps_summary_and_flags_entry() {
             turn_id: Some("turn-1".to_string()),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         },
     ];
 
@@ -2438,6 +2465,7 @@ fn compact_for_broker_shells_bring_oversized_transcript_under_budget() {
                 can_apply: None,
             }),
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         })
         .collect();
 
@@ -2509,6 +2537,7 @@ fn compact_for_broker_trims_many_file_changes_without_clearing_transcript() {
             can_apply: None,
         }),
         content_state: crate::protocol::TranscriptContentState::Full,
+        injection: None,
     }];
 
     let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
@@ -2690,6 +2719,7 @@ fn compact_for_broker_preserves_existing_transcript_truncated_flag() {
             turn_id: Some(format!("turn-{index}")),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         })
         .collect();
 
@@ -2752,6 +2782,7 @@ fn thread_transcript_response_preserves_oversized_single_entries() {
             turn_id: Some("turn-1".to_string()),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         },
         TranscriptEntryView {
             row_id: None,
@@ -2764,6 +2795,7 @@ fn thread_transcript_response_preserves_oversized_single_entries() {
             turn_id: Some("turn-2".to_string()),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         },
     ];
 
@@ -2802,6 +2834,7 @@ fn thread_transcript_response_keeps_complete_entries_together() {
         turn_id: Some("turn-1".to_string()),
         tool: None,
         content_state: crate::protocol::TranscriptContentState::Full,
+        injection: None,
     }];
 
     let (page, older) = page_as_sent(&transcript, None, 0);
@@ -2828,6 +2861,7 @@ fn large_entries(count: usize) -> Vec<TranscriptEntryView> {
             turn_id: Some(format!("turn-{index}")),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         })
         .collect()
 }
@@ -2871,6 +2905,7 @@ fn thread_transcript_response_packs_many_small_entries_within_budget() {
             turn_id: Some(format!("turn-{index}")),
             tool: None,
             content_state: crate::protocol::TranscriptContentState::Full,
+            injection: None,
         })
         .collect::<Vec<_>>();
 
@@ -2926,6 +2961,7 @@ fn thread_transcript_page_materializes_only_entries_near_the_requested_cursor() 
                 turn_id: Some(format!("turn-{index}")),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::Full,
+                injection: None,
             }
         },
     );
@@ -3014,6 +3050,7 @@ fn thread_transcript_history_externalizes_large_file_change_diffs() {
             can_apply: None,
         }),
         content_state: crate::protocol::TranscriptContentState::Full,
+        injection: None,
     }];
 
     let (page, _) = page_as_sent(&transcript, None, 9);
@@ -3037,6 +3074,7 @@ fn thread_entry_detail_response_chunks_large_command_text() {
         turn_id: Some("turn-1".to_string()),
         tool: None,
         content_state: crate::protocol::TranscriptContentState::Full,
+        injection: None,
     };
 
     let response =
@@ -3112,6 +3150,7 @@ fn thread_entry_detail_response_chunks_large_nested_file_change_diff() {
             can_apply: None,
         }),
         content_state: crate::protocol::TranscriptContentState::Full,
+        injection: None,
     };
 
     let response =
@@ -3181,6 +3220,7 @@ mod can_apply_flag_tests {
                 can_apply: None,
             }),
             content_state: TranscriptContentState::Full,
+            injection: None,
         }
     }
 
@@ -3389,6 +3429,7 @@ fn compaction_cuts_a_long_command_and_says_so() {
             can_apply: None,
         }),
         content_state: TranscriptContentState::Full,
+        injection: None,
     }];
 
     let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);

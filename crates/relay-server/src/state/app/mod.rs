@@ -317,6 +317,7 @@ mod fork;
 mod git_context;
 mod goal;
 mod handover;
+mod handover_marks;
 mod orchestrator;
 pub(crate) mod orchestrator_dispatch;
 pub(crate) mod orchestrator_proposals;
@@ -537,13 +538,13 @@ impl AppState {
             security,
         )));
 
-        // Install the token ledger beside session.json. Best-effort by
+        // Install the database beside session.json. Best-effort by
         // construction: a failure degrades to `enabled: false` on /api/usage and
         // never blocks boot (see `crate::usage::store`).
         {
             let mut relay = relay.write().await;
-            let ledger_path = persistence.path().with_file_name("token-usage.db");
-            relay.usage_store = crate::usage::store::UsageStore::open(&ledger_path);
+            let path = crate::usage::store::database_path(persistence.path());
+            relay.install_database(crate::usage::store::UsageStore::open(&path));
         }
 
         if let Some(ref persisted) = restored_state {

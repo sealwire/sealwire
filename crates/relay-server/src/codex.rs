@@ -1568,6 +1568,7 @@ fn parse_transcript(thread: &Value) -> ParsedTranscript {
                 turn_id: turn_id.clone(),
                 tool: None,
                 content_state: crate::protocol::TranscriptContentState::default(),
+                injection: None,
             }));
         }
     }
@@ -1712,6 +1713,7 @@ fn parse_transcript_detail_item(
         turn_id,
         tool,
         content_state: crate::protocol::TranscriptContentState::Full,
+        injection: None,
     })
 }
 
@@ -2004,6 +2006,7 @@ pub(crate) fn build_turn_diff_entry_with_fallback(
             can_apply: None,
         }),
         content_state: crate::protocol::TranscriptContentState::Full,
+        injection: None,
     }
 }
 
