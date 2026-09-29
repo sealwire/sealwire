@@ -10,8 +10,8 @@ import { chromium } from "playwright";
 /// after the fix, having been 3-of-3 green at full speed both times.
 const CPU_THROTTLE_RATE = Number(process.env.E2E_CPU_THROTTLE) || 0;
 
-export async function launchBrowser({ contextOptions = {} } = {}) {
-  const browser = await chromium.launch({ headless: true });
+export async function launchBrowser({ contextOptions = {}, browserType = chromium } = {}) {
+  const browser = await browserType.launch({ headless: true });
   const context = await browser.newContext(contextOptions);
   if (CPU_THROTTLE_RATE > 1) {
     context.on("page", (page) => {

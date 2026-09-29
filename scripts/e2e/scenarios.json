@@ -679,6 +679,18 @@
         "touch-input"
       ]
     },
+    "android-remote-composer-commands": {
+      "script": "browser-remote-composer-commands-e2e.mjs",
+      "tier": "manual",
+      "provider": "fake-compatible",
+      "transport": "remote",
+      "coverage": [
+        "composer-commands",
+        "real-mobile-browser",
+        "soft-keyboard",
+        "touch-input"
+      ]
+    },
     "local-ask-user-click": {
       "script": "browser-local-ask-user-click-e2e.mjs",
       "tier": "core",

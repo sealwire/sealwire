@@ -10,11 +10,17 @@
 // Needs the private build: a public checkout has no commands to offer, and the menu
 // correctly never opens. Same lightweight fixture as the mobile header test — a
 // static server over web/ with the relay WebSocket stubbed.
+// E2E_BROWSER=webkit runs the phone tap checks in WebKit (playwright install webkit).
+// Chromium additionally exercises finger drift and native scrolling through CDP.
+// ANDROID_E2E=1 attaches those tap checks to a booted Android Chrome over adb.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { chromium, webkit } from "playwright";
 
 import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
 import { attachPageDebugLogging, launchBrowser } from "./e2e/harness/browser.mjs";
@@ -30,6 +36,25 @@ const PROJECT_NAME = "Mobile Project With A Very Long Header Name";
 const LONG_PROMPT_TAIL = "MOBILE-HEADER-TAIL-E2E";
 const FULL_TEXT = buildFullTranscriptText();
 const MOBILE_VIEWPORT = { width: 390, height: 844 };
+const WEBKIT = process.env.E2E_BROWSER === "webkit";
+const ANDROID = process.env.ANDROID_E2E === "1";
+const ADB = process.env.ADB_PATH || path.join(os.homedir(), "Library/Android/sdk/platform-tools/adb");
+const ANDROID_CDP_PORT = Number(process.env.ANDROID_CDP_PORT || 9222);
+
+function adb(...args) {
+  return execFileSync(ADB, args, { encoding: "utf8" }).trim();
+}
+
+let androidContentTop = null;
+function readAndroidContentTop() {
+  if (androidContentTop !== null) return androidContentTop;
+  adb("shell", "uiautomator", "dump", "/sdcard/sealwire-window.xml");
+  const xml = adb("shell", "cat", "/sdcard/sealwire-window.xml");
+  const match = xml.match(/resource-id="com\.android\.chrome:id\/control_container"[^>]*bounds="\[[^\]]+\]\[[^,]+,(\d+)\]"/);
+  assert.ok(match, "Android Chrome's content offset is missing from the window tree");
+  androidContentTop = Number(match[1]);
+  return androidContentTop;
+}
 
 // The relay, stubbed in the page: a paired profile, and a socket that answers like one.
 // Serialised by Playwright into each page, so it must close over nothing.
@@ -443,20 +468,48 @@ async function main() {
     stripStaticPrefix: true,
   });
   const origin = `http://127.0.0.1:${server.port}`;
-  const { browser, context } = await launchBrowser({
-    contextOptions: {
-      viewport: MOBILE_VIEWPORT,
-      deviceScaleFactor: 2,
-      hasTouch: true,
-      isMobile: true,
-    },
-  });
+  let browser;
+  let context;
+  if (ANDROID) {
+    adb("reverse", `tcp:${server.port}`, `tcp:${server.port}`);
+    adb("forward", `tcp:${ANDROID_CDP_PORT}`, "localabstract:chrome_devtools_remote");
+    browser = await chromium.connectOverCDP(`http://127.0.0.1:${ANDROID_CDP_PORT}`);
+    context = browser.contexts()[0];
+  } else {
+    ({ browser, context } = await launchBrowser({
+      browserType: WEBKIT ? webkit : undefined,
+      contextOptions: {
+        viewport: MOBILE_VIEWPORT,
+        deviceScaleFactor: 2,
+        hasTouch: true,
+        isMobile: true,
+      },
+    }));
+  }
   const page = await context.newPage();
   attachPageDebugLogging(page, "remote", { prefix: "remote-mobile-header-e2e" });
 
   try {
     await page.addInitScript(installFakeRelay, FIXTURE);
     await openComposer(page, origin);
+    if (ANDROID) {
+      await assertAndroidImeTap(page);
+      await assertPhoneTaps(page, { systemTouch: true });
+      if (process.env.SKILLS_SCREENSHOT) await page.screenshot({ path: process.env.SKILLS_SCREENSHOT });
+      console.log("remote-composer-commands-e2e OK — Android Chrome phone touch picks");
+      return;
+    }
+    for (const height of [MOBILE_VIEWPORT.height, 480]) {
+      await page.setViewportSize({ width: MOBILE_VIEWPORT.width, height });
+      await assertPhoneTaps(page);
+      // WebKit's automation API exposes taps; continuous native touch input is CDP-only.
+      if (!WEBKIT) await assertPhoneTaps(page, { jitter: true });
+    }
+    await page.setViewportSize(MOBILE_VIEWPORT);
+    if (WEBKIT) {
+      console.log("remote-composer-commands-e2e OK — WebKit phone touch picks");
+      return;
+    }
 
     // Type the way a person does, so the controller's own input listener runs.
     await page.click("#remote-message-input");
@@ -623,8 +676,184 @@ ordinary message sends THAT instead of what the user types — ${JSON.stringify(
   } finally {
     await context.close().catch(() => {});
     await browser.close().catch(() => {});
+    if (ANDROID) {
+      try {
+        adb("reverse", "--remove", `tcp:${server.port}`);
+      } catch {}
+    }
     await server.close();
   }
+}
+
+// Use the browser's real touch pipeline, including native touchend; neither keyboard
+// Enter nor synthetic pointer events exercise the whole gesture.
+async function dispatchTouch(page, locator, { jitter = false } = {}) {
+  await locator.scrollIntoViewIfNeeded();
+  const box = await locator.boundingBox();
+  assert.ok(box, "the touch target has a visible box");
+  const x = Math.round(box.x + box.width / 2);
+  const y = Math.round(box.y + box.height / 2);
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+    if (jitter) {
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: x + 8, y: y + 8 }] });
+    }
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  } finally {
+    await cdp.detach();
+  }
+}
+
+async function dispatchAndroidSystemTap(page, locator) {
+  const handle = await locator.elementHandle();
+  assert.ok(handle, "the Android touch target exists");
+  const box = await handle.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+  });
+  assert.ok(box, "the Android touch target has a visible box");
+  const viewport = await page.evaluate(() => ({
+    dpr: devicePixelRatio,
+    height: visualViewport.height,
+    offsetLeft: visualViewport.offsetLeft,
+    offsetTop: visualViewport.offsetTop,
+  }));
+  const centreY = box.y + box.height / 2;
+  assert.ok(
+    centreY >= viewport.offsetTop && centreY <= viewport.offsetTop + viewport.height,
+    `the Android touch target is outside the visible viewport — ${JSON.stringify({ box, viewport })}`
+  );
+  const x = Math.round((box.x + box.width / 2 - viewport.offsetLeft) * viewport.dpr);
+  const y = Math.round(
+    readAndroidContentTop() + (box.y + box.height / 2 - viewport.offsetTop) * viewport.dpr
+  );
+  console.log(
+    `Android system tap ${JSON.stringify({ box, viewport, screen: { x, y }, target: await locator.getAttribute("class") })}`
+  );
+  adb("shell", "input", "tap", String(x), String(y));
+}
+
+async function centreInCommandMenu(locator) {
+  await locator.evaluate((node) => {
+    const menu = node.closest(".composer-command-menu");
+    if (!menu) return;
+    const row = node.getBoundingClientRect();
+    const frame = menu.getBoundingClientRect();
+    menu.scrollTop += row.top + row.height / 2 - (frame.top + frame.height / 2);
+  });
+}
+
+// Programmatic fill never opens Android's IME. Focus with a real touch first, then
+// keep that keyboard open while picking the menu — the state a phone actually uses
+// and desktop mobile emulation cannot reproduce.
+async function assertAndroidImeTap(page) {
+  await page.fill("#remote-message-input", "");
+  const fullHeight = await page.evaluate(() => innerHeight);
+  await dispatchAndroidSystemTap(page, page.locator("#remote-message-input"));
+  await page.waitForFunction(
+    (before) => document.activeElement?.id === "remote-message-input" && visualViewport.height < before * 0.8,
+    fullHeight,
+    { timeout: TIMEOUT_MS }
+  );
+  // Keep the real Android keyboard open, but isolate the reported failure to the
+  // menu tap itself. adb's text injection has device-dependent key-event timing.
+  await page.fill("#remote-message-input", "/rev");
+  await page.waitForSelector(".composer-command-row.is-provider", { timeout: TIMEOUT_MS });
+  const providerRow = page.locator(".composer-command-row.is-provider");
+  const before = await page.evaluate(() => {
+    const rect = (node) => {
+      const box = node?.getBoundingClientRect();
+      return box
+        ? { left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: box.width, height: box.height }
+        : null;
+    };
+    const row = document.querySelector(".composer-command-row.is-provider");
+    const rowBox = row?.getBoundingClientRect();
+    const x = rowBox ? rowBox.left + rowBox.width / 2 : 0;
+    const y = rowBox ? rowBox.top + rowBox.height / 2 : 0;
+    return {
+      active: document.activeElement?.id || "",
+      innerHeight,
+      scrollY,
+      visualViewport: {
+        height: visualViewport.height,
+        offsetLeft: visualViewport.offsetLeft,
+        offsetTop: visualViewport.offsetTop,
+        pageLeft: visualViewport.pageLeft,
+        pageTop: visualViewport.pageTop,
+        scale: visualViewport.scale,
+      },
+      input: rect(document.querySelector("#remote-message-input")),
+      menu: rect(document.querySelector(".composer-command-menu")),
+      row: rect(row),
+      hit: document.elementFromPoint(x, y)?.className || document.elementFromPoint(x, y)?.tagName || "",
+    };
+  });
+  console.log(`Android IME menu ${JSON.stringify(before)}`);
+  await dispatchAndroidSystemTap(page, providerRow);
+  await page.waitForFunction(
+    () => [...document.querySelectorAll(".composer-command-pill-label")].some((n) => n.textContent === "$review"),
+    null,
+    { timeout: TIMEOUT_MS }
+  );
+  assert.ok(
+    before.visualViewport.height < fullHeight * 0.8,
+    `Android IME was not open — ${JSON.stringify(before)}`
+  );
+  await page.keyboard.press("Backspace");
+  await page.waitForFunction(() => !document.querySelector(".composer-command-pill"), null, { timeout: TIMEOUT_MS });
+}
+
+async function assertPhoneTaps(page, { jitter = false, systemTouch = false } = {}) {
+  const tap = async (locator) => {
+    if (systemTouch) return dispatchAndroidSystemTap(page, locator);
+    if (!jitter) return locator.tap();
+    // A normal Chromium tap may drift 8px on each axis (11.3px radially). The old
+    // 10px guard rejected it, then cancelled touchend so its native click never came.
+    await dispatchTouch(page, locator, { jitter });
+  };
+  for (const { selector, label } of [
+    { selector: ".composer-command-row:not(.is-provider)", label: "/review" },
+    { selector: ".composer-command-row.is-provider", label: "$review" },
+  ]) {
+    await page.fill("#remote-message-input", "/rev");
+    await page.waitForSelector(".composer-command-row.is-provider", { timeout: TIMEOUT_MS });
+    await tap(page.locator(selector));
+    await page.waitForFunction(
+      (expected) => [...document.querySelectorAll(".composer-command-pill-label")].some((n) => n.textContent === expected),
+      label,
+      { timeout: TIMEOUT_MS }
+    );
+    const picked = await readMenu(page);
+    assert.equal(picked.fieldValue, "", `${label}: tapping consumes the filter`);
+    assert.equal(picked.surfaceDraft.value, "", `${label}: React agrees the filter was consumed`);
+    assert.equal(picked.pills.length, 1, "one tap stages exactly one choice");
+    assert.equal(await page.$eval("#remote-message-input", (input) => document.activeElement === input), true);
+    if (process.env.SKILLS_SCREENSHOT) {
+      const height = page.viewportSize()?.height || "android";
+      const name = `${label === "/review" ? "command" : "skill"}${jitter ? "-jitter" : ""}-${height}`;
+      await page.screenshot({ path: process.env.SKILLS_SCREENSHOT.replace(/\.png$/, `-tap-${name}.png`) });
+    }
+    await page.keyboard.press("Backspace");
+    await page.waitForFunction(() => !document.querySelector(".composer-command-pill"), null, { timeout: TIMEOUT_MS });
+  }
+  await page.fill("#remote-message-input", "/");
+  const expand = page.locator(".composer-command-expand");
+  if (systemTouch) await centreInCommandMenu(expand);
+  await tap(expand);
+  await waitExpanded(page, true);
+  const target = page.locator(".composer-command-row.is-provider").filter({ hasText: "$batch-skill-060" });
+  if (systemTouch) await centreInCommandMenu(target);
+  await tap(target);
+  await page.waitForFunction(
+    () => [...document.querySelectorAll(".composer-command-pill-label")].some((n) => n.textContent === "$batch-skill-060"),
+    null,
+    { timeout: TIMEOUT_MS }
+  );
+  await page.keyboard.press("Backspace");
+  await page.waitForFunction(() => !document.querySelector(".composer-command-pill"), null, { timeout: TIMEOUT_MS });
+  await page.fill("#remote-message-input", "");
 }
 
 // Geometry of the open menu, its expand control and the composer it floats over.
