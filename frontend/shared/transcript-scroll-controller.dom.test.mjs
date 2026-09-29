@@ -14,7 +14,8 @@ function fixture() {
   let frameId = 0;
   window.requestAnimationFrame = cb => { frames.set(++frameId, cb); return frameId; };
   window.cancelAnimationFrame = id => frames.delete(id);
-  global.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
+  let notifyResize;
+  global.ResizeObserver = class { constructor(callback) { notifyResize = callback; } observe() {} unobserve() {} disconnect() {} };
   const scroller = window.document.querySelector(".chat-thread");
   let scrollTop = 600;
   let firstHeight = 600;
@@ -37,9 +38,10 @@ function fixture() {
   controller.apply({ kind: "read-content" });
   const paint = () => { const callbacks = [...frames.values()]; frames.clear(); callbacks.forEach(cb => cb()); };
   return { window, scroller, controller, frames, writes, paint, second,
+    notifyResize: () => notifyResize(),
     grow(by) { firstHeight += by; scrollHeight += by; controller.geometryChanged(); },
-    readerScroll(top, report = true) {
-      scroller.dispatchEvent(new window.WheelEvent("wheel", { deltaY: top - scrollTop }));
+    readerScroll(top, report = true, gesture = true) {
+      if (gesture) scroller.dispatchEvent(new window.WheelEvent("wheel", { deltaY: top - scrollTop }));
       scrollTop = top;
       if (report) scroller.dispatchEvent(new window.Event("scroll"));
     },
@@ -105,6 +107,18 @@ test("disconnect cancels pending geometry work and removes gesture listeners", (
   assert.deepEqual(view.writes, []);
 });
 
+for (const report of [false, true]) test(`native movement without a fresh input event survives geometry changes (scroll event delivered: ${report})`, () => {
+  const view = fixture();
+  try {
+    view.readerScroll(570, report, false);
+    view.grow(100);
+    view.paint();
+    assert.equal(view.scroller.scrollTop, 670);
+    assert.equal(view.second.getBoundingClientRect().top, 30, "the reader's 30px movement is preserved");
+    assert.equal(view.controller.readPosition().followBottom, false);
+  } finally { view.close(); }
+});
+
 test("clicking a disclosure at the bottom cannot re-arm paused following", () => {
   const view = fixture();
   try {
@@ -113,6 +127,20 @@ test("clicking a disclosure at the bottom cannot re-arm paused following", () =>
     view.scroller.dispatchEvent(new view.window.MouseEvent("mousedown"));
     view.window.dispatchEvent(new view.window.MouseEvent("mouseup"));
     assert.equal(view.controller.readPosition().followBottom, false);
+  } finally { view.close(); }
+});
+
+test("navigation from a disclosure rejoins even when resize precedes the native scroll event", () => {
+  const view = fixture();
+  try {
+    view.second.firstElementChild.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    view.readerScroll(2600, false, false);
+    view.grow(0);
+    view.paint();
+    assert.equal(view.controller.readPosition().followBottom, true);
+    view.grow(100);
+    view.paint();
+    assert.equal(view.scroller.scrollTop, 2700);
   } finally { view.close(); }
 });
 
@@ -127,5 +155,16 @@ test("an explicit content reveal retains its target while later content changes"
     view.grow(100);
     view.paint();
     assert.equal(view.second.getBoundingClientRect().top, 0);
+  } finally { view.close(); }
+});
+
+test("an observer delivery before a restored row mounts preserves its content address", () => {
+  const view = fixture();
+  try {
+    const anchor = { path: ["entry:restored", "card:answer"], rowKey: "restored", rowOffset: 120, offset: 20, edge: "top" };
+    view.controller.apply({ kind: "restore-thread", scrollTop: 500, anchor });
+    view.notifyResize();
+    assert.deepEqual(view.controller.readPosition().anchor, anchor, "the range commit still owns mounting the requested content");
+    assert.equal(view.scroller.scrollTop, 500, "other currently mounted rows do not replace the restore target");
   } finally { view.close(); }
 });

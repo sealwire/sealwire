@@ -23,9 +23,8 @@ export function getTranscriptScrollController(element) {
 }
 
 // How long after a wheel/key gesture an untagged scroll still counts as the reader's.
-// This only has to outlive the gap between a gesture and the scroll event it causes —
-// momentum scrolling keeps emitting `wheel` while it coasts, so a long flick stays
-// attributed throughout.
+// This attributes following intent, not position. Touch momentum can outlive
+// the input events; all native movement still updates the reading anchor.
 const READER_INTENT_MS = 300;
 const now = () => Date.now();
 
@@ -62,6 +61,7 @@ function createTranscriptScrollController(scroller) {
   let disclosure = null;
   let frame = null;
   let geometryDirty = false;
+  const measurementKeys = new Set();
   let intentKnown = false;
   let flushing = false;
   const requestFrame = callback => (view.requestAnimationFrame || (fn => setTimeout(fn, 16))).call(view, callback);
@@ -134,7 +134,8 @@ function createTranscriptScrollController(scroller) {
     }
   };
   const onKeyDown = event => {
-    if (event.target?.closest?.("input, textarea, [contenteditable], button, summary, [aria-expanded]")) return;
+    if (event.target?.closest?.("input, textarea, [contenteditable]")) return;
+    if ([" ", "Enter"].includes(event.key) && event.target?.closest?.("button, summary, [aria-expanded]")) return;
     if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) stampReader();
   };
   const onScroll = () => {
@@ -150,7 +151,7 @@ function createTranscriptScrollController(scroller) {
     const scrolledDown = sp > lastScrollTop + SCROLL_JITTER_PX;
     // Kept on jitter, so a drag of one pixel per frame still adds up to a move.
     if (scrolledUp || scrolledDown) {
-      if (anchor && (interacting() || readerDriven())) {
+      if (anchor) {
         anchor = { ...anchor, offset: anchor.offset - (sp - lastScrollTop) };
       }
       lastScrollTop = sp;
@@ -239,16 +240,21 @@ function createTranscriptScrollController(scroller) {
     frame = requestFrame(flush);
   }
 
-  function geometryChanged() {
+  function geometryChanged(rowKey) {
+    if (rowKey != null) measurementKeys.add(rowKey);
     geometryDirty = true;
     schedule();
+  }
+
+  function consumeNativeMovement() {
+    if (Math.abs(scroller.scrollTop - lastScrollTop) > SCROLL_JITTER_PX) onScroll();
   }
 
   function capture() {
     if (!stuck) anchor = captureReadingAnchor(scroller) || anchor;
   }
 
-  function restoreAnchor(saved) {
+  function restoreAnchor(saved, domOnly = false) {
     if (!saved) return false;
     let candidate = saved;
     let resolved;
@@ -259,10 +265,13 @@ function createTranscriptScrollController(scroller) {
         ...alternative, offset: Math.max(0, Math.min(saved.offset, scroller.clientHeight - 40)),
       };
       resolved = resolveReadingAnchor(scroller, candidate);
+      // RO can precede the range commit that mounts a restored thread/reveal
+      // target. Keep its address for rAF rather than selecting a different row.
+      if (domOnly && !resolved) return false;
       if (resolved?.rowKey != null) candidate.rowKey = resolved.rowKey;
       // Use the measured row's NEW position before React commits its transform.
       // Otherwise a large shrink unmounts the row we are trying to retain.
-      const projected = viewport?.locate(candidate, resolved?.rowOffset ?? candidate.rowOffset, resolved?.offset ?? candidate.offset);
+      const projected = !domOnly && viewport?.locate(candidate, resolved?.rowOffset ?? candidate.rowOffset, resolved?.offset ?? candidate.offset);
       target = Number.isFinite(projected) ? projected
         : resolved ? scroller.scrollTop + resolved.position - resolved.offset : null;
       if (Number.isFinite(target)) break;
@@ -286,19 +295,18 @@ function createTranscriptScrollController(scroller) {
     flushing = true;
     // The native scroller moves before delivering its scroll event. Consume
     // that movement against the same live offset before applying any resize.
-    const liveTop = scroller.scrollTop;
-    if (anchor && (interacting() || readerDriven()) && Math.abs(liveTop - lastScrollTop) > SCROLL_JITTER_PX) {
-      anchor = { ...anchor, offset: anchor.offset - (liveTop - lastScrollTop) };
-      lastScrollTop = liveTop;
-    }
+    consumeNativeMovement();
     const changed = geometryDirty;
     geometryDirty = false;
     if (changed) {
+      for (const key of measurementKeys) viewport?.measure(key);
+      const measured = measurementKeys.size > 0;
+      measurementKeys.clear();
       const saved = disclosure || anchor;
       const moved = saved && (!interacting() || disclosure) && restoreAnchor(saved);
       if (!saved && stuck && !interacting()) pin();
-      if (saved && (moved || disclosure)) {
-        viewport?.commit(disclosure?.rowKey);
+      if (saved && (moved || disclosure || measured)) {
+        viewport?.commit();
         if ((!interacting() || disclosure) && restoreAnchor(saved)) viewport?.commit();
       }
       if (disclosure) anchor = stuck ? null : disclosure;
@@ -345,6 +353,9 @@ function createTranscriptScrollController(scroller) {
   }
 
   function disclosureChange(element, expanded) {
+    // Queue before the component changes its own state, including an offscreen
+    // focused control. Waiting for RO would miss this frame's paint.
+    geometryChanged(element.closest("[data-transcript-row-key]")?.getAttribute("data-transcript-row-key"));
     if (!expanded) return;
     // The clicked edge is a short-lived semantic anchor. The identity survives
     // replacement of the control; no durable position retains a DOM node.
@@ -352,7 +363,16 @@ function createTranscriptScrollController(scroller) {
     const bounds = scroller.getBoundingClientRect();
     if (rect.bottom <= bounds.top || rect.top >= bounds.bottom) return;
     disclosure = captureElementAnchor(scroller, element, rect.top < bounds.top ? "bottom" : "top");
-    geometryChanged();
+  }
+
+  function correctObservedGeometry() {
+    consumeNativeMovement();
+    // RO runs after rAF. Correct the already-mounted DOM before this paint;
+    // React range updates remain in rAF to avoid observer delivery loops.
+    if (!interacting()) {
+      if (disclosure || anchor) restoreAnchor(disclosure || anchor, true);
+      else if (stuck) pin();
+    }
   }
 
   function refreshContent() {
@@ -367,6 +387,7 @@ function createTranscriptScrollController(scroller) {
   function connect() {
     connected = true;
     resizeObserver = new ResizeObserver(() => {
+      correctObservedGeometry();
       geometryChanged();
     });
 
@@ -394,6 +415,7 @@ function createTranscriptScrollController(scroller) {
       resizeObserver.disconnect();
       resizeObserver = null;
       observedContent = null;
+      measurementKeys.clear();
       scroller.removeEventListener("wheel", onWheel);
       scroller.removeEventListener("keydown", onKeyDown);
       scroller.removeEventListener("scroll", onScroll);
@@ -416,10 +438,19 @@ function createTranscriptScrollController(scroller) {
     subscribePosition(listener) { positionListeners.add(listener); return () => positionListeners.delete(listener); },
     setViewport(adapter) { viewport = adapter; return () => { if (viewport === adapter) viewport = null; }; },
     resizeRow(item, _delta, instance) {
-      if (anchor || disclosure || stuck) { geometryChanged(); return false; }
+      if (anchor || disclosure || stuck) {
+        geometryChanged();
+        if (!interacting()) {
+          // Includes component-local and intrinsic growth within a shared row.
+          correctObservedGeometry();
+          return false;
+        }
+        // During a native drag keep the existing above-viewport compensation.
+        // The tagged write moves content with the finger, without rejoining.
+      }
       return item.end <= (instance.scrollElement?.scrollTop ?? instance.getScrollOffset());
     },
-    adjustBy(delta) { write(scroller.scrollTop + delta); },
+    adjustBy(delta) { consumeNativeMovement(); write(scroller.scrollTop + delta); },
     position(top) { write(top); },
     readPosition() {
       return { followBottom: intentKnown ? stuck : distance() <= RESTICK_AT_BOTTOM_PX,

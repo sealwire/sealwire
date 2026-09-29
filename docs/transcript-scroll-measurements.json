@@ -216,5 +216,225 @@
       "LayoutDurationMs": 33.436,
       "RecalcStyleDurationMs": 49.472
     }
-  ]
+  ],
+  "reviewFollowup": {
+    "beforeCommit": "32d767eb",
+    "afterVersion": "review fixes in this document commit",
+    "conditions": {
+      "engine": "chromium",
+      "browser": "153.0.8010.12",
+      "cpuThrottleRate": 4,
+      "tracing": false,
+      "trialsPerVersion": 3,
+      "realRelay": false
+    },
+    "before": [
+      {
+        "name": "measured-stream-scroll-1",
+        "frameMs": {
+          "count": 142,
+          "p50": 16.699999999999818,
+          "p95": 33.299999999999955,
+          "max": 33.40000000000009
+        },
+        "framesOver25ms": 10,
+        "estimatedMissed60HzFrames": 10,
+        "inputDispatchDelayMs": {
+          "count": 108,
+          "p50": 0.29999999701976776,
+          "p95": 34.3999999910593,
+          "max": 65.70000000298023
+        },
+        "inputToNextFrameMs": {
+          "count": 108,
+          "p50": 11.299999997019768,
+          "p95": 45.900000005960464,
+          "max": 67.29999999701977
+        },
+        "longTaskMs": {
+          "count": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "typed": 96,
+        "TaskDurationMs": 1054.8600000000001,
+        "ScriptDurationMs": 696.429,
+        "LayoutDurationMs": 46.813,
+        "RecalcStyleDurationMs": 57.029999999999994
+      },
+      {
+        "name": "measured-stream-scroll-2",
+        "frameMs": {
+          "count": 143,
+          "p50": 16.699999999999818,
+          "p95": 33.200000000000045,
+          "max": 33.399999999999864
+        },
+        "framesOver25ms": 8,
+        "estimatedMissed60HzFrames": 8,
+        "inputDispatchDelayMs": {
+          "count": 108,
+          "p50": 0.29999999701976776,
+          "p95": 33,
+          "max": 49.599999994039536
+        },
+        "inputToNextFrameMs": {
+          "count": 108,
+          "p50": 13.399999991059303,
+          "p95": 34,
+          "max": 49.70000000298023
+        },
+        "longTaskMs": {
+          "count": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "typed": 96,
+        "TaskDurationMs": 933.4570000000001,
+        "ScriptDurationMs": 649.799,
+        "LayoutDurationMs": 42.532000000000004,
+        "RecalcStyleDurationMs": 44.977999999999994
+      },
+      {
+        "name": "measured-stream-scroll-3",
+        "frameMs": {
+          "count": 145,
+          "p50": 16.699999999999818,
+          "p95": 16.800000000000182,
+          "max": 33.399999999999864
+        },
+        "framesOver25ms": 7,
+        "estimatedMissed60HzFrames": 7,
+        "inputDispatchDelayMs": {
+          "count": 108,
+          "p50": 0.29999999701976776,
+          "p95": 33.29999999701977,
+          "max": 59.099999994039536
+        },
+        "inputToNextFrameMs": {
+          "count": 108,
+          "p50": 11.799999997019768,
+          "p95": 34.20000000298023,
+          "max": 60
+        },
+        "longTaskMs": {
+          "count": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "typed": 96,
+        "TaskDurationMs": 930.071,
+        "ScriptDurationMs": 646.732,
+        "LayoutDurationMs": 35.954,
+        "RecalcStyleDurationMs": 49.431999999999995
+      }
+    ],
+    "after": [
+      {
+        "name": "measured-stream-scroll-1",
+        "frameMs": {
+          "count": 143,
+          "p50": 16.699999999999818,
+          "p95": 33.299999999999955,
+          "max": 33.5
+        },
+        "framesOver25ms": 8,
+        "estimatedMissed60HzFrames": 8,
+        "inputDispatchDelayMs": {
+          "count": 108,
+          "p50": 0.3999999910593033,
+          "p95": 33.099999994039536,
+          "max": 67.79999999701977
+        },
+        "inputToNextFrameMs": {
+          "count": 108,
+          "p50": 13.5,
+          "p95": 42.29999999701977,
+          "max": 69.5
+        },
+        "longTaskMs": {
+          "count": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "typed": 96,
+        "TaskDurationMs": 1057.998,
+        "ScriptDurationMs": 696.255,
+        "LayoutDurationMs": 48.306000000000004,
+        "RecalcStyleDurationMs": 60.161
+      },
+      {
+        "name": "measured-stream-scroll-2",
+        "frameMs": {
+          "count": 143,
+          "p50": 16.699999999999818,
+          "p95": 33.299999999999955,
+          "max": 33.40000000000009
+        },
+        "framesOver25ms": 8,
+        "estimatedMissed60HzFrames": 8,
+        "inputDispatchDelayMs": {
+          "count": 108,
+          "p50": 0.20000000298023224,
+          "p95": 34.29999999701977,
+          "max": 50.3999999910593
+        },
+        "inputToNextFrameMs": {
+          "count": 108,
+          "p50": 11.600000008940697,
+          "p95": 34.3999999910593,
+          "max": 50.5
+        },
+        "longTaskMs": {
+          "count": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "typed": 96,
+        "TaskDurationMs": 917.221,
+        "ScriptDurationMs": 637.85,
+        "LayoutDurationMs": 34.681,
+        "RecalcStyleDurationMs": 52.602000000000004
+      },
+      {
+        "name": "measured-stream-scroll-3",
+        "frameMs": {
+          "count": 145,
+          "p50": 16.699999999999818,
+          "p95": 16.800000000000182,
+          "max": 33.40000000000009
+        },
+        "framesOver25ms": 7,
+        "estimatedMissed60HzFrames": 7,
+        "inputDispatchDelayMs": {
+          "count": 108,
+          "p50": 0.5,
+          "p95": 34.3999999910593,
+          "max": 59
+        },
+        "inputToNextFrameMs": {
+          "count": 108,
+          "p50": 12.699999988079071,
+          "p95": 34.5,
+          "max": 59
+        },
+        "longTaskMs": {
+          "count": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "typed": 96,
+        "TaskDurationMs": 873.385,
+        "ScriptDurationMs": 617.838,
+        "LayoutDurationMs": 36.695,
+        "RecalcStyleDurationMs": 42.457
+      }
+    ]
+  }
 }

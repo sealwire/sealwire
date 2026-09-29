@@ -3763,15 +3763,17 @@ function useTranscriptVirtualizer(rows, enabled) {
     const controller = getTranscriptScrollController(findTranscriptScrollElement(content));
     const virtualizer = virtualizerRef.current;
     return controller.setViewport({
-      commit(rowKey) {
+      measure(rowKey) {
+        for (const row of content.querySelectorAll(".transcript-virtual-row")) {
+          if (row.getAttribute("data-transcript-row-key") === rowKey) {
+            virtualizer.resizeItem(Number(row.dataset.index), measureElement(row, undefined, virtualizer));
+            break;
+          }
+        }
+      },
+      commit() {
         // This is called only by the controller's rAF, never from RO delivery.
         flushSync(() => {
-          if (rowKey != null) for (const row of content.querySelectorAll(".transcript-virtual-row")) {
-            if (row.getAttribute("data-transcript-row-key") === rowKey) {
-              virtualizer.resizeItem(Number(row.dataset.index), measureElement(row, undefined, virtualizer));
-              break;
-            }
-          }
           scrollAdjusterRef.current.syncScrollOffset();
           forceUpdate();
         });

@@ -72,7 +72,7 @@ function reason(ask) {
 function DelegateCard({ anchorId, tone, icon, kicker, title, time, onFold = null, children, footerStart = null, link = null }) {
   return h(
     "div",
-    { className: `handover-card delegate-card is-${tone}`, "data-transcript-anchor": `delegate:${anchorId}` },
+    { className: `handover-card delegate-card is-${tone}`, ...(anchorId ? { "data-transcript-anchor": `delegate:${anchorId}` } : {}) },
     h(
       "div",
       { className: "handover-card-head" },
@@ -160,7 +160,7 @@ function Cited({ places }) {
 function Strip({ anchorId, tone, icon, label, title, onOpen }) {
   return h(
     "button",
-    { type: "button", className: `review-strip delegate-strip is-${tone}`, "data-transcript-anchor": `delegate:${anchorId}`, "aria-expanded": "false", onClick: onOpen },
+    { type: "button", className: `review-strip delegate-strip is-${tone}`, ...(anchorId ? { "data-transcript-anchor": `delegate:${anchorId}` } : {}), "aria-expanded": "false", onClick: onOpen },
     h("span", { className: "review-strip-icon" }, h(CardIcon, { paths: icon, size: 14 })),
     h("span", { className: "review-strip-text" }, h("b", null, label), title ? ` · ${title}` : ""),
     h(Caret, { open: false })
@@ -202,7 +202,7 @@ function AskedCard({ ask, brief, collapsed }) {
   const title = ask.title || "A question for another agent";
   if (collapsed && !open) {
     return h(Strip, {
-      anchorId: ask.id,
+      anchorId: `${ask.id}:asked`,
       tone: "info",
       icon: ICONS.asked,
       label: `Delegated to ${peer}`,
@@ -213,7 +213,7 @@ function AskedCard({ ask, brief, collapsed }) {
   return h(
     DelegateCard,
     {
-      anchorId: ask.id,
+      anchorId: `${ask.id}:asked`,
       tone: "info",
       icon: ICONS.asked,
       kicker: `Delegated to ${peer}`,
@@ -233,7 +233,7 @@ function MissingCard({ ask }) {
   return h(
     DelegateCard,
     {
-      anchorId: ask.id,
+      anchorId: `${ask.id}:answer`,
       tone: "needs-you",
       icon: ICONS.missing,
       kicker: `No answer from ${peer}`,
@@ -254,7 +254,7 @@ function AnsweredCard({ ask }) {
   return h(
     DelegateCard,
     {
-      anchorId: ask.id,
+      anchorId: `${ask.id}:answer`,
       tone: "pass",
       icon: ICONS.answered,
       kicker: `${peer} answered`,
@@ -344,7 +344,7 @@ export function DelegateRequestEntry({
   } else if (first) {
     outcomeNode = h(
       "article",
-      { className: "chat-message chat-message-assistant handover-message delegate-message" },
+      { className: "chat-message chat-message-assistant handover-message delegate-message", "data-transcript-anchor": `request:${transcriptRowKey(entry)}` },
       avatar(providerIcon, provider),
       h(
         "div",
@@ -400,6 +400,7 @@ export function DelegateTaskEntry({ attrs, entry }) {
     h(
       DelegateCard,
       {
+        anchorId: `${ask.id}:task`,
         tone: "info",
         icon: ICONS.task,
         kicker: ask.asker_title ? `Task from ${asker} · ${ask.asker_title}` : `Task from ${asker}`,
@@ -434,6 +435,7 @@ export function DelegateReportedEntry({ entry, provider = "", providerIcon = "" 
   const attrs = {
     className: `chat-message chat-message-assistant handover-message delegate-message${entry.opensTurn ? "" : " is-turn-continued"}`,
     "data-transcript-entry-id": transcriptRowKey(entry) || "",
+    "data-transcript-anchor": `entry:${transcriptRowKey(entry)}`,
   };
   return h(
     "article",
@@ -442,6 +444,7 @@ export function DelegateReportedEntry({ entry, provider = "", providerIcon = "" 
     h(
       DelegateCard,
       {
+        anchorId: `${ask.id}:reported`,
         tone: "pass",
         icon: ICONS.answered,
         kicker: `Reported back to ${asker}`,

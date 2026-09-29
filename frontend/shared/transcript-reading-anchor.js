@@ -63,7 +63,11 @@ export function captureReadingAnchor(scroller) {
 
 export function resolveReadingAnchor(scroller, anchor) {
   if (!anchor?.path?.length || !scroller.querySelector) return null;
-  let scope = scroller;
+  // A mounted virtual row is an identity boundary. A sibling row can contain
+  // the same section/card labels, especially in task and report transcripts.
+  let scope = anchor.rowKey != null
+    ? scroller.querySelector(`[data-transcript-row-key=${quote(anchor.rowKey)}]`) || scroller
+    : scroller;
   let matched = 0;
   for (const key of anchor.path) {
     const next = scope.querySelector(`[${ATTR}=${quote(key)}]`);

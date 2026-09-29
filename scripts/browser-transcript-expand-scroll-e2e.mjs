@@ -43,6 +43,15 @@ const initial = Array.from({ length: count }, (_, i) => {
   Object.defineProperty(entry, "item_id", { enumerable: true, get() { window.entryReads++; return "entry-" + i; } });
   return entry;
 });
+if (params.has("peer")) {
+  const ask = { id: "peer-task", title: "Task", asker_provider: "claude_code", peer_provider: "codex", instruction: "", status: "done",
+    asked_at: 1790000000, sent_at: 1790000030, finished_at: 1790000160, asker_thread_id: "asker" };
+  initial.length = 0;
+  initial.push({ item_id: "task", kind: "user_text", status: "completed", text: answer, injection: { kind: "delegate_task", delegate: [ask] } });
+  for (let i = 0; i < 3; i++) initial.push({ item_id: "work-" + i, kind: "agent_text", status: "completed", text: paragraph.slice(0, 200) });
+  initial.push({ item_id: "reported", kind: "agent_text", status: "completed", text: answer, injection: { kind: "delegate_reported", delegate: [ask] } });
+  for (let i = 5; i < count; i++) initial.push({ item_id: "tail-" + i, kind: "agent_text", status: "completed", text: paragraph.slice(0, 200) });
+}
 if (params.has("group")) initial.splice(4, 1,
   { item_id: "tool-a", kind: "tool_call", status: "completed", tool: { name: "Read", title: "source.js" } },
   { item_id: "tool-b", kind: "tool_call", status: "completed", tool: { name: "Grep", title: "scroll position" } },
@@ -189,20 +198,27 @@ function assertRetained(before, after, label) {
 // Track a layout-neutral colored line in Chromium's actual composited frames.
 async function assertPaintedAnchor(page, anchor, name, action) {
   if (ENGINE === "webkit") {
-    // WebKit has no CDP screencast. These are after-rAF DOM positions, not proof
-    // of composited frames; the before/after screenshots are retained as well.
+    // WebKit has no CDP screencast. Sample after rAF and in a later RO delivery,
+    // so RO-only changes cannot hide behind their next-frame correction. These
+    // remain geometry samples, not proof of composited frames.
     await anchor.evaluate(el => {
       window.anchorFrames = { positions: [], running: true };
+      const record = () => window.anchorFrames.positions.push(el.isConnected ? el.getBoundingClientRect().top : null);
+      record();
+      const observer = new ResizeObserver(record);
+      for (const node of document.querySelectorAll(".thread-content, .transcript-virtual-row, .thread-content > article")) observer.observe(node);
+      window.anchorFrames.observer = observer;
       const sample = () => {
-        window.anchorFrames.positions.push(el.isConnected ? el.getBoundingClientRect().top : null);
+        if (!window.anchorFrames.running) return;
+        record();
         if (window.anchorFrames.running) requestAnimationFrame(() => setTimeout(sample, 0));
       };
       requestAnimationFrame(() => setTimeout(sample, 0));
     });
     await action();
-    const positions = await page.evaluate(() => { window.anchorFrames.running = false; return window.anchorFrames.positions; });
+    const positions = await page.evaluate(() => { window.anchorFrames.running = false; window.anchorFrames.observer.disconnect(); return window.anchorFrames.positions; });
     assert.ok(positions.length > 1 && positions.every(y => y !== null && Math.abs(y - positions[0]) <= 2), `rAF geometry jumped: ${JSON.stringify(positions)}`);
-    return { method: "after-rAF geometry (not composited frames)", positions };
+    return { method: "after-rAF and late-RO geometry (not composited frames)", positions };
   }
   const shadow = await anchor.evaluate(el => {
     const previous = el.style.boxShadow;
@@ -684,12 +700,14 @@ async function main() {
       assert.ok(row.top < 0 && row.bottom > 0, "the row is still partially visible");
       const before = await cards.nth(2).boundingBox();
       assert.ok(before.y >= 0 && before.y < 500, "a later card in the same row is visible");
-      await page.keyboard.press("Space");
-      await settle(page);
+      const paintedPositions = await assertPaintedAnchor(page, cards.nth(2).locator(".delegate-card-text"), "offscreen-shared-collapse", async () => {
+        await page.keyboard.press("Space");
+        await settle(page);
+      });
       assert.equal(await disclosure.getAttribute("aria-expanded"), "false");
       const after = await cards.nth(2).boundingBox();
       assertRetained(before, after, "offscreen collapse above another card in the same row");
-      return { readingShift: after.y - before.y };
+      return { readingShift: after.y - before.y, paintedPositions };
     });
     for (const action of ["link", "text-selection"]) {
       await run(`bottom-${action}-keeps-follow`, async () => {
@@ -809,6 +827,119 @@ async function main() {
         return { readingShift: (await label.boundingBox()).y - before.y };
       });
     }
+    for (const count of [10, 30]) {
+      await run(`review-peer-reported-anchor-${count}`, async () => {
+        await load(`peer=1&count=${count}`);
+        const label = page.locator('[data-transcript-entry-id="reported"] .handover-section-label').nth(1);
+        await position(page, label, 150);
+        const before = await label.boundingBox();
+        await page.evaluate(() => window.appendMessage());
+        await settle(page);
+        assertRetained(before, await label.boundingBox(), "reported section retains its own message identity");
+        return { readingShift: (await label.boundingBox()).y - before.y };
+      });
+      await run(`review-observer-only-growth-${count}`, async () => {
+        await load(`count=${count}`);
+        const cards = page.locator('[data-transcript-entry-id="entry-4"] .delegate-card');
+        await position(page, cards.nth(1), 0);
+        const label = cards.nth(1).locator(".handover-section-label").nth(1);
+        const paintedPositions = await assertPaintedAnchor(page, label, `observer-growth-${count}`, async () => {
+          // Synthetic intrinsic growth, with no React parent commit or user
+          // disclosure intent. Only ResizeObserver can discover this change.
+          await cards.first().evaluate(el => { el.style.paddingBottom = "300px"; });
+          await settle(page);
+        });
+        return { paintedPositions };
+      });
+    }
+    for (const key of ["End", "PageDown"]) {
+      await run(`review-focused-disclosure-${key}-rejoins`, async () => {
+        await load("count=10&plain=1", { width: 1100, height: 500 });
+        const text = page.locator('[data-transcript-entry-id="entry-5"] .delegate-card-text');
+        await position(page, text, 200);
+        await clickVisible(page, text);
+        assert.ok(await text.evaluate(el => el === document.activeElement), "focus remains on the disclosure");
+        const distance = () => page.locator(".chat-thread").evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop);
+        for (let i = 0; i < 20 && await distance() > 2; i++) {
+          await page.keyboard.press(key);
+          await settle(page);
+        }
+        assert.ok(await distance() <= 2, "navigation key reached the bottom");
+        await page.evaluate(() => window.appendMessage());
+        await settle(page);
+        assert.ok(await distance() <= 2, "navigation to the bottom restored following");
+      });
+    }
+    for (const stream of [false, true]) {
+      await run(`review-untagged-scroll-${stream ? "streaming" : "idle"}`, async () => {
+        await load("perf=1&count=2000");
+        await page.evaluate(() => window.followBottom());
+        await settle(page);
+        await page.mouse.move(550, 400);
+        await page.mouse.wheel(0, -2000);
+        await settle(page);
+        await page.waitForTimeout(400);
+        if (stream) await page.evaluate(() => window.startStream());
+        const result = await page.evaluate(() => new Promise(resolve => {
+          const scroller = document.querySelector(".chat-thread");
+          let tracked = null;
+          for (let y = 380; !tracked && y < 600; y += 10) tracked = document.elementFromPoint(550, y)?.closest("[data-transcript-entry-id]");
+          const before = tracked.getBoundingClientRect().top;
+          let steps = 0;
+          const timer = setInterval(() => {
+            // Deterministic stand-in for native momentum/find/focus scrolls:
+            // position changes without any fresh wheel/touch/key input event.
+            scroller.scrollTop -= 10;
+            if (++steps === 20) {
+              clearInterval(timer);
+              setTimeout(() => resolve({ moved: tracked.getBoundingClientRect().top - before, connected: tracked.isConnected }), 300);
+            }
+          }, 16);
+        }));
+        assert.ok(result.connected && Math.abs(result.moved - 200) <= 2, `native displacement lost: ${JSON.stringify(result)}`);
+        return result;
+      });
+    }
+    if (MOBILE && ENGINE === "chromium") await run("mobile-touch-unmeasured-history", async () => {
+      await load("perf=1&count=2000", { width: 390, height: 844 });
+      await page.evaluate(() => window.followBottom());
+      await settle(page);
+      const session = await page.context().newCDPSession(page);
+      const frames = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const track = () => page.evaluate(() => {
+        if (!window.dragTracked?.isConnected) {
+          window.dragTracked = null;
+          for (let y = 200; !window.dragTracked && y < 350; y += 10) window.dragTracked = document.elementFromPoint(190, y)?.closest("[data-transcript-entry-id]");
+        }
+        return { id: window.dragTracked?.getAttribute("data-transcript-entry-id"), y: window.dragTracked?.getBoundingClientRect().top };
+      });
+      const movements = [], liftJumps = [];
+      try {
+        for (let gesture = 0; gesture < 6; gesture++) {
+          await page.evaluate(() => { window.dragTracked = null; });
+          await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: 190, y: 200 }] });
+          await frames();
+          let previous = await track();
+          for (let step = 0; step < 16; step++) {
+            await session.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: 190, y: 230 + step * 30 }] });
+            await frames(); await frames();
+            const current = await track();
+            if (step > 0 && current.id && current.id === previous.id) movements.push(current.y - previous.y);
+            previous = current;
+          }
+          await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+          await settle(page);
+          await page.evaluate(() => window.appendMessage());
+          await settle(page);
+          const lifted = await track();
+          if (lifted.id === previous.id) liftJumps.push(lifted.y - previous.y);
+        }
+      } finally { await session.detach(); }
+      assert.ok(movements.length >= 80, "tracked the same visible content across native drag steps");
+      assert.ok(movements.every(delta => Math.abs(delta - 30) <= 8), `content slipped under the finger: ${JSON.stringify(movements)}`);
+      assert.ok(liftJumps.length === 6 && liftJumps.every(delta => Math.abs(delta) <= 2), `content jumped after lifting: ${JSON.stringify(liftJumps)}`);
+      return { steps: movements.length, maxDeviation: Math.max(...movements.map(delta => Math.abs(delta - 30))), liftJumps };
+    });
     await run("anchor-reveal-approval-before-questions", async () => {
       await load("approval=1&perf=1");
       await page.evaluate(() => window.followBottom());

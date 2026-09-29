@@ -33,8 +33,10 @@ it has no independent observer or settling loop.
 - Only an actual downward reader scroll reaching the narrow bottom boundary or
   an explicit action rejoins. All controller writes are tagged so their scroll
   events cannot be mistaken for reader input, including inside the wheel window.
-- The controller uses the live native offset. A wheel movement whose scroll
-  event has not arrived yet is incorporated before correcting changed geometry.
+- The controller uses the live native offset. Movement whose scroll event has
+  not arrived yet is incorporated before correcting changed geometry, including
+  momentum after the input attribution window. The input window only determines
+  follow intent. Navigation keys still count when focus is on a disclosure.
 
 Bookkeeping retains semantic intent as well as position. Remote bookkeeping is
 notified after the frame's anchor capture/correction, so switching threads does
@@ -45,8 +47,10 @@ transcript-generation retirement still apply.
 
 An anchor contains a path of stable `data-transcript-anchor` identities, its
 viewport offset, edge and virtual-row key. Message identities use
-`transcriptRowKey`; delegate cards include the delegate ID, so multiple cards in
-one virtual row are distinguishable. Summary sections use heading and duplicate
+`transcriptRowKey`; delegate cards include the delegate ID and role (asked,
+answer, task or reported), so cards in one virtual row and the peer thread's
+task/report are distinguishable. Resolution stays inside the identified virtual
+row when it is mounted. Summary sections use heading and duplicate
 occurrence, so inserting an introductory paragraph does not rename them.
 
 The controller captures the deepest content block crossing a line near the top
@@ -68,14 +72,21 @@ is no longer expanded, restoration follows the surviving-content rule above.
 
 ## Measurement and paint order
 
-Resize notifications are coalesced into one pending animation-frame callback.
-There are no synchronous React commits inside ResizeObserver delivery.
+Measurements and range commits are coalesced into one pending animation-frame
+callback. ResizeObserver runs after rAF, so observer-only geometry changes also
+receive a synchronous correction using the mounted DOM's current position.
+This only writes the scroll offset; it never synchronously commits React during
+observer delivery. Unmounted targets retain their address for the range commit.
+During an active touch/scrollbar drag, wholly-above-viewport row measurements
+retain the incremental correction so newly measured history moves with the
+finger. Those writes are tagged like every other controller correction.
 
 For a correction, the controller first combines the semantic content offset
 with the virtualizer's **new measured row start**, then writes the position. It
 commits the matching virtual range, reads any remaining displacement and commits
-again only when a second correction is necessary. A disclosure's row is measured
-in that same callback. Correcting before changing the range prevents a large
+again only when a second correction is necessary. A disclosure queues measurement
+before its component changes state, including a focused control above the screen.
+Its row is measured before restoration in that same callback. Correcting before changing the range prevents a large
 collapse from unmounting the row the reader is still viewing. TanStack's observed
 offset and accumulated adjustment total are reset through the same observation
 callback, not by writing its internal fields.
@@ -94,11 +105,14 @@ comparison runs on viewport-only renders.
 
 ## Verification
 
-The existing 43 behavior/paint/workload cases remain, with ten added cases:
+The existing 43 behavior/paint/workload cases remain, with eighteen added cases:
 shared-row growth at both virtualization sizes, same-card section insertion,
 message removal, local/remote prepend and thread restoration after hidden
 history growth, controller lifecycle across virtualization thresholds, and
-revealing an approval when pending questions follow it. Tests use real React components and CSS, without a relay.
+revealing an approval when pending questions follow it, peer task/report identity,
+observer-only shared-row growth, End/PageDown from a focused disclosure, and
+native displacement without fresh input events. Screen-off keyboard collapse
+also checks the intermediate frames. Tests use real React components and CSS, without a relay.
 
 ```sh
 npm test
@@ -110,27 +124,34 @@ E2E_BROWSER=webkit E2E_MOBILE=1 SCROLL_CASE=phone node scripts/browser-transcrip
 E2E_CPU_THROTTLE=4 npm run test:browser:transcript-scroll:perf
 ```
 
-The local validation ran 4,469 unit/DOM tests and the Vite build successfully.
-Chromium and WebKit each passed 51 behavior cases plus the lifecycle and approval-reveal cases
-(53 total per engine). Touch/mobile checks passed on both engines; Chromium
-also passed the native touch-drag case. No window/page errors were observed.
+The review follow-up passed 4,473 unit/DOM tests and the Vite build. Chromium
+(CPU 4x) and WebKit each passed all 61 browser cases, including the original 53,
+without page/window errors. Chromium mobile emulation passed
+both native touch cases: 90 history-drag steps had no measurable deviation from
+the finger movement and all six subsequent output updates retained position.
+The eight new default cases all failed against the original `32d767eb`, covering
+identity collisions, intermediate observer-only jumps, keyboard following and
+lost native displacement.
 
 Use `E2E_ARTIFACT_DIR` for a dedicated results/screenshot directory. Chromium's
 collapse checks inspect actual CDP-composited PNG frames; a missing anchor in a
 frame fails. WebKit has no equivalent CDP screencast: it checks geometry after
-the animation-frame callbacks and saves before/after screenshots. That is a
+the animation-frame callbacks and in a later ResizeObserver delivery, and saves
+before/after screenshots. That is a
 narrower guarantee, not proof about every WebKit composited frame. Both engines
 check Playwright page errors and `window.error`, including resize-observer loops.
 
 The mobile tests use a touch-enabled, mobile-emulated browser context, plus a
 native Chromium touch drag through CDP during streaming and a tap to rejoin.
+The unmeasured-history case checks 90 movement steps across six native drags,
+then verifies subsequent output does not cause a jump after each finger lift.
 They are not physical-device or installed Safari tests. No live relay, private
 crate, main-worktree build directory or user session state is used.
 
 ## Measured performance
 
 [Raw trial results](transcript-scroll-measurements.json) compare `dc5ca834` with
-this implementation on macOS arm64, Chromium 153.0.8010.12, CPU throttling 4x.
+the initial controller implementation (`32d767eb`) on macOS arm64, Chromium 153.0.8010.12, CPU throttling 4x.
 Each version has three trials: 2,000 messages, 50 stream updates at 50ms intervals,
 12 actual wheel inputs and 96 typed characters. The final message is running
 until the final update. All characters arrived; neither version recorded a long
@@ -168,3 +189,13 @@ For a before/after run, point `E2E_SOURCE_ROOT` at an exported baseline's fronte
 sources with dependencies resolvable, using this same harness. `E2E_PROFILE=1`
 adds a CPU profile and the bundled source for attribution; do not compare its
 timing directly with unprofiled trials. `E2E_PERF_TRIALS` changes the trial count.
+
+The review fixes were measured separately against `32d767eb`, using three trials
+per version under the same CPU4/no-tracing fixture. The raw file's
+`reviewFollowup` contains both sets. Median task time was 933.5ms before and
+917.2ms after; layout time was 42.5ms and 36.7ms. Frame interval P95 was 33.2ms and
+33.3ms, input dispatch P95 was 33.3ms and 34.3ms, and input-to-next-frame P95 was
+34.2ms and 34.5ms. Both versions estimated eight missed frames and recorded no
+long tasks. These small samples show no large additional cost from correcting
+mounted content during observer delivery; they do not establish a speedup or
+an input-latency improvement.
