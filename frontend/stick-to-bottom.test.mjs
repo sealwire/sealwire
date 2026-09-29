@@ -25,6 +25,7 @@ test("programmatic actions preserve explicit bottom-follow intent", () => {
   assert.equal(classifyTranscriptScrollAction({ kind: "jump-bottom" }), "stick");
   assert.equal(classifyTranscriptScrollAction({ kind: "rejoin-bottom" }), "stick");
   assert.equal(classifyTranscriptScrollAction({ kind: "restore-thread" }), "unstick");
+  assert.equal(classifyTranscriptScrollAction({ kind: "read-content" }), "unstick");
   assert.equal(classifyTranscriptScrollAction({ kind: "preserve" }), "none");
 });
 

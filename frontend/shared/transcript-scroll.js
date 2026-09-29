@@ -36,6 +36,8 @@ export const TRANSCRIPT_BOTTOM_FOLLOW_THRESHOLD_PX = 4;
 // just landed at the bottom of a thread" — which geometry alone cannot
 // distinguish from user scrolling.
 export const TRANSCRIPT_SCROLL_ACTION_EVENT = "transcript-scroll-action";
+// A disclosure's explicit position correction must share a paint with its row resize.
+export const TRANSCRIPT_DISCLOSURE_RESIZE_EVENT = "transcript-disclosure-resize";
 
 export function rememberTranscriptScrollPosition(cache, threadId, scrollElement) {
   if (!(cache instanceof Map) || !threadId || !scrollElement) {

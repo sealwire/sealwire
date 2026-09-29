@@ -154,6 +154,7 @@ export function SummarySections({ text, moreLabel = "Show full summary", footer 
     ),
     more
       ? h(ShowAllButton, {
+          key: "show-all",
           open: expanded,
           onToggle: () => setExpanded((value) => !value),
           label: more,

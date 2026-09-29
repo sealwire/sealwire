@@ -3,8 +3,56 @@ import { TranscriptContent } from "./transcript-react.js";
 import { ScrollToBottomButton } from "./scroll-to-bottom.js";
 import { ApprovalFloatBar } from "./approval-float-bar.js";
 import { StickToBottomFollower } from "./stick-to-bottom.js";
+import {
+  dispatchTranscriptScrollActionEvent,
+  TRANSCRIPT_DISCLOSURE_RESIZE_EVENT,
+} from "./transcript-scroll.js";
 
 const h = React.createElement;
+
+function retainDisclosurePosition(disclosure) {
+  const scroller = disclosure.closest(".chat-thread");
+  if (!scroller) return;
+  const rect = disclosure.getBoundingClientRect();
+  const viewport = scroller.getBoundingClientRect();
+  // Focus can stay on a disclosure after the reader scrolls past it. Offscreen
+  // changes already belong to the virtualizer/browser's normal size compensation.
+  if (rect.bottom <= viewport.top || rect.top >= viewport.bottom) return;
+  // A footer button keeps its top; text read from below keeps its trailing edge.
+  const edge = rect.top < viewport.top ? "bottom" : "top";
+  const before = rect[edge];
+  requestAnimationFrame(() => {
+    if (!disclosure.isConnected || !scroller.isConnected) return;
+    // Read after the toggle and native scroll anchoring, before the next paint.
+    // Compensating the remaining movement also works without native anchoring.
+    const delta = disclosure.getBoundingClientRect()[edge] - before;
+    if (delta) scroller.scrollTop += delta;
+    disclosure.dispatchEvent(new CustomEvent(TRANSCRIPT_DISCLOSURE_RESIZE_EVENT, { bubbles: true }));
+  });
+}
+
+// Opening releases bottom-follow; closing retains the reader's current intent.
+function onDisclosureCapture(event) {
+  if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") return;
+  const target = event.target;
+  if (target.closest?.("a")) return;
+  const disclosure = target.closest?.("[aria-expanded], summary, .card-fold.is-togglable");
+  if (!disclosure) return;
+  const expanded = disclosure.matches("summary")
+    ? disclosure.parentElement?.open
+    : disclosure.getAttribute("aria-expanded") === "true"
+      || disclosure.matches(".card-fold:not(.is-clamped)");
+  if (
+    event.type === "click"
+    && disclosure.classList.contains("card-fold")
+    && String(globalThis.getSelection?.() || "")
+  ) return;
+  if (expanded) {
+    retainDisclosurePosition(disclosure);
+    return;
+  }
+  dispatchTranscriptScrollActionEvent(disclosure, "read-content");
+}
 
 function fallbackShortId(value) {
   return value ? String(value).slice(0, 8) : "unknown";
@@ -114,6 +162,8 @@ export function TranscriptState({
     "div",
     {
       className: "transcript-react-root",
+      onClickCapture: onDisclosureCapture,
+      onKeyDownCapture: onDisclosureCapture,
       onClick: onClick || onApprovalClick,
       onScroll,
     },

@@ -4,13 +4,17 @@ import React, {
   useReducer,
   useRef,
 } from "react";
+import { flushSync } from "react-dom";
 import { canApplyPatch } from "./file-change-actions.js";
 import {
   Virtualizer,
   measureElement,
   observeElementRect,
 } from "@tanstack/virtual-core";
-import { createTranscriptScrollAdjuster } from "./transcript-scroll-adjust.js";
+import {
+  createTranscriptScrollAdjuster,
+  shouldAdjustTranscriptRowSize,
+} from "./transcript-scroll-adjust.js";
 import { ASK_SVG, CHECK_SVG, COPY_SVG, FORK_SVG, SPARKLES_SVG } from "../svg.js";
 import { approvalKindLabel } from "./approval-labels.js";
 import { approvalTitle } from "./approval-view.js";
@@ -55,7 +59,7 @@ import {
 import { transcriptRowKey } from "./transcript-row-key.js";
 import { isFailedTranscriptEntry, isPartialTranscriptEntry } from "./transcript-entry-details-state.js";
 import { renderMarkdown, renderStreamingMarkdown } from "./markdown.js";
-import { didPrependOlderTranscript } from "./transcript-scroll.js";
+import { didPrependOlderTranscript, TRANSCRIPT_DISCLOSURE_RESIZE_EVENT } from "./transcript-scroll.js";
 
 const h = React.createElement;
 
@@ -899,6 +903,7 @@ function ReasoningEntryImpl({
             ? h(
                 "button",
                 {
+                  "aria-expanded": showAll ? "true" : "false",
                   className: "reasoning-show-all",
                   "data-expand-key": allKey,
                   "data-transcript-toggle": "group",
@@ -1001,6 +1006,7 @@ function UnifiedDiff({ value }) {
       ? h(
           "button",
           {
+            "aria-expanded": "false",
             className: "diff-show-more",
             onClick: () => setShowAll(true),
             type: "button",
@@ -3519,12 +3525,6 @@ export function TranscriptContent({
   // transcript to the bottom (decideTranscriptScrollAction -> jump-bottom) and
   // the stick-to-bottom follower keeps us pinned as the reply streams in.
   const sentinel = nodes.shift();
-  const virtualized = shouldVirtualizeTranscript(nodes.length);
-  const virtualizer = useTranscriptVirtualizer(nodes, virtualized);
-  const contentProps = {
-    className: `thread-content${virtualized ? " thread-content-virtualized" : ""}`,
-    ref: virtualizer.scrollTargetRef,
-  };
 
   // Every question the agent is blocked on, last and OUTSIDE the virtualized
   // range. Inside it, the row holding a half-finished answer is unmounted as soon
@@ -3584,6 +3584,17 @@ export function TranscriptContent({
     canAsk: Boolean(effectiveOptions?.canAsk),
   });
 
+  return h(TranscriptViewport, { nodes, sentinel, askUserFooter, selectionToolbar });
+}
+
+// Scrolling changes only the rendered range, not the full transcript projection.
+function TranscriptViewport({ nodes, sentinel, askUserFooter, selectionToolbar }) {
+  const virtualized = shouldVirtualizeTranscript(nodes.length);
+  const virtualizer = useTranscriptVirtualizer(nodes, virtualized);
+  const contentProps = {
+    className: `thread-content${virtualized ? " thread-content-virtualized" : ""}`,
+    ref: virtualizer.scrollTargetRef,
+  };
   if (!virtualized) {
     return h("div", contentProps, sentinel, ...nodes, askUserFooter, selectionToolbar);
   }
@@ -3666,6 +3677,7 @@ function useTranscriptVirtualizer(rows, enabled) {
     (index) => rows[index]?.key || index,
     [rows]
   );
+  virtualizerRef.current.shouldAdjustScrollPositionOnItemSizeChange = shouldAdjustTranscriptRowSize;
   virtualizerRef.current.setOptions({
     count: rows.length,
     enabled,
@@ -3692,6 +3704,25 @@ function useTranscriptVirtualizer(rows, enabled) {
   useLayoutEffect(() => {
     virtualizerRef.current._willUpdate();
   });
+
+  useLayoutEffect(() => {
+    if (!enabled) return undefined;
+    const content = scrollTargetRef.current;
+    const onDisclosureResize = (event) => {
+      const row = event.target.closest(".transcript-virtual-row");
+      if (!row) return;
+      const virtualizer = virtualizerRef.current;
+      // Called from the disclosure's rAF, outside ResizeObserver delivery. Only
+      // this explicit correction needs its row geometry committed before paint.
+      flushSync(() => {
+        virtualizer.resizeItem(Number(row.dataset.index), measureElement(row, undefined, virtualizer));
+        scrollAdjusterRef.current.syncScrollOffset();
+        forceUpdate();
+      });
+    };
+    content.addEventListener(TRANSCRIPT_DISCLOSURE_RESIZE_EVENT, onDisclosureResize);
+    return () => content.removeEventListener(TRANSCRIPT_DISCLOSURE_RESIZE_EVENT, onDisclosureResize);
+  }, [enabled]);
 
   return {
     getTotalSize: () => virtualizerRef.current.getTotalSize(),

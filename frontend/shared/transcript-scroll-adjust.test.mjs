@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Virtualizer } from "@tanstack/virtual-core";
 
-import { createTranscriptScrollAdjuster } from "./transcript-scroll-adjust.js";
+import { createTranscriptScrollAdjuster, shouldAdjustTranscriptRowSize } from "./transcript-scroll-adjust.js";
 
 // `virtual-core` asks for a row-size correction as
 // `_scrollToOffset(getScrollOffset(), { adjustments: scrollAdjustments += delta })`.
@@ -107,4 +108,76 @@ test("an observed scroll resets the running total, matching virtual-core", () =>
     1930,
     "after an observed scroll the total restarts, so -20 is the whole increment"
   );
+});
+
+test("a row revealed by an unreported upward scroll grows below the reader", () => {
+  const element = fakeInstance(0).scrollElement;
+  const adjuster = createTranscriptScrollAdjuster();
+  const virtualizer = new Virtualizer({
+    count: 100,
+    getScrollElement: () => element,
+    estimateSize: () => 100,
+    initialOffset: 500,
+    observeElementRect: (_instance, callback) => {
+      callback({ width: 500, height: 400 });
+      return () => {};
+    },
+    observeElementOffset: (_instance, callback) => {
+      callback(500, false);
+      return () => {};
+    },
+    scrollToFn: adjuster.scrollToFn,
+  });
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = shouldAdjustTranscriptRowSize;
+  const cleanup = virtualizer._didMount();
+  virtualizer._willUpdate();
+  try {
+    virtualizer.getVirtualItems();
+    // Chromium applies wheel motion before delivering its scroll event.
+    element.scrollTop = 250;
+    assert.equal(virtualizer.getScrollOffset(), 500);
+    virtualizer.resizeItem(2, 150);
+    assert.equal(element.scrollTop, 250, "the now-visible row must not push its reader down");
+    virtualizer.getVirtualItems();
+    virtualizer.resizeItem(0, 150);
+    assert.equal(element.scrollTop, 300, "growth wholly above the reader still compensates");
+  } finally {
+    cleanup();
+  }
+});
+
+test("refreshing the rendered range observes live scroll and resets compensation together", () => {
+  const stub = fakeInstance(500);
+  const element = stub.scrollElement;
+  element.ownerDocument = { defaultView: stub.targetWindow };
+  const adjuster = createTranscriptScrollAdjuster();
+  const virtualizer = new Virtualizer({
+    count: 100,
+    getScrollElement: () => element,
+    estimateSize: () => 100,
+    initialOffset: 500,
+    overscan: 0,
+    observeElementRect: (_instance, callback) => {
+      callback({ width: 500, height: 400 });
+      return () => {};
+    },
+    observeElementOffset: adjuster.observeElementOffset,
+    scrollToFn: adjuster.scrollToFn,
+  });
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = shouldAdjustTranscriptRowSize;
+  const cleanup = virtualizer._didMount();
+  virtualizer._willUpdate();
+  try {
+    virtualizer.getVirtualItems();
+    virtualizer.resizeItem(0, 150);
+    assert.equal(element.scrollTop, 550);
+    element.scrollTop = 250; // Disclosure correction; its scroll event is still pending.
+    assert.equal(virtualizer.getScrollOffset(), 500);
+    adjuster.syncScrollOffset();
+    assert.equal(virtualizer.getVirtualItems()[0].index, 2, "render the rows at the actual offset");
+    virtualizer.resizeItem(1, 150);
+    assert.equal(element.scrollTop, 300, "the next correction applies its full delta after resync");
+  } finally {
+    cleanup();
+  }
 });

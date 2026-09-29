@@ -6,6 +6,7 @@
       "local-view-only-models",
       "local-scroll-to-bottom",
       "local-stick-to-bottom",
+      "transcript-expand-scroll",
       "local-auth",
       "local-allowed-roots",
       "local-file-diff",
@@ -36,6 +37,7 @@
       "local-view-only-models",
       "local-scroll-to-bottom",
       "local-stick-to-bottom",
+      "transcript-expand-scroll",
       "local-multi-live-follow",
       "local-auth",
       "local-allowed-roots",
@@ -596,6 +598,18 @@
       "transport": "local",
       "coverage": [
         "real-provider"
+      ]
+    },
+    "transcript-expand-scroll": {
+      "script": "browser-transcript-expand-scroll-e2e.mjs",
+      "tier": "core",
+      "provider": "fake",
+      "transport": "local",
+      "coverage": [
+        "transcript-expand-scroll",
+        "virtualized-scroll-work",
+        "desktop-layout",
+        "mobile-layout"
       ]
     },
     "local-stick-to-bottom": {

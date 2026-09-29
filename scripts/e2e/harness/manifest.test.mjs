@@ -50,6 +50,7 @@ test("browser e2e core suites keep required coverage", async () => {
     "thread-interleaving",
     "thread-groups",
     "transcript-load",
+    "transcript-expand-scroll",
     "view-only-models",
   ]);
 });

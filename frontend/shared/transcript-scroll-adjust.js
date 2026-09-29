@@ -1,14 +1,19 @@
 import { elementScroll, observeElementOffset } from "@tanstack/virtual-core";
 
+// A visible row can contain several cards. Its growth belongs below the reader,
+// even when the row's top has already left the viewport.
+export function shouldAdjustTranscriptRowSize(item, _delta, instance) {
+  return item.end <= (instance.scrollElement?.scrollTop ?? instance.getScrollOffset());
+}
+
 // The TanStack virtualizer corrects `scrollTop` whenever a row measures differently
-// from `estimateTranscriptRowSize`. That correction is the ONLY untagged writer to
-// `.chat-thread` — the stick-to-bottom follower tags its own pins (`selfScrollTop`),
-// nothing tags these.
+// from `estimateTranscriptRowSize`. Those writes to `.chat-thread` are untagged,
+// unlike the stick-to-bottom follower's own pins (`selfScrollTop`).
 //
 // The correction it asks for is `getScrollOffset() + scrollAdjustments`, and
-// `getScrollOffset()` is the LAST OBSERVED offset: it only advances when a `scroll`
-// event is dispatched (`virtual-core` updates it inside `observeElementOffset`, where
-// it also resets `scrollAdjustments` to 0). Scroll events are asynchronous, so between
+// `getScrollOffset()` is the LAST OBSERVED offset: TanStack normally updates it when
+// a `scroll` event is dispatched (`observeElementOffset` also resets
+// `scrollAdjustments` to 0). Scroll events are asynchronous, so between
 // the browser applying a scroll and dispatching its event, that base is stale — and
 // writing `staleBase + adjustments` DISCARDS the scroll the reader just made.
 //
@@ -24,6 +29,7 @@ export function createTranscriptScrollAdjuster() {
   // How much of `virtual-core`'s running `scrollAdjustments` total we have already
   // applied. It hands us the cumulative figure each time, not the increment.
   let applied = 0;
+  let syncOffset = null;
 
   const scrollToFn = (offset, options, instance) => {
     const { adjustments, behavior } = options || {};
@@ -48,11 +54,27 @@ export function createTranscriptScrollAdjuster() {
 
   // `virtual-core` zeroes `scrollAdjustments` in this same callback, so our running
   // total has to be zeroed at exactly the same moment or the next delta is miscomputed.
-  const observeOffset = (instance, callback) =>
-    observeElementOffset(instance, (offset, isScrolling) => {
+  const observeOffset = (instance, callback) => {
+    const notify = (offset, isScrolling) => {
       applied = 0;
       callback(offset, isScrolling);
-    });
+    };
+    syncOffset = () => {
+      const offset = instance.scrollElement.scrollTop;
+      if (offset !== instance.getScrollOffset()) notify(offset, instance.isScrolling);
+    };
+    const cleanup = observeElementOffset(instance, notify);
+    return () => {
+      syncOffset = null;
+      cleanup?.();
+    };
+  };
 
-  return { scrollToFn, observeElementOffset: observeOffset };
+  return {
+    scrollToFn,
+    observeElementOffset: observeOffset,
+    // A collapse can move farther than the overscan before its scroll event.
+    // Use the same observation/reset path before selecting the rendered range.
+    syncScrollOffset: () => syncOffset?.(),
+  };
 }

@@ -42,7 +42,8 @@ export function classifyTranscriptScrollAction({ kind } = {}) {
   if (kind === "jump-bottom" || kind === "rejoin-bottom" || kind === "input-required") {
     return "stick";
   }
-  if (kind === "restore-thread") {
+  // Opening a disclosure expresses reading intent even if we were at the bottom.
+  if (kind === "restore-thread" || kind === "read-content") {
     return "unstick";
   }
   return "none";
@@ -128,6 +129,8 @@ function nestedScrollerCanScrollUp(target, scroller) {
 //   - intent events broadcast by transcript-scroll.js: jump-bottom / rejoin-bottom
 //     -> stick now; restore-thread -> remain unstuck at the retained history
 //     offset.
+//   - read-content -> pause follow when opening a disclosure. Closing preserves
+//     the current follow state.
 //   Keyboard scrolling is intentionally NOT a first-class escape (it would also
 //   fire for caret movement inside AskUser inputs); a keyboard scroll-up is
 //   treated as churn and re-glued, which is acceptable for this dev surface.
