@@ -119,6 +119,7 @@ npm test
 E2E_CPU_THROTTLE=4 npm run test:browser:transcript-expand-scroll
 npm run test:browser:transcript-scroll:webkit
 E2E_CPU_THROTTLE=4 SCROLL_CASE=mobile-touch npm run test:browser:transcript-scroll:mobile
+E2E_CPU_THROTTLE=4 npm run test:browser:transcript-scroll:mobile
 SCROLL_CASE=phone npm run test:browser:transcript-scroll:mobile
 E2E_BROWSER=webkit E2E_MOBILE=1 SCROLL_CASE=phone node scripts/browser-transcript-expand-scroll-e2e.mjs
 E2E_CPU_THROTTLE=4 npm run test:browser:transcript-scroll:perf
@@ -126,8 +127,9 @@ E2E_CPU_THROTTLE=4 npm run test:browser:transcript-scroll:perf
 
 The review follow-up passed 4,473 unit/DOM tests and the Vite build. Chromium
 (CPU 4x) and WebKit each passed all 61 browser cases, including the original 53,
-without page/window errors. Chromium mobile emulation passed
-both native touch cases: 90 history-drag steps had no measurable deviation from
+without page/window errors. The complete Chromium mobile-emulated suite also
+passed 63/63 at CPU 4x with no page/window errors, including both native touch
+cases: 90 sampled history-drag steps had no measurable deviation from
 the finger movement and all six subsequent output updates retained position.
 The eight new default cases all failed against the original `32d767eb`, covering
 identity collisions, intermediate observer-only jumps, keyboard following and
@@ -135,7 +137,10 @@ lost native displacement.
 
 Use `E2E_ARTIFACT_DIR` for a dedicated results/screenshot directory. Chromium's
 collapse checks inspect actual CDP-composited PNG frames; a missing anchor in a
-frame fails. WebKit has no equivalent CDP screencast: it checks geometry after
+frame fails. The fixture disables native tap highlighting so that touch feedback
+cannot tint the exact-color marker and masquerade as a missing frame. Product
+styles and the strict missing-marker assertion are unchanged.
+WebKit has no equivalent CDP screencast: it checks geometry after
 the animation-frame callbacks and in a later ResizeObserver delivery, and saves
 before/after screenshots. That is a
 narrower guarantee, not proof about every WebKit composited frame. Both engines
@@ -145,6 +150,9 @@ The mobile tests use a touch-enabled, mobile-emulated browser context, plus a
 native Chromium touch drag through CDP during streaming and a tap to rejoin.
 The unmeasured-history case checks 90 movement steps across six native drags,
 then verifies subsequent output does not cause a jump after each finger lift.
+Those step samples do not prove every composited frame is stationary: independent
+frame inspection found a brief 18px measurement rebound in both this version and
+the original baseline during native history dragging.
 They are not physical-device or installed Safari tests. No live relay, private
 crate, main-worktree build directory or user session state is used.
 

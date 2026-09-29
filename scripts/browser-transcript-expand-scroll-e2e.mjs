@@ -293,6 +293,8 @@ async function main() {
     <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <link rel="stylesheet" href="/styles.css"><style>
     html,body,#root{height:100%;margin:0}#root{max-width:900px;margin:auto}.chat-thread{height:100vh;box-sizing:border-box}
+    /* Keep native tap feedback from tinting the exact-color frame marker. */
+    *{-webkit-tap-highlight-color:transparent}
     </style></head><body><div id="root"></div><script type="module" src="/harness.js"></script></body></html>`);
   const server = await startStaticServer({ rootDir: buildDir });
   const contextOptions = MOBILE ? { hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } } : {};
