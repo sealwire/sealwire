@@ -456,7 +456,9 @@ could not do. It cannot see your session.",
     },
     ToolSpec {
         name: "delegate",
-        summary: "Hand work to another agent. Returns at once and you are woken with the answers — do not poll or wait. Ask one again to continue, or several at once.",
+        summary: "Hand work you cannot finish yourself to another agent — \
+full harness, heavier than a subagent. Returns at once — do not poll or wait. \
+Skip trivial work.",
         effect: Effect::Acts,
         params: &[
             ToolParam {
@@ -483,7 +485,8 @@ to bring in a new one.",
                 name: "model",
                 kind: ParamKind::Text,
                 required: false,
-                summary: "Model for a new agent. Omit for the provider default.",
+                summary: "Omit for the provider default; only name a flagship \
+(claude fable, gpt6-astrol) when the user names it explicitly.",
             },
             ToolParam {
                 name: "effort",
@@ -1749,6 +1752,30 @@ it failed",
             summary.contains("do not poll"),
             "delegate's summary must forbid polling, got: {}",
             tool.summary
+        );
+        assert!(
+            summary.contains("trivial"),
+            "delegate's summary must steer away from busywork, got: {}",
+            tool.summary
+        );
+        assert!(
+            summary.contains("subagent") && summary.contains("harness"),
+            "delegate must say it is a full harness, not a subagent, got: {}",
+            tool.summary
+        );
+        let model = tool
+            .params
+            .iter()
+            .find(|param| param.name == "model")
+            .expect("delegate takes a model");
+        let model_summary = model.summary.to_lowercase();
+        assert!(
+            model_summary.contains("omit")
+                && model_summary.contains("explicitly")
+                && model_summary.contains("claude fable")
+                && model_summary.contains("gpt6-astrol"),
+            "model must require an explicit user ask for flagships, got: {}",
+            model.summary
         );
     }
 
