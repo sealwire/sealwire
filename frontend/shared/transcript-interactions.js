@@ -115,6 +115,16 @@ export function resolveTranscriptAction(target) {
     };
   }
 
+  const delegateButton = closest("[data-delegate-action]");
+  if (delegateButton) {
+    return {
+      kind: "delegateAction",
+      element: delegateButton,
+      action: delegateButton.dataset.delegateAction || "",
+      threadId: delegateButton.dataset.threadId || "",
+    };
+  }
+
   const openThreadButton = closest("[data-open-thread-id]");
   if (openThreadButton) {
     return {

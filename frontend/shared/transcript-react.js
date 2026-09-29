@@ -20,6 +20,16 @@ import {
   writeAskUserDraft,
 } from "./ask-user-draft-store.js";
 import { providerIconSvg } from "./provider-icons.js";
+import {
+  DELEGATE_REPORTED_KIND,
+  DelegateAnswerEntry,
+  DelegateNudgeEntry,
+  DelegateReportedEntry,
+  DelegateRequestEntry,
+  DelegateTaskEntry,
+  foldDelegateInjections,
+  opensAnsweredTurn,
+} from "./delegate-card.js";
 import { foldHandoverTurns, HandoverSourceEntry, HandoverTargetEntry } from "./handover-card.js";
 import {
   foldReviewInjections,
@@ -2754,6 +2764,7 @@ function OmittedEntryImpl({ entry, isJustPrepended = false, provider = "", showA
 const OmittedEntry = React.memo(OmittedEntryImpl);
 
 const EMPTY_HANDOVER_MEMBERS = [];
+const EMPTY_DELEGATE_ANSWERED = new Set();
 
 export function TranscriptEntry({
   entry,
@@ -2778,12 +2789,16 @@ export function TranscriptEntry({
   const kind = entry.kind || "reasoning";
 
   if (kind === "user_text") {
-    const injection = entry.injection?.handover || entry.injection?.review ? entry.injection : null;
+    const injection =
+      entry.injection?.handover || entry.injection?.review || entry.injection?.delegate
+        ? entry.injection
+        : null;
     if (injection) {
       const attrs = transcriptEntryDomAttrs(
         entry,
-        // A review result opens the agent's turn, so it sits in the agent's column.
-        opensReviewedTurn(entry)
+        // A review result or a delegate's answer opens the agent's turn, so it sits in
+        // the agent's column.
+        opensReviewedTurn(entry) || opensAnsweredTurn(entry)
           ? "chat-message chat-message-assistant"
           : "chat-message chat-message-user",
         isLatestUser ? { "data-latest-user-message": "true" } : null,
@@ -2810,11 +2825,46 @@ export function TranscriptEntry({
       if (injection.kind === "handover_brief") {
         return h(HandoverTargetEntry, { attrs, entry });
       }
+      if (injection.delegate) {
+        const providerIcon = providerIconSvg(provider) || SPARKLES_SVG;
+        switch (injection.kind) {
+          case "delegate_request":
+            return h(DelegateRequestEntry, {
+              attrs,
+              entry,
+              members: options?.delegateMembers?.get(rowKey) || EMPTY_HANDOVER_MEMBERS,
+              answered: options?.delegateAnswered || EMPTY_DELEGATE_ANSWERED,
+              provider,
+              providerIcon,
+            });
+          case "delegate_answer":
+            return h(DelegateAnswerEntry, {
+              attrs,
+              entry,
+              joined: Boolean(options?.delegateJoined?.has(rowKey)),
+              provider,
+              providerIcon,
+            });
+          case "delegate_task":
+            return h(DelegateTaskEntry, { attrs, entry });
+          case "delegate_nudge":
+            return h(DelegateNudgeEntry, { attrs, entry });
+          default:
+            break;
+        }
+      }
     }
     return h(UserEntry, { entry, isJustPrepended, isLatestUser });
   }
   if (kind === REVIEW_RESULT_LINE_KIND) {
     return h(ReviewResultLine, { entry });
+  }
+  if (kind === DELEGATE_REPORTED_KIND) {
+    return h(DelegateReportedEntry, {
+      entry,
+      provider,
+      providerIcon: providerIconSvg(provider) || SPARKLES_SVG,
+    });
   }
   if (kind === "agent_text") {
     return h(AgentEntry, {
@@ -3245,7 +3295,7 @@ function computeTurnOpenerIds(entries) {
   let opened = false;
   for (const entry of entries) {
     if (entry?.kind === "user_text") {
-      opened = opensReviewedTurn(entry);
+      opened = opensReviewedTurn(entry) || opensAnsweredTurn(entry);
     } else if (entry?.kind === "agent_text" && !opened) {
       opened = true;
       const id = transcriptRowKey(entry);
@@ -3271,9 +3321,13 @@ export function TranscriptContent({
     () => foldReviewInjections(handoverFold.entries),
     [handoverFold]
   );
-  const groupedItems = React.useMemo(
-    () => groupToolEntries(reviewFold.entries),
+  const delegateFold = React.useMemo(
+    () => foldDelegateInjections(reviewFold.entries),
     [reviewFold]
+  );
+  const groupedItems = React.useMemo(
+    () => groupToolEntries(delegateFold.entries),
+    [delegateFold]
   );
   const latestUserEntryId = React.useMemo(() => {
     for (let index = entries.length - 1; index >= 0; index -= 1) {
@@ -3306,6 +3360,9 @@ export function TranscriptContent({
   const turnOpenerItemIds = React.useMemo(() => computeTurnOpenerIds(entries), [entries]);
   const handoverMembers = handoverFold.members;
   const reviewFolded = reviewFold.folded;
+  const delegateMembers = delegateFold.members;
+  const delegateAnswered = delegateFold.answered;
+  const delegateJoined = delegateFold.joined;
   const effectiveOptions = React.useMemo(() => {
     const derived = {
       lastTurnDiffItemId,
@@ -3314,6 +3371,9 @@ export function TranscriptContent({
       turnOpenerItemIds,
       handoverMembers,
       reviewFolded,
+      delegateMembers,
+      delegateAnswered,
+      delegateJoined,
     };
     return options ? { ...options, ...derived } : derived;
   }, [
@@ -3324,6 +3384,9 @@ export function TranscriptContent({
     turnOpenerItemIds,
     handoverMembers,
     reviewFolded,
+    delegateMembers,
+    delegateAnswered,
+    delegateJoined,
   ]);
   const justPrependedItemIds = useJustPrependedItemIds(entries);
   // An UNANSWERED question is the one thing the session is waiting on, so it

@@ -184,6 +184,7 @@ import {
   skillForSend,
 } from "./shared/thread-skills.js";
 import { canRequestReview, selectReviewLaunchModel } from "./shared/review-state.js";
+import { dispatchDelegateAction } from "./shared/delegate-card.js";
 import { dispatchReviewAction } from "./shared/review-card.js";
 import { createGoalActions } from "./shared/goal-actions.js";
 import { createDelegateAuthor } from "./local/delegate-authoring.js";
@@ -3263,6 +3264,10 @@ transcript.addEventListener(
         stop: (reviewId) => state.controller?.resolveReview(reviewId),
         accept: (reviewId) => state.controller?.acceptReview(reviewId),
         rerun: (values) => state.controller?.requestReview(values),
+      }),
+    delegateAction: (action) =>
+      void dispatchDelegateAction(action, {
+        cancel: (threadId) => state.controller?.stopActiveTurn(threadId),
       }),
     goHome: () => void runViewTransition(() => clearThreadRoute()),
   })

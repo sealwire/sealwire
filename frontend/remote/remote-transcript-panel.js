@@ -28,6 +28,7 @@ export function RemoteTranscriptPanel({
   onForkFromMessage,
   onOpenThread = null,
   onReviewAction = null,
+  onDelegateAction = null,
   reviewJobs = null,
   onAskMessage = null,
   onSelectRelay,
@@ -204,6 +205,10 @@ export function RemoteTranscriptPanel({
         reviewAction: (action, event) => {
           event.preventDefault();
           onReviewAction?.(action);
+        },
+        delegateAction: (action, event) => {
+          event.preventDefault();
+          onDelegateAction?.(action);
         },
       }),
     });

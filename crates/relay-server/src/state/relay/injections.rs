@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
-    HandoverCardView, InjectionCard, InjectionKind, InjectionView, ReviewCardView,
-    ReviewFindingView, ReviewRoundView, TranscriptEntryKind,
+    DelegateCardView, HandoverCardView, InjectionCard, InjectionKind, InjectionView,
+    ReviewCardView, ReviewFindingView, ReviewRoundView, TranscriptEntryKind,
 };
 
 use super::transcript::TranscriptRecord;
@@ -42,7 +42,7 @@ impl MessageAnchor {
     }
 }
 
-const KIND_NAMES: [(InjectionKind, &str); 8] = [
+const KIND_NAMES: [(InjectionKind, &str); 13] = [
     (InjectionKind::HandoverRequest, "handover_request"),
     (InjectionKind::HandoverBrief, "handover_brief"),
     (InjectionKind::ReviewRecap, "review_recap"),
@@ -51,6 +51,11 @@ const KIND_NAMES: [(InjectionKind, &str); 8] = [
     (InjectionKind::ReviewCommit, "review_commit"),
     (InjectionKind::ReviewApproved, "review_approved"),
     (InjectionKind::ReviewEscalated, "review_escalated"),
+    (InjectionKind::DelegateRequest, "delegate_request"),
+    (InjectionKind::DelegateTask, "delegate_task"),
+    (InjectionKind::DelegateNudge, "delegate_nudge"),
+    (InjectionKind::DelegateAnswer, "delegate_answer"),
+    (InjectionKind::DelegateReported, "delegate_reported"),
 ];
 
 pub(crate) fn injection_kind_name(kind: InjectionKind) -> &'static str {
@@ -92,6 +97,19 @@ impl InjectionTag {
             ref_id: review_id.to_string(),
             round,
         }
+    }
+
+    /// One wake can hand back several asks; their ids share the row's one tag.
+    pub(crate) fn delegate(kind: InjectionKind, ask_ids: &[String]) -> Self {
+        Self {
+            kind,
+            ref_id: ask_ids.join(","),
+            round: 0,
+        }
+    }
+
+    pub(crate) fn ref_ids(&self) -> impl Iterator<Item = &str> {
+        self.ref_id.split(',').filter(|id| !id.is_empty())
     }
 }
 
@@ -162,6 +180,37 @@ impl ReviewMark {
     }
 }
 
+/// The lasting side of an ask. `Ask` is pruned from the session file; its cards need
+/// it for as long as their rows exist.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct DelegateMark {
+    pub(crate) id: String,
+    pub(crate) asker_thread_id: String,
+    pub(crate) peer_thread_id: String,
+    pub(crate) asker_provider: String,
+    pub(crate) peer_provider: String,
+    pub(crate) task: String,
+    pub(crate) title: String,
+    pub(crate) instruction: String,
+    /// When the peer was handed the brief; until then the asker is still writing it.
+    pub(crate) sent_at: Option<u64>,
+    pub(crate) status: String,
+    pub(crate) error: Option<String>,
+    pub(crate) answer: Option<String>,
+    pub(crate) answered_with_tool: bool,
+    pub(crate) delivered: bool,
+    pub(crate) asked_at: u64,
+    pub(crate) finished_at: Option<u64>,
+    pub(crate) updated_at: u64,
+}
+
+impl DelegateMark {
+    pub(crate) fn is_settled(&self) -> bool {
+        self.status != "working"
+    }
+}
+
 #[derive(Clone, Debug)]
 enum Match {
     Anchor(MessageAnchor),
@@ -174,6 +223,7 @@ enum Match {
 pub(crate) struct Injections {
     handovers: HashMap<String, HandoverMark>,
     reviews: HashMap<String, ReviewMark>,
+    delegates: HashMap<String, DelegateMark>,
     anchored: HashMap<String, Vec<InjectedMessage>>,
     pending: HashMap<String, Vec<(String, InjectionTag)>>,
 }
@@ -182,6 +232,7 @@ impl Injections {
     pub(crate) fn load(
         handovers: Vec<HandoverMark>,
         reviews: Vec<ReviewMark>,
+        delegates: Vec<DelegateMark>,
         messages: Vec<InjectedMessage>,
     ) -> Self {
         let mut injections = Self::default();
@@ -190,6 +241,9 @@ impl Injections {
         }
         for review in reviews {
             injections.put_review(review);
+        }
+        for delegate in delegates {
+            injections.put_delegate(delegate);
         }
         for message in messages {
             injections.anchor(message);
@@ -211,6 +265,14 @@ impl Injections {
 
     pub(crate) fn put_review(&mut self, review: ReviewMark) {
         self.reviews.insert(review.id.clone(), review);
+    }
+
+    pub(crate) fn delegate(&self, id: &str) -> Option<&DelegateMark> {
+        self.delegates.get(id)
+    }
+
+    pub(crate) fn put_delegate(&mut self, delegate: DelegateMark) {
+        self.delegates.insert(delegate.id.clone(), delegate);
     }
 
     pub(crate) fn reviews_continued_by(&self, review_id: &str) -> Vec<String> {
@@ -244,6 +306,14 @@ impl Injections {
         messages.push(message);
     }
 
+    pub(crate) fn tag_at(&self, thread_id: &str, anchor: &MessageAnchor) -> Option<&InjectionTag> {
+        self.anchored
+            .get(thread_id)?
+            .iter()
+            .find(|message| message.anchor == *anchor)
+            .map(|message| &message.tag)
+    }
+
     #[cfg(test)]
     pub(crate) fn anchored_rows(&self, thread_id: &str) -> usize {
         self.anchored.get(thread_id).map_or(0, Vec::len)
@@ -253,12 +323,12 @@ impl Injections {
         self.anchored
             .values()
             .flatten()
-            .map(|message| message.tag.ref_id.as_str())
+            .flat_map(|message| message.tag.ref_ids())
             .chain(
                 self.pending
                     .values()
                     .flatten()
-                    .map(|(_, tag)| tag.ref_id.as_str()),
+                    .flat_map(|(_, tag)| tag.ref_ids()),
             )
             .collect()
     }
@@ -271,6 +341,7 @@ impl Injections {
     pub(crate) fn forget_mark(&mut self, ref_id: &str) {
         self.handovers.remove(ref_id);
         self.reviews.remove(ref_id);
+        self.delegates.remove(ref_id);
     }
 
     /// Drops the thread's rows, and every mark only they carried. Returns those marks'
@@ -281,14 +352,15 @@ impl Injections {
             .remove(thread_id)
             .into_iter()
             .flatten()
-            .map(|message| message.tag.ref_id)
+            .map(|message| message.tag)
             .chain(
                 self.pending
                     .remove(thread_id)
                     .into_iter()
                     .flatten()
-                    .map(|(_, tag)| tag.ref_id),
+                    .map(|(_, tag)| tag),
             )
+            .flat_map(|tag| tag.ref_ids().map(str::to_string).collect::<Vec<_>>())
             .collect();
         let referenced = self.referenced();
         let orphaned: Vec<String> = carried
@@ -313,6 +385,8 @@ impl Injections {
         let view = |tag: &InjectionTag| {
             let card = if tag.kind.is_review() {
                 InjectionCard::Review(self.review_card(tag, &named, &title)?)
+            } else if tag.kind.is_delegate() {
+                InjectionCard::Delegate(self.delegate_cards(tag, &named, &title)?)
             } else {
                 InjectionCard::Handover(self.handover_card(&tag.ref_id, &named, &title)?)
             };
@@ -372,6 +446,21 @@ impl Injections {
             created_at: handover.created_at,
             updated_at: handover.updated_at,
         })
+    }
+
+    /// The asks a row draws: one, or an answer row's batch.
+    fn delegate_cards(
+        &self,
+        tag: &InjectionTag,
+        named: &impl Fn(&str) -> bool,
+        title: &impl Fn(&str) -> Option<String>,
+    ) -> Option<Vec<DelegateCardView>> {
+        let cards: Vec<DelegateCardView> = tag
+            .ref_ids()
+            .filter_map(|id| self.delegates.get(id))
+            .map(|mark| delegate_card(mark, tag.kind, named, title))
+            .collect();
+        (!cards.is_empty()).then_some(cards)
     }
 
     fn review_card(
@@ -506,6 +595,67 @@ fn card_note(note: &str) -> String {
     clip_chars(note, CARD_NOTE_CHARS)
 }
 
+/// Bounds a page; a snapshot clips it further (`compact_for_budget`).
+const CARD_ANSWER_CHARS: usize = 4_000;
+
+fn delegate_card(
+    mark: &DelegateMark,
+    kind: InjectionKind,
+    named: &impl Fn(&str) -> bool,
+    title: &impl Fn(&str) -> Option<String>,
+) -> DelegateCardView {
+    let visible = |id: &str| !id.is_empty() && named(id);
+    let (asker, peer) = (
+        visible(&mark.asker_thread_id),
+        visible(&mark.peer_thread_id),
+    );
+    let side = |shown: bool, id: &str| match shown {
+        true => (id.to_string(), title(id)),
+        false => (String::new(), None),
+    };
+    let (asker_thread_id, asker_title) = side(asker, &mark.asker_thread_id);
+    let (peer_thread_id, peer_title) = side(peer, &mark.peer_thread_id);
+    // A reply that answered is its own text; a `report_back` call carries what it said.
+    let draws_answer = match kind {
+        InjectionKind::DelegateAnswer => true,
+        InjectionKind::DelegateReported => mark.answered_with_tool,
+        _ => false,
+    };
+    DelegateCardView {
+        id: mark.id.clone(),
+        asker_thread_id,
+        asker_title,
+        asker_provider: mark.asker_provider.clone(),
+        peer_thread_id,
+        peer_title,
+        peer_provider: mark.peer_provider.clone(),
+        // Typed into the asker, so it stays wherever the asker is hidden.
+        task: if asker {
+            card_note(&mark.task)
+        } else {
+            String::new()
+        },
+        title: mark.title.clone(),
+        instruction: mark.instruction.clone(),
+        status: mark.status.clone(),
+        // A failure before any peer existed concerns the asker alone.
+        error: mark
+            .error
+            .clone()
+            .filter(|_| asker && (peer || mark.peer_thread_id.is_empty())),
+        answer: mark
+            .answer
+            .as_deref()
+            .filter(|_| draws_answer)
+            .map(|answer| clip_chars(answer, CARD_ANSWER_CHARS)),
+        answered_with_tool: mark.answered_with_tool,
+        delivered: mark.delivered,
+        asked_at: mark.asked_at,
+        sent_at: mark.sent_at,
+        finished_at: mark.finished_at,
+    }
+}
+
 /// One thread's marks, resolved once per read and applied row by row.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ThreadInjections {
@@ -518,12 +668,17 @@ impl ThreadInjections {
         transcript: &ThreadTranscript,
         record: &TranscriptRecord,
     ) -> Option<InjectionView> {
-        if self.marks.is_empty() || record.kind != TranscriptEntryKind::UserText {
+        if self.marks.is_empty() {
             return None;
         }
+        // Only a delegate's answer marks a row the relay did not send.
+        let sent = record.kind == TranscriptEntryKind::UserText;
         self.marks
             .iter()
-            .find(|(matcher, _)| matches(matcher, transcript, record))
+            .find(|(matcher, view)| {
+                (view.kind != InjectionKind::DelegateReported) == sent
+                    && matches(matcher, transcript, record)
+            })
             .map(|(_, view)| view.clone())
     }
 }
@@ -591,6 +746,7 @@ mod tests {
         let mut injections = Injections::load(
             Vec::new(),
             vec![review("carried"), review("waiting")],
+            Vec::new(),
             vec![row("gone", "carried", InjectionKind::ReviewResult)],
         );
 
@@ -699,6 +855,7 @@ mod tests {
                 error: Some("failed in /elsewhere".to_string()),
                 ..review("r")
             }],
+            Vec::new(),
             vec![row("parent", "r", InjectionKind::ReviewResult)],
         );
         let card = |may_see: bool| {

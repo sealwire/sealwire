@@ -1,6 +1,7 @@
 mod approval;
 mod ask_user_question;
 mod background;
+mod delegate_marks;
 mod device;
 mod injections;
 mod push;
@@ -41,8 +42,8 @@ pub(crate) use self::device::{
     PendingPairingResult, PendingTranscriptDelta, TranscriptDeltaKind,
 };
 pub(crate) use self::injections::{
-    clip_chars, injection_kind_from_name, injection_kind_name, HandoverMark, InjectedMessage,
-    InjectionTag, Injections, MessageAnchor, ReviewMark, ThreadInjections,
+    clip_chars, injection_kind_from_name, injection_kind_name, DelegateMark, HandoverMark,
+    InjectedMessage, InjectionTag, Injections, MessageAnchor, ReviewMark, ThreadInjections,
 };
 pub(crate) use self::push::{
     is_acceptable_push_endpoint, load_or_generate_vapid, vapid_key_path, PushAttentionTracker,
@@ -1025,7 +1026,12 @@ impl RelayState {
     /// The database beside `session.json`, and what it remembers.
     pub(crate) fn install_database(&mut self, store: crate::usage::store::UsageStore) {
         let loaded = store.load_injections("the relay restarted before this finished");
-        self.injections = Injections::load(loaded.handovers, loaded.reviews, loaded.messages);
+        self.injections = Injections::load(
+            loaded.handovers,
+            loaded.reviews,
+            loaded.delegates,
+            loaded.messages,
+        );
         self.usage_store = store;
     }
 
@@ -2736,7 +2742,9 @@ impl RelayState {
         let mut terminal: Vec<(String, u64)> = self
             .asks
             .iter()
-            .filter(|(_, job)| job.status.is_terminal())
+            // Never an answer the asker has yet to get; those and live asks may take it
+            // past the cap instead.
+            .filter(|(_, job)| job.status.is_terminal() && job.delivered)
             .map(|(id, job)| (id.clone(), job.updated_at))
             .collect();
         terminal.sort_by_key(|(_, updated_at)| *updated_at);
@@ -2750,6 +2758,7 @@ impl RelayState {
 
     pub(crate) fn insert_ask(&mut self, job: Ask) {
         self.prune_asks();
+        self.record_delegate_mark(&job);
         self.asks.insert(job.id.clone(), job);
     }
 
@@ -3143,6 +3152,7 @@ happened, then hand over again."
         match self.asks.get_mut(ask_id) {
             Some(job) => {
                 update(job);
+                self.sync_delegate_mark(ask_id);
                 true
             }
             None => false,
@@ -5069,6 +5079,7 @@ so {} never got it — hand over again when you are ready.",
         // the sweep to settle from that peer's transcript, and only one that never got a
         // peer is settled here.
         self.asks = Self::restored_asks(&persisted.asks);
+        self.resync_delegate_marks();
         self.handovers = Self::restored_handovers(&persisted.handovers);
         // A goal survives, but never running: whatever was driving it died with
         // the process, and picking the work back up unasked — minutes or days
@@ -6728,6 +6739,7 @@ so {} never got it — hand over again when you are ready.",
         // the sweep to settle from that peer's transcript, and only one that never got a
         // peer is settled here.
         self.asks = Self::restored_asks(&persisted.asks);
+        self.resync_delegate_marks();
         self.handovers = Self::restored_handovers(&persisted.handovers);
         // A goal survives, but never running: whatever was driving it died with
         // the process, and picking the work back up unasked — minutes or days
@@ -7643,6 +7655,51 @@ mod tests {
             restored.asks.get("done").map(|ask| ask.status),
             Some(AskStatus::Done),
             "a settled one is untouched"
+        );
+    }
+
+    /// An answer not yet handed back is the one thing the cap may never drop.
+    #[test]
+    fn making_room_never_drops_an_answer_the_asker_has_not_been_given() {
+        use super::MAX_ASKS;
+        use crate::state::Ask;
+        let ask = |id: String, by: relay_api::delegation::StartedBy| {
+            Ask::new(
+                id,
+                "asker".to_string(),
+                "peer".to_string(),
+                "codex".to_string(),
+                None,
+                None,
+                "do the thing".to_string(),
+                "/tmp".to_string(),
+                None,
+                by,
+            )
+        };
+        let mut relay = test_relay();
+        for index in 0..MAX_ASKS - 1 {
+            relay.insert_ask(ask(
+                format!("live-{index:03}"),
+                relay_api::delegation::StartedBy::Agent,
+            ));
+        }
+        let mut answered = ask(
+            "answered".to_string(),
+            relay_api::delegation::StartedBy::Agent,
+        );
+        answered.finish("the answer");
+        assert!(answered.owed_to_asker());
+        relay.insert_ask(answered);
+
+        relay.insert_ask(ask(
+            "next".to_string(),
+            relay_api::delegation::StartedBy::Agent,
+        ));
+
+        assert!(
+            relay.asks.contains_key("answered"),
+            "better past the cap than an answer lost"
         );
     }
 

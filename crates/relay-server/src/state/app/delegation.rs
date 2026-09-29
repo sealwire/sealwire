@@ -8,8 +8,9 @@
 use relay_api::delegation::{AskError, AskRequest};
 
 use super::super::delegation::{peer_is_wider_than_asker, peer_thread_settings, Ask};
+use crate::protocol::InjectionKind;
 use crate::provider::StartThreadRequest;
-use crate::state::{unix_now, AppState};
+use crate::state::{unix_now, AppState, InjectionTag};
 
 /// How many peers one session may have brought in. A runaway asker is a runaway
 /// bill, and a sidebar nobody can read. Ask *rounds* to those peers are not
@@ -148,7 +149,11 @@ impl AppState {
         .ok_or_else(|| AskError::Failed("nobody is waiting on you right now".to_string()))?;
 
         let mut relay = self.relay.write().await;
-        relay.update_ask(&ask_id, |ask| ask.finish(answer));
+        relay.update_ask(&ask_id, |ask| {
+            ask.answered_with_tool = true;
+            ask.finish(answer);
+        });
+        relay.mark_report_back_call(&ask_id, &peer_thread_id);
         relay.notify();
         Ok(())
     }
@@ -178,30 +183,7 @@ impl AppState {
         // Refusals a person can act on are answered here; only the brief and the peer's
         // start happen out of sight.
         let prechecked = self.precheck_ask(&asker_thread_id, &request, None).await?;
-
-        // Written before the caller is answered: a restart during the minutes the brief
-        // takes would otherwise lose an accepted delegate with nothing to show for it.
-        let ask_id = new_ask_id();
-        {
-            let mut relay = self.relay.write().await;
-            let mut ask = Ask::new(
-                ask_id.clone(),
-                prechecked.asker_thread_id.clone(),
-                // Filled in when the peer exists; until then this is the delegation.
-                String::new(),
-                request.provider.clone().unwrap_or_default(),
-                request.model.clone(),
-                request.effort.clone(),
-                prechecked.message.clone(),
-                prechecked.asker_cwd.clone(),
-                None,
-                request.started_by,
-            );
-            ask.asker_provider =
-                Some(prechecked.asker_provider.clone()).filter(|provider| !provider.is_empty());
-            relay.insert_ask(ask);
-            relay.notify();
-        }
+        let ask_id = self.record_accepted_ask(&prechecked, &request).await;
 
         let app = self.clone();
         let asker = prechecked.asker_thread_id.clone();
@@ -216,6 +198,35 @@ impl AppState {
             }
         });
         Ok(ask_id)
+    }
+
+    /// Written before the caller is answered: a restart during the minutes the brief
+    /// takes would otherwise lose an accepted delegate with nothing to show for it.
+    async fn record_accepted_ask(
+        &self,
+        prechecked: &PrecheckedAsk,
+        request: &AskRequest,
+    ) -> String {
+        let ask_id = new_ask_id();
+        let mut relay = self.relay.write().await;
+        let mut ask = Ask::new(
+            ask_id.clone(),
+            prechecked.asker_thread_id.clone(),
+            // Filled in when the peer exists; until then this is the delegation.
+            String::new(),
+            request.provider.clone().unwrap_or_default(),
+            request.model.clone(),
+            request.effort.clone(),
+            prechecked.message.clone(),
+            prechecked.asker_cwd.clone(),
+            None,
+            request.started_by,
+        );
+        ask.asker_provider =
+            Some(prechecked.asker_provider.clone()).filter(|provider| !provider.is_empty());
+        relay.insert_ask(ask);
+        relay.notify();
+        ask_id
     }
 
     /// Report an accepted delegate's failure on the record the panel is showing, rather
@@ -351,7 +362,19 @@ Carry on with one of those instead of bringing in another."
                     .map_err(AskError::Failed)?,
             );
         }
-        self.delegate_filling(&asker_thread_id, request, None).await
+        if request.started_by != relay_api::delegation::StartedBy::Person {
+            return self.delegate_filling(&asker_thread_id, request, None).await;
+        }
+        // On record before the brief, like a detached one, so its cards have a row to hang on.
+        let prechecked = self.precheck_ask(&asker_thread_id, &request, None).await?;
+        let ask_id = self.record_accepted_ask(&prechecked, &request).await;
+        let filled = self
+            .delegate_filling(&asker_thread_id, request, Some(ask_id.clone()))
+            .await;
+        if let Err(error) = &filled {
+            self.fail_detached_ask(&ask_id, error.message()).await;
+        }
+        filled
     }
 
     /// `existing_ask_id` fills in a record written before the caller was answered, so an
@@ -377,7 +400,8 @@ Carry on with one of those instead of bringing in another."
         // costs a turn on the asking agent, which is why it is opt-in: an agent
         // calling the tool already wrote its message with the context in view.
         let message = if request.started_by == relay_api::delegation::StartedBy::Person {
-            self.brief_from_asker(&asker_thread_id, &message).await?
+            self.brief_from_asker(&asker_thread_id, &message, existing_ask_id.as_deref())
+                .await?
         } else {
             message
         };
@@ -468,6 +492,7 @@ Carry on with one of those instead of bringing in another."
         // peer working with nobody waiting for it. The reverse — recorded but not
         // sent — is visible and settles as a failure.
         let ask_id = existing_ask_id.clone().unwrap_or_else(new_ask_id);
+        let instruction = answer_instruction(peer_has_tools);
         {
             let mut relay = self.relay.write().await;
             if existing_ask_id.is_some() {
@@ -500,12 +525,16 @@ Carry on with one of those instead of bringing in another."
                 relay.insert_ask(ask);
                 relay.notify();
             }
+            relay.edit_delegate_mark(&ask_id, |mark| {
+                mark.instruction = instruction.to_string();
+            });
         }
 
         match self
-            .send_message_to_thread(
+            .send_injected(
+                InjectionTag::delegate(InjectionKind::DelegateTask, &[ask_id.clone()]),
                 &peer_thread_id,
-                &format!("{message}{}", answer_instruction(peer_has_tools)),
+                &format!("{message}{instruction}"),
                 request.model.as_deref(),
                 request.effort.as_deref(),
             )
@@ -516,7 +545,10 @@ Carry on with one of those instead of bringing in another."
                     let mut relay = self.relay.write().await;
                     // Which turn to listen for. Without it a reply meant for
                     // somebody else gets handed back as this ask's answer.
-                    relay.update_ask(&ask_id, |ask| ask.turn_id = dispatched.turn_id.clone());
+                    relay.update_ask(&ask_id, |ask| {
+                        ask.turn_id = dispatched.turn_id.clone();
+                        ask.sent_at = Some(unix_now());
+                    });
                     relay.notify();
                 }
                 Ok(peer_thread_id)
@@ -619,6 +651,7 @@ write the brief — try again once it is done"
         &self,
         asker_thread_id: &str,
         task: &str,
+        ask_id: Option<&str>,
     ) -> Result<String, AskError> {
         // ONE budget for the whole delegate — queueing behind another turn and waiting for
         // our own are the same person waiting, and the desktop route blocks on the total.
@@ -633,10 +666,21 @@ write the brief — try again once it is done"
             .await
             .map(|(item_id, _)| item_id);
 
-        let dispatched = self
-            .send_message_to_thread(asker_thread_id, &brief_prompt(task), None, None)
-            .await
-            .map_err(|error| AskError::Failed(format!("could not ask for a brief: {error}")))?;
+        let prompt = brief_prompt(task);
+        let sent = match ask_id {
+            Some(ask_id) => {
+                let tag =
+                    InjectionTag::delegate(InjectionKind::DelegateRequest, &[ask_id.to_string()]);
+                self.send_injected(tag, asker_thread_id, &prompt, None, None)
+                    .await
+            }
+            None => {
+                self.send_message_to_thread(asker_thread_id, &prompt, None, None)
+                    .await
+            }
+        };
+        let dispatched =
+            sent.map_err(|error| AskError::Failed(format!("could not ask for a brief: {error}")))?;
 
         // An UNCERTAIN start (see `DispatchedTurn`): the provider may be working, but
         // nothing it writes could be matched to what we asked, so there is no brief to
@@ -901,8 +945,7 @@ pub(crate) fn askers_ready_to_wake(asks: &[Ask]) -> Vec<String> {
     }
     for ask in asks {
         let asker = ask.asker_thread_id.as_str();
-        if ask.status.is_terminal()
-            && !ask.delivered
+        if ask.owed_to_asker()
             && !blocked.contains(asker)
             && !ready.iter().any(|seen| seen == asker)
         {
@@ -957,25 +1000,17 @@ impl AppState {
     }
 
     async fn settle_finished_asks_at(&self, now: u64) {
-        let live: Vec<(String, String, Option<String>, Option<String>, u64)> = {
+        let live: Vec<(String, String, u64)> = {
             let relay = self.relay.read().await;
             relay
                 .asks
                 .values()
                 .filter(|ask| !ask.status.is_terminal())
-                .map(|ask| {
-                    (
-                        ask.id.clone(),
-                        ask.peer_thread_id.clone(),
-                        ask.baseline_item_id.clone(),
-                        ask.turn_id.clone(),
-                        ask.asked_at,
-                    )
-                })
+                .map(|ask| (ask.id.clone(), ask.peer_thread_id.clone(), ask.asked_at))
                 .collect()
         };
 
-        for (ask_id, peer_thread_id, baseline, turn_id, asked_at) in live {
+        for (ask_id, peer_thread_id, asked_at) in live {
             let busy = {
                 let relay = self.relay.read().await;
                 let working = relay
@@ -998,20 +1033,24 @@ impl AppState {
                 // Take whatever it did say before giving up. A finished answer
                 // sitting in its transcript, discarded because a clock fired, is
                 // the one outcome nobody wants — and it is what happened.
-                let salvaged = self
-                    .latest_assistant_entry_with_turn(&peer_thread_id)
-                    .await
-                    .filter(|(item_id, _, _, _)| baseline.as_deref() != Some(item_id.as_str()))
-                    .map(|(_, text, _, _)| text);
+                // Only from its own turn: a reply the person prompted meanwhile is theirs.
+                let latest = self.latest_assistant_entry_with_turn(&peer_thread_id).await;
                 let mut relay = self.relay.write().await;
-                relay.update_ask(&ask_id, |ask| match salvaged {
-                    Some(text) => ask.finish(text),
-                    // Name the session, so whoever reads this can go and look
-                    // rather than being told only that it failed.
-                    None => ask.fail(format!(
-                        "it stopped without answering; its session is {peer_thread_id}"
-                    )),
+                let salvaged = latest.filter(|(item_id, _, reply_turn, _)| {
+                    relay
+                        .ask(&ask_id)
+                        .is_some_and(|ask| reply_answers_ask(ask, item_id, reply_turn.as_deref()))
                 });
+                match salvaged {
+                    Some((item_id, text, _, _)) => {
+                        relay.update_ask(&ask_id, |ask| ask.finish(text));
+                        relay.mark_delegate_reply(&ask_id, &peer_thread_id, &item_id);
+                    }
+                    // The wake names the session, and the card links to it.
+                    None => {
+                        relay.update_ask(&ask_id, |ask| ask.fail("it stopped without answering"));
+                    }
+                }
                 relay.notify();
                 continue;
             }
@@ -1052,8 +1091,9 @@ impl AppState {
                     .unwrap_or(false)
             };
             if !nudged && can_be_nudged {
+                let tag = InjectionTag::delegate(InjectionKind::DelegateNudge, &[ask_id.clone()]);
                 let dispatched = self
-                    .send_message_to_thread(&peer_thread_id, answer_nudge(), None, None)
+                    .send_injected(tag, &peer_thread_id, answer_nudge(), None, None)
                     .await;
                 let mut relay = self.relay.write().await;
                 relay.update_ask(&ask_id, |ask| {
@@ -1073,6 +1113,7 @@ impl AppState {
             // Nudged and still nothing. Its last message beats silence.
             let mut relay = self.relay.write().await;
             relay.update_ask(&ask_id, |ask| ask.finish(text));
+            relay.mark_delegate_reply(&ask_id, &peer_thread_id, &item_id);
             relay.notify();
         }
     }
@@ -1102,18 +1143,18 @@ impl AppState {
         let latest = self.latest_assistant_entry_with_turn(peer_thread_id).await;
         let mut relay = self.relay.write().await;
         for ask in live {
-            let salvaged = latest
-                .as_ref()
-                .filter(|(item_id, _, reply_turn, _)| {
-                    reply_answers_ask(&ask, item_id, reply_turn.as_deref())
-                })
-                .map(|(_, text, _, _)| text.clone());
-            relay.update_ask(&ask.id, |ask| match salvaged {
-                Some(text) => ask.finish(text),
-                None => ask.fail(format!(
-                    "you stopped it before it answered; its session is {peer_thread_id}"
-                )),
+            let salvaged = latest.as_ref().filter(|(item_id, _, reply_turn, _)| {
+                reply_answers_ask(&ask, item_id, reply_turn.as_deref())
             });
+            match salvaged {
+                Some((item_id, text, _, _)) => {
+                    relay.update_ask(&ask.id, |ask| ask.finish(text.clone()));
+                    relay.mark_delegate_reply(&ask.id, peer_thread_id, item_id);
+                }
+                None => {
+                    relay.update_ask(&ask.id, |ask| ask.fail("you stopped it before it answered"));
+                }
+            }
         }
         relay.notify();
     }
@@ -1144,7 +1185,7 @@ impl AppState {
                 let mut mine: Vec<&Ask> = relay
                     .asks_of_asker(&asker)
                     .into_iter()
-                    .filter(|ask| ask.status.is_terminal() && !ask.delivered)
+                    .filter(|ask| ask.owed_to_asker())
                     .collect();
                 mine.sort_by_key(|ask| ask.asked_at);
                 if mine.is_empty() {
@@ -1182,10 +1223,8 @@ impl AppState {
             // Charged before the send, because a turn that lands uncounted is how a budget
             // gets beaten and a failed start does not prove the provider never began.
             let charged = any_agent_asked && self.charge_goal_for_driven_turn(&asker).await;
-            match self
-                .send_message_to_thread(&asker, &message, None, None)
-                .await
-            {
+            let tag = InjectionTag::delegate(InjectionKind::DelegateAnswer, &ask_ids);
+            match self.send_injected(tag, &asker, &message, None, None).await {
                 Ok(dispatched) if charged => {
                     self.goal_dispatch_landed(&asker, dispatched.turn_id.clone())
                         .await

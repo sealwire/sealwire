@@ -1,5 +1,6 @@
 @import "./conversation.css";
 @import "./review-cards.css";
+@import "./delegate-cards.css";
 
 :root {
   color-scheme: dark;

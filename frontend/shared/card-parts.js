@@ -1,4 +1,5 @@
-// What the handover and review cards share: the fold, and the small parts of the skeleton.
+// What the handover, review and delegate cards share: the fold, and the small parts of
+// the skeleton.
 import React, { useEffect, useRef, useState } from "react";
 
 const h = React.createElement;
@@ -9,6 +10,19 @@ export function clockTime(seconds) {
   }
   const date = new Date(seconds * 1000);
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+/** Ticks once a second while `active`, for a card's running time. */
+export function useNow(active) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) {
+      return undefined;
+    }
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [active]);
+  return now;
 }
 
 export function CardIcon({ paths, size = 15 }) {

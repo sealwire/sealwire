@@ -33588,6 +33588,377 @@ watchdog settle this Blocked",
 }
 
 #[cfg(test)]
+mod delegate_card_tests {
+    //! Design 25a–25c: what a `/delegate` sends is drawn as cards at both ends, and a
+    //! person's delegate that fails waits for the person.
+    use super::path_scope_tests::{build_app, grant_workspace};
+    use crate::protocol::{InjectionKind, InjectionView, TranscriptEntryView};
+    use relay_api::delegation::{AskRequest, StartedBy};
+    use tempfile::TempDir;
+
+    async fn session(app: &crate::state::AppState, cwd: &str) -> String {
+        app.start_session(crate::protocol::StartSessionInput {
+            cwd: Some(cwd.to_string()),
+            provider: Some("fake".to_string()),
+            approval_policy: Some("bypass".to_string()),
+            device_id: Some("dev".to_string()),
+            initial_prompt: None,
+            model: None,
+            effort: None,
+            project_id: None,
+            sandbox: None,
+        })
+        .await
+        .expect("session starts")
+        .active_thread_id
+        .clone()
+        .expect("thread")
+    }
+
+    fn request(started_by: StartedBy, message: &str) -> AskRequest {
+        AskRequest {
+            device_id: None,
+            started_by,
+            peer_thread_id: None,
+            provider: Some("fake".to_string()),
+            model: None,
+            effort: None,
+            message: message.to_string(),
+        }
+    }
+
+    async fn marked_rows(
+        app: &crate::state::AppState,
+        thread_id: &str,
+    ) -> Vec<(TranscriptEntryView, InjectionView)> {
+        let page = app
+            .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+                thread_id: thread_id.to_string(),
+                before: None,
+                device_id: None,
+            })
+            .await
+            .expect("tail read");
+        page.entries
+            .into_iter()
+            .filter_map(|row| row.injection.clone().map(|mark| (row, mark)))
+            .collect()
+    }
+
+    /// Polls until `kind` marks a row of `thread_id`; marks are tied to rows in the background.
+    async fn row_marked(
+        app: &crate::state::AppState,
+        thread_id: &str,
+        kind: InjectionKind,
+    ) -> (TranscriptEntryView, InjectionView) {
+        for _ in 0..200 {
+            app.settle_and_deliver_asks_at(crate::state::unix_now())
+                .await;
+            if let Some(found) = marked_rows(app, thread_id)
+                .await
+                .into_iter()
+                .find(|(_, mark)| mark.kind == kind)
+            {
+                return found;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("no {kind:?} row on {thread_id}");
+    }
+
+    async fn only_ask(app: &crate::state::AppState, asker: &str) -> crate::state::Ask {
+        let relay = app.relay.read().await;
+        let mine = relay.asks_of_asker(asker);
+        assert_eq!(mine.len(), 1, "one delegate on record");
+        mine[0].clone()
+    }
+
+    fn was_woken(relay: &crate::state::RelayState, thread_id: &str) -> bool {
+        relay.runtime_for_thread(thread_id).is_some_and(|runtime| {
+            runtime.transcript.iter().any(|entry| {
+                entry.kind == crate::protocol::TranscriptEntryKind::UserText
+                    && entry
+                        .text
+                        .as_deref()
+                        .is_some_and(|text| text.contains("The agents you asked have finished"))
+            })
+        })
+    }
+
+    /// Only a quiet peer runs the clock out; a working one is never timed out.
+    async fn peer_quiet(app: &crate::state::AppState, peer: &str) {
+        for _ in 0..200 {
+            let working = {
+                let relay = app.relay.read().await;
+                relay
+                    .runtime_for_thread(peer)
+                    .is_some_and(|runtime| runtime.is_working())
+            };
+            if !working {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// A person's delegate whose peer then fails, the way a silent timeout leaves it.
+    async fn failed_delegate(app: &crate::state::AppState, asker: &str) -> crate::state::Ask {
+        app.delegate(
+            asker,
+            request(StartedBy::Person, "ask it about the retry loop"),
+        )
+        .await
+        .expect("the delegate goes through");
+        let ask = only_ask(app, asker).await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.update_ask(&ask.id, |ask| ask.fail("it stopped without answering"));
+        }
+        only_ask(app, asker).await
+    }
+
+    #[tokio::test]
+    async fn a_persons_delegate_is_a_card_where_it_was_asked_and_where_it_was_answered() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = session(&app, &cwd).await;
+
+        let peer = app
+            .delegate(
+                &asker,
+                request(StartedBy::Person, "ask it about the retry loop"),
+            )
+            .await
+            .expect("the delegate goes through");
+
+        let (_, asked) = row_marked(&app, &asker, InjectionKind::DelegateRequest).await;
+        let card = &asked.delegates()[0];
+        assert_eq!(
+            card.task, "ask it about the retry loop",
+            "the bubble shows what was typed"
+        );
+        assert_eq!(card.peer_thread_id, peer);
+        assert!(card.sent_at.is_some(), "the brief reached the peer");
+
+        let (row, given) = row_marked(&app, &peer, InjectionKind::DelegateTask).await;
+        let task = &given.delegates()[0];
+        assert!(
+            !task.instruction.is_empty()
+                && row
+                    .text
+                    .as_deref()
+                    .unwrap_or_default()
+                    .ends_with(&task.instruction),
+            "a client strips the instruction to show the brief alone"
+        );
+        assert_eq!(task.asker_thread_id, asker);
+
+        let (_, answered) = row_marked(&app, &asker, InjectionKind::DelegateAnswer).await;
+        let answer = &answered.delegates()[0];
+        assert_eq!(answer.id, card.id, "one delegate, seen from both ends");
+        assert_eq!(answer.status, "done");
+        assert!(
+            answer.answer.is_some(),
+            "the answer card carries what came back"
+        );
+        assert!(answer.delivered);
+    }
+
+    #[tokio::test]
+    async fn an_answer_through_report_back_is_not_copied_onto_the_task_card() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = session(&app, &cwd).await;
+
+        let peer = app
+            .delegate(&asker, request(StartedBy::Agent, "look at the retry loop"))
+            .await
+            .expect("the ask goes through");
+        row_marked(&app, &peer, InjectionKind::DelegateTask).await;
+        app.report_back(&peer, "It retries forever.".to_string())
+            .await
+            .expect("reported");
+
+        let (_, given) = row_marked(&app, &peer, InjectionKind::DelegateTask).await;
+        let task = &given.delegates()[0];
+        assert!(task.answered_with_tool);
+        assert_eq!(task.answer, None, "the call's own row carries it");
+        assert!(
+            marked_rows(&app, &asker)
+                .await
+                .iter()
+                .all(|(_, mark)| mark.kind != InjectionKind::DelegateRequest),
+            "an agent's own delegate has no brief turn to draw"
+        );
+    }
+
+    /// No answer is still an answer: the asker hears of it at once and decides what next.
+    #[tokio::test]
+    async fn a_persons_failed_delegate_is_handed_back_at_once() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = session(&app, &cwd).await;
+        let failed = failed_delegate(&app, &asker).await;
+
+        let (_, answered) = row_marked(&app, &asker, InjectionKind::DelegateAnswer).await;
+        let card = &answered.delegates()[0];
+        assert_eq!(card.id, failed.id);
+        assert_eq!(card.status, "failed");
+        assert_eq!(card.error.as_deref(), Some("it stopped without answering"));
+        let relay = app.relay.read().await;
+        assert!(was_woken(&relay, &asker));
+    }
+
+    /// Timing out takes what the peer said in the task's own turn, never a reply to
+    /// something the person asked it in the meantime.
+    #[tokio::test]
+    async fn a_timeout_never_takes_another_turns_reply_as_the_answer() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = session(&app, &cwd).await;
+        let peer = app
+            .delegate(&asker, request(StartedBy::Agent, "look at the retry loop"))
+            .await
+            .expect("the ask goes through");
+        peer_quiet(&app, &peer).await;
+        let asked_at = {
+            let mut relay = app.relay.write().await;
+            let ask_id = relay.asks_of_asker(&asker)[0].id.clone();
+            // As if the peer's latest reply belonged to a turn somebody else started.
+            relay.update_ask(&ask_id, |ask| {
+                ask.turn_id = Some("the-delegated-turn".to_string())
+            });
+            relay.ask(&ask_id).expect("on record").asked_at
+        };
+
+        app.settle_and_deliver_asks_at(asked_at + 5 * 60 * 60).await;
+
+        let settled = only_ask(&app, &asker).await;
+        assert!(settled.answer.is_none(), "took {:?}", settled.answer);
+        assert_eq!(
+            settled.error.as_deref(),
+            Some("it stopped without answering")
+        );
+    }
+
+    /// The row that answered carries its own mark, so the card does not depend on the task
+    /// row being loaded too.
+    #[tokio::test]
+    async fn the_reply_that_answered_is_marked_where_it_is() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        // Not unrestricted, so the peer has no tool and answers in its reply.
+        let asker = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("never".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+                sandbox: None,
+            })
+            .await
+            .expect("session starts")
+            .active_thread_id
+            .clone()
+            .expect("thread");
+        let peer = app
+            .delegate(&asker, request(StartedBy::Agent, "look at the retry loop"))
+            .await
+            .expect("the ask goes through");
+
+        let (row, mark) = row_marked(&app, &peer, InjectionKind::DelegateReported).await;
+        let ask = only_ask(&app, &asker).await;
+        assert_eq!(row.kind, crate::protocol::TranscriptEntryKind::AgentText);
+        assert_eq!(row.text, ask.answer, "the reply that became the answer");
+        assert_eq!(mark.delegates()[0].id, ask.id);
+    }
+
+    #[tokio::test]
+    async fn a_report_back_call_is_marked_as_the_answer() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = session(&app, &cwd).await;
+        let peer = app
+            .delegate(&asker, request(StartedBy::Agent, "look at the retry loop"))
+            .await
+            .expect("the ask goes through");
+        row_marked(&app, &peer, InjectionKind::DelegateTask).await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.upsert_transcript_item_for_thread(
+                &peer,
+                "call-report".to_string(),
+                crate::protocol::TranscriptEntryKind::ToolCall,
+                None,
+                "in_progress".to_string(),
+                None,
+                Some(crate::protocol::ToolCallView {
+                    item_type: "mcpToolCall".to_string(),
+                    name: "mcp__sealwire__report_back".to_string(),
+                    title: "report_back".to_string(),
+                    ..crate::protocol::ToolCallView::command_execution(None)
+                }),
+            );
+        }
+        app.report_back(&peer, "It retries forever.".to_string())
+            .await
+            .expect("reported");
+
+        let (row, mark) = row_marked(&app, &peer, InjectionKind::DelegateReported).await;
+        assert_eq!(row.kind, crate::protocol::TranscriptEntryKind::ToolCall);
+        assert_eq!(
+            mark.delegates()[0].answer.as_deref(),
+            Some("It retries forever."),
+            "the call carries what it said"
+        );
+        let first = mark.delegates()[0].id.clone();
+
+        // Asked again; its call has not reached the transcript when report_back lands.
+        peer_quiet(&app, &peer).await;
+        app.delegate(
+            &asker,
+            AskRequest {
+                peer_thread_id: Some(peer.clone()),
+                ..request(StartedBy::Agent, "and the backoff?")
+            },
+        )
+        .await
+        .expect("asked again");
+        app.report_back(&peer, "No backoff at all.".to_string())
+            .await
+            .expect("reported");
+
+        let reported: Vec<String> = marked_rows(&app, &peer)
+            .await
+            .into_iter()
+            .filter(|(_, mark)| mark.kind == InjectionKind::DelegateReported)
+            .map(|(_, mark)| mark.delegates()[0].id.clone())
+            .collect();
+        assert_eq!(
+            reported,
+            vec![first],
+            "the earlier call keeps its own answer; the new one is left for the client to find"
+        );
+    }
+}
+
+#[cfg(test)]
 mod provider_result_adoption_tests {
     use super::path_scope_tests::{build_recording_provider_app, pair_device};
     use crate::protocol::{

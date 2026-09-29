@@ -930,9 +930,11 @@ async fn delegate_to_agent(
     Json(input): Json<DelegateInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     authorize_api(&context, &headers, &uri)?;
+    // Answered once accepted: the transcript shows the brief being written, and a
+    // composer held for its minutes could say nothing about it.
     let outcome = context
         .app
-        .delegate(
+        .delegate_detached(
             &input.thread_id,
             relay_api::delegation::AskRequest {
                 peer_thread_id: input.agent,
@@ -947,10 +949,9 @@ async fn delegate_to_agent(
             },
         )
         .await
-        .map(|peer| {
-            format!(
-                "Delegated. That agent's id is {peer}; you will be sent its answer when it is done."
-            )
+        .map(|_| {
+            "Delegating. This session writes the question first; the answer comes back here."
+                .to_string()
         })
         .map_err(|error| error.message());
     Ok(Json(

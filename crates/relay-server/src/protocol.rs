@@ -992,6 +992,15 @@ impl SessionSnapshot {
                         truncate_with_ellipsis(&mut change.diff, budget.max_transcript_chars);
                 }
             }
+            if let Some(InjectionView {
+                card: InjectionCard::Delegate(asks),
+                ..
+            }) = &mut entry.injection
+            {
+                for answer in asks.iter_mut().filter_map(|ask| ask.answer.as_mut()) {
+                    entry_previewed |= truncate_with_ellipsis(answer, budget.max_transcript_chars);
+                }
+            }
             if entry_previewed {
                 transcript_truncated = true;
                 // The entry's content was ellipsis-truncated but is still
@@ -1207,16 +1216,26 @@ impl SessionSnapshot {
                         }
                     }
                     // An omitted row is drawn from its hydrated copy, card included.
-                    if let Some(InjectionView {
-                        card: InjectionCard::Review(review),
-                        ..
-                    }) = &mut entry.injection
-                    {
-                        for round in &mut review.rounds {
-                            round.findings.clear();
-                            round.fixed.clear();
-                            round.change = None;
+                    match &mut entry.injection {
+                        Some(InjectionView {
+                            card: InjectionCard::Review(review),
+                            ..
+                        }) => {
+                            for round in &mut review.rounds {
+                                round.findings.clear();
+                                round.fixed.clear();
+                                round.change = None;
+                            }
                         }
+                        Some(InjectionView {
+                            card: InjectionCard::Delegate(asks),
+                            ..
+                        }) => {
+                            for ask in asks {
+                                ask.answer = None;
+                            }
+                        }
+                        _ => {}
                     }
                     if let Some(tool) = &mut entry.tool {
                         if !tool.file_changes.is_empty() || tool.diff.is_some() {
@@ -2194,11 +2213,40 @@ pub enum InjectionKind {
     ReviewApproved,
     /// The review ended without approval and needs the person.
     ReviewEscalated,
+    /// The asker was asked to turn a person's `/delegate` into a brief; its reply is it.
+    DelegateRequest,
+    /// The peer was given the brief, followed by `DelegateCardView::instruction`.
+    DelegateTask,
+    /// The peer finished without `report_back` and was reminded once.
+    DelegateNudge,
+    /// The asker was handed what came back, one card per ask.
+    DelegateAnswer,
+    /// Not a user row: the peer's `report_back` call or reply that answered the ask.
+    DelegateReported,
 }
 
 impl InjectionKind {
     pub fn is_review(self) -> bool {
-        !matches!(self, Self::HandoverRequest | Self::HandoverBrief)
+        matches!(
+            self,
+            Self::ReviewRecap
+                | Self::ReviewBrief
+                | Self::ReviewResult
+                | Self::ReviewCommit
+                | Self::ReviewApproved
+                | Self::ReviewEscalated
+        )
+    }
+
+    pub fn is_delegate(self) -> bool {
+        matches!(
+            self,
+            Self::DelegateRequest
+                | Self::DelegateTask
+                | Self::DelegateNudge
+                | Self::DelegateAnswer
+                | Self::DelegateReported
+        )
     }
 }
 
@@ -2213,14 +2261,21 @@ impl InjectionView {
     pub fn handover(&self) -> Option<&HandoverCardView> {
         match &self.card {
             InjectionCard::Handover(handover) => Some(handover),
-            InjectionCard::Review(_) => None,
+            _ => None,
         }
     }
 
     pub fn review(&self) -> Option<&ReviewCardView> {
         match &self.card {
             InjectionCard::Review(review) => Some(review),
-            InjectionCard::Handover(_) => None,
+            _ => None,
+        }
+    }
+
+    pub fn delegates(&self) -> &[DelegateCardView] {
+        match &self.card {
+            InjectionCard::Delegate(asks) => asks,
+            _ => &[],
         }
     }
 }
@@ -2231,6 +2286,47 @@ impl InjectionView {
 pub enum InjectionCard {
     Handover(HandoverCardView),
     Review(ReviewCardView),
+    /// Several only on an answer row, when one wake handed back more than one ask.
+    Delegate(Vec<DelegateCardView>),
+}
+
+/// One `/delegate` or peer ask, as the cards at both ends draw it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegateCardView {
+    pub id: String,
+    pub asker_thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asker_title: Option<String>,
+    pub asker_provider: String,
+    /// Empty until the peer exists, and wherever it is hidden from the reader.
+    pub peer_thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_title: Option<String>,
+    pub peer_provider: String,
+    /// What the person typed after `/delegate`; empty when an agent asked.
+    pub task: String,
+    /// The opening line of what the peer was given.
+    pub title: String,
+    /// Appended to the brief on the peer's row; a client strips it to show the brief.
+    pub instruction: String,
+    /// `working`, `done` or `failed`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Only on the rows that draw it: the asker's answer row, and the peer's task row
+    /// when the answer came through `report_back` rather than as a reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    #[serde(default)]
+    pub answered_with_tool: bool,
+    #[serde(default)]
+    pub delivered: bool,
+    pub asked_at: u64,
+    /// When the peer was handed the brief; absent while the asker writes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
 }
 
 /// One review as the row it rides on needs it: only the rounds that row's card draws.

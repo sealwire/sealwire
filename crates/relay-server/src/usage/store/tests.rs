@@ -956,6 +956,94 @@ fn review_marks_survive_a_reopen_and_an_unfinished_one_fails() {
     );
 }
 
+/// A delegate's cards outlive its pruned ask; one whose brief never reached a peer is
+/// over, while one with a peer is left for its sweep to settle after the restart.
+#[test]
+fn delegate_marks_survive_a_reopen_and_one_without_a_peer_fails() {
+    use crate::protocol::InjectionKind;
+    use crate::state::{DelegateMark, InjectedMessage, InjectionTag, MessageAnchor};
+    let dir = TempDir::new().expect("tempdir");
+    let answered = DelegateMark {
+        id: "ask-1".to_string(),
+        asker_thread_id: "asker".to_string(),
+        peer_thread_id: "peer".to_string(),
+        asker_provider: "claude_code".to_string(),
+        peer_provider: "codex".to_string(),
+        task: "ask codex".to_string(),
+        title: "Where does the text come from?".to_string(),
+        status: "done".to_string(),
+        answer: Some("From innerText.".to_string()),
+        delivered: true,
+        asked_at: 1,
+        sent_at: Some(2),
+        finished_at: Some(9),
+        updated_at: 9,
+        ..DelegateMark::default()
+    };
+    let briefing = DelegateMark {
+        id: "ask-2".to_string(),
+        peer_thread_id: String::new(),
+        status: "working".to_string(),
+        answer: None,
+        sent_at: None,
+        ..answered.clone()
+    };
+    let asked = DelegateMark {
+        id: "ask-3".to_string(),
+        status: "working".to_string(),
+        ..answered.clone()
+    };
+    // One wake handed back two asks; both ride on its row.
+    let wake = InjectedMessage {
+        thread_id: "asker".to_string(),
+        anchor: MessageAnchor::Item("user:wake".to_string()),
+        tag: InjectionTag::delegate(
+            InjectionKind::DelegateAnswer,
+            &["ask-1".to_string(), "ask-3".to_string()],
+        ),
+        created_at: 10,
+    };
+    {
+        let store = open_in(&dir);
+        store.save_delegate_mark(&answered);
+        store.save_delegate_mark(&briefing);
+        store.save_delegate_mark(&asked);
+        store.record_injected_message(&wake);
+    }
+
+    let loaded = open_in(&dir).load_injections("the relay restarted");
+
+    let by_id = |id: &str| {
+        loaded
+            .delegates
+            .iter()
+            .find(|d| d.id == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(by_id("ask-1"), answered);
+    assert_eq!(by_id("ask-2").status, "failed");
+    assert_eq!(by_id("ask-2").error.as_deref(), Some("the relay restarted"));
+    assert_eq!(
+        by_id("ask-3").status,
+        "working",
+        "its peer may still answer"
+    );
+    assert_eq!(loaded.messages, vec![wake.clone()]);
+    assert_eq!(
+        loaded.messages[0].tag.ref_ids().collect::<Vec<_>>(),
+        vec!["ask-1", "ask-3"]
+    );
+
+    let store = open_in(&dir);
+    store.forget_mark("ask-1");
+    assert!(store
+        .load_injections("again")
+        .delegates
+        .iter()
+        .all(|d| d.id != "ask-1"));
+}
+
 /// A sidecar that cannot be removed is a step that failed, so the old name stays.
 #[test]
 fn an_old_database_whose_sidecar_cannot_be_removed_keeps_its_name() {

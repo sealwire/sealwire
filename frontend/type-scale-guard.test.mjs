@@ -12,5 +12,5 @@ import { registerTypeScaleRatchet } from "./type-scale-guard.mjs";
 
 registerTypeScaleRatchet({
   baseDir: dirname(fileURLToPath(import.meta.url)),
-  files: ["styles.css", "conversation.css", "review-cards.css", "desktop/desktop.css"],
+  files: ["styles.css", "conversation.css", "review-cards.css", "delegate-cards.css", "desktop/desktop.css"],
 });

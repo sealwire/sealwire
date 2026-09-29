@@ -79,6 +79,12 @@ pub(crate) struct Ask {
     pub(crate) cwd: String,
     pub(crate) asked_at: u64,
     pub(crate) updated_at: u64,
+    /// When it settled; `updated_at` moves again on later edits.
+    pub(crate) finished_at: Option<u64>,
+    /// Answered through `report_back` rather than taken from its last reply.
+    pub(crate) answered_with_tool: bool,
+    /// When the peer was handed the task; until then the asker is writing it.
+    pub(crate) sent_at: Option<u64>,
 }
 
 impl Ask {
@@ -115,7 +121,15 @@ impl Ask {
             cwd,
             asked_at: now,
             updated_at: now,
+            finished_at: None,
+            answered_with_tool: false,
+            sent_at: None,
         }
+    }
+
+    /// Settled and not yet handed back to the asker.
+    pub(crate) fn owed_to_asker(&self) -> bool {
+        self.status.is_terminal() && !self.delivered
     }
 
     /// Terminal is final. A user stop and the peer's own completion race each
@@ -127,6 +141,9 @@ impl Ask {
         }
         self.status = status;
         self.updated_at = unix_now();
+        if status.is_terminal() {
+            self.finished_at = Some(self.updated_at);
+        }
     }
 
     pub(crate) fn finish(&mut self, answer: impl Into<String>) {
@@ -196,7 +213,7 @@ impl Ask {
 /// Match the ledger's first-meaningful-line cleanup without putting a JS parser in the
 /// request path. Markdown decoration is presentation noise, and fenced code commonly
 /// precedes the actual ask title.
-fn intent_title(message: &str) -> Option<String> {
+pub(crate) fn intent_title(message: &str) -> Option<String> {
     let mut fenced = false;
     let first = message.lines().find_map(|raw| {
         if raw.trim().starts_with("```") {

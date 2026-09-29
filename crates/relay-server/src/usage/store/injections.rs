@@ -1,4 +1,4 @@
-//! Handover and review marks: which user rows were sent on the person's behalf.
+//! Handover, review and delegate marks: which user rows were sent on the person's behalf.
 //!
 //! Best-effort like the rest of the store: a failed write costs a card, never a turn.
 
@@ -6,8 +6,8 @@ use rusqlite::{params, Connection};
 use tracing::warn;
 
 use crate::state::{
-    injection_kind_from_name, injection_kind_name, HandoverMark, InjectedMessage, InjectionTag,
-    MessageAnchor, ReviewMark,
+    injection_kind_from_name, injection_kind_name, DelegateMark, HandoverMark, InjectedMessage,
+    InjectionTag, MessageAnchor, ReviewMark,
 };
 
 use super::UsageStore;
@@ -64,6 +64,22 @@ impl UsageStore {
             conn.execute(
                 "INSERT OR REPLACE INTO review (id, body, updated_at) VALUES (?1, ?2, ?3)",
                 params![review.id, body, review.updated_at as i64],
+            )
+        });
+    }
+
+    pub(crate) fn save_delegate_mark(&self, delegate: &DelegateMark) {
+        let body = match serde_json::to_string(delegate) {
+            Ok(body) => body,
+            Err(error) => {
+                warn!(%error, "database: could not encode delegate {}", delegate.id);
+                return;
+            }
+        };
+        self.with_conn("save delegate", |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO delegation (id, body, updated_at) VALUES (?1, ?2, ?3)",
+                params![delegate.id, body, delegate.updated_at as i64],
             )
         });
     }
@@ -134,6 +150,23 @@ impl UsageStore {
                     },
                 )
                 .collect();
+            let delegates = conn
+                .prepare("SELECT id, body FROM delegation ORDER BY updated_at, id")?
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .filter_map(
+                    |(id, body)| match serde_json::from_str::<DelegateMark>(&body) {
+                        Ok(delegate) => Some(delegate),
+                        Err(error) => {
+                            warn!(%error, "database: skipping unreadable delegate {id}");
+                            None
+                        }
+                    },
+                )
+                .collect();
             let messages = conn
                 .prepare(
                     "SELECT thread_id, anchor, kind, ref_id, round, created_at
@@ -167,6 +200,7 @@ impl UsageStore {
             Ok(LoadedInjections {
                 handovers,
                 reviews,
+                delegates,
                 messages,
             })
         });
@@ -183,6 +217,17 @@ impl UsageStore {
             if !review.rounds.iter().any(|round| round.delivered) {
                 ended_undelivered.push(review.id.clone());
             }
+        }
+        // An ask with a peer survives a restart and its sweep settles the card; one that
+        // never got a peer is failed on the way in (`restored_asks`), and so is its card.
+        for delegate in loaded
+            .delegates
+            .iter_mut()
+            .filter(|delegate| !delegate.is_settled() && delegate.peer_thread_id.is_empty())
+        {
+            delegate.status = "failed".to_string();
+            delegate.error = Some(restart_reason.to_string());
+            self.save_delegate_mark(delegate);
         }
         // Same as a live one ending with nothing handed back: the card it took up asks again.
         for review in loaded.reviews.iter_mut().filter(|review| {
@@ -201,7 +246,8 @@ impl UsageStore {
     pub(crate) fn forget_mark(&self, ref_id: &str) {
         self.with_conn("forget mark", |conn| {
             conn.execute("DELETE FROM handover WHERE id = ?1", [ref_id])?;
-            conn.execute("DELETE FROM review WHERE id = ?1", [ref_id])
+            conn.execute("DELETE FROM review WHERE id = ?1", [ref_id])?;
+            conn.execute("DELETE FROM delegation WHERE id = ?1", [ref_id])
         });
     }
 
@@ -223,5 +269,6 @@ impl UsageStore {
 pub(crate) struct LoadedInjections {
     pub(crate) handovers: Vec<HandoverMark>,
     pub(crate) reviews: Vec<ReviewMark>,
+    pub(crate) delegates: Vec<DelegateMark>,
     pub(crate) messages: Vec<InjectedMessage>,
 }

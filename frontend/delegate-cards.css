@@ -1,0 +1,74 @@
+/* Design 25a–25c. The review cards' skeleton and tones: blue asked, green answered,
+   amber no answer. */
+.handover-card.delegate-card {
+  --review-tone: var(--accent);
+  border-color: color-mix(in srgb, var(--review-tone) 22%, var(--border-soft));
+}
+.delegate-card.is-pass {
+  --review-tone: var(--ok-fg);
+}
+.delegate-card.is-needs-you {
+  --review-tone: var(--warn-fg);
+}
+.delegate-card .handover-card-head {
+  background: color-mix(in srgb, var(--review-tone) 8%, var(--bg-surface));
+}
+.delegate-card .handover-card-icon {
+  border-color: color-mix(in srgb, var(--review-tone) 22%, var(--border-soft));
+  color: var(--review-tone);
+}
+.delegate-card .handover-card-kicker {
+  color: var(--review-tone);
+}
+@container handover-card (max-width: 420px) {
+  .delegate-card .handover-card-title {
+    white-space: normal;
+  }
+}
+
+/* The asked card, and its strip once answered, in the agent's column. */
+.delegate-stack {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.delegate-card-reason {
+  margin: 0;
+  color: var(--text-secondary);
+}
+.delegate-status-missing {
+  color: var(--warn-fg);
+}
+.delegate-preparing {
+  align-items: center;
+}
+.delegate-preparing-detail {
+  flex: 1;
+  min-width: 0;
+}
+@media (max-width: 600px) {
+  .delegate-preparing-detail {
+    order: 1;
+    flex-basis: 100%;
+  }
+}
+
+/* The peer's one reminder to report back (25b). */
+.delegate-nudge {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 22px;
+  padding-left: var(--assistant-text-inset);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+.delegate-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--warn-fg);
+}

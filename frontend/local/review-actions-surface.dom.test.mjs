@@ -16,10 +16,11 @@ global.localStorage = dom.window.localStorage;
 
 const { createSessionController } = await import("./session-controller.js");
 const { dispatchReviewAction } = await import("../shared/review-card.js");
+const { dispatchDelegateAction } = await import("../shared/delegate-card.js");
 
-test("every review card button has a controller method behind it", () => {
+function controllerForTest() {
   const noop = () => {};
-  const controller = createSessionController({
+  return createSessionController({
     state: {},
     apiFetch: noop,
     shortId: (value) => value,
@@ -37,6 +38,10 @@ test("every review card button has a controller method behind it", () => {
     runViewTransition: (run) => run(),
     handleUnauthorized: noop,
   });
+}
+
+test("every review card button has a controller method behind it", () => {
+  const controller = controllerForTest();
   const called = [];
   const handlers = {
     stop: () => called.push(typeof controller.resolveReview),
@@ -47,4 +52,14 @@ test("every review card button has a controller method behind it", () => {
     dispatchReviewAction({ action, reviewId: "r", reviewerProvider: "codex" }, handlers);
   }
   assert.deepEqual(called, ["function", "function", "function"]);
+});
+
+test("the delegate card's Cancel has a controller method behind it", () => {
+  const controller = controllerForTest();
+  const called = [];
+  dispatchDelegateAction(
+    { action: "cancel", threadId: "t" },
+    { cancel: () => called.push(typeof controller.stopActiveTurn) }
+  );
+  assert.deepEqual(called, ["function"]);
 });

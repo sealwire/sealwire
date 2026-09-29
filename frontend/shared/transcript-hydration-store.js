@@ -1756,6 +1756,9 @@ function mergeTranscriptEntry(existing, incoming) {
     ...incoming,
     text: selectTranscriptText(existing.text, incoming.text, existingFull, incomingFull),
     tool: mergeToolView(existing.tool, incoming.tool, existingFull, incomingFull),
+    ...(incoming.injection
+      ? { injection: mergeInjection(existing.injection, incoming.injection, incomingFull) }
+      : {}),
     turn_id: incoming.turn_id || existing.turn_id || null,
     content_state: mergedContentState,
     // Absorbing: a copy serialized before the withdrawal must not resurrect the row.
@@ -1765,6 +1768,21 @@ function mergeTranscriptEntry(existing, incoming) {
     // keeps its position — leaving a window whose cached proof still says
     // "sorted" while the numbers no longer agree with the order.
     ...(Number.isSafeInteger(existing.order_seq) ? { order_seq: existing.order_seq } : {}),
+  };
+}
+
+// A snapshot clips a delegate card's answer with the row; the copy read whole keeps its own.
+function mergeInjection(existing, incoming, incomingFull) {
+  if (incomingFull || !existing?.delegate || !incoming.delegate) {
+    return incoming;
+  }
+  const held = new Map(existing.delegate.map((ask) => [ask.id, ask.answer]));
+  return {
+    ...incoming,
+    delegate: incoming.delegate.map((ask) => {
+      const answer = held.get(ask.id);
+      return answer ? { ...ask, answer } : ask;
+    }),
   };
 }
 

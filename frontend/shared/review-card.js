@@ -1,6 +1,6 @@
 // Design 24a–24c: a review is one card per round, and the card's colour is its conclusion.
 // Same skeleton as the handover cards (`handover-card*` classes); `review-*` sets the tone.
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 
 import {
   avatar,
@@ -11,6 +11,7 @@ import {
   ShowAllButton,
   Spinner,
   useFold,
+  useNow,
 } from "./card-parts.js";
 import { providerLabel } from "./provider-labels.js";
 import { transcriptRowKey } from "./transcript-row-key.js";
@@ -589,18 +590,6 @@ const PROGRESS = {
   interrupting: () => "Stopping the review",
   blocked: () => "The reviewer could not be stopped",
 };
-
-function useNow(active) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active) {
-      return undefined;
-    }
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [active]);
-  return now;
-}
 
 /** The reviewed thread's live line while a review runs (24a); gone once a card says more. */
 export function ReviewProgressLine({ activity, provider = "" }) {

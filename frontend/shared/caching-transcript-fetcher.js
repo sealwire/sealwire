@@ -95,6 +95,16 @@ export function isVolatileEntry(entry) {
   ) {
     return true;
   }
+  // A delegate card changes until its answer is handed back.
+  if (
+    (entry?.injection?.delegate || []).some(
+      (ask) =>
+        ask?.status === "working"
+        || (!ask?.delivered && Boolean(ask?.peer_thread_id))
+    )
+  ) {
+    return true;
+  }
   const status = typeof entry?.status === "string" ? entry.status.trim().toLowerCase() : "";
   return VOLATILE_ENTRY_STATUSES.has(status);
 }

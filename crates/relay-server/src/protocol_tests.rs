@@ -1536,6 +1536,51 @@ fn compact_marks_ellipsis_truncated_entry_preview_and_leaves_short_full() {
     assert!(long.text.as_ref().unwrap().chars().count() <= MAX_BROKER_TRANSCRIPT_CHARS);
 }
 
+/// Every marked row carries its card, so a long answer is clipped like the text it
+/// repeats, and the row is re-read for the rest.
+#[test]
+fn compact_clips_a_delegate_answer_and_marks_its_row_preview() {
+    use crate::protocol::{DelegateCardView, InjectionCard, InjectionKind, InjectionView};
+    let mut snapshot = make_snapshot();
+    snapshot.logs.clear();
+    snapshot.pending_approvals.clear();
+    snapshot.transcript = vec![TranscriptEntryView {
+        row_id: None,
+        order_seq: None,
+        withdrawn: false,
+        item_id: Some("wake".to_string()),
+        kind: TranscriptEntryKind::UserText,
+        text: Some("short wake".to_string()),
+        status: "completed".to_string(),
+        turn_id: Some("turn-1".to_string()),
+        tool: None,
+        content_state: TranscriptContentState::Full,
+        injection: Some(InjectionView {
+            kind: InjectionKind::DelegateAnswer,
+            card: InjectionCard::Delegate(vec![DelegateCardView {
+                id: "ask-1".to_string(),
+                answer: Some("A".repeat(MAX_BROKER_TRANSCRIPT_CHARS * 4)),
+                ..DelegateCardView::default()
+            }]),
+        }),
+    }];
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+
+    let row = &compacted.transcript[0];
+    assert_eq!(row.content_state, TranscriptContentState::Preview);
+    let answer = row.injection.as_ref().unwrap().delegates()[0]
+        .answer
+        .clone()
+        .unwrap();
+    assert!(answer.chars().count() <= MAX_BROKER_TRANSCRIPT_CHARS);
+    assert_eq!(
+        row.text.as_deref(),
+        Some("short wake"),
+        "the person's row is left whole"
+    );
+}
+
 #[test]
 fn control_plane_flood_keeps_both_surfaces_bounded_without_shelling_live_text() {
     // P1.5/P1.6: a flood of low-frequency control-plane records (review jobs,

@@ -80,6 +80,7 @@ import {
 } from "./state.js";
 import { useRelayNicknames } from "./use-relay-nicknames.js";
 import { RemoteTranscriptPanel } from "./remote-transcript-panel.js";
+import { dispatchDelegateAction } from "../shared/delegate-card.js";
 import { dispatchReviewAction } from "../shared/review-card.js";
 import { retainAskUserDraftsForPending } from "../shared/ask-user-draft-store.js";
 import {
@@ -2501,6 +2502,11 @@ function RemoteApp() {
               accept: (reviewId) => handlersRef.current.onAcceptReview?.(reviewId),
               rerun: reviewerActions.onRequestReview,
             }),
+          // The card sits in the thread on screen, so its Cancel is that thread's Stop.
+          onDelegateAction: (action) =>
+            void dispatchDelegateAction(action, {
+              cancel: () => handleStopTurn(),
+            }),
           composerModel,
           composerDraft,
           composerScope,
@@ -3350,6 +3356,7 @@ function RemoteThreadPanel({
   onForkFromMessage,
   onOpenThread = null,
   onReviewAction = null,
+  onDelegateAction = null,
   reviewJobs = null,
   agentWorkingIndicatorModel,
   composerModel,
@@ -3457,6 +3464,7 @@ function RemoteThreadPanel({
         onForkFromMessage,
         onOpenThread,
         onReviewAction,
+        onDelegateAction,
         reviewJobs,
         onAskMessage: askAboutMessage,
         onSelectRelay,

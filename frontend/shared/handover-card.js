@@ -128,7 +128,8 @@ function SummarySection({ section, body }) {
   );
 }
 
-function SummarySections({ text }) {
+/** Markdown split at its headings, three shown; a delegate card uses it for its text too. */
+export function SummarySections({ text, moreLabel = "Show full summary" }) {
   const [expanded, setExpanded] = useState(false);
   const sections = parseHandoverSections(text);
   if (!sections.length) {
@@ -140,7 +141,7 @@ function SummarySections({ text }) {
   const preview = titled ? null : summaryPreview(sections[0].body);
   const hidden = titled ? Math.max(0, titled - SECTIONS_SHOWN) : 0;
   const shown = expanded || !titled ? sections : sections.slice(0, lead + SECTIONS_SHOWN);
-  const more = hidden || preview ? "Show full summary" : null;
+  const more = hidden || preview ? moreLabel : null;
   return h(
     "div",
     { className: "handover-card-body" },
