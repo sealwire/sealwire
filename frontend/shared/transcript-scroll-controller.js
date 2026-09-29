@@ -125,12 +125,20 @@ function createTranscriptScrollController(scroller) {
     readerScrollAt = now();
   };
   const readerDriven = () => now() - readerScrollAt <= READER_INTENT_MS;
+  const readFromHere = () => {
+    const needsAnchor = stuck || !anchor;
+    unstick();
+    consumeNativeMovement();
+    // A short first page may not scroll at all. Capture before the gesture
+    // starts loading history; there may be no scroll event before it arrives.
+    if (needsAnchor) capture();
+  };
   const onWheel = (event) => {
     stampReader();
     disclosure = null;
     // Wheel does not go through the pointer-down path, so escape here directly.
     if (!event.ctrlKey && (event.deltaY || 0) < 0) {
-      unstick();
+      readFromHere();
     }
   };
   const onKeyDown = event => {
@@ -147,15 +155,20 @@ function createTranscriptScrollController(scroller) {
       return;
     }
     selfScrollTop = -1;
-    const scrolledUp = sp < lastScrollTop - SCROLL_JITTER_PX;
-    const scrolledDown = sp > lastScrollTop + SCROLL_JITTER_PX;
+    // Measuring newly mounted history can shrink the estimated scroll range.
+    // The browser clamps the offset before its scroll event; that lost range
+    // is layout movement, not an upward gesture to bake into the anchor.
+    const previousTop = Math.min(lastScrollTop, Math.max(0, scroller.scrollHeight - scroller.clientHeight));
+    const scrolledUp = sp < previousTop - SCROLL_JITTER_PX;
+    const scrolledDown = sp > previousTop + SCROLL_JITTER_PX;
     // Kept on jitter, so a drag of one pixel per frame still adds up to a move.
     if (scrolledUp || scrolledDown) {
       if (anchor) {
-        anchor = { ...anchor, offset: anchor.offset - (sp - lastScrollTop) };
+        anchor = { ...anchor, offset: anchor.offset - (sp - previousTop) };
       }
       lastScrollTop = sp;
     }
+    else if (previousTop !== lastScrollTop) lastScrollTop = previousTop;
     const action = classifyScrollIntent({
       scrolledUp,
       scrolledDown,
@@ -202,7 +215,7 @@ function createTranscriptScrollController(scroller) {
       && pulled > Math.abs(point.x - touchAnchor.x)
       && scroller.scrollTop > 0
     ) {
-      unstick();
+      readFromHere();
     }
   };
   const onTouchEnd = () => {
@@ -286,8 +299,9 @@ function createTranscriptScrollController(scroller) {
     }
     if (resolved?.rowOffset != null) candidate.rowOffset = resolved.rowOffset;
     if (Math.abs(target - scroller.scrollTop) <= .5) return false;
+    const before = scroller.scrollTop;
     write(target);
-    return true;
+    return Math.abs(scroller.scrollTop - before) > .5;
   }
 
   function flush() {
@@ -345,6 +359,10 @@ function createTranscriptScrollController(scroller) {
       unstick();
       capture();
     } else if (action.kind === "anchor-prepend") {
+      if (stuck) {
+        geometryChanged();
+        return;
+      }
       anchor = action.anchor || anchor;
       if (anchor) geometryChanged();
       else write(action.scrollTop);
@@ -430,6 +448,19 @@ function createTranscriptScrollController(scroller) {
 
   return {
     connect, refreshContent, apply, disclosureChange, geometryChanged,
+    contentCommitted() {
+      if (!geometryDirty || (interacting() && !disclosure)) return;
+      consumeNativeMovement();
+      if (disclosure || anchor) restoreAnchor(disclosure || anchor);
+      else if (stuck) pin();
+      // A history response can commit inside rAF. Waiting for another rAF
+      // would paint a range that no longer contains the reading target. React
+      // layout effects can update this range before paint, without flushSync.
+      // Mount-time measurements may already have corrected the DOM offset
+      // before this effect. Synchronize that offset even if no further write
+      // was needed here, so the virtual range cannot lag behind it.
+      viewport?.commit(false);
+    },
     transition(options) {
       const action = decideTranscriptScrollAction(options);
       apply(action);

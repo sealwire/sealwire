@@ -37,6 +37,10 @@ it has no independent observer or settling loop.
   not arrived yet is incorporated before correcting changed geometry, including
   momentum after the input attribution window. The input window only determines
   follow intent. Navigation keys still count when focus is on a disclosure.
+- The first upward wheel gesture captures the reading anchor immediately, even
+  if the initial page fits the viewport and cannot dispatch a scroll event.
+  Browser clamping after estimated history heights shrink is separated from
+  native reader movement; it must not shift the saved reading offset.
 
 Bookkeeping retains semantic intent as well as position. Remote bookkeeping is
 notified after the frame's anchor capture/correction, so switching threads does
@@ -66,6 +70,11 @@ section/control disappears, its surviving card/message header is brought into
 the viewport. If a whole message disappears, prefer the saved next message,
 then the previous message. If none survive, capture the current visible content.
 
+Plain rows expose `data-transcript-content-key` with the same identity as their
+virtual row. Loading history across the virtualization threshold can therefore
+restore a reader whose message was unmounted during that very commit. The
+virtualizer starts from the live offset rather than its default zero.
+
 This does not add persistence for every component's local expansion state.
 Existing folds can still reset when their row unmounts. When a retained section
 is no longer expanded, restoration follows the surviving-content rule above.
@@ -90,6 +99,21 @@ Its row is measured before restoration in that same callback. Correcting before 
 collapse from unmounting the row the reader is still viewing. TanStack's observed
 offset and accumulated adjustment total are reset through the same observation
 callback, not by writing its internal fields.
+
+A history response can itself commit inside rAF. The controller also reconciles
+committed content from a React layout effect, synchronizing the virtualizer's
+observed offset even when a mount-time measurement already corrected scrollTop.
+Range updates there use React's ordinary layout-effect update path; only the
+separate rAF path needs `flushSync`. This avoids painting an empty range while
+waiting for the next frame or native scroll event. History entrance animations
+are disabled inside virtual rows, where remounting would otherwise replay the
+fade and temporarily hide already-visible text.
+
+When history changes row identities, the mounted range is measured during the
+layout commit. Later rows must also receive their measured transforms before
+paint, even if the anchor above a regrouped card has not moved. This extra pass
+is bounded to mounted rows and does not run for streaming with unchanged keys
+or ordinary range-only scrolling.
 
 Native `overflow-anchor` is disabled for this scroller. Mounted messages also no
 longer use `content-visibility: auto`: virtualized rows already have bounded
@@ -134,6 +158,24 @@ the finger movement and all six subsequent output updates retained position.
 The eight new default cases all failed against the original `32d767eb`, covering
 identity collisions, intermediate observer-only jumps, keyboard following and
 lost native displacement.
+
+The subsequent history-loading fix adds thirteen browser cases: the first
+upward wheel on a short tail, pending loading placeholders, 12/36-row responses
+committing inside rAF, compact rows, simultaneous streaming, virtualization of
+already-read history, and regrouping below the reading anchor. Local and remote
+bookkeeping are both covered. The final checks passed 4,489 unit/DOM tests and
+the Vite build, Chromium CPU4 74/74, WebKit 74/74, and both Chromium native-touch
+mobile-emulation cases (90 drag steps, zero measured deviation or lift jumps).
+No page/window errors were recorded. The first-wheel regression fails against
+the pre-fix `90ffee98` sources.
+
+The reported live localhost thread was also repeatedly hard-reloaded and
+scrolled through an isolated frontend connected to the existing relay. In four
+final production-build recordings, including CPU4, a 120px upward wheel moved
+the same marked text approximately 118–120px and then retained it, without a
+post-gesture missing frame or distant-history jump. These are local diagnostics,
+not a new performance benchmark or a physical-phone/Safari claim. The original
+relay and its served build were not replaced by this investigation.
 
 Use `E2E_ARTIFACT_DIR` for a dedicated results/screenshot directory. Chromium's
 collapse checks inspect actual CDP-composited PNG frames; a missing anchor in a

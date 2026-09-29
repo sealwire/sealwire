@@ -4,6 +4,20 @@ const ATTR = "data-transcript-anchor";
 const SELECTOR = `[${ATTR}]`;
 const quote = value => `"${String(value).replace(/["\\\n\r]/g, c => `\\${c.codePointAt(0).toString(16)} `)}"`;
 
+// Plain transcripts have the same row identities before virtualization starts.
+// Keep that address even if a history page enables virtualization and unmounts
+// the reading target before the controller can restore it.
+function contentRow(element, scroller) {
+  const virtual = element.closest("[data-transcript-row-key]");
+  if (virtual) return virtual;
+  let row = null;
+  for (let node = element; node && node !== scroller; node = node.parentElement) {
+    if (node.hasAttribute?.("data-transcript-content-key")) row = node;
+  }
+  return row;
+}
+const rowKey = row => row?.getAttribute("data-transcript-row-key") || row?.getAttribute("data-transcript-content-key") || null;
+
 function pathFor(element, scroller) {
   const path = [];
   for (let node = element; node && node !== scroller; node = node.parentElement) {
@@ -17,12 +31,12 @@ export function captureElementAnchor(scroller, element, edge = "top") {
   if (!scope) return null;
   const bounds = scroller.getBoundingClientRect();
   const rect = element.getBoundingClientRect();
-  const row = element.closest("[data-transcript-row-key]");
+  const row = contentRow(element, scroller);
   const container = row || element.closest("[data-transcript-entry-id]");
   const neighbor = node => {
     const target = node?.matches(SELECTOR) ? node : node?.querySelector(SELECTOR);
     if (!target) return null;
-    return { path: pathFor(target, scroller), rowKey: node.getAttribute("data-transcript-row-key"),
+    return { path: pathFor(target, scroller), rowKey: rowKey(node),
       rowOffset: target.getBoundingClientRect().top - node.getBoundingClientRect().top, edge: "top" };
   };
   let control = null;
@@ -35,7 +49,7 @@ export function captureElementAnchor(scroller, element, edge = "top") {
   }
   return {
     path: pathFor(scope, scroller),
-    rowKey: row?.getAttribute("data-transcript-row-key") || null,
+    rowKey: rowKey(row),
     rowOffset: row ? rect[edge] - row.getBoundingClientRect().top : 0,
     offset: rect[edge] - bounds.top,
     edge,
@@ -85,9 +99,9 @@ export function resolveReadingAnchor(scroller, anchor) {
   const rect = scope.getBoundingClientRect();
   // A folded/removed section returns to its surviving card/message header. It
   // cannot preserve an invisible line, so put that header inside the viewport.
-  const row = scope.closest("[data-transcript-row-key]");
+  const row = contentRow(scope, scroller);
   return {
-    rowKey: row?.getAttribute("data-transcript-row-key") || null,
+    rowKey: rowKey(row),
     rowOffset: row ? rect[exact ? anchor.edge : "top"] - row.getBoundingClientRect().top : null,
     position: rect[exact ? anchor.edge : "top"] - scroller.getBoundingClientRect().top,
     offset: exact ? anchor.offset : Math.max(0, Math.min(anchor.offset, scroller.clientHeight - 40)),

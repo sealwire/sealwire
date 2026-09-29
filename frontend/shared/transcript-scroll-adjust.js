@@ -49,7 +49,9 @@ export function createTranscriptScrollAdjuster() {
     };
     syncOffset = () => {
       const offset = instance.scrollElement.scrollTop;
-      if (offset !== instance.getScrollOffset()) notify(offset, instance.isScrolling);
+      if (offset === instance.getScrollOffset()) return false;
+      notify(offset, instance.isScrolling);
+      return true;
     };
     const cleanup = observeElementOffset(instance, notify);
     return () => {

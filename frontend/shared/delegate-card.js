@@ -356,7 +356,7 @@ export function DelegateRequestEntry({
   }
   return h(
     "div",
-    { className: "handover-turn", "data-delegate-row": transcriptRowKey(entry) || "" },
+    { className: "handover-turn", "data-delegate-row": transcriptRowKey(entry) || "", "data-transcript-content-key": transcriptRowKey(entry) || "" },
     showCommand ? bubble : null,
     showOutcome ? outcomeNode : null
   );
@@ -435,6 +435,7 @@ export function DelegateReportedEntry({ entry, provider = "", providerIcon = "" 
   const attrs = {
     className: `chat-message chat-message-assistant handover-message delegate-message${entry.opensTurn ? "" : " is-turn-continued"}`,
     "data-transcript-entry-id": transcriptRowKey(entry) || "",
+    "data-transcript-content-key": transcriptRowKey(entry) || "",
     "data-transcript-anchor": `entry:${transcriptRowKey(entry)}`,
   };
   return h(

@@ -160,6 +160,12 @@
   animation: chat-message-prepend-in 280ms cubic-bezier(0.32, 0.72, 0.24, 1) forwards;
 }
 
+/* Virtual rows remount when history enables virtualization or changes its
+ * range. Replaying an entrance would hide text the reader already has open. */
+.transcript-virtual-row .chat-message-just-prepended {
+  animation: none;
+}
+
 @keyframes chat-message-prepend-in {
   from {
     opacity: 0;

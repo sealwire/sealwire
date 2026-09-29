@@ -137,7 +137,7 @@ function transcriptEntryDomAttrs(
   }
   return {
     className: finalClassName,
-    ...(itemId ? { "data-transcript-entry-id": itemId, "data-transcript-anchor": `entry:${itemId}` } : {}),
+    ...(itemId ? { "data-transcript-entry-id": itemId, "data-transcript-content-key": itemId, "data-transcript-anchor": `entry:${itemId}` } : {}),
     ...(entry?.kind ? { "data-transcript-entry-kind": entry.kind } : {}),
     ...(extras || {}),
   };
@@ -2593,7 +2593,7 @@ function WorkGroupEntry({ group, options = null }) {
     "article",
     {
       className: "chat-message chat-message-system chat-message-work-group",
-      ...(expandKey ? { "data-work-group-key": expandKey, "data-transcript-anchor": `group:${expandKey}` } : {}),
+      ...(expandKey ? { "data-work-group-key": expandKey, "data-transcript-content-key": expandKey, "data-transcript-anchor": `group:${expandKey}` } : {}),
     },
     h(
       "button",
@@ -2689,7 +2689,7 @@ function DiffGroupEntry({ group, options = null }) {
     "article",
     {
       className: "chat-message chat-message-system chat-message-diff-group",
-      ...(expandKey ? { "data-diff-group-key": expandKey, "data-transcript-anchor": `group:${expandKey}` } : {}),
+      ...(expandKey ? { "data-diff-group-key": expandKey, "data-transcript-content-key": expandKey, "data-transcript-anchor": `group:${expandKey}` } : {}),
     },
     h(
       "button",
@@ -2951,7 +2951,7 @@ export function ApprovalCard({ approval, options = null }) {
     {
       "aria-label": "Approval required",
       className: "chat-message chat-message-system chat-message-approval",
-      ...(id ? { "data-approval-id": id, "data-transcript-anchor": `approval:${id}` } : {}),
+      ...(id ? { "data-approval-id": id, "data-transcript-content-key": "approval", "data-transcript-anchor": `approval:${id}` } : {}),
     },
     h(
       "div",
@@ -3631,6 +3631,10 @@ function TranscriptViewport({ nodes, sentinel, askUserFooter, selectionToolbar }
     const scroller = findTranscriptScrollElement(virtualizer.scrollTargetRef.current);
     getTranscriptScrollController(scroller)?.geometryChanged();
   }, [nodes, askUserFooter, virtualizer.scrollTargetRef]);
+  useLayoutEffect(() => {
+    const scroller = findTranscriptScrollElement(virtualizer.scrollTargetRef.current);
+    getTranscriptScrollController(scroller)?.contentCommitted();
+  });
   const contentProps = {
     className: `thread-content${virtualized ? " thread-content-virtualized" : ""}`,
     ref: virtualizer.scrollTargetRef,
@@ -3704,6 +3708,7 @@ function useTranscriptVirtualizer(rows, enabled) {
       count: rows.length,
       enabled,
       estimateSize: estimateTranscriptRowSize,
+      initialOffset: () => findTranscriptScrollElement(scrollTargetRef.current)?.scrollTop || 0,
       getScrollElement: () => findTranscriptScrollElement(scrollTargetRef.current),
       observeElementOffset,
       observeElementRect,
@@ -3733,6 +3738,7 @@ function useTranscriptVirtualizer(rows, enabled) {
     count: rows.length,
     enabled,
     estimateSize: estimateTranscriptRowSize,
+    initialOffset: () => findTranscriptScrollElement(scrollTargetRef.current)?.scrollTop || 0,
     getItemKey,
     getScrollElement: () => findTranscriptScrollElement(scrollTargetRef.current),
     measureElement,
@@ -3771,12 +3777,29 @@ function useTranscriptVirtualizer(rows, enabled) {
           }
         }
       },
-      commit() {
-        // This is called only by the controller's rAF, never from RO delivery.
-        flushSync(() => {
-          scrollAdjusterRef.current.syncScrollOffset();
-          forceUpdate();
-        });
+      commit(synchronous = true) {
+        // rAF needs flushSync; a layout effect already commits before paint.
+        // Neither path runs from ResizeObserver delivery.
+        const update = () => {
+          const changed = scrollAdjusterRef.current.syncScrollOffset();
+          if (synchronous || changed) {
+            forceUpdate();
+            return;
+          }
+          // A new group can already be measured while later mounted rows
+          // still use its estimate. Correct those transforms before paint,
+          // even when the reading anchor above the group did not move.
+          const measurements = virtualizer.getMeasurements();
+          const stalePositions = [...content.querySelectorAll(".transcript-virtual-row")].some(row => {
+            const measured = measurements[Number(row.dataset.index)];
+            return measured && row.style.transform !== `translateY(${measured.start - virtualizer.options.scrollMargin}px)`;
+          });
+          const spacer = content.querySelector(".transcript-virtual-spacer");
+          const staleHeight = spacer && Math.abs(parseFloat(spacer.style.height) - virtualizer.getTotalSize()) > .5;
+          if (stalePositions || staleHeight) forceUpdate();
+        };
+        if (synchronous) flushSync(update);
+        else update();
       },
       locate(anchor, rowOffset = anchor.rowOffset, offset = anchor.offset) {
         const index = indexByKey.get(anchor.rowKey);
@@ -3786,6 +3809,17 @@ function useTranscriptVirtualizer(rows, enabled) {
       },
     });
   }, [enabled, indexByKey]);
+
+  useLayoutEffect(() => {
+    if (!enabled) return;
+    // History can regroup existing rows as well as mount new ones. Measure
+    // the bounded mounted range when identities change; streaming with the
+    // same keys and ordinary scrolling do not repeat this pass.
+    const virtualizer = virtualizerRef.current;
+    for (const row of scrollTargetRef.current.querySelectorAll(".transcript-virtual-row")) {
+      virtualizer.resizeItem(Number(row.dataset.index), measureElement(row, undefined, virtualizer));
+    }
+  }, [enabled, rowKeys]);
 
   return {
     getTotalSize: () => virtualizerRef.current.getTotalSize(),

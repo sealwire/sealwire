@@ -17,6 +17,7 @@ const ARTIFACTS = process.env.E2E_ARTIFACT_DIR || path.join(ROOT, "artifacts/e2e
 const fixture = `
 import React from "react";
 import { createRoot } from "react-dom/client";
+import { flushSync } from "react-dom";
 import { TranscriptState } from ${JSON.stringify(path.join(ROOT, "frontend/shared/conversation.js"))};
 import { createTranscriptInteractionHandler } from ${JSON.stringify(path.join(ROOT, "frontend/shared/transcript-interactions.js"))};
 import { dispatchTranscriptScrollActionEvent } from ${JSON.stringify(path.join(ROOT, "frontend/shared/transcript-scroll.js"))};
@@ -32,7 +33,7 @@ const answer = params.has("plain")
 window.entryReads = 0;
 const initial = Array.from({ length: count }, (_, i) => {
   const entry = params.has("perf")
-    ? { kind: "agent_text", status: "completed", text: "Message " + i + ". " + paragraph.slice(0, 240) }
+    ? { kind: "agent_text", status: "completed", text: "Message " + i + ". " + paragraph.slice(0, params.has("compact") ? 45 : 240) }
     : { kind: "user_text", status: "completed", text: "Delegate response", injection: {
       kind: "delegate_answer", delegate: Array.from({ length: i === 4 ? 3 : 1 }, (_, card) => ({
         id: "ask-" + i + "-" + card, title: "Delegate " + i + " / card " + (card + 1),
@@ -82,6 +83,12 @@ function RemoteBookkeeping({ entries, threadId, scrollerRef }) {
 function App() {
   const [entries, setEntries] = React.useState(initial);
   const [mounted, setMounted] = React.useState(true);
+  const [hydrationLoading, setHydrationLoading] = React.useState(false);
+  window.historyLoads = window.historyLoads || 0;
+  window.loadHistory = () => {
+    setHydrationLoading(true);
+    setTimeout(() => requestAnimationFrame(() => flushSync(() => { window.prependHistory(); setHydrationLoading(false); window.historyLoads++; })), 100);
+  };
   window.setEntryCount = n => setEntries(initial.slice(0, n));
   window.setTranscriptMounted = setMounted;
   const [threadId, setThreadId] = React.useState("thread-a");
@@ -89,8 +96,17 @@ function App() {
   const scrollerRef = React.useRef(null);
   const attach = React.useCallback(node => { scrollerRef.current = node; setScroller(node); }, []);
   const threads = React.useRef(new Map());
-  const older = () => Array.from({length: 12}, (_, i) => ({ item_id: "older-" + i, kind: "agent_text", status: "completed", text: paragraph.slice(0, 220) }));
+  const historyBatch = React.useRef(0);
+  const older = () => {
+    const batch = historyBatch.current++;
+    return Array.from({length: Number(params.get("historyCount") || 12)}, (_, i) => ({ item_id: "older-" + (batch ? batch + "-" : "") + i, kind: "agent_text", status: "completed", text: paragraph.slice(0, params.has("compact") ? 45 : 220) }));
+  };
   window.prependHistory = () => setEntries(previous => [...older(), ...previous]);
+  window.prependGroupMember = () => requestAnimationFrame(() => flushSync(() => setEntries(previous => {
+    const next = [...previous];
+    next.splice(next.findIndex(entry => entry.item_id === "tool-a"), 0, { item_id: "tool-before", kind: "tool_call", status: "completed", tool: { name: "Read", title: "older-source.js" } });
+    return next;
+  })));
   window.removeEntry = id => setEntries(previous => previous.filter(entry => entry.item_id !== id));
   window.changeCardAbove = (cardIndex = 0) => setEntries(previous => previous.map(entry => entry.item_id !== "entry-4" ? entry : {
     ...entry, injection: { ...entry.injection, delegate: entry.injection.delegate.map((ask, i) => i !== cardIndex ? ask : { ...ask, answer: "New visible introductory paragraph.\\n\\n" + ask.answer }) },
@@ -130,7 +146,7 @@ function App() {
     params.get("bookkeeping") === "local" ? h(LocalBookkeeping, { entries, threadId, scroller })
       : params.get("bookkeeping") === "remote" ? h(RemoteBookkeeping, { entries, threadId, scrollerRef }) : null,
     mounted ? h(TranscriptState, {
-    entries,
+    entries, hydrationLoading,
     approval: params.has("approval") ? { request_id: "approval-fixture", kind: "command", command: "npm test", detail: "Review this command" } : null,
     options: { provider: "claude_code", expandedKeys,
       pendingAskUserQuestions: params.has("approval") ? Array.from({ length: 4 }, (_, i) => ({ request_id: "question-" + i,
@@ -196,14 +212,17 @@ function assertRetained(before, after, label) {
 
 // Geometry after settling misses a frame painted with stale virtual-row positions.
 // Track a layout-neutral colored line in Chromium's actual composited frames.
-async function assertPaintedAnchor(page, anchor, name, action) {
+async function assertPaintedAnchor(page, anchor, name, action, selector = null) {
   if (ENGINE === "webkit") {
     // WebKit has no CDP screencast. Sample after rAF and in a later RO delivery,
     // so RO-only changes cannot hide behind their next-frame correction. These
     // remain geometry samples, not proof of composited frames.
-    await anchor.evaluate(el => {
+    await anchor.evaluate((el, selector) => {
       window.anchorFrames = { positions: [], running: true };
-      const record = () => window.anchorFrames.positions.push(el.isConnected ? el.getBoundingClientRect().top : null);
+      const record = () => {
+        const current = selector ? document.querySelector(selector) : el;
+        window.anchorFrames.positions.push(current?.isConnected ? current.getBoundingClientRect().top : null);
+      };
       record();
       const observer = new ResizeObserver(record);
       for (const node of document.querySelectorAll(".thread-content, .transcript-virtual-row, .thread-content > article")) observer.observe(node);
@@ -214,12 +233,13 @@ async function assertPaintedAnchor(page, anchor, name, action) {
         if (window.anchorFrames.running) requestAnimationFrame(() => setTimeout(sample, 0));
       };
       requestAnimationFrame(() => setTimeout(sample, 0));
-    });
+    }, selector);
     await action();
     const positions = await page.evaluate(() => { window.anchorFrames.running = false; window.anchorFrames.observer.disconnect(); return window.anchorFrames.positions; });
     assert.ok(positions.length > 1 && positions.every(y => y !== null && Math.abs(y - positions[0]) <= 2), `rAF geometry jumped: ${JSON.stringify(positions)}`);
     return { method: "after-rAF and late-RO geometry (not composited frames)", positions };
   }
+  const markerStyle = selector ? await page.addStyleTag({ content: `${selector} { box-shadow: inset 0 3px 0 rgb(255, 0, 255) !important; }` }) : null;
   const shadow = await anchor.evaluate(el => {
     const previous = el.style.boxShadow;
     el.style.boxShadow = "inset 0 3px 0 rgb(255, 0, 255)";
@@ -244,6 +264,7 @@ async function assertPaintedAnchor(page, anchor, name, action) {
     cdp.off("Page.screencastFrame", onFrame);
     await cdp.detach();
     await anchor.evaluate((el, previous) => { el.style.boxShadow = previous; }, shadow);
+    await markerStyle?.evaluate(el => el.remove());
   }
   assert.ok(frames.length >= 2, "captured frames spanning the collapse");
   const positions = await page.evaluate(async frames => {
@@ -1005,7 +1026,69 @@ async function main() {
       assert.ok(Math.abs((await next.boundingBox()).y - y) <= 2, "removal does not re-arm follow");
       return { nextMessageY: y };
     });
+    await run("history-regroups-row-below-reader", async () => {
+      await load("perf=1&count=30&group=1");
+      const top = page.locator('[data-transcript-entry-id="entry-3"]');
+      await position(page, top, 0);
+      const reading = page.locator('[data-transcript-entry-id="entry-5"]');
+      const before = await reading.boundingBox();
+      const paintedPositions = await assertPaintedAnchor(page, reading, "history-regroup", async () => {
+        await page.evaluate(() => window.prependGroupMember());
+        await settle(page);
+      });
+      assertRetained(before, await reading.boundingBox(), "measuring the regrouped row retains the following visible text");
+      return { paintedPositions };
+    });
     for (const surface of ["local", "remote"]) {
+      for (const [count, historyCount, streaming, compact] of [[4, 12], [10, 12], [10, 36], [10, 36, true], [16, 36, true, true]]) await run(`first-wheel-history-${surface}-${count}-${historyCount}${streaming ? "-streaming" : ""}${compact ? "-compact" : ""}`, async () => {
+        await load(`perf=1&count=${count}&historyCount=${historyCount}&bookkeeping=${surface}${compact ? "&compact=1" : ""}`, { width: 1100, height: 1800 });
+        // Exclude native macOS edge bounce from the history-retention measurement.
+        await page.addStyleTag({ content: ".chat-thread { overscroll-behavior: none; }" });
+        const height = await page.locator(".chat-thread").evaluate(el => Math.ceil(
+          el.querySelector(".thread-content").getBoundingClientRect().bottom + parseFloat(getComputedStyle(el).paddingBottom)
+        ));
+        await page.setViewportSize({ width: 1100, height });
+        await page.evaluate(() => window.followBottom());
+        await settle(page);
+        assert.equal(await page.locator(".chat-thread").evaluate(el => el.scrollTop), 0, "the initial tail fits without scrolling");
+        const reading = page.locator('[data-transcript-entry-id="entry-0"]');
+        const before = await reading.boundingBox();
+        await page.evaluate(streaming => {
+          document.querySelector(".chat-thread").addEventListener("wheel", () => {
+            if (streaming) window.startStream();
+            window.loadHistory();
+          }, { once: true });
+        }, streaming);
+        const paintedPositions = await assertPaintedAnchor(page, reading, `first-wheel-${surface}-${count}-${historyCount}${streaming ? "-streaming" : ""}${compact ? "-compact" : ""}`, async () => {
+          await page.mouse.move(550, 300);
+          await page.mouse.wheel(0, -120);
+          await page.waitForFunction(() => window.historyLoads === 1);
+          await settle(page);
+        }, '[data-transcript-entry-id="entry-0"]');
+        assertRetained(before, await reading.boundingBox(), "first upward gesture retains the text through history arrival");
+        await page.evaluate(() => window.appendMessage());
+        await settle(page);
+        assertRetained(before, await reading.boundingBox(), "subsequent output leaves the reader with the same text");
+        return { paintedPositions };
+      });
+      await run(`history-virtualize-existing-reader-${surface}`, async () => {
+        await load(`perf=1&count=4&bookkeeping=${surface}`);
+        await page.evaluate(() => window.prependHistory());
+        await settle(page);
+        await page.mouse.move(550, 400);
+        await page.mouse.wheel(0, -800);
+        await settle(page);
+        const reading = page.locator('[data-transcript-entry-id="older-6"]');
+        await position(page, reading, 32);
+        const before = await reading.boundingBox();
+        const paintedPositions = await assertPaintedAnchor(page, reading, `history-remount-${surface}`, async () => {
+          await page.evaluate(() => window.loadHistory());
+          await page.waitForFunction(() => window.historyLoads === 1);
+          await settle(page);
+        }, '[data-transcript-entry-id="older-6"]');
+        assertRetained(before, await reading.boundingBox(), "the existing historical message survives virtualization");
+        return { paintedPositions };
+      });
       await run(`anchor-prepend-${surface}`, async () => {
         await load(`bookkeeping=${surface}`);
         await page.mouse.move(550, 400);

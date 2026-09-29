@@ -40,6 +40,11 @@ function fixture() {
   return { window, scroller, controller, frames, writes, paint, second,
     notifyResize: () => notifyResize(),
     grow(by) { firstHeight += by; scrollHeight += by; controller.geometryChanged(); },
+    clampRange(maxTop) {
+      scrollHeight = maxTop + 400;
+      scrollTop = Math.min(scrollTop, maxTop);
+      controller.geometryChanged();
+    },
     readerScroll(top, report = true, gesture = true) {
       if (gesture) scroller.dispatchEvent(new window.WheelEvent("wheel", { deltaY: top - scrollTop }));
       scrollTop = top;
@@ -74,6 +79,55 @@ test("a reader who paused at the bottom stays paused even when geometry says bot
     assert.equal(view.controller.readPosition().followBottom, false);
     view.controller.position(2600);
     assert.equal(view.controller.readPosition().followBottom, false, "position writes carry no following intent");
+  } finally { view.close(); }
+});
+
+test("the first upward gesture captures content even when the first page cannot scroll", () => {
+  const view = fixture();
+  try {
+    view.clampRange(0);
+    view.controller.apply({ kind: "jump-bottom" });
+    view.scroller.dispatchEvent(new view.window.WheelEvent("wheel", { deltaY: -120 }));
+    const position = view.controller.readPosition();
+    assert.equal(position.followBottom, false);
+    assert.deepEqual(position.anchor.path, ["entry:message", "card:first"]);
+    assert.equal(Math.abs(position.anchor.offset), 0, "captured before any scroll event or history commit");
+  } finally { view.close(); }
+});
+
+test("native movement before a passive wheel listener is not pinned back to the bottom", () => {
+  const view = fixture();
+  try {
+    view.controller.apply({ kind: "jump-bottom" });
+    view.readerScroll(2500, false, false);
+    view.scroller.dispatchEvent(new view.window.WheelEvent("wheel", { deltaY: -100 }));
+    assert.equal(view.scroller.scrollTop, 2500);
+    assert.equal(view.controller.readPosition().followBottom, false);
+  } finally { view.close(); }
+});
+
+for (const nativeDelta of [0, -30]) test(`estimated range shrink keeps the anchor and ${nativeDelta}px of native movement`, () => {
+  const view = fixture();
+  try {
+    view.clampRange(500);
+    view.readerScroll(500 + nativeDelta, false, false);
+    view.notifyResize();
+    assert.equal(view.controller.readPosition().anchor.offset, 0 - nativeDelta);
+    view.clampRange(1000);
+    view.paint();
+    assert.equal(view.scroller.scrollTop, 600 + nativeDelta);
+    assert.equal(view.second.getBoundingClientRect().top, 0 - nativeDelta);
+  } finally { view.close(); }
+});
+
+test("history arrival while following ignores a stale height-delta fallback", () => {
+  const view = fixture();
+  try {
+    view.controller.apply({ kind: "jump-bottom" });
+    view.writes.length = 0;
+    view.controller.apply({ kind: "anchor-prepend", scrollTop: 0 });
+    assert.deepEqual(view.writes, [], "never writes the obsolete top before re-pinning");
+    assert.equal(view.controller.readPosition().followBottom, true);
   } finally { view.close(); }
 });
 
