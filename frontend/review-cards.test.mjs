@@ -54,7 +54,7 @@ const review = (extra = {}) => ({
   ...extra,
 });
 const user = (id, text, extra = {}) => ({ item_id: id, kind: "user_text", status: "completed", text, ...extra });
-const agent = (id, text) => ({ item_id: id, kind: "agent_text", status: "completed", text });
+const agent = (id, text, extra = {}) => ({ item_id: id, kind: "agent_text", status: "completed", text, ...extra });
 const marked = (id, kind, reviewExtra = {}, text = `PROMPT-${id}`) =>
   user(id, text, { injection: { kind, review: review(reviewExtra) } });
 
@@ -188,7 +188,9 @@ test("the reviewer thread opens on a request card and closes each round with one
   const markup = render(
     [
       marked("brief", "review_brief", { max_rounds: 3, status: "addressing_findings" }),
-      agent("r1", "The gate is checked once.\n\nVERDICT: NEEDS_CHANGES"),
+      agent("r1", "The gate is checked once.\n\nVERDICT: NEEDS_CHANGES", {
+        injection: { kind: "review_reply", review: review({ max_rounds: 3, status: "addressing_findings" }) },
+      }),
     ],
     { provider: "codex" }
   );
@@ -200,7 +202,45 @@ test("the reviewer thread opens on a request card and closes each round with one
   assert.match(markup, /3a0e1f2…7be04d1 · 6 files · \+84 −41/);
   assert.match(markup, /data-open-thread-id="parent"[^>]*>Source thread/);
   assert.match(markup, /Result sent to Claude/);
+  assert.equal((markup.match(/Result sent to Claude/g) || []).length, 1, "loading the request adds no second result");
   assert.match(markup, /· 1 blocker, 1 medium/);
+});
+
+test("the reviewer reply page shows its result without loading the request page", () => {
+  const markup = render(
+    [agent("r1", "## Findings\nNone.\n\nVERDICT: APPROVE", {
+      injection: { kind: "review_reply", review: review({ rounds: [round(1, { verdict: "approve", delivered: true })] }) },
+    })],
+    { provider: "codex" }
+  );
+
+  assert.match(markup, /VERDICT: APPROVE/, "the review text stays readable");
+  assert.match(markup, /Result sent to Claude/);
+  assert.equal((markup.match(/Result sent to Claude/g) || []).length, 1);
+});
+
+test("an unrelated user row between request and reply does not duplicate the result", () => {
+  const markup = render(
+    [
+      marked("brief", "review_brief"),
+      user("intervening", "A provider-side note"),
+      agent("r1", "VERDICT: NEEDS_CHANGES", {
+        injection: { kind: "review_reply", review: review() },
+      }),
+    ],
+    { provider: "codex" }
+  );
+
+  assert.equal((markup.match(/Result sent to Claude/g) || []).length, 1);
+  assert.ok(markup.indexOf("VERDICT: NEEDS_CHANGES") < markup.indexOf("Result sent to Claude"));
+});
+
+test("a review recorded before reply marks keeps its result when the request page loads", () => {
+  const markup = render(
+    [marked("brief", "review_brief"), agent("r1", "VERDICT: NEEDS_CHANGES")],
+    { provider: "codex" }
+  );
+  assert.equal((markup.match(/Result sent to Claude/g) || []).length, 1);
 });
 
 test("a round whose result never reached the agent does not claim it did", () => {

@@ -1,12 +1,65 @@
 //! Keeping a review's cards in step with its job.
 
-use crate::protocol::ReviewRoundView;
-use crate::state::ReviewJob;
+use crate::protocol::{InjectionKind, ReviewRoundView, TranscriptEntryKind};
+use crate::state::{InjectedMessage, InjectionTag, MessageAnchor, ReviewJob};
 
 use super::injections::ReviewMark;
 use super::RelayState;
 
 impl RelayState {
+    /// The final reply carries its own result line when the request is on an older page.
+    pub(crate) fn mark_review_reply(&mut self, review_id: &str, round: u32, item_id: &str) {
+        let reviewer_thread_id = self
+            .injections
+            .review(review_id)
+            .and_then(|mark| mark.rounds.iter().find(|entry| entry.round == round))
+            .map(|entry| entry.reviewer_thread_id.clone());
+        let Some(reviewer_thread_id) = reviewer_thread_id else {
+            tracing::warn!(
+                review_id,
+                round,
+                "reviewer thread missing when recording its reply"
+            );
+            return;
+        };
+        let anchor = self
+            .runtime_for_thread(&reviewer_thread_id)
+            .and_then(|runtime| {
+                runtime.transcript.iter().find(|record| {
+                    record.kind == TranscriptEntryKind::AgentText
+                        && (record.row_id == item_id
+                            || record.provider_item_id.as_deref() == Some(item_id))
+                })
+            })
+            .map(|record| {
+                MessageAnchor::Item(
+                    record
+                        .provider_item_id
+                        .clone()
+                        .unwrap_or_else(|| record.row_id.clone()),
+                )
+            });
+        let Some(anchor) = anchor else {
+            tracing::warn!(
+                review_id,
+                round,
+                reviewer_thread_id,
+                item_id,
+                "reviewer reply row missing when recording its result"
+            );
+            return;
+        };
+        let message = InjectedMessage {
+            thread_id: reviewer_thread_id.clone(),
+            anchor,
+            tag: InjectionTag::review(InjectionKind::ReviewReply, review_id, round),
+            created_at: crate::state::unix_now(),
+        };
+        self.usage_store.record_injected_message(&message);
+        self.injections.anchor(message);
+        self.republish_thread_rows(&reviewer_thread_id);
+    }
+
     /// The provider a thread runs on, from what the relay already knows of it.
     pub(crate) fn provider_of_thread(&self, thread_id: &str) -> String {
         self.runtime_for_thread(thread_id)

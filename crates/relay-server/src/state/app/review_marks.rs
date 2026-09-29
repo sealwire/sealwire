@@ -78,13 +78,19 @@ impl AppState {
         relay.notify();
     }
 
-    pub(super) async fn review_round_delivered(&self, review_id: &str, round: u32) {
+    pub(super) async fn review_round_delivered(
+        &self,
+        review_id: &str,
+        round: u32,
+        reviewer_reply_item_id: &str,
+    ) {
         let mut relay = self.relay.write().await;
         relay.edit_review_mark(review_id, |mark| {
             if let Some(entry) = mark.round_mut(round) {
                 entry.delivered = true;
             }
         });
+        relay.mark_review_reply(review_id, round, reviewer_reply_item_id);
         relay.notify();
     }
 

@@ -1357,9 +1357,12 @@ started ({error}); re-resolving the workspace and retrying the round."
             self.set_job_status(&job_id, ReviewJobStatus::WaitingToPostBack)
                 .await;
             reviewer_thread_id = Some(this_reviewer_id.clone());
-            let mut review = match self.latest_assistant_entry(&this_reviewer_id).await {
+            let (reviewer_reply_item_id, mut review) = match self
+                .latest_assistant_entry(&this_reviewer_id)
+                .await
+            {
                 Some((item_id, text)) if reviewer_baseline.as_deref() != Some(item_id.as_str()) => {
-                    text
+                    (item_id, text)
                 }
                 _ => {
                     self.fail_job(&job_id, "the reviewer produced no review for this turn")
@@ -1453,6 +1456,7 @@ the new `HEAD` must be reviewed as a fresh committed candidate.\n\n{review}"
                 self.finish_review_to_parent(
                     &job_id,
                     &parent_thread_id,
+                    &reviewer_reply_item_id,
                     message,
                     InjectionKind::ReviewResult,
                     ReviewJobStatus::Complete,
@@ -1465,6 +1469,7 @@ the new `HEAD` must be reviewed as a fresh committed candidate.\n\n{review}"
                 self.finish_review_to_parent(
                     &job_id,
                     &parent_thread_id,
+                    &reviewer_reply_item_id,
                     message,
                     InjectionKind::ReviewApproved,
                     ReviewJobStatus::Complete,
@@ -1477,6 +1482,7 @@ the new `HEAD` must be reviewed as a fresh committed candidate.\n\n{review}"
                 self.finish_review_to_parent(
                     &job_id,
                     &parent_thread_id,
+                    &reviewer_reply_item_id,
                     message,
                     InjectionKind::ReviewEscalated,
                     ReviewJobStatus::Escalated,
@@ -1526,7 +1532,8 @@ reviewer prompt; starting another review round for the current committed candida
                 .await
             {
                 Ok(dispatched) if dispatched.turn_id.is_some() => {
-                    self.review_round_delivered(&job_id, round).await;
+                    self.review_round_delivered(&job_id, round, &reviewer_reply_item_id)
+                        .await;
                     parent_thread_id.clone()
                 }
                 Ok(_) => {
@@ -1551,6 +1558,7 @@ started ({error}); finishing with round {round}'s findings."
                     self.finish_review_to_parent(
                         &job_id,
                         &parent_thread_id,
+                        &reviewer_reply_item_id,
                         message,
                         InjectionKind::ReviewResult,
                         ReviewJobStatus::Complete,
@@ -1584,6 +1592,7 @@ started ({error}); finishing with round {round}'s findings."
                         self.finish_review_to_parent(
                             &job_id,
                             &fix_thread_id,
+                            &reviewer_reply_item_id,
                             message,
                             InjectionKind::ReviewEscalated,
                             ReviewJobStatus::Escalated,
@@ -1634,6 +1643,7 @@ started ({error}); finishing with round {round}'s findings."
         &self,
         job_id: &str,
         parent_thread_id: &str,
+        reviewer_reply_item_id: &str,
         message: String,
         kind: InjectionKind,
         status: ReviewJobStatus,
@@ -1665,7 +1675,8 @@ started ({error}); finishing with round {round}'s findings."
                     self.goal_dispatch_landed(parent_thread_id, dispatched.turn_id.clone())
                         .await;
                 }
-                self.review_round_delivered(job_id, round).await;
+                self.review_round_delivered(job_id, round, reviewer_reply_item_id)
+                    .await;
                 dispatched.turn_id
             }
             Err(error) if error.is_workspace_gone() => {

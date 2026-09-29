@@ -2203,6 +2203,8 @@ pub enum InjectionKind {
     ReviewRecap,
     /// The reviewer was given the change to review.
     ReviewBrief,
+    /// The reviewer's final reply for a round, after delivery to the author.
+    ReviewReply,
     /// A round's findings, handed back to the reviewed thread.
     ReviewResult,
     /// The reviewed thread was asked to commit before the next round.
@@ -2231,6 +2233,7 @@ impl InjectionKind {
             self,
             Self::ReviewRecap
                 | Self::ReviewBrief
+                | Self::ReviewReply
                 | Self::ReviewResult
                 | Self::ReviewCommit
                 | Self::ReviewApproved

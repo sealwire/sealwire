@@ -491,8 +491,8 @@ export function ReviewEntry({ attrs, entry, folded = false, provider = "", provi
   );
 }
 
-function resultLineEntry(brief) {
-  const review = brief.injection.review;
+function resultLineEntry(reply) {
+  const review = reply.injection.review;
   const round = roundOf(review, review.round);
   if (!round?.verdict || !round.delivered) {
     return null;
@@ -540,15 +540,31 @@ export function foldReviewInjections(entries) {
   const result = [];
   const folded = new Set();
   const newest = new Map();
+  const replyRounds = new Map();
+  for (const entry of list) {
+    if (entry?.kind !== "agent_text" || entry.injection?.kind !== "review_reply") continue;
+    const review = entry.injection.review;
+    if (!review) continue;
+    if (!replyRounds.has(review.id)) replyRounds.set(review.id, new Set());
+    replyRounds.get(review.id).add(review.round);
+  }
   let brief = null;
-  const closeBrief = () => {
-    const line = brief && resultLineEntry(brief);
+  let reply = null;
+  const closeRound = () => {
+    const briefReview = brief?.injection?.review;
+    const oldBrief = briefReview && !replyRounds.get(briefReview.id)?.has(briefReview.round) ? brief : null;
+    const carrier = reply || oldBrief;
+    const line = carrier && resultLineEntry(carrier);
     if (line) result.push(line);
     brief = null;
+    reply = null;
   };
   for (const entry of list) {
     if (entry?.kind === "user_text") {
-      closeBrief();
+      closeRound();
+    }
+    if (entry?.kind === "agent_text" && entry.injection?.kind === "review_reply") {
+      reply = entry;
     }
     const review = entry?.kind === "user_text" ? entry.injection?.review : null;
     if (!review) {
@@ -570,7 +586,7 @@ export function foldReviewInjections(entries) {
       brief = entry;
     }
   }
-  closeBrief();
+  closeRound();
   return { entries: result, folded };
 }
 

@@ -42,12 +42,13 @@ impl MessageAnchor {
     }
 }
 
-const KIND_NAMES: [(InjectionKind, &str); 15] = [
+const KIND_NAMES: [(InjectionKind, &str); 16] = [
     (InjectionKind::HandoverRequest, "handover_request"),
     (InjectionKind::HandoverSummary, "handover_summary"),
     (InjectionKind::HandoverBrief, "handover_brief"),
     (InjectionKind::ReviewRecap, "review_recap"),
     (InjectionKind::ReviewBrief, "review_brief"),
+    (InjectionKind::ReviewReply, "review_reply"),
     (InjectionKind::ReviewResult, "review_result"),
     (InjectionKind::ReviewCommit, "review_commit"),
     (InjectionKind::ReviewApproved, "review_approved"),
@@ -601,7 +602,9 @@ fn card_rounds(
                     kept.findings = take(&round.findings);
                     kept.change = round.change.clone();
                 }
-                InjectionKind::ReviewResult if round.round == row_round => {
+                InjectionKind::ReviewResult | InjectionKind::ReviewReply
+                    if round.round == row_round =>
+                {
                     kept.findings = take(&round.findings);
                 }
                 // Read only for how many of the card's findings the next round fixed.
@@ -725,9 +728,9 @@ impl ThreadInjections {
             .iter()
             .find(|(matcher, view)| {
                 let right_kind = match view.kind {
-                    InjectionKind::HandoverSummary | InjectionKind::DelegateBrief => {
-                        record.kind == TranscriptEntryKind::AgentText
-                    }
+                    InjectionKind::HandoverSummary
+                    | InjectionKind::DelegateBrief
+                    | InjectionKind::ReviewReply => record.kind == TranscriptEntryKind::AgentText,
                     InjectionKind::DelegateReported => record.kind != TranscriptEntryKind::UserText,
                     _ => record.kind == TranscriptEntryKind::UserText,
                 };

@@ -22841,15 +22841,25 @@ settings update: {error}"
             "the last card tells the whole story"
         );
 
-        let reviewer_marks = review_marks_on(&app, &reviewer, 2).await;
+        let reviewer_marks = review_marks_on(&app, &reviewer, 4).await;
         assert_eq!(
             kinds_and_rounds(&reviewer_marks),
             vec![
                 (InjectionKind::ReviewBrief, 1),
-                (InjectionKind::ReviewBrief, 2)
+                (InjectionKind::ReviewReply, 1),
+                (InjectionKind::ReviewBrief, 2),
+                (InjectionKind::ReviewReply, 2),
             ]
         );
-        for (mark, round) in reviewer_marks.iter().zip(1..) {
+        let first_reply = reviewer_marks[1].review().expect("first reviewer reply");
+        assert_eq!(first_reply.rounds.len(), 1);
+        assert_eq!(first_reply.rounds[0].findings_total, 2);
+        assert_eq!(first_reply.rounds[0].findings.len(), 2);
+        for (mark, round) in reviewer_marks
+            .iter()
+            .filter(|mark| mark.kind == InjectionKind::ReviewBrief)
+            .zip(1..)
+        {
             let brief = mark.review().unwrap();
             assert_eq!(brief.parent_thread_id, parent.id);
             assert_eq!(
@@ -22863,6 +22873,98 @@ settings update: {error}"
                 "round {round}'s result reached the author"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_long_reviewer_reply_carries_its_result_without_the_request_page() {
+        use crate::protocol::InjectionKind;
+        use crate::state::relay::{InjectionReader, ThreadTranscript};
+        use crate::usage::store::UsageStore;
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let database = dir.path().join("sealwire.db");
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        app.relay
+            .write()
+            .await
+            .install_database(UsageStore::open(&database));
+        start_parent(&app, cwd, "codex").await;
+        let codex = providers.get("codex").unwrap();
+        queue_verdicts(codex, &["APPROVE"]).await;
+        codex
+            .reviewer_notes
+            .lock()
+            .await
+            .push_back(format!("## Findings\nNone.\n\n{}", "detail ".repeat(5_000)));
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review starts");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        let reviewer = job.reviewer_thread_id.expect("reviewer thread");
+        let tail = app
+            .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+                thread_id: reviewer.clone(),
+                before: None,
+                device_id: None,
+            })
+            .await
+            .expect("latest page");
+        assert!(
+            tail.prev_cursor.is_some(),
+            "the request is on an older page"
+        );
+        assert_eq!(tail.entries.len(), 1, "the long reply owns the latest page");
+        let reply = &tail.entries[0];
+        assert_eq!(reply.kind, crate::protocol::TranscriptEntryKind::AgentText);
+        let injection = reply.injection.as_ref().expect("reply mark");
+        assert_eq!(injection.kind, InjectionKind::ReviewReply);
+        let review = injection.review().expect("review card");
+        assert!(review.rounds[0].delivered);
+
+        let older = app
+            .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+                thread_id: reviewer.clone(),
+                before: tail.prev_cursor,
+                device_id: None,
+            })
+            .await
+            .expect("older page");
+        assert!(older.entries.iter().any(|entry| {
+            entry
+                .injection
+                .as_ref()
+                .is_some_and(|mark| mark.kind == InjectionKind::ReviewBrief)
+        }));
+
+        let mut relay = app.relay.write().await;
+        let mut rebuilt = relay
+            .runtime_for_thread(&reviewer)
+            .unwrap()
+            .transcript
+            .iter()
+            .find(|row| row.kind == crate::protocol::TranscriptEntryKind::AgentText)
+            .expect("review reply")
+            .clone();
+        assert!(
+            rebuilt.provider_item_id.is_some(),
+            "provider identity survives a history read"
+        );
+        rebuilt.row_id = "rebuilt-review-reply".into();
+        rebuilt.turn_id = Some("rebuilt-review-turn".into());
+        relay.install_database(UsageStore::open(&database));
+        relay.ensure_runtime_for_thread(&reviewer).transcript =
+            ThreadTranscript::from_rows(vec![rebuilt]);
+        let marks = relay.thread_injections(&reviewer, InjectionReader::Operator);
+        let page = relay
+            .runtime_for_thread(&reviewer)
+            .unwrap()
+            .transcript_page(&reviewer, None, &marks);
+        assert_eq!(
+            page.entries[0].injection.as_ref().map(|mark| mark.kind),
+            Some(InjectionKind::ReviewReply)
+        );
     }
 
     #[tokio::test]
