@@ -10,10 +10,11 @@ mod team;
 #[cfg(test)]
 mod tests;
 mod workflow;
+mod workspace_scope;
 
 use std::{
     env,
-    path::{Component, Path, PathBuf},
+    path::{Component, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -81,6 +82,7 @@ pub(crate) use self::workflow::{
     ArtifactKind, FindingSet, LoopSpec, RunStatus, StepRole, StopCondition, Workflow, WorkflowRun,
     WorkflowStep, WorkflowVerdict,
 };
+pub(crate) use self::workspace_scope::WorkspaceScope;
 
 use crate::protocol::ThreadSummaryView;
 
@@ -210,67 +212,6 @@ fn sort_threads_by_recency(threads: &mut [ThreadSummaryView]) {
             .then_with(|| left.provider.cmp(&right.provider))
             .then_with(|| left.id.cmp(&right.id))
     });
-}
-
-pub(super) fn path_within_allowed_roots(path: &str, allowed_roots: &[String]) -> bool {
-    if allowed_roots.is_empty() {
-        return true;
-    }
-
-    let normalized_path = normalize_cwd(path);
-    let candidate_path = Path::new(&normalized_path);
-    allowed_roots.iter().any(|root| {
-        let root_path = Path::new(root);
-        candidate_path == root_path || candidate_path.starts_with(root_path)
-    })
-}
-
-pub(super) fn ensure_path_within_allowed_roots(
-    path: &str,
-    allowed_roots: &[String],
-) -> Result<(), String> {
-    if path_within_allowed_roots(path, allowed_roots) {
-        return Ok(());
-    }
-
-    let normalized_path = normalize_cwd(path);
-    let root_hint = match allowed_roots {
-        [] => "this relay is unrestricted".to_string(),
-        [root] => format!("choose a directory under {root}"),
-        _ => "choose a directory under one of this relay's allowed roots".to_string(),
-    };
-
-    Err(format!(
-        "workspace {normalized_path} is outside this relay's allowed roots; {root_hint}"
-    ))
-}
-
-pub(super) fn path_within_device_scope(
-    path: &str,
-    device_scope: &[String],
-    relay_allowed_roots: &[String],
-) -> bool {
-    path_within_allowed_roots(path, relay_allowed_roots)
-        && (device_scope.is_empty() || path_within_allowed_roots(path, device_scope))
-}
-
-pub(super) fn ensure_path_within_device_scope(
-    path: &str,
-    device_scope: &[String],
-    relay_allowed_roots: &[String],
-) -> Result<(), String> {
-    ensure_path_within_allowed_roots(path, relay_allowed_roots)?;
-    if !device_scope.is_empty() && !path_within_allowed_roots(path, device_scope) {
-        let normalized_path = normalize_cwd(path);
-        let hint = match device_scope {
-            [one] => format!("choose a directory under {one}"),
-            _ => "choose a directory under one of this device's allowed paths".to_string(),
-        };
-        return Err(format!(
-            "workspace {normalized_path} is outside this device's allowed paths; {hint}"
-        ));
-    }
-    Ok(())
 }
 
 pub(super) fn normalize_allowed_roots(roots: Vec<String>) -> Result<Vec<String>, String> {

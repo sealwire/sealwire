@@ -81,12 +81,9 @@ impl AppState {
         let runtime = relay
             .runtime_for_thread(&input.thread_id)
             .ok_or_else(|| format!("thread `{}` is not loaded", input.thread_id))?;
-        let device_scope = input
-            .device_id
-            .as_deref()
-            .map(|id| relay.device_path_scope(id))
-            .unwrap_or_default();
-        ensure_path_within_device_scope(&runtime.current_cwd, &device_scope, &relay.allowed_roots)?;
+        relay
+            .workspace_scope(input.device_id.as_deref())
+            .ensure(&runtime.current_cwd)?;
         let rows = runtime
             .transcript_rows(
                 &input.thread_id,
@@ -126,12 +123,9 @@ impl AppState {
         let runtime = relay
             .runtime_in_key_space(&input.thread_id, &key_space)
             .ok_or(CURSOR_EXPIRED)?;
-        let device_scope = input
-            .device_id
-            .as_deref()
-            .map(|id| relay.device_path_scope(id))
-            .unwrap_or_default();
-        ensure_path_within_device_scope(&runtime.current_cwd, &device_scope, &relay.allowed_roots)?;
+        relay
+            .workspace_scope(input.device_id.as_deref())
+            .ensure(&runtime.current_cwd)?;
         Ok(runtime.transcript_page(
             &input.thread_id,
             Some(cursor),
@@ -171,15 +165,11 @@ impl AppState {
                 None => target.read_thread_transcript_page(None).await?,
             };
             if let Some(page) = page {
-                {
-                    let relay = self.relay.read().await;
-                    let device_scope = relay.device_path_scope(device_id);
-                    ensure_path_within_device_scope(
-                        &page.sync.thread.cwd,
-                        &device_scope,
-                        &relay.allowed_roots,
-                    )?;
-                }
+                self.relay
+                    .read()
+                    .await
+                    .workspace_scope(Some(device_id))
+                    .ensure(&page.sync.thread.cwd)?;
                 let defaults = self.defaults().await;
                 let settings = {
                     let relay = self.relay.read().await;
@@ -254,12 +244,9 @@ impl AppState {
         let runtime = relay
             .runtime_for_thread(&input.thread_id)
             .ok_or_else(|| format!("thread `{}` is not loaded", input.thread_id))?;
-        let device_scope = input
-            .device_id
-            .as_deref()
-            .map(|id| relay.device_path_scope(id))
-            .unwrap_or_default();
-        ensure_path_within_device_scope(&runtime.current_cwd, &device_scope, &relay.allowed_roots)?;
+        relay
+            .workspace_scope(input.device_id.as_deref())
+            .ensure(&runtime.current_cwd)?;
         let mut response = runtime.transcript_page(
             &input.thread_id,
             None,
@@ -311,12 +298,9 @@ impl AppState {
                 )));
             };
             let mut relay = self.relay.write().await;
-            let device_scope = relay.device_path_scope(device_id);
-            ensure_path_within_device_scope(
-                &page.sync.thread.cwd,
-                &device_scope,
-                &relay.allowed_roots,
-            )?;
+            relay
+                .workspace_scope(Some(device_id))
+                .ensure(&page.sync.thread.cwd)?;
             let runtime = relay
                 .runtime_in_key_space_mut(thread_id, key_space)
                 .ok_or(CURSOR_EXPIRED)?;
@@ -425,17 +409,10 @@ impl AppState {
     ) -> Result<ThreadEntryDetailResponse, String> {
         let relay_entry = {
             let relay = self.relay.read().await;
-            let device_scope = input
-                .device_id
-                .as_deref()
-                .map(|id| relay.device_path_scope(id))
-                .unwrap_or_default();
             if let Some(runtime) = relay.runtime_for_thread(&input.thread_id) {
-                ensure_path_within_device_scope(
-                    &runtime.current_cwd,
-                    &device_scope,
-                    &relay.allowed_roots,
-                )?;
+                relay
+                    .workspace_scope(input.device_id.as_deref())
+                    .ensure(&runtime.current_cwd)?;
                 // A whole copy is the detail (Claude cannot answer per row at all); a
                 // cut one (Codex history) is re-read from the provider below.
                 let marks = relay.thread_injections(
@@ -458,19 +435,11 @@ impl AppState {
         } else {
             let target = self.resolve_session_target(&input.thread_id).await?;
             let thread_data = target.read_thread().await?;
-            {
-                let relay = self.relay.read().await;
-                let device_scope = input
-                    .device_id
-                    .as_deref()
-                    .map(|id| relay.device_path_scope(id))
-                    .unwrap_or_default();
-                ensure_path_within_device_scope(
-                    &thread_data.thread.cwd,
-                    &device_scope,
-                    &relay.allowed_roots,
-                )?;
-            }
+            self.relay
+                .read()
+                .await
+                .workspace_scope(input.device_id.as_deref())
+                .ensure(&thread_data.thread.cwd)?;
 
             // The client can only name a row the way the relay published it. The
             // provider matches on its OWN id, so translate before crossing that

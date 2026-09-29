@@ -728,7 +728,7 @@ const WITH_SIBLING = {
   ...WORKSPACE,
   roots: [
     ...ROOTS,
-    { path: SIBLING_CWD, branch: "feat/sibling", is_main: false, preview_only: true },
+    { path: SIBLING_CWD, branch: "feat/sibling", is_main: false },
   ],
 };
 

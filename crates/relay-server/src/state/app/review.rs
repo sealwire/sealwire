@@ -396,8 +396,9 @@ starting a review"
             // liveness (above) and path-scope (below) are still enforced; a running
             // workflow on the workspace is still refused earlier (it drives turns on
             // this same parent/cwd).
-            let device_scope = relay.device_path_scope(&device_id);
-            ensure_path_within_device_scope(&parent_cwd, &device_scope, &relay.allowed_roots)?;
+            relay
+                .workspace_scope(Some(&device_id))
+                .ensure(&parent_cwd)?;
 
             // Validate a reuse target and lock its provider.
             let locked_provider = match &reuse_thread_id {
@@ -3280,11 +3281,9 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
             // you could start (path-authorized), you must be able to stop; gating stop on
             // control would strand a hung review whose starter isn't the active controller.
             if let Some(parent_cwd) = relay.thread_cwd(&ids.1) {
-                ensure_path_within_device_scope(
-                    &parent_cwd,
-                    &relay.device_path_scope(&device_id),
-                    &relay.allowed_roots,
-                )?;
+                relay
+                    .workspace_scope(Some(&device_id))
+                    .ensure(&parent_cwd)?;
             }
             ids
         };
@@ -3406,11 +3405,9 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
         {
             let relay = self.relay.read().await;
             if let Some(parent_cwd) = relay.thread_cwd(&parent_thread_id) {
-                ensure_path_within_device_scope(
-                    &parent_cwd,
-                    &relay.device_path_scope(&device_id),
-                    &relay.allowed_roots,
-                )?;
+                relay
+                    .workspace_scope(Some(&device_id))
+                    .ensure(&parent_cwd)?;
             }
         }
 

@@ -28,10 +28,10 @@ use crate::{
 };
 
 use super::{
-    delegation::Ask, ensure_path_within_device_scope, goal::Goal, goal::GoalStatus,
-    persistence::PersistedRelayState, unix_now, ReviewJob, RunStatus, SecurityProfile, TeamRun,
-    TeamRunStatus, TeamThreadGate, WorkflowRun, CONTROLLER_LEASE_SECS, DEFAULT_APPROVAL_POLICY,
-    DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX, STALE_TURN_PROGRESS_TIMEOUT_SECS,
+    delegation::Ask, goal::Goal, goal::GoalStatus, persistence::PersistedRelayState, unix_now,
+    ReviewJob, RunStatus, SecurityProfile, TeamRun, TeamRunStatus, TeamThreadGate, WorkflowRun,
+    CONTROLLER_LEASE_SECS, DEFAULT_APPROVAL_POLICY, DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX,
+    STALE_TURN_PROGRESS_TIMEOUT_SECS,
 };
 
 pub use self::approval::{ApprovalKind, PendingApproval};
@@ -1050,11 +1050,9 @@ impl RelayState {
             };
             match reader {
                 InjectionReader::Operator => true,
-                InjectionReader::Device(device_id) => super::path_within_device_scope(
-                    &peer_cwd,
-                    &self.device_path_scope(device_id),
-                    &self.allowed_roots,
-                ),
+                InjectionReader::Device(device_id) => {
+                    self.workspace_scope(Some(device_id)).allows(&peer_cwd)
+                }
                 // One payload for every device: only a peer in the same folder is
                 // visible to exactly whoever can see this thread.
                 InjectionReader::Everyone => self.thread_cwd(thread_id) == Some(peer_cwd),
@@ -2647,7 +2645,7 @@ impl RelayState {
         self.team_runs.values().any(|run| {
             run.is_live_in_current_build()
                 && !run.cwd.is_empty()
-                && super::path_within_allowed_roots(&candidate, std::slice::from_ref(&run.cwd))
+                && std::path::Path::new(&candidate).starts_with(&run.cwd)
         })
     }
 
@@ -2818,11 +2816,9 @@ impl RelayState {
         match actor {
             crate::state::HandoverActor::LocalOperator => true,
             crate::state::HandoverActor::Device(device_id) => {
-                let scope = self.device_path_scope(device_id);
+                let scope = self.workspace_scope(Some(device_id));
                 self.thread_cwd(&handover.source_thread_id)
-                    .is_some_and(|cwd| {
-                        crate::state::path_within_device_scope(&cwd, &scope, &self.allowed_roots)
-                    })
+                    .is_some_and(|cwd| scope.allows(&cwd))
             }
         }
     }
@@ -3256,12 +3252,11 @@ happened, then hand over again."
         device_id: &str,
     ) -> Result<(String, String, String, Vec<String>), String> {
         let blocked = self.blocked_workflow_run_ids(run_id)?;
-        let device_scope = self.device_path_scope(device_id);
         let run = self
             .workflow_jobs
             .get(&blocked)
             .ok_or_else(|| "blocked workflow was not found".to_string())?;
-        ensure_path_within_device_scope(&run.cwd, &device_scope, &self.allowed_roots)?;
+        self.workspace_scope(Some(device_id)).ensure(&run.cwd)?;
 
         let run = self
             .workflow_jobs
@@ -3771,23 +3766,12 @@ so {} never got it — hand over again when you are ready.",
         // learn review metadata for parents outside its allowed paths. `None` (the local
         // operator) sees everything. `reviews_revision` stays global (it matches the
         // snapshot's — the client's cache key); only the lists are filtered.
-        let scope = device_id
-            .map(|id| self.device_path_scope(id))
-            .unwrap_or_default();
+        let scope = self.workspace_scope(device_id);
         let in_scope = |parent_thread_id: &str| -> bool {
             match self.thread_cwd(parent_thread_id) {
-                // `ensure_path_within_device_scope` enforces relay `allowed_roots` FIRST
-                // (always), then the device scope (skipped when empty) — so even an unscoped
-                // device / the local operator stays bounded by relay roots, matching
-                // workspace_diff / transcripts.
-                Some(cwd) => {
-                    crate::state::ensure_path_within_device_scope(&cwd, &scope, &self.allowed_roots)
-                        .is_ok()
-                }
-                // Unknown workspace: only a fully-unrestricted requester (no device scope AND
-                // no relay roots) has no boundary to enforce, so it may still see the review;
-                // otherwise exclude it (we can't prove it's in-bounds).
-                None => scope.is_empty() && self.allowed_roots.is_empty(),
+                Some(cwd) => scope.allows(&cwd),
+                // Unknown workspace: it cannot be proven in bounds unless there are none.
+                None => scope.is_unrestricted(),
             }
         };
         crate::protocol::ReviewsResponse {
@@ -3850,16 +3834,11 @@ so {} never got it — hand over again when you are ready.",
         let ask = self
             .ask(ask_id)
             .ok_or_else(|| "there is no such ask".to_string())?;
-        let scope = device_id
-            .map(|id| self.device_path_scope(id))
-            .unwrap_or_default();
+        let scope = self.workspace_scope(device_id);
         let in_scope = |parent_thread_id: &str| -> bool {
             match self.thread_cwd(parent_thread_id) {
-                Some(cwd) => {
-                    crate::state::ensure_path_within_device_scope(&cwd, &scope, &self.allowed_roots)
-                        .is_ok()
-                }
-                None => scope.is_empty() && self.allowed_roots.is_empty(),
+                Some(cwd) => scope.allows(&cwd),
+                None => scope.is_unrestricted(),
             }
         };
         if !in_scope(&ask.asker_thread_id)
@@ -4030,16 +4009,11 @@ so {} never got it — hand over again when you are ready.",
         &self,
         device_id: Option<&str>,
     ) -> crate::protocol::WorkflowsResponse {
-        let scope = device_id
-            .map(|id| self.device_path_scope(id))
-            .unwrap_or_default();
+        let scope = self.workspace_scope(device_id);
         let in_scope = |parent_thread_id: &str| -> bool {
             match self.thread_cwd(parent_thread_id) {
-                Some(cwd) => {
-                    crate::state::ensure_path_within_device_scope(&cwd, &scope, &self.allowed_roots)
-                        .is_ok()
-                }
-                None => scope.is_empty() && self.allowed_roots.is_empty(),
+                Some(cwd) => scope.allows(&cwd),
+                None => scope.is_unrestricted(),
             }
         };
         crate::protocol::WorkflowsResponse {
@@ -6095,8 +6069,8 @@ so {} never got it — hand over again when you are ready.",
     ///
     /// Scope is enforced here because a watch declaration is a content grant: the relay
     /// streams the thread's transcript to whoever declares it. Every other content path
-    /// (transcript pages, approvals, fork, review, workflow) checks
-    /// `ensure_path_within_device_scope`, and a subscription must not be the one way
+    /// (transcript pages, approvals, fork, review, workflow) checks its
+    /// `WorkspaceScope`, and a subscription must not be the one way
     /// around it. E2EE does not mitigate this — the declaring device holds the key.
     ///
     /// A thread whose runtime is not loaded has no known cwd, so it cannot be proven
@@ -6133,8 +6107,7 @@ so {} never got it — hand over again when you are ready.",
                 return false;
             }
         }
-        let device_scope = self.device_path_scope(device_id);
-        let allowed_roots = self.allowed_roots.clone();
+        let scope = self.workspace_scope(Some(device_id));
         let next: HashSet<String> = thread_ids
             .into_iter()
             .filter(|id| !id.is_empty())
@@ -6150,11 +6123,7 @@ so {} never got it — hand over again when you are ready.",
             // delivery is the gate.
             .filter(|thread_id| match self.runtime_for_thread(thread_id) {
                 Some(runtime) if !runtime.current_cwd.trim().is_empty() => {
-                    Self::thread_is_readable_by(
-                        Some(runtime.current_cwd.as_str()),
-                        &device_scope,
-                        &allowed_roots,
-                    )
+                    Self::thread_is_readable_by(Some(runtime.current_cwd.as_str()), &scope)
                 }
                 _ => true,
             })
@@ -6297,8 +6266,7 @@ so {} never got it — hand over again when you are ready.",
         Self::thread_is_readable_by(
             self.runtime_for_thread(thread_id)
                 .map(|r| r.current_cwd.as_str()),
-            &self.device_path_scope(device_id),
-            &self.allowed_roots,
+            &self.workspace_scope(Some(device_id)),
         )
     }
 
@@ -6310,18 +6278,10 @@ so {} never got it — hand over again when you are ready.",
     /// When neither a device scope nor relay roots exist there is nothing to violate, so
     /// an unloaded thread stays declarable (a client may legitimately declare a thread
     /// before its runtime materializes).
-    fn thread_is_readable_by(
-        cwd: Option<&str>,
-        device_scope: &[String],
-        allowed_roots: &[String],
-    ) -> bool {
-        let unrestricted = device_scope.is_empty() && allowed_roots.is_empty();
+    fn thread_is_readable_by(cwd: Option<&str>, scope: &crate::state::WorkspaceScope) -> bool {
         match cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) {
-            Some(cwd) => {
-                crate::state::ensure_path_within_device_scope(cwd, device_scope, allowed_roots)
-                    .is_ok()
-            }
-            None => unrestricted,
+            Some(cwd) => scope.allows(cwd),
+            None => scope.is_unrestricted(),
         }
     }
 

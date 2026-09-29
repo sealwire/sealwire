@@ -2204,15 +2204,14 @@ async fn head_movement_keeps_approval_bound_to_the_reviewed_candidate_without_bl
 }
 
 #[tokio::test]
-async fn a_task_cannot_fork_from_a_worktree_outside_the_allowed_roots() {
+async fn a_task_cannot_fork_from_a_worktree_outside_the_devices_paths() {
     // Guarding only the DESTINATION is not enough. Provisioning reads and
     // MUTATES the origin's repository — it writes info/exclude in the common
     // git dir and creates a branch there.
     //
-    // The two checks only come apart when the destination is in scope while
-    // the origin is not, which is exactly what a linked worktree outside the
-    // allowed roots produces: the task worktree still lands under the MAIN
-    // worktree (in scope), so a destination-only guard would wave it through.
+    // The two checks come apart for a device narrowed to the main worktree: a
+    // sibling worktree is outside its paths, yet the task worktree still lands
+    // under the MAIN worktree, so a destination-only guard would wave it through.
     let (_repo, root) = init_team_repo().await;
     let outside = TempDir::new().expect("tmpdir");
     let linked = outside.path().canonicalize().unwrap().join("linked");
@@ -2234,8 +2233,9 @@ async fn a_task_cannot_fork_from_a_worktree_outside_the_allowed_roots() {
     assert!(out.status.success(), "worktree add failed");
 
     let (app, _providers) = build_review_app(&root, &["codex"]).await;
-    // Only the main repository is in scope; the linked worktree is not.
     app.relay.write().await.allowed_roots = vec![root.clone()];
+    crate::state::app::tests::path_scope_tests::pair_device(&app, "device-1", vec![root.clone()])
+        .await;
 
     let mut input = team_input(&root);
     input.origin_cwd = linked.to_string_lossy().into_owned();
@@ -2244,7 +2244,7 @@ async fn a_task_cannot_fork_from_a_worktree_outside_the_allowed_roots() {
         .await
         .expect_err("an out-of-scope origin must be refused even when the destination is fine");
     assert!(
-        error.contains("allowed roots"),
+        error.contains("device's allowed paths"),
         "the error should name the scope: {error}"
     );
     assert!(

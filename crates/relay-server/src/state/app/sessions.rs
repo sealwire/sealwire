@@ -18,8 +18,7 @@ impl AppState {
         let cwd = normalize_cwd(&non_empty(input.cwd).unwrap_or(defaults.current_cwd));
         {
             let relay = self.relay.read().await;
-            let device_scope = relay.device_path_scope(&device_id);
-            ensure_path_within_device_scope(&cwd, &device_scope, &relay.allowed_roots)?;
+            relay.workspace_scope(Some(&device_id)).ensure(&cwd)?;
             if relay.is_cwd_workflow_locked(&cwd) {
                 return Err(WORKFLOW_LOCKED_THREAD_MSG.to_string());
             }
@@ -318,12 +317,9 @@ impl AppState {
         };
         {
             let relay = self.relay.read().await;
-            let device_scope = relay.device_path_scope(&device_id);
-            ensure_path_within_device_scope(
-                &preview.thread.cwd,
-                &device_scope,
-                &relay.allowed_roots,
-            )?;
+            relay
+                .workspace_scope(Some(&device_id))
+                .ensure(&preview.thread.cwd)?;
             if relay.is_thread_workflow_locked(&input.thread_id)
                 || relay.is_cwd_workflow_locked(&preview.thread.cwd)
             {
@@ -792,8 +788,9 @@ impl AppState {
         };
         {
             let relay = self.relay.read().await;
-            let device_scope = relay.device_path_scope(&device_id);
-            ensure_path_within_device_scope(&target_cwd, &device_scope, &relay.allowed_roots)?;
+            relay
+                .workspace_scope(Some(&device_id))
+                .ensure(&target_cwd)?;
             if relay.is_thread_workflow_locked(&target_thread)
                 || relay.is_cwd_workflow_locked(&target_cwd)
             {
@@ -1029,12 +1026,9 @@ impl AppState {
             let runtime = relay
                 .runtime_for_thread(&thread_id)
                 .ok_or_else(|| format!("thread `{thread_id}` is not loaded"))?;
-            let device_scope = relay.device_path_scope(&device_id);
-            ensure_path_within_device_scope(
-                &runtime.current_cwd,
-                &device_scope,
-                &relay.allowed_roots,
-            )?;
+            relay
+                .workspace_scope(Some(&device_id))
+                .ensure(&runtime.current_cwd)?;
             if relay.is_thread_review_locked(&thread_id) {
                 return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
             }

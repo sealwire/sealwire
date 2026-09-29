@@ -21,11 +21,7 @@ impl AppState {
             // unattended task's question renders as "Loading question detail"
             // forever: visible, nominally answerable, and impossible to read.
             match relay.team_run_cwd_for_thread(&pending.thread_id) {
-                Some(cwd) => ensure_path_within_device_scope(
-                    &cwd,
-                    &relay.device_path_scope(&device_id),
-                    &relay.allowed_roots,
-                )?,
+                Some(cwd) => relay.workspace_scope(Some(&device_id)).ensure(&cwd)?,
                 None => relay.ensure_device_can_approve(&device_id)?,
             }
             pending.to_view()
@@ -150,12 +146,10 @@ impl AppState {
                 .as_ref()
                 .and_then(|pending| relay.team_run_cwd_for_thread(&pending.thread_id))
             {
-                Some(cwd) => ensure_path_within_device_scope(
-                    &cwd,
-                    &relay.device_path_scope(&device_id),
-                    &relay.allowed_roots,
-                )
-                .map_err(AskUserAnswerError::Bridge)?,
+                Some(cwd) => relay
+                    .workspace_scope(Some(&device_id))
+                    .ensure(&cwd)
+                    .map_err(AskUserAnswerError::Bridge)?,
                 None => relay
                     .ensure_device_can_approve(&device_id)
                     .map_err(AskUserAnswerError::Bridge)?,
@@ -242,41 +236,21 @@ impl AppState {
                         .to_string(),
                 );
             }
-            let (cwd, device_scope, allowed_roots, grants) = {
+            let (cwd, scope, grants) = {
                 let relay = self.relay.read().await;
-                let device_scope = device_id
-                    .as_deref()
-                    .map(|id| relay.device_path_scope(id))
-                    .unwrap_or_default();
-                ensure_path_within_device_scope(
-                    &relay.current_cwd,
-                    &device_scope,
-                    &relay.allowed_roots,
-                )?;
-                (
-                    relay.current_cwd.clone(),
-                    device_scope,
-                    relay.allowed_roots.clone(),
-                    relay.trust_grants(),
-                )
+                let scope = relay.workspace_scope(device_id.as_deref());
+                scope.ensure(&relay.current_cwd)?;
+                (relay.current_cwd.clone(), scope, relay.trust_grants())
             };
-            let (mut response, retry_fallback) = super::collect_workspace_diff_resilient(
-                &cwd,
-                &cwd,
-                &device_scope,
-                &allowed_roots,
-                &grants,
-            )
-            .await?;
+            let (mut response, retry_fallback) =
+                super::collect_workspace_diff_resilient(&cwd, &cwd, &scope, &grants).await?;
             if response.unavailable {
                 return Ok(response);
             }
             response.roots = super::list_worktrees(&response.cwd, &grants)
                 .await
                 .into_iter()
-                .filter(|candidate| {
-                    path_within_device_scope(&candidate.path, &device_scope, &allowed_roots)
-                })
+                .filter(|candidate| scope.allows(&candidate.path))
                 .collect();
             response.fallback_from = retry_fallback;
             return Ok(response);
@@ -311,28 +285,18 @@ the trees the relay listed for it"
             None => resolved.cwd.clone(),
         };
 
-        let (relay_cwd, device_scope, allowed_roots, grants) = {
+        let (relay_cwd, scope, grants) = {
             let relay = self.relay.read().await;
             (
                 relay.current_cwd.clone(),
-                device_id
-                    .as_deref()
-                    .map(|id| relay.device_path_scope(id))
-                    .unwrap_or_default(),
-                relay.allowed_roots.clone(),
+                relay.workspace_scope(device_id.as_deref()),
                 relay.trust_grants(),
             )
         };
 
         // Tree can vanish between resolve and collect.
-        let (mut response, retry_fallback) = super::collect_workspace_diff_resilient(
-            &diff_cwd,
-            &relay_cwd,
-            &device_scope,
-            &allowed_roots,
-            &grants,
-        )
-        .await?;
+        let (mut response, retry_fallback) =
+            super::collect_workspace_diff_resilient(&diff_cwd, &relay_cwd, &scope, &grants).await?;
         if response.unavailable {
             // Live but ungranted is a Trust prompt for this tree, not a missing workspace.
             if matches!(grants.admit(&diff_cwd).await, Admission::Restricted(_)) {
@@ -381,12 +345,9 @@ the trees the relay listed for it"
             let runtime = relay
                 .runtime_for_thread(&thread_id)
                 .ok_or_else(|| format!("thread `{thread_id}` is not loaded"))?;
-            let device_scope = relay.device_path_scope(&device_id);
-            ensure_path_within_device_scope(
-                &runtime.current_cwd,
-                &device_scope,
-                &relay.allowed_roots,
-            )?;
+            relay
+                .workspace_scope(Some(&device_id))
+                .ensure(&runtime.current_cwd)?;
             let entry = runtime
                 .transcript
                 .iter()

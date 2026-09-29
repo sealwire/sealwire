@@ -347,19 +347,17 @@ impl AppState {
         let _slot = self.acquire_session_slot()?;
 
         let origin_cwd = normalize_cwd(&input.origin_cwd);
-        let (allowed_roots, device_scope) = {
-            let relay = self.relay.read().await;
-            (
-                relay.allowed_roots.clone(),
-                relay.device_path_scope(&input.device_id),
-            )
-        };
+        let scope = self
+            .relay
+            .read()
+            .await
+            .workspace_scope(Some(&input.device_id));
         // The ORIGIN must be in scope too, not only the destination. Provisioning
         // reads and MUTATES the origin's repository — it writes `info/exclude` in
         // the common git dir and creates a branch — so a scope check that only
         // covered the new worktree path would let a device with a configured
         // worktree root reach into a repository it was never granted.
-        ensure_path_within_device_scope(&origin_cwd, &device_scope, &allowed_roots)?;
+        scope.ensure(&origin_cwd)?;
         // Provisioning WRITES to the origin repository — `worktree add` touches the common
         // git dir and creates a branch — so this needs the grant, not merely the fence
         // checked above. A repo the operator vouched for covers the task worktrees cut
@@ -380,7 +378,7 @@ locally and trust it before starting a task team there"
             &origin,
             &input.spec.title,
             input.target_branch.as_deref(),
-            &|planned| ensure_path_within_device_scope(planned, &device_scope, &allowed_roots),
+            &|planned| scope.ensure(planned),
         )
         .await?;
 
@@ -1101,7 +1099,7 @@ over on resume"
         let _slot = self.acquire_session_slot()?;
         let _gate = self.team_drive_gate.lock().await;
 
-        let (owned, cwd, status, path_scope, allowed_roots) = {
+        let (owned, cwd, status, scope) = {
             let relay = self.relay.read().await;
             let Some(run) = relay.team_run(run_id) else {
                 return Err("there is no task with that id".to_string());
@@ -1110,11 +1108,10 @@ over on resume"
                 run.owned_thread_ids(),
                 run.cwd.clone(),
                 run.status,
-                relay.device_path_scope(device_id),
-                relay.allowed_roots.clone(),
+                relay.workspace_scope(Some(device_id)),
             )
         };
-        ensure_path_within_device_scope(&cwd, &path_scope, &allowed_roots)?;
+        scope.ensure(&cwd)?;
         if !status.is_terminal() {
             return Err(format!(
                 "only a finished task can be deleted (this one is {})",
@@ -1610,11 +1607,7 @@ over on resume"
             .team_run(&run_id)
             .map(|run| run.cwd.clone())
             .unwrap_or_default();
-        ensure_path_within_device_scope(
-            &cwd,
-            &relay.device_path_scope(&device_id),
-            &relay.allowed_roots,
-        )?;
+        relay.workspace_scope(Some(&device_id)).ensure(&cwd)?;
         Ok((run_id, device_id))
     }
 
@@ -1746,11 +1739,7 @@ over on resume"
                 .team_run(&run_id)
                 .map(|run| run.cwd.clone())
                 .unwrap_or_default();
-            ensure_path_within_device_scope(
-                &cwd,
-                &relay.device_path_scope(&device_id),
-                &relay.allowed_roots,
-            )?;
+            relay.workspace_scope(Some(&device_id)).ensure(&cwd)?;
             // Blocked -> Resolving under the SAME write lock that resolved the id,
             // or two recoveries can both pass the check and drain the same threads.
             let mut began = false;
@@ -1837,11 +1826,7 @@ over on resume"
             .team_run(&run_id)
             .map(|run| run.cwd.clone())
             .unwrap_or_default();
-        ensure_path_within_device_scope(
-            &cwd,
-            &relay.device_path_scope(&device_id),
-            &relay.allowed_roots,
-        )?;
+        relay.workspace_scope(Some(&device_id)).ensure(&cwd)?;
         Ok((run_id, device_id))
     }
 

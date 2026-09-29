@@ -39,13 +39,12 @@ use crate::{
 
 use super::persistence::{spawn_persistence_task, PersistedRelayState, PersistenceStore};
 use super::{
-    ensure_path_within_allowed_roots, ensure_path_within_device_scope, expire_controller_if_needed,
-    load_or_generate_vapid, non_empty, normalize_allowed_roots, normalize_cwd,
-    path_within_allowed_roots, path_within_device_scope, require_device_id, short_device_id,
-    sort_threads_by_recency, thread_status_is_working, unix_now, vapid_key_path,
-    BrokerPendingMessage, CachedRemoteActionResult, ClaimChallenge, CompletedRemoteClaim,
-    IssuedClaimChallenge, PendingPairingResult, PushDispatcher, PushSubscriptionInput, RelayState,
-    RemoteActionReplayDecision, SecurityProfile, DEFAULT_EFFORT, DEFAULT_MODEL,
+    expire_controller_if_needed, load_or_generate_vapid, non_empty, normalize_allowed_roots,
+    normalize_cwd, require_device_id, short_device_id, sort_threads_by_recency,
+    thread_status_is_working, unix_now, vapid_key_path, BrokerPendingMessage,
+    CachedRemoteActionResult, ClaimChallenge, CompletedRemoteClaim, IssuedClaimChallenge,
+    PendingPairingResult, PushDispatcher, PushSubscriptionInput, RelayState,
+    RemoteActionReplayDecision, SecurityProfile, WorkspaceScope, DEFAULT_EFFORT, DEFAULT_MODEL,
     STALE_TURN_PROGRESS_TIMEOUT_SECS,
 };
 
@@ -252,12 +251,6 @@ pub struct AppState {
     team_seat_ownership_arrivals: Arc<std::sync::atomic::AtomicU64>,
     /// Test-only latch after git listing and before workspace write-back, so a cwd
     /// observation can land in that window deterministically.
-    /// Test-only latch after sibling-worktree verification and before the list's write
-    /// lock, so the allowed roots can change in that window deterministically.
-    #[cfg(test)]
-    thread_list_scope_barrier: Arc<tokio::sync::Mutex<()>>,
-    #[cfg(test)]
-    thread_list_scope_arrivals: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(test)]
     workspace_resolve_barrier: Arc<tokio::sync::Mutex<()>>,
     #[cfg(test)]
@@ -492,10 +485,6 @@ impl AppState {
             #[cfg(test)]
             team_seat_ownership_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(test)]
-            thread_list_scope_barrier: Arc::new(tokio::sync::Mutex::new(())),
-            #[cfg(test)]
-            thread_list_scope_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            #[cfg(test)]
             workspace_resolve_barrier: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(test)]
             workspace_resolve_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -690,10 +679,6 @@ impl AppState {
             team_seat_ownership_barrier: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(test)]
             team_seat_ownership_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            #[cfg(test)]
-            thread_list_scope_barrier: Arc::new(tokio::sync::Mutex::new(())),
-            #[cfg(test)]
-            thread_list_scope_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(test)]
             workspace_resolve_barrier: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(test)]
@@ -1292,12 +1277,9 @@ in thread {thread_id}: {error}"
                 }
             }
             if let Some(runtime) = relay.runtime_for_thread(thread_id) {
-                let device_scope = relay.device_path_scope(device_id);
-                ensure_path_within_device_scope(
-                    &runtime.current_cwd,
-                    &device_scope,
-                    &relay.allowed_roots,
-                )?;
+                relay
+                    .workspace_scope(Some(device_id))
+                    .ensure(&runtime.current_cwd)?;
                 return Ok(());
             }
             recorded_cwd
@@ -1338,11 +1320,11 @@ in thread {thread_id}: {error}"
                 PROVIDER_DEFAULT_MODEL.to_string(),
             )
             .await;
-        {
-            let relay = self.relay.read().await;
-            let device_scope = relay.device_path_scope(device_id);
-            ensure_path_within_device_scope(&data.thread.cwd, &device_scope, &relay.allowed_roots)?;
-        }
+        self.relay
+            .read()
+            .await
+            .workspace_scope(Some(device_id))
+            .ensure(&data.thread.cwd)?;
         let mut relay = self.relay.write().await;
         if settings.is_some() {
             relay.hydrate_background_runtime(data, &approval_policy, &sandbox, &effort, &model);
@@ -1716,8 +1698,7 @@ pub(crate) fn dir_exists(path: &str) -> bool {
 pub(crate) async fn collect_workspace_diff_resilient(
     target: &str,
     relay_cwd: &str,
-    device_scope: &[String],
-    allowed_roots: &[String],
+    scope: &WorkspaceScope,
     grants: &TrustGrants,
 ) -> Result<(WorkspaceDiffResponse, Option<String>), String> {
     // An ungranted tree lands in the same arm as a vanished one, and that is the point:
@@ -1732,8 +1713,7 @@ pub(crate) async fn collect_workspace_diff_resilient(
         Ok(diff) => Ok((diff, None)),
         // Only a vanished workspace is retried; a genuine git error still surfaces.
         Err(error) if !first.as_ref().is_some_and(TrustedWorkspace::is_live) => {
-            let resolution =
-                resolve_workspace_cwd(target, relay_cwd, device_scope, allowed_roots, grants).await;
+            let resolution = resolve_workspace_cwd(target, relay_cwd, scope, grants).await;
             match resolution.into_readable() {
                 // The substitute is a DIFFERENT directory than the one admitted above —
                 // `resolve_workspace_cwd` deliberately reaches outside the vanished tree —
@@ -1808,8 +1788,7 @@ fn enclosing_repo_root(path: &str) -> Option<String> {
 pub(crate) async fn resolve_workspace_cwd(
     recorded: &str,
     relay_cwd: &str,
-    device_scope: &[String],
-    allowed_roots: &[String],
+    scope: &WorkspaceScope,
     grants: &TrustGrants,
 ) -> WorkspaceResolution {
     if let Some(workspace) = LiveDir::from_path(recorded) {
@@ -1829,7 +1808,7 @@ pub(crate) async fn resolve_workspace_cwd(
         if paths_equivalent_allowing_missing(&candidate, recorded) || !dir_exists(&candidate) {
             continue;
         }
-        if !path_within_device_scope(&candidate, device_scope, allowed_roots) {
+        if !scope.allows(&candidate) {
             continue;
         }
         let Some(substitute) = LiveDir::from_path(&candidate) else {
@@ -1926,48 +1905,6 @@ pub(crate) async fn list_worktrees(cwd: &str, grants: &TrustGrants) -> Vec<Works
     list_worktrees_in(&workspace).await
 }
 
-/// Roots outside `allowed_roots` survive as `preview_only` when verified as linked worktrees of
-/// `anchor`'s allowed main checkout. A device's path scope is a per-device grant and stays literal.
-pub(crate) async fn reachable_roots(
-    listed: Vec<WorkspaceRootView>,
-    anchor: &str,
-    device_scope: &[String],
-    allowed_roots: &[String],
-) -> Vec<WorkspaceRootView> {
-    let mut main: Option<Option<std::path::PathBuf>> = None;
-    let mut reachable = Vec::with_capacity(listed.len());
-    for mut root in listed {
-        if path_within_device_scope(&root.path, device_scope, allowed_roots) {
-            reachable.push(root);
-            continue;
-        }
-        if !device_scope.is_empty() && !path_within_allowed_roots(&root.path, device_scope) {
-            continue;
-        }
-        if main.is_none() {
-            main = Some(
-                workspace_trust::repository_root(std::path::Path::new(anchor))
-                    .await
-                    .filter(|main| {
-                        path_within_device_scope(
-                            &main.to_string_lossy(),
-                            device_scope,
-                            allowed_roots,
-                        )
-                    }),
-            );
-        }
-        let Some(Some(main)) = main.as_ref() else {
-            continue;
-        };
-        if workspace_trust::is_linked_worktree_of(std::path::Path::new(&root.path), main).await {
-            root.preview_only = true;
-            reachable.push(root);
-        }
-    }
-    reachable
-}
-
 /// Keep only the records that HAVE a working tree to diff. Neither a bare repo nor a
 /// prunable entry does: prunable is the `rm -rf`-without-`git worktree remove` case, which
 /// git keeps listing until pruned, and offering it would be an option guaranteed to fail.
@@ -1982,7 +1919,6 @@ fn diffable_roots(records: Vec<WorktreeRecord>) -> Vec<WorkspaceRootView> {
             // Left unmeasured here on purpose — see `measure_root_changes`.
             changed_files: None,
             changed_files_capped: false,
-            preview_only: false,
         })
         .collect()
 }

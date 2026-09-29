@@ -336,8 +336,7 @@ starting a workflow"
             }
             // The device must be allowed to act in the parent thread's workspace — the
             // run launches file-mutating turns there.
-            let device_scope = relay.device_path_scope(device_id);
-            ensure_path_within_device_scope(&parent_cwd, &device_scope, &relay.allowed_roots)?;
+            relay.workspace_scope(Some(device_id)).ensure(&parent_cwd)?;
             // That directory may be GONE (an agent worktree removed once its work landed).
             // A read-only review can be moved to a related workspace; Code Flow CANNOT: its
             // author writes files, and a provider thread stays bound to the cwd it was

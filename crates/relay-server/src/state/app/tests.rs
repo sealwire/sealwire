@@ -619,7 +619,6 @@ break the agent's own git commands: {offenders:?}"
             is_main: true,
             changed_files: None,
             changed_files_capped: false,
-            preview_only: false,
         }];
         let grants = grants_for(&[roots[0].path.as_str()]);
 
@@ -663,7 +662,6 @@ break the agent's own git commands: {offenders:?}"
             is_main: false,
             changed_files: None,
             changed_files_capped: false,
-            preview_only: false,
         }];
 
         let app = app_trusting(&[roots[0].path.clone()]).await;
@@ -1740,8 +1738,7 @@ pub(crate) mod path_scope_tests {
         let (response, fallback_from) = super::super::collect_workspace_diff_resilient(
             &vanishing_cwd,
             &main_cwd,
-            &[],
-            &[],
+            &crate::state::WorkspaceScope::default(),
             &grants,
         )
         .await
@@ -1779,8 +1776,7 @@ pub(crate) mod path_scope_tests {
         let (response, fallback_from) = super::super::collect_workspace_diff_resilient(
             &orphan_cwd,
             "",
-            &[],
-            &[],
+            &crate::state::WorkspaceScope::default(),
             &crate::state::app::TrustGrants::default(),
         )
         .await
@@ -2490,15 +2486,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                 resolved.roots
             )
         });
-        assert!(
-            sibling.preview_only,
-            "outside allowed_roots it may be looked at, not moved into"
-        );
-        assert!(
-            !find_root(&resolved.roots, &fx.main)
-                .expect("main")
-                .preview_only
-        );
+        assert!(find_root(&resolved.roots, &fx.main).is_some());
 
         let preview = fx
             .app
@@ -2574,7 +2562,6 @@ is also what keeps the refusal from confirming it exists: {error}"
         let listed = find_root(&resolved.roots, &sibling)
             .unwrap_or_else(|| panic!("got {:?}", resolved.roots))
             .clone();
-        assert!(listed.preview_only);
 
         let preview = app
             .workspace_diff(None, Some("thread-a".to_string()), Some(listed.path))
@@ -2586,7 +2573,7 @@ is also what keeps the refusal from confirming it exists: {error}"
 
     // Review must offer the same trees as Changes, so an explicit pick may land on a sibling.
     #[tokio::test]
-    async fn a_preview_only_sibling_can_be_pinned_for_review() {
+    async fn a_sibling_worktree_can_be_pinned_for_review() {
         let fx = sibling_fixture(true).await;
 
         let pinned = pin(&fx.app, "thread-a", Some(&fx.sibling))
@@ -2608,7 +2595,7 @@ is also what keeps the refusal from confirming it exists: {error}"
 
     // Auto-follow treats a sibling like any in-root worktree, so Review and Changes agree.
     #[tokio::test]
-    async fn writes_in_a_preview_only_sibling_move_the_sessions_tree_there() {
+    async fn writes_in_a_sibling_worktree_move_the_sessions_tree_there() {
         let fx = sibling_fixture(true).await;
 
         {
@@ -2998,6 +2985,39 @@ is also what keeps the refusal from confirming it exists: {error}"
         );
     }
 
+    // Listing a session and reading it are one permission: a row the sidebar shows must open.
+    #[tokio::test]
+    async fn a_session_in_a_sibling_worktree_is_readable_wherever_it_is_listed() {
+        let fx = relocated_fixture().await;
+        fx.app
+            .relay
+            .write()
+            .await
+            .ensure_runtime_for_thread(&fx.thread_id)
+            .current_cwd = fx.sibling.clone();
+        assert!(fx.listed(None).await);
+
+        let page = fx
+            .app
+            .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+                thread_id: fx.thread_id.clone(),
+                before: None,
+                device_id: None,
+            })
+            .await;
+        if let Err(error) = page {
+            panic!("transcript: {error}");
+        }
+        fx.app
+            .thread_settings_view(None, &fx.thread_id)
+            .await
+            .expect("settings");
+        fx.app
+            .workspace_git_context(None, fx.sibling.clone())
+            .await
+            .expect("git context");
+    }
+
     // The failure path serves the cached row, and the empty-cwd path fills from it; both
     // must be judged like a fresh row or one flaky list hides the session again.
     #[tokio::test]
@@ -3033,36 +3053,15 @@ is also what keeps the refusal from confirming it exists: {error}"
         assert!(!fx.listed(None).await);
     }
 
-    // Verification runs off the lock; a root withdrawn in that window must still hide the
-    // row, or the list leaks a repo the operator just removed.
+    // The sibling rides on its repo's root, so withdrawing the repo hides its rows too.
     #[tokio::test]
-    async fn withdrawing_the_repo_during_a_list_hides_its_sibling_rows() {
+    async fn withdrawing_the_repo_hides_its_sibling_rows() {
         let fx = relocated_fixture().await;
         let unrelated = TempDir::new().expect("unrelated");
 
-        let hold = fx.app.hold_thread_list_scope_barrier().await;
-        let arrivals_before = fx.app.thread_list_scope_arrivals();
-        let app = fx.app.clone();
-        let list = tokio::spawn(async move { app.list_threads(50, None).await });
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while fx.app.thread_list_scope_arrivals() == arrivals_before {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("list should reach the scope latch");
         allow_only(&fx.app, &[unrelated.path().to_str().unwrap()]).await;
-        drop(hold);
 
-        let listed = list.await.expect("list task").expect("list");
-        assert!(
-            !listed
-                .threads
-                .iter()
-                .any(|thread| thread.id == fx.thread_id),
-            "got {:?}",
-            listed.threads
-        );
+        assert!(!fx.listed(None).await);
     }
 
     // Only the relay-wide roots are relaxed; a device the operator narrowed stays narrow.
@@ -5151,7 +5150,7 @@ tree; got {}",
 
         // An UNSCOPED device is still bound — by the relay's own `allowed_roots`. An
         // empty `path_scope` means "the relay's roots", not "anywhere", which is exactly
-        // what `path_within_device_scope` encodes; short-circuiting the check when the
+        // what `WorkspaceScope` encodes; short-circuiting the check when the
         // scope happens to be empty would hand every ordinarily-paired phone the ability
         // to relabel sessions its own list refuses to show it.
         pair_device(&app, "wide-device", Vec::new()).await;
@@ -19131,7 +19130,7 @@ resurrected into a turn that never completes: {:?}",
         // Even with an EMPTY device scope — the local operator via reviews(None), or a paired
         // device with no per-device scope — reviews for parents outside the relay's
         // allowed_roots must NOT leak. This mirrors workspace_diff, whose
-        // ensure_path_within_device_scope enforces relay roots FIRST regardless of device
+        // WorkspaceScope enforces relay roots FIRST regardless of device
         // scope (guards against stale review jobs left over from older allowed_roots).
         let in_dir = TempDir::new().expect("in tmpdir");
         let out_dir = TempDir::new().expect("out tmpdir");
@@ -23752,6 +23751,44 @@ settings update: {error}"
                 .any(|(tid, cwd)| tid == &reviewer_thread && same_dir(cwd, &linked_cwd)),
             "the reviewer must be able to open the files it is reviewing: {cwds:?}"
         );
+    }
+
+    // A reviewer that may run in a sibling worktree outside allowed_roots must be readable
+    // there too, or the Agents panel shows a refusal for a review that succeeded.
+    #[tokio::test]
+    async fn a_reviewer_in_a_sibling_worktree_is_readable() {
+        let dir = TempDir::new().expect("tmpdir");
+        let (main_cwd, linked_cwd) = init_repo_with_sibling_worktree(dir.path());
+        std::fs::write(
+            std::path::Path::new(&linked_cwd).join("seed.txt"),
+            "line1\nline2\nWORKTREE_EDIT\n",
+        )
+        .unwrap();
+
+        let (app, _providers) = build_review_app(&main_cwd, &["codex"]).await;
+        app.relay.write().await.allowed_roots =
+            normalize_allowed_roots(vec![main_cwd.clone()]).expect("allowed roots");
+        let parent = start_parent(&app, &main_cwd, "codex").await;
+        seed_landed_edit(&app, &parent.id, &format!("{linked_cwd}/seed.txt")).await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job err: {:?}", job.error);
+        let reviewer = job.reviewer_thread_id.expect("reviewer thread");
+
+        let page = app
+            .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+                thread_id: reviewer,
+                before: None,
+                device_id: None,
+            })
+            .await;
+        if let Err(error) = page {
+            panic!("the reviewer's messages: {error}");
+        }
     }
 
     // Multi-round: the reviewed worktree can vanish BETWEEN rounds (its work landed and it

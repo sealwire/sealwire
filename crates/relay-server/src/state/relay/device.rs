@@ -952,6 +952,14 @@ impl RelayState {
             .unwrap_or_default()
     }
 
+    /// What `device_id` may reach right now; `None` is the local operator, bound by the roots alone.
+    pub(crate) fn workspace_scope(&self, device_id: Option<&str>) -> crate::state::WorkspaceScope {
+        let device_paths = device_id
+            .map(|id| self.device_path_scope(id))
+            .unwrap_or_default();
+        crate::state::WorkspaceScope::new(&self.allowed_roots, &device_paths)
+    }
+
     /// The execution grants, copied out so admission can run WITHOUT the relay lock.
     ///
     /// Deciding trust reads `.git` from disk, and `workspace_resolve_lock_lint` exists

@@ -5,9 +5,7 @@
 //! accept — see `crates/relay-server/src/state/goal.rs` for why the objective
 //! is not something an agent can write.
 
-use crate::state::{
-    path_within_device_scope, relay::RelayState, unix_now, AppState, Goal, GoalStatus,
-};
+use crate::state::{relay::RelayState, unix_now, AppState, Goal, GoalStatus};
 
 /// Scope a goal write exactly as the panel scopes its READ, so a device can only point a
 /// goal at — or erase one from — a session it can see. "No such session" rather than a
@@ -22,10 +20,7 @@ pub(crate) fn ensure_thread_in_device_scope(
     let Some(cwd) = relay.thread_cwd(thread_id) else {
         return Err("there is no such session".to_string());
     };
-    let scope = device_id
-        .map(|id| relay.device_path_scope(id))
-        .unwrap_or_default();
-    if !path_within_device_scope(&cwd, &scope, &relay.allowed_roots) {
+    if !relay.workspace_scope(device_id).allows(&cwd) {
         return Err("there is no such session".to_string());
     }
     Ok(())

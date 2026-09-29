@@ -1737,10 +1737,6 @@ pub struct WorkspaceRootView {
     /// full of unignored build output can produce megabytes of `git status`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub changed_files_capped: bool,
-    /// Outside the caller's allowed roots, offered because it is a verified worktree of an
-    /// allowed repository. Treated like any other root; the name predates that.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub preview_only: bool,
 }
 
 /// The git standing of a workspace path, for the launch dialog's `main · clean` chip.

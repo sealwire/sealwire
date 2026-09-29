@@ -40,11 +40,9 @@ impl AppState {
         // an execution grant would hand this probe straight to whatever it fetched.
         {
             let relay = self.relay.read().await;
-            let device_scope = device_id
-                .as_deref()
-                .map(|id| relay.device_path_scope(id))
-                .unwrap_or_default();
-            ensure_path_within_device_scope(&cwd, &device_scope, &relay.allowed_roots)
+            relay
+                .workspace_scope(device_id.as_deref())
+                .ensure(&cwd)
                 .map_err(|_| WORKSPACE_GIT_CONTEXT_OUT_OF_SCOPE.to_string())?;
         }
 

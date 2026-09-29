@@ -92,12 +92,9 @@ New task button on the Tasks screen."
         // Prefer the user's current workspace; fall back to the relay default.
         let cwd = {
             let relay = self.relay.read().await;
-            let device_scope = relay.device_path_scope(&device_id);
-            ensure_path_within_device_scope(
-                &relay.current_cwd,
-                &device_scope,
-                &relay.allowed_roots,
-            )?;
+            relay
+                .workspace_scope(Some(&device_id))
+                .ensure(&relay.current_cwd)?;
             relay.current_cwd.clone()
         };
 

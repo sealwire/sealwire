@@ -9,61 +9,47 @@ impl AppState {
         thread_id: &str,
         device_id: Option<&str>,
     ) -> Result<ResolvedWorkspace, ThreadWorkspaceError> {
-        let (birth_cwd, relay_cwd, device_scope, allowed_roots, grants) = {
+        let (birth_cwd, relay_cwd, scope, grants) = {
             let relay = self.relay.read().await;
             let birth_cwd = relay.thread_cwd(thread_id).ok_or_else(|| {
                 ThreadWorkspaceError::Unresolvable(format!(
                     "cannot resolve the workspace of thread `{thread_id}`"
                 ))
             })?;
-            let device_scope = device_id
-                .map(|id| relay.device_path_scope(id))
-                .unwrap_or_default();
-            ensure_path_within_device_scope(&birth_cwd, &device_scope, &relay.allowed_roots)
+            let scope = relay.workspace_scope(device_id);
+            scope
+                .ensure(&birth_cwd)
                 .map_err(ThreadWorkspaceError::OutOfScope)?;
             (
                 birth_cwd,
                 relay.current_cwd.clone(),
-                device_scope,
-                relay.allowed_roots.clone(),
+                scope,
                 relay.trust_grants(),
             )
         };
 
         let birth_cwd_exists = dir_exists(&birth_cwd);
-        let (usable, gone) = resolve_workspace_cwd(
-            &birth_cwd,
-            &relay_cwd,
-            &device_scope,
-            &allowed_roots,
-            &grants,
-        )
-        .await
-        .into_readable()
-        .ok_or_else(|| {
-            ThreadWorkspaceError::Unresolvable(format!(
-                "the workspace this thread ran in ({birth_cwd}) no longer exists, and \
+        let (usable, gone) = resolve_workspace_cwd(&birth_cwd, &relay_cwd, &scope, &grants)
+            .await
+            .into_readable()
+            .ok_or_else(|| {
+                ThreadWorkspaceError::Unresolvable(format!(
+                    "the workspace this thread ran in ({birth_cwd}) no longer exists, and \
 no workspace related to it is available instead"
-            ))
-        })?;
+                ))
+            })?;
         // PASSIVE, so it degrades rather than refusing: enumerating a repo's worktrees is
         // `git worktree list`, which is still git running in a directory nobody vouched
         // for. An ungranted tree simply reports no sibling roots — the picker shows fewer
         // rows instead of the relay executing an unfamiliar repo to populate them.
         let offered: Vec<WorkspaceRootView> = match self.admit(usable.as_str()).await.trusted() {
-            Some(workspace) => {
-                reachable_roots(
-                    list_worktrees_in(workspace).await,
-                    usable.as_str(),
-                    &device_scope,
-                    &allowed_roots,
-                )
+            Some(workspace) => list_worktrees_in(workspace)
                 .await
-            }
+                .into_iter()
+                .filter(|root| scope.allows(&root.path))
+                .collect(),
             None => Vec::new(),
         };
-        // Preview-only siblings count as the session's tree too, pinned or inferred alike:
-        // `reachable_roots` already proved them this repo's worktrees and device-scoped them.
         let roots: &[WorkspaceRootView] = &offered;
 
         #[cfg(test)]
@@ -96,10 +82,7 @@ no workspace related to it is available instead"
             roots
                 .iter()
                 .find(|root| paths_equivalent(&root.path, candidate))
-                .filter(|root| {
-                    root.preview_only
-                        || path_within_device_scope(&root.path, &device_scope, &allowed_roots)
-                })
+                .filter(|root| scope.allows(&root.path))
                 .map(|root| root.path.clone())
         };
         let proven_root = |candidate: &str| -> Option<String> {
@@ -303,28 +286,12 @@ no workspace related to it is available instead"
 of the trees the relay listed for it"
                         )
                     })?;
-                // Scope is the actual boundary.
-                let (device_scope, allowed_roots) = {
-                    let relay = self.relay.read().await;
-                    (
-                        device_id
-                            .as_deref()
-                            .map(|id| relay.device_path_scope(id))
-                            .unwrap_or_default(),
-                        relay.allowed_roots.clone(),
-                    )
-                };
                 // Re-read scope: the resolve above may have run under a wider one.
-                if !matched.preview_only {
-                    ensure_path_within_device_scope(&matched.path, &device_scope, &allowed_roots)?;
-                } else if !device_scope.is_empty()
-                    && !path_within_allowed_roots(&matched.path, &device_scope)
-                {
-                    return Err(format!(
-                        "workspace {} is outside this device's allowed paths",
-                        matched.path
-                    ));
-                }
+                self.relay
+                    .read()
+                    .await
+                    .workspace_scope(device_id.as_deref())
+                    .ensure(&matched.path)?;
                 Some(matched.path.clone())
             }
         };

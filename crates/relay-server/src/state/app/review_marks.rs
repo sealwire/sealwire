@@ -4,7 +4,7 @@
 use crate::protocol::{ReviewAcceptReceipt, ReviewRoundView};
 use crate::state::{clip_chars, parse_review_findings, unix_now, AppState};
 
-use super::{ensure_path_within_device_scope, require_device_id, run_git_capture};
+use super::{require_device_id, run_git_capture};
 
 /// The brief card shows the change as one line; the whole recap is in the prompt.
 const CHANGE_CHARS: usize = 160;
@@ -106,8 +106,9 @@ impl AppState {
         let parent_cwd = relay
             .thread_cwd(&mark.parent_thread_id)
             .ok_or_else(|| "cannot resolve the reviewed thread".to_string())?;
-        let scope = relay.device_path_scope(&device_id);
-        ensure_path_within_device_scope(&parent_cwd, &scope, &relay.allowed_roots)?;
+        relay
+            .workspace_scope(Some(&device_id))
+            .ensure(&parent_cwd)?;
         relay.edit_review_mark(&review_id, |mark| {
             mark.decision = Some("accepted".to_string());
         });

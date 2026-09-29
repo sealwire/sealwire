@@ -123,7 +123,7 @@ test("a clean current tree still opens the mobile picker when a sibling can be p
           cwd: "/repo",
           roots: [
             { path: "/repo" },
-            { path: "/repo-feature", preview_only: true },
+            { path: "/repo-feature" },
           ],
         },
       }),
@@ -2115,7 +2115,7 @@ test("previewing an ungranted tree offers Trust for that tree, not 'unavailable'
       cwd: "/repo/main",
       origin: { kind: "proven" },
       git: { cwd: "/repo/main", is_repo: true, branch: "main", dirty: false, dirty_known: true },
-      roots: [...RESOLVED.roots, { path: sibling, branch: "feat/sibling", preview_only: true }],
+      roots: [...RESOLVED.roots, { path: sibling, branch: "feat/sibling" }],
     },
     viewRoot: sibling,
   };

@@ -1845,7 +1845,7 @@ fn normalize_allowed_roots_expands_home_and_deduplicates() {
 }
 
 #[test]
-fn ensure_path_within_allowed_roots_rejects_outside_workspace() {
+fn workspace_scope_rejects_outside_workspace() {
     let unique = format!("agent-relay-roots-{}-{}", std::process::id(), unix_now());
     let root = std::env::temp_dir().join(unique);
     let nested = root.join("subdir");
@@ -1853,9 +1853,15 @@ fn ensure_path_within_allowed_roots_rejects_outside_workspace() {
     let roots = normalize_allowed_roots(vec![root.display().to_string()])
         .expect("allowed roots should normalize");
 
-    assert!(ensure_path_within_allowed_roots(&root.display().to_string(), &roots).is_ok());
-    assert!(ensure_path_within_allowed_roots(&nested.display().to_string(), &roots).is_ok());
-    assert!(ensure_path_within_allowed_roots("/tmp/other", &roots).is_err());
+    assert!(WorkspaceScope::new(&roots, &[])
+        .ensure(&root.display().to_string())
+        .is_ok());
+    assert!(WorkspaceScope::new(&roots, &[])
+        .ensure(&nested.display().to_string())
+        .is_ok());
+    assert!(WorkspaceScope::new(&roots, &[])
+        .ensure("/tmp/other")
+        .is_err());
 
     std::fs::remove_dir_all(&root).expect("temp workspace root should be removable");
 }
@@ -1909,7 +1915,7 @@ fn nearest_enumerated_root_picks_the_longest_containing_worktree() {
 }
 
 #[test]
-fn ensure_path_within_allowed_roots_rejects_parent_dir_escape_for_missing_paths() {
+fn workspace_scope_rejects_parent_dir_escape_for_missing_paths() {
     let unique = format!(
         "agent-relay-allowed-roots-{}-{}",
         std::process::id(),
@@ -1922,7 +1928,8 @@ fn ensure_path_within_allowed_roots_rejects_parent_dir_escape_for_missing_paths(
     let escaped = allowed.join("../outside");
     let roots = vec![allowed.display().to_string()];
 
-    let error = ensure_path_within_allowed_roots(&escaped.display().to_string(), &roots)
+    let error = WorkspaceScope::new(&roots, &[])
+        .ensure(&escaped.display().to_string())
         .expect_err("parent-dir traversal should be rejected");
     assert!(error.contains("outside this relay's allowed roots"));
 
@@ -4819,7 +4826,7 @@ fn remote_action_replay_cache_expires_old_entries() {
 }
 
 #[test]
-fn ensure_path_within_device_scope_blocks_outside_device_scope() {
+fn workspace_scope_blocks_outside_device_scope() {
     let unique = format!(
         "agent-relay-scope-block-{}-{}",
         std::process::id(),
@@ -4836,25 +4843,19 @@ fn ensure_path_within_device_scope_blocks_outside_device_scope() {
     let device_scope = normalize_allowed_roots(vec![device_dir.display().to_string()])
         .expect("device scope should normalize");
 
-    assert!(ensure_path_within_device_scope(
-        &device_dir.display().to_string(),
-        &device_scope,
-        &allowed_roots,
-    )
-    .is_ok());
-    let error = ensure_path_within_device_scope(
-        &outside_device.display().to_string(),
-        &device_scope,
-        &allowed_roots,
-    )
-    .expect_err("path outside device scope should be rejected");
+    assert!(WorkspaceScope::new(&allowed_roots, &device_scope)
+        .ensure(&device_dir.display().to_string())
+        .is_ok());
+    let error = WorkspaceScope::new(&allowed_roots, &device_scope)
+        .ensure(&outside_device.display().to_string())
+        .expect_err("path outside device scope should be rejected");
     assert!(error.contains("device's allowed paths"));
 
     std::fs::remove_dir_all(&root).expect("temp scope dir should be removable");
 }
 
 #[test]
-fn ensure_path_within_device_scope_blocks_outside_relay_roots_even_when_in_device_scope() {
+fn workspace_scope_blocks_outside_relay_roots_even_when_in_device_scope() {
     let unique = format!(
         "agent-relay-scope-relay-{}-{}",
         std::process::id(),
@@ -4871,19 +4872,16 @@ fn ensure_path_within_device_scope_blocks_outside_relay_roots_even_when_in_devic
     // means the relay roots check still fires first.
     let device_scope = vec![outside_relay.display().to_string()];
 
-    let error = ensure_path_within_device_scope(
-        &outside_relay.display().to_string(),
-        &device_scope,
-        &allowed_roots,
-    )
-    .expect_err("path outside relay roots should be rejected even if device scope allows");
+    let error = WorkspaceScope::new(&allowed_roots, &device_scope)
+        .ensure(&outside_relay.display().to_string())
+        .expect_err("path outside relay roots should be rejected even if device scope allows");
     assert!(error.contains("relay's allowed roots"));
 
     std::fs::remove_dir_all(&root).expect("temp scope dir should be removable");
 }
 
 #[test]
-fn ensure_path_within_device_scope_passes_when_device_scope_empty() {
+fn workspace_scope_passes_when_device_scope_empty() {
     let unique = format!(
         "agent-relay-scope-empty-{}-{}",
         std::process::id(),
@@ -4896,10 +4894,9 @@ fn ensure_path_within_device_scope_passes_when_device_scope_empty() {
     let allowed_roots = normalize_allowed_roots(vec![allowed.display().to_string()])
         .expect("allowed roots should normalize");
 
-    assert!(
-        ensure_path_within_device_scope(&nested.display().to_string(), &[], &allowed_roots,)
-            .is_ok()
-    );
+    assert!(WorkspaceScope::new(&allowed_roots, &[])
+        .ensure(&nested.display().to_string())
+        .is_ok());
 
     std::fs::remove_dir_all(&root).expect("temp scope dir should be removable");
 }
@@ -6316,7 +6313,7 @@ mod watched_threads {
 
     /// REVIEW P1 (security): a watch declaration is a CONTENT grant — the relay streams
     /// the thread's transcript to whoever declares it. Every other content path checks
-    /// `ensure_path_within_device_scope`, so a subscription must not be the one way
+    /// its `WorkspaceScope`, so a subscription must not be the one way
     /// around a device's path scope. E2EE does not mitigate it: the declaring device
     /// holds the decryption key.
     #[test]

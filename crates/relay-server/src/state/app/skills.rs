@@ -58,10 +58,7 @@ impl AppState {
             .thread_cwd(thread_id)
             .ok_or_else(|| "this session has no folder yet, so it has no skills".to_string())?;
         // Local names no device and is already authorized; `allowed_roots` still bind it.
-        let device_scope = device_id
-            .map(|id| relay.device_path_scope(id))
-            .unwrap_or_default();
-        ensure_path_within_device_scope(&cwd, &device_scope, &relay.allowed_roots)?;
+        relay.workspace_scope(device_id).ensure(&cwd)?;
         Ok(cwd)
     }
 

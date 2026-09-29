@@ -129,9 +129,9 @@ impl AppState {
                 return Err(FORK_BUSY_SOURCE_MSG.to_string());
             }
 
-            let device_scope = relay.device_path_scope(&device_id);
-            ensure_path_within_device_scope(&source_cwd, &device_scope, &relay.allowed_roots)?;
-            ensure_path_within_device_scope(&cwd, &device_scope, &relay.allowed_roots)?;
+            let scope = relay.workspace_scope(Some(&device_id));
+            scope.ensure(&source_cwd)?;
+            scope.ensure(&cwd)?;
             if relay.is_thread_workflow_locked(&source_thread_id)
                 || relay.is_cwd_workflow_locked(&source_cwd)
                 || relay.is_cwd_workflow_locked(&cwd)

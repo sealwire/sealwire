@@ -25,12 +25,6 @@ use std::path::{Path, PathBuf};
 
 use super::{dir_exists, normalize_cwd};
 
-/// Nothing here reads more than this from a directory the caller named.
-const MAX_GIT_METADATA_BYTES: u64 = 64 * 1024;
-
-/// `git` itself walks to the filesystem root; the bound only stops a pathological path.
-const MAX_REPO_DISCOVERY_DEPTH: usize = 64;
-
 /// A directory the operator vouched for, and the ONLY thing that may spawn git.
 ///
 /// The field is private and there is no public constructor, which is the whole mechanism:
@@ -215,101 +209,14 @@ impl TrustGrants {
     }
 }
 
-/// The main worktree of the repository containing `start`, or `None` if there is not one
-/// that can be established without taking the repository's word for it.
-///
-/// Deliberately free of any notion of who is granted what, because it answers the same
-/// question in two places that must agree: admission asks "which repository is this?", and
-/// granting asks "which repository am I vouching for?". Trust is a property of the
-/// REPOSITORY, so if those two resolved differently, a grant made through a linked
-/// worktree would not cover the tree beside it — which is precisely the directional
-/// behaviour this replaced.
+/// The main worktree of the repository containing `start`: `workspace_scope::repository_root`,
+/// off the runtime's thread, so trust and scope verify worktree pointers the same way.
 pub(super) async fn repository_root(start: &Path) -> Option<PathBuf> {
-    for dir in start.ancestors().take(MAX_REPO_DISCOVERY_DEPTH) {
-        let dot_git = dir.join(".git");
-        // symlink_metadata, not metadata: a `.git` symlink aimed at a FIFO would
-        // otherwise be followed, and reading a FIFO parks a runtime thread forever.
-        let Ok(metadata) = tokio::fs::symlink_metadata(&dot_git).await else {
-            continue;
-        };
-        // An ordinary repository: `.git` is a directory, and its parent is the root.
-        // Nothing inside it is consulted, so nothing inside it can lie.
-        if metadata.is_dir() {
-            return Some(dir.to_path_buf());
-        }
-        if !metadata.is_file() {
-            continue;
-        }
-        return main_worktree_of(dir, &dot_git).await;
-    }
-    None
-}
-
-/// A linked worktree's `.git` is a FILE reading `gitdir: <main>/.git/worktrees/<name>`.
-///
-/// That file is attacker-writable — it sits in the very directory whose standing is in
-/// question — so following it naively would hand out trust for the asking: write
-/// `gitdir: /a/repo/.git/worktrees/x` into a hostile tree and inherit `/a/repo`.
-///
-/// What defeats that is git's own rule that a real worktree is recorded on BOTH sides, so
-/// this verifies the back-pointer. An earlier version ALSO required the claimed main
-/// worktree to be granted before reading anything, which looked stronger but made the
-/// answer depend on the grant set — and a resolver that answers "which repository is
-/// this?" differently depending on who is trusted cannot be used at grant time, which is
-/// what left trust directional.
-///
-/// Dropping that ordering costs little: the read below is size-capped, regular-files-only,
-/// and its contents are never returned to the caller — only compared against a path we
-/// already hold. A forged pointer still gains nothing, because the repository it names
-/// does not have the worktree registered.
-async fn main_worktree_of(dir: &Path, dot_git: &Path) -> Option<PathBuf> {
-    let pointer = read_small_regular_file(dot_git).await?;
-    let target = resolve_gitdir_pointer(dir, pointer.trim().strip_prefix("gitdir:")?).await?;
-
-    // <main>/.git/worktrees/<name> — anything else is not a worktree pointer, and a
-    // shape we do not recognise inherits nothing.
-    let worktrees = target.parent()?;
-    if worktrees.file_name()? != "worktrees" {
-        return None;
-    }
-    let git_dir = worktrees.parent()?;
-    if git_dir.file_name()? != ".git" {
-        return None;
-    }
-    let main = git_dir.parent()?;
-
-    // A genuine worktree is registered here, pointing back at the `.git` file we came
-    // from; a forged one is not.
-    let back = read_small_regular_file(&target.join("gitdir")).await?;
-    let back = resolve_gitdir_pointer(&target, &back).await?;
-    let here = tokio::fs::canonicalize(dot_git).await.ok()?;
-    (back == here).then(|| main.to_path_buf())
-}
-
-/// A pointer as git reads it (a relative one from the directory holding it), resolved on disk:
-/// lexically collapsing `sub/..` is wrong when `sub` is a symlink, and lets a pointer borrow a repo.
-async fn resolve_gitdir_pointer(base: &Path, pointer: &str) -> Option<PathBuf> {
-    let pointer = pointer.trim();
-    if pointer.is_empty() {
-        return None;
-    }
-    tokio::fs::canonicalize(base.join(pointer)).await.ok()
-}
-
-/// Checked on disk, both directions: `git worktree list` believes any `gitdir` entry, so a
-/// forged one could name an unrelated repo.
-pub(crate) async fn is_linked_worktree_of(path: &Path, main: &Path) -> bool {
-    let dot_git = path.join(".git");
-    match tokio::fs::symlink_metadata(&dot_git).await {
-        Ok(metadata) if metadata.is_file() => {}
-        _ => return false,
-    }
-    let Some(found) = main_worktree_of(path, &dot_git).await else {
-        return false;
-    };
-    tokio::fs::canonicalize(main)
+    let start = start.to_path_buf();
+    tokio::task::spawn_blocking(move || crate::state::workspace_scope::repository_root(&start))
         .await
-        .is_ok_and(|main| main == found)
+        .ok()
+        .flatten()
 }
 
 /// The path a grant should be RECORDED under: the repository, when there is one.
@@ -322,16 +229,6 @@ pub(crate) async fn grant_key(cwd: &str) -> String {
         Some(root) => root.to_string_lossy().to_string(),
         None => cwd.to_string(),
     }
-}
-
-/// Regular files only, size-capped, off the runtime's thread. A caller-named directory can
-/// hold a FIFO, a device node, or a multi-gigabyte `HEAD`.
-pub(super) async fn read_small_regular_file(path: &Path) -> Option<String> {
-    let metadata = tokio::fs::symlink_metadata(path).await.ok()?;
-    if !metadata.is_file() || metadata.len() > MAX_GIT_METADATA_BYTES {
-        return None;
-    }
-    tokio::fs::read_to_string(path).await.ok()
 }
 
 impl super::AppState {
@@ -385,6 +282,12 @@ mod tests {
 
     fn grants(paths: &[&Path]) -> TrustGrants {
         TrustGrants::new(paths.iter().map(|p| p.to_string_lossy().to_string()))
+    }
+
+    /// Scope rides on the same resolver, so a forged pointer must not widen it either.
+    fn in_scope_of(path: &Path, main: &Path) -> bool {
+        crate::state::WorkspaceScope::new(&[main.to_string_lossy().to_string()], &[])
+            .allows(&path.to_string_lossy())
     }
 
     #[tokio::test]
@@ -628,7 +531,7 @@ mod tests {
             grant_key(&linked.to_string_lossy()).await,
             main.to_string_lossy()
         );
-        assert!(is_linked_worktree_of(&linked, &main).await);
+        assert!(in_scope_of(&linked, &main));
     }
 
     // Relative pointers must not reopen the forgery: aiming at a genuine worktree's admin dir
@@ -649,7 +552,7 @@ mod tests {
         let admission = grants(&[&main]).admit(&hostile.to_string_lossy()).await;
 
         assert!(admission.trusted().is_none());
-        assert!(!is_linked_worktree_of(&hostile, &main).await);
+        assert!(!in_scope_of(&hostile, &main));
     }
 
     // `main/sub/..` is lexically `main` but physically wherever `sub` links to; collapsing
@@ -683,7 +586,7 @@ mod tests {
         let admission = grants(&[&main]).admit(&hostile.to_string_lossy()).await;
 
         assert!(admission.trusted().is_none());
-        assert!(!is_linked_worktree_of(&hostile, &main).await);
+        assert!(!in_scope_of(&hostile, &main));
     }
 
     // Git writes real paths, but a pointer spelled through a symlinked prefix names the same
@@ -713,6 +616,6 @@ mod tests {
         let admission = grants(&[&main]).admit(&linked.to_string_lossy()).await;
 
         assert!(admission.trusted().is_some(), "{admission:?}");
-        assert!(is_linked_worktree_of(&linked, &main).await);
+        assert!(in_scope_of(&linked, &main));
     }
 }

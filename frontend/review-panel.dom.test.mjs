@@ -119,7 +119,7 @@ test("the working tree to review sits in the context bar", () => {
 });
 
 // Same list as the Changes panel's picker: a sibling worktree outside allowed_roots is still pinnable.
-test("the working tree picker offers the same trees as the Changes panel, preview-only ones included", () => {
+test("the working tree picker offers the same trees as the Changes panel, sibling worktrees included", () => {
   const pinned = [];
   const view = mount({
     onPinWorkspace: (path) => pinned.push(path),
@@ -127,7 +127,7 @@ test("the working tree picker offers the same trees as the Changes panel, previe
       ...WORKSPACE,
       roots: [
         { path: "/Users/luchi/git/agent-relay", branch: "main", is_main: true },
-        { path: "/Users/luchi/git/agent-relay-sibling", branch: "feat/x", preview_only: true },
+        { path: "/Users/luchi/git/agent-relay-sibling", branch: "feat/x" },
       ],
     },
   });

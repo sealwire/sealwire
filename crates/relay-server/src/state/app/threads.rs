@@ -202,31 +202,6 @@ impl AppState {
             .iter()
             .map(String::as_str)
             .collect::<std::collections::HashSet<_>>();
-        let sibling_worktree_mains = {
-            let (allowed_roots, candidates) = {
-                let relay = self.relay.read().await;
-                // The cache too: the locked section below may serve or fill rows from it.
-                let candidates = all_threads
-                    .iter()
-                    .chain(relay.threads.iter())
-                    .map(|thread| thread.cwd.clone())
-                    .chain(
-                        all_threads
-                            .iter()
-                            .filter(|thread| thread.cwd.is_empty())
-                            .filter_map(|thread| relay.thread_cwd(&thread.id)),
-                    )
-                    .collect::<Vec<_>>();
-                (relay.allowed_roots.clone(), candidates)
-            };
-            sibling_worktree_mains(candidates, &allowed_roots).await
-        };
-        #[cfg(test)]
-        {
-            self.thread_list_scope_arrivals
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            drop(self.thread_list_scope_barrier.lock().await);
-        }
         let mut relay = self.relay.write().await;
         // `all_threads` is canonical here. Provider-native rows crossed the adoption
         // seam under their authoritative configured provider key before this lock and
@@ -251,19 +226,13 @@ impl AppState {
                 }
             }
         }
-        let allowed_roots = relay.allowed_roots.clone();
-        let device_scope = device_id
-            .as_deref()
-            .map(|id| relay.device_path_scope(id))
-            .unwrap_or_default();
-        // A sibling's repo is re-checked against the roots as they are NOW, not as they
-        // were when it was verified off the lock.
-        let in_scope = |cwd: &str| {
-            path_within_device_scope(cwd, &device_scope, &allowed_roots)
-                || (device_scope.is_empty()
-                    && sibling_worktree_mains.get(cwd).is_some_and(|main| {
-                        path_within_allowed_roots(&main.to_string_lossy(), &allowed_roots)
-                    }))
+        let scope = relay.workspace_scope(device_id.as_deref());
+        // Many rows share a folder, and a folder outside the roots costs disk reads under this lock.
+        let mut verdicts = std::collections::HashMap::<String, bool>::new();
+        let mut in_scope = |cwd: &str| {
+            *verdicts
+                .entry(cwd.to_string())
+                .or_insert_with(|| scope.allows(cwd))
         };
         for thread in &mut all_threads {
             if thread.cwd.is_empty() {
@@ -436,17 +405,6 @@ impl AppState {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) async fn hold_thread_list_scope_barrier(&self) -> tokio::sync::OwnedMutexGuard<()> {
-        self.thread_list_scope_barrier.clone().lock_owned().await
-    }
-
-    #[cfg(test)]
-    pub(crate) fn thread_list_scope_arrivals(&self) -> u64 {
-        self.thread_list_scope_arrivals
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
     /// Grant or withdraw trust for one directory.
     ///
     /// Reachable only from the local surface: no `RemoteActionRequest` variant maps
@@ -545,8 +503,7 @@ impl AppState {
                     format!("Updated relay allowed roots: {}.", allowed_roots.join(", "))
                 },
             );
-            if relay.active_thread_id.is_some()
-                && !path_within_allowed_roots(&current_cwd, &allowed_roots)
+            if relay.active_thread_id.is_some() && !relay.workspace_scope(None).allows(&current_cwd)
             {
                 relay.push_log(
                     "warn",
@@ -708,14 +665,13 @@ impl AppState {
         let thread_id = self.canonical_session_id(thread_id).await?;
         let thread_id = thread_id.as_str();
         let device_id = require_device_id(input.device_id)?;
-        let (recorded, device_scope, allowed_roots, grants) = {
+        let (recorded, scope, grants) = {
             let relay = self.relay.read().await;
             (
                 relay
                     .thread_cwd(thread_id)
                     .ok_or_else(|| format!("thread `{thread_id}` has no workspace on record"))?,
-                relay.device_path_scope(&device_id),
-                relay.allowed_roots.clone(),
+                relay.workspace_scope(Some(&device_id)),
                 relay.trust_grants(),
             )
         };
@@ -733,8 +689,7 @@ impl AppState {
         // refusal leaves the repository exactly as it was. The scope is read once, above,
         // rather than re-locking the relay inside the guard: the guard is held across
         // awaits, and taking the lock there would deadlock the snapshot at the end.
-        let guard =
-            move |path: &str| ensure_path_within_device_scope(path, &device_scope, &allowed_roots);
+        let guard = move |path: &str| scope.ensure(path);
         super::worktree::repair_workspace(&plan, &guard, &grants).await?;
         // The directory is back: re-decide now rather than leaving the banner up until
         // something else happens to look.
@@ -817,23 +772,16 @@ impl AppState {
         // per-SESSION metadata and sessions are scope-filtered; a device that cannot see
         // a session must not be able to relabel it for everyone else.
         //
-        // The scope is passed THROUGH rather than short-circuited on when empty. An empty
-        // device scope does not mean "anywhere": `path_within_device_scope` reads it as
-        // "the relay's own `allowed_roots`", which is the boundary an unscoped paired
-        // device still has to respect. The local operator (`device_id: None`) takes the
-        // same path with an empty scope, so it too is held to `allowed_roots` — again
-        // matching what its own session list already shows it.
+        // An empty device scope does not mean "anywhere": the relay's roots still bind an
+        // unscoped device and the local operator, matching what their session list shows.
         //
         // This is deliberately STRICTER than `project_action`'s membership writes, which
         // accept any thread id. Project membership is a global grouping; a session's
         // title is the session's own.
-        let scope = input
-            .device_id
-            .as_deref()
-            .map(|device_id| relay.device_path_scope(device_id))
-            .unwrap_or_default();
-        let allowed_roots = relay.allowed_roots.clone();
-        if !path_within_device_scope(&cwd, &scope, &allowed_roots) {
+        if !relay
+            .workspace_scope(input.device_id.as_deref())
+            .allows(&cwd)
+        {
             return Err(format!(
                 "session `{thread_id}` is outside this device's allowed paths"
             ));
@@ -910,13 +858,10 @@ impl AppState {
                 "session `{thread_id}` is not available on this relay"
             ));
         };
-        let scope = input
-            .device_id
-            .as_deref()
-            .map(|device_id| relay.device_path_scope(device_id))
-            .unwrap_or_default();
-        let allowed_roots = relay.allowed_roots.clone();
-        if !path_within_device_scope(&cwd, &scope, &allowed_roots) {
+        if !relay
+            .workspace_scope(input.device_id.as_deref())
+            .allows(&cwd)
+        {
             return Err(format!(
                 "session `{thread_id}` is outside this device's allowed paths"
             ));
@@ -1215,11 +1160,7 @@ impl AppState {
         // Optional `device_id`, like `workspace_git_context`: local is already
         // authorized and names none, and `allowed_roots` still bind the read.
         if let Some(cwd) = relay.thread_cwd(thread_id) {
-            let device_scope = device_id
-                .as_deref()
-                .map(|id| relay.device_path_scope(id))
-                .unwrap_or_default();
-            ensure_path_within_device_scope(&cwd, &device_scope, &relay.allowed_roots)?;
+            relay.workspace_scope(device_id.as_deref()).ensure(&cwd)?;
         }
 
         Ok(match relay.remembered_thread_settings(thread_id) {
@@ -1241,34 +1182,4 @@ impl AppState {
             },
         })
     }
-}
-
-/// The main repo of each cwd outside the relay roots that is a linked worktree of an
-/// allowed repo — the trees the workspace panel already offers as preview-only.
-async fn sibling_worktree_mains(
-    candidates: Vec<String>,
-    allowed_roots: &[String],
-) -> HashMap<String, std::path::PathBuf> {
-    let mut mains = HashMap::new();
-    if allowed_roots.is_empty() {
-        return mains;
-    }
-    let mut checked = HashSet::new();
-    for cwd in candidates {
-        if cwd.is_empty()
-            || !checked.insert(cwd.clone())
-            || path_within_allowed_roots(&cwd, allowed_roots)
-        {
-            continue;
-        }
-        let normalized = normalize_cwd(&cwd);
-        if let Some(main) =
-            super::workspace_trust::repository_root(std::path::Path::new(&normalized)).await
-        {
-            if path_within_allowed_roots(&main.to_string_lossy(), allowed_roots) {
-                mains.insert(cwd, main);
-            }
-        }
-    }
-    mains
 }

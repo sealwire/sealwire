@@ -26,9 +26,13 @@ impl AppState {
         {
             let relay = self.relay.read().await;
             for root in &path_scope {
-                ensure_path_within_allowed_roots(root, &relay.allowed_roots).map_err(|err| {
-                    format!("pairing path scope {root} cannot exceed relay allowed roots: {err}")
-                })?;
+                WorkspaceScope::new(&relay.allowed_roots, &[])
+                    .ensure(root)
+                    .map_err(|err| {
+                        format!(
+                            "pairing path scope {root} cannot exceed relay allowed roots: {err}"
+                        )
+                    })?;
             }
         }
         let prepared = {
