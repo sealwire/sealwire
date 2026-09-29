@@ -40,7 +40,12 @@ const React = (await import("react")).default;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { StickToBottomFollower } = await import("./stick-to-bottom.js");
-const { TRANSCRIPT_SCROLL_ACTION_EVENT } = await import("./transcript-scroll.js");
+const { getTranscriptScrollController } = await import("./transcript-scroll-controller.js");
+const frames = new Map();
+let nextFrame = 0;
+dom.window.requestAnimationFrame = cb => { frames.set(++nextFrame, cb); return nextFrame; };
+dom.window.cancelAnimationFrame = id => frames.delete(id);
+function paint() { const pending = [...frames.values()]; frames.clear(); for (const cb of pending) cb(); }
 
 const h = React.createElement;
 const VIEWPORT = 1000;
@@ -88,6 +93,7 @@ function mountFollower() {
       scrollHeight += by;
       // The follower follows growth through the ResizeObserver, never through scroll.
       for (const observer of observers) observer.callback();
+      paint();
     },
     // A write with no reader gesture behind it and no `selfScrollTop` tag — a
     // virtualizer size correction, or any other programmatic writer.
@@ -102,11 +108,7 @@ function mountFollower() {
     },
     jumpToBottom() {
       scrollTop = bottom();
-      scroller.dispatchEvent(
-        new dom.window.CustomEvent(TRANSCRIPT_SCROLL_ACTION_EVENT, {
-          detail: { kind: "jump-bottom" },
-        })
-      );
+      getTranscriptScrollController(scroller).apply({ kind: "jump-bottom" });
     },
   };
 }

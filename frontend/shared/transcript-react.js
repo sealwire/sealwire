@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useLayoutEffect,
+  useMemo,
   useReducer,
   useRef,
 } from "react";
@@ -60,7 +61,8 @@ import {
 import { transcriptRowKey } from "./transcript-row-key.js";
 import { isFailedTranscriptEntry, isPartialTranscriptEntry } from "./transcript-entry-details-state.js";
 import { renderMarkdown, renderStreamingMarkdown } from "./markdown.js";
-import { didPrependOlderTranscript, TRANSCRIPT_DISCLOSURE_RESIZE_EVENT } from "./transcript-scroll.js";
+import { didPrependOlderTranscript } from "./transcript-scroll.js";
+import { getTranscriptScrollController } from "./transcript-scroll-controller.js";
 
 const h = React.createElement;
 
@@ -135,7 +137,7 @@ function transcriptEntryDomAttrs(
   }
   return {
     className: finalClassName,
-    ...(itemId ? { "data-transcript-entry-id": itemId } : {}),
+    ...(itemId ? { "data-transcript-entry-id": itemId, "data-transcript-anchor": `entry:${itemId}` } : {}),
     ...(entry?.kind ? { "data-transcript-entry-kind": entry.kind } : {}),
     ...(extras || {}),
   };
@@ -2591,7 +2593,7 @@ function WorkGroupEntry({ group, options = null }) {
     "article",
     {
       className: "chat-message chat-message-system chat-message-work-group",
-      ...(expandKey ? { "data-work-group-key": expandKey } : {}),
+      ...(expandKey ? { "data-work-group-key": expandKey, "data-transcript-anchor": `group:${expandKey}` } : {}),
     },
     h(
       "button",
@@ -2687,7 +2689,7 @@ function DiffGroupEntry({ group, options = null }) {
     "article",
     {
       className: "chat-message chat-message-system chat-message-diff-group",
-      ...(expandKey ? { "data-diff-group-key": expandKey } : {}),
+      ...(expandKey ? { "data-diff-group-key": expandKey, "data-transcript-anchor": `group:${expandKey}` } : {}),
     },
     h(
       "button",
@@ -2949,7 +2951,7 @@ export function ApprovalCard({ approval, options = null }) {
     {
       "aria-label": "Approval required",
       className: "chat-message chat-message-system chat-message-approval",
-      ...(id ? { "data-approval-id": id } : {}),
+      ...(id ? { "data-approval-id": id, "data-transcript-anchor": `approval:${id}` } : {}),
     },
     h(
       "div",
@@ -3625,6 +3627,10 @@ export function TranscriptContent({
 function TranscriptViewport({ nodes, sentinel, askUserFooter, selectionToolbar }) {
   const virtualized = shouldVirtualizeTranscript(nodes.length);
   const virtualizer = useTranscriptVirtualizer(nodes, virtualized);
+  useLayoutEffect(() => {
+    const scroller = findTranscriptScrollElement(virtualizer.scrollTargetRef.current);
+    getTranscriptScrollController(scroller)?.geometryChanged();
+  }, [nodes, askUserFooter, virtualizer.scrollTargetRef]);
   const contentProps = {
     className: `thread-content${virtualized ? " thread-content-virtualized" : ""}`,
     ref: virtualizer.scrollTargetRef,
@@ -3654,6 +3660,7 @@ function TranscriptViewport({ nodes, sentinel, askUserFooter, selectionToolbar }
           {
             className: "transcript-virtual-row",
             "data-index": virtualRow.index,
+            "data-transcript-row-key": String(node.key || virtualRow.key),
             key: node.key || virtualRow.key,
             ref: virtualizer.measureElement,
             style: {
@@ -3707,10 +3714,20 @@ function useTranscriptVirtualizer(rows, enabled) {
     });
   }
 
-  const getItemKey = useCallback(
-    (index) => rows[index]?.key || index,
-    [rows]
-  );
+  // Streaming replaces React nodes without changing row identity. A fresh
+  // getItemKey function invalidates TanStack's entire measurements cache, so
+  // retain the key sequence until a prepend, removal or thread switch changes it.
+  // This comparison runs on content updates, never on viewport-only renders.
+  const retainedKeys = useRef([]);
+  const rowKeys = useMemo(() => {
+    const next = rows.map((row, index) => String(row.key || index));
+    const previous = retainedKeys.current;
+    if (next.length !== previous.length || next.some((key, index) => key !== previous[index])) {
+      retainedKeys.current = next;
+    }
+    return retainedKeys.current;
+  }, [rows]);
+  const getItemKey = useCallback(index => rowKeys[index], [rowKeys]);
   virtualizerRef.current.shouldAdjustScrollPositionOnItemSizeChange = shouldAdjustTranscriptRowSize;
   virtualizerRef.current.setOptions({
     count: rows.length,
@@ -3739,24 +3756,34 @@ function useTranscriptVirtualizer(rows, enabled) {
     virtualizerRef.current._willUpdate();
   });
 
+  const indexByKey = useMemo(() => new Map(rowKeys.map((key, index) => [key, index])), [rowKeys]);
   useLayoutEffect(() => {
     if (!enabled) return undefined;
     const content = scrollTargetRef.current;
-    const onDisclosureResize = (event) => {
-      const row = event.target.closest(".transcript-virtual-row");
-      if (!row) return;
-      const virtualizer = virtualizerRef.current;
-      // Called from the disclosure's rAF, outside ResizeObserver delivery. Only
-      // this explicit correction needs its row geometry committed before paint.
-      flushSync(() => {
-        virtualizer.resizeItem(Number(row.dataset.index), measureElement(row, undefined, virtualizer));
-        scrollAdjusterRef.current.syncScrollOffset();
-        forceUpdate();
-      });
-    };
-    content.addEventListener(TRANSCRIPT_DISCLOSURE_RESIZE_EVENT, onDisclosureResize);
-    return () => content.removeEventListener(TRANSCRIPT_DISCLOSURE_RESIZE_EVENT, onDisclosureResize);
-  }, [enabled]);
+    const controller = getTranscriptScrollController(findTranscriptScrollElement(content));
+    const virtualizer = virtualizerRef.current;
+    return controller.setViewport({
+      commit(rowKey) {
+        // This is called only by the controller's rAF, never from RO delivery.
+        flushSync(() => {
+          if (rowKey != null) for (const row of content.querySelectorAll(".transcript-virtual-row")) {
+            if (row.getAttribute("data-transcript-row-key") === rowKey) {
+              virtualizer.resizeItem(Number(row.dataset.index), measureElement(row, undefined, virtualizer));
+              break;
+            }
+          }
+          scrollAdjusterRef.current.syncScrollOffset();
+          forceUpdate();
+        });
+      },
+      locate(anchor, rowOffset = anchor.rowOffset, offset = anchor.offset) {
+        const index = indexByKey.get(anchor.rowKey);
+        if (index === undefined) return null;
+        const row = virtualizer.getMeasurements()[index];
+        return row ? row.start + rowOffset - offset : null;
+      },
+    });
+  }, [enabled, indexByKey]);
 
   return {
     getTotalSize: () => virtualizerRef.current.getTotalSize(),

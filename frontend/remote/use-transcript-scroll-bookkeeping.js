@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef } from "react";
 
 import { findPendingInputRequestIds } from "../shared/thread-attention.js";
 import { createTranscriptScrollBookkeeping } from "../shared/transcript-scroll-bookkeeping.js";
+import { getTranscriptScrollController } from "../shared/transcript-scroll-controller.js";
 import { setRemoteTranscriptElement } from "./ui-refs.js";
 
 // Per-thread scroll bookkeeping for the remote transcript pane, built on the
@@ -102,6 +103,7 @@ export function useRemoteTranscriptScrollBookkeeping({
       engine.rememberView(remoteScrollKey, transcript);
     };
     rememberCurrentPosition();
+    const unsubscribePosition = getTranscriptScrollController(transcript).subscribePosition(rememberCurrentPosition);
     transcript.addEventListener("scroll", rememberCurrentPosition, { passive: true });
 
     engine.commitSnapshot({
@@ -112,6 +114,7 @@ export function useRemoteTranscriptScrollBookkeeping({
     });
     return () => {
       rememberCurrentPosition();
+      unsubscribePosition();
       transcript.removeEventListener("scroll", rememberCurrentPosition);
       setRemoteTranscriptElement(null);
     };

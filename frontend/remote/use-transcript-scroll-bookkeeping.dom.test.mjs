@@ -33,6 +33,7 @@ const { useRemoteTranscriptScrollBookkeeping } = await import(
   "./use-transcript-scroll-bookkeeping.js"
 );
 
+const { getTranscriptScrollController } = await import("../shared/transcript-scroll-controller.js");
 const h = React.createElement;
 
 const CLIENT_HEIGHT = 266;
@@ -117,6 +118,7 @@ function mount() {
     scrollTo(scrollTop) {
       const element = host.querySelector(".chat-thread");
       element.scrollTop = scrollTop;
+      getTranscriptScrollController(element).apply({ kind: scrollTop < element.scrollHeight - element.clientHeight ? "read-content" : "rejoin-bottom" });
       act(() => {
         element.dispatchEvent(new dom.window.Event("scroll"));
       });

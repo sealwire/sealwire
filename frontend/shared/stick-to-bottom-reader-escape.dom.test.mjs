@@ -30,7 +30,12 @@ const React = (await import("react")).default;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { StickToBottomFollower } = await import("./stick-to-bottom.js");
-const { TRANSCRIPT_SCROLL_ACTION_EVENT } = await import("./transcript-scroll.js");
+const { getTranscriptScrollController } = await import("./transcript-scroll-controller.js");
+const frames = new Map();
+let nextFrame = 0;
+dom.window.requestAnimationFrame = cb => { frames.set(++nextFrame, cb); return nextFrame; };
+dom.window.cancelAnimationFrame = id => frames.delete(id);
+function paint() { const pending = [...frames.values()]; frames.clear(); for (const cb of pending) cb(); }
 
 const VIEWPORT = 800;
 
@@ -71,15 +76,12 @@ function mountFollower({ scrollHeight: initialHeight = 6000 } = {}) {
     },
     jumpToBottom() {
       scrollTop = maxTop();
-      scroller.dispatchEvent(
-        new dom.window.CustomEvent(TRANSCRIPT_SCROLL_ACTION_EVENT, {
-          detail: { kind: "jump-bottom" },
-        })
-      );
+      getTranscriptScrollController(scroller).apply({ kind: "jump-bottom" });
     },
     grow(by) {
       scrollHeight += by;
       for (const observer of observers) observer.callback();
+      paint();
     },
     // The browser applying a scroll (reader or momentum) and reporting it.
     scrollTo(value) {

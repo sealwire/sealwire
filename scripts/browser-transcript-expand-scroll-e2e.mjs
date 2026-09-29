@@ -5,11 +5,14 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import * as esbuild from "esbuild";
+import { chromium, webkit } from "playwright";
 
 import { launchBrowser } from "./e2e/harness/browser.mjs";
 import { startStaticServer } from "./e2e/harness/static-server.mjs";
 
-const ROOT = process.cwd();
+const ENGINE = process.env.E2E_BROWSER || "chromium";
+const MOBILE = Boolean(process.env.E2E_MOBILE);
+const ROOT = process.env.E2E_SOURCE_ROOT || process.cwd();
 const ARTIFACTS = process.env.E2E_ARTIFACT_DIR || path.join(ROOT, "artifacts/e2e/transcript-expand-scroll");
 const fixture = `
 import React from "react";
@@ -17,6 +20,8 @@ import { createRoot } from "react-dom/client";
 import { TranscriptState } from ${JSON.stringify(path.join(ROOT, "frontend/shared/conversation.js"))};
 import { createTranscriptInteractionHandler } from ${JSON.stringify(path.join(ROOT, "frontend/shared/transcript-interactions.js"))};
 import { dispatchTranscriptScrollActionEvent } from ${JSON.stringify(path.join(ROOT, "frontend/shared/transcript-scroll.js"))};
+import { useLocalTranscriptScrollBookkeeping } from ${JSON.stringify(path.join(ROOT, "frontend/local/use-local-transcript-scroll-bookkeeping.js"))};
+import { useRemoteTranscriptScrollBookkeeping } from ${JSON.stringify(path.join(ROOT, "frontend/remote/use-transcript-scroll-bookkeeping.js"))};
 const h = React.createElement;
 const params = new URLSearchParams(location.search);
 const count = Number(params.get("count") || 30);
@@ -57,8 +62,36 @@ if (params.has("diff")) initial.push({
     diff: "@@ -0,0 +1,450 @@\\n" + Array.from({ length: 450 }, (_, i) => "+const line" + i + " = true;").join("\\n"),
   }] },
 });
+function LocalBookkeeping({ entries, threadId, scroller }) {
+  useLocalTranscriptScrollBookkeeping({ activeThreadId: threadId, entries, mode: "entries", resetEpoch: 0, scrollElement: scroller, session: {} });
+  return null;
+}
+function RemoteBookkeeping({ entries, threadId, scrollerRef }) {
+  useRemoteTranscriptScrollBookkeeping({ currentState: { activeRelayId: "fixture" }, entries, threadId, transcriptRef: scrollerRef, session: {} });
+  return null;
+}
 function App() {
   const [entries, setEntries] = React.useState(initial);
+  const [mounted, setMounted] = React.useState(true);
+  window.setEntryCount = n => setEntries(initial.slice(0, n));
+  window.setTranscriptMounted = setMounted;
+  const [threadId, setThreadId] = React.useState("thread-a");
+  const [scroller, setScroller] = React.useState(null);
+  const scrollerRef = React.useRef(null);
+  const attach = React.useCallback(node => { scrollerRef.current = node; setScroller(node); }, []);
+  const threads = React.useRef(new Map());
+  const older = () => Array.from({length: 12}, (_, i) => ({ item_id: "older-" + i, kind: "agent_text", status: "completed", text: paragraph.slice(0, 220) }));
+  window.prependHistory = () => setEntries(previous => [...older(), ...previous]);
+  window.removeEntry = id => setEntries(previous => previous.filter(entry => entry.item_id !== id));
+  window.changeCardAbove = (cardIndex = 0) => setEntries(previous => previous.map(entry => entry.item_id !== "entry-4" ? entry : {
+    ...entry, injection: { ...entry.injection, delegate: entry.injection.delegate.map((ask, i) => i !== cardIndex ? ask : { ...ask, answer: "New visible introductory paragraph.\\n\\n" + ask.answer }) },
+  }));
+  window.switchThread = next => {
+    threads.current.set(threadId, entries);
+    setThreadId(next);
+    setEntries(threads.current.get(next) || [{ item_id: "other", kind: "agent_text", status: "completed", text: "Another thread" }]);
+  };
+  window.prependHidden = id => threads.current.set(id, [...older(), ...threads.current.get(id)]);
   const [expandedKeys, setExpandedKeys] = React.useState(new Set(
     params.has("native") ? ["entry:native"] : params.has("reasoning") ? ["reasoning:reason"] : [],
   ));
@@ -69,7 +102,7 @@ function App() {
     window.streamChunks = 0;
     const timer = setInterval(() => {
       setEntries(previous => previous.map((entry, index) => index === previous.length - 1
-        ? { ...entry, text: entry.text + "\\n\\n" + paragraph.slice(0, 180) } : entry));
+        ? { ...entry, status: window.streamChunks >= 49 ? "completed" : "running", text: entry.text + "\\n\\n" + paragraph.slice(0, 180) } : entry));
       if (++window.streamChunks === 50) clearInterval(timer);
     }, 50);
   };
@@ -84,9 +117,18 @@ function App() {
     },
     toggleGroup: ({ expandKey }, event) => { event.preventDefault(); toggle(expandKey); },
   });
-  return h("div", { className: "chat-thread", id: "transcript" }, h(TranscriptState, {
-    entries, options: { provider: "claude_code", expandedKeys }, onClick: interact,
-  }));
+  return h(React.Fragment, null, params.has("perf") ? h("input", { id: "perf-input", "aria-label": "Message", style: { position: "fixed", right: 0, bottom: 0, zIndex: 100 } }) : null, h("div", { className: "chat-thread", id: "transcript", ref: attach },
+    params.get("bookkeeping") === "local" ? h(LocalBookkeeping, { entries, threadId, scroller })
+      : params.get("bookkeeping") === "remote" ? h(RemoteBookkeeping, { entries, threadId, scrollerRef }) : null,
+    mounted ? h(TranscriptState, {
+    entries,
+    approval: params.has("approval") ? { request_id: "approval-fixture", kind: "command", command: "npm test", detail: "Review this command" } : null,
+    options: { provider: "claude_code", expandedKeys,
+      pendingAskUserQuestions: params.has("approval") ? Array.from({ length: 4 }, (_, i) => ({ request_id: "question-" + i,
+        questions: [{ header: "Question", question: "Question " + i + ": " + paragraph.slice(0, 300), options: [{ label: "Yes" }, { label: "No" }] }],
+      })) : [],
+    }, onClick: interact,
+  }) : null));
 }
 createRoot(document.getElementById("root")).render(h(App));
 `;
@@ -134,7 +176,8 @@ async function clickVisible(page, locator) {
   const box = await locator.boundingBox();
   assert.ok(box && box.y >= 0 && box.y < page.viewportSize().height - 20, "click target is on screen");
   // No locator auto-scroll: it would hide the very jump this test measures.
-  await page.mouse.click(box.x + Math.min(25, box.width / 2), box.y + Math.min(10, box.height / 2));
+  if (MOBILE) await page.touchscreen.tap(box.x + Math.min(25, box.width / 2), box.y + Math.min(10, box.height / 2));
+  else await page.mouse.click(box.x + Math.min(25, box.width / 2), box.y + Math.min(10, box.height / 2));
   await settle(page);
 }
 
@@ -145,6 +188,22 @@ function assertRetained(before, after, label) {
 // Geometry after settling misses a frame painted with stale virtual-row positions.
 // Track a layout-neutral colored line in Chromium's actual composited frames.
 async function assertPaintedAnchor(page, anchor, name, action) {
+  if (ENGINE === "webkit") {
+    // WebKit has no CDP screencast. These are after-rAF DOM positions, not proof
+    // of composited frames; the before/after screenshots are retained as well.
+    await anchor.evaluate(el => {
+      window.anchorFrames = { positions: [], running: true };
+      const sample = () => {
+        window.anchorFrames.positions.push(el.isConnected ? el.getBoundingClientRect().top : null);
+        if (window.anchorFrames.running) requestAnimationFrame(() => setTimeout(sample, 0));
+      };
+      requestAnimationFrame(() => setTimeout(sample, 0));
+    });
+    await action();
+    const positions = await page.evaluate(() => { window.anchorFrames.running = false; return window.anchorFrames.positions; });
+    assert.ok(positions.length > 1 && positions.every(y => y !== null && Math.abs(y - positions[0]) <= 2), `rAF geometry jumped: ${JSON.stringify(positions)}`);
+    return { method: "after-rAF geometry (not composited frames)", positions };
+  }
   const shadow = await anchor.evaluate(el => {
     const previous = el.style.boxShadow;
     el.style.boxShadow = "inset 0 3px 0 rgb(255, 0, 255)";
@@ -210,6 +269,7 @@ async function main() {
     define: { "process.env.NODE_ENV": '"production"' },
     outfile: path.join(buildDir, "harness.js"), logLevel: "silent",
   });
+  if (process.env.E2E_PROFILE) await fs.copyFile(path.join(buildDir, "harness.js"), path.join(ARTIFACTS, "harness.js"));
   for (const name of ["styles.css", "conversation.css", "review-cards.css", "delegate-cards.css"]) {
     await fs.copyFile(path.join(ROOT, "frontend", name), path.join(buildDir, name));
   }
@@ -219,13 +279,33 @@ async function main() {
     html,body,#root{height:100%;margin:0}#root{max-width:900px;margin:auto}.chat-thread{height:100vh;box-sizing:border-box}
     </style></head><body><div id="root"></div><script type="module" src="/harness.js"></script></body></html>`);
   const server = await startStaticServer({ rootDir: buildDir });
-  const { browser, context } = await launchBrowser();
+  const contextOptions = MOBILE ? { hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } } : {};
+  const browserSession = ENGINE === "webkit" || process.env.E2E_PERF ? await (async () => {
+    const browser = await (ENGINE === "webkit" ? webkit : chromium).launch({ headless: true });
+    return { browser, context: await browser.newContext(contextOptions) };
+  })() : await launchBrowser({ contextOptions });
+  const { browser, context } = browserSession;
   const results = [];
   const failures = [];
   const page = await context.newPage();
+  if (process.env.E2E_PERF && Number(process.env.E2E_CPU_THROTTLE) > 1) {
+    const session = await context.newCDPSession(page);
+    await session.send("Emulation.setCPUThrottlingRate", { rate: Number(process.env.E2E_CPU_THROTTLE) });
+    await session.detach();
+  }
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
   await page.addInitScript(() => {
+    window.controllerWheelListeners = new Set();
+    for (const method of ["addEventListener", "removeEventListener"]) {
+      const original = Element.prototype[method];
+      Element.prototype[method] = function(type, listener, ...args) {
+        if (type === "wheel" && this.classList.contains("chat-thread")) {
+          window.controllerWheelListeners[method === "addEventListener" ? "add" : "delete"](listener);
+        }
+        return original.call(this, type, listener, ...args);
+      };
+    }
     window.browserErrors = [];
     // ResizeObserver delivery errors are not surfaced by Playwright's pageerror.
     window.addEventListener("error", event => {
@@ -688,8 +768,202 @@ async function main() {
       assert.ok(metrics.renderedRows < 40, "the long history stays virtualized");
       return metrics;
     });
+    if (MOBILE && ENGINE === "chromium") await run("mobile-touch-escape-during-stream", async () => {
+      await load("perf=1&count=2000", { width: 390, height: 844 });
+      await page.evaluate(() => window.followBottom());
+      await settle(page);
+      await page.evaluate(() => window.startStream());
+      await page.waitForFunction(() => window.streamChunks >= 5);
+      const session = await page.context().newCDPSession(page);
+      await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: 190, y: 280 }] });
+      for (let y = 300; y <= 620; y += 40) {
+        await session.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: 190, y }] });
+        await page.waitForTimeout(25);
+      }
+      await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      await session.detach();
+      await page.waitForFunction(() => window.streamChunks >= 30);
+      const before = await page.locator(".chat-thread").evaluate(el => ({ top: el.scrollTop, distance: el.scrollHeight - el.scrollTop - el.clientHeight }));
+      assert.ok(before.distance > 200, "native touch drag escaped follow");
+      await page.waitForFunction(() => window.streamChunks === 50);
+      const after = await page.locator(".chat-thread").evaluate(el => el.scrollTop);
+      assert.ok(Math.abs(after - before.top) < 2, "stream leaves the touch reader in place after momentum settles");
+      await page.locator(".scroll-to-bottom-button").tap();
+      await settle(page);
+      assert.ok(await page.locator(".chat-thread").evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight) <= 2, "tap rejoins latest output");
+      return { before, after, input: "CDP native touch, emulated mobile viewport" };
+    });
+    for (const count of [10, 30]) {
+      await run(`anchor-shared-row-growth-${count}`, async () => {
+        await load(`count=${count}`);
+        const row = page.locator('[data-transcript-entry-id="entry-4"]');
+        const second = row.locator('.delegate-card').nth(1);
+        const label = second.locator('.handover-section-label').nth(1);
+        await position(page, label, 120);
+        const before = await label.boundingBox();
+        // Synthetic update to an earlier card in the SAME virtual row. There
+        // need not be a user click on that offscreen content to retain a reader.
+        await page.evaluate(() => window.changeCardAbove());
+        await settle(page);
+        assertRetained(before, await label.boundingBox(), "growth inside shared row");
+        return { readingShift: (await label.boundingBox()).y - before.y };
+      });
+    }
+    await run("anchor-reveal-approval-before-questions", async () => {
+      await load("approval=1&perf=1");
+      await page.evaluate(() => window.followBottom());
+      await settle(page);
+      const card = page.locator('[data-approval-id="approval-fixture"]');
+      assert.ok((await card.boundingBox()).y < 0, "pending questions put the approval above the viewport");
+      await page.locator(".approval-float-jump").click();
+      await settle(page);
+      const before = await card.boundingBox();
+      assert.ok(before.y >= -2 && before.y + before.height < 800, "the requested approval is actually visible");
+      await page.evaluate(() => window.appendMessage());
+      await settle(page);
+      assertRetained(before, await card.boundingBox(), "explicit reveal retains the requested content through output");
+      return { approvalY: before.y, approvalHeight: before.height };
+    });
+    await run("anchor-controller-lifecycle", async () => {
+      await load();
+      const listeners = [];
+      for (const count of [30, 10, 30, 10, 30]) {
+        await page.evaluate(n => window.setEntryCount(n), count);
+        await settle(page);
+        const label = page.locator('[data-transcript-entry-id="entry-4"] .delegate-card').nth(1).locator('.handover-section-label').nth(1);
+        await position(page, label, 260);
+        const before = await label.boundingBox();
+        await clickVisible(page, label);
+        assertRetained(before, await label.boundingBox(), "expand after virtualizer lifecycle change");
+        await clickVisible(page, label);
+        assertRetained(before, await label.boundingBox(), "collapse after virtualizer lifecycle change");
+        listeners.push(await page.evaluate(() => window.controllerWheelListeners.size));
+      }
+      await page.evaluate(() => window.setTranscriptMounted(false));
+      await settle(page);
+      listeners.push(await page.evaluate(() => window.controllerWheelListeners.size));
+      await page.evaluate(() => window.setTranscriptMounted(true));
+      await settle(page);
+      listeners.push(await page.evaluate(() => window.controllerWheelListeners.size));
+      assert.deepEqual(listeners, [1, 1, 1, 1, 1, 0, 1], "one owner across threshold changes, none after unmount");
+      return { listeners };
+    });
+    await run("anchor-same-card-section-growth", async () => {
+      await load();
+      const label = page.locator('[data-transcript-entry-id="entry-4"] .delegate-card').nth(1).locator('.handover-section-label').nth(1);
+      await position(page, label, 16);
+      const before = await label.boundingBox();
+      await page.evaluate(() => window.changeCardAbove(1));
+      await settle(page);
+      assertRetained(before, await label.boundingBox(), "a new intro preserves the existing section identity");
+      return { readingShift: (await label.boundingBox()).y - before.y };
+    });
+    await run("anchor-removed-message", async () => {
+      await load();
+      const card = page.locator('[data-transcript-entry-id="entry-4"] .delegate-card').nth(1);
+      await position(page, card, -20);
+      await page.evaluate(() => window.removeEntry("entry-4"));
+      await settle(page);
+      const next = page.locator('[data-transcript-entry-id="entry-5"]');
+      const y = (await next.boundingBox()).y;
+      assert.ok(y >= -2 && y <= 40, `removed message returns to the next message header: ${y}`);
+      await page.evaluate(() => window.appendMessage());
+      await settle(page);
+      assert.ok(Math.abs((await next.boundingBox()).y - y) <= 2, "removal does not re-arm follow");
+      return { nextMessageY: y };
+    });
+    for (const surface of ["local", "remote"]) {
+      await run(`anchor-prepend-${surface}`, async () => {
+        await load(`bookkeeping=${surface}`);
+        await page.mouse.move(550, 400);
+        await page.mouse.wheel(0, -10000);
+        await settle(page);
+        const label = page.locator('[data-transcript-entry-id="entry-4"] .delegate-card').nth(1).locator('.handover-section-label').nth(1);
+        await position(page, label, 180);
+        const before = await label.boundingBox();
+        await page.evaluate(() => window.prependHistory());
+        await settle(page);
+        assertRetained(before, await label.boundingBox(), "history prepend retains content identity");
+        return { readingShift: (await label.boundingBox()).y - before.y };
+      });
+      await run(`anchor-thread-restore-${surface}`, async () => {
+        await load(`bookkeeping=${surface}`);
+        await page.mouse.move(550, 400);
+        await page.mouse.wheel(0, -10000);
+        await settle(page);
+        const label = page.locator('[data-transcript-entry-id="entry-4"] .delegate-card').nth(1).locator('.handover-section-label').nth(1);
+        await position(page, label, 180);
+        const before = await label.boundingBox();
+        await page.evaluate(() => window.switchThread("thread-b"));
+        await settle(page);
+        await page.evaluate(() => { window.prependHidden("thread-a"); window.switchThread("thread-a"); });
+        await settle(page);
+        assertRetained(before, await label.boundingBox(), "thread restore after hidden prepend");
+        await page.evaluate(() => window.appendMessage());
+        await settle(page);
+        assertRetained(before, await label.boundingBox(), "restored reading intent survives output");
+        return { readingShift: (await label.boundingBox()).y - before.y };
+      });
+    }
+    if (process.env.E2E_PERF && ENGINE === "chromium") for (let trial = 1; trial <= Number(process.env.E2E_PERF_TRIALS || 3); trial++) {
+      await run(`measured-stream-scroll-${trial}`, async () => {
+        await load("perf=1&count=2000");
+        await page.evaluate(() => window.followBottom());
+        await settle(page);
+        const cdp = await page.context().newCDPSession(page);
+        await cdp.send("Performance.enable");
+        if (Number(process.env.E2E_CPU_THROTTLE) > 1) await cdp.send("Emulation.setCPUThrottlingRate", { rate: Number(process.env.E2E_CPU_THROTTLE) });
+        if (process.env.E2E_PROFILE) { await cdp.send("Profiler.enable"); await cdp.send("Profiler.start"); }
+        const startMetrics = (await cdp.send("Performance.getMetrics")).metrics;
+        await page.evaluate(() => {
+          const sample = window.perfSample = { frames: [], inputDelay: [], inputToFrame: [], longTasks: [], running: true };
+          let previous = performance.now();
+          const frame = now => {
+            sample.frames.push(now - previous); previous = now;
+            if (sample.running) requestAnimationFrame(frame);
+          };
+          requestAnimationFrame(frame);
+          const observer = new PerformanceObserver(list => sample.longTasks.push(...list.getEntries().map(e => e.duration)));
+          observer.observe({ type: "longtask", buffered: false });
+          sample.observer = observer;
+          for (const type of ["wheel", "keydown"]) document.addEventListener(type, event => {
+            sample.inputDelay.push(performance.now() - event.timeStamp);
+            requestAnimationFrame(() => sample.inputToFrame.push(performance.now() - event.timeStamp));
+          }, { passive: true, capture: true });
+          window.startStream();
+        });
+        await page.locator("#perf-input").focus();
+        for (let i = 0; i < 12; i++) {
+          await page.keyboard.type("reading ");
+          await page.mouse.move(550, 400);
+          await page.mouse.wheel(0, i < 6 ? -180 : 180);
+          await page.waitForTimeout(80);
+        }
+        await page.waitForFunction(() => window.streamChunks === 50);
+        const endMetrics = (await cdp.send("Performance.getMetrics")).metrics;
+        if (process.env.E2E_PROFILE) await fs.writeFile(path.join(ARTIFACTS, `cpu-${trial}.json`), JSON.stringify((await cdp.send("Profiler.stop")).profile));
+        await cdp.detach();
+        const metrics = await page.evaluate(() => {
+          const s = window.perfSample; s.running = false; s.observer.disconnect();
+          const stats = values => {
+            const sorted = [...values].sort((a, b) => a - b);
+            return { count: sorted.length, p50: sorted[Math.floor(sorted.length * .5)] || 0,
+              p95: sorted[Math.floor(sorted.length * .95)] || 0, max: sorted.at(-1) || 0 };
+          };
+          return { frameMs: stats(s.frames), framesOver25ms: s.frames.filter(v => v > 25).length,
+            estimatedMissed60HzFrames: s.frames.reduce((n, v) => n + Math.max(0, Math.round(v / (1000 / 60)) - 1), 0),
+            inputDispatchDelayMs: stats(s.inputDelay), inputToNextFrameMs: stats(s.inputToFrame),
+            longTaskMs: stats(s.longTasks), typed: document.querySelector("#perf-input").value.length };
+        });
+        for (const key of ["TaskDuration", "ScriptDuration", "LayoutDuration", "RecalcStyleDuration"]) {
+          metrics[key + "Ms"] = 1000 * (endMetrics.find(m => m.name === key).value - startMetrics.find(m => m.name === key).value);
+        }
+        assert.equal(metrics.typed, 96, "all input reached the composer during streaming");
+        return metrics;
+      });
+    }
     assert.deepEqual(errors, [], "no browser runtime errors");
-    await fs.writeFile(path.join(ARTIFACTS, "results.json"), JSON.stringify({ browser: browser.version(), results, failures }, null, 2));
+    await fs.writeFile(path.join(ARTIFACTS, "results.json"), JSON.stringify({ engine: ENGINE, mobileEmulation: MOBILE, browser: browser.version(), results, failures }, null, 2));
     assert.deepEqual(failures, [], "transcript scroll regressions");
   } finally {
     await context.close();

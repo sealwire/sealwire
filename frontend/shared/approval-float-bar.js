@@ -2,6 +2,7 @@ import React from "react";
 
 import { findScrollContainer } from "./scroll-to-bottom-core.js";
 import { approvalFloatName, approvalFloatSubject, isApprovalCardOffscreen } from "./approval-view.js";
+import { applyTranscriptScrollAction } from "./transcript-scroll.js";
 
 const h = React.createElement;
 
@@ -82,13 +83,9 @@ export function ApprovalFloatBar({ approval }) {
     (event) => {
       event.stopPropagation();
       const scroller = findScrollContainer(anchorRef.current);
-      const card = findCard(scroller, requestId);
-      if (card) {
-        card.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      } else if (scroller) {
-        // Virtualized away: the card is always rendered after the entries.
-        scroller.scrollTo({ top: scroller.scrollHeight, behavior: "auto" });
-      }
+      applyTranscriptScrollAction({
+        kind: "reveal-content", contentId: `approval:${requestId}`, rowKey: "approval",
+      }, scroller);
     },
     [requestId]
   );

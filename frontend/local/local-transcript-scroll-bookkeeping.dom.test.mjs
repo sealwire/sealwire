@@ -32,6 +32,7 @@ const { useLocalTranscriptScrollBookkeeping } = await import(
   "./use-local-transcript-scroll-bookkeeping.js"
 );
 
+const { getTranscriptScrollController } = await import("../shared/transcript-scroll-controller.js");
 const h = React.createElement;
 
 const CLIENT_HEIGHT = 266;
@@ -132,6 +133,7 @@ test("a leaving thread's offset is retained at its pre-swap value, not the clamp
 
     // The reader escapes the tail to read history.
     view.host.scrollTop = bottom - 40;
+    if (view.host.scrollTop < view.host.scrollHeight - view.host.clientHeight) getTranscriptScrollController(view.host).apply({ kind: "read-content" });
     assert.equal(view.host.scrollTop, bottom - 40);
 
     // Switch to a thread whose projection is empty — the shorter content
@@ -156,7 +158,8 @@ test("switching away and back restores a bottom-follow reader to the new bottom,
   try {
     view.show("thread-a", entriesFor("thread-a", 8));
     const bottom = view.host.scrollTop;
-    view.host.scrollTop = bottom; // reader is at the tail, following
+    view.host.scrollTop = bottom;
+    if (view.host.scrollTop < view.host.scrollHeight - view.host.clientHeight) getTranscriptScrollController(view.host).apply({ kind: "read-content" }); // reader is at the tail, following
 
     view.show("thread-b", []);
     // The thread grew while it was hidden: bottom-follow is an intent, not a
@@ -183,7 +186,8 @@ test("a genuinely empty thread's first message ignores a stale retained offset f
   try {
     // An earlier visit to thread-a leaves a mid-history offset on record.
     view.show("thread-a", entriesFor("thread-a", 8));
-    view.host.scrollTop = 10; // near the top, far from bottom-follow
+    view.host.scrollTop = 10;
+    if (view.host.scrollTop < view.host.scrollHeight - view.host.clientHeight) getTranscriptScrollController(view.host).apply({ kind: "read-content" }); // near the top, far from bottom-follow
     view.show("decoy-1", []); // evicts thread-a's offset (10) into the store
 
     // thread-a is now empty and ready (e.g. hydration reset before the first
@@ -215,6 +219,7 @@ test("branches 1-4 (mode: null) leave the retained store untouched", () => {
     view.show("thread-a", entriesFor("thread-a", 20));
     const bottom = view.host.scrollTop;
     view.host.scrollTop = 600;
+    if (view.host.scrollTop < view.host.scrollHeight - view.host.clientHeight) getTranscriptScrollController(view.host).apply({ kind: "read-content" });
 
     view.show("thread-a", entriesFor("thread-a", 20, ":decoy"), { mode: null });
 
@@ -300,6 +305,7 @@ test("a reset epoch bump clears the retained store", () => {
     view.show("thread-a", entriesFor("thread-a", 8));
     const bottom = view.host.scrollTop;
     view.host.scrollTop = bottom - 40;
+    if (view.host.scrollTop < view.host.scrollHeight - view.host.clientHeight) getTranscriptScrollController(view.host).apply({ kind: "read-content" });
     view.show("decoy-1", []); // evicts thread-a's offset into the store
 
     // Without a bump, switching back restores the retained offset.
@@ -307,6 +313,7 @@ test("a reset epoch bump clears the retained store", () => {
     assert.equal(view.host.scrollTop, bottom - 40, "precondition: the offset is retained");
 
     view.host.scrollTop = bottom - 40;
+    if (view.host.scrollTop < view.host.scrollHeight - view.host.clientHeight) getTranscriptScrollController(view.host).apply({ kind: "read-content" });
     view.show("decoy-1", [], { resetEpoch: 0 });
 
     // A hydration reset bumps the epoch between renders.

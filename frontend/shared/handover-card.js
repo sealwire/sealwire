@@ -96,7 +96,7 @@ const HANDED_OVER_ICON = ["M2 8h9M8 4.5 11.5 8 8 11.5", "M14 3v10"];
 const PICKED_UP_ICON = ["M2 3v10", "M5 8h9M8.5 4.5 5 8l3.5 3.5"];
 
 // Folded to a couple of lines; its heading or its text opens it.
-function SummarySection({ section, body }) {
+function SummarySection({ section, body, anchorId }) {
   const fold = useFold(body, Boolean(section.title));
   const label = !section.title
     ? null
@@ -114,7 +114,7 @@ function SummarySection({ section, body }) {
       : h("span", { className: "handover-section-label" }, section.title);
   return h(
     "div",
-    { className: `handover-section${section.title ? "" : " is-untitled"}` },
+    { className: `handover-section${section.title ? "" : " is-untitled"}`, "data-transcript-anchor": anchorId },
     label,
     h(
       "div",
@@ -142,16 +142,22 @@ export function SummarySections({ text, moreLabel = "Show full summary", footer 
   const hidden = titled ? Math.max(0, titled - SECTIONS_SHOWN) : 0;
   const shown = expanded || !titled ? sections : sections.slice(0, lead + SECTIONS_SHOWN);
   const more = hidden || preview ? moreLabel : null;
+  const occurrences = new Map();
   return h(
     "div",
     { className: "handover-card-body" },
-    ...shown.map((section, index) =>
-      h(SummarySection, {
-        key: `${index}:${section.title}`,
+    ...shown.map(section => {
+      // Inserting a lead paragraph must not rename every existing heading.
+      const occurrence = occurrences.get(section.title) || 0;
+      occurrences.set(section.title, occurrence + 1);
+      const key = JSON.stringify([section.title, occurrence]);
+      return h(SummarySection, {
+        key,
+        anchorId: `section:${key}`,
         section,
         body: (!expanded && preview) || section.body,
-      })
-    ),
+      });
+    }),
     more
       ? h(ShowAllButton, {
           key: "show-all",

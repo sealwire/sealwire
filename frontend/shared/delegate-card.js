@@ -69,10 +69,10 @@ function reason(ask) {
   return text ? `${capitalize(text).replace(/[.\s]+$/, "")}.` : "It did not answer.";
 }
 
-function DelegateCard({ tone, icon, kicker, title, time, onFold = null, children, footerStart = null, link = null }) {
+function DelegateCard({ anchorId, tone, icon, kicker, title, time, onFold = null, children, footerStart = null, link = null }) {
   return h(
     "div",
-    { className: `handover-card delegate-card is-${tone}` },
+    { className: `handover-card delegate-card is-${tone}`, "data-transcript-anchor": `delegate:${anchorId}` },
     h(
       "div",
       { className: "handover-card-head" },
@@ -157,10 +157,10 @@ function Cited({ places }) {
 }
 
 /** The asked card once its answer card is below it, as one line (25a). */
-function Strip({ tone, icon, label, title, onOpen }) {
+function Strip({ anchorId, tone, icon, label, title, onOpen }) {
   return h(
     "button",
-    { type: "button", className: `review-strip delegate-strip is-${tone}`, "aria-expanded": "false", onClick: onOpen },
+    { type: "button", className: `review-strip delegate-strip is-${tone}`, "data-transcript-anchor": `delegate:${anchorId}`, "aria-expanded": "false", onClick: onOpen },
     h("span", { className: "review-strip-icon" }, h(CardIcon, { paths: icon, size: 14 })),
     h("span", { className: "review-strip-text" }, h("b", null, label), title ? ` · ${title}` : ""),
     h(Caret, { open: false })
@@ -202,6 +202,7 @@ function AskedCard({ ask, brief, collapsed }) {
   const title = ask.title || "A question for another agent";
   if (collapsed && !open) {
     return h(Strip, {
+      anchorId: ask.id,
       tone: "info",
       icon: ICONS.asked,
       label: `Delegated to ${peer}`,
@@ -212,6 +213,7 @@ function AskedCard({ ask, brief, collapsed }) {
   return h(
     DelegateCard,
     {
+      anchorId: ask.id,
       tone: "info",
       icon: ICONS.asked,
       kicker: `Delegated to ${peer}`,
@@ -231,6 +233,7 @@ function MissingCard({ ask }) {
   return h(
     DelegateCard,
     {
+      anchorId: ask.id,
       tone: "needs-you",
       icon: ICONS.missing,
       kicker: `No answer from ${peer}`,
@@ -251,6 +254,7 @@ function AnsweredCard({ ask }) {
   return h(
     DelegateCard,
     {
+      anchorId: ask.id,
       tone: "pass",
       icon: ICONS.answered,
       kicker: `${peer} answered`,

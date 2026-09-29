@@ -4,9 +4,9 @@ import { CHEVRON_DOWN_SVG } from "../svg.js";
 import {
   computeScrollToBottomVisible,
   findScrollContainer,
-  nextSettleScrollTop,
   readScrollMetrics,
 } from "./scroll-to-bottom-core.js";
+import { getTranscriptScrollController } from "./transcript-scroll-controller.js";
 import { dispatchTranscriptScrollActionEvent } from "./transcript-scroll.js";
 
 const h = React.createElement;
@@ -20,69 +20,18 @@ const h = React.createElement;
 // see conversation.css), so the button hovers just above the composer without
 // adding scrollable height. It only appears when the reader has scrolled away
 // from the bottom.
-export function ScrollToBottomButton({ entries = [], label = "Scroll to latest" }) {
+export function ScrollToBottomButton({ label = "Scroll to latest" }) {
   const anchorRef = React.useRef(null);
   const buttonRef = React.useRef(null);
-  const settleRafRef = React.useRef(null);
   const [visible, setVisible] = React.useState(false);
 
-  // The transcript is an element scroller (`.chat-thread`) on every surface;
-  // resolve it fresh every read so the button adapts as the transcript grows.
-  const update = React.useCallback(() => {
-    setVisible(
-      computeScrollToBottomVisible(readScrollMetrics(findScrollContainer(anchorRef.current)))
-    );
+  React.useEffect(() => {
+    const scroller = findScrollContainer(anchorRef.current);
+    if (!scroller) return undefined;
+    const update = metrics => setVisible(computeScrollToBottomVisible(metrics));
+    update(readScrollMetrics(scroller));
+    return getTranscriptScrollController(scroller).subscribePosition(update);
   }, []);
-
-  React.useEffect(() => {
-    const anchor = anchorRef.current;
-    const chatThread = anchor?.closest?.(".chat-thread") || null;
-    const view = anchor?.ownerDocument?.defaultView
-      || (typeof window !== "undefined" ? window : null);
-
-    // The `.chat-thread` element scrolls; a viewport resize can still move the
-    // bottom out from under a pinned reader, so watch that too.
-    chatThread?.addEventListener?.("scroll", update, { passive: true });
-    view?.addEventListener?.("resize", update);
-
-    // Content height changes (streaming tokens, expanding tool cards, the
-    // turn-end spacer collapsing) move the bottom without firing a scroll
-    // event, so watch the scroller and its content for resizes too.
-    let resizeObserver = null;
-    if (typeof ResizeObserver !== "undefined" && chatThread) {
-      resizeObserver = new ResizeObserver(() => update());
-      resizeObserver.observe(chatThread);
-      const content = chatThread.querySelector?.(".thread-content");
-      if (content) {
-        resizeObserver.observe(content);
-      }
-    }
-
-    update();
-
-    return () => {
-      chatThread?.removeEventListener?.("scroll", update);
-      view?.removeEventListener?.("resize", update);
-      resizeObserver?.disconnect();
-    };
-  }, [update]);
-
-  // Re-evaluate when the transcript changes: new/updated entries can grow the
-  // scroll height while the reader sits mid-transcript.
-  React.useEffect(() => {
-    update();
-  }, [entries, update]);
-
-  // Cancel any in-flight scroll-settling frame when the button unmounts.
-  React.useEffect(
-    () => () => {
-      if (settleRafRef.current != null && typeof cancelAnimationFrame === "function") {
-        cancelAnimationFrame(settleRafRef.current);
-      }
-      settleRafRef.current = null;
-    },
-    []
-  );
 
   // Move focus off the button before the wrapper becomes aria-hidden, so focus
   // is never trapped inside a hidden subtree.
@@ -99,54 +48,9 @@ export function ScrollToBottomButton({ entries = [], label = "Scroll to latest" 
     // `.transcript-react-root`; keep this (non-transcript) click from reaching it.
     event.stopPropagation();
 
-    // Tell the stick-to-bottom follower the reader explicitly asked for the
-    // latest content. Click fires for mouse, keyboard (Enter/Space) and
-    // assistive-tech activation alike, so this intent channel — unlike input
-    // gesture heuristics — covers all of them, and it releases the
-    // send-anchor's rejoin hold so live following resumes after the settle.
+    // The controller resumes following as measured content grows. The button
+    // has no separate multi-frame settling loop to fight a subsequent gesture.
     dispatchTranscriptScrollActionEvent(anchorRef.current, "rejoin-bottom");
-
-    if (settleRafRef.current != null && typeof cancelAnimationFrame === "function") {
-      cancelAnimationFrame(settleRafRef.current);
-      settleRafRef.current = null;
-    }
-
-    // `content-visibility: auto` on `.chat-message` re-measures rows as they
-    // scroll into view, so a single scrollTo undershoots the true bottom. We
-    // *follow* the bottom for a few frames until it settles — but ONLY ever move
-    // downward. Snapping to a momentarily-smaller scrollHeight (the estimate ↔
-    // real height flip-flop) would yank the viewport back up and read as violent
-    // shaking, so a target above the current position is ignored.
-    const requestFrame =
-      typeof requestAnimationFrame === "function"
-        ? requestAnimationFrame
-        : (cb) => setTimeout(cb, 16);
-    let frames = 0;
-    const step = () => {
-      settleRafRef.current = null;
-      const scrollEl = findScrollContainer(anchorRef.current);
-      const metrics = readScrollMetrics(scrollEl);
-      if (!scrollEl || !metrics) {
-        return;
-      }
-      // Only ever move DOWNWARD toward the bottom (returns null otherwise).
-      const target = nextSettleScrollTop(metrics);
-      const needsScroll = target != null;
-      if (needsScroll) {
-        if (typeof scrollEl.scrollTo === "function") {
-          scrollEl.scrollTo({ top: target, behavior: "auto" });
-        } else if ("scrollTop" in scrollEl) {
-          scrollEl.scrollTop = target;
-        }
-      }
-      frames += 1;
-      // Watch a couple of frames past "looks settled" to catch late re-measures,
-      // then stop. The cap bounds the follow to ~24 frames (~0.4s) of safety.
-      if ((needsScroll || frames < 3) && frames < 24) {
-        settleRafRef.current = requestFrame(step);
-      }
-    };
-    settleRafRef.current = requestFrame(step);
   }, []);
 
   return h(

@@ -1,0 +1,220 @@
+{
+  "baselineCommit": "dc5ca83496914d8bae6cf3f84812a0258dfd721a",
+  "scenario": "2000 messages, 50 running/completed stream updates at 50ms intervals, 12 wheel inputs, 96 typed characters",
+  "conditions": {
+    "engine": "chromium",
+    "browser": "153.0.8010.12",
+    "cpuThrottleRate": 4,
+    "tracing": false,
+    "trialsPerVersion": 3,
+    "realRelay": false
+  },
+  "baseline": [
+    {
+      "name": "measured-stream-scroll-1",
+      "frameMs": {
+        "count": 147,
+        "p50": 16.699999999999818,
+        "p95": 16.800000000000182,
+        "max": 33.40000000000009
+      },
+      "framesOver25ms": 7,
+      "estimatedMissed60HzFrames": 7,
+      "inputDispatchDelayMs": {
+        "count": 108,
+        "p50": 0.3999999910593033,
+        "p95": 33.599999994039536,
+        "max": 60
+      },
+      "inputToNextFrameMs": {
+        "count": 108,
+        "p50": 13.399999991059303,
+        "p95": 48,
+        "max": 61.80000001192093
+      },
+      "longTaskMs": {
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "typed": 96,
+      "TaskDurationMs": 1038.983,
+      "ScriptDurationMs": 662.172,
+      "LayoutDurationMs": 41.19,
+      "RecalcStyleDurationMs": 57.295
+    },
+    {
+      "name": "measured-stream-scroll-2",
+      "frameMs": {
+        "count": 143,
+        "p50": 16.699999999999818,
+        "p95": 33.299999999999955,
+        "max": 33.40000000000009
+      },
+      "framesOver25ms": 8,
+      "estimatedMissed60HzFrames": 8,
+      "inputDispatchDelayMs": {
+        "count": 108,
+        "p50": 0.3999999910593033,
+        "p95": 33.29999999701977,
+        "max": 51
+      },
+      "inputToNextFrameMs": {
+        "count": 108,
+        "p50": 13.699999988079071,
+        "p95": 33.79999999701977,
+        "max": 51.70000000298023
+      },
+      "longTaskMs": {
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "typed": 96,
+      "TaskDurationMs": 957.9929999999999,
+      "ScriptDurationMs": 633.345,
+      "LayoutDurationMs": 38.747,
+      "RecalcStyleDurationMs": 51.888999999999996
+    },
+    {
+      "name": "measured-stream-scroll-3",
+      "frameMs": {
+        "count": 143,
+        "p50": 16.699999999999818,
+        "p95": 33.299999999999955,
+        "max": 33.40000000000009
+      },
+      "framesOver25ms": 9,
+      "estimatedMissed60HzFrames": 9,
+      "inputDispatchDelayMs": {
+        "count": 108,
+        "p50": 0.29999999701976776,
+        "p95": 33.400000005960464,
+        "max": 53.80000001192093
+      },
+      "inputToNextFrameMs": {
+        "count": 108,
+        "p50": 11.400000005960464,
+        "p95": 33.70000000298023,
+        "max": 53.80000001192093
+      },
+      "longTaskMs": {
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "typed": 96,
+      "TaskDurationMs": 1148.509,
+      "ScriptDurationMs": 734.328,
+      "LayoutDurationMs": 51.33,
+      "RecalcStyleDurationMs": 64.679
+    }
+  ],
+  "controller": [
+    {
+      "name": "measured-stream-scroll-1",
+      "frameMs": {
+        "count": 143,
+        "p50": 16.699999999999932,
+        "p95": 33.19999999999982,
+        "max": 33.40000000000009
+      },
+      "framesOver25ms": 8,
+      "estimatedMissed60HzFrames": 8,
+      "inputDispatchDelayMs": {
+        "count": 108,
+        "p50": 0.29999999701976776,
+        "p95": 33.5,
+        "max": 62.5
+      },
+      "inputToNextFrameMs": {
+        "count": 108,
+        "p50": 14.700000002980232,
+        "p95": 41.20000000298023,
+        "max": 64.40000000596046
+      },
+      "longTaskMs": {
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "typed": 96,
+      "TaskDurationMs": 945.2649999999999,
+      "ScriptDurationMs": 649.501,
+      "LayoutDurationMs": 33.094,
+      "RecalcStyleDurationMs": 51.441
+    },
+    {
+      "name": "measured-stream-scroll-2",
+      "frameMs": {
+        "count": 143,
+        "p50": 16.699999999999818,
+        "p95": 33.29999999999973,
+        "max": 33.399999999999864
+      },
+      "framesOver25ms": 8,
+      "estimatedMissed60HzFrames": 8,
+      "inputDispatchDelayMs": {
+        "count": 108,
+        "p50": 0.3999999910593033,
+        "p95": 33.1000000089407,
+        "max": 50.400000005960464
+      },
+      "inputToNextFrameMs": {
+        "count": 108,
+        "p50": 13.400000005960464,
+        "p95": 33.400000005960464,
+        "max": 50.70000000298023
+      },
+      "longTaskMs": {
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "typed": 96,
+      "TaskDurationMs": 946.2230000000001,
+      "ScriptDurationMs": 655.969,
+      "LayoutDurationMs": 35.284000000000006,
+      "RecalcStyleDurationMs": 44.893
+    },
+    {
+      "name": "measured-stream-scroll-3",
+      "frameMs": {
+        "count": 145,
+        "p50": 16.699999999999818,
+        "p95": 16.799999999999955,
+        "max": 33.5
+      },
+      "framesOver25ms": 6,
+      "estimatedMissed60HzFrames": 6,
+      "inputDispatchDelayMs": {
+        "count": 108,
+        "p50": 0.30000001192092896,
+        "p95": 33.3999999910593,
+        "max": 40.5
+      },
+      "inputToNextFrameMs": {
+        "count": 108,
+        "p50": 12.400000005960464,
+        "p95": 33.79999999701977,
+        "max": 40.5
+      },
+      "longTaskMs": {
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "typed": 96,
+      "TaskDurationMs": 879.629,
+      "ScriptDurationMs": 609.533,
+      "LayoutDurationMs": 33.436,
+      "RecalcStyleDurationMs": 49.472
+    }
+  ]
+}

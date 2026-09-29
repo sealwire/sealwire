@@ -11,13 +11,9 @@
    * restores momentum scrolling on iOS (the sidebars already opt in). */
   overscroll-behavior-y: contain;
   -webkit-overflow-scrolling: touch;
-  /* `overflow-anchor: auto` is the browser-native equivalent of our manual
-   * "preserve scroll position on prepend" logic in transcript-scroll.js. With
-   * it on, prepending older messages stays visually stable without needing the
-   * JS scrollHeight-delta math to run during the same frame as the React
-   * commit. The JS path still runs for cases where we deliberately want to
-   * override (thread switch → jump to bottom; new user message → pin to top
-   * via scrollIntoView). */
+  /* The transcript controller preserves a semantic reading anchor. Browser
+   * anchoring would apply a second, unrelated correction to the same resize. */
+  overflow-anchor: none;
   padding: 32px 32px 160px;
   scroll-padding-bottom: 160px;
 }
@@ -151,12 +147,8 @@
 
 .chat-message {
   min-width: 0;
-  /* Off-screen messages skip layout / paint until they scroll into view. The
-   * `auto` keyword uses the last-rendered size once known, falling back to
-   * the 200px estimate, so the scrollbar stays accurate. Cheaper than
-   * full virtualization and effective on long transcripts. */
-  content-visibility: auto;
-  contain-intrinsic-size: auto 200px;
+  /* Long transcripts are virtualized. Render mounted messages at their real
+   * height so focus and paint never replace a second set of size estimates. */
 }
 
 /* Entries that just landed via an older-page fetch get a one-shot fade +
@@ -591,16 +583,6 @@
     opacity: 1;
     pointer-events: auto;
   }
-
-  /* The toolbar overhangs the top edge, which the row's paint containment clips. */
-  .chat-message-assistant.has-message-toolbar:hover {
-    content-visibility: visible;
-  }
-}
-
-.chat-message-assistant.has-message-toolbar:focus-within,
-.chat-message-assistant.has-message-toolbar[data-toolbar-open="true"] {
-  content-visibility: visible;
 }
 
 .chat-message-assistant.has-message-toolbar[data-toolbar-open="true"] .message-card {
