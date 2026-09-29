@@ -20,6 +20,7 @@ import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { chromium, webkit } from "playwright";
 
 import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
@@ -58,7 +59,7 @@ function readAndroidContentTop() {
 
 // The relay, stubbed in the page: a paired profile, and a socket that answers like one.
 // Serialised by Playwright into each page, so it must close over nothing.
-function installFakeRelay({ relayId, threadId, projectId, projectName, fullText }) {
+export function installFakeRelay({ relayId, threadId, projectId, projectName, fullText }) {
   const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state";
   const REMOTE_STATE_SCHEMA_VERSION = 1;
   const REMOTE_SECRET_DB_NAME = "agent-relay-secrets";
@@ -379,13 +380,15 @@ function installFakeRelay({ relayId, threadId, projectId, projectName, fullText 
   window.WebSocket = FakeWebSocket;
 }
 
-const FIXTURE = {
+export const REMOTE_COMPOSER_FIXTURE = {
   relayId: RELAY_ID,
   threadId: THREAD_ID,
   projectId: PROJECT_ID,
   projectName: PROJECT_NAME,
   fullText: FULL_TEXT,
 };
+
+const FIXTURE = REMOTE_COMPOSER_FIXTURE;
 
 async function openComposer(page, origin) {
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
@@ -1335,7 +1338,9 @@ function buildFullTranscriptText() {
   return `Store this exact user message in the thread history.\n${segments.join(" ")}`;
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack || error.message : String(error));
-  process.exitCode = 1;
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack || error.message : String(error));
+    process.exitCode = 1;
+  });
+}

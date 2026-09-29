@@ -151,6 +151,7 @@
     "test:browser:public:fake": "node scripts/e2e/run-browser-suite.mjs --suite public-full --fake",
     "test:browser:android": "npm run build && ANDROID_E2E=1 node scripts/browser-android-dialog-menus-e2e.mjs",
     "test:browser:android:composer": "npm run build && ANDROID_E2E=1 node scripts/browser-remote-composer-commands-e2e.mjs",
+    "test:browser:ios:composer": "scripts/with-private.sh sh -c 'npm run build && node scripts/browser-ios-remote-composer-commands-e2e.mjs'",
     "live": "node scripts/live-browser.mjs"
   },
   "dependencies": {

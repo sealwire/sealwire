@@ -691,6 +691,18 @@
         "touch-input"
       ]
     },
+    "ios-remote-composer-commands": {
+      "script": "browser-ios-remote-composer-commands-e2e.mjs",
+      "tier": "manual",
+      "provider": "fake-compatible",
+      "transport": "remote",
+      "coverage": [
+        "composer-commands",
+        "real-mobile-browser",
+        "mobile-safari",
+        "touch-input"
+      ]
+    },
     "local-ask-user-click": {
       "script": "browser-local-ask-user-click-e2e.mjs",
       "tier": "core",
