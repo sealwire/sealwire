@@ -230,6 +230,21 @@ test("branch 4: a view-only thread whose load failed shows the reason, not Loadi
   }
 });
 
+// A read that succeeded and found nothing is finished; "Loading" there never ends.
+test("branch 4: a loaded view-only thread with no messages says so, not Loading", () => {
+  const view = mount();
+  try {
+    view.render({ entries: [], viewOnly: true, viewOnlyLoaded: true });
+    assert.match(view.host.textContent, /No messages yet/);
+    assert.doesNotMatch(view.host.textContent, /Loading/);
+
+    view.render({ entries: [], viewOnly: true, viewOnlyLoaded: false });
+    assert.match(view.host.textContent, /Loading this saved session's conversation/);
+  } finally {
+    view.unmount();
+  }
+});
+
 test("branch 5: empty + no approval renders the standby thunk only when there is no active thread", () => {
   const view = mount();
   let standbyCalls = 0;

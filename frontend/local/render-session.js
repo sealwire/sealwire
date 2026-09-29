@@ -1505,6 +1505,10 @@ export function createSessionRenderer({
         shortId,
         standbyCanWrite: canCurrentDeviceWrite(session),
         viewOnly: Boolean(session.view_only),
+        viewOnlyLoaded:
+          state.viewOnlyThread?.threadId === state.viewThreadId &&
+          !state.viewOnlyThread?.loading &&
+          !state.viewOnlyThread?.error,
         viewOnlyLoadError:
           state.viewOnlyThread?.threadId === state.viewThreadId
             ? state.viewOnlyThread?.loadError || null

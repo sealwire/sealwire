@@ -30,6 +30,7 @@ export function LocalTranscriptPanel({
   shortId,
   standbyCanWrite,
   viewOnly,
+  viewOnlyLoaded = false,
   viewOnlyLoadError = null,
   viewOnlyReviewView,
   viewedThreadLocked,
@@ -113,6 +114,13 @@ export function LocalTranscriptPanel({
       copy: viewOnlyLoadError,
       details: ["Retrying automatically."],
       title: "Couldn't load this conversation",
+    });
+  } else if (!entries.length && viewOnly && viewOnlyLoaded) {
+    content = h(ConversationEmptyState, {
+      badge: viewOnlyReviewView ? "Review" : "Read-only",
+      className: "thread-empty-ready",
+      copy: "This session has no messages yet.",
+      title: "No messages yet",
     });
   } else if (!entries.length && viewOnly) {
     // A view-only thread whose transcript hasn't loaded yet — calm placeholder
