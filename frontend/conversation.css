@@ -883,7 +883,6 @@ button.tool-run-row:focus-visible {
 }
 
 .tool-run-subtitle {
-  font-size: var(--text-ui);
   color: var(--text-2);
   overflow-wrap: anywhere;
 }
@@ -895,12 +894,30 @@ button.tool-run-row:focus-visible {
   border-radius: 8px;
   background: var(--surface-0);
   font-family: var(--font-mono);
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
   line-height: var(--leading-relaxed);
   color: var(--text-1);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-all;
+}
+
+/* An opened tool reads at its row's command size; a long one scrolls inside
+ * about 20 lines instead of pushing the conversation a screen away. */
+/* `.tool-log-block` so a long result outranks `.collapsible-pre`'s cap, which the approval card keeps. */
+.command-detail,
+.tool-run-full-command,
+.tool-log-block .tool-log-pre {
+  max-height: 30em;
+  overflow-y: auto;
+}
+
+@media (max-width: 640px) {
+  .command-detail,
+  .tool-run-full-command,
+  .tool-log-block .tool-log-pre {
+    max-height: 18em;
+  }
 }
 
 .tool-run-output-tail {
@@ -1502,11 +1519,13 @@ button.tool-run-row:focus-visible {
   width: auto;
   min-width: 0;
   max-width: 100%;
-  padding: 8px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-0);
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: var(--text-ui);
-  line-height: var(--leading-normal);
+  font-size: var(--text-xs);
+  line-height: var(--leading-relaxed);
   white-space: pre-wrap;
   overflow-x: auto;
   overflow-wrap: anywhere;
@@ -1544,11 +1563,12 @@ button.tool-run-row:focus-visible {
 
 .tool-log-pre {
   margin: 0;
-  background: transparent;
+  background: var(--surface-0);
   border: 0;
-  padding: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
   font-family: var(--font-mono);
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
   line-height: var(--leading-relaxed);
   white-space: pre-wrap;
   overflow-x: auto;

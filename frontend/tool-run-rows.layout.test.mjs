@@ -272,3 +272,160 @@ test("an opened file-change group matches tool-group density on the hairline", a
     await browser.close();
   }
 });
+
+const SHELL = `/bin/zsh -lc "command -v superset; test -f /Users/luchi/.codex/plugins/cache/browser-client.mjs"`;
+const manyLines = (n) => Array.from({ length: n }, (_, i) => `line ${i} -rwxr-xr-x 1 luchi staff 122 /Users/luchi/bin/tool`).join("\n");
+const codexCommand = (id, status, output) => ({
+  item_id: id,
+  kind: "command",
+  status,
+  text: `${SHELL}\n${output}`,
+  tool: { command: SHELL },
+});
+const claudeBash = (id, status, { command = "npm run build", result = "ok" } = {}) => ({
+  item_id: id,
+  kind: "tool_call",
+  status,
+  tool: {
+    item_type: "toolCall",
+    name: "Bash",
+    title: "Run the build script",
+    detail: "Build it",
+    command,
+    result_preview: result,
+  },
+});
+const opened = (...ids) => new Set(ids.flatMap((id) => [`group:${id}`, `entry:${id}`, `tool:${id}:result`]));
+
+// Opened, a Codex command read at 13px and Claude's Bash at 12px, under an 11px row.
+test("an opened tool's text is no larger than the row it opened from, running or done", async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await render(
+      page,
+      [
+        codexCommand("c1", "completed", "done"),
+        agent("a1", "next"),
+        codexCommand("c2", "running", "still going"),
+        agent("a2", "next"),
+        claudeBash("b1", "completed"),
+        agent("a3", "next"),
+        claudeBash("b2", "running"),
+      ],
+      { expandedKeys: opened("c1", "c2", "b1", "b2") }
+    );
+    const m = await page.evaluate(() => {
+      const size = (node) => getComputedStyle(node).fontSize;
+      const all = (selector) => [...document.querySelectorAll(selector)];
+      return {
+        rowCommand: size(document.querySelector(".tool-run-command")),
+        rowTitle: size(document.querySelector('[data-transcript-entry-id="b1"] .tool-run-title')),
+        bodies: all(".command-detail, .tool-run-full-command, .tool-log-pre").map((node) => [node.className, size(node)]),
+        subtitles: all(".tool-run-subtitle").map(size),
+      };
+    });
+    assert.ok(m.bodies.length >= 6, `expected every opened body, got ${m.bodies.length}`);
+    for (const [name, value] of m.bodies) {
+      assert.equal(value, m.rowCommand, `${name} reads at ${value}, the row's command at ${m.rowCommand}`);
+    }
+    assert.equal(m.subtitles.length, 2);
+    for (const value of m.subtitles) {
+      assert.ok(parseFloat(value) <= parseFloat(m.rowTitle), `subtitle ${value} above row title ${m.rowTitle}`);
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test("a long opened tool body scrolls inside a bounded box; a short one is left alone", async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await render(
+      page,
+      [
+        codexCommand("c1", "completed", manyLines(200)),
+        agent("a1", "next"),
+        codexCommand("c2", "running", manyLines(200)),
+        agent("a2", "next"),
+        claudeBash("b1", "completed", { command: `cat <<'EOF'\n${manyLines(200)}\nEOF`, result: manyLines(200) }),
+        agent("a3", "next"),
+        codexCommand("c3", "completed", "one line"),
+      ],
+      { expandedKeys: opened("c1", "c2", "b1", "c3") }
+    );
+    const m = await page.evaluate(() => {
+      const box = (selector) => {
+        const node = document.querySelector(selector);
+        return {
+          height: Math.round(node.getBoundingClientRect().height),
+          overflows: node.scrollHeight - node.clientHeight,
+          overflowY: getComputedStyle(node).overflowY,
+        };
+      };
+      return {
+        long: {
+          done: box('[data-transcript-entry-id="c1"] .command-detail'),
+          running: box('[data-transcript-entry-id="c2"] .command-detail'),
+          command: box('[data-transcript-entry-id="b1"] .tool-run-full-command'),
+          result: box('[data-transcript-entry-id="b1"] .message-collapsible-full .tool-log-pre'),
+        },
+        short: box('[data-transcript-entry-id="c3"] .command-detail'),
+      };
+    });
+    for (const [name, b] of Object.entries(m.long)) {
+      assert.ok(b.height >= 150 && b.height <= 400, `${name} box is ${b.height}px tall`);
+      assert.ok(b.overflows > 1000, `${name} keeps the rest of its lines to scroll to (${b.overflows}px)`);
+      assert.ok(["auto", "scroll"].includes(b.overflowY), `${name} scrolls inside (${b.overflowY})`);
+    }
+    assert.ok(m.short.overflows <= 0, "a short body needs no scrolling");
+    assert.ok(m.short.height < 80, `a short body stays short (${m.short.height}px)`);
+  } finally {
+    await browser.close();
+  }
+});
+
+// A phone screen holds far less, so the box stops at about 12 lines there, 20 elsewhere.
+test("an opened tool body shows about 20 lines on a wide screen and about 12 on a phone", async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const visibleLines = async (viewport) => {
+      const page = await browser.newPage({ viewport });
+      const markup = renderToStaticMarkup(
+        h(TranscriptContent, {
+          entries: [
+            codexCommand("c1", "completed", manyLines(200)),
+            agent("a1", "next"),
+            claudeBash("b1", "completed", { result: manyLines(200) }),
+          ],
+          options: { expandedKeys: opened("c1", "b1") },
+        })
+      );
+      await page.setContent(
+        `<!doctype html><html><head><style>${css}</style></head><body>
+          <div class="chat-thread">${markup}</div></body></html>`,
+        { waitUntil: "load" }
+      );
+      const lines = await page.evaluate(() =>
+        ['[data-transcript-entry-id="c1"] .command-detail', '[data-transcript-entry-id="b1"] .message-collapsible-full .tool-log-pre']
+          .map((selector) => {
+            const node = document.querySelector(selector);
+            const style = getComputedStyle(node);
+            const inner = node.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+            return Math.round(inner / parseFloat(style.lineHeight));
+          })
+      );
+      await page.close();
+      return lines;
+    };
+    for (const lines of await visibleLines({ width: 1200, height: 900 })) {
+      assert.ok(lines >= 18 && lines <= 21, `wide screen shows ${lines} lines`);
+    }
+    for (const lines of await visibleLines({ width: 390, height: 844 })) {
+      assert.ok(lines >= 11 && lines <= 13, `phone shows ${lines} lines`);
+    }
+  } finally {
+    await browser.close();
+  }
+});
