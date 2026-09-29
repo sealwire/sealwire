@@ -126,9 +126,10 @@ enum SessionTools {
     },
     /// A team seat: read-only tools, built-ins untouched.
     Seat { run_id: String },
-    /// An unrestricted session, so it can bring in another agent. Built-ins
-    /// stay: stripping them would leave a coding session unable to code.
-    Peer,
+    /// An ordinary session: it can answer whoever asked it and, when unrestricted,
+    /// bring in another agent. Built-ins stay: stripping them would leave a coding
+    /// session unable to code.
+    Peer { unrestricted: bool },
     /// Everything else: no sealwire tools at all.
     None,
 }
@@ -152,12 +153,10 @@ fn resolve_session_tools(
     if let Some(run_id) = seat_run_id {
         return SessionTools::Seat { run_id };
     }
-    // Two gates, and both must hold. `standalone` also covers a reviewer and a Code
-    // Flow step, which permissions cannot: a reviewer inherits the wide ones it needs in
-    // order to read. Unrestricted stays because a restricted session could otherwise ask
-    // a freer agent to do what it may not.
-    if standalone && unrestricted {
-        return SessionTools::Peer;
+    // `standalone` also covers a reviewer and a Code Flow step, which permissions
+    // cannot: a reviewer inherits the wide ones it needs in order to read.
+    if standalone {
+        return SessionTools::Peer { unrestricted };
     }
     SessionTools::None
 }
@@ -216,10 +215,11 @@ async fn attach_orchestrator_session(
         // The caller's own thread id rides in the env, so the relay learns who is
         // asking from the subprocess it launched rather than from the model —
         // which could otherwise name any thread it liked.
-        SessionTools::Peer => {
+        SessionTools::Peer { unrestricted } => {
             let token = { state.write().await.ask_token_for_thread(thread_id) };
             cmd["mcpServers"] = peer_mcp_config(worker_path, &token);
-            cmd["allowedTools"] = peer_allowed_tools();
+            let server = crate::provider::relay_mcp_server_name(&token);
+            cmd["allowedTools"] = peer_allowed_tools(&server, unrestricted);
         }
         SessionTools::None => {}
     }
@@ -227,11 +227,13 @@ async fn attach_orchestrator_session(
 
 /// Auto-allow the peer tools, for the same reason the Orchestrator's are:
 /// otherwise every call stops for an approval the agent cannot answer.
-fn peer_allowed_tools() -> Value {
+/// Following the permission level also makes the worker rebuild the session when it
+/// changes, which is what re-lists the tools.
+fn peer_allowed_tools(server: &str, unrestricted: bool) -> Value {
     Value::Array(
-        crate::orchestrator_tools::peer_tools()
+        crate::orchestrator_tools::peer_tools_for(unrestricted)
             .iter()
-            .map(|tool| Value::String(format!("mcp__sealwire__{}", tool.name)))
+            .map(|tool| Value::String(format!("mcp__{server}__{}", tool.name)))
             .collect(),
     )
 }
@@ -256,14 +258,17 @@ fn peer_mcp_config_with_transport(
     relay_api_token: Option<&str>,
 ) -> Value {
     let mut config = orchestrator_mcp_config_with_transport(worker_path, "", relay_api_token);
-    if let Some(env) = config["sealwire"]["env"].as_object_mut() {
+    let mut server = config["sealwire"].take();
+    if let Some(env) = server["env"].as_object_mut() {
         env.remove("SEALWIRE_DEVICE_ID");
         env.insert(
             "SEALWIRE_ASK_TOKEN".to_string(),
             Value::String(token.to_string()),
         );
     }
-    config
+    let mut named = serde_json::Map::new();
+    named.insert(crate::provider::relay_mcp_server_name(token), server);
+    Value::Object(named)
 }
 
 /// Auto-allow MCP tools (`acceptEdits` does not).
@@ -2872,7 +2877,7 @@ mod tests {
         );
         assert_eq!(
             resolve_session_tools(None, None, true, true),
-            SessionTools::Peer
+            SessionTools::Peer { unrestricted: true }
         );
 
         // A reviewer or a Code Flow step: no run owns it, and its permissions are wide
@@ -2892,10 +2897,17 @@ mod tests {
         // The escalation is "a restricted agent gets a freer one to act for it".
         // Offering the tool only to an already-unrestricted session removes that
         // case rather than guarding against it: there is nothing to escalate to.
+        // Answering whoever asked is only a reply, so that one tool it keeps.
         assert_eq!(
             resolve_session_tools(None, None, true, false),
-            SessionTools::None,
-            "a restricted session is offered nothing at all",
+            SessionTools::Peer {
+                unrestricted: false
+            },
+        );
+        assert_eq!(
+            super::peer_allowed_tools("sealwire-0a1b2c3d4e5f", false),
+            serde_json::json!(["mcp__sealwire-0a1b2c3d4e5f__report_back"]),
+            "a restricted session is offered nothing else",
         );
 
         assert!(session_is_unrestricted("bypass", "workspace-write"));
@@ -2920,18 +2932,22 @@ mod tests {
         // `tools: []` strips Bash/Edit. Right for the Orchestrator, fatal for a
         // session that is supposed to keep coding while a peer helps.
         let mut cmd = serde_json::json!({});
+        let server = crate::provider::relay_mcp_server_name("tok-9");
         match resolve_session_tools(None, None, true, true) {
-            SessionTools::Peer => {
+            SessionTools::Peer { unrestricted } => {
                 cmd["mcpServers"] = super::peer_mcp_config("/w/worker.mjs", "tok-9");
-                cmd["allowedTools"] = super::peer_allowed_tools();
+                cmd["allowedTools"] = super::peer_allowed_tools(&server, unrestricted);
             }
             other => panic!("expected Peer, got {other:?}"),
         }
         assert!(cmd.get("tools").is_none(), "built-ins must not be stripped");
+        // A project's own `.mcp.json` may name a server `sealwire`; auto-allowing its tools
+        // would run them unasked, so the relay's is attached under a name no config can take.
+        assert!(cmd["mcpServers"].get("sealwire").is_none(), "{cmd}");
 
         // The caller's identity comes from the subprocess env, not from the
         // model — the model could otherwise name any thread it liked.
-        let env = &cmd["mcpServers"]["sealwire"]["env"];
+        let env = &cmd["mcpServers"][server.as_str()]["env"];
         assert_eq!(env["SEALWIRE_ASK_TOKEN"], "tok-9");
         assert!(
             env.get("SEALWIRE_DEVICE_ID").is_none(),
@@ -2947,7 +2963,7 @@ mod tests {
             .map(|tool| tool.as_str().expect("each is a string"))
             .collect();
         for tool in crate::orchestrator_tools::PEER_TOOLS {
-            let expected = format!("mcp__sealwire__{tool}");
+            let expected = format!("mcp__{server}__{tool}");
             assert!(
                 allowed.contains(&expected.as_str()),
                 "{expected} must be auto-allowed",
@@ -3604,9 +3620,11 @@ for await (const line of rl) {
             crate::provider::sealwire_relay_api_token_from(Some("  secret  ".to_string()))
                 .as_deref(),
         );
-        assert_eq!(peer["sealwire"]["env"]["RELAY_API_TOKEN"], "secret");
-        assert_eq!(peer["sealwire"]["env"]["SEALWIRE_ASK_TOKEN"], "tok-1");
-        assert!(peer["sealwire"]["env"].get("SEALWIRE_DEVICE_ID").is_none());
+        let server = crate::provider::relay_mcp_server_name("tok-1");
+        let server = server.as_str();
+        assert_eq!(peer[server]["env"]["RELAY_API_TOKEN"], "secret");
+        assert_eq!(peer[server]["env"]["SEALWIRE_ASK_TOKEN"], "tok-1");
+        assert!(peer[server]["env"].get("SEALWIRE_DEVICE_ID").is_none());
 
         for absent in [
             crate::provider::sealwire_relay_api_token_from(None),
@@ -3624,7 +3642,7 @@ for await (const line of rl) {
                 "tok-1",
                 absent.as_deref(),
             );
-            assert!(peer["sealwire"]["env"].get("RELAY_API_TOKEN").is_none());
+            assert!(peer[server]["env"].get("RELAY_API_TOKEN").is_none());
         }
     }
 

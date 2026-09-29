@@ -72,3 +72,31 @@
   border-radius: 999px;
   background: var(--warn-fg);
 }
+
+/* Where the answer rests (25a / 25b): one quiet line under it. */
+.delegate-card-cited {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+}
+.delegate-card-cited-places {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+}
+.delegate-card-cited-place {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--accent);
+}
+/* The brief's labels are single words ("Context"); 25b gives them a narrower column. */
+@container handover-card (min-width: 401px) {
+  .delegate-card .handover-section:not(.is-untitled) {
+    grid-template-columns: 90px minmax(0, 1fr);
+  }
+}

@@ -227,6 +227,7 @@ pub(crate) struct DelegateMark {
     pub(crate) status: String,
     pub(crate) error: Option<String>,
     pub(crate) answer: Option<String>,
+    pub(crate) cited: Vec<String>,
     pub(crate) answered_with_tool: bool,
     pub(crate) delivered: bool,
     pub(crate) asked_at: u64,
@@ -677,6 +678,11 @@ fn delegate_card(
             .as_deref()
             .filter(|_| draws_answer)
             .map(|answer| clip_chars(answer, CARD_ANSWER_CHARS)),
+        cited: if draws_answer {
+            mark.cited.clone()
+        } else {
+            Vec::new()
+        },
         answered_with_tool: mark.answered_with_tool,
         delivered: mark.delivered,
         asked_at: mark.asked_at,

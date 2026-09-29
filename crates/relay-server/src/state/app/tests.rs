@@ -29568,19 +29568,22 @@ mod ask_tests {
 
         // A thread nobody asked has nothing to answer.
         assert!(
-            app.report_back(&asker, "not mine to give".to_string())
+            app.report_back(&asker, "not mine to give".to_string(), Vec::new())
                 .await
                 .is_err(),
             "only the agent that was asked may answer",
         );
         assert!(
-            app.report_back(&peer, "   ".to_string()).await.is_err(),
+            app.report_back(&peer, "   ".to_string(), Vec::new())
+                .await
+                .is_err(),
             "an empty answer tells the other agent nothing",
         );
 
         app.report_back(
             &peer,
             "Fixed it; you still need to pick the cap.".to_string(),
+            Vec::new(),
         )
         .await
         .expect("the peer answers");
@@ -29598,10 +29601,122 @@ mod ask_tests {
         // And a second answer cannot overwrite the first.
         drop(relay);
         assert!(
-            app.report_back(&peer, "actually, something else".to_string())
+            app.report_back(&peer, "actually, something else".to_string(), Vec::new())
                 .await
                 .is_err(),
             "a settled ask is not still waiting",
+        );
+    }
+
+    // Answering is a reply, not a way to act, so a restricted peer gets that one tool —
+    // and still none of the ones that could borrow a freer agent's reach.
+    #[tokio::test]
+    async fn a_restricted_session_may_answer_but_not_bring_in_agents() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("never".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+                sandbox: Some("workspace-write".to_string()),
+            })
+            .await
+            .expect("asker starts")
+            .active_thread_id
+            .clone()
+            .expect("thread");
+        let asker_token = app.ask_token_for_thread(&asker).await;
+        let peer = app
+            .delegate(
+                &asker,
+                AskRequest {
+                    device_id: None,
+                    started_by: relay_api::delegation::StartedBy::Person,
+                    peer_thread_id: None,
+                    provider: Some("fake".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "have a look".to_string(),
+                },
+            )
+            .await
+            .expect("a person may delegate from a restricted session");
+        let token = app.ask_token_for_thread(&peer).await;
+
+        for token in [&asker_token, &token] {
+            let listed: Vec<String> = app
+                .list_peer_tools_for(token)
+                .await
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect();
+            assert_eq!(listed, vec!["report_back".to_string()]);
+        }
+        for tool in crate::orchestrator_tools::PEER_TOOLS {
+            if *tool == "report_back" {
+                continue;
+            }
+            let error = app
+                .call_peer_tool(tool, &serde_json::json!({ "message": "x" }), &token)
+                .await
+                .expect_err("a restricted session may not reach past itself");
+            assert!(error.contains("permissions"), "{tool}: {error}");
+        }
+        let error = app
+            .call_peer_tool(
+                "report_back",
+                &serde_json::json!({ "answer": "x" }),
+                &asker_token,
+            )
+            .await
+            .expect_err("the asker was not asked anything");
+        assert!(error.contains("nobody is waiting"), "{error}");
+
+        app.call_peer_tool(
+            "report_back",
+            &serde_json::json!({ "answer": "It retries forever." }),
+            &token,
+        )
+        .await
+        .expect("the restricted peer answers with the tool");
+        let relay = app.relay.read().await;
+        let ask = relay.asks_of_asker(&asker)[0].clone();
+        assert!(ask.answered_with_tool);
+        assert_eq!(ask.answer.as_deref(), Some("It retries forever."));
+    }
+
+    // Codex and cursor list the tools before the session has an id to bind the token
+    // to, so a restricted one must already be told apart then.
+    #[tokio::test]
+    async fn a_token_not_yet_bound_lists_what_its_session_will_be_allowed() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        let (restricted, unrestricted) = {
+            let mut relay = app.relay.write().await;
+            (
+                relay.mint_unbound_ask_token(false),
+                relay.mint_unbound_ask_token(true),
+            )
+        };
+        let listed: Vec<String> = app
+            .list_peer_tools_for(&restricted)
+            .await
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(listed, vec!["report_back".to_string()]);
+        assert_eq!(
+            app.list_peer_tools_for(&unrestricted).await.len(),
+            crate::orchestrator_tools::PEER_TOOLS.len()
         );
     }
 
@@ -32735,8 +32850,8 @@ watchdog settle this Blocked",
 
     #[tokio::test]
     async fn a_session_that_cannot_end_a_goal_is_not_given_one() {
-        // The three stopping tools ride the same token as `delegate`, which only
-        // an unrestricted session is handed. Driving a restricted one would hand
+        // The three stopping tools are, like `delegate`, only offered to an
+        // unrestricted session. Driving a restricted one would hand
         // it the objective twenty times over while telling it to stop by calling
         // tools it does not have.
         let project = TempDir::new().expect("tempdir");
@@ -33394,7 +33509,7 @@ watchdog settle this Blocked",
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
 
-        // Unrestricted, because that is the only kind a bridge ever hands a token to.
+        // Unrestricted, because only that kind may call `delegate`.
         let asker = goal_session(&app, &cwd).await;
 
         let args = serde_json::json!({ "message": "do the thing", "provider": "fake" });
@@ -33876,7 +33991,7 @@ mod delegate_card_tests {
             .await
             .expect("the ask goes through");
         row_marked(&app, &peer, InjectionKind::DelegateTask).await;
-        app.report_back(&peer, "It retries forever.".to_string())
+        app.report_back(&peer, "It retries forever.".to_string(), Vec::new())
             .await
             .expect("reported");
 
@@ -33946,15 +34061,37 @@ mod delegate_card_tests {
         );
     }
 
-    /// The row that answered carries its own mark, so the card does not depend on the task
-    /// row being loaded too.
+    /// A peer that never calls the tool is reminded once, then the reply that answered
+    /// carries its own mark, so the card does not depend on the task row being loaded too.
     #[tokio::test]
     async fn the_reply_that_answered_is_marked_where_it_is() {
         let project = TempDir::new().expect("tempdir");
         let cwd = project.path().to_string_lossy().to_string();
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
-        // Not unrestricted, so the peer has no tool and answers in its reply.
+        let asker = session(&app, &cwd).await;
+        let peer = app
+            .delegate(&asker, request(StartedBy::Agent, "look at the retry loop"))
+            .await
+            .expect("the ask goes through");
+
+        let (row, mark) = row_marked(&app, &peer, InjectionKind::DelegateReported).await;
+        let ask = only_ask(&app, &asker).await;
+        assert!(ask.nudged, "reminded before its reply was taken");
+        assert!(!ask.answered_with_tool);
+        assert_eq!(row.kind, crate::protocol::TranscriptEntryKind::AgentText);
+        assert_eq!(row.text, ask.answer, "the reply that became the answer");
+        assert_eq!(mark.delegates()[0].id, ask.id);
+    }
+
+    // Restricted peers have `report_back` too, so they are told to use it and reminded
+    // once like any other; being told to answer in prose would leave the tool unused.
+    #[tokio::test]
+    async fn a_restricted_peer_is_told_to_report_back_and_reminded_once() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
         let asker = app
             .start_session(crate::protocol::StartSessionInput {
                 cwd: Some(cwd.clone()),
@@ -33965,7 +34102,7 @@ mod delegate_card_tests {
                 model: None,
                 effort: None,
                 project_id: None,
-                sandbox: None,
+                sandbox: Some("workspace-write".to_string()),
             })
             .await
             .expect("session starts")
@@ -33973,15 +34110,68 @@ mod delegate_card_tests {
             .clone()
             .expect("thread");
         let peer = app
-            .delegate(&asker, request(StartedBy::Agent, "look at the retry loop"))
+            .delegate(&asker, request(StartedBy::Person, "look at the retry loop"))
             .await
             .expect("the ask goes through");
 
-        let (row, mark) = row_marked(&app, &peer, InjectionKind::DelegateReported).await;
-        let ask = only_ask(&app, &asker).await;
-        assert_eq!(row.kind, crate::protocol::TranscriptEntryKind::AgentText);
-        assert_eq!(row.text, ask.answer, "the reply that became the answer");
-        assert_eq!(mark.delegates()[0].id, ask.id);
+        let (task, _) = row_marked(&app, &peer, InjectionKind::DelegateTask).await;
+        let text = task.text.unwrap_or_default();
+        assert!(text.contains("call the `report_back` tool"), "{text}");
+        row_marked(&app, &peer, InjectionKind::DelegateNudge).await;
+        row_marked(&app, &peer, InjectionKind::DelegateReported).await;
+        assert!(only_ask(&app, &asker).await.nudged);
+    }
+
+    // Design 25a/25b: where the answer's evidence is shows under it, at both ends, and
+    // nowhere the answer itself is not drawn.
+    #[tokio::test]
+    async fn the_places_an_answer_cites_ride_on_both_answer_cards() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = session(&app, &cwd).await;
+        let peer = app
+            .delegate(&asker, request(StartedBy::Agent, "look at the retry loop"))
+            .await
+            .expect("the ask goes through");
+        row_marked(&app, &peer, InjectionKind::DelegateTask).await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.upsert_transcript_item_for_thread(
+                &peer,
+                "call-report".to_string(),
+                crate::protocol::TranscriptEntryKind::ToolCall,
+                None,
+                "completed".to_string(),
+                None,
+                Some(crate::protocol::ToolCallView {
+                    item_type: "mcpToolCall".to_string(),
+                    name: "mcp__sealwire__report_back".to_string(),
+                    title: "report_back".to_string(),
+                    ..crate::protocol::ToolCallView::command_execution(None)
+                }),
+            );
+        }
+        let long = format!("src/{}.rs:9", "x".repeat(400));
+        let mut cited = vec!["remote/ask.js:42".to_string(), long];
+        cited.extend((0..20).map(|line| format!("src/lib.rs:{line}")));
+        app.report_back(&peer, "It retries forever.".to_string(), cited)
+            .await
+            .expect("reported");
+
+        let (_, reported) = row_marked(&app, &peer, InjectionKind::DelegateReported).await;
+        let (_, answered) = row_marked(&app, &asker, InjectionKind::DelegateAnswer).await;
+        for card in [&reported.delegates()[0], &answered.delegates()[0]] {
+            assert_eq!(card.cited.len(), crate::state::delegation::MAX_CITED);
+            assert_eq!(card.cited[0], "remote/ask.js:42");
+            assert!(card.cited[1].chars().count() <= crate::state::delegation::MAX_CITED_CHARS + 1);
+        }
+        let (_, given) = row_marked(&app, &peer, InjectionKind::DelegateTask).await;
+        assert!(
+            given.delegates()[0].cited.is_empty(),
+            "the task card draws no answer"
+        );
     }
 
     #[tokio::test]
@@ -34013,7 +34203,7 @@ mod delegate_card_tests {
                 }),
             );
         }
-        app.report_back(&peer, "It retries forever.".to_string())
+        app.report_back(&peer, "It retries forever.".to_string(), Vec::new())
             .await
             .expect("reported");
 
@@ -34037,7 +34227,7 @@ mod delegate_card_tests {
         )
         .await
         .expect("asked again");
-        app.report_back(&peer, "No backoff at all.".to_string())
+        app.report_back(&peer, "No backoff at all.".to_string(), Vec::new())
             .await
             .expect("reported");
 

@@ -20,6 +20,9 @@ use super::unix_now;
 // for that ledger, not a second copy of the peer sessions' transcripts.
 const ASK_TITLE_MAX_CHARS: usize = 76;
 const ASK_RESULT_MAX_CHARS: usize = 160;
+/// Bounds what `report_back` may cite: the list rides on every row that draws the answer.
+pub(crate) const MAX_CITED: usize = 8;
+pub(crate) const MAX_CITED_CHARS: usize = 160;
 
 /// `Default` + `#[serde(default)]` give forward-compat: a record written by a
 /// future build still decodes, missing fields fall back, unknown ones are ignored.
@@ -68,6 +71,9 @@ pub(crate) struct Ask {
     pub(crate) nudged: bool,
     /// What came back.
     pub(crate) answer: Option<String>,
+    /// The `path:line` places the answer rests on, as `report_back` passed them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) cited: Vec<String>,
     pub(crate) status: AskStatus,
     pub(crate) error: Option<String>,
     /// Whether the answer has been handed back to the asker yet.
@@ -115,6 +121,7 @@ impl Ask {
             turn_id: None,
             nudged: false,
             answer: None,
+            cited: Vec::new(),
             status: AskStatus::Working,
             error: None,
             delivered: false,

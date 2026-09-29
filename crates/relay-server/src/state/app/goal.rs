@@ -48,9 +48,8 @@ done in prose does not end it. Turn {next} of {max_turns}.",
 
 /// Whether this session would still be handed the tools that end a goal.
 ///
-/// They ride the same token as `delegate`, which only an unrestricted session
-/// gets — so this is checked again before every driven turn, not just when the
-/// goal is set. Settings can be changed on any idle thread, and a goal between
+/// Like `delegate`, only an unrestricted session is offered them — so this is
+/// checked again before every driven turn, not just when the goal is set. Settings can be changed on any idle thread, and a goal between
 /// turns is idle.
 fn thread_can_end_a_goal(relay: &crate::state::RelayState, thread_id: &str) -> bool {
     relay

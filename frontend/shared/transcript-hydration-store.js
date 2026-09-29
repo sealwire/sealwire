@@ -1771,17 +1771,22 @@ function mergeTranscriptEntry(existing, incoming) {
   };
 }
 
-// A snapshot clips a delegate card's answer with the row; the copy read whole keeps its own.
+// A snapshot clips a delegate card's answer and cited places with the row; the copy read
+// whole keeps its own.
 function mergeInjection(existing, incoming, incomingFull) {
   if (incomingFull || !existing?.delegate || !incoming.delegate) {
     return incoming;
   }
-  const held = new Map(existing.delegate.map((ask) => [ask.id, ask.answer]));
+  const held = new Map(existing.delegate.map((ask) => [ask.id, ask]));
   return {
     ...incoming,
     delegate: incoming.delegate.map((ask) => {
-      const answer = held.get(ask.id);
-      return answer ? { ...ask, answer } : ask;
+      const whole = held.get(ask.id);
+      return {
+        ...ask,
+        ...(whole?.answer ? { answer: whole.answer } : {}),
+        ...(whole?.cited?.length && !ask.cited?.length ? { cited: whole.cited } : {}),
+      };
     }),
   };
 }

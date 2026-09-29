@@ -7,35 +7,27 @@
 
 use relay_api::delegation::{AskError, AskRequest};
 
-use super::super::delegation::{peer_is_wider_than_asker, peer_thread_settings, Ask};
+use super::super::delegation::{
+    peer_is_wider_than_asker, peer_thread_settings, Ask, MAX_CITED, MAX_CITED_CHARS,
+};
 use crate::protocol::InjectionKind;
 use crate::provider::StartThreadRequest;
-use crate::state::{unix_now, AppState, InjectionTag};
+use crate::state::{clip_chars, unix_now, AppState, InjectionTag};
 
 /// How many peers one session may have brought in. A runaway asker is a runaway
 /// bill, and a sidebar nobody can read. Ask *rounds* to those peers are not
 /// capped — the goal turn budget already bounds the loop that drives them.
 const MAX_PEERS_PER_ASKER: usize = 5;
 
-/// Appended to every task handed to a peer.
-///
-/// Two versions, because only an unrestricted session is given tools. Telling a
-/// peer to call `report_back` when it has no such tool produced the worst of both
-/// worlds: a useful first reply, then a nudge it could not obey, then "I don't
-/// have that tool" REPLACING the useful reply.
-fn answer_instruction(has_tools: bool) -> &'static str {
-    if has_tools {
-        "\n\n---\nAnother agent asked for this and cannot see your session. When \
+/// Appended to every task handed to a peer. Every ordinary session has `report_back`,
+/// whatever its permissions.
+fn answer_instruction() -> &'static str {
+    "\n\n---\nAnother agent asked for this and cannot see your session. When \
 you are done, call the `report_back` tool with what it needs to know. That is \
 what it will be shown."
-    } else {
-        "\n\n---\nAnother agent asked for this and cannot see your session. End \
-with what it needs to know — the outcome, anything it must decide, and anything \
-you could not do. Your last message is what it will be shown."
-    }
 }
 
-/// Sent once if a peer that HAS the tool finishes without using it.
+/// Sent once if a peer finishes without calling `report_back`.
 fn answer_nudge() -> &'static str {
     "You finished without calling `report_back`. Call it now with what the agent \
 that asked you needs to know — it is still waiting."
@@ -59,14 +51,19 @@ whole task in the command"
 ///
 /// It says "rewrite", not "answer": the agent must not do the work here, only
 /// describe it. Left vague, models start solving the problem in this turn.
+/// The shape is the cards': the first line is their title, `## Context` their Context line.
 fn brief_prompt(task: &str) -> String {
     format!(
         "Another agent is about to be given this task, in a fresh session that \
 cannot see this conversation:\n\n{task}\n\nWrite the instructions it should \
-get. Include whatever it needs from what we have been doing — what the goal is, \
-which files and decisions matter, what \"this\" and \"the next step\" refer to, \
-and how it will know it is done. Do NOT do the work, and do not reply to me: \
-reply with the instructions themselves and nothing else."
+get, in this shape:\n\n\
+First line: the request as one sentence.\n\
+Then: what to do, and how it will know it is done.\n\
+Last: a `## Context` section with what it needs from what we have been doing — \
+what the goal is, which files and decisions matter, what \"this\" and \"the next \
+step\" refer to.\n\n\
+Do NOT do the work, and do not reply to me: reply with the instructions \
+themselves and nothing else."
     )
 }
 
@@ -123,6 +120,7 @@ impl AppState {
         &self,
         peer_thread_id: &str,
         answer: String,
+        cited: Vec<String>,
     ) -> Result<(), AskError> {
         let peer_thread_id = self
             .canonical_session_id(peer_thread_id)
@@ -134,6 +132,11 @@ impl AppState {
                 "say what you found — an empty answer tells the other agent nothing".to_string(),
             ));
         }
+        let cited: Vec<String> = cited
+            .iter()
+            .take(MAX_CITED)
+            .map(|place| clip_chars(place, MAX_CITED_CHARS))
+            .collect();
         let ask_id = {
             let relay = self.relay.read().await;
             let mut live: Vec<&Ask> = relay
@@ -151,6 +154,7 @@ impl AppState {
         let mut relay = self.relay.write().await;
         relay.update_ask(&ask_id, |ask| {
             ask.answered_with_tool = true;
+            ask.cited = cited;
             ask.finish(answer);
         });
         relay.mark_report_back_call(&ask_id, &peer_thread_id);
@@ -471,16 +475,6 @@ Carry on with one of those instead of bringing in another."
             }
         };
 
-        // Whether this peer can actually answer with the tool. A peer that runs
-        // restricted has none, and must be told to answer in prose instead.
-        let peer_has_tools = {
-            let relay = self.relay.read().await;
-            relay
-                .thread_settings(&peer_thread_id)
-                .map(|s| crate::state::session_is_unrestricted(&s.approval_policy, &s.sandbox))
-                .unwrap_or(false)
-        };
-
         // What the peer had already said, so the sweeper can tell "has not picked
         // this up yet" from "answered". Both look idle.
         let baseline_item_id = self
@@ -492,7 +486,7 @@ Carry on with one of those instead of bringing in another."
         // peer working with nobody waiting for it. The reverse — recorded but not
         // sent — is visible and settles as a failure.
         let ask_id = existing_ask_id.clone().unwrap_or_else(new_ask_id);
-        let instruction = answer_instruction(peer_has_tools);
+        let instruction = answer_instruction();
         {
             let mut relay = self.relay.write().await;
             if existing_ask_id.is_some() {
@@ -1083,14 +1077,7 @@ impl AppState {
             // It finished its turn without calling `report_back`. Ask once; a peer
             // that ignores it twice is not going to start, and waiting forever
             // would keep the asker asleep.
-            let can_be_nudged = {
-                let relay = self.relay.read().await;
-                relay
-                    .thread_settings(&peer_thread_id)
-                    .map(|s| crate::state::session_is_unrestricted(&s.approval_policy, &s.sandbox))
-                    .unwrap_or(false)
-            };
-            if !nudged && can_be_nudged {
+            if !nudged {
                 let tag = InjectionTag::delegate(InjectionKind::DelegateNudge, &[ask_id.clone()]);
                 let dispatched = self
                     .send_injected(tag, &peer_thread_id, answer_nudge(), None, None)
@@ -1295,6 +1282,21 @@ mod wake_tests {
             ask("2", "a", AskStatus::Failed, false),
         ];
         assert_eq!(askers_ready_to_wake(&asks), vec!["a".to_string()]);
+    }
+
+    // Design 25b: the task card's title is the brief's first line and its Context line is
+    // the brief's `## Context`, so the prompt asks for exactly that shape.
+    #[test]
+    fn the_brief_is_asked_for_in_the_shape_its_card_draws() {
+        let prompt = brief_prompt("ask codex how remote reads the text");
+        assert!(prompt.contains("ask codex how remote reads the text"));
+        assert!(prompt.contains("First line:"), "{prompt}");
+        assert!(prompt.contains("a `## Context` section"), "{prompt}");
+        let brief = "How does remote Ask read message text?\n\nFind the handler.\n\n## Context\nLocal reads data-ask-message.";
+        assert_eq!(
+            crate::state::delegation::intent_title(brief).as_deref(),
+            Some("How does remote Ask read message text?")
+        );
     }
 
     #[test]

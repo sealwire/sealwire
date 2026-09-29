@@ -5377,7 +5377,7 @@ fn the_codex_mcp_config_is_the_shape_codex_actually_parses() {
         config.is_object(),
         "mcp_servers is a map; codex rejects an array outright",
     );
-    let server = &config["sealwire"];
+    let server = &config[crate::provider::relay_mcp_server_name("tok-1").as_str()];
     assert_eq!(server["env"]["SEALWIRE_ASK_TOKEN"], "tok-1");
     assert!(
         server["env"]["SEALWIRE_RELAY_URL"].as_str().is_some(),
@@ -5391,6 +5391,21 @@ fn the_codex_mcp_config_is_the_shape_codex_actually_parses() {
             .is_some_and(|arg| arg.ends_with("orchestrator-mcp.mjs")),
         "and which bridge to run",
     );
+}
+
+// Probed against codex-cli 0.156.1: an on-request / workspace-write thread asks
+// `mcpServer/elicitation/request` before every call, which the relay never answers, so
+// a restricted peer's `report_back` hung. The relay gates these tools itself, and approves
+// them under a name no project's own `sealwire` server can share.
+#[test]
+fn a_restricted_codex_peer_is_not_stopped_to_approve_the_relays_own_tools() {
+    let config = super::peer_mcp_servers("tok-1");
+    let server = crate::provider::relay_mcp_server_name("tok-1");
+    assert_eq!(
+        config[server.as_str()]["default_tools_approval_mode"],
+        "approve"
+    );
+    assert!(config.get("sealwire").is_none(), "{config}");
 }
 
 #[test]
@@ -5423,19 +5438,19 @@ fn codex_seat_and_peer_mcp_include_non_empty_relay_api_token_only() {
     assert!(seat["sealwire"]["env"].get("SEALWIRE_ASK_TOKEN").is_none());
     assert!(seat["sealwire"]["env"].get("SEALWIRE_DEVICE_ID").is_none());
 
+    let name = crate::provider::relay_mcp_server_name("tok-1");
+    let name = name.as_str();
     let peer = super::peer_mcp_servers_with_transport("tok-1", Some("relay-secret"));
-    assert_eq!(peer["sealwire"]["env"]["RELAY_API_TOKEN"], "relay-secret");
-    assert_eq!(peer["sealwire"]["env"]["SEALWIRE_ASK_TOKEN"], "tok-1");
-    assert!(peer["sealwire"]["env"]
-        .get("SEALWIRE_SEAT_RUN_ID")
-        .is_none());
-    assert!(peer["sealwire"]["env"].get("SEALWIRE_DEVICE_ID").is_none());
+    assert_eq!(peer[name]["env"]["RELAY_API_TOKEN"], "relay-secret");
+    assert_eq!(peer[name]["env"]["SEALWIRE_ASK_TOKEN"], "tok-1");
+    assert!(peer[name]["env"].get("SEALWIRE_SEAT_RUN_ID").is_none());
+    assert!(peer[name]["env"].get("SEALWIRE_DEVICE_ID").is_none());
 
     for absent in [None, Some("")] {
         let seat = super::seat_mcp_servers_with_transport("run-7", absent);
         assert!(seat["sealwire"]["env"].get("RELAY_API_TOKEN").is_none());
         let peer = super::peer_mcp_servers_with_transport("tok-1", absent);
-        assert!(peer["sealwire"]["env"].get("RELAY_API_TOKEN").is_none());
+        assert!(peer[name]["env"].get("RELAY_API_TOKEN").is_none());
     }
 }
 
@@ -5459,14 +5474,16 @@ fn assert_codex_seat_mcp(mcp: &Value, run_id: &str) {
 }
 
 fn assert_codex_peer_mcp(mcp: &Value) {
-    assert!(mcp.is_object(), "Codex mcp_servers must be a map: {mcp}");
-    let env = mcp["sealwire"]["env"].as_object().expect("env object");
-    assert!(
-        env.get("SEALWIRE_ASK_TOKEN")
-            .and_then(|v| v.as_str())
-            .is_some_and(|t| !t.is_empty()),
-        "{env:?}"
-    );
+    let servers = mcp.as_object().expect("Codex mcp_servers must be a map");
+    assert_eq!(servers.len(), 1, "{mcp}");
+    let (name, server) = servers.iter().next().expect("one server");
+    let env = server["env"].as_object().expect("env object");
+    let token = env
+        .get("SEALWIRE_ASK_TOKEN")
+        .and_then(|v| v.as_str())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| panic!("{env:?}"));
+    assert_eq!(name, &crate::provider::relay_mcp_server_name(token));
     assert!(env.get("SEALWIRE_SEAT_RUN_ID").is_none(), "{env:?}");
     assert!(env.get("SEALWIRE_DEVICE_ID").is_none(), "{env:?}");
 }

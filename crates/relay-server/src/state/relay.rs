@@ -646,6 +646,9 @@ pub struct RelayState {
     /// tell us the session id until AFTER the tools are attached.
     /// In memory only — a restart re-mints on the next turn.
     ask_tokens: HashMap<String, String>,
+    /// Unbound tokens minted for a restricted session: its tools are listed before
+    /// it has an id whose settings could say so.
+    restricted_unbound_ask_tokens: HashSet<String>,
     /// Durable identity of reviewer threads: reviewer_thread_id -> parent_thread_id.
     /// This is the *persisted* source of truth for nav-hiding (so reviewer threads
     /// stay hidden across a relay restart and across review-job eviction). An entry
@@ -835,6 +838,7 @@ impl RelayState {
             handovers: HashMap::new(),
             goals: HashMap::new(),
             ask_tokens: HashMap::new(),
+            restricted_unbound_ask_tokens: HashSet::new(),
             reviewer_threads: HashMap::new(),
             reviewer_thread_seq: 0,
             workflow_jobs: HashMap::new(),
@@ -3046,10 +3050,17 @@ happened, then hand over again."
 
     /// Mint a token whose owner is not known yet — ACP hands the session id back
     /// only after the tools are already attached.
-    pub(crate) fn mint_unbound_ask_token(&mut self) -> String {
+    pub(crate) fn mint_unbound_ask_token(&mut self, unrestricted: bool) -> String {
         let token = new_ask_token();
         self.ask_tokens.insert(token.clone(), String::new());
+        if !unrestricted {
+            self.restricted_unbound_ask_tokens.insert(token.clone());
+        }
         token
+    }
+
+    pub(crate) fn unbound_ask_token_is_restricted(&self, token: &str) -> bool {
+        self.restricted_unbound_ask_tokens.contains(token)
     }
 
     /// Bind a token minted before its session existed. Refuses to re-point a
@@ -3060,6 +3071,7 @@ happened, then hand over again."
                 *owner = thread_id.to_string();
             }
         }
+        self.restricted_unbound_ask_tokens.remove(token);
     }
 
     /// Which thread may ask with this token, if any.

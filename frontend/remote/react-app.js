@@ -140,6 +140,7 @@ import {
 import {
   buildReviewingThreadSet,
   canRequestReview,
+  offersReviewNudge,
   isReviewBlocked,
   isReviewInProgressForThread,
   selectReviewLaunchModel,
@@ -2625,7 +2626,9 @@ function RemoteApp() {
             actions: remoteComposerCommandActions,
           }),
           reviewNudgeModel: {
-            canRequest: canRequestRemoteReview,
+            canRequest:
+              canRequestRemoteReview
+              && offersReviewNudge(session, remoteReviews, remoteViewedThreadId),
             reviewModel: reviewLaunchModel,
             // The composer nudge launcher needs the reusable-reviewer list too, or it shows
             // no "reuse an existing reviewer" option. Source it from the dedicated reviews

@@ -61,6 +61,20 @@ pub(crate) fn peer_tools() -> Vec<&'static ToolSpec> {
         .collect()
 }
 
+/// Whether a restricted session must be refused this peer tool. Answering whoever
+/// asked is only a reply, so it cannot borrow a freer agent's reach the way the rest can.
+pub(crate) fn peer_tool_needs_unrestricted(name: &str) -> bool {
+    name != "report_back"
+}
+
+/// The specs a session at this permission level is offered.
+pub(crate) fn peer_tools_for(unrestricted: bool) -> Vec<&'static ToolSpec> {
+    peer_tools()
+        .into_iter()
+        .filter(|tool| unrestricted || !peer_tool_needs_unrestricted(tool.name))
+        .collect()
+}
+
 /// The seats a task runs on. Order is the pipeline's own.
 pub(crate) const SEATS: &[&str] = &["tl", "dev", "reviewer"];
 
@@ -446,13 +460,22 @@ resumes when they answer.",
         summary: "Send your answer to the agent that asked you for this. Call it \
 when you are done; what you write here is all it will see.",
         effect: Effect::Acts,
-        params: &[ToolParam {
-            name: "answer",
-            kind: ParamKind::Text,
-            required: true,
-            summary: "The outcome, anything it must decide, and anything you \
+        params: &[
+            ToolParam {
+                name: "answer",
+                kind: ParamKind::Text,
+                required: true,
+                summary: "The outcome, anything it must decide, and anything you \
 could not do. It cannot see your session.",
-        }],
+            },
+            ToolParam {
+                name: "cited",
+                kind: ParamKind::TextList,
+                required: false,
+                summary: "The code your answer rests on, one `path:line` per \
+entry, e.g. `src/ask.rs:42`. Shown under the answer. Omit if none.",
+            },
+        ],
     },
     ToolSpec {
         name: "delegate",
@@ -757,6 +780,7 @@ pub(crate) enum ToolCall {
     /// token, so a peer cannot answer on somebody else's behalf.
     ReportBack {
         answer: String,
+        cited: Vec<String>,
     },
     /// Hand work to another agent. Nothing here says "worker" or "reviewer":
     /// the direction lives in `message`, which the relay never reads.
@@ -889,6 +913,32 @@ fn parse_text_list(tool: &str, param: &str, raw: Option<&Value>) -> Result<Vec<S
     }
     if list.is_empty() {
         return Err(format!("{tool}: '{param}' must not be empty"));
+    }
+    Ok(list)
+}
+
+/// Blank entries are dropped rather than refused: refusing would throw away the answer
+/// they came with.
+fn parse_optional_text_list(
+    tool: &str,
+    param: &str,
+    raw: Option<&Value>,
+) -> Result<Vec<String>, String> {
+    let Some(raw) = raw.filter(|raw| !raw.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let Value::Array(items) = raw else {
+        return Err(format!("{tool}: '{param}' must be a list of strings"));
+    };
+    let mut list = Vec::new();
+    for item in items {
+        let Value::String(text) = item else {
+            return Err(format!("{tool}: '{param}' must be a list of strings"));
+        };
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            list.push(trimmed.to_string());
+        }
     }
     Ok(list)
 }
@@ -1069,6 +1119,7 @@ pub(crate) fn parse_call(name: &str, args: &Value) -> Result<ToolCall, String> {
         }),
         "report_back" => Ok(ToolCall::ReportBack {
             answer: get("answer")?.expect("required param yields Some"),
+            cited: parse_optional_text_list(spec.name, "cited", object.get("cited"))?,
         }),
         "delegate" => Ok(ToolCall::Delegate {
             message: get("message")?.expect("required param yields Some"),
@@ -1847,6 +1898,38 @@ request, not once",
                 run_id: None,
             }
         );
+    }
+
+    // The card shows where an answer's evidence is only from what the peer passed here,
+    // never from reading its prose.
+    #[test]
+    fn a_report_back_carries_the_places_it_cites() {
+        let call = parse_call(
+            "report_back",
+            &json!({ "answer": "It retries forever.", "cited": [" remote/ask.js:42 ", ""] }),
+        )
+        .expect("parse");
+        assert_eq!(
+            call,
+            ToolCall::ReportBack {
+                answer: "It retries forever.".to_string(),
+                cited: vec!["remote/ask.js:42".to_string()],
+            }
+        );
+        let bare = parse_call("report_back", &json!({ "answer": "Done." })).expect("parse");
+        assert_eq!(
+            bare,
+            ToolCall::ReportBack {
+                answer: "Done.".to_string(),
+                cited: Vec::new(),
+            }
+        );
+        let err = parse_call("report_back", &json!({ "answer": "x", "cited": "a.rs:1" }))
+            .expect_err("a single string is not the list the schema asks for");
+        assert!(err.contains("cited"), "{err}");
+        let schema = spec_for("report_back").unwrap().input_schema();
+        assert_eq!(schema["properties"]["cited"]["type"], "array");
+        assert_eq!(schema["required"], json!(["answer"]));
     }
 
     #[test]

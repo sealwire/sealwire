@@ -108,7 +108,7 @@ function withoutTitle(text, title) {
 }
 
 // Headings split it like a handover summary; otherwise it is one value, two lines until pressed.
-function CardText({ text, title = "", moreLabel }) {
+function CardText({ text, title = "", moreLabel, footer = null }) {
   const body = withoutTitle(text, title);
   const plain = !parseHandoverSections(body).some((section) => section.title);
   const fold = useFold(body, plain);
@@ -116,7 +116,7 @@ function CardText({ text, title = "", moreLabel }) {
     return null;
   }
   if (!plain) {
-    return h(SummarySections, { text: body, moreLabel });
+    return h(SummarySections, { text: body, moreLabel, footer });
   }
   return h(
     "div",
@@ -130,6 +130,24 @@ function CardText({ text, title = "", moreLabel }) {
         ...fold.keyboard,
       },
       renderMarkdown(body)
+    ),
+    footer
+  );
+}
+
+/** The `path:line` places `report_back` said the answer rests on (25a / 25b). */
+function Cited({ places }) {
+  if (!places?.length) {
+    return null;
+  }
+  return h(
+    "div",
+    { className: "delegate-card-cited" },
+    h("span", { className: "delegate-card-cited-label" }, "Cited"),
+    h(
+      "span",
+      { className: "delegate-card-cited-places" },
+      ...places.map((place, index) => h("code", { key: index, className: "delegate-card-cited-place" }, place))
     )
   );
 }
@@ -236,7 +254,11 @@ function AnsweredCard({ ask }) {
       time: answerSpan(ask),
       link: h(OpenThreadLink, { threadId: ask.peer_thread_id, label: `${peer} thread` }),
     },
-    h(CardText, { text: ask.answer, moreLabel: "Show the whole answer" })
+    h(CardText, {
+      text: ask.answer,
+      moreLabel: "Show the whole answer",
+      footer: h(Cited, { places: ask.cited }),
+    })
   );
 }
 
@@ -422,7 +444,11 @@ export function DelegateReportedEntry({ entry, provider = "", providerIcon = "" 
         ),
         link: h(OpenThreadLink, { threadId: ask.asker_thread_id, label: "Asker thread" }),
       },
-      h(CardText, { text: entry.answer, moreLabel: "Show the whole answer" })
+      h(CardText, {
+        text: entry.answer,
+        moreLabel: "Show the whole answer",
+        footer: h(Cited, { places: entry.cited }),
+      })
     )
   );
 }
@@ -431,17 +457,27 @@ function isReportBackRow(entry) {
   return entry?.kind === "tool_call" && REPORT_BACK_TOOL.test(String(entry.tool?.name || ""));
 }
 
+// Until the relay marks the call, only its own arguments say what it answered and cited.
 function reportedEntry(row, ask, opensTurn) {
-  const answer = ask.answered_with_tool ? ask.answer || toolAnswer(row) : row.text;
-  return { ...row, kind: DELEGATE_REPORTED_KIND, delegate: ask, answer: answer || "", opensTurn };
+  const input = ask.answered_with_tool ? toolInput(row) : {};
+  const answer = ask.answered_with_tool ? ask.answer || input.answer : row.text;
+  const cited = ask.cited?.length ? ask.cited : input.cited;
+  return {
+    ...row,
+    kind: DELEGATE_REPORTED_KIND,
+    delegate: ask,
+    answer: typeof answer === "string" ? answer : "",
+    cited: Array.isArray(cited) ? cited.filter((place) => typeof place === "string") : [],
+    opensTurn,
+  };
 }
 
-function toolAnswer(entry) {
+function toolInput(entry) {
   try {
     const parsed = JSON.parse(entry?.tool?.input_preview || "");
-    return typeof parsed?.answer === "string" ? parsed.answer : "";
+    return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
-    return "";
+    return {};
   }
 }
 

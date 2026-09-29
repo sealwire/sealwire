@@ -347,25 +347,25 @@ impl AppState {
     /// Not beta-gated: this is not the task engine, and a public build is meant
     /// to have it. Deliberately different from `list_orchestrator_tools`, which
     /// returns nothing when tasks are locked.
-    /// Empty for a thread a task run owns: `call_peer_tool` refuses it anyway, and a
-    /// list is re-sent with every request, so advertising what can only be refused is
-    /// paid for over and over.
+    /// Only what `call_peer_tool` would accept: a list is re-sent with every request, so
+    /// advertising what can only be refused is paid for over and over.
     pub async fn list_peer_tools_for(&self, ask_token: &str) -> Vec<OrchestratorToolView> {
-        let eligible = {
+        let offered = {
             let relay = self.relay.read().await;
-            relay
-                .thread_for_ask_token(ask_token)
-                .map(|thread_id| self.peer_tools_allowed(&relay, &thread_id).is_ok())
-                .unwrap_or(true)
+            match relay.thread_for_ask_token(ask_token) {
+                Some(thread_id) => orchestrator_tools::peer_tools()
+                    .into_iter()
+                    .filter(|spec| {
+                        self.peer_tool_allowed(&relay, &thread_id, spec.name)
+                            .is_ok()
+                    })
+                    .collect(),
+                None => orchestrator_tools::peer_tools_for(
+                    !relay.unbound_ask_token_is_restricted(ask_token),
+                ),
+            }
         };
-        if !eligible {
-            return Vec::new();
-        }
-        self.list_peer_tools().await
-    }
-
-    pub async fn list_peer_tools(&self) -> Vec<OrchestratorToolView> {
-        orchestrator_tools::peer_tools()
+        offered
             .into_iter()
             .map(|spec| self.tool_view(spec))
             .collect()
@@ -374,16 +374,17 @@ impl AppState {
     /// The ordinary-session entry point. The token comes from the env of the
     /// bridge subprocess the relay launched; resolving it here is what turns
     /// "somebody claims to be a session" into "this session".
-    /// Whether this thread may use the peer tools, as things stand.
+    /// Whether this thread may use this peer tool, as things stand.
     ///
     /// Re-derived rather than trusted: a token is minted once and never changes, while both
     /// facts behind it move — a run can take a thread over, and settings can be narrowed
     /// after the bridge was attached. The list asks the same thing, so a session is never
     /// advertised what it would be refused.
-    fn peer_tools_allowed(
+    fn peer_tool_allowed(
         &self,
         relay: &crate::state::RelayState,
         thread_id: &str,
+        name: &str,
     ) -> Result<(), String> {
         if !relay.thread_is_standalone(thread_id) {
             return Err(if relay.thread_is_retained_team_seat(thread_id) {
@@ -393,6 +394,9 @@ impl AppState {
                 "this session is not an ordinary standalone session — these tools are for one that is"
                     .to_string()
             });
+        }
+        if !orchestrator_tools::peer_tool_needs_unrestricted(name) {
+            return Ok(());
         }
         let unrestricted = relay
             .thread_settings(thread_id)
@@ -427,7 +431,7 @@ impl AppState {
 
         {
             let relay = self.relay.read().await;
-            self.peer_tools_allowed(&relay, caller_thread_id)?;
+            self.peer_tool_allowed(&relay, caller_thread_id, name)?;
         }
         match orchestrator_tools::parse_call(name, args)? {
             ToolCall::GoalStatus => Ok(self.goal_status_text(caller_thread_id).await),
@@ -454,8 +458,8 @@ impl AppState {
                 )
                 .await
                 .map(|()| "Asked. Work resumes when they answer.".to_string()),
-            ToolCall::ReportBack { answer } => {
-                match self.report_back(caller_thread_id, answer).await {
+            ToolCall::ReportBack { answer, cited } => {
+                match self.report_back(caller_thread_id, answer, cited).await {
                     Ok(()) => Ok("Sent. The agent that asked will be given it.".to_string()),
                     Err(error) => Err(error.message()),
                 }

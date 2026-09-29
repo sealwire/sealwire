@@ -155,7 +155,47 @@ test("the peer's report_back call is the Reported back card, and its reminder is
   assert.ok(!markup.includes("mcp__sealwire__report_back"), "the call is the card, not a tool row");
 });
 
-test("a peer without the tool answers in prose, and that reply is the card", () => {
+// Design 25a/25b: where the answer's evidence is, under it, at both ends.
+test("an answer's cited places are one line under it, on both answer cards", () => {
+  const cited = ["remote/ask.js:42", "frontend/app.js:7"];
+  const done = ask({ status: "done", delivered: true, answered_with_tool: true, answer: "From innerText.", cited, finished_at: 1_790_000_160 });
+  const asker = render([marked("wake", "delegate_answer", [done], WAKE)]);
+  const peer = render([
+    marked("task", "delegate_task", [{ ...done, cited: [] }], `${BRIEF}${INSTRUCTION}`),
+    { ...reportBack("tool", "report_back", "From innerText."), injection: { kind: "delegate_reported", delegate: [done] } },
+  ]);
+  for (const markup of [asker, peer]) {
+    assert.equal(count(markup, "delegate-card-cited-label"), 1, markup);
+    assert.ok(markup.includes(">Cited<"));
+    assert.ok(markup.includes(">remote/ask.js:42<") && markup.includes(">frontend/app.js:7<"));
+    assert.ok(markup.indexOf("From innerText.") < markup.indexOf(">Cited<"), "under the answer");
+  }
+  const bare = render([marked("wake", "delegate_answer", [{ ...done, cited: [] }], WAKE)]);
+  assert.ok(!bare.includes("Cited"), "nothing cited, no line");
+});
+
+test("before its row is marked, a report_back call's own arguments say what it cited", () => {
+  const done = ask({ status: "done", delivered: true, answered_with_tool: true, answer: "From innerText.", finished_at: 1_790_000_160 });
+  const call = reportBack("tool", "mcp__sealwire__report_back", "From innerText.");
+  call.tool.input_preview = JSON.stringify({ answer: "From innerText.", cited: ["remote/ask.js:42"] });
+  const markup = render([marked("task", "delegate_task", [done], `${BRIEF}${INSTRUCTION}`), call]);
+  assert.ok(markup.includes("Reported back to Claude"));
+  assert.ok(markup.includes(">remote/ask.js:42<"));
+});
+
+// Design 25b: the brief's `## Context` is a labelled line on the cards that show the brief.
+test("a brief's Context section is its own line on the task and the asked card", () => {
+  const brief = `${BRIEF}\n\n## Context\nLocal already reads data-ask-message; remote is unconfirmed.`;
+  const task = render([marked("task", "delegate_task", [ask()], `${brief}${INSTRUCTION}`)]);
+  const asked = render([marked("req", "delegate_request", [ask()], "BRIEF-PROMPT"), agent("brief", brief)]);
+  for (const markup of [task, asked]) {
+    assert.ok(markup.includes('class="handover-section-label">Context<'), markup);
+    assert.ok(markup.includes("Local already reads data-ask-message"));
+    assert.ok(markup.includes("Find where the remote ask handler"), "what to do stays above it");
+  }
+});
+
+test("a peer that never calls the tool answers in prose, and that reply is the card", () => {
   const done = ask({ status: "done", delivered: false, answered_with_tool: false, answer: "It is innerText.", finished_at: 1_790_000_160 });
   const markup = render([
     marked("task", "delegate_task", [done], `${BRIEF}${INSTRUCTION}`),
@@ -218,6 +258,23 @@ test("a snapshot's clipped answer never replaces the whole one already read, but
   const card = state.transcriptHydrationEntries.get("wake").injection.delegate[0];
   assert.equal(card.answer, whole);
   assert.equal(card.delivered, true, "what did change still lands");
+
+  // An emptied shell drops the cited places with the answer; the ones read stay.
+  state.transcriptHydrationEntries.set(
+    "wake",
+    row({ status: "done", answer: whole, cited: ["remote/ask.js:42"], delivered: true }, "full")
+  );
+  Object.assign(
+    state,
+    prepareTranscriptHydrationState(state, {
+      ...snapshot,
+      transcript_revision: 12,
+      transcript: [row({ status: "done", delivered: true }, "omitted")],
+    }).patch
+  );
+  const kept = state.transcriptHydrationEntries.get("wake").injection.delegate[0];
+  assert.deepEqual(kept.cited, ["remote/ask.js:42"]);
+  assert.equal(kept.answer, whole);
 });
 
 test("an answer marked where it is becomes the card even when the task row is not loaded", () => {

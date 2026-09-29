@@ -163,6 +163,7 @@ import {
 import {
   buildReviewingThreadSet,
   canRequestReview,
+  offersReviewNudge,
   isReviewBlocked,
   isReviewInProgressForThread,
   reviewActivity,
@@ -1219,14 +1220,12 @@ export function createSessionRenderer({
     if (!reviewIdleNudge) {
       return;
     }
+    const threadId = state.viewThreadId || session?.active_thread_id || null;
     const show =
       typeof requestReview === "function" &&
       isViewingConversation(session) &&
-      canRequestReview(
-        session,
-        state.deviceId,
-        state.viewThreadId || session?.active_thread_id || null
-      );
+      canRequestReview(session, state.deviceId, threadId) &&
+      offersReviewNudge(session, reviewsCache.current(), threadId);
     reviewIdleNudge.hidden = !show;
     if (!show) {
       renderReactContent(reviewIdleNudge, null);

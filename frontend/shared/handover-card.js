@@ -129,7 +129,7 @@ function SummarySection({ section, body }) {
 }
 
 /** Markdown split at its headings, three shown; a delegate card uses it for its text too. */
-export function SummarySections({ text, moreLabel = "Show full summary" }) {
+export function SummarySections({ text, moreLabel = "Show full summary", footer = null }) {
   const [expanded, setExpanded] = useState(false);
   const sections = parseHandoverSections(text);
   if (!sections.length) {
@@ -158,7 +158,8 @@ export function SummarySections({ text, moreLabel = "Show full summary" }) {
           onToggle: () => setExpanded((value) => !value),
           label: more,
         })
-      : null
+      : null,
+    footer
   );
 }
 

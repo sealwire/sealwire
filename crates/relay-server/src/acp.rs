@@ -184,6 +184,9 @@ pub(crate) struct SessionRuntime {
     pub(crate) ordinals: HashMap<&'static str, u64>,
     /// ACP `toolCallId` → the stable relay item id minted for it.
     pub(crate) tool_items: HashMap<String, String>,
+    /// The name the relay's own MCP server was attached under, when it was. A
+    /// permission request names a tool only by `<server>-<tool>`.
+    pub(crate) relay_mcp_server: Option<String>,
     /// Accumulated view of each tool call, keyed by the minted item id.
     ///
     /// ACP tool updates are *partial*: `tool_call` carries the title and input,
@@ -405,6 +408,8 @@ pub struct AcpBridge {
     authenticated: AtomicBool,
 }
 
+use crate::provider::relay_mcp_server_name;
+
 /// Peer MCP entry as ACP wants it: array element, env as name/value pairs.
 fn peer_mcp_server_entry(token: &str) -> Value {
     peer_mcp_server_entry_with_transport(
@@ -422,7 +427,7 @@ fn peer_mcp_server_entry_with_transport(token: &str, relay_api_token: Option<&st
         env.push(json!({ "name": "RELAY_API_TOKEN", "value": api_token }));
     }
     json!({
-        "name": "sealwire",
+        "name": relay_mcp_server_name(token),
         "command": std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".to_string()),
         "args": [crate::provider::sealwire_mcp_bridge_path()],
         "env": env,
@@ -506,19 +511,20 @@ impl AcpBridge {
             let thread_id = &relay
                 .session_for_provider_handle(self.provider_name, acp_session_id)
                 .unwrap_or_else(|| acp_session_id.to_string());
-            let unrestricted = relay
-                .thread_settings(thread_id)
-                .map(|s| crate::state::session_is_unrestricted(&s.approval_policy, &s.sandbox))
-                .unwrap_or(false);
             let identity = crate::provider::sealwire_mcp_for_reattach(
                 relay.retained_seat_run_id_for_thread(thread_id),
                 relay.thread_is_standalone(thread_id),
-                unrestricted,
             );
             let peer_token = matches!(identity, crate::provider::SealwireMcpIdentity::Peer)
                 .then(|| relay.ask_token_for_thread(thread_id));
             (identity, peer_token)
         };
+        self.sessions
+            .lock()
+            .await
+            .entry(acp_session_id.to_string())
+            .or_default()
+            .relay_mcp_server = peer_token.as_deref().map(relay_mcp_server_name);
         match identity {
             crate::provider::SealwireMcpIdentity::Seat(run_id) => {
                 self.seat_mcp_servers(&run_id).await
@@ -934,6 +940,25 @@ impl AcpBridge {
                 ..Default::default()
             },
         );
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn seed_relay_mcp_server_for_test(&self, thread_id: &str, name: &str) {
+        self.sessions
+            .lock()
+            .await
+            .entry(thread_id.to_string())
+            .or_default()
+            .relay_mcp_server = Some(name.to_string());
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn relay_mcp_server_for_test(&self, thread_id: &str) -> Option<String> {
+        self.sessions
+            .lock()
+            .await
+            .get(thread_id)
+            .and_then(|session| session.relay_mcp_server.clone())
     }
 
     /// Absorb a thread the way a `session/list` response does: a cwd cached for
@@ -1382,15 +1407,16 @@ impl ProviderBridge for AcpBridge {
         // whether it gets one at all — permissions alone handed a task seat the tools of
         // a session that drives itself. Seat purpose attaches the run-scoped bridge
         // instead and never mints an ask token.
-        let identity = crate::provider::sealwire_mcp_for_new_session(
-            request.approval_policy.as_str(),
-            request.sandbox.as_str(),
-            &request.purpose,
-        );
+        let identity = crate::provider::sealwire_mcp_for_new_session(&request.purpose);
+        let unrestricted =
+            crate::state::session_is_unrestricted(&request.approval_policy, &request.sandbox);
         let new_token = match &identity {
-            crate::provider::SealwireMcpIdentity::Peer => {
-                Some(self.state.write().await.mint_unbound_ask_token())
-            }
+            crate::provider::SealwireMcpIdentity::Peer => Some(
+                self.state
+                    .write()
+                    .await
+                    .mint_unbound_ask_token(unrestricted),
+            ),
             _ => None,
         };
         let mcp_servers = match &identity {
@@ -1429,6 +1455,7 @@ impl ProviderBridge for AcpBridge {
                 approval_policy: approval_policy.to_string(),
                 // `session/new` just opened it on this connection.
                 attached: true,
+                relay_mcp_server: new_token.as_deref().map(relay_mcp_server_name),
                 ..Default::default()
             };
             // Whatever `session/new` chose, until the relay says otherwise.

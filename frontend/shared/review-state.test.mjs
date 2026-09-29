@@ -6,6 +6,7 @@ import {
   REVIEW_IN_PROGRESS_BADGE,
   buildReviewingThreadSet,
   canRequestReview,
+  offersReviewNudge,
   isReviewBlocked,
   isReviewInProgress,
   isReviewInProgressForThread,
@@ -157,4 +158,56 @@ test("buildReviewingThreadSet is empty and never throws without jobs", () => {
   assert.equal(buildReviewingThreadSet(null).size, 0);
   assert.equal(buildReviewingThreadSet(undefined).size, 0);
   assert.equal(buildReviewingThreadSet({}).size, 0);
+});
+
+const userRow = (id, injection = null) => ({
+  item_id: id,
+  kind: "user_text",
+  text: id,
+  ...(injection ? { injection: { kind: injection } } : {}),
+});
+const agentRow = (id) => ({ item_id: id, kind: "agent_text", text: id });
+
+test("the review nudge is not offered in a reviewer's own thread", () => {
+  const session = { transcript: [userRow("u1"), agentRow("a1")] };
+  const reviews = { reviewer_threads: [{ reviewer_thread_id: "rev", parent_thread_id: "p" }] };
+  assert.equal(offersReviewNudge(session, reviews, "rev"), false);
+  assert.equal(offersReviewNudge(session, reviews, "p"), true);
+  // Before the reviews channel loads, the snapshot's own list is enough.
+  const early = { ...session, reviewer_threads: reviews.reviewer_threads };
+  assert.equal(offersReviewNudge(early, null, "rev"), false);
+});
+
+test("the review nudge waits while a thread is doing another agent's task", () => {
+  for (const kind of ["delegate_task", "delegate_nudge"]) {
+    const working = { transcript: [userRow("u1"), userRow("task", kind), agentRow("a1")] };
+    assert.equal(offersReviewNudge(working, null, "t"), false, kind);
+  }
+  const reported = {
+    transcript: [
+      userRow("task", "delegate_task"),
+      agentRow("a1"),
+      { ...agentRow("r"), injection: { kind: "delegate_reported" } },
+    ],
+  };
+  assert.equal(offersReviewNudge(reported, null, "t"), false, "still the other agent's round");
+  const withdrawn = {
+    transcript: [userRow("task", "delegate_task"), { ...userRow("mine"), withdrawn: true }],
+  };
+  assert.equal(offersReviewNudge(withdrawn, null, "t"), false, "a rejected send never happened");
+  const reviewedSince = {
+    transcript: [userRow("task", "delegate_task"), agentRow("a1"), userRow("result", "review_result"), agentRow("a2")],
+  };
+  assert.equal(offersReviewNudge(reviewedSince, null, "t"), false, "only the person's own words end it");
+});
+
+test("the review nudge comes back once the person speaks in the thread again", () => {
+  const session = {
+    transcript: [userRow("task", "delegate_task"), agentRow("a1"), userRow("mine"), agentRow("a2")],
+  };
+  assert.equal(offersReviewNudge(session, null, "t"), true);
+  const asker = {
+    transcript: [userRow("mine"), userRow("answer", "delegate_answer"), agentRow("a")],
+  };
+  assert.equal(offersReviewNudge(asker, null, "t"), true, "an answer coming back is the asker's own work");
 });

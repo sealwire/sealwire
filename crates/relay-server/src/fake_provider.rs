@@ -108,6 +108,13 @@ struct FakeFileWrite {
     contents: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct FakeReportBack {
+    answer: String,
+    #[serde(default)]
+    cited: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 struct FakeTurnScenario {
     reply: Option<String>,
@@ -136,6 +143,10 @@ struct FakeTurnScenario {
     /// merge gate, a commit — is unreachable end to end.
     #[serde(default)]
     write_files: Vec<FakeFileWrite>,
+    /// Answer the ask this thread is working on through `report_back`, as a real
+    /// provider's MCP bridge would: a tool row, then a call to the relay's own route.
+    #[serde(default)]
+    report_back: Option<FakeReportBack>,
     #[serde(default)]
     duplicate_chunk_indices: Vec<usize>,
     #[serde(default)]
@@ -1180,6 +1191,9 @@ impl ProviderBridge for FakeProviderBridge {
             .as_ref()
             .map(|scenario| scenario.stop)
             .unwrap_or_default();
+        let report_back = scenario
+            .as_ref()
+            .and_then(|scenario| scenario.report_back.clone());
         let write_files = scenario
             .as_ref()
             .map(|scenario| scenario.write_files.clone())
@@ -1892,6 +1906,11 @@ impl ProviderBridge for FakeProviderBridge {
                         injection: None,
                     });
                 }
+            }
+
+            if let Some(report) = &report_back {
+                tool_entries
+                    .push(fake_report_back(&state, &thread_id, &turn_id_for_task, report).await);
             }
 
             // 4. Begin the agent reply.
@@ -2616,6 +2635,64 @@ fn fake_reply_for_prompt(prompt: &str) -> String {
         .strip_prefix("Reply with exactly: ")
         .unwrap_or(prompt)
         .to_string()
+}
+
+/// The row lands before the call, as a real provider's does; a failed call is only logged.
+async fn fake_report_back(
+    state: &Arc<RwLock<RelayState>>,
+    thread_id: &str,
+    turn_id: &str,
+    report: &FakeReportBack,
+) -> TranscriptEntryView {
+    let arguments = serde_json::json!({ "answer": report.answer, "cited": report.cited });
+    let item_id = format!("{turn_id}-report-back");
+    let tool = ToolCallView {
+        item_type: "mcpToolCall".to_string(),
+        name: "mcp__sealwire__report_back".to_string(),
+        title: "report_back".to_string(),
+        input_preview: Some(arguments.to_string()),
+        ..ToolCallView::command_execution(None)
+    };
+    let token = {
+        let mut relay = state.write().await;
+        relay.upsert_transcript_item_for_thread(
+            thread_id,
+            item_id.clone(),
+            TranscriptEntryKind::ToolCall,
+            None,
+            "completed".to_string(),
+            Some(turn_id.to_string()),
+            Some(tool.clone()),
+        );
+        relay.notify();
+        relay.ask_token_for_thread(thread_id)
+    };
+    let url = format!(
+        "{}/api/orchestrator/tools/report_back/call",
+        crate::provider::sealwire_relay_url()
+    );
+    let mut request = reqwest::Client::new()
+        .post(url)
+        .json(&serde_json::json!({ "arguments": arguments, "ask_token": token }));
+    if let Some(api_token) = crate::provider::sealwire_relay_api_token() {
+        request = request.bearer_auth(api_token);
+    }
+    if let Err(error) = request.send().await {
+        tracing::warn!("fake report_back could not reach the relay: {error}");
+    }
+    TranscriptEntryView {
+        row_id: None,
+        order_seq: None,
+        withdrawn: false,
+        item_id: Some(item_id),
+        kind: TranscriptEntryKind::ToolCall,
+        text: None,
+        status: "completed".to_string(),
+        turn_id: Some(turn_id.to_string()),
+        tool: Some(tool),
+        content_state: crate::protocol::TranscriptContentState::Full,
+        injection: None,
+    }
 }
 
 fn fake_tool_call_view(index: usize, completed: bool) -> ToolCallView {

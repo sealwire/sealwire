@@ -301,3 +301,23 @@ export function canRequestReview(session, deviceId, viewedThreadId = null) {
   if (isThreadReviewLocked(session, target)) return false;
   return true;
 }
+
+const WORK_FOR_ANOTHER_AGENT = new Set(["delegate_task", "delegate_nudge"]);
+
+// The idle nudge offers a review of the person's own changes, which a reviewer's thread
+// and a round of another agent's task are not. Kept apart from `canRequestReview`: the
+// other review entry points stay open in those threads.
+export function offersReviewNudge(session, reviews, threadId) {
+  if (!threadId) return false;
+  const reviewers = [...(reviews?.reviewer_threads || []), ...(session?.reviewer_threads || [])];
+  if (reviewers.some((entry) => entry?.reviewer_thread_id === threadId)) return false;
+  // Other rows the relay sent are not the person, so only their own words end it.
+  const transcript = session?.transcript || [];
+  for (let index = transcript.length - 1; index >= 0; index -= 1) {
+    const entry = transcript[index];
+    if (entry?.kind !== "user_text" || entry.withdrawn) continue;
+    if (WORK_FOR_ANOTHER_AGENT.has(entry.injection?.kind)) return false;
+    if (!entry.injection) return true;
+  }
+  return true;
+}

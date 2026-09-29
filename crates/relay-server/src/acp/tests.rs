@@ -1493,6 +1493,185 @@ async fn start_turn_and_drain_prompt(
     );
 }
 
+// Measured against cursor-agent 2026.08.04: an MCP call's own `tool_call` says only
+// "MCP: tool", and its permission request is the one place that names the tool. The relay
+// gates its own tools itself, so a restricted peer's `report_back` must not wait on a
+// person, and its row must carry the name the relay finds the answer by.
+#[tokio::test]
+async fn a_call_to_the_relays_own_tool_is_named_and_let_through() {
+    let state = relay_state();
+    {
+        let mut relay = state.write().await;
+        relay.remember_thread_settings("t1", "on-request", "workspace-write", "high", "");
+    }
+    let (outbound, mut outbound_peer) = tokio::io::duplex(8192);
+    let (inbound_writer, inbound) = tokio::io::duplex(8192);
+    let bridge = AcpBridge::for_test(state.clone(), outbound, inbound, "cursor");
+    bridge
+        .seed_session_with_policy_for_test("t1", "/tmp/project", "on-request")
+        .await;
+    bridge
+        .seed_relay_mcp_server_for_test("t1", "sealwire-0a1b2c3d4e5f")
+        .await;
+    start_turn_and_drain_prompt(&bridge, &mut outbound_peer, "t1").await;
+
+    let tool_call = |id: &str| {
+        json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {"sessionId": "t1", "update": {
+                "sessionUpdate": "tool_call", "toolCallId": id, "title": "MCP: tool",
+                "kind": "other", "status": "pending", "rawInput": {}
+            }}
+        })
+    };
+    let permission = |id: u64, call: &str, title: &str| {
+        let mut request = permission_request(id, "t1");
+        request["params"]["toolCall"] =
+            json!({ "toolCallId": call, "title": title, "kind": "other", "status": "pending" });
+        request
+    };
+    let mut writer = inbound_writer;
+    for line in [
+        tool_call("call-9"),
+        permission(
+            22,
+            "call-9",
+            "sealwire-0a1b2c3d4e5f-report_back: report_back",
+        ),
+    ] {
+        tokio::io::AsyncWriteExt::write_all(&mut writer, format!("{line}\n").as_bytes())
+            .await
+            .expect("write");
+    }
+
+    let answered = next_wire_line(&mut outbound_peer).await;
+    assert_eq!(answered["id"], json!(22));
+    assert_eq!(
+        answered["result"]["outcome"],
+        json!({"outcome": "selected", "optionId": "allow"}),
+    );
+    {
+        let relay = state.read().await;
+        assert!(relay.pending_approvals.is_empty(), "nobody is asked");
+        let runtime = relay.runtime_for_thread("t1").expect("runtime");
+        assert!(
+            runtime.transcript.iter().any(|record| record
+                .tool
+                .as_ref()
+                .is_some_and(|tool| tool.name == "report_back")),
+            "the row is named for the tool it called"
+        );
+    }
+
+    // A server a project configured as plain `sealwire` wears the same tool names; only the
+    // name the relay attached this session with is its own.
+    for line in [
+        tool_call("call-10"),
+        permission(23, "call-10", "sealwire-report_back: report_back"),
+    ] {
+        tokio::io::AsyncWriteExt::write_all(&mut writer, format!("{line}\n").as_bytes())
+            .await
+            .expect("write");
+    }
+    let mut parked = None;
+    for _ in 0..100 {
+        parked = state
+            .read()
+            .await
+            .pending_approvals
+            .values()
+            .next()
+            .map(|pending| pending.summary.clone());
+        if parked.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        parked.as_deref(),
+        Some("sealwire-report_back: report_back"),
+        "the person decides a server the relay did not attach"
+    );
+}
+
+#[test]
+fn only_the_relays_own_tools_are_read_out_of_a_permission_title() {
+    use crate::acp::protocol::relay_tool_in_permission_title as tool;
+    let ours = Some("sealwire-0a1b2c3d4e5f");
+    assert_eq!(
+        tool(Some("sealwire-0a1b2c3d4e5f-report_back: report_back"), ours),
+        Some("report_back")
+    );
+    assert_eq!(
+        tool(Some("sealwire-0a1b2c3d4e5f-delegate: delegate"), ours),
+        Some("delegate")
+    );
+    for other in [
+        "sealwire-report_back: report_back",
+        "github-create_issue: create_issue",
+        "sealwire-0a1b2c3d4e5f-report_back: something_else",
+        "sealwire-0a1b2c3d4e5f-rm: rm",
+        "`rm -rf build`",
+    ] {
+        assert_eq!(tool(Some(other), ours), None, "{other}");
+    }
+    assert_eq!(
+        tool(Some("sealwire-report_back: report_back"), None),
+        None,
+        "no relay server attached"
+    );
+    assert_eq!(tool(None, ours), None);
+}
+
+// The name is all Cursor shows of a server, so the relay's must be one no other config can
+// take; derived from the token, it is stable across reattach and reveals nothing of it.
+#[tokio::test]
+async fn an_ordinary_acp_session_attaches_the_relay_server_under_its_own_name() {
+    let state = relay_state();
+    let (outbound, outbound_peer) = tokio::io::duplex(8192);
+    let (inbound_writer, inbound) = tokio::io::duplex(8192);
+    let bridge = std::sync::Arc::new(AcpBridge::for_test(state, outbound, inbound, "cursor"));
+
+    let (_started, session_new) = drive_acp_start_thread(
+        bridge.clone(),
+        outbound_peer,
+        inbound_writer,
+        crate::provider::StartThreadRequest::new(
+            "/tmp/project",
+            "",
+            "on-request",
+            "workspace-write",
+        ),
+    )
+    .await;
+
+    let entry = &session_new["params"]["mcpServers"][0];
+    let token = entry["env"]
+        .as_array()
+        .expect("env pairs")
+        .iter()
+        .find(|pair| pair["name"] == "SEALWIRE_ASK_TOKEN")
+        .and_then(|pair| pair["value"].as_str())
+        .expect("a restricted session still gets the bridge")
+        .to_string();
+    let name = entry["name"].as_str().expect("named").to_string();
+    assert_eq!(name, crate::provider::relay_mcp_server_name(&token));
+    assert!(
+        name.starts_with("sealwire-") && name != "sealwire",
+        "{name}"
+    );
+    assert!(!name.contains(&token), "{name}");
+    assert_eq!(
+        bridge
+            .relay_mcp_server_for_test("acp-seat-1")
+            .await
+            .as_deref(),
+        Some(name.as_str()),
+        "and the session remembers which name is the relay's"
+    );
+}
+
 #[tokio::test]
 async fn a_turn_refreshes_a_stale_approval_policy_before_prompting() {
     // "YOLO still asks for permission on Cursor": pressing YOLO on a thread the

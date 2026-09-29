@@ -35,6 +35,19 @@ pub(crate) fn acp_mode_for_policy(approval_policy: &str, sandbox: &str) -> &'sta
 /// ACP always asks (verified: `cat` triggered a prompt with "Not in allowlist"),
 /// so a relay thread configured to never prompt has to be satisfied on the
 /// bridge side rather than by a provider flag.
+/// The relay's own tool a permission request is for, from Cursor's `<server>-<tool>: <tool>`.
+/// `server` is the name the relay attached this session's MCP bridge under, if it did.
+pub(crate) fn relay_tool_in_permission_title(
+    title: Option<&str>,
+    server: Option<&str>,
+) -> Option<&'static str> {
+    let (title, server) = (title?, server?);
+    crate::orchestrator_tools::TOOLS
+        .iter()
+        .map(|tool| tool.name)
+        .find(|name| title == format!("{server}-{name}: {name}"))
+}
+
 pub(crate) fn auto_approves(approval_policy: &str) -> bool {
     matches!(approval_policy, "never" | "bypass" | "bypassPermissions")
 }

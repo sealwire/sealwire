@@ -1233,6 +1233,7 @@ impl SessionSnapshot {
                         }) => {
                             for ask in asks {
                                 ask.answer = None;
+                                ask.cited.clear();
                             }
                         }
                         _ => {}
@@ -2313,6 +2314,9 @@ pub struct DelegateCardView {
     /// when the answer came through `report_back` rather than as a reply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
+    /// The `path:line` places the answer rests on; wherever `answer` is drawn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cited: Vec<String>,
     #[serde(default)]
     pub answered_with_tool: bool,
     #[serde(default)]

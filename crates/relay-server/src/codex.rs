@@ -318,13 +318,17 @@ fn peer_mcp_servers_with_transport(token: &str, relay_api_token: Option<&str>) -
     if let Some(api_token) = relay_api_token.filter(|t| !t.is_empty()) {
         env["RELAY_API_TOKEN"] = Value::String(api_token.to_string());
     }
-    json!({
-        "sealwire": {
-            "command": std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".to_string()),
-            "args": [crate::provider::sealwire_mcp_bridge_path()],
-            "env": env,
-        }
-    })
+    let server = json!({
+        "command": std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".to_string()),
+        "args": [crate::provider::sealwire_mcp_bridge_path()],
+        "env": env,
+        // A restricted thread otherwise asks through an elicitation the relay never
+        // answers; the relay already decides which of these tools a session may call.
+        "default_tools_approval_mode": "approve",
+    });
+    let mut servers = serde_json::Map::new();
+    servers.insert(crate::provider::relay_mcp_server_name(token), server);
+    Value::Object(servers)
 }
 
 /// Seat MCP for Codex: same map shape as peer, run id instead of ask token.
@@ -671,12 +675,15 @@ impl CodexBridge {
         // the same order ACP forced, because neither provider names the session
         // until after the tools are attached. Seat purpose attaches the
         // run-scoped bridge instead and never mints an ask token.
-        let identity =
-            crate::provider::sealwire_mcp_for_new_session(&approval_policy, &sandbox, purpose);
+        let identity = crate::provider::sealwire_mcp_for_new_session(purpose);
+        let unrestricted = crate::state::session_is_unrestricted(&approval_policy, &sandbox);
         let ask_token = match &identity {
-            crate::provider::SealwireMcpIdentity::Peer => {
-                Some(self.state.write().await.mint_unbound_ask_token())
-            }
+            crate::provider::SealwireMcpIdentity::Peer => Some(
+                self.state
+                    .write()
+                    .await
+                    .mint_unbound_ask_token(unrestricted),
+            ),
             _ => None,
         };
         let mut params = json!({
@@ -783,9 +790,7 @@ impl CodexBridge {
                     relay.thread_is_standalone(&session_id),
                 )
             };
-            let unrestricted = crate::state::session_is_unrestricted(&approval_policy, &sandbox);
-            match crate::provider::sealwire_mcp_for_reattach(seat_run_id, standalone, unrestricted)
-            {
+            match crate::provider::sealwire_mcp_for_reattach(seat_run_id, standalone) {
                 crate::provider::SealwireMcpIdentity::Seat(run_id) => {
                     params["config"] = json!({ "mcp_servers": seat_mcp_servers(&run_id) });
                 }

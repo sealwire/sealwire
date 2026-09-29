@@ -172,6 +172,7 @@ impl RelayState {
         mark.status = ask.status.as_str().to_string();
         mark.error = ask.error.clone();
         mark.answer = ask.answer.clone();
+        mark.cited = ask.cited.clone();
         mark.answered_with_tool = ask.answered_with_tool;
         mark.delivered = ask.delivered;
         mark.finished_at = ask.finished_at;

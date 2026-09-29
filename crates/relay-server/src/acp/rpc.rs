@@ -1158,12 +1158,42 @@ async fn handle_server_request(
         .cloned()
         .unwrap_or_default();
 
-    let auto_approve = sessions
+    let tool_call = params.get("toolCall").cloned().unwrap_or(Value::Null);
+    let relay_server = sessions
         .lock()
         .await
         .get(&session_id)
-        .map(|session| protocol::auto_approves(&session.approval_policy))
-        .unwrap_or(false);
+        .and_then(|session| session.relay_mcp_server.clone());
+    let relay_tool = protocol::relay_tool_in_permission_title(
+        tool_call.get("title").and_then(Value::as_str),
+        relay_server.as_deref(),
+    );
+    // Its `tool_call` said only "MCP: tool", and the relay finds a `report_back` by name.
+    if let (Some(tool), Some(raw_id)) = (
+        relay_tool,
+        tool_call.get("toolCallId").and_then(Value::as_str),
+    ) {
+        let update =
+            json!({ "sessionUpdate": "tool_call_update", "toolCallId": raw_id, "title": tool });
+        let (op, turn_id) = {
+            let mut sessions = sessions.lock().await;
+            let session = sessions.entry(session_id.clone()).or_default();
+            (plan_update(&update, session), session.turn_id.clone())
+        };
+        let mut relay = state.write().await;
+        if apply_op(&mut relay, &session_id, turn_id, op, provider_key) {
+            relay.notify();
+        }
+    }
+
+    // The relay decides which of its own tools a session may call, at the call.
+    let auto_approve = relay_tool.is_some()
+        || sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .map(|session| protocol::auto_approves(&session.approval_policy))
+            .unwrap_or(false);
 
     if auto_approve {
         let outcome = match auto_approve_option_id(&options) {
@@ -1180,7 +1210,6 @@ async fn handle_server_request(
         return;
     }
 
-    let tool_call = params.get("toolCall").cloned().unwrap_or(Value::Null);
     let title = tool_call
         .get("title")
         .and_then(Value::as_str)
