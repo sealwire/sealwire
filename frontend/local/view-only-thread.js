@@ -249,6 +249,7 @@ export function buildViewOnlyPin({
   historyExtended = false,
   loading = false,
   error = false,
+  loadError = null,
   relayGeneration = "",
 }) {
   const pin = {
@@ -298,6 +299,8 @@ export function buildViewOnlyPin({
     // self-heal decision retry it after a backoff instead of treating the empty
     // shell as a settled, complete view forever. See viewOnlySelfHealThreadId.
     error,
+    // Why the last load failed, kept through the retry so the view explains itself.
+    loadError,
   };
   if (reviewerThreads !== undefined) {
     pin.reviewerThreads = Array.isArray(reviewerThreads) ? reviewerThreads : [];

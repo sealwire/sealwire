@@ -107,6 +107,7 @@ export function createViewOnlyRefreshOps({
       priorPageRevision: prior?.pageRevision ?? null,
       historyExtended: Boolean(prior?.historyExtended),
       loading: true,
+      loadError: prior?.loadError ?? null,
     });
     state.viewOnlyThread = prior?.tailGap ? { ...loadingPin, tailGap: true } : loadingPin;
     if (state.session) renderSession(state.session);
@@ -216,6 +217,7 @@ export function createViewOnlyRefreshOps({
         priorPageRevision: livePin?.pageRevision ?? null,
         historyExtended: Boolean(livePin?.historyExtended),
         error: true,
+        loadError: error?.message || String(error),
       });
       state.viewOnlyThread =
         livePin?.tailGap && livePin?.deltaDuringFetch

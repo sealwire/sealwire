@@ -30,6 +30,7 @@ export function LocalTranscriptPanel({
   shortId,
   standbyCanWrite,
   viewOnly,
+  viewOnlyLoadError = null,
   viewOnlyReviewView,
   viewedThreadLocked,
   viewedThreadWorkflowLocked,
@@ -104,6 +105,14 @@ export function LocalTranscriptPanel({
       clampDetails: true,
       details: [`Current session: ${activeThreadLabel}`],
       title: "Relay console home",
+    });
+  } else if (!entries.length && viewOnly && viewOnlyLoadError) {
+    content = h(ConversationEmptyState, {
+      badge: viewOnlyReviewView ? "Review" : "Read-only",
+      className: "thread-empty-ready thread-empty-error",
+      copy: viewOnlyLoadError,
+      details: ["Retrying automatically."],
+      title: "Couldn't load this conversation",
     });
   } else if (!entries.length && viewOnly) {
     // A view-only thread whose transcript hasn't loaded yet — calm placeholder

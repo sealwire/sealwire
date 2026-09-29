@@ -222,6 +222,17 @@
   text-transform: uppercase;
 }
 
+/* A failed read shows its reason in the warning colour, so it cannot pass for loading. */
+.thread-empty-error .thread-empty-badge {
+  background: var(--status-alert-bg);
+  color: var(--status-alert-text);
+}
+
+.thread-empty-error h2 + p {
+  color: var(--text-warning);
+  overflow-wrap: anywhere;
+}
+
 .thread-empty-detail {
   font-size: var(--text-ui);
   color: var(--text-tertiary);

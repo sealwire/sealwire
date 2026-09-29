@@ -212,6 +212,24 @@ test("branch 4: a not-yet-loaded view-only thread shows a read-only or review pl
   }
 });
 
+// A read that failed must say why; an endless "Loading" was all the reader got before.
+test("branch 4: a view-only thread whose load failed shows the reason, not Loading", () => {
+  const refusal = "workspace /repo-feature is outside this relay's allowed roots";
+  const view = mount();
+  try {
+    view.render({ entries: [], viewOnly: true, viewOnlyLoadError: refusal });
+    assert.match(view.host.textContent, /Couldn't load this conversation/);
+    assert.ok(view.host.textContent.includes(refusal), view.host.textContent);
+    assert.doesNotMatch(view.host.textContent, /Loading/);
+
+    view.render({ entries: [], viewOnly: true, viewOnlyReviewView: true, viewOnlyLoadError: refusal });
+    assert.ok(view.host.textContent.includes(refusal), view.host.textContent);
+    assert.doesNotMatch(view.host.textContent, /Loading/);
+  } finally {
+    view.unmount();
+  }
+});
+
 test("branch 5: empty + no approval renders the standby thunk only when there is no active thread", () => {
   const view = mount();
   let standbyCalls = 0;
