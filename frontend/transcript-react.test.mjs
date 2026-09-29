@@ -2002,10 +2002,10 @@ test("TranscriptContent renders a collapsed diff-group chip with once-per-turn s
   assert.match(markup, /chat-message-diff-group/);
   assert.match(markup, /data-expand-key="group:fc"/);
   assert.match(markup, /data-transcript-toggle="group"/);
-  assert.match(markup, /··· 1 file change</);
+  assert.match(markup, /1 file change</);
   // Counted once per turn — NOT doubled across the fileChange + turnDiff.
-  assert.match(markup, /diff-group-chip-add">\+3</);
-  assert.match(markup, /diff-group-chip-del">−1</);
+  assert.match(markup, /work-group-chip-add">\+3</);
+  assert.match(markup, /work-group-chip-del">−1</);
   // Members (diff panels) do not render while the group is collapsed.
   assert.doesNotMatch(markup, /file-diff-panel/);
 });
@@ -2035,9 +2035,9 @@ test("diff-group chip counts one file once when the path is absolute and the hea
   const markup = renderTranscriptContentMarkup([fileChange, turnDiff], null, {
     currentCwd: "/repo",
   });
-  assert.match(markup, /··· 1 file change</);
-  assert.match(markup, /diff-group-chip-add">\+1</);
-  assert.match(markup, /diff-group-chip-del">−1</);
+  assert.match(markup, /1 file change</);
+  assert.match(markup, /work-group-chip-add">\+1</);
+  assert.match(markup, /work-group-chip-del">−1</);
 });
 
 test("a turn editing several files collapses to ONE chip even with text between edits", () => {
@@ -2061,7 +2061,7 @@ test("a turn editing several files collapses to ONE chip even with text between 
   const markup = renderTranscriptContentMarkup([fcA, text, fcB]);
   // A single chip aggregating both files — not two separate collapsed groups.
   assert.equal((markup.match(/chat-message-diff-group/g) || []).length, 1);
-  assert.match(markup, /··· 2 file changes</);
+  assert.match(markup, /2 file changes</);
 });
 
 test("diff-group chip falls back to fileChange stats when the turnDiff bodies are omitted", () => {
@@ -2086,8 +2086,8 @@ test("diff-group chip falls back to fileChange stats when the turnDiff bodies ar
   });
   const markup = renderTranscriptContentMarkup([fileChange, turnDiff]);
   // turnDiff carries no usable diff → count the inline fileChange, not 0.
-  assert.match(markup, /diff-group-chip-add">\+2</);
-  assert.match(markup, /diff-group-chip-del">−1</);
+  assert.match(markup, /work-group-chip-add">\+2</);
+  assert.match(markup, /work-group-chip-del">−1</);
 });
 
 test("diff-group label counts edits, not entries, when no file paths resolve", () => {
@@ -2103,8 +2103,8 @@ test("diff-group label counts edits, not entries, when no file paths resolve", (
     turn_id: "t1",
   });
   const markup = renderTranscriptContentMarkup([fileChange, turnDiff]);
-  assert.match(markup, /··· 1 file change</);
-  assert.doesNotMatch(markup, /··· 2 file changes/);
+  assert.match(markup, /1 file change</);
+  assert.doesNotMatch(markup, /2 file changes/);
 });
 
 test("expanded diff-group shows only the fileChange member, not the redundant turnDiff card", () => {
@@ -2133,7 +2133,7 @@ test("expanded diff-group shows only the fileChange member, not the redundant tu
     null,
     { expandedKeys: new Set(["group:fc"]) }
   );
-  assert.match(markup, /diff-group-chip-open/);
+  assert.match(markup, /work-group-chip-open/);
   // Exactly one diff panel: the inline edit. The turnDiff summary is suppressed.
   assert.equal((markup.match(/file-diff-panel/g) || []).length, 1);
   assert.doesNotMatch(markup, /INLINE_EDIT/);

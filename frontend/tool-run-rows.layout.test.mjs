@@ -193,3 +193,82 @@ test("tool rows and group lines sit close to the messages around them", async ()
     await browser.close();
   }
 });
+
+const fileChange = (id, path) => ({
+  item_id: id,
+  kind: "tool_call",
+  status: "completed",
+  tool: {
+    item_type: "fileChange",
+    name: "Edit",
+    file_changes: [
+      {
+        path,
+        change_type: "modify",
+        diff: "@@ -1 +1 @@\n-old\n+new\n",
+      },
+    ],
+  },
+});
+
+// Opened file-change groups used to keep per-row accent cards (taller than tool
+// rows, with gaps that broke the hairline). They must measure like tool groups.
+test("an opened file-change group matches tool-group density on the hairline", async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await render(
+      page,
+      [
+        cursorTool("t1", "grep"),
+        cursorTool("t2", "Find"),
+        fileChange("fc1", "frontend/a.js"),
+        fileChange("fc2", "frontend/b.js"),
+      ],
+      { expandedKeys: new Set(["group:t1", "group:fc1"]) }
+    );
+    const m = await page.evaluate(() => {
+      const toolMembers = [...document.querySelectorAll(".chat-message-tool:not(.chat-message-file-change).is-group-member")];
+      const fileMembers = [...document.querySelectorAll(".chat-message-file-change.is-group-member")];
+      const toolRow = document.querySelector(".tool-run-row")?.getBoundingClientRect().height ?? 0;
+      const fileHeaders = fileMembers.map((node) =>
+        node.querySelector(".diff-file-section-header")?.getBoundingClientRect().height ?? 0
+      );
+      const fileCards = fileMembers.map((node) => {
+        const card = node.querySelector(".message-card-tool");
+        return card ? parseFloat(getComputedStyle(card).borderLeftWidth) : -1;
+      });
+      const chip = document.querySelector(".chat-message-diff-group .work-group-chip")
+        || document.querySelector(".chat-message-diff-group .diff-group-chip");
+      const firstFile = fileMembers[0];
+      return {
+        toolSeams: toolMembers.slice(1).map((node, i) =>
+          Math.round(node.getBoundingClientRect().top - toolMembers[i].getBoundingClientRect().bottom)
+        ),
+        fileSeams: fileMembers.slice(1).map((node, i) =>
+          Math.round(node.getBoundingClientRect().top - fileMembers[i].getBoundingClientRect().bottom)
+        ),
+        chipToFirst: chip && firstFile
+          ? Math.round(firstFile.getBoundingClientRect().top - chip.getBoundingClientRect().bottom)
+          : null,
+        toolRow: Math.round(toolRow * 10) / 10,
+        fileHeaders: fileHeaders.map((h) => Math.round(h * 10) / 10),
+        fileCardBorders: fileCards,
+        usesWorkGroupChip: Boolean(document.querySelector(".chat-message-diff-group .work-group-chip")),
+      };
+    });
+    assert.equal(m.usesWorkGroupChip, true, "diff group must use the work-group chip");
+    assert.deepEqual(m.toolSeams, [0], "tool members stay flush");
+    assert.deepEqual(m.fileSeams, [0], "file-change members stay flush like tools");
+    assert.equal(m.chipToFirst, 0, "first file row sits flush under the chip");
+    assert.deepEqual(m.fileCardBorders, [0, 0], "no per-file accent stripe");
+    for (const height of m.fileHeaders) {
+      assert.ok(
+        height <= m.toolRow + 4,
+        `file header ${height}px should stay near tool row ${m.toolRow}px`
+      );
+    }
+  } finally {
+    await browser.close();
+  }
+});

@@ -685,12 +685,14 @@
 }
 
 .thread-content > .chat-message-work-group + .chat-message.is-group-member,
+.thread-content > .chat-message-diff-group + .chat-message.is-group-member,
 .thread-content > .chat-message.is-group-member + .chat-message.is-group-member {
   margin-top: -24px; /* .thread-content's gap */
 }
 
 /* Virtualized, each row is wrapped and spaced by the wrapper's own padding. */
 .transcript-virtual-row:has(> .chat-message-work-group):has(+ .transcript-virtual-row > .is-group-member),
+.transcript-virtual-row:has(> .chat-message-diff-group):has(+ .transcript-virtual-row > .is-group-member),
 .transcript-virtual-row:has(> .is-group-member):has(+ .transcript-virtual-row > .is-group-member) {
   padding-bottom: 0;
 }
@@ -702,8 +704,7 @@
   background: transparent;
 }
 
-/* Tool runs (design 20c): a log line, not a card. File-change cards keep theirs.
- * 20c-3: a size below the text and faint, so the replies are what the eye reads. */
+/* Tool runs (design 20c): a log line, not a card. */
 .message-card-tool,
 .message-card-command {
   position: relative;
@@ -716,13 +717,6 @@
   font-size: var(--text-sm);
   line-height: var(--leading-relaxed);
   color: var(--text-primary);
-}
-
-.chat-message-file-change .message-card-tool {
-  border-left: 2px solid var(--accent);
-  padding: 3px 12px;
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
 }
 
 /* `justify-content` because a global `button` rule centres; a title-only row
@@ -2345,59 +2339,13 @@ button.ask-user-summary:focus-visible {
   font-size: var(--text-xs);
 }
 
-/* Diff group chip — mirrors the work-group chip, used to collapse consecutive
-   per-turn diff cards. Stacks the optional Undo action beneath the chip. */
+/* Diff group — same process line as work-group (design 20c). The chip reuses
+ * `.work-group-chip`; this keeps the article's layout for the optional Undo. */
 .chat-message-diff-group {
   align-self: stretch;
   display: flex;
   flex-direction: column;
   gap: 6px;
-}
-
-.diff-group-chip {
-  display: inline-flex;
-  align-self: flex-start;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 10px;
-  margin: 0;
-  border: 1px solid var(--border-faint);
-  border-radius: 999px;
-  background: var(--surface-1);
-  color: var(--text-tertiary);
-  font-size: var(--text-sm);
-  line-height: var(--leading-normal);
-  cursor: pointer;
-  font-family: inherit;
-  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
-}
-
-.diff-group-chip:hover,
-.diff-group-chip-open {
-  color: var(--text-secondary);
-  background: var(--bg-elevated);
-  border-color: var(--border-subtle);
-}
-
-.diff-group-chevron {
-  display: inline-block;
-  width: 10px;
-  flex-shrink: 0;
-  text-align: center;
-}
-
-.diff-group-count {
-  white-space: nowrap;
-}
-
-.diff-group-chip-add {
-  color: var(--status-ready-text);
-  font-size: var(--text-xs);
-}
-
-.diff-group-chip-del {
-  color: var(--status-offline-text);
-  font-size: var(--text-xs);
 }
 
 .file-change-summary {

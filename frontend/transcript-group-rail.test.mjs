@@ -112,3 +112,89 @@ test("rail rows drop the per-card stripe that made the stack a barcode", () => {
   assert.ok(rule, "expected a rule neutralising the member card's own chrome");
   assert.match(rule[1], /border(-left)?:\s*(0|none)/, "the individual left stripe has to go");
 });
+
+// Diff groups used to keep a separate pill chip and per-file accent cards, so an
+// opened "N file changes" read as a different widget from "Ran N commands" —
+// taller rows, barcode stripes, and a gap under the chip. They have to share the
+// work-group chip and the same hairline member rail.
+
+const FILE_CHANGE_ENTRIES = [
+  {
+    item_id: "fc1",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      item_type: "fileChange",
+      name: "Edit",
+      file_changes: [
+        {
+          path: "frontend/a.js",
+          change_type: "modify",
+          diff: "@@ -1 +1 @@\n-old\n+new\n",
+        },
+      ],
+    },
+  },
+  {
+    item_id: "fc2",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      item_type: "fileChange",
+      name: "Edit",
+      file_changes: [
+        {
+          path: "frontend/b.js",
+          change_type: "modify",
+          diff: "@@ -1 +1 @@\n-old\n+new\n",
+        },
+      ],
+    },
+  },
+];
+
+test("the diff-group chip is the same plain line as the work-group chip", () => {
+  const markup = render(FILE_CHANGE_ENTRIES);
+  assert.match(markup, /chat-message-diff-group/);
+  assert.match(
+    markup,
+    /work-group-chip/,
+    "file-change groups must reuse the work-group chip, not a separate pill"
+  );
+  assert.doesNotMatch(
+    markup,
+    /diff-group-chip/,
+    "a parallel chip class is how the pill style leaked back in"
+  );
+});
+
+test("file-change CSS must not reintroduce a per-card accent stripe", () => {
+  const css = readFileSync(join(HERE, "conversation.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  // The group-member rule zeros the stripe; a later `.chat-message-file-change
+  // .message-card-tool { border-left: 2px … }` at equal specificity undoes it for
+  // every edit row and is what made the opened file list look like fat cards again.
+  const fileChangeCard = css.match(
+    /\.chat-message-file-change\s+\.message-card-tool\s*\{([^}]*)\}/
+  );
+  if (fileChangeCard) {
+    assert.doesNotMatch(
+      fileChangeCard[1],
+      /border-left\s*:\s*[^0]/,
+      "file-change members must not paint their own accent stripe over the shared hairline"
+    );
+  }
+});
+
+test("diff-group members flush the same way work-group members do", () => {
+  const css = readFileSync(join(HERE, "conversation.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.match(
+    css,
+    /\.chat-message-diff-group\s*\+\s*\.chat-message\.is-group-member/,
+    "the first file row must sit flush under the chip, like tools under Ran N commands"
+  );
+  assert.match(
+    css,
+    /\.transcript-virtual-row:has\(\s*>\s*\.chat-message-diff-group\s*\)/,
+    "virtualized diff groups must close the wrapper gap the same way work groups do"
+  );
+});

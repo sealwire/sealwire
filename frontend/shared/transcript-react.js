@@ -2645,7 +2645,7 @@ function DiffGroupEntry({ group, options = null }) {
     (entry) => entry?.tool?.item_type !== "turnDiff"
   ).length;
   const count = fileCount || editCount || (group?.entries?.length || 0);
-  const label = `··· ${count} file ${count === 1 ? "change" : "changes"}`;
+  const label = `${count} file ${count === 1 ? "change" : "changes"}`;
 
   // The turnDiff is folded into the chip rather than rendered as its own card
   // (its per-file diffs are already shown by the inline fileChange members on
@@ -2673,22 +2673,29 @@ function DiffGroupEntry({ group, options = null }) {
     h(
       "button",
       {
-        className: `diff-group-chip${expanded ? " diff-group-chip-open" : ""}`,
+        // Same plain process line as work-group chips (design 20c) — a parallel
+        // pill class made file-change groups read as a different widget.
+        className: [
+          "work-group-chip",
+          expanded ? "work-group-chip-open" : "",
+        ]
+          .filter(Boolean)
+          .join(" "),
         ...(expandKey ? { "data-expand-key": expandKey } : {}),
         "data-transcript-toggle": "group",
         type: "button",
       },
       h(
         "span",
-        { "aria-hidden": "true", className: "diff-group-chevron" },
+        { "aria-hidden": "true", className: "work-group-chevron" },
         expanded ? "▾" : "▸"
       ),
-      h("span", { className: "diff-group-count" }, label),
+      h("span", { className: "work-group-lead" }, label),
       added > 0
-        ? h("span", { className: "diff-group-chip-add" }, `+${added}`)
+        ? h("span", { className: "work-group-chip-add" }, `+${added}`)
         : null,
       removed > 0
-        ? h("span", { className: "diff-group-chip-del" }, `−${removed}`)
+        ? h("span", { className: "work-group-chip-del" }, `−${removed}`)
         : null
     ),
     // Sibling of the toggle button (NOT a descendant) so clicking Undo never
@@ -3444,6 +3451,8 @@ export function TranscriptContent({
           nodes.push(
             h(TranscriptEntry, {
               entry: memberEntry,
+              // Same rail as work-group members: one hairline, flush seams.
+              inGroup: true,
               isJustPrepended: Boolean(memberId && justPrependedItemIds.has(memberId)),
               isLatestUser: false,
               key:

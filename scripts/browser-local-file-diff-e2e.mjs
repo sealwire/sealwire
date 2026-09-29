@@ -106,14 +106,16 @@ async function main() {
     await page.waitForFunction(
       (itemId) =>
         Boolean(
-          document.querySelector(".diff-group-chip") ||
+          document.querySelector(".chat-message-diff-group .work-group-chip") ||
             document.querySelector(`[data-transcript-entry-id="${itemId}"]`)
         ),
       TURN_DIFF_ITEM_ID,
       { timeout: TIMEOUT_MS }
     );
     await page.evaluate(() => {
-      const chip = document.querySelector(".diff-group-chip:not(.diff-group-chip-open)");
+      const chip = document.querySelector(
+        ".chat-message-diff-group .work-group-chip:not(.work-group-chip-open)"
+      );
       if (chip instanceof HTMLButtonElement) {
         chip.click();
       }
