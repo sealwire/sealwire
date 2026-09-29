@@ -2365,21 +2365,33 @@ function isGroupableFinishedTool(entry) {
 }
 
 // File-change / per-turn-diff cards form their OWN group, kept separate from the
-// regular tool group. Only completed entries group, so a still-streaming
-// turnDiff (status "running") stays inline until the turn settles.
-function isGroupableDiff(entry) {
+// regular tool group. A running turnDiff joins an existing completed edit for
+// its turn so its live summary does not repeat that edit as a second file row.
+function isGroupableDiff(entry, turnsWithCompletedEdits = null) {
   if (!entry || entry.kind !== "tool_call") {
     return false;
   }
-  if ((entry.status || "completed") !== "completed") {
-    return false;
-  }
   const itemType = entry?.tool?.item_type || "";
-  return itemType === "fileChange" || itemType === "turnDiff";
+  const status = entry.status || "completed";
+  if (status === "completed") {
+    return itemType === "fileChange" || itemType === "turnDiff";
+  }
+  return status === "running"
+    && itemType === "turnDiff"
+    && Boolean(entry.turn_id && turnsWithCompletedEdits?.has(entry.turn_id));
 }
 
 export function groupToolEntries(entries) {
   const list = entries || [];
+  const turnsWithCompletedEdits = new Set();
+  for (const entry of list) {
+    if (entry?.turn_id
+      && entry?.tool?.item_type === "fileChange"
+      && isGroupableDiff(entry)) {
+      turnsWithCompletedEdits.add(entry.turn_id);
+    }
+  }
+  const isDiffEntry = (entry) => isGroupableDiff(entry, turnsWithCompletedEdits);
 
   // Every turn that has any groupable diff entry gets consolidated: all of that
   // turn's diff entries (every per-edit fileChange card plus the turnDiff, if
@@ -2389,7 +2401,7 @@ export function groupToolEntries(entries) {
   // index up front.
   const lastDiffIndexByTurn = new Map();
   list.forEach((entry, index) => {
-    if (isGroupableDiff(entry) && entry?.turn_id) {
+    if (isDiffEntry(entry) && entry?.turn_id) {
       lastDiffIndexByTurn.set(entry.turn_id, index);
     }
   });
@@ -2407,7 +2419,7 @@ export function groupToolEntries(entries) {
       return;
     }
 
-    const diffEntry = isGroupableDiff(entry);
+    const diffEntry = isDiffEntry(entry);
     const turnId = entry?.turn_id;
 
     // Consolidated diff entry: accumulate by turn, emit at the turn's last diff.

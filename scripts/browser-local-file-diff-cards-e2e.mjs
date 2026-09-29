@@ -1,4 +1,5 @@
-// Regression: ONE edited file must draw ONE card.
+// Regression: ONE edited file must draw ONE row, both while the turn is running
+// and after its full diff detail has loaded.
 //
 // The Claude worker reports a change's `path` ABSOLUTE (that is how the relay tells which
 // worktree a thread has been writing in) while the patch header inside its diff is
@@ -11,8 +12,8 @@
 // the first with no +/− counts.
 //
 // The invariant is unit-tested in frontend/transcript-react.test.mjs; this drives the whole
-// path (snapshot strip → detail fetch → render) in a real browser, because that round trip
-// is what puts the two spellings in the same list.
+// path (snapshot strip → detail fetch → render) in a real browser. The seed also carries
+// the running per-turn summary that previously drew the same file again beside its edit.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
@@ -106,8 +107,24 @@ async function main() {
       null,
       { timeout: TIMEOUT_MS }
     );
+    const transcriptResponse = await page.request.get(
+      `http://127.0.0.1:${relayPort}/api/threads/${THREAD_ID}/transcript`
+    );
+    assert.equal(transcriptResponse.status(), 200);
+    const transcript = (await transcriptResponse.json()).data.entries;
+    assert.equal(
+      transcript.find((entry) => entry.item_id === EDIT_ITEM_ID)?.status,
+      "completed",
+      "the fixture must contain a completed edit"
+    );
+    assert.equal(
+      transcript.find((entry) => entry.item_id === `turn-diff:${TURN_ID}`)?.status,
+      "running",
+      "the fixture must contain the running summary that caused the duplicate"
+    );
 
-    // The edit is consolidated into a collapsed diff-group chip; expand it to reach the card.
+    // The completed edit and running turn summary share one collapsed diff-group chip.
+    // Expand it to reach the edit card.
     await page.waitForFunction(
       (itemId) =>
         Boolean(
@@ -143,7 +160,7 @@ async function main() {
     assert.equal(
       await page.locator(".diff-file-section").count(),
       1,
-      "one edited file must draw exactly one file section, not one per path spelling"
+      "the live turn summary must not repeat the edit as a second file section"
     );
 
     // Opening the section is what fetches the detail — the response that carries the
@@ -242,7 +259,8 @@ async function writeSeedState(statePath, workspaceDir) {
 }
 
 // A JSON array of TranscriptEntryView served by the fake provider as the resumed thread's
-// transcript. One entry, shaped exactly as the Claude worker emits an edit.
+// transcript. Claude's completed edit is followed by its still-running turn summary,
+// the lifecycle state that used to draw the same file twice.
 async function writeSeedTranscript(seedPath, absolutePath, diff) {
   await fs.mkdir(path.dirname(seedPath), { recursive: true });
   await fs.writeFile(
@@ -266,6 +284,22 @@ async function writeSeedTranscript(seedPath, absolutePath, diff) {
             command: null,
             input_preview: null,
             result_preview: null,
+            diff,
+            file_changes: [{ path: absolutePath, change_type: "modify", diff }],
+          },
+        },
+        {
+          item_id: `turn-diff:${TURN_ID}`,
+          kind: "tool_call",
+          text: `Changed files in turn ${TURN_ID}`,
+          status: "running",
+          turn_id: TURN_ID,
+          tool: {
+            item_type: "turnDiff",
+            name: "File summary",
+            title: `Claude changed ${TEST_FILE}.`,
+            detail: `Target file: ${absolutePath}`,
+            path: absolutePath,
             diff,
             file_changes: [{ path: absolutePath, change_type: "modify", diff }],
           },

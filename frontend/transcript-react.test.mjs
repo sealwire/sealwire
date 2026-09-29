@@ -1608,18 +1608,29 @@ test("groupToolEntries fuses a turn's fileChange and turnDiff into one diff-grou
   assert.deepEqual(result[0].entries.map((e) => e.item_id), ["fc1", "fc2", "td1"]);
 });
 
-test("groupToolEntries leaves a running turnDiff ungrouped", () => {
-  const fc = makeTool("fc", { tool: { item_type: "fileChange", name: "Edit" }, turn_id: "t1" });
+test("groupToolEntries leaves a lone running turnDiff ungrouped", () => {
   const runningTd = {
     ...makeTool("td", { tool: { item_type: "turnDiff", name: "TurnDiff" }, turn_id: "t1" }),
     status: "running",
   };
-  const result = groupToolEntries([fc, runningTd]);
-  assert.equal(result.length, 2);
-  assert.equal(result[0].type, "diff-group");
-  assert.deepEqual(result[0].entries.map((e) => e.item_id), ["fc"]);
-  assert.equal(result[1].kind, "tool_call");
-  assert.equal(result[1].status, "running");
+  const result = groupToolEntries([runningTd]);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].kind, "tool_call");
+  assert.equal(result[0].status, "running");
+});
+
+test("groupToolEntries folds a running turnDiff into its completed file change", () => {
+  const fc = makeTool("fc", {
+    tool: { item_type: "fileChange", name: "Edit" },
+    turn_id: "t1",
+  });
+  const text = { item_id: "txt", kind: "agent_text", status: "completed", text: "Still working", turn_id: "t1" };
+  const runningTd = {
+    ...makeTool("td", { tool: { item_type: "turnDiff", name: "TurnDiff" }, turn_id: "t1" }),
+    status: "running",
+  };
+  const result = groupToolEntries([fc, text, runningTd]);
+  assert.deepEqual(groupShape(result), ["txt", "diff-group[fc,td]"]);
 });
 
 test("groupToolEntries consolidates a turn's fileChange and turnDiff across intervening text", () => {
@@ -2138,6 +2149,34 @@ test("expanded diff-group shows only the fileChange member, not the redundant tu
   assert.equal((markup.match(/file-diff-panel/g) || []).length, 1);
   assert.doesNotMatch(markup, /INLINE_EDIT/);
   assert.doesNotMatch(markup, /SUMMARY_AGG/);
+});
+
+test("expanded diff-group does not repeat a running turnDiff's file row", () => {
+  const fileChange = makeTool("fc", {
+    tool: {
+      item_type: "fileChange",
+      name: "Edit",
+      file_changes: [{ path: "frontend/a.js", change_type: "update", diff: "+edit\n" }],
+    },
+    turn_id: "t1",
+  });
+  const runningTurnDiff = {
+    ...makeTool("td", {
+      tool: {
+        item_type: "turnDiff",
+        name: "File summary",
+        file_changes: [{ path: "frontend/a.js", change_type: "update", diff: "+edit\n" }],
+      },
+      turn_id: "t1",
+    }),
+    status: "running",
+  };
+  const markup = renderTranscriptContentMarkup(
+    [fileChange, runningTurnDiff],
+    null,
+    { expandedKeys: new Set(["group:fc"]) }
+  );
+  assert.equal((markup.match(/file-diff-panel/g) || []).length, 1);
 });
 
 test("collapsed diff-group surfaces the Undo action on the chip", () => {
