@@ -7014,11 +7014,12 @@ body.is-resizing-panel {
 }
 
 /* Rail file rows ---------------------------------------------------------
- * The compact list behind `variant: "rail"`. Deliberately borderless: ten
- * bordered cards read as ten containers rather than one list, and the chrome
- * outweighed the one line of content each of them held. Structure here comes
- * from alignment (a fixed status column, a right-aligned stats column) and
- * whitespace instead. The transcript's `.diff-file-section` card is untouched. */
+ * Shared by the workspace-diff panel and the transcript's inline file-change
+ * entries. Deliberately borderless: ten bordered cards read as ten containers
+ * rather than one list, and the chrome outweighed the one line of content each
+ * of them held. Structure here comes from alignment (a fixed status column, a
+ * right-aligned stats column) and whitespace instead — matching the slim
+ * tool-run rows the edit sits among in the conversation. */
 .file-diff-panel.is-rail .diff-file-sections {
   gap: 0;
 }

@@ -138,7 +138,7 @@ async function main() {
         chip.click();
       }
     });
-    await page.waitForSelector("#transcript .diff-file-section-name", { timeout: TIMEOUT_MS });
+    await page.waitForSelector("#transcript .diff-file-name", { timeout: TIMEOUT_MS });
 
     // 1. The path is rendered as two addressable halves, not one string.
     const parts = await readParts(page);

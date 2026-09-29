@@ -1056,7 +1056,6 @@ function FileDiffSection({
   diffsOmitted,
   itemId,
   onEnsureDetail,
-  variant,
 }) {
   const [opened, setOpened] = React.useState(false);
   // Computed for every row, open or not: the collapsed list is what people scan,
@@ -1080,15 +1079,14 @@ function FileDiffSection({
     }
   };
 
-  const isRail = variant === "rail";
   const glyph = changeGlyph(change.change_type);
   const [dir, base] = splitDisplayPath(displayPath);
 
-  // The rail's row is a different shape, not just different paint: a fixed
-  // status column, a two-part name that truncates directory-first, and a
-  // right-aligned stats column. The transcript keeps the original markup so this
-  // restyle cannot leak into the conversation.
-  const railHeader = h(
+  // One compact row everywhere: status glyph, directory-first name, right-aligned
+  // stats. The transcript used to carry a padded card with a chevron; that read as
+  // a different widget next to the slim tool-run lines above it. Same shape as the
+  // workspace-diff rail keeps the two surfaces (and neighboring tools) in step.
+  const header = h(
     "summary",
     { className: "diff-file-section-header", title: change.path || "unknown" },
     h("span", { className: `diff-file-glyph ${glyph.modifier}`, title: glyph.label }, glyph.letter),
@@ -1106,41 +1104,13 @@ function FileDiffSection({
     )
   );
 
-  const transcriptHeader = h(
-    "summary",
-    { className: "diff-file-section-header" },
-    h(
-      "div",
-      { className: "diff-file-section-meta", title: change.path || "unknown" },
-      h(
-        "div",
-        { className: "diff-file-section-primary" },
-        // Same dir/base split as the rail. This used to be one flat string,
-        // deliberately — which held while the transcript column was wide enough
-        // to show a path whole. On remote the column relaxes to the viewport
-        // and `.diff-file-section-name` ellipsises from the END, so the
-        // basename — the thing actually being scanned for — was the first part
-        // to disappear. See frontend/shared/diff-file-name.test.mjs.
-        h(
-          "span",
-          { className: "diff-file-section-name" },
-          dir ? h("span", { className: "diff-file-dir" }, dir) : null,
-          h("span", { className: "diff-file-base" }, base)
-        ),
-        added > 0 ? h("span", { className: "file-change-chip-add" }, `+${added}`) : null,
-        removed > 0 ? h("span", { className: "file-change-chip-del" }, `-${removed}`) : null
-      )
-    ),
-    h("span", { className: "diff-file-section-chevron", "aria-hidden": "true" }, "▾")
-  );
-
   return h(
     "details",
     {
-      className: isRail ? "diff-file-section is-rail" : "diff-file-section",
+      className: "diff-file-section is-rail",
       onToggle,
     },
-    isRail ? railHeader : transcriptHeader,
+    header,
     opened
       ? h(
           "div",
@@ -1157,9 +1127,11 @@ function FileDiffSection({
   );
 }
 
-// `variant: "rail"` opts into the right panel's compact row. Everything else
-// (the transcript's inline file-change entries) gets the original card.
-export function FileChangeDiff({ tool, itemId = "", onEnsureDetail = null, variant = "transcript" }) {
+// Compact git-status row for both the transcript and the workspace-diff rail.
+// `variant` is accepted for callers that still pass it; both surfaces share one
+// markup so a future "card" revival would need an explicit new shape, not a silent
+// default flip.
+export function FileChangeDiff({ tool, itemId = "", onEnsureDetail = null, variant = "rail" }) {
   const fileChanges = getFileChanges(tool);
   const displayPaths = buildFileDisplayPathMap(fileChanges, tool?.display_options || null);
   const diffsOmitted = Boolean(tool?.file_changes_omitted);
@@ -1170,7 +1142,7 @@ export function FileChangeDiff({ tool, itemId = "", onEnsureDetail = null, varia
 
   return h(
     "div",
-    { className: variant === "rail" ? "file-diff-panel is-rail" : "file-diff-panel" },
+    { className: "file-diff-panel is-rail" },
     h(
       "div",
       { className: "diff-file-sections" },
@@ -1182,7 +1154,6 @@ export function FileChangeDiff({ tool, itemId = "", onEnsureDetail = null, varia
           itemId,
           key: `${change.path || "unknown"}:${index}`,
           onEnsureDetail,
-          variant,
         })
       )
     )

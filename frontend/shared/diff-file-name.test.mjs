@@ -5,16 +5,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { FileChangeDiff, splitDisplayPath } from "./transcript-react.js";
 
-// A file header is scanned for its BASENAME. The workspace-diff rail already
-// knows this: it splits the display path and lets the directory give up space
-// first (styles.css:5346-5367, with the asymmetric 1000-vs-1 shrink that keeps
-// the basename whole). The transcript rendered the same data as one flat
-// string, so a deep path pushed the filename out of view — the part you were
-// actually looking for was the first thing truncated.
-//
-// This pins BOTH variants to the same treatment, with the rail as the
-// reference. The point is not the styling; it is that one component should not
-// present the same value two different ways on two surfaces.
+// A file header is scanned for its BASENAME. Both the workspace-diff rail and
+// the transcript share the compact row: directory and basename are split so the
+// directory gives up space first (styles.css `.diff-file-dir` / `.diff-file-base`,
+// with the asymmetric 1000-vs-1 shrink that keeps the basename whole).
 
 const DEEP_PATH = "crates/relay-broker/src/pairing.rs";
 
@@ -63,6 +57,11 @@ for (const variant of ["rail", "transcript"]) {
       markup,
       />crates\/relay-broker\/src\/pairing\.rs</,
       `${variant} should not also emit the path as one flat string`
+    );
+    assert.match(
+      markup,
+      /diff-file-section is-rail/,
+      `${variant} uses the compact rail row`
     );
   });
 }

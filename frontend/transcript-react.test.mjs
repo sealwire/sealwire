@@ -692,7 +692,9 @@ test("renderEntryMarkup never attaches undo controls to individual file change e
     lastTurnDiffItemId: "fc-2",
   });
 
-  assert.match(markup, /diff-file-section-chevron/);
+  assert.match(markup, /diff-file-glyph/);
+  assert.match(markup, /diff-file-section is-rail/);
+  assert.doesNotMatch(markup, /diff-file-section-chevron/);
   assert.doesNotMatch(markup, /data-file-change-action/);
   assert.doesNotMatch(markup, /diff-line-delete/);
   assert.doesNotMatch(markup, /diff-line-add/);
@@ -903,8 +905,9 @@ test("renderEntryMarkup exposes turn diff files as independently closed sections
     expandedKeys: new Set(["entry:turn-diff:1"]),
   });
 
-  assert.match(markup, /diff-file-section/);
-  assert.match(markup, /diff-file-section-chevron/);
+  assert.match(markup, /diff-file-section is-rail/);
+  assert.match(markup, /diff-file-glyph/);
+  assert.doesNotMatch(markup, /diff-file-section-chevron/);
   assert.match(markup, /frontend\/app\.js/);
   assert.match(markup, /frontend\/styles\.css/);
   assert.doesNotMatch(markup, /diff-line-number/);
@@ -1147,9 +1150,9 @@ test("renderEntryMarkup draws one section when the worker path is absolute and t
     expandedKeys: new Set(["entry:fc-abs-header"]),
   });
 
-  assert.equal(markup.match(/class="diff-file-section"/g)?.length, 1);
+  assert.equal(markup.match(/class="diff-file-section is-rail"/g)?.length, 1);
   assert.match(markup, /\+1/);
-  assert.match(markup, /-1/);
+  assert.match(markup, /−1/);
 });
 
 // The shape the detail fetch delivers: `externalize_nested_file_change_diffs` moves the
@@ -1179,7 +1182,7 @@ test("renderEntryMarkup folds an externalized patch onto its path-only file chan
     expandedKeys: new Set(["entry:turn-diff:externalized"]),
   });
 
-  assert.equal(markup.match(/class="diff-file-section"/g)?.length, 1);
+  assert.equal(markup.match(/class="diff-file-section is-rail"/g)?.length, 1);
   assert.match(markup, /\+1/);
 });
 
@@ -1209,7 +1212,7 @@ test("renderEntryMarkup keeps same-named files in different directories apart", 
     expandedKeys: new Set(["entry:turn-diff:same-basename"]),
   });
 
-  assert.equal(markup.match(/class="diff-file-section"/g)?.length, 2);
+  assert.equal(markup.match(/class="diff-file-section is-rail"/g)?.length, 2);
 });
 
 test("renderEntryMarkup shows expanded command detail and loading note when requested", () => {

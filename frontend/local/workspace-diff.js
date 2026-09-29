@@ -827,11 +827,9 @@ function renderStatsBadge(state, stats) {
   );
 }
 
-// `variant` stays the CALLER's choice even though both current callers pass
-// "rail": the transcript renders file changes through the same component, and
-// defaulting to the wide card is what keeps a future caller from silently
-// inheriting a layout nobody checked on that surface.
-function renderDiffContent(state, variant = "transcript") {
+// `variant` stays accepted for callers that still pass it, but both surfaces
+// share the compact rail row — the transcript no longer defaults to a wide card.
+function renderDiffContent(state, variant = "rail") {
   if (state.status === "loading" && !state.data) {
     return h("p", { className: "diff-file-empty" }, "Loading…");
   }

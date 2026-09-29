@@ -2106,6 +2106,12 @@ button.ask-user-summary:focus-visible {
   max-width: 540px;
 }
 
+/* Compact rail rows should span the same width as neighboring tool-run lines,
+ * not sit in a narrower 540px card column. */
+.chat-message-file-change .file-diff-panel.is-rail {
+  max-width: none;
+}
+
 /* fileChange + turnDiff entries hug the preceding tool/diff entry instead of
  * inheriting the 24px gap from .thread-content (flex `gap`). */
 .chat-message-file-change:not(:first-child) {

@@ -1884,11 +1884,11 @@ test("collapsed file rows still show their own +/- counts", () => {
   assert.match(list, /[-−]3\b/, "b.txt's collapsed row must show its removed-line count");
 });
 
-// The rail's compact row and the transcript's card share one component, so the
-// only thing keeping this restyle out of the conversation is the `variant` prop.
-// Lock both sides: the rail must get the new structure, and the transcript must
-// keep the exact markup it had before (name in a <strong>, no status glyph).
-test("the compact row is opt-in — the transcript keeps its original card markup", async () => {
+// The compact rail row is shared by the workspace-diff panel and the transcript's
+// inline file-change entries. Both surfaces must carry the status glyph and the
+// directory/basename split — a padded card next to slim tool-run lines is what
+// this restyle removes.
+test("file-change rows use the compact rail markup in both surfaces", async () => {
   const { FileChangeDiff } = await import("../shared/transcript-react.js");
   const tool = {
     item_type: "workspaceDiff",
@@ -1901,26 +1901,19 @@ test("the compact row is opt-in — the transcript keeps its original card marku
     ],
   };
 
-  const rail = renderToStaticMarkup(React.createElement(FileChangeDiff, { tool, variant: "rail" }));
-  assert.match(rail, /diff-file-glyph/, "the rail row carries a status glyph");
-  assert.match(rail, />A</, "an added file is glyphed A, like git status --short");
-  // Directory and basename are separate elements so the directory can be the
-  // half that truncates.
-  assert.match(rail, /diff-file-dir[^>]*>src\/deep\/</);
-  assert.match(rail, /diff-file-base[^>]*>a\.txt</);
-  assert.doesNotMatch(rail, /<strong/, "the rail row drops the bold full-path treatment");
-
-  const transcript = renderToStaticMarkup(React.createElement(FileChangeDiff, { tool }));
-  assert.doesNotMatch(transcript, /diff-file-glyph/, "the transcript card gains no glyph column");
-  // This assertion used to be the opposite — "the transcript card keeps one
-  // whole path". That was a real decision, and it was right for the surface it
-  // was made on: a 760px desktop column shows these paths in full, so splitting
-  // them bought nothing. It stopped being right on remote, where the column
-  // relaxes to the viewport and `.diff-file-section-name` ellipsised from the
-  // END, dropping the basename first. Both surfaces now use the rail's split.
-  // The glyph column above stays rail-only: that one IS just for the rail.
-  assert.match(transcript, /diff-file-dir[^>]*>src\/deep\/</);
-  assert.match(transcript, /diff-file-base[^>]*>a\.txt</);
+  for (const variant of ["rail", "transcript"]) {
+    const markup = renderToStaticMarkup(
+      React.createElement(FileChangeDiff, { tool, variant })
+    );
+    assert.match(markup, /file-diff-panel is-rail/, `${variant} uses the compact panel`);
+    assert.match(markup, /diff-file-section is-rail/, `${variant} uses the compact row`);
+    assert.match(markup, /diff-file-glyph/, `${variant} carries a status glyph`);
+    assert.match(markup, />A</, `${variant}: an added file is glyphed A, like git status --short`);
+    assert.match(markup, /diff-file-dir[^>]*>src\/deep\//);
+    assert.match(markup, /diff-file-base[^>]*>a\.txt</);
+    assert.doesNotMatch(markup, /diff-file-section-chevron/, `${variant} drops the fat-card chevron`);
+    assert.doesNotMatch(markup, /<strong/, `${variant} drops the bold full-path treatment`);
+  }
 });
 
 // Which half of the path survives a narrow rail is a design decision, not an
