@@ -4,12 +4,14 @@ import { formatRelativeTime } from "../remote/utils.js";
 import {
   askLedger,
   askedSummary,
+  reviewFindings,
   reviewLedger,
   reviewOutcome,
 } from "./agents-ledger.js";
 import { renderMarkdown } from "./markdown.js";
 import { providerMark } from "./provider-mark.js";
 import { transcriptPageIsFromAnotherGeneration } from "./transcript-generation.js";
+import { FindingList } from "./review-card.js";
 import { ReviewLauncher } from "./review-panel.js";
 import { CodeFlowLauncher, WorkflowRunCard } from "./workflow-panel.js";
 import { MenuPortal, useAnchoredMenu } from "./use-anchored-menu.js";
@@ -37,11 +39,13 @@ export function reviewerPreviewEntriesFromPage(session, page) {
 /**
  * Findings body is the open affordance (design 19a). Links inside the markdown must
  * stay links — including keyboard activation — so Enter on a focused <a> must not
- * open the reviewer or preventDefault the navigation.
+ * open the reviewer or preventDefault the navigation. A finding that opens in place,
+ * and "Show all findings", are presses of their own.
  */
 export function shouldOpenReviewerFromPointerEvent(event) {
   const target = event?.target;
   if (target?.closest?.("a")) return false;
+  if (target?.closest?.("button, [role='button']")) return false;
   return true;
 }
 
@@ -369,13 +373,16 @@ function ReviewSlot({
   const terminal = isTerminalReviewStatus(job.status);
   const reviewerThreadId = job.reviewer_thread_id || null;
   const outcome = reviewOutcome(job);
+  const findings = reviewFindings(job);
+  const listed = Boolean(findings?.rows.length);
+  // The reviewer's own words only while it reads, or where it wrote outside the asked-for
+  // form; a clean approval has nothing more to say.
+  const wantsText = !listed && findings?.verdict !== "approve";
+  const following = !terminal && !findings;
 
-  // Surface the reviewer's latest message for ANY review with a reviewer thread —
-  // not just terminal ones — so the user can see what an in-progress or stuck
-  // reviewer is doing (the whole point of "let me see inside the review"). While the
-  // review is still running we poll, so the preview keeps up with the reviewer.
+  // Polled while the reviewer reads, so a stuck one can be watched from here.
   React.useEffect(() => {
-    if (!reviewerThreadId || typeof fetchReviewerTranscript !== "function") {
+    if (!wantsText || !reviewerThreadId || typeof fetchReviewerTranscript !== "function") {
       return undefined;
     }
     let cancelled = false;
@@ -406,17 +413,17 @@ function ReviewSlot({
     load();
     // Poll while the review runs so the preview tracks the reviewer, but pause when the
     // tab is hidden — nobody's watching, so there's no point spending a broker round-trip.
-    const timer = terminal
-      ? null
-      : setInterval(() => {
+    const timer = following
+      ? setInterval(() => {
           if (typeof document !== "undefined" && document.hidden) return;
           load();
-        }, REVIEWER_PREVIEW_POLL_MS);
+        }, REVIEWER_PREVIEW_POLL_MS)
+      : null;
     return () => {
       cancelled = true;
       if (timer) clearInterval(timer);
     };
-  }, [terminal, reviewerThreadId, fetchReviewerTranscript]);
+  }, [wantsText, following, reviewerThreadId, fetchReviewerTranscript]);
 
   // Effort is the quietest fact on the row and the first to cost the model its space,
   // so it rides the tooltip only.
@@ -431,21 +438,28 @@ function ReviewSlot({
       : null;
   const preview = [
     job.error ? h("p", { className: "reviewer-card-error", key: "err" }, job.error) : null,
-    review.status === "loading" && !review.text
+    listed
+      ? h(
+          "div",
+          { className: "reviewer-review-findings", key: "listed" },
+          h(FindingList, { rows: findings.rows, more: findings.more })
+        )
+      : null,
+    wantsText && review.status === "loading" && !review.text
       ? h(
           "p",
           { className: "reviewer-card-note", key: "loading" },
           terminal ? "Loading review…" : "Loading the reviewer's latest message…"
         )
       : null,
-    review.status === "error" && !review.text
+    wantsText && review.status === "error" && !review.text
       ? h(
           "p",
           { className: "reviewer-card-error", key: "load-err" },
           `Couldn't load the reviewer's messages: ${review.error}`
         )
       : null,
-    review.text
+    wantsText && review.text
       ? h(
           "div",
           { className: "reviewer-findings message-body", key: "findings" },

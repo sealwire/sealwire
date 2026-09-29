@@ -4165,6 +4165,19 @@ pub struct ReviewJobView {
     /// When the reviewer began the round it is reading; 0 while it is not reading one.
     pub reviewing_since: u64,
     pub files: Option<u32>,
+    /// Only on the reviews channel, so the Agents panel and the conversation list the
+    /// same findings in the same words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<ReviewResultView>,
+}
+
+/// The newest card a review's conversation shows for its result, as that card gets it.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewResultView {
+    /// `review_result`, `review_approved` or `review_escalated`.
+    pub kind: InjectionKind,
+    pub round: u32,
+    pub rounds: Vec<ReviewRoundView>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]

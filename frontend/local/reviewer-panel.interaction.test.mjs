@@ -358,3 +358,115 @@ test("a working ask that later gains an answer refetches detail on the next focu
 
   await unmount();
 });
+
+const severities = ["high", "medium", "low", "low"];
+function reviewWith(findings, overrides = {}) {
+  return {
+    id: "r1",
+    reviewer_provider: "codex",
+    reviewer_thread_id: "rev-1",
+    status: "complete",
+    max_rounds: 1,
+    updated_at: 1,
+    result: {
+      kind: "review_result",
+      round: 1,
+      rounds: [
+        {
+          round: 1,
+          verdict: "needs_changes",
+          findings,
+          findings_total: findings.length,
+        },
+      ],
+    },
+    ...overrides,
+  };
+}
+const findingsOf = (count) =>
+  Array.from({ length: count }, (_, index) => ({
+    severity: severities[index],
+    text: `finding ${index + 1}`,
+    location: index === 0 ? "src/gate.rs:88" : null,
+  }));
+
+test("a finished review lists its findings and does not read the reviewer's messages", async () => {
+  const reads = [];
+  const panel = await mountPanel({
+    reviewJobs: [reviewWith(findingsOf(2))],
+    fetchReviewerTranscript: async (threadId) => {
+      reads.push(threadId);
+      return [{ kind: "agent_text", text: "## Findings\n- [high] prose" }];
+    },
+  });
+  try {
+    const tags = [...panel.container.querySelectorAll(".review-finding-tag")].map((tag) => tag.textContent);
+    assert.deepEqual(tags, ["HIGH", "MED"]);
+    assert.equal(panel.container.querySelector(".review-finding-where")?.textContent, "src/gate.rs:88");
+    assert.deepEqual(reads, []);
+    assert.equal(panel.container.querySelector(".reviewer-findings"), null);
+  } finally {
+    await panel.unmount();
+  }
+});
+
+test("a review with nothing in the asked-for form shows the reviewer's own words", async () => {
+  const reads = [];
+  const panel = await mountPanel({
+    reviewJobs: [reviewWith([])],
+    fetchReviewerTranscript: async (threadId) => {
+      reads.push(threadId);
+      return [{ kind: "agent_text", text: "The gate is only checked once." }];
+    },
+  });
+  try {
+    assert.deepEqual(reads, ["rev-1"]);
+    assert.match(panel.container.querySelector(".reviewer-findings")?.textContent || "", /checked once/);
+    assert.equal(panel.container.querySelector(".review-finding"), null);
+  } finally {
+    await panel.unmount();
+  }
+});
+
+test("while the reviewer reads the next round, the card follows it rather than the last one", async () => {
+  const reads = [];
+  const panel = await mountPanel({
+    reviewJobs: [
+      reviewWith(findingsOf(2), { status: "waiting_for_reviewer", max_rounds: 3, round: 2, reviewing_since: 5 }),
+    ],
+    fetchReviewerTranscript: async (threadId) => {
+      reads.push(threadId);
+      return [{ kind: "agent_text", text: "re-reading gate.rs" }];
+    },
+  });
+  try {
+    assert.equal(panel.container.querySelector(".reviewer-review-banner-text")?.textContent, "Reviewing");
+    assert.deepEqual(reads, ["rev-1"]);
+    assert.match(panel.container.querySelector(".reviewer-findings")?.textContent || "", /re-reading/);
+    assert.equal(panel.container.querySelector(".review-finding"), null);
+  } finally {
+    await panel.unmount();
+  }
+});
+
+test("showing all findings stays in the card instead of opening the reviewer", async () => {
+  const opened = [];
+  const panel = await mountPanel({
+    reviewJobs: [reviewWith(findingsOf(4))],
+    onOpenThread: (threadId) => opened.push(threadId),
+  });
+  try {
+    assert.equal(panel.container.querySelectorAll(".review-finding").length, 3);
+    const more = [...panel.container.querySelectorAll("button")].find((button) =>
+      /Show all findings/.test(button.textContent)
+    );
+    await act(async () => click(more));
+    assert.equal(panel.container.querySelectorAll(".review-finding").length, 4);
+    assert.deepEqual(opened, []);
+
+    await act(async () => click(panel.container.querySelector(".review-finding-tag")));
+    assert.deepEqual(opened, ["rev-1"], "the rest of the list still opens it");
+  } finally {
+    await panel.unmount();
+  }
+});

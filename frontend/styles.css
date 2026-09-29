@@ -7576,9 +7576,14 @@ body.is-resizing-panel {
 .reviewer-tone-alert .reviewer-review-banner-dot { background: var(--warn-fg); }
 .reviewer-tone-ready .reviewer-review-banner { background: var(--ok-bg); }
 .reviewer-tone-ready .reviewer-review-banner-dot { background: var(--ok-fg); }
+.reviewer-tone-blocker .reviewer-review-banner { background: var(--err-bg); }
+.reviewer-tone-blocker .reviewer-review-banner-dot { background: var(--err-fg); }
 .reviewer-tone-active .reviewer-review-banner-dot { background: var(--accent); }
 :root[data-theme="light"] .reviewer-tone-alert .reviewer-review-banner-text {
   color: var(--warn-fg);
+}
+:root[data-theme="light"] .reviewer-tone-blocker .reviewer-review-banner-text {
+  color: var(--err-fg);
 }
 :root[data-theme="light"] .reviewer-tone-ready .reviewer-review-banner-text {
   color: var(--ok-fg);
@@ -7589,9 +7594,22 @@ body.is-resizing-panel {
   gap: 6px;
   padding: 9px 12px 11px;
 }
-/* The reviewer's own words. The relay carries them as free markdown — there is no
-   severity or file:line on the wire — so they render quieter than the verdict above
-   and scroll rather than growing the card. */
+/* The conversation card's finding rows. The rail is always this narrow, so where each
+   one is goes under its text, as on a phone. */
+.reviewer-review-findings {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.reviewer-review-findings .review-finding {
+  grid-template-columns: auto minmax(0, 1fr);
+  font-size: var(--text-sm);
+}
+.reviewer-review-findings .review-finding-meta {
+  grid-column: 2;
+}
+/* The reviewer's own words, while it reads or where it wrote outside the asked-for form.
+   Quieter than the verdict above, and they scroll rather than growing the card. */
 .reviewer-findings {
   font-size: var(--text-sm);
   line-height: var(--leading-normal);

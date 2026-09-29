@@ -338,16 +338,68 @@ test("the review heading carries the iterative round, and the card headlines the
           round: 1,
           max_rounds: 3,
           verdict: "needs_changes",
+          result: {
+            kind: "review_result",
+            round: 1,
+            rounds: [
+              {
+                round: 1,
+                verdict: "needs_changes",
+                findings: [{ severity: "high", text: "Gate checked once", location: "src/gate.rs:88" }],
+                findings_total: 1,
+              },
+            ],
+          },
         },
       ],
       canRequest: false,
     })
   );
   assert.match(html, /round 1\/3 · Codex/, "the loop's own round beats the attempt count");
-  // The verdict is the headline, phrased as the decision it implies rather than as the
-  // enum — "needs_changes" is not what a user wants to read off a merge gate.
-  assert.match(html, /Needs changes · won&#x27;t merge yet/);
-  assert.match(html, /reviewer-tone-alert/);
+  // The same words, and colour, as the card the conversation shows for this round.
+  assert.match(html, /reviewer-review-banner-text[^>]*>1 blocker · won&#x27;t merge as is</);
+  assert.match(html, /reviewer-tone-blocker/);
+});
+
+test("a finished review lists its findings as the conversation card does", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      reviewJobs: [
+        {
+          id: "r1",
+          reviewer_provider: "codex",
+          reviewer_thread_id: "rev-1",
+          status: "complete",
+          max_rounds: 1,
+          verdict: "needs_changes",
+          result: {
+            kind: "review_result",
+            round: 1,
+            rounds: [
+              {
+                round: 1,
+                verdict: "needs_changes",
+                findings: [
+                  { severity: "high", text: "Gate checked once", location: "src/gate.rs:88" },
+                  { severity: "medium", text: "Archive drops the goal" },
+                ],
+                findings_total: 3,
+              },
+            ],
+          },
+        },
+      ],
+      canRequest: false,
+      onOpenThread() {},
+    })
+  );
+  assert.match(html, /review-finding-tag is-high[^>]*>HIGH</);
+  assert.match(html, /review-finding-tag is-medium[^>]*>MED</);
+  assert.match(html, /review-finding-where[^>]*>src\/gate.rs:88</);
+  assert.match(html, /Archive drops the goal/);
+  assert.match(html, /1 more in the reviewer(?:&#x27;|')s thread/);
+  assert.doesNotMatch(html, /class="reviewer-findings/, "no second rendering of the reviewer's prose");
+  assert.match(html, /reviewer-review-open/, "and the list is still the way into the reviewer");
 });
 
 test("a single-shot review counts attempts instead, and an unknown verdict is not surfaced", () => {
@@ -509,7 +561,18 @@ test("earlier review attempts collapse to one line each instead of repeating as 
   const html = renderToStaticMarkup(
     h(ReviewerPanel, {
       reviewJobs: [
-        { id: "r1", reviewer_provider: "codex", status: "complete", verdict: "approve", updated_at: 100 },
+        {
+          id: "r1",
+          reviewer_provider: "codex",
+          status: "complete",
+          verdict: "approve",
+          updated_at: 100,
+          result: {
+            kind: "review_result",
+            round: 1,
+            rounds: [{ round: 1, verdict: "approve", findings: [], findings_total: 0 }],
+          },
+        },
         { id: "r2", reviewer_provider: "codex", status: "failed", error: "nothing committed to review", updated_at: 200 },
         { id: "r3", reviewer_provider: "codex", status: "blocked", updated_at: 300 },
       ],
@@ -518,7 +581,7 @@ test("earlier review attempts collapse to one line each instead of repeating as 
   );
   assert.equal(html.match(/reviewer-review-banner-text/g).length, 1, "one card, not three");
   assert.match(html, /reviewer-round-label[^>]*>R2<[\s\S]*nothing committed to review/);
-  assert.match(html, /reviewer-round-label[^>]*>R1<[\s\S]*Review complete · approve/);
+  assert.match(html, /reviewer-round-label[^>]*>R1<[\s\S]*Approved · no findings/);
   assert.match(html, /reviewer-ledger-meta[^>]*>round 3 · Codex</, "and the heading counts them");
 });
 

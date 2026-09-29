@@ -6,6 +6,7 @@ import {
   askedSummary,
   intentTitle,
   oneLineResult,
+  reviewFindings,
   reviewLedger,
   reviewOutcome,
   shortSha,
@@ -53,8 +54,16 @@ test("only a real sha shortens — a uuid or thread id is refused", () => {
   assert.equal(shortSha(null), null);
 });
 
+const finding = (severity, text, location = null) => ({ severity, text, location });
+
+const APPROVED = {
+  kind: "review_result",
+  round: 1,
+  rounds: [{ round: 1, verdict: "approve", findings: [], findings_total: 0 }],
+};
+
 const REVIEWS = [
-  { id: "r1", status: "complete", verdict: "approve", updated_at: 100 },
+  { id: "r1", status: "complete", verdict: "approve", updated_at: 100, result: APPROVED },
   { id: "r2", status: "failed", error: "nothing committed to review", updated_at: 200 },
   {
     id: "r3",
@@ -76,25 +85,83 @@ test("the newest review is the conclusion; earlier attempts collapse to one line
     ledger.rounds.map((round) => [round.label, round.summary]),
     [
       ["R2", "Review failed · nothing committed to review"],
-      ["R1", "Review complete · approve"],
+      ["R1", "Approved · no findings"],
     ]
   );
   assert.equal(reviewLedger([]), null);
 });
 
-test("the review headline states the decision, not the lifecycle, when there is a verdict", () => {
-  assert.deepEqual(reviewOutcome({ status: "complete", verdict: "needs_changes" }), {
-    text: "Needs changes · won't merge yet",
-    tone: "alert",
-  });
-  assert.deepEqual(reviewOutcome({ status: "complete", verdict: "approve" }), {
-    text: "Approved",
+test("the review headline is the conversation card's title, in its colour", () => {
+  const job = {
+    status: "complete",
+    reviewer_provider: "codex",
+    max_rounds: 1,
+    result: {
+      kind: "review_result",
+      round: 1,
+      rounds: [
+        {
+          round: 1,
+          verdict: "needs_changes",
+          findings: [finding("high", "Gate checked once", "src/gate.rs:88"), finding("medium", "Archive drops it")],
+          findings_total: 2,
+        },
+      ],
+    },
+  };
+  assert.deepEqual(reviewOutcome(job), { text: "1 blocker · won't merge as is", tone: "blocker" });
+  assert.deepEqual(reviewOutcome({ ...job, result: APPROVED }), {
+    text: "Approved · no findings",
     tone: "ready",
   });
+  const escalated = {
+    ...job,
+    status: "escalated",
+    max_rounds: 2,
+    result: {
+      kind: "review_escalated",
+      round: 2,
+      rounds: [{ round: 1 }, { ...job.result.rounds[0], round: 2 }],
+    },
+  };
+  assert.deepEqual(reviewOutcome(escalated), { text: "Codex still disagrees on 2 points", tone: "alert" });
   // A blocked review outranks its verdict: it is the one thing the user must act on.
-  assert.equal(reviewOutcome({ status: "blocked", verdict: "approve" }).text, "Review blocked — action needed");
-  assert.equal(reviewOutcome({ status: "waiting_for_reviewer" }).text, "Reviewing");
+  assert.equal(reviewOutcome({ ...job, status: "blocked" }).text, "Review blocked — action needed");
+  // Reading the next round: what it found last time is not what it is doing now.
+  assert.deepEqual(reviewOutcome({ ...job, status: "waiting_for_reviewer", reviewing_since: 50 }), {
+    text: "Reviewing",
+    tone: "active",
+  });
+  assert.equal(
+    reviewOutcome({ status: "complete", verdict: "needs_changes" }).text,
+    "Review complete",
+    "a verdict with nothing listed is not put into words of its own"
+  );
   assert.equal(reviewOutcome(null), null);
+});
+
+test("a review's findings are the rows its conversation card lists", () => {
+  const rows = [1, 2, 3, 4].map((n) => finding(n === 1 ? "high" : "low", `finding ${n}`));
+  const listed = reviewFindings({
+    status: "complete",
+    reviewer_provider: "codex",
+    result: {
+      kind: "review_result",
+      round: 1,
+      rounds: [{ round: 1, verdict: "needs_changes", findings: rows, findings_total: 6 }],
+    },
+  });
+  assert.deepEqual(
+    listed.rows.map(({ finding, state }) => [finding.text, state]),
+    rows.map((row) => [row.text, null])
+  );
+  assert.equal(listed.more, 2, "the relay held two back");
+  assert.equal(reviewFindings({ status: "complete" }), null);
+  assert.equal(
+    reviewFindings({ status: "waiting_for_reviewer", reviewing_since: 9, result: APPROVED }),
+    null,
+    "nothing is listed while the reviewer reads the next round"
+  );
 });
 
 const ASKS = [

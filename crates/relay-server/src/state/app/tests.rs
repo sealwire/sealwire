@@ -22867,6 +22867,66 @@ settings update: {error}"
     }
 
     #[tokio::test]
+    async fn the_agents_panel_lists_what_the_last_review_card_lists() {
+        use crate::protocol::InjectionKind;
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        let codex = providers.get("codex").unwrap();
+        queue_verdicts(codex, &["NEEDS_CHANGES", "APPROVE"]).await;
+        codex.reviewer_notes.lock().await.extend([
+            "## Findings\n\
+- [high] `src/gate.rs:88` The gate is checked only once.\n\
+- [medium] Archive drops the goal."
+                .to_string(),
+            "## Fixed since the last review\n\
+- [high] `src/gate.rs:88` The gate is checked only once.\n\n\
+## Findings\n- [low] `src/archive.rs:9` A comment still says it deletes."
+                .to_string(),
+        ]);
+        let mut input = review_input("codex");
+        input.max_rounds = Some(3);
+        let receipt = app.request_review(input).await.expect("review starts");
+        assert_eq!(
+            wait_for_review(&app, &receipt.review_job_id).await.status,
+            "complete"
+        );
+        let marks = review_marks_on(&app, &parent.id, 3).await;
+        let card = marks[2].review().expect("the approved card");
+
+        let reviews = app.reviews(None).await;
+        let job = reviews
+            .review_jobs
+            .iter()
+            .find(|job| job.id == receipt.review_job_id)
+            .expect("the review is listed");
+        let result = job
+            .result
+            .as_ref()
+            .expect("a finished review sends its result");
+        assert_eq!(
+            (result.kind, result.round),
+            (InjectionKind::ReviewApproved, 2)
+        );
+        let without_threads = |rounds: &[crate::protocol::ReviewRoundView]| {
+            rounds
+                .iter()
+                .cloned()
+                .map(|round| crate::protocol::ReviewRoundView {
+                    reviewer_thread_id: String::new(),
+                    ..round
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(result.rounds, without_threads(&card.rounds));
+        assert_eq!(
+            result.rounds[1].findings[0].location.as_deref(),
+            Some("src/archive.rs:9")
+        );
+    }
+
+    #[tokio::test]
     async fn a_review_that_needs_the_person_can_be_accepted_as_it_stands() {
         use crate::protocol::InjectionKind;
         let dir = TempDir::new().expect("tmpdir");

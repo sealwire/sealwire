@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
     DelegateCardView, HandoverCardView, InjectionCard, InjectionKind, InjectionView,
-    ReviewCardView, ReviewFindingView, ReviewRoundView, TranscriptEntryKind,
+    ReviewCardView, ReviewFindingView, ReviewResultView, ReviewRoundView, TranscriptEntryKind,
 };
 
 use super::transcript::TranscriptRecord;
@@ -177,6 +177,35 @@ impl ReviewMark {
         self.rounds
             .iter_mut()
             .find(|existing| existing.round == round)
+    }
+
+    /// Which card the review's conversation ends on, by the same rule the loop picks
+    /// it when it hands the result back. `job_status` because the mark trails the job.
+    pub(crate) fn result_view(&self, job_status: &str) -> Option<ReviewResultView> {
+        let last = self
+            .rounds
+            .iter()
+            .rev()
+            .find(|round| round.verdict.is_some())?;
+        let kind = match job_status {
+            "escalated" => InjectionKind::ReviewEscalated,
+            "complete" if self.max_rounds > 1 && last.verdict.as_deref() == Some("approve") => {
+                InjectionKind::ReviewApproved
+            }
+            _ => InjectionKind::ReviewResult,
+        };
+        let rounds = card_rounds(kind, last.round, &self.rounds)
+            .into_iter()
+            .map(|round| ReviewRoundView {
+                reviewer_thread_id: String::new(),
+                ..round
+            })
+            .collect();
+        Some(ReviewResultView {
+            kind,
+            round: last.round,
+            rounds,
+        })
     }
 }
 
@@ -880,5 +909,75 @@ mod tests {
         assert_eq!(hidden.reviewer_thread_id, "");
         assert_eq!(hidden.rounds[0].reviewer_thread_id, "");
         assert_eq!(hidden.error, None);
+    }
+
+    #[test]
+    fn the_agents_panel_is_given_the_card_a_review_ends_on() {
+        let finished = |round: u32, verdict: &str| ReviewRoundView {
+            round,
+            reviewer_thread_id: "reviewer".to_string(),
+            verdict: Some(verdict.to_string()),
+            findings: vec![found("still")],
+            findings_total: 1,
+            finished_at: Some(10),
+            ..ReviewRoundView::default()
+        };
+        let mark = |max_rounds: u32, rounds: Vec<ReviewRoundView>| ReviewMark {
+            max_rounds,
+            rounds,
+            ..review("r")
+        };
+        let card = |mark: &ReviewMark, status: &str| {
+            mark.result_view(status)
+                .map(|result| (result.kind, result.round))
+        };
+        use InjectionKind::{ReviewApproved, ReviewEscalated, ReviewResult};
+
+        let single = mark(1, vec![finished(1, "approve")]);
+        assert_eq!(card(&single, "complete"), Some((ReviewResult, 1)));
+        let approved = mark(
+            3,
+            vec![finished(1, "needs_changes"), finished(2, "approve")],
+        );
+        assert_eq!(card(&approved, "complete"), Some((ReviewApproved, 2)));
+        let exhausted = mark(
+            2,
+            vec![finished(1, "needs_changes"), finished(2, "needs_changes")],
+        );
+        assert_eq!(card(&exhausted, "escalated"), Some((ReviewEscalated, 2)));
+        let fixing = mark(3, vec![finished(1, "needs_changes")]);
+        assert_eq!(
+            card(&fixing, "addressing_findings"),
+            Some((ReviewResult, 1))
+        );
+        assert_eq!(card(&fixing, "failed"), Some((ReviewResult, 1)));
+        let reading = mark(
+            3,
+            vec![
+                finished(1, "needs_changes"),
+                ReviewRoundView {
+                    round: 2,
+                    ..ReviewRoundView::default()
+                },
+            ],
+        );
+        assert_eq!(
+            card(&reading, "waiting_for_reviewer"),
+            Some((ReviewResult, 1))
+        );
+        assert_eq!(card(&review("r"), "waiting_for_reviewer"), None);
+
+        let result = approved.result_view("complete").expect("a result");
+        assert_eq!(
+            result.rounds,
+            card_rounds(ReviewApproved, 2, &approved.rounds)
+                .into_iter()
+                .map(|round| ReviewRoundView {
+                    reviewer_thread_id: String::new(),
+                    ..round
+                })
+                .collect::<Vec<_>>(),
+            "the rounds the conversation's card draws, naming no reviewer thread"
+        );
     }
 }

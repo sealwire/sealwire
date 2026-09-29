@@ -6,6 +6,7 @@
 // Pure on purpose: the grouping is the part worth testing, and it must not need a DOM.
 
 import { providerLabel } from "./provider-labels.js";
+import { cardFindings, reviewCardTitle, reviewTone } from "./review-card.js";
 import { reviewChipTone, reviewStatusLabel } from "./review-state.js";
 
 // A title has to stay one line in a 340px rail; a result gets two.
@@ -80,10 +81,6 @@ export function shortSha(value) {
   return /^[0-9a-f]{7,}$/i.test(hex) ? hex.slice(0, 7) : null;
 }
 
-function humanVerdict(verdict) {
-  return verdict && verdict !== "unknown" ? String(verdict).replace(/_/g, " ") : null;
-}
-
 function byUpdatedAsc(a, b) {
   return (a?.updated_at || 0) - (b?.updated_at || 0);
 }
@@ -128,12 +125,51 @@ export function reviewLedger(reviewJobs) {
 }
 
 function reviewRoundSummary(job) {
-  const detail = oneLineResult(job.error) || humanVerdict(job.verdict);
-  const label = reviewStatusLabel(job.status);
-  return detail ? `${label} · ${detail}` : label;
+  const error = oneLineResult(job.error);
+  if (error) {
+    return `${reviewStatusLabel(job.status)} · ${error}`;
+  }
+  return reviewResultCard(job)?.title || reviewStatusLabel(job.status);
 }
 
-/** What the review DECIDED, in the words the panel headlines it with. */
+// The panel's colours for the conversation card's tones.
+const PANEL_TONES = { blocker: "blocker", pass: "ready", "needs-you": "alert" };
+
+/**
+ * The conversation's last card for this review, as the relay sent it. Null while the
+ * reviewer reads a newer round: what it found before is not what it is doing now.
+ */
+function reviewResultCard(job) {
+  const result = job?.result;
+  if (!result?.kind || !Array.isArray(result.rounds)) {
+    return null;
+  }
+  if (job.reviewing_since > 0) {
+    return null;
+  }
+  const review = {
+    reviewer_provider: job.reviewer_provider,
+    round: result.round,
+    max_rounds: job.max_rounds,
+    rounds: result.rounds,
+  };
+  const round = result.rounds.find((entry) => entry.round === result.round) || null;
+  return {
+    kind: result.kind,
+    round,
+    title: reviewCardTitle(result.kind, review, round),
+    tone: PANEL_TONES[reviewTone(result.kind, round)] || "neutral",
+    ...cardFindings(result.kind, review, round),
+  };
+}
+
+/** What the review's card lists: `{rows, more}` for `FindingList`, or null. */
+export function reviewFindings(job) {
+  const card = reviewResultCard(job);
+  return card ? { rows: card.rows, more: card.more, verdict: card.round?.verdict || null } : null;
+}
+
+/** What the review DECIDED, in the words its card in the conversation uses. */
 export function reviewOutcome(job) {
   if (!job) {
     return null;
@@ -141,15 +177,9 @@ export function reviewOutcome(job) {
   if (job.status === "blocked") {
     return { text: "Review blocked — action needed", tone: "alert" };
   }
-  const verdict = humanVerdict(job.verdict);
-  if (verdict === "needs changes") {
-    return { text: "Needs changes · won't merge yet", tone: "alert" };
-  }
-  if (verdict === "approve") {
-    return { text: "Approved", tone: "ready" };
-  }
-  if (verdict === "unsure") {
-    return { text: "Reviewer is unsure", tone: "neutral" };
+  const card = reviewResultCard(job);
+  if (card) {
+    return { text: card.title, tone: card.tone };
   }
   return { text: reviewStatusLabel(job.status), tone: reviewChipTone(job.status) };
 }

@@ -288,6 +288,7 @@ impl ReviewJob {
             verdict_candidate_sha: self.verdict_candidate_sha.clone(),
             reviewing_since: 0,
             files: None,
+            result: None,
         }
     }
 }

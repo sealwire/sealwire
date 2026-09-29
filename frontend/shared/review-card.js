@@ -173,7 +173,8 @@ function FindingRow({ finding, state }) {
   );
 }
 
-function FindingList({ rows, more }) {
+/** The findings a card lists, three at first; the Agents panel lists them the same way. */
+export function FindingList({ rows, more }) {
   const [expanded, setExpanded] = useState(false);
   if (!rows.length) {
     return null;
@@ -206,7 +207,7 @@ function FindingList({ rows, more }) {
 }
 
 /** Rows a card lists, each with what became of it where the card knows. */
-function cardFindings(kind, review, round) {
+export function cardFindings(kind, review, round) {
   if (kind === "review_result") {
     return {
       rows: (round?.findings || []).map((finding) => ({ finding, state: null })),

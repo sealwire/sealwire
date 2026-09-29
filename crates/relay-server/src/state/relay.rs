@@ -3713,6 +3713,12 @@ so {} never got it — hand over again when you are ready.",
             job.reviewer_provider.hash(&mut h);
             job.reviewing_since.hash(&mut h);
             job.files.hash(&mut h);
+            // A round's findings are written once, as it finishes.
+            if let Some(mark) = self.injections.review(&job.id) {
+                for round in &mark.rounds {
+                    (round.round, round.finished_at).hash(&mut h);
+                }
+            }
             acc ^= h.finish();
         }
         for view in self.reviewer_thread_views() {
@@ -3790,6 +3796,14 @@ so {} never got it — hand over again when you are ready.",
                 .active_review_jobs_view()
                 .into_iter()
                 .filter(|job| in_scope(&job.parent_thread_id))
+                .map(|mut job| {
+                    // Here, not in `review_job_view`: that one is hashed on every snapshot.
+                    job.result = self
+                        .injections
+                        .review(&job.id)
+                        .and_then(|mark| mark.result_view(&job.status));
+                    job
+                })
                 .collect(),
             reviewer_threads: self
                 .reviewer_thread_views()
@@ -7904,6 +7918,54 @@ mod tests {
             relay.ask("ask-large").and_then(|ask| ask.answer.as_deref()),
             Some(full_answer.as_str()),
             "the peer transcript handoff still needs the complete stored answer"
+        );
+    }
+
+    #[test]
+    fn a_rounds_findings_move_the_reviews_revision_on_their_own() {
+        let mut relay = test_relay();
+        let mut job = ReviewJob::new(
+            "review-1".to_string(),
+            "parent".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+            None,
+            ReviewMode::CleanThread,
+            "/tmp/project".to_string(),
+            "device".to_string(),
+            relay_api::delegation::StartedBy::Person,
+            None,
+            1,
+        );
+        job.set_status(crate::state::ReviewJobStatus::Complete);
+        relay.insert_review_job(job);
+        let round = crate::protocol::ReviewRoundView {
+            round: 1,
+            started_at: 5,
+            ..crate::protocol::ReviewRoundView::default()
+        };
+        relay.injections.put_review(super::ReviewMark {
+            id: "review-1".to_string(),
+            parent_thread_id: "parent".to_string(),
+            rounds: vec![round.clone()],
+            ..super::ReviewMark::default()
+        });
+        let before = relay.reviews_revision();
+
+        relay.injections.put_review(super::ReviewMark {
+            id: "review-1".to_string(),
+            parent_thread_id: "parent".to_string(),
+            rounds: vec![crate::protocol::ReviewRoundView {
+                verdict: Some("needs_changes".to_string()),
+                finished_at: Some(9),
+                ..round
+            }],
+            ..super::ReviewMark::default()
+        });
+        assert_ne!(
+            before,
+            relay.reviews_revision(),
+            "the panel lists what the round found, so it has to refetch"
         );
     }
 
