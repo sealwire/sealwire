@@ -2657,6 +2657,8 @@ button.ask-user-summary:focus-visible {
   display: grid;
   grid-template-columns: 104px minmax(0, 1fr);
   gap: 12px;
+  /* A value stretched to a tall label's height would show the lines its fold hides. */
+  align-items: start;
 }
 .handover-section.is-untitled {
   grid-template-columns: minmax(0, 1fr);
