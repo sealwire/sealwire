@@ -32,7 +32,7 @@ const ask = (extra = {}) => ({
   ...extra,
 });
 const user = (id, text, extra = {}) => ({ item_id: id, kind: "user_text", status: "completed", text, ...extra });
-const agent = (id, text) => ({ item_id: id, kind: "agent_text", status: "completed", text });
+const agent = (id, text, extra = {}) => ({ item_id: id, kind: "agent_text", status: "completed", text, ...extra });
 const marked = (id, kind, asks, text = `PROMPT-${id}`) =>
   user(id, text, { injection: { kind, delegate: asks } });
 const reportBack = (id, name, answer) => ({
@@ -83,11 +83,65 @@ test("once sent, the brief becomes the Delegated card and the peer's progress is
   assert.ok(!markup.includes("Preparing brief"));
 });
 
+test("a marked brief is its Delegated card when the older request is on another page", () => {
+  const delegated = ask();
+  const markup = render([
+    agent("brief", BRIEF, { injection: { kind: "delegate_brief", delegate: [delegated] } }),
+  ]);
+
+  assert.ok(markup.includes("Delegated to Codex"));
+  assert.equal(count(markup, "Find where the remote ask handler"), 1);
+  assert.ok(!markup.includes("chat-message-content"), "the brief is not an ordinary assistant message first");
+});
+
+test("loading the older request keeps one Delegated card and restores the command bubble", () => {
+  const delegated = ask();
+  const brief = agent("brief", BRIEF, {
+    injection: { kind: "delegate_brief", delegate: [delegated] },
+  });
+  const markup = render([
+    marked("req", "delegate_request", [delegated], "BRIEF-PROMPT"),
+    brief,
+  ]);
+
+  assert.equal(count(markup, "Delegated to Codex"), 1);
+  assert.equal(count(markup, "Find where the remote ask handler"), 1);
+  assert.ok(markup.includes("/delegate 问下 Codex"));
+});
+
+test("a brief remains readable when starting the peer fails before it was sent", () => {
+  const failed = ask({
+    status: "failed",
+    sent_at: undefined,
+    error: "the peer could not start",
+  });
+  const markup = render([
+    marked("req", "delegate_request", [failed], "BRIEF-PROMPT"),
+    agent("brief", BRIEF, { injection: { kind: "delegate_brief", delegate: [failed] } }),
+    marked("wake", "delegate_answer", [{ ...failed, delivered: true }], WAKE),
+    agent("decision", "I will ask a different agent."),
+  ]);
+
+  assert.ok(markup.includes("Delegate did not start"));
+  assert.ok(markup.includes("The peer could not start."));
+  assert.match(
+    markup,
+    /chat-message-assistant[\s\S]*Find where the remote ask handler/,
+    "the completed brief remains an ordinary assistant message"
+  );
+  assert.ok(!markup.includes("Delegated to Codex"));
+  assert.equal(
+    count(markup, "message-avatar"),
+    2,
+    "the failed answer starts a new agent turn after the ordinary brief"
+  );
+});
+
 test("the answer replaces the wake, folds the asked card to a line, and opens the asker's turn", () => {
   const done = ask({ status: "done", delivered: true, answer: "From innerText, so it carries the button label.", finished_at: 1_790_000_160 });
   const markup = render([
     marked("req", "delegate_request", [done], "BRIEF-PROMPT"),
-    agent("brief", BRIEF),
+    agent("brief", BRIEF, { injection: { kind: "delegate_brief", delegate: [done] } }),
     marked("wake", "delegate_answer", [done], WAKE),
     agent("decision", "Confirmed — switching remote/ask.js to data-ask-message."),
   ]);

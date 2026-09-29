@@ -59,6 +59,46 @@ impl RelayState {
         self.store_delegate_mark(next);
     }
 
+    /// The brief can fill the latest page by itself, so its own row carries the card.
+    pub(crate) fn mark_delegate_brief(
+        &mut self,
+        ask_id: &str,
+        asker_thread_id: &str,
+        item_id: &str,
+    ) {
+        let anchor = self
+            .runtime_for_thread(asker_thread_id)
+            .and_then(|runtime| {
+                let record = runtime.transcript.iter().find(|record| {
+                    record.row_id == item_id || record.provider_item_id.as_deref() == Some(item_id)
+                })?;
+                Some(MessageAnchor::Item(
+                    record
+                        .provider_item_id
+                        .clone()
+                        .unwrap_or_else(|| record.row_id.clone()),
+                ))
+            });
+        let Some(anchor) = anchor else {
+            tracing::warn!(
+                ask_id,
+                asker_thread_id,
+                item_id,
+                "delegate brief row missing when recording its card"
+            );
+            return;
+        };
+        let message = InjectedMessage {
+            thread_id: asker_thread_id.to_string(),
+            anchor,
+            tag: InjectionTag::delegate(InjectionKind::DelegateBrief, &[ask_id.to_string()]),
+            created_at: crate::state::unix_now(),
+        };
+        self.usage_store.record_injected_message(&message);
+        self.injections.anchor(message);
+        self.republish_thread_rows(asker_thread_id);
+    }
+
     /// The peer's reply that became the answer: its own row carries the card, so the
     /// card does not wait for the task row to be loaded as well.
     pub(crate) fn mark_delegate_reply(
@@ -72,7 +112,8 @@ impl RelayState {
         });
     }
 
-    /// Best-effort: a call not yet in the transcript leaves the client to find it.
+    /// A call already in the transcript can carry the answer immediately. A late row
+    /// is picked up by `mark_late_report_back_call` when the provider inserts it.
     pub(crate) fn mark_report_back_call(&mut self, ask_id: &str, peer_thread_id: &str) {
         let turn = self.asks.get(ask_id).and_then(|ask| ask.turn_id.clone());
         self.mark_delegate_answer_row(ask_id, peer_thread_id, |record| {
@@ -82,6 +123,48 @@ impl RelayState {
                     _ => true,
                 }
         });
+    }
+
+    /// Complete the other ordering of the report-back race: the tool settled the ask
+    /// before its transcript row arrived. Exact turn matching keeps old asks separate.
+    pub(crate) fn mark_late_report_back_call(&mut self, peer_thread_id: &str, row_id: &str) {
+        let Some(turn_id) = self
+            .runtime_for_thread(peer_thread_id)
+            .and_then(|runtime| runtime.transcript.get_row(row_id))
+            .filter(|record| is_report_back_call(record))
+            .and_then(|record| record.turn_id.clone())
+        else {
+            return;
+        };
+        let ask_ids: Vec<String> = self
+            .asks
+            .values()
+            .filter(|ask| {
+                ask.peer_thread_id == peer_thread_id
+                    && ask.answered_with_tool
+                    && ask.status.is_terminal()
+                    && ask.turn_id.as_deref() == Some(turn_id.as_str())
+            })
+            .map(|ask| ask.id.clone())
+            .collect();
+        let [ask_id] = ask_ids.as_slice() else {
+            if ask_ids.len() > 1 {
+                tracing::warn!(
+                    peer_thread_id,
+                    turn_id,
+                    asks = ?ask_ids,
+                    "several delegate asks claim one report_back turn"
+                );
+            }
+            return;
+        };
+        if self
+            .injections
+            .has_anchored_tag(peer_thread_id, InjectionKind::DelegateReported, ask_id)
+        {
+            return;
+        }
+        self.mark_delegate_reply(ask_id, peer_thread_id, row_id);
     }
 
     fn mark_delegate_answer_row(

@@ -1,4 +1,4 @@
-//! Which user rows the relay sent on the person's behalf, and what for.
+//! Which relay-sent prompts and recorded replies belong to a card.
 //!
 //! Keyed by what the provider hands back, never the relay's row id: a restart
 //! rebuilds every transcript from provider history.
@@ -42,8 +42,9 @@ impl MessageAnchor {
     }
 }
 
-const KIND_NAMES: [(InjectionKind, &str); 13] = [
+const KIND_NAMES: [(InjectionKind, &str); 15] = [
     (InjectionKind::HandoverRequest, "handover_request"),
+    (InjectionKind::HandoverSummary, "handover_summary"),
     (InjectionKind::HandoverBrief, "handover_brief"),
     (InjectionKind::ReviewRecap, "review_recap"),
     (InjectionKind::ReviewBrief, "review_brief"),
@@ -52,6 +53,7 @@ const KIND_NAMES: [(InjectionKind, &str); 13] = [
     (InjectionKind::ReviewApproved, "review_approved"),
     (InjectionKind::ReviewEscalated, "review_escalated"),
     (InjectionKind::DelegateRequest, "delegate_request"),
+    (InjectionKind::DelegateBrief, "delegate_brief"),
     (InjectionKind::DelegateTask, "delegate_task"),
     (InjectionKind::DelegateNudge, "delegate_nudge"),
     (InjectionKind::DelegateAnswer, "delegate_answer"),
@@ -342,6 +344,19 @@ impl Injections {
             .iter()
             .find(|message| message.anchor == *anchor)
             .map(|message| &message.tag)
+    }
+
+    pub(crate) fn has_anchored_tag(
+        &self,
+        thread_id: &str,
+        kind: InjectionKind,
+        ref_id: &str,
+    ) -> bool {
+        self.anchored.get(thread_id).is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message.tag.kind == kind && message.tag.ref_ids().any(|id| id == ref_id)
+            })
+        })
     }
 
     #[cfg(test)]
@@ -706,13 +721,17 @@ impl ThreadInjections {
         if self.marks.is_empty() {
             return None;
         }
-        // Only a delegate's answer marks a row the relay did not send.
-        let sent = record.kind == TranscriptEntryKind::UserText;
         self.marks
             .iter()
             .find(|(matcher, view)| {
-                (view.kind != InjectionKind::DelegateReported) == sent
-                    && matches(matcher, transcript, record)
+                let right_kind = match view.kind {
+                    InjectionKind::HandoverSummary | InjectionKind::DelegateBrief => {
+                        record.kind == TranscriptEntryKind::AgentText
+                    }
+                    InjectionKind::DelegateReported => record.kind != TranscriptEntryKind::UserText,
+                    _ => record.kind == TranscriptEntryKind::UserText,
+                };
+                right_kind && matches(matcher, transcript, record)
             })
             .map(|(_, view)| view.clone())
     }

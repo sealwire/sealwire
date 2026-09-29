@@ -233,6 +233,8 @@ export function HandoverSourceEntry({
   members = [],
   provider = "",
   providerIcon = "",
+  showCommand = true,
+  showOutcome = true,
 }) {
   const handover = entry.injection.handover;
   const sourceAgent = agentName(handover.source_provider || provider);
@@ -269,7 +271,8 @@ export function HandoverSourceEntry({
       h(SourceCard, { handover, members })
     );
   }
-  return h("div", { className: "handover-turn", "data-handover-row": transcriptRowKey(entry) || "" }, bubble, outcome);
+  return h("div", { className: "handover-turn", "data-handover-row": transcriptRowKey(entry) || "" },
+    showCommand ? bubble : null, showOutcome ? outcome : null);
 }
 
 /** The target's first row: the summary it was given, in place of the user bubble. */
@@ -296,6 +299,11 @@ export function HandoverTargetEntry({ attrs, entry }) {
  * Returns the remaining entries and, per request row, the rows it absorbed.
  */
 export function foldHandoverTurns(entries) {
+  // Keep the card on its reply when the older request arrives, preserving open sections.
+  const summaries = new Set(entries.filter((entry) =>
+    entry?.kind === "agent_text" && entry.injection?.kind === "handover_summary"
+      && entry.injection.handover?.status !== "failed"
+  ).map((entry) => entry.injection.handover?.id));
   let folded = null;
   let members = null;
   let absorbing = null;
@@ -311,13 +319,13 @@ export function foldHandoverTurns(entries) {
       }
     } else if (absorbing) {
       absorbing.push(entry);
-      return;
+      if (entry.injection?.kind !== "handover_summary") return;
     }
     if (folded) {
       folded.push(entry);
     }
   });
-  return { entries: folded || entries, members: members || EMPTY_MEMBERS };
+  return { entries: folded || entries, members: members || EMPTY_MEMBERS, summaries };
 }
 
 const EMPTY_MEMBERS = new Map();

@@ -31,6 +31,7 @@ import {
   DelegateReportedEntry,
   DelegateRequestEntry,
   DelegateTaskEntry,
+  drawsDelegateBriefCard,
   foldDelegateInjections,
   opensAnsweredTurn,
 } from "./delegate-card.js";
@@ -2784,6 +2785,31 @@ export function TranscriptEntry({
 
   const kind = entry.kind || "reasoning";
 
+  if (kind === "agent_text" && entry.injection?.kind === "handover_summary"
+      && entry.injection.handover && entry.injection.handover.status !== "failed") {
+    return h(HandoverSourceEntry, {
+      attrs: transcriptEntryDomAttrs(entry, "chat-message chat-message-assistant"),
+      entry,
+      members: [entry],
+      provider,
+      providerIcon: providerIconSvg(provider) || SPARKLES_SVG,
+      showCommand: false,
+    });
+  }
+
+  if (kind === "agent_text" && entry.injection?.kind === "delegate_brief"
+      && drawsDelegateBriefCard(entry.injection.delegate?.[0])) {
+    return h(DelegateRequestEntry, {
+      attrs: transcriptEntryDomAttrs(entry, "chat-message chat-message-assistant"),
+      entry,
+      members: [entry],
+      answered: options?.delegateAnswered || EMPTY_DELEGATE_ANSWERED,
+      provider,
+      providerIcon: providerIconSvg(provider) || SPARKLES_SVG,
+      showCommand: false,
+    });
+  }
+
   if (kind === "user_text") {
     const injection =
       entry.injection?.handover || entry.injection?.review || entry.injection?.delegate
@@ -2816,6 +2842,7 @@ export function TranscriptEntry({
           members: options?.handoverMembers?.get(rowKey) || EMPTY_HANDOVER_MEMBERS,
           provider,
           providerIcon: providerIconSvg(provider) || SPARKLES_SVG,
+          showOutcome: !options?.handoverSummaries?.has(injection.handover.id),
         });
       }
       if (injection.kind === "handover_brief") {
@@ -2832,6 +2859,7 @@ export function TranscriptEntry({
               answered: options?.delegateAnswered || EMPTY_DELEGATE_ANSWERED,
               provider,
               providerIcon,
+              showOutcome: !options?.delegateBriefs?.has(injection.delegate[0]?.id),
             });
           case "delegate_answer":
             return h(DelegateAnswerEntry, {
@@ -3355,10 +3383,12 @@ export function TranscriptContent({
   );
   const turnOpenerItemIds = React.useMemo(() => computeTurnOpenerIds(entries), [entries]);
   const handoverMembers = handoverFold.members;
+  const handoverSummaries = handoverFold.summaries;
   const reviewFolded = reviewFold.folded;
   const delegateMembers = delegateFold.members;
   const delegateAnswered = delegateFold.answered;
   const delegateJoined = delegateFold.joined;
+  const delegateBriefs = delegateFold.briefs;
   const effectiveOptions = React.useMemo(() => {
     const derived = {
       lastTurnDiffItemId,
@@ -3366,10 +3396,12 @@ export function TranscriptContent({
       settledFinalItemIds,
       turnOpenerItemIds,
       handoverMembers,
+      handoverSummaries,
       reviewFolded,
       delegateMembers,
       delegateAnswered,
       delegateJoined,
+      delegateBriefs,
     };
     return options ? { ...options, ...derived } : derived;
   }, [
@@ -3379,10 +3411,12 @@ export function TranscriptContent({
     settledFinalItemIds,
     turnOpenerItemIds,
     handoverMembers,
+    handoverSummaries,
     reviewFolded,
     delegateMembers,
     delegateAnswered,
     delegateJoined,
+    delegateBriefs,
   ]);
   const justPrependedItemIds = useJustPrependedItemIds(entries);
   // An UNANSWERED question is the one thing the session is waiting on, so it

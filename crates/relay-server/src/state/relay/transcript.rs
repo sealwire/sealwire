@@ -471,7 +471,12 @@ impl RelayState {
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
         }
-        transcript_mutation_meta(base_revision, revision, entry_seq, order_seq, stamp_id)
+        let mutation =
+            transcript_mutation_meta(base_revision, revision, entry_seq, order_seq, stamp_id);
+        if space == IdSpace::Provider {
+            self.mark_late_report_back_call(thread_id, &mutation.row_id);
+        }
+        mutation
     }
 
     fn upsert_transcript_item_legacy(

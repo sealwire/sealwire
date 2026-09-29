@@ -58,6 +58,30 @@ function section(container, title) {
   return { toggle: row.querySelector("button.handover-section-label"), value: row.querySelector(".handover-section-value") };
 }
 
+test("prepending the request keeps the summary card and its expanded section", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const markedSummary = { ...entries[1], injection: { kind: "handover_summary", handover } };
+  const render = (rows) => act(async () => root.render(h(TranscriptContent, {
+    entries: rows, options: { provider: "claude_code" },
+  })));
+  try {
+    await render([markedSummary]);
+    assert.equal(container.querySelectorAll(".handover-card").length, 1);
+    const card = container.querySelector(".handover-card");
+    await act(async () => section(container, "Goal").toggle.click());
+    await render([entries[0], markedSummary]);
+    assert.equal(container.querySelectorAll(".handover-card").length, 1);
+    assert.ok(container.querySelector(".handover-card") === card, "the loaded request does not replace the card");
+    assert.equal(section(container, "Goal").toggle.getAttribute("aria-expanded"), "true");
+    assert.equal(container.querySelectorAll(".handover-command").length, 1);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("a long section opens from its heading, and a short one has nothing to open", async () => {
   const container = document.createElement("div");
   document.body.appendChild(container);

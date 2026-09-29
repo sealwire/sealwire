@@ -49,10 +49,41 @@ const request = (extra = {}) =>
   user("u1", PROMPT, { injection: { kind: "handover_request", handover: handover(extra) } });
 const brief = () =>
   user("b1", SUMMARY + INSTRUCTION, { injection: { kind: "handover_brief", handover: handover() } });
+const summary = (extra = {}) =>
+  agent("a1", SUMMARY, { injection: { kind: "handover_summary", handover: handover(extra) } });
 
 function render(entries, options = {}) {
   return renderToStaticMarkup(h(TranscriptContent, { entries, options: { provider: "claude_code", ...options } }));
 }
+
+test("a latest page containing only the handover summary draws its card", () => {
+  const markup = render([summary()]);
+  assert.match(markup, /Handed over/);
+  assert.match(markup, /Selection Ask remote/);
+  assert.doesNotMatch(markup, /HIDDEN-REMAINING/);
+  assert.doesNotMatch(markup, /data-fork-from-item="a1"/);
+  assert.doesNotMatch(markup, /\/handover/, "the unloaded request is not fabricated");
+});
+
+test("loading the request page leaves one summary card and one typed command", () => {
+  const markup = render([request(), summary()]);
+  assert.equal((markup.match(/class="handover-card"/g) || []).length, 1);
+  assert.equal((markup.match(/\/handover going to do the review part/g) || []).length, 1);
+  assert.doesNotMatch(markup, /HIDDEN-REMAINING/);
+});
+
+test("an ordinary reply with handover-like text stays a normal reply", () => {
+  const markup = render([agent("ordinary", SUMMARY)]);
+  assert.match(markup, /HIDDEN-REMAINING/);
+  assert.doesNotMatch(markup, /class="handover-card"/);
+});
+
+test("a summary page follows a handover still being delivered or failed", () => {
+  assert.match(render([summary({ status: "working" })]), /Preparing handover/);
+  const failed = render([summary({ status: "failed", error: "target went away" })]);
+  assert.match(failed, /HIDDEN-REMAINING/, "a failed handover leaves its reply readable");
+  assert.doesNotMatch(failed, /class="handover-card"/);
+});
 
 test("the source shows what was typed and a Handed over card instead of the prompt and reply", () => {
   const markup = render([user("u0", "earlier"), agent("a0", "ok"), request(), agent("a1", SUMMARY)]);

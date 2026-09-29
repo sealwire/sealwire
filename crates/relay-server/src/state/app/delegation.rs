@@ -697,15 +697,24 @@ write the brief — try again once it is done"
 
         let entry = self
             .assistant_entry_for_turn(asker_thread_id, turn_id)
-            .await;
-        match crate::state::delegation::brief_from_reply(entry, baseline.as_deref(), Some(turn_id))
-        {
-            Some(text) => Ok(text),
-            // Nothing new, nothing said, or said in some other turn. Sending the raw
-            // words is worse than failing: the peer would act on an instruction with
-            // no referent.
-            None => Err(AskError::Failed(no_brief_written())),
+            .await
+            .ok_or_else(|| AskError::Failed(no_brief_written()))?;
+        let item_id = entry.0.clone();
+        let brief = crate::state::delegation::brief_from_reply(
+            Some(entry),
+            baseline.as_deref(),
+            Some(turn_id),
+        )
+        // Nothing new, nothing said, or said in some other turn. Sending the raw
+        // words is worse than failing: the peer would act on an instruction with
+        // no referent.
+        .ok_or_else(|| AskError::Failed(no_brief_written()))?;
+        if let Some(ask_id) = ask_id {
+            let mut relay = self.relay.write().await;
+            relay.mark_delegate_brief(ask_id, asker_thread_id, &item_id);
+            relay.notify();
         }
+        Ok(brief)
     }
 
     /// May `asker_thread_id` hand work to `peer_thread_id`?

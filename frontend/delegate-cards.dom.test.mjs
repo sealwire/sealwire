@@ -52,6 +52,38 @@ async function mount(entries) {
   return { container, unmount: () => act(async () => root.unmount()) };
 }
 
+test("prepending the request keeps the marked brief's card", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const delegated = ask({ sent_at: 10 });
+  const brief = {
+    item_id: "brief",
+    kind: "agent_text",
+    status: "completed",
+    text: "Where does the text come from?\n\nInspect the remote Ask handler.",
+    injection: { kind: "delegate_brief", delegate: [delegated] },
+  };
+  const render = (entries) => act(async () => root.render(h(TranscriptContent, {
+    entries,
+    options: { provider: "claude_code" },
+  })));
+  try {
+    await render([brief]);
+    const card = container.querySelector(".delegate-card");
+    assert.ok(card);
+
+    await render([request({ sent_at: 10 }), brief]);
+
+    assert.equal(container.querySelectorAll(".delegate-card").length, 1);
+    assert.ok(container.querySelector(".delegate-card") === card, "the older request does not replace the card");
+    assert.equal(container.querySelectorAll(".handover-command").length, 1);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("Cancel on the brief line stops the asker's own turn", async () => {
   const { container, unmount } = await mount([
     request({ peer_thread_id: "" }),

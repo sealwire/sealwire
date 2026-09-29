@@ -1,13 +1,52 @@
-//! Marking a handover's two injected prompts so clients draw them as cards.
+//! Marking a handover's prompts and summary so clients draw them as cards.
 //!
-//! Best-effort: a missing mark leaves an ordinary user row and never fails the handover.
+//! Best-effort: a missing mark leaves an ordinary message and never fails the handover.
 
-use crate::state::{AppState, HandoverMark};
+use crate::protocol::InjectionKind;
+use crate::state::{AppState, HandoverMark, InjectedMessage, InjectionTag, MessageAnchor};
 
 use super::handover::continue_instruction;
 use super::injection_marks::thread_provider;
 
 impl AppState {
+    /// The reply can be the entire tail page, including after a provider history read.
+    pub(super) async fn mark_handover_summary(
+        &self,
+        handover_id: &str,
+        thread_id: &str,
+        row_id: &str,
+    ) {
+        let mut relay = self.relay.write().await;
+        let anchor = relay.runtime_for_thread(thread_id).and_then(|runtime| {
+            runtime.transcript.get_row(row_id).map(|row| {
+                MessageAnchor::Item(
+                    row.provider_item_id
+                        .clone()
+                        .unwrap_or_else(|| row.row_id.clone()),
+                )
+            })
+        });
+        let Some(anchor) = anchor else {
+            tracing::warn!(
+                handover_id,
+                thread_id,
+                row_id,
+                "handover summary row missing when recording its card"
+            );
+            return;
+        };
+        let message = InjectedMessage {
+            thread_id: thread_id.to_string(),
+            anchor,
+            tag: InjectionTag::handover(InjectionKind::HandoverSummary, handover_id),
+            created_at: crate::state::unix_now(),
+        };
+        relay.usage_store.record_injected_message(&message);
+        relay.injections.anchor(message);
+        relay.republish_thread_rows(thread_id);
+        relay.notify();
+    }
+
     /// Written once the source is about to be asked, so both cards have something
     /// to draw from the moment the first prompt lands.
     pub(super) async fn record_handover_mark(&self, handover_id: &str, note: &str) {

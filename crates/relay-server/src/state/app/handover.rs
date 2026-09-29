@@ -611,9 +611,13 @@ finished"
 
         let entry = self
             .assistant_entry_for_turn(&source_thread_id, turn_id)
-            .await;
-        let summary = brief_from_reply(entry, baseline.as_deref(), Some(turn_id))
+            .await
             .ok_or_else(|| HandoverError::Failed(no_summary_written()))?;
+        let summary_row_id = entry.0.clone();
+        let summary = brief_from_reply(Some(entry), baseline.as_deref(), Some(turn_id))
+            .ok_or_else(|| HandoverError::Failed(no_summary_written()))?;
+        self.mark_handover_summary(handover_id, &source_thread_id, &summary_row_id)
+            .await;
 
         // Re-checked against the settings as they are NOW, not as the precheck saw them:
         // writing the handover takes minutes, and a narrowing inside that window must

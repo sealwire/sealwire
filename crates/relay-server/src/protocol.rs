@@ -2184,18 +2184,19 @@ pub struct TranscriptEntryView {
     /// serialize `Full`.
     #[serde(default)]
     pub content_state: TranscriptContentState,
-    /// Set on a user row the relay sent on the person's behalf, so it is drawn as
-    /// what it was for rather than as something they typed.
+    /// Identifies a relay-sent prompt or its recorded reply so cards survive paging.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub injection: Option<InjectionView>,
 }
 
-/// What an injected user row was for.
+/// What a relay-sent prompt or its recorded reply was for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InjectionKind {
     /// The source was asked to write a handover; its reply is the summary.
     HandoverRequest,
+    /// The source's summary, independently readable without its request row.
+    HandoverSummary,
     /// The target was given the summary, followed by `HandoverCardView::instruction`.
     HandoverBrief,
     /// The reviewed thread was asked to recap its change for the reviewer.
@@ -2212,6 +2213,8 @@ pub enum InjectionKind {
     ReviewEscalated,
     /// The asker was asked to turn a person's `/delegate` into a brief; its reply is it.
     DelegateRequest,
+    /// The asker's brief, independently readable without its request row.
+    DelegateBrief,
     /// The peer was given the brief, followed by `DelegateCardView::instruction`.
     DelegateTask,
     /// The peer finished without `report_back` and was reminded once.
@@ -2239,6 +2242,7 @@ impl InjectionKind {
         matches!(
             self,
             Self::DelegateRequest
+                | Self::DelegateBrief
                 | Self::DelegateTask
                 | Self::DelegateNudge
                 | Self::DelegateAnswer

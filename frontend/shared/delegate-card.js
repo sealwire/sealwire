@@ -56,6 +56,10 @@ function outcome(ask) {
   return "failed";
 }
 
+export function drawsDelegateBriefCard(ask) {
+  return Boolean(ask && (ask.sent_at || outcome(ask) === "working"));
+}
+
 function answerSpan(ask) {
   return ask?.finished_at ? reviewDuration(ask.finished_at - ask.asked_at) : "";
 }
@@ -315,6 +319,8 @@ export function DelegateRequestEntry({
   answered = EMPTY_SET,
   provider = "",
   providerIcon = "",
+  showCommand = true,
+  showOutcome = true,
 }) {
   const asks = entry.injection.delegate || [];
   const first = asks[0];
@@ -347,8 +353,8 @@ export function DelegateRequestEntry({
   return h(
     "div",
     { className: "handover-turn", "data-delegate-row": transcriptRowKey(entry) || "" },
-    bubble,
-    outcomeNode
+    showCommand ? bubble : null,
+    showOutcome ? outcomeNode : null
   );
 }
 
@@ -489,8 +495,13 @@ function toolInput(entry) {
 export function foldDelegateInjections(entries) {
   const list = entries || [];
   if (!list.some((entry) => entry?.injection?.delegate)) {
-    return { entries: list, members: EMPTY_MEMBERS, answered: EMPTY_SET, joined: EMPTY_SET };
+    return { entries: list, members: EMPTY_MEMBERS, answered: EMPTY_SET, joined: EMPTY_SET, briefs: EMPTY_SET };
   }
+  const briefs = new Set(
+    list
+      .filter((entry) => entry?.kind === "agent_text" && entry.injection?.kind === "delegate_brief")
+      .flatMap((entry) => (entry.injection.delegate || []).filter(drawsDelegateBriefCard).map((ask) => ask.id))
+  );
   const answered = new Set();
   for (const entry of list) {
     if (entry?.kind === "user_text" && entry.injection?.kind === "delegate_answer") {
@@ -539,10 +550,13 @@ export function foldDelegateInjections(entries) {
       absorbing = null;
       const first = injection?.delegate?.[0];
       const previous = result[result.length - 1];
+      const previousAsk = (previous?.injection?.delegate || []).find((ask) => ask.id === first?.id);
       if (
         kind === "delegate_answer"
-        && previous?.injection?.kind === "delegate_request"
-        && (previous.injection.delegate || []).some((ask) => ask.id === first?.id)
+        && (previous?.injection?.kind === "delegate_request"
+          || (previous?.injection?.kind === "delegate_brief"
+            && drawsDelegateBriefCard(previousAsk)))
+        && previousAsk
       ) {
         joined.add(transcriptRowKey(entry) || "");
       }
@@ -557,7 +571,7 @@ export function foldDelegateInjections(entries) {
     }
     if (absorbing) {
       absorbing.push(entry);
-      continue;
+      if (entry.injection?.kind !== "delegate_brief") continue;
     }
     const reported = entry?.injection?.kind === "delegate_reported" ? entry.injection.delegate?.[0] : null;
     if (reported) {
@@ -582,6 +596,7 @@ export function foldDelegateInjections(entries) {
     members,
     answered,
     joined,
+    briefs,
   };
 }
 

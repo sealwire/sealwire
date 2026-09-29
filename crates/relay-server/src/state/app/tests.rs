@@ -33979,6 +33979,79 @@ mod delegate_card_tests {
     }
 
     #[tokio::test]
+    async fn a_delegate_brief_page_keeps_its_card_without_the_request_even_after_restart() {
+        use crate::state::relay::{InjectionReader, ThreadTranscript};
+        use crate::usage::store::UsageStore;
+
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let database = project.path().join("sealwire.db");
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        app.relay
+            .write()
+            .await
+            .install_database(UsageStore::open(&database));
+        let asker = session(&app, &cwd).await;
+        app.delegate(
+            &asker,
+            request(StartedBy::Person, "ask it about the retry loop"),
+        )
+        .await
+        .expect("the delegate goes through");
+
+        let mut relay = app.relay.write().await;
+        let runtime = relay.ensure_runtime_for_thread(&asker);
+        let reply_id = runtime
+            .transcript
+            .iter()
+            .rev()
+            .find(|row| row.kind == crate::protocol::TranscriptEntryKind::AgentText)
+            .expect("brief")
+            .row_id
+            .clone();
+        runtime.transcript.update_row(&reply_id, |row| {
+            row.text = Some(format!("Delegate title\n{}", "context ".repeat(2600)));
+        });
+        let reply = runtime.transcript.get_row(&reply_id).unwrap().clone();
+        let marks = relay.thread_injections(&asker, InjectionReader::Operator);
+        let page = relay
+            .runtime_for_thread(&asker)
+            .unwrap()
+            .transcript_page(&asker, None, &marks);
+        assert_eq!(
+            page.entries.len(),
+            1,
+            "the long brief occupies the latest page"
+        );
+        assert!(
+            page.prev_cursor.is_some(),
+            "the request is on an older page"
+        );
+        let mark = serde_json::to_value(&page.entries[0].injection).unwrap();
+        assert_eq!(
+            mark["kind"], "delegate_brief",
+            "the brief must identify its own card"
+        );
+
+        relay.install_database(UsageStore::open(&database));
+        let mut rebuilt = reply;
+        rebuilt.row_id = "rebuilt-brief".into();
+        rebuilt.turn_id = Some("history-rebuilt-turn".into());
+        relay.ensure_runtime_for_thread(&asker).transcript =
+            ThreadTranscript::from_rows(vec![rebuilt]);
+        let marks = relay.thread_injections(&asker, InjectionReader::Operator);
+        let runtime = relay.runtime_for_thread(&asker).unwrap();
+        let page = runtime.transcript_page(&asker, None, &marks);
+        let recovered = runtime.transcript_rows(&asker, &["rebuilt-brief".into()], &marks);
+        for row in [&page.entries[0], &recovered.entries[0]] {
+            let restored = serde_json::to_value(&row.injection).unwrap();
+            assert_eq!(restored["kind"], "delegate_brief");
+            assert_eq!(restored["delegate"][0]["id"], mark["delegate"][0]["id"]);
+        }
+    }
+
+    #[tokio::test]
     async fn an_answer_through_report_back_is_not_copied_onto_the_task_card() {
         let project = TempDir::new().expect("tempdir");
         let cwd = project.path().to_string_lossy().to_string();
@@ -34227,9 +34300,40 @@ mod delegate_card_tests {
         )
         .await
         .expect("asked again");
+        let (second, turn) = {
+            let relay = app.relay.read().await;
+            let ask = relay
+                .asks_of_asker(&asker)
+                .into_iter()
+                .find(|ask| !ask.status.is_terminal())
+                .expect("second ask is live");
+            (
+                ask.id.clone(),
+                ask.turn_id.clone().expect("the ask names its peer turn"),
+            )
+        };
         app.report_back(&peer, "No backoff at all.".to_string(), Vec::new())
             .await
             .expect("reported");
+        {
+            let mut relay = app.relay.write().await;
+            relay.bg_upsert_transcript_item(
+                &peer,
+                crate::state::IdSpace::Provider,
+                "late-call-report".to_string(),
+                crate::protocol::TranscriptEntryKind::ToolCall,
+                None,
+                "completed".to_string(),
+                Some(turn),
+                Some(crate::protocol::ToolCallView {
+                    item_type: "mcpToolCall".to_string(),
+                    name: "mcp__sealwire__report_back".to_string(),
+                    title: "report_back".to_string(),
+                    ..crate::protocol::ToolCallView::command_execution(None)
+                }),
+                crate::state::unix_now(),
+            );
+        }
 
         let reported: Vec<String> = marked_rows(&app, &peer)
             .await
@@ -34239,9 +34343,78 @@ mod delegate_card_tests {
             .collect();
         assert_eq!(
             reported,
-            vec![first],
-            "the earlier call keeps its own answer; the new one is left for the client to find"
+            vec![first, second],
+            "a call arriving after report_back carries its own answer too"
         );
+    }
+
+    #[tokio::test]
+    async fn a_second_report_back_call_in_one_turn_does_not_get_the_same_answer_card() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = session(&app, &cwd).await;
+        let peer = app
+            .delegate(&asker, request(StartedBy::Agent, "look at the retry loop"))
+            .await
+            .expect("the ask goes through");
+        row_marked(&app, &peer, InjectionKind::DelegateTask).await;
+        let turn = only_ask(&app, &asker)
+            .await
+            .turn_id
+            .expect("the ask names its peer turn");
+        {
+            let mut relay = app.relay.write().await;
+            relay.upsert_transcript_item_for_thread(
+                &peer,
+                "call-report".to_string(),
+                crate::protocol::TranscriptEntryKind::ToolCall,
+                None,
+                "completed".to_string(),
+                Some(turn.clone()),
+                Some(crate::protocol::ToolCallView {
+                    item_type: "mcpToolCall".to_string(),
+                    name: "mcp__sealwire__report_back".to_string(),
+                    title: "report_back".to_string(),
+                    ..crate::protocol::ToolCallView::command_execution(None)
+                }),
+            );
+        }
+        app.report_back(&peer, "It retries forever.".to_string(), Vec::new())
+            .await
+            .expect("the first report answers the ask");
+        assert!(
+            app.report_back(&peer, "Saying it twice.".to_string(), Vec::new())
+                .await
+                .is_err(),
+            "the second call has no ask left to answer"
+        );
+        {
+            let mut relay = app.relay.write().await;
+            relay.upsert_transcript_item_for_thread(
+                &peer,
+                "call-again".to_string(),
+                crate::protocol::TranscriptEntryKind::ToolCall,
+                None,
+                "completed".to_string(),
+                Some(turn),
+                Some(crate::protocol::ToolCallView {
+                    item_type: "mcpToolCall".to_string(),
+                    name: "mcp__sealwire__report_back".to_string(),
+                    title: "report_back".to_string(),
+                    ..crate::protocol::ToolCallView::command_execution(None)
+                }),
+            );
+        }
+
+        let reported: Vec<String> = marked_rows(&app, &peer)
+            .await
+            .into_iter()
+            .filter(|(_, mark)| mark.kind == InjectionKind::DelegateReported)
+            .map(|(row, _)| row.item_id.expect("marked row has an id"))
+            .collect();
+        assert_eq!(reported, ["call-report"]);
     }
 }
 
@@ -36356,6 +36529,79 @@ mod handover_tests {
     }
 
     #[tokio::test]
+    async fn a_handover_summary_page_keeps_its_card_without_the_request_even_after_restart() {
+        use crate::state::relay::{InjectionReader, ThreadTranscript};
+        use crate::usage::store::UsageStore;
+
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let database = project.path().join("sealwire.db");
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        app.relay
+            .write()
+            .await
+            .install_database(UsageStore::open(&database));
+        let source = session(&app, &cwd, "never").await;
+        let target = app.handover(&source, request()).await.expect("handover");
+
+        let mut relay = app.relay.write().await;
+        let runtime = relay.ensure_runtime_for_thread(&source);
+        let reply_id = runtime
+            .transcript
+            .iter()
+            .rev()
+            .find(|row| row.kind == TranscriptEntryKind::AgentText)
+            .expect("summary")
+            .row_id
+            .clone();
+        runtime.transcript.update_row(&reply_id, |row| {
+            row.text = Some(format!("## Goal\n{}", "summary ".repeat(2400)));
+        });
+        let reply = runtime.transcript.get_row(&reply_id).unwrap().clone();
+        let marks = relay.thread_injections(&source, InjectionReader::Operator);
+        let page = relay
+            .runtime_for_thread(&source)
+            .unwrap()
+            .transcript_page(&source, None, &marks);
+        assert_eq!(
+            page.entries.len(),
+            1,
+            "the long reply occupies the latest page"
+        );
+        assert!(
+            page.prev_cursor.is_some(),
+            "the request is on an older page"
+        );
+        let mark = serde_json::to_value(&page.entries[0].injection).unwrap();
+        assert_eq!(
+            mark["kind"], "handover_summary",
+            "the reply must identify its own card"
+        );
+        assert_eq!(mark["handover"]["target_thread_id"], target);
+        assert_eq!(mark["handover"]["status"], "done");
+
+        relay.install_database(UsageStore::open(&database));
+        let mut rebuilt = reply;
+        rebuilt.row_id = "rebuilt-summary".into();
+        rebuilt.turn_id = Some("history-rebuilt-turn".into());
+        relay.ensure_runtime_for_thread(&source).transcript =
+            ThreadTranscript::from_rows(vec![rebuilt]);
+        let marks = relay.thread_injections(&source, InjectionReader::Operator);
+        let runtime = relay.runtime_for_thread(&source).unwrap();
+        let page = runtime.transcript_page(&source, None, &marks);
+        let recovered = runtime.transcript_rows(&source, &["rebuilt-summary".into()], &marks);
+        for row in [&page.entries[0], &recovered.entries[0]] {
+            let restored = serde_json::to_value(&row.injection).unwrap();
+            assert_eq!(
+                restored["kind"], "handover_summary",
+                "a cold tail has no request row in memory"
+            );
+            assert_eq!(restored["handover"]["id"], mark["handover"]["id"]);
+        }
+    }
+
+    #[tokio::test]
     async fn both_injected_prompts_come_back_marked_as_one_handover() {
         use crate::protocol::InjectionKind;
         let project = TempDir::new().expect("tempdir");
@@ -36379,8 +36625,8 @@ mod handover_tests {
         let asked = injected_rows(&app, &source).await;
         assert_eq!(
             asked.len(),
-            1,
-            "only the summary prompt is injected: {asked:?}"
+            2,
+            "the request and its summary each carry the handover: {asked:?}"
         );
         let (row, request) = &asked[0];
         assert_eq!(row.kind, TranscriptEntryKind::UserText);
@@ -36389,6 +36635,9 @@ mod handover_tests {
         assert_eq!(request.handover().unwrap().target_provider, "fake");
         assert_eq!(request.handover().unwrap().note, "mind the parser");
         assert_eq!(request.handover().unwrap().status, "done");
+        assert_eq!(asked[1].0.kind, TranscriptEntryKind::AgentText);
+        assert_eq!(asked[1].1.kind, InjectionKind::HandoverSummary);
+        assert_eq!(asked[1].1.handover(), request.handover());
 
         let snapshot = app.snapshot().await;
         assert!(
