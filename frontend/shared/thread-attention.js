@@ -16,8 +16,9 @@ import { isWorkingThreadStatus } from "./thread-status.js";
  *                    without needing input) and kept until the user opens it.
  *
  * Browser notifications fire on the *transitions* into those states; the badge
- * map reflects current state. Both are suppressed for the thread the user is
- * actively looking at in a focused tab.
+ * map reflects current state. Completion badges are suppressed for the thread
+ * the user is actively looking at in a focused tab; pending input remains live
+ * until the request is answered. Notifications are suppressed for that thread.
  *
  * The module is framework-agnostic: it exposes a tiny observable (subscribe /
  * getVersion) so React (useSyncExternalStore) and the imperative local renderer
@@ -263,10 +264,11 @@ export class ThreadAttentionTracker {
       }
     }
 
-    // 2. needs_input badge is LIVE: present iff the thread is currently waiting
-    //    (and the user isn't looking at it). Reconcile every snapshot.
+    // 2. needs_input badge is LIVE: present iff the thread is currently waiting.
+    //    Looking at a request does not answer it, and the bell reads this same map
+    //    to put the session in its "Needs input" bucket. Reconcile every snapshot.
     for (const [threadId, st] of next) {
-      if (st.needsInput && away(threadId)) {
+      if (st.needsInput) {
         setKind(threadId, "needs_input");
       } else if (this.attention.get(threadId) === "needs_input") {
         dropKind(threadId);
@@ -294,8 +296,9 @@ export class ThreadAttentionTracker {
       }
     }
 
-    // 5. Whatever the user is viewing in the foreground needs no dot.
-    if (isForeground && viewedThreadId) {
+    // 5. A completed thread needs no dot once the user is viewing it. A pending
+    //    request still needs an answer, so it keeps its dot and bell bucket.
+    if (isForeground && viewedThreadId && this.attention.get(viewedThreadId) === "completed") {
       dropKind(viewedThreadId);
     }
 
@@ -307,19 +310,21 @@ export class ThreadAttentionTracker {
     return events;
   }
 
-  /** Remove a thread's badge (e.g. the user opened it). */
+  /** Opening a thread acknowledges completion, but cannot answer pending input. */
   clear(threadId) {
-    if (threadId && this.attention.delete(threadId)) {
+    if (threadId && this.attention.get(threadId) === "completed") {
+      this.attention.delete(threadId);
       this._bump();
     }
   }
 
   /**
-   * Clear the last-viewed thread's badge when the tab regains focus — backs the
-   * "refocus clears the dot" behavior even when no snapshot arrives.
+   * Clear a completed badge when the tab regains focus, even without a snapshot.
+   * A pending input request remains visible until it is answered.
    */
   clearViewedOnFocus(isForeground) {
-    if (isForeground && this.lastViewed && this.attention.delete(this.lastViewed)) {
+    if (isForeground && this.lastViewed && this.attention.get(this.lastViewed) === "completed") {
+      this.attention.delete(this.lastViewed);
       this._bump();
     }
   }

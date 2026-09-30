@@ -174,6 +174,24 @@ test("background approval badges + notifies the originating thread, not the acti
   assert.equal(tracker.kindFor("b"), null);
 });
 
+test("a request arriving on the viewed foreground thread is marked without notifying", () => {
+  for (const source of ["pending_approvals", "pending_ask_user_questions"]) {
+    const tracker = new ThreadAttentionTracker();
+    const base = snapshot({
+      active_thread_id: "a",
+      active_turn_id: "t1",
+      current_status: "active",
+    });
+    tracker.ingest(base, { viewedThreadId: "a", isForeground: true });
+    const events = tracker.ingest(
+      { ...base, [source]: [{ request_id: "r1", thread_id: "a" }] },
+      { viewedThreadId: "a", isForeground: true }
+    );
+    assert.deepEqual(events, [{ threadId: "a", kind: "needs_input", notify: false }], source);
+    assert.equal(tracker.kindFor("a"), "needs_input", source);
+  }
+});
+
 test("needs_input badge is live: present while waiting (even while working), cleared on resolve", () => {
   const tracker = new ThreadAttentionTracker();
   tracker.ingest(snapshot({ active_thread_id: "v", thread_activity: [{ thread_id: "a" }] }), {

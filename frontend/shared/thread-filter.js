@@ -59,7 +59,10 @@ function flattenThreads(groups) {
  * thread that finishes while you are looking at it gets no `completed` badge at all
  * (`thread-attention.js` drops the badge for the viewed foreground thread), so it goes
  * working → stateless. With only an id to go on there would be no bucket to keep it in
- * and the row would vanish anyway.
+ * and the row would vanish anyway. A request that goes straight from pending to
+ * idle is different: it must remain listed, but retaining `needs_input` would
+ * claim an already-answered request still needs the user. Move that memory to
+ * `completed` when no live state remains.
  *
  * New matches join live — that half must stay immediate, or the bell would show a
  * snapshot of the past rather than what is going on. Every non-idle thread is admitted:
@@ -87,6 +90,10 @@ export function nextRetainedStates(previous, groups, filter, stateOf) {
     const id = thread?.id;
     const state = id ? stateOf(thread) : null;
     if (!state) {
+      if (id && next.get(id) === "needs_input") {
+        next.set(id, "completed");
+        changed = true;
+      }
       continue;
     }
     // Every live state refreshes the memory, so a row is remembered where it ACTUALLY
