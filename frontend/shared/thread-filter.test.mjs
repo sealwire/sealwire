@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { selectThreadDot, selectThreadState } from "./thread-dot.js";
+import { ThreadAttentionTracker } from "./thread-attention.js";
+import { buildThreadActivityMap } from "./thread-activity.js";
 import {
   EMPTY_THREAD_FILTER,
   buildThreadStateGroups,
@@ -68,6 +70,58 @@ test("on → everything except idle, bucketed by state", () => {
     "done",
   ]);
   assert.equal(view.countLabel, "4 sessions");
+});
+
+test("a viewed session awaiting approval or an answer leaves Needs input when it becomes idle", () => {
+  for (const source of ["pending_approvals", "pending_ask_user_questions"]) {
+    const tracker = new ThreadAttentionTracker();
+    const base = {
+      active_thread_id: "work",
+      active_turn_id: "turn-1",
+      current_status: "active",
+      thread_activity: [{ thread_id: "work", tool: null }],
+    };
+    const waiting = {
+      ...base,
+      [source]: [{ request_id: "request-1", thread_id: "work" }],
+    };
+    const events = tracker.ingest(waiting, { viewedThreadId: "work", isForeground: true });
+    assert.deepEqual(events, [], `${source}: the initial snapshot does not notify`);
+    tracker.clear("work");
+    tracker.clearViewedOnFocus(true);
+
+    const activity = buildThreadActivityMap(waiting);
+    const stateOfWaiting = (thread) => selectThreadState({
+      activity: activity.get(thread.id) || null,
+      attentionKind: tracker.kindFor(thread.id),
+    });
+    const view = selectThreadFilterView({ groups: GROUPS, filter: ON, stateOf: stateOfWaiting });
+    assert.equal(
+      view.groups.find((group) => group.threads.some((thread) => thread.id === "work"))?.state,
+      "needs_input",
+      source
+    );
+
+    const retained = nextRetainedStates(null, GROUPS, ON, stateOfWaiting);
+    const idle = { ...base, active_turn_id: null, current_status: "idle", thread_activity: [] };
+    tracker.ingest(idle, { viewedThreadId: "work", isForeground: true });
+    assert.equal(tracker.kindFor("work"), null, `${source}: answering clears the live request`);
+    const idleActivity = buildThreadActivityMap(idle);
+    const stateOfIdle = (thread) => selectThreadState({
+      activity: idleActivity.get(thread.id) || null,
+      attentionKind: tracker.kindFor(thread.id),
+    });
+    const after = nextRetainedStates(retained, GROUPS, ON, stateOfIdle);
+    const idleView = selectThreadFilterView({
+      groups: GROUPS,
+      filter: { ...ON, retained: after },
+      stateOf: stateOfIdle,
+    });
+    assert.notEqual(after, retained, `${source}: the remote store observes the bucket change`);
+    assert.equal(after.get("work"), "completed", source);
+    assert.deepEqual(idleView.groups.map((group) => group.state), ["completed"], source);
+    assert.deepEqual(idleView.groups[0].threads.map((thread) => thread.id), ["work"], source);
+  }
 });
 
 // Ladder order IS urgency order. Sorting buckets by recency instead would move the

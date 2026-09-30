@@ -2003,7 +2003,7 @@ function RemoteApp() {
   // tab), a double click keeps. It used to be dropped here because remote had no strip.
   async function handleResumeThread(threadId, { preview } = {}) {
     closeRemoteNavigation();
-    // Opening a thread clears its attention dot; treat the click as the user
+    // Opening a thread clears its completed dot; treat the click as the user
     // gesture that unlocks notification permission for later events. Store the
     // result so the auto-enroll effect can react to a grant made here (e.g. after
     // the user dismissed the prompt during pairing).
@@ -2889,8 +2889,8 @@ function RemoteSidebar({
   // refocus). Snapshot-driven changes already re-render via the session prop.
   useSyncExternalStore(subscribeThreadAttention, getThreadAttentionVersion, getThreadAttentionVersion);
 
-  // Clear the viewed thread's dot when the tab regains focus, even with no new
-  // snapshot for an idle thread.
+  // Clear the viewed thread's completed dot when the tab regains focus, even
+  // with no new snapshot for an idle thread. Pending input stays visible.
   useEffect(() => {
     const clearViewedDot = () => threadAttention.clearViewedOnFocus(isDocumentForeground());
     window.addEventListener("focus", clearViewedDot);

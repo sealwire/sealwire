@@ -405,9 +405,8 @@ export function createSessionRenderer({
     },
   });
 
-  // When the tab regains focus, clear the dot on the thread the user is looking
-  // at (the tracker only does this on the next snapshot, which may not arrive
-  // for an idle thread). Attached once per page.
+  // When the tab regains focus, clear the completed dot on the thread the user
+  // is looking at. A pending request stays visible until answered. Attached once.
   if (!attentionFocusListenerAttached && typeof window !== "undefined") {
     attentionFocusListenerAttached = true;
     const clearViewedDot = () => {
@@ -1718,7 +1717,7 @@ export function createSessionRenderer({
           }
         },
         onResumeThread(threadId, { preview = true } = {}) {
-          // Opening a thread clears its attention dot immediately; the click also
+          // Opening a thread clears its completed dot immediately; the click also
           // doubles as the user gesture that unlocks notification permission.
           threadAttention.clear(threadId);
           void ensureNotificationPermission();
@@ -3076,7 +3075,7 @@ export function createSessionRenderer({
           return formatRelativeTime(thread.updated_at);
         },
         onOpenAgent(threadId, { preview = true } = {}) {
-          // Opening clears the attention dot and doubles as the gesture that unlocks
+          // Opening clears a completed dot and doubles as the gesture that unlocks
           // notification permission — mirrors the sidebar's onResumeThread, peek
           // semantics and skipped transition included. A card and a row are two
           // doors onto the same list; they must not disagree about what a click
