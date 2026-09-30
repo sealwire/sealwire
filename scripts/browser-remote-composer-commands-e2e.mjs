@@ -868,13 +868,20 @@ async function assertPhoneTaps(page, { jitter = false, systemTouch = false } = {
     assert.equal(picked.surfaceDraft.value, "", `${label}: React agrees the filter was consumed`);
     assert.equal(picked.pills.length, 1, "one tap stages exactly one choice");
     assert.equal(await page.$eval("#remote-message-input", (input) => document.activeElement === input), true);
+    const pill = page.locator(".composer-command-pill");
+    const pillBox = await pill.boundingBox();
+    assert.ok(pillBox && pillBox.height >= 32, `${label}: the remove target fits a finger`);
     if (process.env.SKILLS_SCREENSHOT) {
       const height = page.viewportSize()?.height || "android";
       const name = `${label === "/review" ? "command" : "skill"}${jitter ? "-jitter" : ""}-${height}`;
       await page.screenshot({ path: process.env.SKILLS_SCREENSHOT.replace(/\.png$/, `-tap-${name}.png`) });
     }
-    await page.keyboard.press("Backspace");
+    // The label and × are one button. Both must remove a staged choice by touch;
+    // previously only the tiny × listened to pointerdown and the label did nothing.
+    const removal = label === "/review" ? ".composer-command-pill-label" : ".composer-command-pill-clear";
+    await tap(page.locator(removal));
     await page.waitForFunction(() => !document.querySelector(".composer-command-pill"), null, { timeout: TIMEOUT_MS });
+    assert.equal(await page.$eval("#remote-message-input", (input) => input.value), "");
   }
   await page.fill("#remote-message-input", "/");
   const expand = page.locator(".composer-command-expand");
