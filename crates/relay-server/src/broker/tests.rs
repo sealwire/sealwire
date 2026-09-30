@@ -358,8 +358,34 @@ async fn broker_config_builds_websocket_url() {
         .starts_with("ws://127.0.0.1:8788/ws/demo-room?"));
     assert!(relay_url.as_str().contains("peer_id=relay-1"));
     assert!(relay_url.as_str().contains("role=relay"));
+    assert!(relay_url
+        .query_pairs()
+        .any(|(key, value)| key == "client_version" && value == product_version()));
     assert!(relay_url.as_str().contains("join_ticket="));
     assert_eq!(config.auth_mode(), BrokerAuthMode::SelfHostedSharedSecret);
+}
+
+#[test]
+fn broker_health_requires_current_relay_version_before_start() {
+    let health = relay_broker::protocol::HealthResponse {
+        status: "ok".to_string(),
+        service: "relay-broker".to_string(),
+        broker_auth_mode: "public".to_string(),
+        join_auth_ready: true,
+        minimum_relay_version: "0.12.0".to_string(),
+        broker_protocol_version: BROKER_PROTOCOL_VERSION,
+        message: None,
+        public_monitoring: None,
+    };
+    let error = validate_broker_health(health.clone(), "0.11.9").expect_err("old client");
+    assert!(error.contains("0.12.0"), "{error}");
+    assert!(error.contains("npx sealwire@latest"), "{error}");
+    validate_broker_health(health.clone(), "0.12.0").expect("current client");
+    let wrong_protocol = relay_broker::protocol::HealthResponse {
+        broker_protocol_version: BROKER_PROTOCOL_VERSION + 1,
+        ..health
+    };
+    assert!(validate_broker_health(wrong_protocol, "0.12.0").is_err());
 }
 
 #[tokio::test]

@@ -220,7 +220,7 @@ if (args.cloud) {
   }
 }
 
-console.log(`sealwire: serving local relay at http://${env.BIND_HOST}:${env.PORT}`);
+console.log(`sealwire: preparing local relay at http://${env.BIND_HOST}:${env.PORT}`);
 if (brokerConfig) {
   console.log(`sealwire: using public broker ${brokerConfig.controlUrl}`);
 }

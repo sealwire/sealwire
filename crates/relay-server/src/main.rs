@@ -202,6 +202,10 @@ async fn main() {
             std::process::exit(code);
         }
         Some("cloud-activate") => {
+            if let Err(error) = broker::check_broker_client_version().await {
+                eprintln!("sealwire: {error}");
+                std::process::exit(1);
+            }
             let code = broker::run_cloud_activate().await;
             std::process::exit(code);
         }
@@ -219,6 +223,11 @@ async fn main() {
                 .unwrap_or_else(|_| "relay_server=debug,tower_http=info".into()),
         )
         .init();
+
+    if let Err(error) = broker::check_broker_client_version().await {
+        eprintln!("sealwire: {error}");
+        std::process::exit(1);
+    }
 
     let port = std::env::var("PORT")
         .ok()

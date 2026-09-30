@@ -1,6 +1,7 @@
 pub mod access;
 pub mod auth;
 pub mod blocklist;
+pub mod client_version;
 pub mod events;
 pub mod join_ticket;
 pub mod origin_guard;
@@ -636,6 +637,7 @@ struct BrokerAppState {
     /// the admin endpoint is disabled and returns 404 (never reveals it exists).
     admin_token: Option<Arc<str>>,
     origin_guard: OriginGuard,
+    min_relay_version: Arc<client_version::MinRelayVersion>,
 }
 
 /// Operator bearer token that gates `/api/admin/stats`. Keep it independent of any
@@ -1467,6 +1469,7 @@ impl BrokerJoinVerifier {
     fn health_response(
         &self,
         public_monitoring: Option<PublicBrokerMonitoring>,
+        minimum_relay_version: &str,
     ) -> (StatusCode, HealthResponse) {
         match self {
             Self::SelfHosted(_) => (
@@ -1476,6 +1479,8 @@ impl BrokerJoinVerifier {
                     service: "relay-broker".to_string(),
                     broker_auth_mode: BrokerAuthMode::SelfHostedSharedSecret.as_str().to_string(),
                     join_auth_ready: true,
+                    minimum_relay_version: minimum_relay_version.to_string(),
+                    broker_protocol_version: BROKER_PROTOCOL_VERSION,
                     message: None,
                     public_monitoring: None,
                 },
@@ -1487,6 +1492,8 @@ impl BrokerJoinVerifier {
                     service: "relay-broker".to_string(),
                     broker_auth_mode: BrokerAuthMode::PublicControlPlane.as_str().to_string(),
                     join_auth_ready: true,
+                    minimum_relay_version: minimum_relay_version.to_string(),
+                    broker_protocol_version: BROKER_PROTOCOL_VERSION,
                     message: self
                         .public_control_plane()
                         .and_then(|control_plane| control_plane.health_message()),
@@ -1500,6 +1507,8 @@ impl BrokerJoinVerifier {
                     service: "relay-broker".to_string(),
                     broker_auth_mode: "unknown".to_string(),
                     join_auth_ready: false,
+                    minimum_relay_version: minimum_relay_version.to_string(),
+                    broker_protocol_version: BROKER_PROTOCOL_VERSION,
                     message: Some(error.clone()),
                     public_monitoring: None,
                 },
@@ -1706,6 +1715,7 @@ fn app_with_access_strategy_parts(
             enrollment_locks: Arc::new(StdMutex::new(HashMap::new())),
             admin_token,
             origin_guard: origin_guard.clone(),
+            min_relay_version: Arc::new(client_version::MinRelayVersion::from_env()),
         })
         // Innermost, so refusals still get security + no-store headers; and applied here,
         // not by callers, so routes merged on later (private admin, readiness) stay outside it.
@@ -1786,7 +1796,9 @@ async fn with_cache_headers(request: Request, next: Next) -> Response {
 async fn health(State(state): State<BrokerAppState>) -> impl IntoResponse {
     // Readiness must fail so a deploy with a broken origin-auth config never goes live.
     if state.origin_guard.is_misconfigured() {
-        let (_, mut payload) = state.join_verifier.health_response(None);
+        let (_, mut payload) = state
+            .join_verifier
+            .health_response(None, state.min_relay_version.as_str());
         payload.status = "misconfigured".to_string();
         payload.join_auth_ready = false;
         payload.message = Some("origin auth is misconfigured; see broker logs".to_string());
@@ -1800,7 +1812,9 @@ async fn health(State(state): State<BrokerAppState>) -> impl IntoResponse {
     } else {
         None
     };
-    let (status, payload) = state.join_verifier.health_response(public_monitoring);
+    let (status, payload) = state
+        .join_verifier
+        .health_response(public_monitoring, state.min_relay_version.as_str());
     (status, Json(payload))
 }
 
@@ -2851,6 +2865,22 @@ async fn handle_socket(
             return;
         }
     };
+
+    if query.role == protocol::PeerRole::Relay {
+        if let Err(message) = state
+            .min_relay_version
+            .check(query.client_version.as_deref())
+        {
+            reject_socket(
+                &state.hardening.publish_metrics,
+                socket,
+                "unsupported_client_version",
+                &message,
+            )
+            .await;
+            return;
+        }
+    }
 
     // Charged only once a ticket vouches for the room, so these keys track real rooms.
     if !state

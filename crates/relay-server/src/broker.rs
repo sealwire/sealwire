@@ -13,6 +13,7 @@ pub use access_release::run_cloud_access_release;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -20,6 +21,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use futures_util::stream::StreamExt;
 use rand::{Rng, RngCore};
 use relay_broker::auth::{BrokerAuthMode, BROKER_AUTH_MODE_ENV};
+use relay_broker::client_version::{MinRelayVersion, UPDATE_INSTRUCTIONS};
 use relay_broker::join_ticket::unix_now;
 use relay_broker::protocol::{PeerRole, PresenceKind, ServerMessage};
 use relay_util::{trimmed_option_string, trimmed_string};
@@ -72,6 +74,95 @@ const BROKER_RECONNECT_STABLE_SESSION_SECS: u64 = 60;
 const BROKER_PING_INTERVAL_SECS: u64 = 20;
 const BROKER_PONG_TIMEOUT_SECS: u64 = 10;
 const PUBLIC_RELAY_AUTH_REQUEST_RETRY_SECS: u64 = 5;
+
+fn product_version() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        serde_json::from_str::<serde_json::Value>(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../package.json"
+        )))
+        .expect("package.json must be valid")
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .expect("package.json must include version")
+        .to_string()
+    })
+}
+
+pub(crate) async fn check_broker_client_version() -> Result<(), String> {
+    let broker_url = match std::env::var("RELAY_BROKER_URL") {
+        Ok(url) if !url.trim().is_empty() => url,
+        _ => return Ok(()),
+    };
+    let origin = std::env::var(RELAY_BROKER_CONTROL_URL_ENV)
+        .ok()
+        .and_then(trimmed_string)
+        .unwrap_or(broker_url);
+    let mut url = Url::parse(&origin).map_err(|error| format!("invalid broker URL: {error}"))?;
+    let scheme = match url.scheme() {
+        "ws" => "http",
+        "wss" => "https",
+        "http" => "http",
+        "https" => "https",
+        _ => return Err("broker URL must use http(s) or ws(s)".to_string()),
+    };
+    url.set_scheme(scheme)
+        .map_err(|_| "failed to convert broker URL to HTTP".to_string())?;
+    url.set_path("/api/health");
+    url.set_query(None);
+    url.set_fragment(None);
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("broker version check setup failed: {error}"))?;
+    let response = match client.get(url).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!(
+                "sealwire: broker version check is unavailable ({error}); starting the local relay and retrying broker connection"
+            );
+            return Ok(());
+        }
+    };
+    if response.status().is_server_error() {
+        eprintln!(
+            "sealwire: broker health returned HTTP {}; starting the local relay and retrying broker connection",
+            response.status()
+        );
+        return Ok(());
+    }
+    if !response.status().is_success() {
+        return Err(format!(
+            "broker version check failed with HTTP {}; retry or run `sealwire local`",
+            response.status()
+        ));
+    }
+    let health: relay_broker::protocol::HealthResponse = response
+        .json()
+        .await
+        .map_err(|error| format!("invalid broker version response: {error}"))?;
+    validate_broker_health(health, product_version())
+}
+
+fn validate_broker_health(
+    health: relay_broker::protocol::HealthResponse,
+    client_version: &str,
+) -> Result<(), String> {
+    if health.status != "ok" || health.service != "relay-broker" || !health.join_auth_ready {
+        return Err("broker is not ready for relay connections".to_string());
+    }
+    validate_broker_protocol_version(health.broker_protocol_version).map_err(|error| {
+        format!(
+            "{error}; {UPDATE_INSTRUCTIONS}. The client and broker protocol versions must match"
+        )
+    })?;
+    let minimum = MinRelayVersion::parse(health.minimum_relay_version)
+        .ok_or_else(|| "broker returned an invalid minimum relay version".to_string())?;
+    minimum.check(Some(client_version))
+}
 
 pub(crate) use self::activation::{
     CLOUD_EXPECTED_BEARER_FP_ENV, CLOUD_EXPECTED_CONTROL_URL_ENV, CLOUD_EXPECTED_RELAY_ID_ENV,
@@ -895,6 +986,7 @@ impl BrokerConfig {
             .clear()
             .append_pair("peer_id", &self.relay_peer_id)
             .append_pair("role", "relay")
+            .append_pair("client_version", product_version())
             .append_pair("join_ticket", &credential.token);
         Ok(url)
     }

@@ -496,6 +496,10 @@ fn websocket_url(
         .mint(&claims)
         .expect("join ticket should mint");
     let mut url = format!("ws://{address}/ws/{channel_id}?role={role}&join_ticket={join_ticket}");
+    if role == "relay" {
+        url.push_str("&client_version=");
+        url.push_str(client_version::DEFAULT_MIN_RELAY_VERSION);
+    }
     if let Some(peer_id) = peer_id {
         url.push_str("&peer_id=");
         url.push_str(peer_id);
@@ -1292,7 +1296,50 @@ async fn health_route_reports_ok() {
     assert_eq!(parsed.service, "relay-broker");
     assert_eq!(parsed.broker_auth_mode, "self_hosted");
     assert!(parsed.join_auth_ready);
+    assert_eq!(
+        parsed.minimum_relay_version,
+        client_version::DEFAULT_MIN_RELAY_VERSION
+    );
+    assert_eq!(parsed.broker_protocol_version, BROKER_PROTOCOL_VERSION);
     assert!(parsed.message.is_none());
+}
+
+#[tokio::test]
+async fn relay_socket_rejects_missing_or_old_client_version_before_join() {
+    let address = spawn_app().await;
+    let claims = JoinTicketClaims::relay_join("room-a", "relay-version");
+    let base_url = websocket_url(
+        address,
+        "room-a",
+        protocol::PeerRole::Relay,
+        Some("relay-version"),
+        claims,
+    );
+    for (url, expected) in [
+        (base_url.replace("&client_version=0.11.3", ""), "missing"),
+        (
+            base_url.replace("client_version=0.11.3", "client_version=0.11.2"),
+            "too old",
+        ),
+    ] {
+        let (mut socket, _) = connect_async(url).await.expect("upgrade should succeed");
+        match next_server_message(&mut socket).await {
+            ServerMessage::Error { code, message } => {
+                assert_eq!(code, "unsupported_client_version");
+                assert!(message.contains(expected), "{message}");
+                assert!(message.contains("npx sealwire@latest"), "{message}");
+                assert!(message.contains("desktop users"), "{message}");
+            }
+            frame => panic!("expected version rejection, got {frame:?}"),
+        }
+    }
+    let (mut socket, _) = connect_async(base_url)
+        .await
+        .expect("current relay should upgrade");
+    assert!(matches!(
+        next_server_message(&mut socket).await,
+        ServerMessage::Welcome { .. }
+    ));
 }
 
 #[tokio::test]
@@ -1765,7 +1812,7 @@ async fn public_relay_challenge_enrollment_can_issue_registration_and_relay_toke
     .await;
 
     let url = format!(
-        "ws://{address}/ws/{}?role=relay&peer_id=relay-challenge&join_ticket={}",
+        "ws://{address}/ws/{}?role=relay&client_version=0.11.3&peer_id=relay-challenge&join_ticket={}",
         relay_token.broker_room_id, relay_token.relay_ws_token
     );
     let (mut socket, _) = connect_async(&url)
@@ -1797,7 +1844,7 @@ async fn public_relay_ws_token_can_join_broker() {
     assert_eq!(relay_token.broker_room_id, "room-a");
 
     let url = format!(
-        "ws://{address}/ws/room-a?role=relay&peer_id=relay-1&join_ticket={}",
+        "ws://{address}/ws/room-a?role=relay&client_version=0.11.3&peer_id=relay-1&join_ticket={}",
         relay_token.relay_ws_token
     );
     let (mut socket, _) = connect_async(&url).await.expect("relay should connect");
@@ -1956,7 +2003,7 @@ async fn public_pairing_and_device_tokens_work_end_to_end() {
     )
     .await;
     let relay_url = format!(
-        "ws://{address}/ws/room-a?role=relay&peer_id=relay-1&join_ticket={}",
+        "ws://{address}/ws/room-a?role=relay&client_version=0.11.3&peer_id=relay-1&join_ticket={}",
         relay_token.relay_ws_token
     );
     let (mut relay, _) = connect_async(&relay_url)
@@ -5157,7 +5204,7 @@ async fn access_release_orders_auth_before_strategy_and_revokes_on_success() {
     );
 
     let (mut relay_ws, _) = connect_async(format!(
-        "ws://{address}/ws/{}?role=relay&peer_id=relay-peer&join_ticket={}",
+        "ws://{address}/ws/{}?role=relay&client_version=0.11.3&peer_id=relay-peer&join_ticket={}",
         enrolled.broker_room_id, relay_token.relay_ws_token
     ))
     .await
@@ -5241,9 +5288,14 @@ async fn access_release_orders_auth_before_strategy_and_revokes_on_success() {
         ),
         ("surface", None, device_grant.device_ws_token.as_str()),
     ] {
+        let client_version = if role == "relay" {
+            "&client_version=0.11.3"
+        } else {
+            ""
+        };
         let url = match peer {
             Some(peer_id) => format!(
-                "ws://{address}/ws/{}?role={role}&peer_id={peer_id}&join_ticket={ticket}",
+                "ws://{address}/ws/{}?role={role}{client_version}&peer_id={peer_id}&join_ticket={ticket}",
                 enrolled.broker_room_id
             ),
             None => format!(
@@ -5283,7 +5335,7 @@ async fn access_release_strategy_denial_preserves_registration_and_sockets() {
     )
     .await;
     let (mut relay_ws, _) = connect_async(format!(
-        "ws://{address}/ws/{}?role=relay&peer_id=relay-peer&join_ticket={}",
+        "ws://{address}/ws/{}?role=relay&client_version=0.11.3&peer_id=relay-peer&join_ticket={}",
         enrolled.broker_room_id, relay_token.relay_ws_token
     ))
     .await
@@ -5463,7 +5515,7 @@ async fn socket_join_consults_strategy_after_ticket_verify() {
     )
     .await;
     let (mut ws, _) = connect_async(format!(
-        "ws://{address}/ws/{}?role=relay&peer_id=relay-peer&join_ticket={}",
+        "ws://{address}/ws/{}?role=relay&client_version=0.11.3&peer_id=relay-peer&join_ticket={}",
         enrolled.broker_room_id, relay_token.relay_ws_token
     ))
     .await
@@ -5525,7 +5577,7 @@ async fn released_ticket_cannot_seat_after_concurrent_access_release() {
     .await;
 
     let join_url = format!(
-        "ws://{address}/ws/{}?role=relay&peer_id=relay-peer&join_ticket={}",
+        "ws://{address}/ws/{}?role=relay&client_version=0.11.3&peer_id=relay-peer&join_ticket={}",
         enrolled.broker_room_id, relay_token.relay_ws_token
     );
     let join_task = tokio::spawn(async move {
@@ -5651,7 +5703,7 @@ async fn access_release_cleanup_failpoint_closes_sockets_and_retries() {
     )
     .await;
     let (mut relay_ws, _) = connect_async(format!(
-        "ws://{address}/ws/{}?role=relay&peer_id=relay-peer&join_ticket={}",
+        "ws://{address}/ws/{}?role=relay&client_version=0.11.3&peer_id=relay-peer&join_ticket={}",
         enrolled.broker_room_id, relay_token.relay_ws_token
     ))
     .await
@@ -5719,7 +5771,7 @@ async fn access_release_reload_uncertain_returns_503_even_when_memory_target_cle
     )
     .await;
     let (mut relay_ws, _) = connect_async(format!(
-        "ws://{address}/ws/{}?role=relay&peer_id=relay-peer&join_ticket={}",
+        "ws://{address}/ws/{}?role=relay&client_version=0.11.3&peer_id=relay-peer&join_ticket={}",
         enrolled.broker_room_id, relay_token.relay_ws_token
     ))
     .await
@@ -5884,7 +5936,7 @@ async fn open_access_release_force_closes_stale_join_seated_during_cleanup() {
     // Registration still exists during the pause; OpenAccess allows seating.
     // Peer id must match the ticket pin or join is rejected before seating.
     let join_url = format!(
-        "ws://{address}/ws/{}?role=relay&peer_id=relay-peer&join_ticket={}",
+        "ws://{address}/ws/{}?role=relay&client_version=0.11.3&peer_id=relay-peer&join_ticket={}",
         enrolled.broker_room_id, relay_token.relay_ws_token
     );
     let (mut stale_ws, _) = connect_async(join_url).await.expect("stale join tcp");
@@ -7146,7 +7198,7 @@ async fn reported_egress_equals_the_bytes_clients_actually_received() {
         )
         .await;
         let url = format!(
-            "ws://{address}/ws/room-a?role=relay&peer_id={peer}&join_ticket={}",
+            "ws://{address}/ws/room-a?role=relay&client_version=0.11.3&peer_id={peer}&join_ticket={}",
             ws_token.relay_ws_token
         );
         let (socket, _) = connect_async(&url).await.expect("peer should connect");
@@ -7424,7 +7476,7 @@ async fn a_rejected_join_counts_its_error_frame_as_egress() {
 
     // A real join the broker refuses: well-formed URL, unusable ticket.
     let (mut socket, _) = connect_async(&format!(
-        "ws://{address}/ws/room-a?role=relay&peer_id=relay-1&join_ticket=not-a-valid-ticket"
+        "ws://{address}/ws/room-a?role=relay&client_version=0.11.3&peer_id=relay-1&join_ticket=not-a-valid-ticket"
     ))
     .await
     .expect("the socket connects before the join is judged");
