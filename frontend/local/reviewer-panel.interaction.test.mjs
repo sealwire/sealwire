@@ -174,6 +174,30 @@ test("an ask card opens the agent's session — the card IS the affordance", asy
   await unmount();
 });
 
+test("a handover's link opens the session at its other end", async () => {
+  const opened = [];
+  const { container } = await mountPanel({
+    handovers: [
+      {
+        id: "handover-1",
+        source_thread_id: "source",
+        source_provider: "claude_code",
+        target_thread_id: "target",
+        target_provider: "codex",
+        status: "done",
+        created_at: 1,
+      },
+    ],
+    parentThreadId: "source",
+    onOpenThread: (threadId) => opened.push(threadId),
+  });
+  const link = container.querySelector('[data-open-thread="target"]');
+  assert.ok(link, container.innerHTML);
+  assert.equal(link.tagName, "BUTTON", "a real control, reachable by keyboard");
+  await act(async () => click(link));
+  assert.deepEqual(opened, ["target"]);
+});
+
 test("focusing an ask card lazily loads the full prompt onto title=", async () => {
   // The list channel only ships ledger previews so multi-KB prompts stay out of the
   // resting DOM. Focus on the openable card (the real tab stop) must fetch detail

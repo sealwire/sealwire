@@ -39234,6 +39234,266 @@ sharing a directory is not being the person who typed the command",
             .is_err());
     }
 
+    /// The fake replies with whatever follows this marker, so the source "writes" this summary.
+    fn written_summary(summary: &str) -> HandoverRequest {
+        HandoverRequest {
+            note: format!("and no extra text:\n{summary}"),
+            ..request()
+        }
+    }
+
+    async fn wait_idle(app: &crate::state::AppState, thread_id: &str) {
+        for _ in 0..200 {
+            let idle = {
+                let relay = app.relay.read().await;
+                relay
+                    .runtime_for_thread(thread_id)
+                    .is_some_and(|runtime| !runtime.is_working())
+            };
+            if idle {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("{thread_id} never went idle");
+    }
+
+    #[tokio::test]
+    async fn the_agents_panel_links_both_ends_of_a_handover() {
+        // Without this list neither session can reach the other from the panel: the
+        // composer's feed only carries a handover while it still wants attention.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+        app.rename_thread(
+            &source,
+            crate::protocol::RenameThreadInput {
+                name: Some("Fix goal gate".to_string()),
+                device_id: None,
+            },
+        )
+        .await
+        .expect("the source is named");
+
+        let target = app
+            .handover(
+                &source,
+                written_summary(
+                    "## Goal\nSelection Ask\n## Current state\n5/5 tests pass\n\
+## Remaining work\nRemote handler reads data-ask-message\n## Tests\nnone",
+                ),
+            )
+            .await
+            .expect("the handover goes through");
+        delivered(&app, &target).await;
+
+        let links = app.reviews(None).await.handover_links;
+        let link = links
+            .iter()
+            .find(|link| link.target_thread_id == target)
+            .unwrap_or_else(|| panic!("the handover is listed: {links:?}"));
+        assert_eq!(link.source_thread_id, source);
+        assert_eq!(link.source_title.as_deref(), Some("Fix goal gate"));
+        assert_eq!(link.target_provider, "fake");
+        assert_eq!(link.status, "done");
+        assert_eq!(link.goal.as_deref(), Some("Selection Ask"));
+        assert_eq!(link.state.as_deref(), Some("5/5 tests pass"));
+        assert_eq!(
+            link.next.as_deref(),
+            Some("Remote handler reads data-ask-message")
+        );
+
+        wait_idle(&app, &target).await;
+        let before = app.relay.read().await.reviews_revision();
+        app.settle_handover_turns().await;
+        let links = app.reviews(None).await.handover_links;
+        let link = links
+            .iter()
+            .find(|link| link.target_thread_id == target)
+            .expect("still listed");
+        assert!(
+            link.finished_at.is_some(),
+            "the target's turn on it has ended"
+        );
+        assert_eq!(link.outcome.as_deref(), Some("completed"));
+        assert!(
+            link.result
+                .as_deref()
+                .is_some_and(|result| result.starts_with("Goal Selection Ask")),
+            "the result is what the target said in that turn: {:?}",
+            link.result
+        );
+        assert_ne!(
+            app.relay.read().await.reviews_revision(),
+            before,
+            "a client only refetches the panel when this key moves"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_handed_over_item_reads_how_the_target_turn_really_ended() {
+        // Idle is not done: a failed or stopped turn leaves the target just as quiet.
+        use crate::state::TurnOutcome;
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+        let target = app
+            .handover(&source, request())
+            .await
+            .expect("the handover goes through");
+        delivered(&app, &target).await;
+        wait_idle(&app, &target).await;
+
+        for (turn, ended, outcome) in [
+            ("turn-failed", Some(TurnOutcome::Failed), Some("failed")),
+            ("turn-stopped", Some(TurnOutcome::Stopped), Some("stopped")),
+            ("turn-still-open", None, None),
+        ] {
+            {
+                let mut relay = app.relay.write().await;
+                let mut mark = relay
+                    .injections
+                    .handovers()
+                    .find(|mark| mark.target_thread_id == target)
+                    .cloned()
+                    .expect("mark");
+                mark.target_turn_id = Some(turn.to_string());
+                mark.finished_at = None;
+                mark.outcome = None;
+                mark.result = None;
+                relay.injections.put_handover(mark);
+                if let Some(ended) = ended {
+                    relay
+                        .ensure_runtime_for_thread(&target)
+                        .record_finished_turn(turn, ended);
+                }
+            }
+            app.settle_handover_turns().await;
+            let links = app.reviews(None).await.handover_links;
+            let link = links
+                .iter()
+                .find(|link| link.target_thread_id == target)
+                .expect("listed");
+            assert_eq!(link.outcome.as_deref(), outcome, "{turn}");
+            assert_eq!(link.finished_at.is_some(), ended.is_some(), "{turn}");
+            assert_eq!(
+                link.result, None,
+                "only a completed turn has a result: {turn}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deleted_session_takes_its_end_of_the_handover_with_it() {
+        // The other session's rows keep the handover's cards, so its record outlives the
+        // delete — and without this, both the panel and the card link to nothing.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        for gone in ["source", "target"] {
+            let source = session(&app, &cwd, "never").await;
+            let target = app
+                .handover(&source, request())
+                .await
+                .expect("the handover goes through");
+            delivered(&app, &target).await;
+            let deleted = if gone == "source" { &source } else { &target };
+            app.relay.write().await.mark_thread_deleted(deleted);
+
+            let links = app.reviews(None).await.handover_links;
+            assert!(
+                !links.iter().any(|link| {
+                    link.source_thread_id == source || link.target_thread_id == target
+                }),
+                "with the {gone} deleted: {links:?}"
+            );
+            let relay = app.relay.read().await;
+            let names_it = relay
+                .injections
+                .handovers()
+                .any(|mark| mark.source_thread_id == *deleted || mark.target_thread_id == *deleted);
+            assert!(!names_it, "no card may still link to the deleted {gone}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_handover_stays_listed_when_its_sessions_are_off_the_current_page() {
+        // The relay's thread list is one page and is replaced on every refresh, and a
+        // restart leaves no runtimes: neither says a session is gone.
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+        let target = app
+            .handover(&source, request())
+            .await
+            .expect("the handover goes through");
+        delivered(&app, &target).await;
+        {
+            let mut relay = app.relay.write().await;
+            relay
+                .threads
+                .retain(|thread| thread.id != source && thread.id != target);
+            relay.runtimes.remove(&source);
+            relay.runtimes.remove(&target);
+            assert_eq!(
+                relay.thread_cwd(&target),
+                None,
+                "precondition: off the page"
+            );
+        }
+
+        let links = app.reviews(None).await.handover_links;
+        assert!(
+            links
+                .iter()
+                .any(|link| link.source_thread_id == source && link.target_thread_id == target),
+            "{links:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_phone_outside_the_workspace_is_not_shown_the_handover() {
+        let project = TempDir::new().expect("tempdir");
+        let elsewhere = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "inside", vec![cwd.clone()]).await;
+        pair_device(
+            &app,
+            "outside",
+            vec![elsewhere.path().to_string_lossy().to_string()],
+        )
+        .await;
+        let source = session(&app, &cwd, "never").await;
+        let target = app
+            .handover(&source, request())
+            .await
+            .expect("the handover goes through");
+
+        let listed = |links: Vec<crate::protocol::HandoverLinkView>| {
+            links.iter().any(|link| link.target_thread_id == target)
+        };
+        assert!(listed(
+            app.reviews(Some("inside".to_string())).await.handover_links
+        ));
+        assert!(
+            !listed(
+                app.reviews(Some("outside".to_string()))
+                    .await
+                    .handover_links
+            ),
+            "it names two sessions and what their work is"
+        );
+    }
+
     #[tokio::test]
     async fn a_handover_records_no_ask_and_never_wakes_the_source() {
         // The whole point of the separation. A delegate records an `Ask`, the sweeper

@@ -141,6 +141,16 @@ pub(crate) struct HandoverMark {
     pub(crate) error: Option<String>,
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
+    /// Read off the summary once it is written, so no client parses agent prose.
+    pub(crate) goal: Option<String>,
+    pub(crate) state: Option<String>,
+    pub(crate) next: Option<String>,
+    /// The turn the summary started on the target; its end is when the item reads done.
+    pub(crate) target_turn_id: Option<String>,
+    pub(crate) finished_at: Option<u64>,
+    /// `completed`, `failed`, `stopped`, or `interrupted` by a restart; `None` is unknown.
+    pub(crate) outcome: Option<String>,
+    pub(crate) result: Option<String>,
 }
 
 /// The lasting side of a review. `ReviewJob` is pruned and keeps only its latest
@@ -292,6 +302,29 @@ impl Injections {
 
     pub(crate) fn put_handover(&mut self, handover: HandoverMark) {
         self.handovers.insert(handover.id.clone(), handover);
+    }
+
+    pub(crate) fn handovers(&self) -> impl Iterator<Item = &HandoverMark> {
+        self.handovers.values()
+    }
+
+    /// Blanks a deleted session out of the handovers it was an end of, and returns
+    /// those. The other end's rows still carry each one, so the mark itself stays.
+    pub(crate) fn detach_handover_end(&mut self, thread_id: &str) -> Vec<HandoverMark> {
+        let mut changed = Vec::new();
+        for mark in self.handovers.values_mut() {
+            let mut touched = false;
+            for end in [&mut mark.source_thread_id, &mut mark.target_thread_id] {
+                if end == thread_id {
+                    end.clear();
+                    touched = true;
+                }
+            }
+            if touched {
+                changed.push(mark.clone());
+            }
+        }
+        changed
     }
 
     pub(crate) fn review(&self, id: &str) -> Option<&ReviewMark> {

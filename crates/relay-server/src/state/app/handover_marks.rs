@@ -3,7 +3,11 @@
 //! Best-effort: a missing mark leaves an ordinary message and never fails the handover.
 
 use crate::protocol::InjectionKind;
-use crate::state::{AppState, HandoverMark, InjectedMessage, InjectionTag, MessageAnchor};
+use crate::state::delegation::one_line_result;
+use crate::state::handover::summary_digest;
+use crate::state::{
+    AppState, HandoverMark, InjectedMessage, InjectionTag, MessageAnchor, TurnOutcome,
+};
 
 use super::handover::continue_instruction;
 use super::injection_marks::thread_provider;
@@ -66,6 +70,7 @@ impl AppState {
             error: record.error,
             created_at: record.created_at,
             updated_at: record.updated_at,
+            ..HandoverMark::default()
         };
         relay.usage_store.save_handover_mark(&mark);
         relay.injections.put_handover(mark);
@@ -94,5 +99,78 @@ impl AppState {
         relay.republish_thread_rows(&record.source_thread_id);
         relay.republish_thread_rows(&record.target_thread_id);
         relay.notify();
+    }
+
+    /// What the target was handed, kept as the panel's lines, and the turn it started.
+    pub(super) async fn record_handover_delivery(
+        &self,
+        handover_id: &str,
+        summary: &str,
+        target_turn_id: Option<String>,
+    ) {
+        let mut relay = self.relay.write().await;
+        let Some(mut mark) = relay.injections.handover(handover_id).cloned() else {
+            return;
+        };
+        let lines = summary_digest(summary);
+        mark.goal = lines.goal;
+        mark.state = lines.state;
+        mark.next = lines.next;
+        mark.target_turn_id = target_turn_id;
+        relay.usage_store.save_handover_mark(&mark);
+        relay.injections.put_handover(mark);
+    }
+
+    /// Settles each delivered handover once the target's turn on it has ended, by the
+    /// outcome the target recorded: an idle target may just as well have failed.
+    pub(crate) async fn settle_handover_turns(&self) {
+        let ended: Vec<(String, String, Option<String>, Option<TurnOutcome>)> = {
+            let relay = self.relay.read().await;
+            relay
+                .injections
+                .handovers()
+                .filter(|mark| mark.status == "done" && mark.finished_at.is_none())
+                .filter_map(|mark| {
+                    let runtime = relay.runtime_for_thread(&mark.target_thread_id);
+                    let outcome = match (runtime, mark.target_turn_id.as_deref()) {
+                        (Some(runtime), Some(turn)) => Some(runtime.finished_turn(turn)?),
+                        (Some(runtime), None) if runtime.is_working() => return None,
+                        // Gone, or started with no turn to go by: how it ended is unknown.
+                        _ => None,
+                    };
+                    Some((
+                        mark.id.clone(),
+                        mark.target_thread_id.clone(),
+                        mark.target_turn_id.clone(),
+                        outcome,
+                    ))
+                })
+                .collect()
+        };
+        for (handover_id, target, turn_id, outcome) in ended {
+            let reply = match (outcome, turn_id) {
+                (Some(TurnOutcome::Completed), Some(turn_id)) => {
+                    self.assistant_entry_for_turn(&target, &turn_id).await
+                }
+                _ => None,
+            };
+            let mut relay = self.relay.write().await;
+            let Some(mut mark) = relay.injections.handover(&handover_id).cloned() else {
+                continue;
+            };
+            mark.outcome = outcome.map(|outcome| {
+                match outcome {
+                    TurnOutcome::Completed => "completed",
+                    TurnOutcome::Failed => "failed",
+                    TurnOutcome::Stopped => "stopped",
+                }
+                .to_string()
+            });
+            mark.result = reply.and_then(|(_, text, _, _)| one_line_result(&text));
+            mark.finished_at = Some(crate::state::unix_now());
+            relay.usage_store.save_handover_mark(&mark);
+            relay.injections.put_handover(mark);
+            relay.notify();
+        }
     }
 }

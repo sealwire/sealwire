@@ -3,11 +3,13 @@ import React from "react";
 import { formatRelativeTime } from "../remote/utils.js";
 import {
   askLedger,
-  askedSummary,
+  handoverLedger,
   reviewFindings,
   reviewLedger,
   reviewOutcome,
+  threadCount,
 } from "./agents-ledger.js";
+import { clockTime } from "./card-parts.js";
 import { renderMarkdown } from "./markdown.js";
 import { providerMark } from "./provider-mark.js";
 import { transcriptPageIsFromAnotherGeneration } from "./transcript-generation.js";
@@ -709,8 +711,6 @@ function AskThreadCard({ thread, onOpen = null, fetchAskDetail = null, onDecideM
         live ? formatRelativeTime(thread.updatedAt) : thread.state
       )
     ),
-    // Which way round the delegation runs is not in the title any more, so it rides here.
-    thread.inbound ? h("p", { className: "reviewer-ask-inbound" }, "asked you") : null,
     ...thread.modelRequests.map(({ id, title, request }) =>
       h(
         "div",
@@ -732,26 +732,82 @@ function AskThreadCard({ thread, onOpen = null, fetchAskDetail = null, onDecideM
   );
 }
 
-function AgentGroup({ group, onOpen = null, fetchAskDetail = null, onDecideModelRequest = null }) {
-  const mark = providerMark(group.provider, "reviewer-agent-mark");
+function agentMark(provider, name) {
+  const mark = providerMark(provider, "reviewer-agent-mark");
   // Only invent a letter when we have a real name and no shipped mark. Never for
   // the "another agent" placeholder — that used to paint "a", then "?", both of
   // which looked like a broken logo rather than an unknown peer.
-  const letter =
-    !mark && group.name && group.name !== "another agent"
-      ? h(
-          "span",
-          { className: "reviewer-agent-mark is-letter", "aria-hidden": "true" },
-          group.name.slice(0, 1).toLowerCase()
-        )
-      : null;
+  if (mark || !name || name === "another agent") {
+    return mark;
+  }
+  return h(
+    "span",
+    { className: "reviewer-agent-mark is-letter", "aria-hidden": "true" },
+    name.slice(0, 1).toLowerCase()
+  );
+}
+
+// Same row as an agent group; the direction word and the summary lines are what differ.
+function HandoverItem({ item, onOpen = null }) {
+  return h(
+    "section",
+    { className: "reviewer-agent reviewer-handover" },
+    h(
+      "div",
+      { className: "reviewer-agent-head" },
+      agentMark(item.provider, item.name),
+      h("span", { className: "reviewer-handover-direction" }, item.direction === "from" ? "From" : "To"),
+      h("span", { className: "reviewer-agent-name reviewer-handover-name" }, item.name),
+      item.state
+        ? h("span", { className: `reviewer-ask-state is-${item.state.replace(/\s+/g, "-")}` }, item.state)
+        : h("span", { className: "reviewer-agent-state" }, clockTime(item.at))
+    ),
+    h(
+      "div",
+      { className: "reviewer-handover-body" },
+      item.title ? h("h3", { className: "reviewer-card-title" }, item.title) : null,
+      item.rows.length
+        ? h(
+            "dl",
+            { className: "reviewer-handover-rows" },
+            ...item.rows.map((row) =>
+              h(
+                "div",
+                { className: "reviewer-handover-row", key: row.label },
+                h("dt", null, row.label),
+                h("dd", null, row.text ?? clockTime(row.at))
+              )
+            )
+          )
+        : null,
+      onOpen && item.otherThreadId
+        ? h(
+            "div",
+            { className: "reviewer-handover-foot" },
+            h(
+              "button",
+              {
+                type: "button",
+                className: "reviewer-handover-link",
+                "data-open-thread": item.otherThreadId,
+                onClick: () => onOpen(item.otherThreadId),
+              },
+              item.linkLabel
+            )
+          )
+        : null
+    )
+  );
+}
+
+function AgentGroup({ group, onOpen = null, fetchAskDetail = null, onDecideModelRequest = null }) {
   return h(
     "section",
     { className: "reviewer-agent" },
     h(
       "div",
       { className: "reviewer-agent-head" },
-      mark || letter,
+      agentMark(group.provider, group.name),
       h("span", { className: "reviewer-agent-name" }, group.name),
       group.model ? h("span", { className: "reviewer-agent-model" }, group.model) : null,
       h(
@@ -792,6 +848,7 @@ function reviewerThreadName(job, reviewerThreads) {
 export function ReviewerPanel({
   reviewJobs = [],
   asks = [],
+  handovers = [],
   goal = null,
   // Why this card's own Stop / Keep going was refused. Lives here rather than on the
   // composer because on a phone this panel is a native <dialog>: the composer is
@@ -834,11 +891,27 @@ export function ReviewerPanel({
 }) {
   const review = reviewLedger(reviewJobs);
   const agents = askLedger(asks, parentThreadId);
+  const delegated = agents.filter((group) => !group.inbound);
+  const delegatedToYou = agents.filter((group) => group.inbound);
+  const { pickedUp, handedOver } = handoverLedger(handovers, parentThreadId);
+  const handoverSections = [
+    ["Picked up", pickedUp],
+    ["Handed over", handedOver],
+  ].filter(([, items]) => items.length);
+  const delegationSections = [
+    ["Delegated", delegated],
+    ["Delegated to you", delegatedToYou],
+  ].filter(([, groups]) => groups.length);
   // Both gated on the feature switch, so a thread that has ONLY hidden workflow runs falls
   // through to the empty state's call to action rather than rendering a populated panel
   // with nothing in it.
   const hasWorkflowRuns = CODE_FLOW_ENABLED && workflowRuns.length > 0;
-  const hasCards = Boolean(review) || agents.length > 0 || hasWorkflowRuns || Boolean(goal);
+  const hasCards =
+    Boolean(review) ||
+    agents.length > 0 ||
+    handoverSections.length > 0 ||
+    hasWorkflowRuns ||
+    Boolean(goal);
   const canLaunch = typeof onRequestReview === "function";
   const canLaunchWorkflow = CODE_FLOW_ENABLED && typeof onStartWorkflow === "function";
 
@@ -848,6 +921,15 @@ export function ReviewerPanel({
     h(
       "div",
       { className: "reviewer-panel-body" },
+      // Pinned first: where this session's work came from, or went.
+      ...handoverSections.flatMap(([label, items], index) => [
+        index ? h("hr", { className: "reviewer-ledger-rule", key: `${label}-rule` }) : null,
+        h(LedgerHeading, { key: label, label }),
+        ...items.map((item) => h(HandoverItem, { key: item.key, item, onOpen: onOpenThread })),
+      ]),
+      handoverSections.length && (goal || review || agents.length)
+        ? h("hr", { className: "reviewer-ledger-rule" })
+        : null,
       goal
         ? h(GoalSlot, {
             goal,
@@ -888,18 +970,19 @@ export function ReviewerPanel({
           })
         : null,
       review && agents.length ? h("hr", { className: "reviewer-ledger-rule" }) : null,
-      agents.length
-        ? h(LedgerHeading, { label: "Asked", meta: askedSummary(agents) })
-        : null,
-      ...agents.map((group) =>
-        h(AgentGroup, {
-          group,
-          key: group.key,
-          onOpen: onOpenThread,
-          fetchAskDetail,
-          onDecideModelRequest,
-        })
-      ),
+      ...delegationSections.flatMap(([label, groups], index) => [
+        index ? h("hr", { className: "reviewer-ledger-rule", key: `${label}-rule` }) : null,
+        h(LedgerHeading, { key: label, label, meta: String(threadCount(groups)) }),
+        ...groups.map((group) =>
+          h(AgentGroup, {
+            group,
+            key: group.key,
+            onOpen: onOpenThread,
+            fetchAskDetail,
+            onDecideModelRequest,
+          })
+        ),
+      ]),
       // Runs trail the results: a review card answers "what did it conclude", a run
       // answers "what is happening right now".
       hasWorkflowRuns
@@ -917,7 +1000,7 @@ export function ReviewerPanel({
             h(
               "p",
               { className: "reviewer-empty-copy" },
-              "Other agents working on this appear here — one you asked for help, or one reviewing the current changes. Each runs in its own session you can open and take over."
+              "Other agents working on this appear here — one you delegated to, one reviewing the current changes, or the session this was handed over to. Each runs in its own session you can open and take over."
             ),
             !canRequest && !canStartWorkflow
               ? h(

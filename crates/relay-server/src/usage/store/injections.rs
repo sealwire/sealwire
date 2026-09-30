@@ -33,8 +33,10 @@ impl UsageStore {
             conn.execute(
                 "INSERT OR REPLACE INTO handover (id, source_thread_id, target_thread_id,
                      source_provider, target_provider, note, instruction, status, error,
-                     created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                     created_at, updated_at, goal, state, next_step, target_turn_id,
+                     finished_at, outcome, result)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                     ?16, ?17, ?18)",
                 params![
                     handover.id,
                     handover.source_thread_id,
@@ -47,6 +49,13 @@ impl UsageStore {
                     handover.error,
                     handover.created_at as i64,
                     handover.updated_at as i64,
+                    handover.goal,
+                    handover.state,
+                    handover.next,
+                    handover.target_turn_id,
+                    handover.finished_at.map(|at| at as i64),
+                    handover.outcome,
+                    handover.result,
                 ],
             )
         });
@@ -110,11 +119,22 @@ impl UsageStore {
                 "UPDATE handover SET status = 'failed', error = ?1 WHERE status = 'working'",
                 [restart_reason],
             )?;
+            // The target's turn is watched only while this process runs, and a restart
+            // ends it: one still under way was interrupted, not done.
+            conn.execute(
+                "UPDATE handover
+                 SET finished_at = updated_at,
+                     outcome = CASE WHEN target_turn_id IS NULL THEN NULL
+                                    ELSE 'interrupted' END
+                 WHERE status = 'done' AND finished_at IS NULL",
+                [],
+            )?;
             let handovers = conn
                 .prepare(
                     "SELECT id, source_thread_id, target_thread_id, source_provider,
                             target_provider, note, instruction, status, error, created_at,
-                            updated_at
+                            updated_at, goal, state, next_step, target_turn_id, finished_at,
+                            outcome, result
                      FROM handover ORDER BY created_at, id",
                 )?
                 .query_map([], |row| {
@@ -130,6 +150,13 @@ impl UsageStore {
                         error: row.get(8)?,
                         created_at: row.get::<_, i64>(9)? as u64,
                         updated_at: row.get::<_, i64>(10)? as u64,
+                        goal: row.get(11)?,
+                        state: row.get(12)?,
+                        next: row.get(13)?,
+                        target_turn_id: row.get(14)?,
+                        finished_at: row.get::<_, Option<i64>>(15)?.map(|at| at as u64),
+                        outcome: row.get(16)?,
+                        result: row.get(17)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;

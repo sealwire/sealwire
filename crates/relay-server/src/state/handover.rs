@@ -207,6 +207,75 @@ pub(crate) enum HandoverActor {
     Device(String),
 }
 
+/// The three lines the Agents panel shows for a handover.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct SummaryDigest {
+    pub(crate) goal: Option<String>,
+    pub(crate) state: Option<String>,
+    pub(crate) next: Option<String>,
+}
+
+/// Found by the headings the summary prompt fixes, and only those: a section written
+/// under any other name is left to the card in the transcript, not guessed at.
+pub(crate) fn summary_digest(summary: &str) -> SummaryDigest {
+    SummaryDigest {
+        goal: summary_section(summary, "goal"),
+        state: summary_section(summary, "current state"),
+        next: summary_section(summary, "remaining work"),
+    }
+}
+
+fn summary_section(summary: &str, name: &str) -> Option<String> {
+    let mut fenced = false;
+    let mut open: Option<usize> = None;
+    let mut body = Vec::new();
+    for line in summary.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
+            continue;
+        }
+        // Prose only: a one-line preview of a code block is noise.
+        if fenced {
+            continue;
+        }
+        if let Some((depth, text)) = markdown_heading(line) {
+            match open {
+                Some(level) if depth <= level => break,
+                Some(_) => continue,
+                None if text.eq_ignore_ascii_case(name) => open = Some(depth),
+                None => {}
+            }
+            continue;
+        }
+        if open.is_some() {
+            body.push(line);
+        }
+    }
+    open?;
+    super::delegation::one_line_result(&body.join("\n"))
+}
+
+fn markdown_heading(line: &str) -> Option<(usize, String)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let depth = rest.bytes().take_while(|byte| *byte == b'#').count();
+    let text = rest[depth..].strip_prefix([' ', '\t'])?;
+    if !(1..=6).contains(&depth) {
+        return None;
+    }
+    let text = text
+        .trim()
+        .trim_end_matches('#')
+        .trim_end()
+        .trim_end_matches(':')
+        .replace(['*', '_', '`'], "");
+    Some((depth, text.trim().to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,6 +360,47 @@ mod tests {
         let future: HandoverStatus =
             serde_json::from_str("\"some_future_state\"").expect("an unknown name must decode");
         assert!(future.is_terminal());
+    }
+
+    #[test]
+    fn the_digest_reads_the_three_sections_the_prompt_names() {
+        let digest = summary_digest(
+            "Intro line.\n\n## Goal\nShip the **parser**.\n\n## Current state\n\
+Tokenizer done;\n5/5 tests pass.\n\n## Completed work\n### Tokenizer\n- lexer.rs\n\n\
+## Remaining work\nWire `parse()` into main.rs.\n### Next action\nRun cargo test.\n\n\
+## Tests\nnone",
+        );
+        assert_eq!(digest.goal.as_deref(), Some("Ship the parser."));
+        assert_eq!(
+            digest.state.as_deref(),
+            Some("Tokenizer done; 5/5 tests pass.")
+        );
+        assert_eq!(
+            digest.next.as_deref(),
+            Some("Wire parse() into main.rs. Run cargo test."),
+            "what sits under a sub-heading belongs to the section above it"
+        );
+    }
+
+    #[test]
+    fn the_digest_matches_headings_as_written_and_nothing_else() {
+        let digest = summary_digest(
+            "## goal:\nlower-case and a colon still name it\n\
+```sh\n## Current state\n```\n\n## Next steps\nnot a heading the prompt asked for",
+        );
+        assert_eq!(
+            digest.goal.as_deref(),
+            Some("lower-case and a colon still name it")
+        );
+        assert_eq!(digest.state, None, "a heading inside a code block is code");
+        assert_eq!(digest.next, None);
+    }
+
+    #[test]
+    fn an_empty_section_says_nothing() {
+        let digest = summary_digest("## Goal\n\n## Current state\nfine");
+        assert_eq!(digest.goal, None);
+        assert_eq!(digest.state.as_deref(), Some("fine"));
     }
 
     #[test]

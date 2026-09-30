@@ -161,17 +161,32 @@ test("ask-referenced identities survive past the memory bound", () => {
 // whichever thread you were looking at before.
 test("the panel slice carries every thread-scoped thing the panel renders", () => {
   const slice = agentsPanelSlice(
-    { ...REVIEWS, review_jobs: [{ id: "j1", parent_thread_id: "t1" }], reviewer_threads: [{ id: "rt1" }] },
+    {
+      ...REVIEWS,
+      review_jobs: [{ id: "j1", parent_thread_id: "t1" }],
+      reviewer_threads: [{ id: "rt1" }],
+      handover_links: [
+        { id: "h1", source_thread_id: "t1", target_thread_id: "t9" },
+        { id: "h2", source_thread_id: "t7", target_thread_id: "t1" },
+        { id: "h3", source_thread_id: "t7", target_thread_id: "t8" },
+      ],
+    },
     "t1",
     THREADS
   );
   assert.deepEqual(Object.keys(slice).sort(), [
     "asks",
     "goal",
+    "handovers",
     "parentThreadId",
     "reviewJobs",
     "reviewerThreads",
   ]);
+  assert.deepEqual(
+    slice.handovers.map((link) => link.id),
+    ["h1", "h2"],
+    "either end of a handover is the viewed thread's"
+  );
   assert.deepEqual(slice.reviewJobs.map((job) => job.id), ["j1"]);
   assert.equal(slice.goal.objective, "Ship it");
   assert.deepEqual(slice.asks.map((ask) => ask.id), ["a1", "a2"]);
@@ -184,4 +199,5 @@ test("the panel slice carries every thread-scoped thing the panel renders", () =
   assert.deepEqual(empty.reviewJobs, []);
   assert.equal(empty.goal, null);
   assert.deepEqual(empty.asks, []);
+  assert.deepEqual(empty.handovers, []);
 });

@@ -844,7 +844,8 @@ test("an ask renders under its agent's heading, titled by intent rather than by 
   );
   assert.match(html, /reviewer-agent-name[^>]*>Codex</, "the agent is the GROUP heading");
   assert.match(html, /reviewer-agent-model[^>]*>gpt-5-codex</);
-  assert.match(html, /Asked<[\s\S]*1 thread</);
+  assert.match(html, /reviewer-ledger-label">Delegated<\/span><span class="reviewer-ledger-meta"[^>]*>1</);
+  assert.doesNotMatch(html, /Delegated to you/, "a side with nothing in it is not drawn");
   // The card carries the intent and the result — never "You asked codex", and never the
   // raw prompt (including in a DOM title tooltip).
   assert.doesNotMatch(html, /You asked/);
@@ -862,7 +863,117 @@ test("an ask renders under its agent's heading, titled by intent rather than by 
     })
   );
   assert.match(mirrored, /reviewer-agent-name[^>]*>Main session</);
-  assert.match(mirrored, /reviewer-ask-inbound[^>]*>asked you</);
+  assert.match(mirrored, /reviewer-ledger-label">Delegated to you<\/span><span class="reviewer-ledger-meta"[^>]*>1</);
+  assert.doesNotMatch(mirrored, />Delegated</, "only the side that has something");
+  assert.doesNotMatch(mirrored, /asked you/, "the section says which way it runs");
+});
+
+test("delegations sit under the direction they run, sent before received", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ReviewerPanel, {
+      asks: [
+        {
+          id: "out",
+          asker_thread_id: "me",
+          peer_thread_id: "peer",
+          peer_provider: "codex",
+          peer_title: "Held failure → remove feature",
+          title: "Fixed the MAXASKS finding; please look again",
+          status: "done",
+          delivered: true,
+          updated_at: 10,
+        },
+        {
+          id: "in",
+          asker_thread_id: "asker",
+          asker_name: "Task重构 Turn 25",
+          asker_provider: "claude_code",
+          peer_thread_id: "me",
+          peer_provider: "codex",
+          title: "Audit round 6 constraints",
+          status: "done",
+          delivered: true,
+          updated_at: 20,
+        },
+      ],
+      parentThreadId: "me",
+    })
+  );
+  const sent = html.indexOf(">Delegated<");
+  const received = html.indexOf(">Delegated to you<");
+  assert.ok(sent >= 0 && received > sent, "Delegated first, even when the received one is newer");
+  assert.match(html.slice(sent, received), /reviewer-card-title[^>]*>Held failure → remove feature</);
+  assert.match(html.slice(received), /reviewer-agent-name[^>]*>Task重构 Turn 25</);
+  assert.match(html.slice(received), /reviewer-card-title[^>]*>Audit round 6 constraints</);
+});
+
+const HANDOVER = {
+  id: "handover-1",
+  source_thread_id: "source",
+  source_title: "Fix goal gate",
+  source_provider: "claude_code",
+  target_thread_id: "target",
+  target_title: "Selection Ask remote",
+  target_provider: "codex",
+  status: "done",
+  goal: "Selection Ask",
+  state: "5/5 tests pass",
+  next: "Remote handler reads data-ask-message",
+  created_at: 1_790_000_000,
+};
+
+test("a handover is pinned above the delegations, from both of its ends", () => {
+  const delegated = {
+    id: "out",
+    asker_thread_id: "target",
+    peer_thread_id: "peer",
+    peer_provider: "codex",
+    title: "A question",
+    status: "done",
+    delivered: true,
+    updated_at: 10,
+  };
+  const target = renderToStaticMarkup(
+    React.createElement(ReviewerPanel, {
+      asks: [delegated],
+      handovers: [HANDOVER],
+      parentThreadId: "target",
+      onOpenThread: () => {},
+    })
+  );
+  assert.ok(target.indexOf(">Picked up<") >= 0, target);
+  assert.ok(target.indexOf(">Picked up<") < target.indexOf(">Delegated<"), "handovers come first");
+  assert.match(target, />From<[\s\S]*>Fix goal gate</);
+  assert.match(target, />Goal<[\s\S]*>Selection Ask</);
+  assert.match(target, />Next<[\s\S]*>Remote handler reads data-ask-message</);
+  assert.match(target, /data-open-thread="source"[^>]*>Source thread</);
+  assert.doesNotMatch(target, /Other agents working on this appear here/);
+
+  const source = renderToStaticMarkup(
+    React.createElement(ReviewerPanel, {
+      handovers: [HANDOVER],
+      parentThreadId: "source",
+      onOpenThread: () => {},
+    })
+  );
+  assert.match(source, />Handed over<[\s\S]*>To<[\s\S]*>Codex</);
+  assert.match(source, /reviewer-card-title[^>]*>Selection Ask remote</);
+  assert.match(source, /reviewer-ask-state is-working[^>]*>working</);
+  assert.match(source, /data-open-thread="target"[^>]*>Codex thread</);
+  assert.doesNotMatch(source, />Picked up</);
+});
+
+test("a handover row keeps its mark column when the agent has no logo, as a delegation row does", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ReviewerPanel, {
+      handovers: [{ ...HANDOVER, source_provider: "fake", source_title: "Fix goal gate" }],
+      parentThreadId: "target",
+    })
+  );
+  assert.match(
+    html,
+    /reviewer-handover[\s\S]*reviewer-agent-mark is-letter[^>]*>f<\/span><span class="reviewer-handover-direction">From</
+  );
 });
 
 test("an answer that has not been handed back does not read as answered", () => {
@@ -908,7 +1019,7 @@ test("follow-ups to one agent session collapse into that thread's rounds", () =>
   assert.equal(html.match(/reviewer-card-title/g).length, 1, "one card for one subject");
   assert.match(html, /reviewer-card-title[^>]*>and what about archive</);
   assert.match(html, /reviewer-round-label[^>]*>R1<[\s\S]*In the JSON state file\./);
-  assert.match(html, /1 thread</, "counted as one thread, not two asks");
+  assert.match(html, /reviewer-ledger-label">Delegated<\/span><span class="reviewer-ledger-meta"[^>]*>1</, "counted as one thread, not two asks");
 });
 
 // The chip is the only way into the Agents panel on a phone, and a session driving a goal

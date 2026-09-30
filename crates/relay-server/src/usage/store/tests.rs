@@ -739,6 +739,7 @@ fn handover_mark(id: &str, status: &str) -> crate::state::HandoverMark {
         error: None,
         created_at: 10,
         updated_at: 20,
+        ..crate::state::HandoverMark::default()
     }
 }
 
@@ -749,7 +750,16 @@ fn handover_marks_survive_a_reopen() {
     use crate::protocol::InjectionKind;
     use crate::state::{InjectedMessage, InjectionTag, MessageAnchor};
     let dir = TempDir::new().expect("tempdir");
-    let done = handover_mark("handover-done", "done");
+    let done = crate::state::HandoverMark {
+        goal: Some("Ship the parser".to_string()),
+        state: Some("Tokenizer done".to_string()),
+        next: Some("Wire it into main.rs".to_string()),
+        target_turn_id: Some("turn-9".to_string()),
+        finished_at: Some(30),
+        outcome: Some("completed".to_string()),
+        result: Some("Parser wired in; tests pass".to_string()),
+        ..handover_mark("handover-done", "done")
+    };
     let request = InjectedMessage {
         thread_id: "source".to_string(),
         anchor: MessageAnchor::Item("user:abc".to_string()),
@@ -793,6 +803,40 @@ fn a_handover_left_working_is_failed_on_load() {
     assert_eq!(
         loaded.handovers[0].error.as_deref(),
         Some("the relay restarted")
+    );
+}
+
+/// A restart ends the provider's turn with it, so a target still on its turn was
+/// interrupted — not done, and not "working" for ever.
+#[test]
+fn a_delivered_handover_is_settled_on_load() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = open_in(&dir);
+    store.save_handover_mark(&crate::state::HandoverMark {
+        target_turn_id: Some("turn-9".to_string()),
+        ..handover_mark("handover-live", "done")
+    });
+    store.save_handover_mark(&handover_mark("handover-untracked", "done"));
+    drop(store);
+
+    let loaded = open_in(&dir).load_injections("the relay restarted");
+    let by_id = |id: &str| {
+        loaded
+            .handovers
+            .iter()
+            .find(|mark| mark.id == id)
+            .expect("loaded")
+    };
+
+    let live = by_id("handover-live");
+    assert_eq!(live.finished_at, Some(20));
+    assert_eq!(live.outcome.as_deref(), Some("interrupted"));
+    assert_eq!(live.result, None);
+    let untracked = by_id("handover-untracked");
+    assert_eq!(untracked.finished_at, Some(20));
+    assert_eq!(
+        untracked.outcome, None,
+        "with no turn to go by, how it ended is unknown"
     );
 }
 

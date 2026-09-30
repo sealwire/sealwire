@@ -706,6 +706,8 @@ no longer the session this was meant for — hand over again"
             Ok(dispatched) => {
                 self.anchor_injection(&brief_tag, &target_thread_id, dispatched.turn_id.as_deref())
                     .await;
+                self.record_handover_delivery(handover_id, &summary, dispatched.turn_id)
+                    .await;
                 Ok(())
             }
             // The provider's own words are not repeated: this reason is shown to a person
