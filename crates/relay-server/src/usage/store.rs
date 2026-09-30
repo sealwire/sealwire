@@ -1989,6 +1989,8 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         // The Agents panel's handover lines, and how the target's turn on it ended.
         let mut batch = String::from("BEGIN;\n");
         for (name, kind) in [
+            ("source_cwd", "TEXT NOT NULL DEFAULT ''"),
+            ("target_cwd", "TEXT NOT NULL DEFAULT ''"),
             ("goal", "TEXT"),
             ("state", "TEXT"),
             ("next_step", "TEXT"),

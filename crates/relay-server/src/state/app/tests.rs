@@ -39495,11 +39495,19 @@ sharing a directory is not being the person who typed the command",
     #[tokio::test]
     async fn a_handover_stays_listed_when_its_sessions_are_off_the_current_page() {
         // The relay's thread list is one page and is replaced on every refresh, and a
-        // restart leaves no runtimes: neither says a session is gone.
+        // restart leaves no runtimes: neither says a session is gone, nor where it is.
         let project = TempDir::new().expect("tempdir");
+        let elsewhere = TempDir::new().expect("tempdir");
         let cwd = project.path().to_string_lossy().to_string();
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
+        pair_device(&app, "inside", vec![cwd.clone()]).await;
+        pair_device(
+            &app,
+            "outside",
+            vec![elsewhere.path().to_string_lossy().to_string()],
+        )
+        .await;
         let source = session(&app, &cwd, "never").await;
         let target = app
             .handover(&source, request())
@@ -39520,13 +39528,63 @@ sharing a directory is not being the person who typed the command",
             );
         }
 
-        let links = app.reviews(None).await.handover_links;
-        assert!(
+        let listed = |links: Vec<crate::protocol::HandoverLinkView>| {
             links
                 .iter()
-                .any(|link| link.source_thread_id == source && link.target_thread_id == target),
-            "{links:?}"
+                .any(|link| link.source_thread_id == source && link.target_thread_id == target)
+        };
+        assert!(listed(app.reviews(None).await.handover_links));
+        assert!(
+            listed(app.reviews(Some("inside".to_string())).await.handover_links),
+            "a phone allowed that folder still sees it"
         );
+        assert!(
+            !listed(
+                app.reviews(Some("outside".to_string()))
+                    .await
+                    .handover_links
+            ),
+            "and one that is not, still does not"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_phone_gets_its_own_newest_handovers_not_the_relays() {
+        // Bounded after the fence: newer handovers elsewhere must not crowd out the
+        // ones this phone may see.
+        let project = TempDir::new().expect("tempdir");
+        let elsewhere = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let other = elsewhere.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "phone", vec![cwd.clone()]).await;
+        {
+            let mut relay = app.relay.write().await;
+            for n in 0..70u64 {
+                let (folder, created_at) = if n < 2 { (&cwd, n) } else { (&other, 100 + n) };
+                relay.injections.put_handover(crate::state::HandoverMark {
+                    id: format!("handover-{n}"),
+                    source_thread_id: format!("source-{n}"),
+                    target_thread_id: format!("target-{n}"),
+                    source_cwd: folder.clone(),
+                    target_cwd: folder.clone(),
+                    status: "done".to_string(),
+                    created_at,
+                    ..crate::state::HandoverMark::default()
+                });
+            }
+        }
+
+        let mut ids: Vec<String> = app
+            .reviews(Some("phone".to_string()))
+            .await
+            .handover_links
+            .into_iter()
+            .map(|link| link.id)
+            .collect();
+        ids.sort();
+        assert_eq!(ids, ["handover-0", "handover-1"]);
     }
 
     #[tokio::test]

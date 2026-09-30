@@ -751,6 +751,8 @@ fn handover_marks_survive_a_reopen() {
     use crate::state::{InjectedMessage, InjectionTag, MessageAnchor};
     let dir = TempDir::new().expect("tempdir");
     let done = crate::state::HandoverMark {
+        source_cwd: "/work/relay".to_string(),
+        target_cwd: "/work/relay-next".to_string(),
         goal: Some("Ship the parser".to_string()),
         state: Some("Tokenizer done".to_string()),
         next: Some("Wire it into main.rs".to_string()),

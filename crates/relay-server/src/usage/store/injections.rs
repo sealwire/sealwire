@@ -34,9 +34,9 @@ impl UsageStore {
                 "INSERT OR REPLACE INTO handover (id, source_thread_id, target_thread_id,
                      source_provider, target_provider, note, instruction, status, error,
                      created_at, updated_at, goal, state, next_step, target_turn_id,
-                     finished_at, outcome, result)
+                     finished_at, outcome, result, source_cwd, target_cwd)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18)",
+                     ?16, ?17, ?18, ?19, ?20)",
                 params![
                     handover.id,
                     handover.source_thread_id,
@@ -56,6 +56,8 @@ impl UsageStore {
                     handover.finished_at.map(|at| at as i64),
                     handover.outcome,
                     handover.result,
+                    handover.source_cwd,
+                    handover.target_cwd,
                 ],
             )
         });
@@ -134,7 +136,7 @@ impl UsageStore {
                     "SELECT id, source_thread_id, target_thread_id, source_provider,
                             target_provider, note, instruction, status, error, created_at,
                             updated_at, goal, state, next_step, target_turn_id, finished_at,
-                            outcome, result
+                            outcome, result, source_cwd, target_cwd
                      FROM handover ORDER BY created_at, id",
                 )?
                 .query_map([], |row| {
@@ -157,6 +159,8 @@ impl UsageStore {
                         finished_at: row.get::<_, Option<i64>>(15)?.map(|at| at as u64),
                         outcome: row.get(16)?,
                         result: row.get(17)?,
+                        source_cwd: row.get(18)?,
+                        target_cwd: row.get(19)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;

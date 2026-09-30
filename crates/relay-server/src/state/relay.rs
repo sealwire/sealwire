@@ -78,6 +78,7 @@ const MAX_SEARCH_ROUTING_HINTS: usize = 2_000;
 /// a timer — is what eventually evicts old completed reviews.
 const MAX_REVIEW_JOBS: usize = 64;
 const MAX_ASKS: usize = 64;
+const MAX_HANDOVER_LINKS: usize = 64;
 /// The HARD total, across every actor. A reservation past it is refused, not absorbed.
 ///
 /// Per-actor quotas alone are not a bound: pairing has no device cap, so N devices at
@@ -3919,33 +3920,56 @@ so {} never got it — hand over again when you are ready.",
             }),
             // A failed one handed nothing over; the composer that typed it says so. A
             // removed end is blanked; absence from the thread page proves nothing.
-            handover_links: self
-                .injections
-                .handovers()
-                .filter(|mark| mark.status != "failed")
-                .filter(|mark| {
-                    [&mark.source_thread_id, &mark.target_thread_id]
+            handover_links: {
+                let mut marks: Vec<_> = self
+                    .injections
+                    .handovers()
+                    .filter(|mark| mark.status != "failed")
+                    .filter(|mark| {
+                        [
+                            (&mark.source_thread_id, &mark.source_cwd),
+                            (&mark.target_thread_id, &mark.target_cwd),
+                        ]
                         .into_iter()
-                        .all(|id| !id.is_empty() && in_scope(id))
-                })
-                .map(|mark| crate::protocol::HandoverLinkView {
-                    id: mark.id.clone(),
-                    source_thread_id: mark.source_thread_id.clone(),
-                    source_title: self.thread_display_name(&mark.source_thread_id),
-                    source_provider: mark.source_provider.clone(),
-                    target_thread_id: mark.target_thread_id.clone(),
-                    target_title: self.thread_display_name(&mark.target_thread_id),
-                    target_provider: mark.target_provider.clone(),
-                    status: mark.status.clone(),
-                    goal: mark.goal.clone(),
-                    state: mark.state.clone(),
-                    next: mark.next.clone(),
-                    finished_at: mark.finished_at,
-                    outcome: mark.outcome.clone(),
-                    result: mark.result.clone(),
-                    created_at: mark.created_at,
-                })
-                .collect(),
+                        .all(|(id, recorded)| {
+                            // Off the thread page nothing says where a session is, so
+                            // fall back to where it was when the work was handed over.
+                            let cwd = self
+                                .thread_cwd(id)
+                                .or_else(|| (!recorded.is_empty()).then(|| recorded.clone()));
+                            !id.is_empty()
+                                && cwd.map_or(scope.is_unrestricted(), |cwd| scope.allows(&cwd))
+                        })
+                    })
+                    .collect();
+                // A record lasts as long as its transcript rows, so the list is bounded.
+                marks.sort_by(|a, b| {
+                    b.created_at
+                        .cmp(&a.created_at)
+                        .then_with(|| b.id.cmp(&a.id))
+                });
+                marks.truncate(MAX_HANDOVER_LINKS);
+                marks
+                    .into_iter()
+                    .map(|mark| crate::protocol::HandoverLinkView {
+                        id: mark.id.clone(),
+                        source_thread_id: mark.source_thread_id.clone(),
+                        source_title: self.thread_display_name(&mark.source_thread_id),
+                        source_provider: mark.source_provider.clone(),
+                        target_thread_id: mark.target_thread_id.clone(),
+                        target_title: self.thread_display_name(&mark.target_thread_id),
+                        target_provider: mark.target_provider.clone(),
+                        status: mark.status.clone(),
+                        goal: mark.goal.clone(),
+                        state: mark.state.clone(),
+                        next: mark.next.clone(),
+                        finished_at: mark.finished_at,
+                        outcome: mark.outcome.clone(),
+                        result: mark.result.clone(),
+                        created_at: mark.created_at,
+                    })
+                    .collect()
+            },
         }
     }
 
@@ -8058,6 +8082,33 @@ mod tests {
             Some(full_answer.as_str()),
             "the peer transcript handoff still needs the complete stored answer"
         );
+    }
+
+    #[test]
+    fn the_panel_is_sent_the_newest_handovers_only() {
+        // A handover's record lasts as long as its transcript rows do, and every panel
+        // refresh carries the list, so it is bounded the way asks are.
+        let mut relay = test_relay();
+        for n in 1..=(super::MAX_HANDOVER_LINKS as u64 + 6) {
+            relay.injections.put_handover(super::HandoverMark {
+                id: format!("handover-{n}"),
+                source_thread_id: format!("source-{n}"),
+                target_thread_id: format!("target-{n}"),
+                status: "done".to_string(),
+                created_at: n,
+                ..super::HandoverMark::default()
+            });
+        }
+
+        let links = relay.reviews_response(None).handover_links;
+        assert_eq!(links.len(), super::MAX_HANDOVER_LINKS);
+        let listed = |id: &str| links.iter().any(|link| link.id == id);
+        assert!(listed(&format!(
+            "handover-{}",
+            super::MAX_HANDOVER_LINKS + 6
+        )));
+        assert!(listed("handover-7"));
+        assert!(!listed("handover-6"), "the oldest go first");
     }
 
     #[test]
