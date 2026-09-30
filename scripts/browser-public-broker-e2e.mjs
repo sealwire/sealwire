@@ -202,6 +202,8 @@ async function main() {
     logStep("received reply after broker restart");
 
     localPage.once("dialog", (dialog) => dialog.accept());
+    // Revoke sits in the device row's details, shown only once the row is opened.
+    await localPage.click("[data-device-id] .settings-row-toggle");
     await localPage.click("[data-revoke-device-id]");
     logStep("clicked revoke device");
     await waitForRevokedDevice(relayPort);

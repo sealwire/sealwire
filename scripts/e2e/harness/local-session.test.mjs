@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { clickMenuRowInPage, pickModelOptionIndex } from "./local-session.mjs";
+import {
+  clickMenuRowInPage,
+  pickModelOptionIndex,
+  settledStartDialogInPage,
+} from "./local-session.mjs";
 
 function withMenu(rows) {
   const clicked = [];
@@ -99,4 +103,35 @@ test("clicking distinguishes two providers publishing the same model id", () => 
   const target = { provider: "codex", value: "shared-model" };
   clickMenuRowInPage(target);
   assert.deepEqual(clicked, [target]);
+});
+
+function withDialog({ open, promptReadOnly } = {}) {
+  const dialog = open === undefined ? null : { open };
+  const prompt = dialog ? { readOnly: Boolean(promptReadOnly) } : null;
+  globalThis.document = {
+    getElementById: (id) =>
+      id === "launch-start-session-dialog"
+        ? dialog
+        : id === "launch-start-session-dialog-start-prompt"
+          ? prompt
+          : null,
+  };
+}
+
+test("a dialog still starting the previous session is not one to fill", () => {
+  withDialog({ open: true, promptReadOnly: true });
+  assert.equal(
+    settledStartDialogInPage("launch-start-session-dialog"),
+    null,
+    "it closes on its own once the start is accepted, taking the next session's draft with it"
+  );
+});
+
+test("an idle open dialog, a closed one and an unrendered one are settled", () => {
+  withDialog({ open: true, promptReadOnly: false });
+  assert.deepEqual(settledStartDialogInPage("launch-start-session-dialog"), { open: true });
+  withDialog({ open: false });
+  assert.deepEqual(settledStartDialogInPage("launch-start-session-dialog"), { open: false });
+  withDialog();
+  assert.deepEqual(settledStartDialogInPage("launch-start-session-dialog"), { open: false });
 });

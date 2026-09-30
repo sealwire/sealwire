@@ -30,11 +30,19 @@ export async function startLocalSession(
   });
 }
 
+// Null while a start is in flight: the dialog stays open until the relay accepts,
+// then closes itself, so filling it then would type into a dialog about to vanish.
+export function settledStartDialogInPage(id) {
+  const dialog = document.getElementById(id);
+  if (!dialog?.open) {
+    return { open: false };
+  }
+  return document.getElementById(`${id}-start-prompt`)?.readOnly ? null : { open: true };
+}
+
 async function openStartSessionDialog(page, timeout) {
-  const alreadyOpen = await page.evaluate(
-    (id) => Boolean(document.getElementById(id)?.open),
-    DIALOG_ID
-  );
+  const settled = await page.waitForFunction(settledStartDialogInPage, DIALOG_ID, { timeout });
+  const { open: alreadyOpen } = await settled.jsonValue();
   if (alreadyOpen) {
     return;
   }

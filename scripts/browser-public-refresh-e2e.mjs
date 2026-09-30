@@ -135,6 +135,8 @@ async function main() {
       timeout: TIMEOUT_MS,
     });
 
+    // Opening pairing (Settings) closed the drawer that holds the New session button.
+    await openMobileDrawer(remotePage);
     await startRemoteSession(remotePage, {
       cwd: workspaceDir,
       approvalPolicy: "never",
