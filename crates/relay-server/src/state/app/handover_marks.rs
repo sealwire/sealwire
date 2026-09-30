@@ -63,6 +63,12 @@ impl AppState {
             id: record.id.clone(),
             source_provider: thread_provider(&relay, &record.source_thread_id),
             target_provider: thread_provider(&relay, &record.target_thread_id),
+            source_cwd: relay
+                .thread_cwd(&record.source_thread_id)
+                .unwrap_or_default(),
+            target_cwd: relay
+                .thread_cwd(&record.target_thread_id)
+                .unwrap_or_default(),
             source_thread_id: record.source_thread_id,
             target_thread_id: record.target_thread_id,
             note: note.to_string(),

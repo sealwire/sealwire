@@ -141,6 +141,10 @@ pub(crate) struct HandoverMark {
     pub(crate) error: Option<String>,
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
+    /// Where each end ran when it was handed over: the fence for a session the relay
+    /// no longer has on its thread page.
+    pub(crate) source_cwd: String,
+    pub(crate) target_cwd: String,
     /// Read off the summary once it is written, so no client parses agent prose.
     pub(crate) goal: Option<String>,
     pub(crate) state: Option<String>,
