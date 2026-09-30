@@ -8632,6 +8632,12 @@ body.is-resizing-panel {
   animation: surface-enter 120ms ease;
 }
 
+/* Keep each two-line project row at its natural height. Otherwise flexbox
+ * shrinks the rows to fit the capped menu and their labels overlap. */
+.project-switcher-menu > * {
+  flex-shrink: 0;
+}
+
 .project-switcher-option {
   width: 100%;
   border: 0;

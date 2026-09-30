@@ -39,6 +39,12 @@ const RELAY_ID = "relay-e2e";
 const REFUSED_CWD = "/tmp/e2e-outside-roots";
 const REFUSAL = `workspace ${REFUSED_CWD} is outside this relay's allowed roots; choose a directory under /tmp/e2e-model-picker`;
 const THREAD_ID = "thread-model-picker-e2e";
+const PROJECT_NAMES = [
+  "Operation", "RN", "Small improvement", "UI Redesign", "poker",
+  "企业code 和cloud orchestration", "神仙教母", "金融", "长任务",
+  "Research", "Documentation", "Release planning", "Mobile app",
+  "Design system", "Infrastructure", "Customer support",
+];
 
 const CODEX_MODELS = [
   { model: "gpt-5.5", display_name: "GPT-5.5", is_default: true },
@@ -139,6 +145,49 @@ async function openWorkspacePanel(page, { touch }) {
   });
 }
 
+async function assertPhoneProjectMenuScrolls(page) {
+  const within = "#remote-start-session-dialog";
+  await page.locator(`${within} .project-picker-trigger`).tap();
+  const menu = page.locator(`${within} .project-switcher-menu`);
+  await menu.waitFor({ state: "visible", timeout: TIMEOUT_MS });
+  await menu.locator('[data-project-id="project-15"]').waitFor();
+
+  const initial = await menu.evaluate((node) => {
+    const rows = [...node.querySelectorAll(".project-switcher-option")];
+    const boxes = rows.map((row) => row.getBoundingClientRect());
+    return {
+      clientHeight: node.clientHeight,
+      scrollHeight: node.scrollHeight,
+      overflowY: getComputedStyle(node).overflowY,
+      overlappingRows: boxes.slice(1).filter((box, index) => box.top < boxes[index].bottom - 0.5).length,
+    };
+  });
+  assert.ok(initial.scrollHeight > initial.clientHeight, `project menu must scroll: ${JSON.stringify(initial)}`);
+  assert.equal(initial.overflowY, "auto");
+  assert.equal(initial.overlappingRows, 0, `project rows overlap: ${JSON.stringify(initial)}`);
+
+  await menu.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+  const bottom = await menu.evaluate((node) => {
+    const last = node.lastElementChild;
+    const box = last.getBoundingClientRect();
+    const menuBox = node.getBoundingClientRect();
+    const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    return {
+      scrollTop: node.scrollTop,
+      lastVisible: box.bottom <= menuBox.bottom + 1,
+      lastReachable: hit === last || last.contains(hit),
+    };
+  });
+  assert.ok(bottom.scrollTop > 0 && bottom.lastVisible && bottom.lastReachable,
+    `bottom of project menu is unreachable: ${JSON.stringify(bottom)}`);
+  await menu.evaluate((node) => Promise.all(node.getAnimations().map((animation) => animation.finished)));
+  const shot = path.join(os.tmpdir(), "remote-project-picker-phone.png");
+  await page.screenshot({ path: shot });
+  await menu.locator('[data-project-id="project-15"]').tap();
+  assert.match(await page.locator(`${within} .project-picker-trigger`).getAttribute("aria-label"), /Customer support/);
+  logStep("phone project menu scrolls", { ...initial, ...bottom, shot });
+}
+
 async function runPass(browser, profile, name) {
   const context = await browser.newContext(profile);
   const page = await context.newPage();
@@ -167,7 +216,7 @@ async function main() {
       ({ context, page } = await runPass(browser, profile, name));
 
       await page.addInitScript(
-        ({ claudeModels, codexModels, openDelayMs, refusal, relayId, threadId }) => {
+        ({ claudeModels, codexModels, openDelayMs, projectNames, refusal, relayId, threadId }) => {
           const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state";
           const REMOTE_STATE_SCHEMA_VERSION = 1;
           const REMOTE_SECRET_DB_NAME = "agent-relay-secrets";
@@ -196,6 +245,16 @@ async function main() {
             status: "completed",
             model_provider: "openai",
           };
+          const projects = projectNames.map((name, index) => ({ id: `project-${index}`, name }));
+          const projectThreads = projects.map((project, index) => ({
+            ...threadSummary,
+            id: `thread-project-${index}`,
+            name: project.name,
+            updated_at: Math.floor(Date.now() / 1000),
+          }));
+          const threadProjectId = Object.fromEntries(projects.map((project, index) => [
+            `thread-project-${index}`, project.id,
+          ]));
           const snapshot = {
             provider: "codex",
             service_ready: true,
@@ -341,7 +400,7 @@ async function main() {
                   action: "list_threads",
                   ok: true,
                   snapshot,
-                  threads: { threads: [threadSummary] },
+                  threads: { threads: [threadSummary, ...projectThreads] },
                 });
                 return;
               }
@@ -350,7 +409,7 @@ async function main() {
                   action: "fetch_projects",
                   ok: true,
                   snapshot,
-                  projects: { projects_revision: 1, projects: [], thread_project_id: {} },
+                  projects: { projects_revision: 1, projects, thread_project_id: threadProjectId },
                 });
                 return;
               }
@@ -388,6 +447,7 @@ async function main() {
           claudeModels: CLAUDE_MODELS,
           codexModels: CODEX_MODELS,
           openDelayMs: SOCKET_OPEN_DELAY_MS,
+          projectNames: PROJECT_NAMES,
           refusal: REFUSAL,
           relayId: RELAY_ID,
           threadId: THREAD_ID,
@@ -423,6 +483,10 @@ async function main() {
         { timeout: TIMEOUT_MS }
       );
       logStep(`${name} dialog open`);
+
+      if (profile.isMobile) {
+        await assertPhoneProjectMenuScrolls(page);
+      }
 
       const menu = await openModelMenu(page, { touch: profile.hasTouch });
       const calls = await page.evaluate(() => window.__brokerCalls);

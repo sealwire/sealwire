@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Project picker scroll demo</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <style>
+      body { margin: 0; }
+      .demo-note { padding: 24px; font: 16px system-ui; }
+    </style>
+  </head>
+  <body>
+    <div class="demo-note">New session project picker demo — scroll the open project list.</div>
+    <div id="demo"></div>
+    <script type="module">
+      import React, { useEffect, useState } from "react";
+      import { createRoot } from "react-dom/client";
+      import { StartSessionDialog } from "../shared/start-session-dialog.js";
+
+      const demoProjects = [
+        "Operation", "RN", "Small improvement", "UI Redesign", "poker",
+        "企业code 和cloud orchestration", "神仙教母", "金融", "长任务",
+        "Research", "Documentation", "Release planning", "Mobile app",
+        "Design system", "Infrastructure", "Customer support",
+      ].map((name, index) => ({ id: `project-${index}`, name }));
+
+      function Demo() {
+        const [projects, setProjects] = useState(demoProjects);
+        const [fields, setFields] = useState({
+          approvalPolicy: "never",
+          cwd: "/Users/luchi/git/agent-relay",
+          effort: "xhigh",
+          initialPrompt: "",
+          model: "claude-opus-4-6",
+          projectId: "project-2",
+          provider: "claude_code",
+        });
+        useEffect(() => {
+          document.getElementById("demo-dialog").showModal();
+          document.querySelector(".project-picker-trigger").click();
+        }, []);
+        return React.createElement(StartSessionDialog, {
+          id: "demo-dialog",
+          fields,
+          projects,
+          gitContext: { is_repo: true, branch: "main", dirty: true },
+          providerModels: {
+            claude_code: [{ model: "claude-opus-4-6", display_name: "Opus 4.6", is_default: true }],
+          },
+          providers: ["claude_code"],
+          approvalOptions: [{ value: "never", label: "Full access", tag: "YOLO" }],
+          effortOptions: [{ value: "xhigh", label: "Extra high" }],
+          threadProjectId: Object.fromEntries(projects.map((project, index) => [
+            `thread-${index}`, project.id,
+          ])),
+          threads: projects.map((_, index) => ({ id: `thread-${index}`, updated_at: Date.now() / 1000 })),
+          requireInitialPrompt: false,
+          onCreateProject: () => setProjects((previous) => [
+            ...previous,
+            { id: `project-${previous.length}`, name: `New project ${previous.length + 1}` },
+          ]),
+          onFieldChange: (field, value) => setFields((previous) => ({ ...previous, [field]: value })),
+        });
+      }
+
+      createRoot(document.getElementById("demo")).render(React.createElement(Demo));
+    </script>
+  </body>
+</html>
