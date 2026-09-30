@@ -3,8 +3,7 @@
 // (`task-board.css`, `task-diff.css`) and imports this rather than copying it —
 // two copies of a ratchet drift, and a drifted ratchet is worse than none.
 //
-// Text must be styled from tokens, never a raw literal (markdown/DESIGN_LANGUAGE.md
-// → Type Tokens):
+// Text must be styled from tokens, never a raw literal:
 //   font-size   → var(--text-*)      font-weight → var(--weight-*)
 //   font-family → var(--font-*)      line-height → var(--leading-*)
 //

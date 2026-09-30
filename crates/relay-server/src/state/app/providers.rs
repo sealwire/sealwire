@@ -22,8 +22,8 @@ impl AppState {
     /// lookup, deletion, reviewer, cwd, or device-scope decision sees them.
     ///
     /// A collision is omitted rather than allowed to enter relay state under an id
-    /// that already routes somewhere else. Phase 2c cannot mint the distinct public
-    /// id needed to represent it; Phase 3 removes that identity-only limitation.
+    /// that already routes somewhere else: adoption is identity-only, so there is no
+    /// distinct public id to give it.
     pub(crate) async fn list_provider_threads(
         &self,
         provider_name: &str,
@@ -340,8 +340,8 @@ impl AppState {
         }
     }
 
-    /// Session id -> the bridge AND the handle to call it with: the Phase-2
-    /// replacement for `find_thread_provider` at every `ProviderBridge` boundary.
+    /// Session id -> the bridge AND the handle to call it with. Use this, not
+    /// `find_thread_provider`, at every `ProviderBridge` boundary.
     ///
     /// Falls back to discovery for a session no list has adopted yet (a reviewer
     /// thread created this run, a row older than the deepest page), and records the
@@ -376,9 +376,9 @@ impl AppState {
         };
         {
             // A refused bind means another session already owns this handle, so the
-            // id is not ours to claim. Phase 2a still routes it the way every call
-            // site did before rather than inventing a refusal this phase promised
-            // not to add; the identity target below is that same behaviour.
+            // id is not ours to claim. Routing through bindings was not meant to add
+            // refusals, so it still gets the identity target below, as every call
+            // site did before.
             let mut relay = self.relay.write().await;
             let _ = relay.register_identity_session_binding(&provider, &session_id);
         }
@@ -643,7 +643,7 @@ pub(crate) struct BoundSessionRoute {
 /// The type exists so a call site cannot hold a session id and a bridge at once and
 /// pass the wrong one: every id-bearing method here sends `provider_handle`, and the
 /// two that return a thread summary put `session_id` back on it before the relay or a
-/// client ever sees it (`markdown/STABLE_SESSION_ID_DESIGN.md`, invariants 2 and 3).
+/// client ever sees it.
 pub(crate) struct SessionTarget {
     pub(crate) session_id: String,
     pub(crate) provider: String,

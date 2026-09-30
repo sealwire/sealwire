@@ -3,7 +3,6 @@ import { settleTranscriptProjection } from "../transcript/store.js";
 /// Cancel the flush scheduler's pending window-projection catch-up AND settle
 /// it into state.session.transcript — a bare cancel would destroy the only
 /// scheduled catch-up while leaving the stale pre-projection array in place.
-/// See .sealwire/PLAN.md, "The one lesson that keeps costing us".
 ///
 /// Returns whether it materialised anything, mirroring settleTranscriptProjection.
 export function cancelAndSettlePendingTranscriptFlush(scheduler, state) {

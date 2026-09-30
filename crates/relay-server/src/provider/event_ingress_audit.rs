@@ -1,10 +1,10 @@
-//! The Phase-2b boundary checklist for provider event ingress, and a tripwire
-//! that notices when a new ingress point skips it.
+//! The boundary checklist for provider event ingress, and a tripwire that notices
+//! when a new ingress point skips it.
 //!
-//! `markdown/STABLE_SESSION_ID_DESIGN.md` invariant 4: every provider event
-//! resolves `(provider, provider handle)` to a session id before mutating
-//! `RelayState`. Nothing in the type system enforces that — a provider handle and
-//! a session id are both `String` — so this file is the standing reminder.
+//! The rule: every provider event resolves `(provider, provider handle)` to a
+//! session id before mutating `RelayState`. Nothing in the type system enforces
+//! that — a provider handle and a session id are both `String` — so this file is
+//! the standing reminder.
 //!
 //! # Manual checklist: adding or changing a provider event
 //!

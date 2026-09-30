@@ -155,7 +155,7 @@ spawnManaged(
   buildEnv
 );
 spawnManaged("relay-broker", "cargo", ["run", "-p", "relay-broker"], brokerEnv);
-// Build with the private crate when this checkout has it (see PRIVATE_CRATE.md).
+// Build with the private crate when this checkout has it.
 // Without this, `scripts/with-private.sh npm run dev:full` would swap the private
 // crate in and then build a relay that ignores it — a dev loop where task teams
 // answer "not available in this build".

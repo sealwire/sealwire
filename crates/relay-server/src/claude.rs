@@ -1502,7 +1502,7 @@ fn session_for_claude_handle(relay: &mut RelayState, provider_session_id: &str) 
 
 /// The relay session a deferred-start placeholder stands for.
 ///
-/// Resolve a pending bridge handle when a Phase-3 binding still owns it. The raw
+/// Resolve a pending bridge handle to the minted session still bound to it. The raw
 /// value is retained only for legacy public pending sessions.
 fn pending_session_id(relay: &RelayState, payload: &Value) -> Option<String> {
     let pending = string_at(payload, &["pending_thread_id"]).filter(|id| !id.is_empty())?;
@@ -4190,12 +4190,11 @@ for await (const line of rl) {
 
     // ----------------------------------------------------------------------
     // Regression for the Claude remote "first message invisible until refresh"
-    // bug. See CLAUDE_REMOTE_PENDING_MESSAGE_VISIBILITY.md. The pending path now
-    // records the first user message synchronously (like an existing-session
-    // send), so it is in the very first snapshot rather than only arriving via
-    // the worker's async replay. The faithful fake worker still replays the
-    // message afterwards, which lets us prove the live record and the replay
-    // collapse to ONE idempotent entry.
+    // bug. The pending path now records the first user message synchronously
+    // (like an existing-session send), so it is in the very first snapshot
+    // rather than only arriving via the worker's async replay. The faithful fake
+    // worker still replays the message afterwards, which lets us prove the live
+    // record and the replay collapse to ONE idempotent entry.
     // ----------------------------------------------------------------------
 
     /// The pending first message is projected the instant `send_message`
@@ -6541,8 +6540,8 @@ for await (const line of rl) {
         // A turn failing in the BACKGROUND must not put its failure (the Error
         // entry, its reason) or that thread's identifiers into the broadcast
         // snapshot a remote device sees — which mirrors the operator's ACTIVE
-        // thread, not the background one. (P1 strips operator-only logs; the
-        // failure entry is confined to the background thread's own runtime.)
+        // thread, not the background one. (Remote snapshots drop operator-only
+        // logs; the failure entry is confined to the background thread's own runtime.)
         let state = new_test_state();
         let now = crate::state::unix_now();
         {
@@ -7001,7 +7000,8 @@ for await (const line of rl) {
     }
 }
 
-/// Phase 2b of `markdown/STABLE_SESSION_ID_DESIGN.md` for the Claude worker.
+/// Worker events name the SDK's session id; each must land on the relay session
+/// bound to it.
 ///
 /// Every binding in production is an identity mapping, so each test here injects
 /// one whose relay session id and SDK session id are deliberately different

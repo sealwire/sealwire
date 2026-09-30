@@ -26,7 +26,7 @@
 //! counters, the verdicts)` is sufficient to decide the next action, and the
 //! driver derives that action from the record alone, which is what proves it.
 //! The driver advances `phase` in the SAME write that records a step's result, so
-//! a crash re-runs at most the last turn. See `markdown/task-team-design.md` §5.
+//! a crash re-runs at most the last turn.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -882,8 +882,8 @@ pub enum TeamTurnOutcome {
 /// Reviewer). Additional structures live beside it and are pinned onto each
 /// run as data rather than another Rust enum branch.
 pub const BUILTIN_TEAM_ID: &str = "builtin";
-/// Immutable version of [`BUILTIN_TEAM_ID`]. A live run must keep this pin for
-/// its whole life — see `orchestrator-teams-budget-design.md` §6.3.
+/// Immutable version of [`BUILTIN_TEAM_ID`]. A live run keeps this pin for its
+/// whole life, so a team edit can never move a resumed run onto different roles.
 pub const BUILTIN_TEAM_VERSION_ID: &str = "builtin-v1";
 /// Display name for the builtin team. Not persisted on the run; the catalog
 /// (when it lands) is the source of truth for names.
@@ -907,45 +907,43 @@ pub struct TeamRun {
 
     /// Immutable orchestration backend selected for this run.
     ///
-    /// Existing and current T1-T3 runs default to `LegacyEmbedded`. Future Cloud
-    /// and local-sidecar runs may be decoded by this public model, but this relay
-    /// build cannot drive them without the later transport/executor tasks.
+    /// Every run this build starts defaults to `LegacyEmbedded`. Cloud and
+    /// local-sidecar runs may be decoded by this public model, but this relay
+    /// build has no transport or executor to drive them.
     #[serde(default)]
     pub orchestration_backend: OrchestrationBackendRef,
-    /// Durable cursor/progress counters for the future command journal. T1-T3
-    /// persists them only; the live embedded driver is not migrated onto this
-    /// bookkeeping yet.
+    /// Durable cursor/progress counters for the command journal, advanced by
+    /// the command reducer.
     #[serde(default)]
     pub driver_progress: DriverProgress,
     /// Bounded, content-blind record of local commands applied or rejected
-    /// against this run — see `orchestration::TeamCommandRecord` and
-    /// `.sealwire/DESIGN.md` D2/D9. Deliberately NOT inside `driver_progress`:
-    /// that type's hand-written `Deserialize` marks the whole thing malformed
-    /// on any unrecognized field, which would make adding this key a one-way
-    /// downgrade trap for an older build. Excluded from `team_run_view`, so a
-    /// journal-only write does not churn `teams_revision()`.
+    /// against this run — see `orchestration::TeamCommandRecord`. Deliberately
+    /// NOT inside `driver_progress`: that type's hand-written `Deserialize`
+    /// marks the whole thing malformed on any unrecognized field, which would
+    /// make adding this key a one-way downgrade trap for an older build.
+    /// Excluded from `team_run_view`, so a journal-only write does not churn
+    /// `teams_revision()`.
     #[serde(default)]
     pub command_journal: TeamCommandJournal,
     /// A command handed to an executor whose outcome this relay never saw.
     ///
-    /// Always `None` in this build: T4's reducer settles every command
+    /// Always `None` in this build: the reducer settles every command
     /// synchronously under the run lock, so there is no window in which one
     /// is outstanding. It is persisted (and recovered on restore) so the
     /// contract an async executor will need is defined and tested now rather
-    /// than invented later — see `.sealwire/DESIGN.md` D10. A sibling of
-    /// `driver_progress` rather than a field inside it, because that struct
-    /// marks itself malformed on any unknown key and an older build reading a
-    /// newer file would then flag every run.
+    /// than invented later. A sibling of `driver_progress` rather than a field
+    /// inside it, because that struct marks itself malformed on any unknown key
+    /// and an older build reading a newer file would then flag every run.
     #[serde(default)]
     pub in_flight_command: Option<InFlightCommand>,
     /// Replay payload for `TeamStateCommand::TakeUserNotes`, kept off the
-    /// (content-blind) journal because notes are prose — see
-    /// `.sealwire/DESIGN.md` D8. One entry per *applied* drain, appended (not
-    /// overwritten): AC-4 requires an identical redelivery to replay the same
-    /// receipt even after a LATER, different drain has landed, which a single
-    /// overwritten slot cannot do. Evicted in lockstep with `command_journal`
-    /// — when a `TakeUserNotes` journal record is dropped, its matching entry
-    /// here is dropped too — so this never outgrows the journal's own bound.
+    /// (content-blind) journal because notes are prose. One entry per
+    /// *applied* drain, appended (not overwritten): an identical redelivery
+    /// must replay the same receipt even after a LATER, different drain has
+    /// landed, which a single overwritten slot cannot do. Evicted in lockstep
+    /// with `command_journal` — when a `TakeUserNotes` journal record is
+    /// dropped, its matching entry here is dropped too — so this never outgrows
+    /// the journal's own bound.
     /// Plain `String`/`Vec<String>` rather than the bounded `CommandId` type
     /// so a corrupt value decodes leniently like the rest of this struct
     /// instead of failing the whole record.
@@ -1294,10 +1292,10 @@ impl TeamRun {
         true
     }
 
-    /// D10: a run loaded with a command still in flight gets a terminal
+    /// A run loaded with a command still in flight gets a terminal
     /// `Interrupted` journal record for it before anything else runs, and the
-    /// marker cleared. T4's own reducer never leaves one in flight, so this
-    /// recovers state left by a future async executor, not anything this
+    /// marker cleared. The synchronous reducer never leaves one in flight, so
+    /// this recovers state left by a future async executor, not anything this
     /// build produces.
     ///
     /// Two markers, because two eras of state file can carry one:
@@ -2723,8 +2721,8 @@ mod tests {
 
     #[test]
     fn restart_recovers_a_stranded_in_flight_command_without_a_false_running_status() {
-        // T4's own reducer never leaves a command in flight (D10) — this run
-        // simulates state a future async executor left behind, so the
+        // The reducer never leaves a command in flight — this run simulates
+        // state a future async executor left behind, so the
         // recovery path is reachable and pinned rather than met as a
         // surprise later.
         let mut run = run_with(TeamPhase::SubTasks, Vec::new());

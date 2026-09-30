@@ -5,8 +5,8 @@
 // writer of state.session on this path, and it wrote AFTER calling
 // renderSession — so state.session still held the old value when this wrap
 // read it. Once applySessionSnapshot had to advance state.session
-// synchronously itself (queue() defers only the paint, never the write — see
-// .sealwire/PLAN.md), that stopped being true: state.session already equals
+// synchronously itself (queue() defers only the paint, never the write),
+// that stopped being true: state.session already equals
 // the NEW session by the time this wrap runs, on every path (interactive or
 // not). lifecycle.js now stashes the outgoing session on
 // state.previousLiveSessionForPin before overwriting it (see

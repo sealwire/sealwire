@@ -7,7 +7,7 @@ import { createTranscriptScrollBookkeeping } from "../shared/transcript-scroll-b
 // engine shared with the remote pane (transcript-scroll-bookkeeping.js). What
 // stays here is this surface's own timing: it renders through flushSync with
 // no StrictMode, so its pre-swap read can happen directly in the render body
-// instead of needing a continuous scroll listener. See .sealwire/PLAN.md.
+// instead of needing a continuous scroll listener.
 export function useLocalTranscriptScrollBookkeeping({
   activeThreadId,
   entries,

@@ -8,8 +8,8 @@
 // wall-clock assertion is flaky in CI and proves nothing about complexity.
 //
 // Accepted trade-off, not a defect: while a background thread is pinned, the
-// hydration window follows the PIN (see .sealwire/PLAN.md, "Decided: the
-// pinned-thread trade-off"), so the LIVE thread's own deltas take the array
+// hydration window follows the PIN (there is one window, and it serves the
+// thread on screen), so the LIVE thread's own deltas take the array
 // fallback below and are therefore NOT O(1) during that window. This file
 // only exercises the (default, un-pinned) windowed path the O(1) claim is
 // actually about.

@@ -414,9 +414,8 @@ pub struct RelayState {
     /// retrofitting it once forked threads exist would need a migration.
     pub(super) thread_forked_from: HashMap<String, String>,
     /// Where each relay session currently reaches its provider — the one place a
-    /// provider handle is allowed to live (see `markdown/STABLE_SESSION_ID_DESIGN.md`).
-    /// Every entry is an identity mapping until Phase 3; only the non-identity ones
-    /// are persisted, the rest are re-adopted from each provider's thread list.
+    /// provider handle is allowed to live. Only the non-identity entries are
+    /// persisted; the rest are re-adopted from each provider's thread list.
     pub(super) session_bindings: SessionBindingRegistry,
     /// Per-thread pin/proven paths. Absent = birth cwd.
     pub(super) thread_workspace: HashMap<String, ThreadWorkspace>,
@@ -2104,7 +2103,7 @@ impl RelayState {
     }
 
     /// Compact views of nav-hidden foreground-reviewer records for the snapshot.
-    /// The local UI uses these both for the delete/archive prompt and the Phase 3
+    /// The local UI uses these both for the delete/archive prompt and the reviewer
     /// reuse picker. Visible task reviewers already live in the Session list and are
     /// deliberately excluded: listing them here too would give one seat two owners.
     /// Each view is enriched best-effort from its in-process summary and sorted for a
@@ -3912,7 +3911,7 @@ so {} never got it — hand over again when you are ready.",
     }
 
     /// Compact views of retained workflow runs for the snapshot. Workflow runs
-    /// are serialized one at a time in phase 1 but terminal runs remain visible
+    /// are serialized one at a time for now but terminal runs remain visible
     /// briefly, mirroring review cards.
     pub(crate) fn active_workflow_runs_view(&self) -> Vec<crate::protocol::WorkflowRunView> {
         let mut views: Vec<_> = self
@@ -5642,7 +5641,7 @@ so {} never got it — hand over again when you are ready.",
 
     /// Translate the thread/session field of ONE arriving provider event.
     ///
-    /// Phase 2b's single event-routing seam: every router calls this before it
+    /// The single event-routing seam: every router calls this before it
     /// compares against `active_thread_id`, picks a runtime, or writes any
     /// relay-owned record, so a provider handle never becomes a relay key.
     ///
@@ -5678,8 +5677,8 @@ so {} never got it — hand over again when you are ready.",
         }
     }
 
-    /// Session id -> what to call the provider with. Phase 2 replaces
-    /// `find_thread_provider` at every provider boundary with this.
+    /// Session id -> what to call the provider with. Use this, not
+    /// `find_thread_provider`, at every provider boundary.
     pub(crate) fn resolve_session_target(
         &self,
         session_id: &str,
@@ -5715,10 +5714,9 @@ so {} never got it — hand over again when you are ready.",
     /// Bring one provider row under a relay session id before anything routes,
     /// filters, or renders it.
     ///
-    /// Production remains identity-only in Phase 2c, so `id` does not move unless a
-    /// test or stale registry already contains a non-identity binding. A native id
-    /// already owned by another provider is refused: this phase cannot mint the
-    /// second public id needed to represent both sessions safely.
+    /// Adoption is identity-only, so `id` moves only when a non-identity binding
+    /// already owns the handle. A native id already owned by another provider is
+    /// refused: adoption mints no second public id to represent both sessions safely.
     pub(crate) fn adopt_provider_summary(
         &mut self,
         provider: &str,
@@ -7542,7 +7540,7 @@ mod tests {
     fn restore_reconciles_non_terminal_workflow_runs() {
         // A run persisted while non-terminal must come back terminal `Interrupted`
         // (no orchestrator survives a restart); a terminal run restores unchanged.
-        // This is the persistence-boundary half of the restart-recovery design.
+        // This is the persistence-boundary half of restart recovery.
         let mut running = WorkflowRun::new(
             "r1".to_string(),
             "wf".to_string(),
@@ -9682,8 +9680,8 @@ mod tests {
         );
     }
 
-    /// Phase 4 deleted the deferred-thread lineage map from the persisted state.
-    /// Every state file written before that still HAS the key, and a decode that
+    /// The deferred-thread lineage map is gone from the persisted state, but every
+    /// state file written before its removal still HAS the key, and a decode that
     /// choked on it would lose the user's whole session — projects, names, goals,
     /// bindings — on first launch after the upgrade.
     ///
@@ -10235,9 +10233,9 @@ mod tests {
         );
     }
 
-    // The Phase-3 shape. An identity binding can be re-derived from the provider's
-    // own list; a session whose id is NOT its provider handle cannot, so losing it
-    // across a restart would strand the session.
+    // An identity binding can be re-derived from the provider's own list; a session
+    // whose id is NOT its provider handle cannot, so losing it across a restart would
+    // strand the session.
     #[test]
     fn a_binding_whose_handle_differs_survives_the_state_file() {
         let mut relay = test_relay();
@@ -10296,7 +10294,8 @@ mod tests {
         let mut relay = test_relay();
 
         // No binding: historical identity state, where the id IS the provider thread.
-        // Spelling is irrelevant, including the shape Phase 3 retired from public ids.
+        // Spelling is irrelevant, including the `claude-pending-` shape no longer used
+        // for public ids.
         assert!(relay.session_is_materialized("codex-thread-1"));
         assert!(
             relay.session_is_materialized("claude-pending-not-a-relay-session"),
@@ -10423,7 +10422,7 @@ mod tests {
             .is_none());
     }
 
-    // Two providers can hand back the same native id string. Phase 2c may not mint a
+    // Two providers can hand back the same native id string. Adoption mints no
     // replacement id, so the second row is refused rather than allowed to steal the
     // first session's provider.
     #[test]

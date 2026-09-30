@@ -1,9 +1,8 @@
 // Store-level coverage for how a non-delta entry patch (started/completed/
 // patched: status, tool, or a text REPLACEMENT) interacts with the hydration
-// window — see .sealwire/PLAN.md, "Invalidate; do not write". A patch can
-// never safely write the window itself (no text_offset to reconcile a future
-// delta against) and, after four straight attempts each shipping a new P1,
-// may not live in a side store either (a `transcriptPatchOverlay` map — now
+// window. A patch can never safely write the window itself (no text_offset to
+// reconcile a future delta against) and, after four straight attempts each
+// shipping a new P1, may not live in a side store either (a `transcriptPatchOverlay` map — now
 // deleted). Replaces frontend/transcript-patch-overlay.test.mjs, which pinned
 // that deleted mechanism's own contract; this file pins its replacement's.
 //
@@ -173,8 +172,7 @@ test("renderedTranscriptFromWindow folds in an item the window has never tracked
   assert.equal(projected[1].text, "brand new");
 });
 
-// One of the four regression scenarios .sealwire/PLAN.md calls out by name:
-// "patching entry C must not drop siblings A and B" — a prior attempt's
+// Patching entry C must not drop siblings A and B — a prior attempt's
 // whole-window invalidate (downgrading every OTHER cached entry to force a
 // refetch) did exactly that once enough entries needed repair at once.
 test("patching entry C invalidates only C — siblings A and B project unaffected", () => {

@@ -118,7 +118,7 @@ export function createSessionController({
   // One pending-render slot shared by the delta stream (session/stream.js) and
   // the snapshot path (session/lifecycle.js) — two instances would leave the
   // double-render bug (a snapshot landing between a delta's state write and
-  // its pending frame) exactly in place. See .sealwire/PLAN.md.
+  // its pending frame) exactly in place.
   const transcriptFlushScheduler = createTranscriptFlushScheduler({
     // Late-bound through `ctx`, not a captured `renderSession` value: app.js
     // monkey-patches `renderer.renderSession`, and `ctx.renderSession` below is

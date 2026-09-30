@@ -315,8 +315,8 @@ export function createStreamController(ctx) {
     void ensureConversationTranscript?.(state.session);
     // Whatever text is already pending must not sit out the coalescing
     // window behind a signal that says the current view may already be
-    // stale — bring it forward now, same as the plan's other immediate
-    // classes.
+    // stale — bring it forward now, same as a terminal patch or a refused
+    // delta.
     transcriptFlushScheduler.flushNow(reason);
   }
 
@@ -752,9 +752,7 @@ export function createStreamController(ctx) {
       // hydration's tail merge would default the missing field to "full" and
       // poison the window with an empty-but-"full" entry — permanently
       // suppressing the real fetch (transcript-hydration-store.js's
-      // contentStateOf; see .sealwire/PLAN.md, "Invalidate; do not write" ->
-      // "Never route non-authoritative data through the authoritative path" ->
-      // "Invalidate and refetch instead of merging a patch-derived session").
+      // contentStateOf). Invalidate and refetch; never merge a patch-derived session.
       // state.session never mentions this item, so the merge can only repair
       // OTHER already-tracked entries — a real snapshot later teaches the
       // window about this one honestly.
@@ -763,7 +761,7 @@ export function createStreamController(ctx) {
     // Completion, failure, error and cancellation are terminal, and a patch is
     // the ONLY way local ever learns of them for an entry with no dedicated
     // snapshot turn-state change — so this must paint at once, not wait out
-    // the coalescing window (.sealwire/PLAN.md). Mirrors remote's
+    // the coalescing window. Mirrors remote's
     // commitLiveSession(nextSession, { immediate: entryPatch.status !== "running" }).
     if (outcome.terminal) {
       state.session = outcome.nextSession;

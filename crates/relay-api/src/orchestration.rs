@@ -832,8 +832,7 @@ where
 /// Durable backend pin for one task-team run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrchestrationBackendRef {
-    /// The current in-process private driver. This is the default for all
-    /// existing and newly-created runs in T1-T3.
+    /// The current in-process private driver, and the default for every run.
     LegacyEmbedded,
     /// Future hosted content-blind driver. It is inert until a later task adds a
     /// transport and executor.
@@ -1532,17 +1531,17 @@ impl<'de> Deserialize<'de> for DriverProgress {
     }
 }
 
-/// Hard cap on `TeamRun.command_journal`. The retention contract
-/// (`.sealwire/DESIGN.md` D7), settled and not to be reopened:
+/// Hard cap on `TeamRun.command_journal`. The retention contract, settled and
+/// not to be reopened:
 ///
 /// - **Bounded retention.** The journal never holds more than this many
-///   records. Eviction is the single D7 rule: droppable if and only if a
+///   records. Eviction is a single rule: droppable if and only if a
 ///   record's own `sequence` is strictly below `driver_progress.last_command_seq` —
 ///   no outcome-dependent class, no "oldest of any class" fallback, and never
 ///   a record sitting AT the watermark. See
 ///   `team_command_reducer::{push_with_eviction, evict_one}`.
-/// - **The rule needs no fallback.** D1 makes every journaled record advance
-///   the watermark the instant it is written, so the record just written is
+/// - **The rule needs no fallback.** Every journaled record advances the
+///   watermark the instant it is written, so the record just written is
 ///   the only one ever sitting AT it; everything else already sits strictly
 ///   below and is therefore always evictable — the cap holds without ever
 ///   needing a second eviction class.
@@ -1589,19 +1588,19 @@ pub enum TeamCommandKind {
     RecordReviewerThread,
     FinishRun,
     TakeUserNotes,
-    /// The lifecycle family (`.sealwire/DESIGN.md` D14). These carry the run's
-    /// own status transitions rather than workflow state, so they are the one
-    /// family exempt from the reducer's lifecycle gate — they ARE the
-    /// transition the gate would otherwise refuse.
+    /// The lifecycle family. These carry the run's own status transitions
+    /// rather than workflow state, so they are the one family exempt from the
+    /// reducer's lifecycle gate — they ARE the transition the gate would
+    /// otherwise refuse.
     SetRunStatus,
     FailRun,
     BlockRun,
     SettleRun,
     /// A restart recovered `DriverProgress.in_flight_command_id` with no
-    /// record of what kind the command actually was. T4's own reducer never
-    /// leaves one in flight (`.sealwire/DESIGN.md` D10), so this is reachable
-    /// only via `TeamRun::reconcile_after_restore` recovering state written
-    /// by a future async executor.
+    /// record of what kind the command actually was. The synchronous reducer
+    /// never leaves one in flight, so this is reachable only via
+    /// `TeamRun::reconcile_after_restore` recovering state written by a
+    /// future async executor.
     Unknown,
 }
 
@@ -1614,17 +1613,17 @@ pub enum TeamCommandOutcome {
     Rejected {
         reason: CommandRejection,
     },
-    /// Recovered from a restart that found `in_flight_command_id` set. T4's
-    /// own reducer is synchronous and never sets that field, so this arm is
+    /// Recovered from a restart that found `in_flight_command_id` set. The
+    /// reducer is synchronous and never sets that field, so this arm is
     /// reachable only via `TeamRun::reconcile_after_restore` today — it exists
-    /// for a future async executor, per `.sealwire/DESIGN.md` D10.
+    /// for a future async executor.
     Interrupted,
 }
 
 /// Fixed-width digest over one command envelope's full canonical
 /// serialization, salted with the run id — the idempotency key alongside
 /// `command_id`. Computed in `relay-server`, which already depends on `sha2`;
-/// this crate holds only the closed shape. See `.sealwire/DESIGN.md` D3.
+/// this crate holds only the closed shape.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CommandFingerprint([u8; 32]);
 
@@ -1661,12 +1660,12 @@ pub struct TeamCommandRecord {
     /// mismatch. The reducer enforces that this wildcard applies to exactly
     /// that shape and no other: an absent fingerprint on any other outcome
     /// (`Applied`, or a rejection) fails closed as `DuplicateCommand` rather
-    /// than matching anything (`.sealwire/DESIGN.md` D3).
+    /// than matching anything.
     pub fingerprint: Option<CommandFingerprint>,
     pub expected_revision: u64,
     /// `state_revision` / `last_event_seq` as they stood immediately after
     /// this record was written. Unchanged from before it for every outcome
-    /// but `Applied` — see `.sealwire/DESIGN.md` D7.
+    /// but `Applied`.
     pub state_revision: u64,
     pub last_event_seq: u64,
     pub outcome: TeamCommandOutcome,
@@ -1679,10 +1678,9 @@ pub struct TeamCommandRecord {
 /// redelivery can be matched against, and matching on the id alone cannot
 /// tell a genuine retry of the SAME envelope (replay `Interrupted`) from a
 /// DIFFERENT command that reused the id (`DuplicateCommand`). Carrying the
-/// digest and the counters the receipt needs is what makes both answerable
-/// — see `.sealwire/DESIGN.md` D10.
+/// digest and the counters the receipt needs is what makes both answerable.
 ///
-/// T4's own reducer is synchronous under one lock and never leaves a command
+/// The reducer is synchronous under one lock and never leaves a command
 /// in flight, so nothing in this build writes this; it exists so the recovery
 /// contract is defined and tested before an async executor needs it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1723,8 +1721,8 @@ impl InFlightCommand {
 /// what forces `DriverProgress` above to hand-write its own lenient decode.
 /// This wrapper absorbs that failure into `is_malformed()` instead: an empty
 /// journal reads as "never seen this command", which is exactly the false
-/// negative the journal exists to prevent (`.sealwire/DESIGN.md` D9), so a
-/// decode failure must never masquerade as an empty one.
+/// negative the journal exists to prevent, so a decode failure must never
+/// masquerade as an empty one.
 ///
 /// `malformed` is itself persisted (like `DriverProgress::malformed`) rather
 /// than reset on every load: once a journal is flagged, a save/reload cycle
@@ -3540,7 +3538,7 @@ mod tests {
         );
     }
 
-    /// T4's local command journal. Additive, per this test's exhaustive-match
+    /// The local command journal. Additive, per this test's exhaustive-match
     /// enforcement: a new `TeamCommandKind` variant fails the crate to build
     /// here until it is pinned, same as every other closed enum in this file.
     #[test]
@@ -3726,7 +3724,7 @@ mod tests {
         );
     }
 
-    /// D9: a journal element that will not decode must fail this journal
+    /// A journal element that will not decode must fail this journal
     /// CLOSED, never collapse to an empty (falsely "never seen this command")
     /// one.
     #[test]
@@ -4672,7 +4670,7 @@ mod tests {
             })
             .unwrap(),
         );
-        // The recovery-record shape: `fingerprint: None` (D10) serializes as a
+        // The recovery-record shape: `fingerprint: None` serializes as a
         // bare `null`, which the walk already allows unconditionally.
         samples.push(
             serde_json::to_value(TeamCommandRecord {

@@ -63,7 +63,7 @@ echo "restart-dev-cloud: using broker ${RELAY_BROKER_CONTROL_URL:-${RELAY_BROKER
 # Build with the private crate when this checkout has it, and say which of the two
 # it got. A cloud relay is where long task lists actually get started, so starting
 # one that answers every request with "not available in this build" is the worst
-# place to discover the feature was compiled out — see PRIVATE_CRATE.md.
+# place to discover the feature was compiled out.
 #
 # The tell is the stub's own marker file, not a module name the private crate
 # happens to have today: anything else that goes private later lands in the same

@@ -1,15 +1,15 @@
-//! Local idempotent command family for task-team run state (T4).
+//! Local idempotent command family for task-team run state.
 //!
 //! Sibling to, and deliberately separate from, `orchestration::DriverCommand`:
 //! that enum is the future Cloud **executor** protocol — content-blind and
 //! golden-pinned. The commands here carry real prose (findings, summaries,
 //! commit shas, thread ids) because there is no artifact store to put it in
-//! until T5, which is expected to replace every such field with an
-//! `ArtifactRef` (marked below) and fold this module into the content-blind
-//! family. Until then: **local-only.** A `TeamCommandEnvelope` is never
-//! serialized to `TeamRun.command_journal` and never sent anywhere off this
-//! relay — see `orchestration::TeamCommandRecord` for the content-blind
-//! projection that IS journaled, and `.sealwire/DESIGN.md` D1/D3.
+//! yet; once there is, every such field (marked `→ ArtifactRef` below) is
+//! expected to become an `ArtifactRef`, folding this module into the
+//! content-blind family. Until then: **local-only.** A `TeamCommandEnvelope`
+//! is never serialized to `TeamRun.command_journal` and never sent anywhere
+//! off this relay — see `orchestration::TeamCommandRecord` for the
+//! content-blind projection that IS journaled.
 //!
 //! The reducer that validates and applies these lives in `relay-server`
 //! (it needs `sha2` for the command fingerprint); this module holds only the
@@ -31,7 +31,7 @@ pub const TEAM_COMMAND_PROTOCOL_VERSION: u32 = 1;
 /// `TeamRun` and never reaches the journal, so a byte cap would buy no
 /// privacy while adding a new way for a real run to fail. Picked well above
 /// anything today's driver produces; if it ever bites a real run that is a
-/// behaviour regression, not a safety win (`.sealwire/DESIGN.md` D6).
+/// behaviour regression, not a safety win.
 pub const MAX_TEAM_COMMAND_SUB_TASKS: usize = 64;
 /// Hard ceiling on a single command's findings/unresolved-additions list.
 /// Same rationale as [`MAX_TEAM_COMMAND_SUB_TASKS`].
@@ -47,7 +47,7 @@ pub const MAX_TEAM_COMMAND_NOTES: usize = 64;
 /// bounds how big it is, which nothing else does — a single findings entry or
 /// result summary can be arbitrarily long on its own. Deliberately far above
 /// any real turn's output (a whole review reply is a few KiB) so it only ever
-/// catches a runaway, never a genuine run — see `.sealwire/DESIGN.md` D6.
+/// catches a runaway, never a genuine run.
 pub const MAX_TEAM_COMMAND_PAYLOAD_BYTES: usize = 1 << 20;
 
 /// A sub-task seat a command may attach a thread to. Never `Tl` — the TL
@@ -74,9 +74,7 @@ pub struct TeamCommandEnvelope {
 
 /// The closed set of state mutations a task-team driver may ask the local
 /// reducer to apply. Every variant is typed and bounded; none carries
-/// `serde_json::Value` or an unconstrained closure. See
-/// `.sealwire/DESIGN.md` D11 for the mapping from each private driver call
-/// site to the variant that replaces it.
+/// `serde_json::Value` or an unconstrained closure.
 ///
 /// A command never carries the DECISION that produced it (which phase, which
 /// verdict, whether a budget is exhausted) as logic — only as an already-made
@@ -94,23 +92,23 @@ pub enum TeamStateCommand {
         phase: TeamPhase,
     },
     RecordDesignReviewRound {
-        // T5: → ArtifactRef
+        // → ArtifactRef
         verdict: WorkflowVerdict,
         next_phase: TeamPhase,
-        // T5: → ArtifactRef
+        // → ArtifactRef
         unresolved_additions: Vec<String>,
     },
     ReplanSubTasks {
-        // T5: → ArtifactRef
+        // → ArtifactRef
         sub_tasks: Vec<SubTask>,
         phase: TeamPhase,
     },
     AttachSubTaskThread {
         index: usize,
         role: TeamSubTaskRole,
-        // T5: → ArtifactRef
+        // → ArtifactRef
         thread_id: String,
-        // T5: → ArtifactRef
+        // → ArtifactRef
         base_commit: Option<String>,
     },
     SetSubTaskStatus {
@@ -129,7 +127,7 @@ pub enum TeamStateCommand {
     },
     RecordReviewRound {
         index: usize,
-        // T5: → ArtifactRef
+        // → ArtifactRef
         verdict: WorkflowVerdict,
         status: SubTaskStatus,
         /// The DECIDED display string for `SubTask.result_summary`, which is
@@ -137,9 +135,9 @@ pub enum TeamStateCommand {
         /// its own message; an approval falls back to "Approved."). Carried
         /// separately so the reducer reproduces both fields exactly as the
         /// driver decided them.
-        // T5: → ArtifactRef
+        // → ArtifactRef
         result_summary: Option<String>,
-        // T5: → ArtifactRef
+        // → ArtifactRef
         escalated: Option<String>,
     },
     MarkSubTaskDigested {
@@ -147,56 +145,55 @@ pub enum TeamStateCommand {
         next_phase: Option<TeamPhase>,
     },
     RecordMrRound {
-        // T5: → ArtifactRef
+        // → ArtifactRef
         verdict: WorkflowVerdict,
         next_phase: Option<TeamPhase>,
-        // T5: → ArtifactRef
+        // → ArtifactRef
         unresolved_additions: Vec<String>,
     },
     SetMrVerdict {
-        // T5: → ArtifactRef
+        // → ArtifactRef
         verdict: Option<WorkflowVerdict>,
     },
     /// Pin the committed candidate reviewed by the next MR gate.
     PrepareMrReview {
-        // T5: → ArtifactRef
+        // → ArtifactRef
         round_base_sha: String,
-        // T5: → ArtifactRef
+        // → ArtifactRef
         candidate_sha: String,
     },
     /// Park an MR correction round that produced no committed candidate.
     PauseMrWithoutCandidate {
-        // T5: → ArtifactRef
+        // → ArtifactRef
         verdict: WorkflowVerdict,
     },
     /// Count a stale MR verdict rebound attempt.
     RecordMrStaleReview {},
     RecordMrDevThread {
-        // T5: → ArtifactRef
+        // → ArtifactRef
         thread_id: String,
     },
     /// Remember the run's shared reviewer seat (design / sub-task / MR).
     RecordReviewerThread {
-        // T5: → ArtifactRef
+        // → ArtifactRef
         thread_id: String,
     },
     FinishRun {
-        // T5: → ArtifactRef
+        // → ArtifactRef
         head_commit: Option<String>,
         phase: TeamPhase,
     },
-    /// Drain `TeamRun.pending_user_notes` atomically. See
-    /// `.sealwire/DESIGN.md` D8 for why this is the one command whose receipt
-    /// carries content, and why replay reads `TeamRun.drained_notes` rather
-    /// than the (content-blind) journal.
+    /// Drain `TeamRun.pending_user_notes` atomically. Its receipt carries the
+    /// notes because the driver cannot know them in advance; replay reads them
+    /// from `TeamRun.drained_notes` because the journal is content-blind.
     TakeUserNotes {},
 
     // -----------------------------------------------------------------
-    // The lifecycle family (`.sealwire/DESIGN.md` D14). Everything above
-    // records workflow progress; these four move the run's own status. They
-    // exist so the driver has exactly ONE mutation seam — before T4 closed
-    // it, these were four separate `TeamPort` methods that wrote state
-    // outside the reducer entirely, unjournaled and unversioned.
+    // The lifecycle family. Everything above records workflow progress;
+    // these four move the run's own status. They exist so the driver has
+    // exactly ONE mutation seam — these used to be four separate `TeamPort`
+    // methods that wrote state outside the reducer entirely, unjournaled and
+    // unversioned.
     //
     // They are the one family exempt from the reducer's lifecycle gate,
     // because they ARE the transition it would refuse. Their own guards live
@@ -210,12 +207,12 @@ pub enum TeamStateCommand {
     /// Record a driver-observed failure. A DRAINING stop outranks it — see
     /// `TeamRun::fail`.
     FailRun {
-        // T5: → ArtifactRef
+        // → ArtifactRef
         error: String,
     },
     /// Park the run for an explicit recovery, keeping its locks.
     BlockRun {
-        // T5: → ArtifactRef
+        // → ArtifactRef
         error: String,
     },
     /// Write a settlement the driver reached at a step boundary. The
@@ -223,7 +220,7 @@ pub enum TeamStateCommand {
     /// mechanism and runs before this command is ever built.
     SettleRun {
         status: TeamRunStatus,
-        // T5: → ArtifactRef
+        // → ArtifactRef
         reason: String,
         /// Named `pause_kind`, not `kind`: the envelope is serialized with an
         /// internally-tagged `kind` discriminant for the fingerprint, and a
@@ -285,7 +282,7 @@ impl TeamStateCommand {
 pub enum TeamCommandOutput {
     Ack,
     /// The notes drained by `TeamStateCommand::TakeUserNotes`.
-    // T5: → ArtifactRef
+    // → ArtifactRef
     DrainedNotes(Vec<String>),
 }
 
@@ -298,13 +295,12 @@ pub enum TeamCommandStatus {
     Rejected(CommandRejection),
     /// The command was in flight when the relay restarted; replayed from a
     /// restored journal record, never produced live by this build's
-    /// synchronous reducer. See `.sealwire/DESIGN.md` D10.
+    /// synchronous reducer.
     Interrupted,
 }
 
-/// Synchronous reply to one [`TeamCommandEnvelope`]. There is no event bus in
-/// T4 — see `.sealwire/DESIGN.md` D4 for why a receipt replaces the
-/// commands-or-events choice the brief allowed.
+/// Synchronous reply to one [`TeamCommandEnvelope`]. There is no event bus:
+/// the reducer settles each command under one lock and answers it directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TeamCommandReceipt {
     pub command_id: CommandId,
@@ -313,8 +309,8 @@ pub struct TeamCommandReceipt {
     /// whether or not this command was the one that moved it.
     pub state_revision: u64,
     /// `TeamRun.driver_progress.last_event_seq` as it stands after this call.
-    /// Counts receipts for APPLIED commands only — see D4's doc note on why
-    /// this and `last_command_seq` are allowed to diverge.
+    /// Counts receipts for APPLIED commands only, so it falls behind
+    /// `last_command_seq` whenever a rejection consumes a sequence number.
     pub last_event_seq: u64,
     pub status: TeamCommandStatus,
 }
@@ -396,7 +392,7 @@ mod tests {
         ]
     }
 
-    /// AC-1's backend-immutability guarantee is structural, not a checked
+    /// A run's backend is immutable by construction, not by a checked
     /// branch: no `TeamStateCommand` variant has a field that could name an
     /// orchestration backend, so there is no rejection path to test — only a
     /// shape to prove absent. Walks every variant's full JSON serialization
@@ -433,9 +429,8 @@ mod tests {
         }
     }
 
-    /// D11's mapping is exhaustive over the 14 private call sites this
-    /// replaces; `kind()` must stay total as the enum grows, which this
-    /// exercises by round-tripping every variant rather than by inspection.
+    /// `kind()` must stay total as the enum grows, which this exercises by
+    /// round-tripping every variant rather than by inspection.
     #[test]
     fn every_command_variant_has_a_content_blind_kind() {
         use crate::orchestration::TeamCommandKind;

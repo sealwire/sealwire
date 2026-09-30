@@ -337,7 +337,7 @@ test("hydrateLocalTranscript re-entry during progress reuses the in-flight promi
 });
 
 test("hydrateLocalTranscript does not recurse while a row recovery is already in flight", async () => {
-  // Reproduces the hard freeze (markdown/transcript-perf-freeze-analysis.md):
+  // Reproduces the hard freeze:
   // a thread with an already-hydrated window receives a streaming snapshot whose
   // live tail is an `omitted` shell, so `reHydrateTail` arms a fetch. While that
   // fetch is pending, hydrateTranscript synchronously fires onProgress, and

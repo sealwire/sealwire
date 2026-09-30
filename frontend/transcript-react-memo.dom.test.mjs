@@ -1,6 +1,5 @@
 // Live-render proof that a prepend of older history does not re-render
-// existing entries — the acceptance criterion for the React memo/identity
-// sub-task (.sealwire/PLAN.md). transcript-react.test.mjs only exercises
+// existing entries. transcript-react.test.mjs only exercises
 // TranscriptContent through renderToStaticMarkup, which has no concept of
 // "did this component's render function actually run again" across an
 // update; that requires a real mount + a second render into the same root.

@@ -57,11 +57,9 @@ pub(crate) fn unix_now() -> u64 {
         .as_secs()
 }
 
-/// A review step's machine-readable result. This is the "structured verdict"
-/// shape decided in the design doc; phase 1 derives it from the reviewer's text
-/// (reusing the existing `VERDICT:` parsing). How a real provider is made to emit
-/// this directly (required tool call vs. parse-last-message) is open for chunk
-/// 2/3 — `fake_provider` returns it deterministically for tests.
+/// A review step's machine-readable result. It is derived from the reviewer's
+/// text (reusing the existing `VERDICT:` parsing) rather than emitted by the
+/// provider directly; `fake_provider` returns it deterministically for tests.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowVerdict {
     pub approved: bool,
@@ -439,9 +437,9 @@ pub struct TeamSeat {
 #[async_trait::async_trait]
 pub trait TeamPort: Send + Sync {
     async fn run_snapshot(&self, run_id: &str) -> Option<team::TeamRun>;
-    /// Validate and apply one local state command (T4) — see `team_command`
-    /// and `.sealwire/DESIGN.md`. `None` means `run_id` names no run; every
-    /// other outcome, including every rejection, is a `Some` receipt.
+    /// Validate and apply one local state command (see `team_command`). `None`
+    /// means `run_id` names no run; every other outcome, including every
+    /// rejection, is a `Some` receipt.
     async fn submit_command(
         &self,
         run_id: &str,

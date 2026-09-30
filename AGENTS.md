@@ -19,11 +19,17 @@ fake) to web/mobile frontends. Rust workspace + Node worker + Vite frontend.
   **`markdown/` is gitignored on purpose** — it is the maintainer's working
   notes, not shipped with the repo. If you cloned this and the directory is
   missing, that is expected: nothing in it is required to build, test, or
-  contribute. Some code comments cite these files by path (e.g.
-  `markdown/transcript-perf-freeze-analysis.md`); treat those as maintainer
-  context you may not be able to read, not as missing files. Do **not** add
-  links into `markdown/` from `README.md` or any other tracked doc — they render
-  as dead links on GitHub.
+  contribute. Do **not** add links into `markdown/` from `README.md` or any
+  other tracked doc — they render as dead links on GitHub.
+
+## Code comments
+
+- Write one only when it is really needed, and only to add what the code can't
+  say: why this choice, what was ruled out, what breaks if someone changes it.
+  Never restate what the code does.
+- Usually two lines at most.
+- Never point at a document (`markdown/`, `.sealwire/PLAN.md`, tracked docs).
+  Put the reason in the comment itself; the code has to make sense on its own.
 
 ## Commands (run after changes)
 - Rust: `cargo fmt --check` · `cargo check -p relay-server` · `cargo test -p relay-server`

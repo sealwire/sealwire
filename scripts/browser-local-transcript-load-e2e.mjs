@@ -159,7 +159,7 @@ async function main() {
       { timeout: LOCAL_TIMEOUT_MS }
     );
 
-    // (1) Native anchoring must stay off; see docs/transcript-scrolling.md.
+    // (1) Native anchoring must stay off: it would fight the controller's own anchor correction.
     const overflowAnchor = await page.evaluate(() => {
       const transcript = document.querySelector("#transcript");
       return transcript ? getComputedStyle(transcript).overflowAnchor : null;
@@ -194,7 +194,8 @@ async function main() {
       `history sentinel should have zero height (got ${sentinelLayout.height})`
     );
 
-    // (3) See docs/transcript-scrolling.md for why rows no longer use `auto`.
+    // (3) Rows no longer use `auto`: a second placeholder-height system on top of
+    // virtualization caused repeated remeasuring and click targets that moved.
     const contentVisibility = await page.evaluate(() => {
       const first = document.querySelector("#transcript .chat-message");
       return first ? getComputedStyle(first).contentVisibility : null;

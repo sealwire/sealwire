@@ -1,11 +1,10 @@
-//! Tripwire for the Phase-4 removal of public thread promotion.
+//! Tripwire for the removal of public thread promotion.
 //!
-//! Before Phase 3 a deferred Claude session was exposed to clients under the
-//! bridge's own `claude-pending-…` handle, and its first turn REPLACED that public
-//! id with the SDK's — so every relay-owned map, every client tab and every saved
-//! reference had to be re-keyed mid-turn. Phase 3 gave such a session a stable
-//! relay id and moved the handle into `SessionBinding`, which left that machinery
-//! dead. Phase 4 deleted it (`markdown/STABLE_SESSION_ID_DESIGN.md`).
+//! A deferred Claude session used to be exposed to clients under the bridge's own
+//! `claude-pending-…` handle, and its first turn REPLACED that public id with the
+//! SDK's — so every relay-owned map, every client tab and every saved reference had
+//! to be re-keyed mid-turn. Giving such a session a stable relay id and moving the
+//! handle into `SessionBinding` left that machinery dead, and it was deleted.
 //!
 //! Dead code does not stay dead on its own: the next person to meet a deferred
 //! start reaches for exactly the shape that was removed. This scan makes that
@@ -148,10 +147,10 @@ fn no_source_reintroduces_public_thread_promotion() {
     found.sort();
     assert!(
         found.is_empty(),
-        "public thread promotion is back in the sources:\n  {}\n\nPhase 4 removed it \
-(markdown/STABLE_SESSION_ID_DESIGN.md). A deferred session keeps ONE relay id for \
-life; only its `SessionBinding` moves. If a provider genuinely needs to hand back a \
-different id, bind it — do not re-key relay state.",
+        "public thread promotion is back in the sources:\n  {}\n\nIt was removed on \
+purpose: a deferred session keeps ONE relay id for life; only its `SessionBinding` \
+moves. If a provider genuinely needs to hand back a different id, bind it — do not \
+re-key relay state.",
         found.join("\n  ")
     );
 }

@@ -11,7 +11,7 @@ const h = React.createElement;
 
 // Owns the six branches render-session.js's renderTranscript used to pick
 // imperatively, the transcript history loader's attach/sync/detach lifecycle,
-// and (via the hook) the transcript scroll bookkeeping. See .sealwire/PLAN.md.
+// and (via the hook) the transcript scroll bookkeeping.
 export function LocalTranscriptPanel({
   activeThreadId,
   activeThreadLabel,
@@ -48,7 +48,7 @@ export function LocalTranscriptPanel({
   onLoadOlderTranscriptRef.current = onLoadOlderTranscript;
   // Written only inside the entries branch below — building/caching
   // transcriptOptions must stay lazy, unlike RemoteTranscriptPanel's
-  // unconditional build (see .sealwire/PLAN.md).
+  // unconditional build: no other branch reads it, so building it there is waste.
   const transcriptOptionsRef = useRef(null);
 
   // Effect 1 (attach): bound to scrollElement's lifetime, not the render

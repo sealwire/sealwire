@@ -56,10 +56,9 @@ pub(super) struct PersistedRelayState {
     /// keeps pre-fork state files loadable.
     #[serde(default)]
     pub(super) thread_forked_from: std::collections::HashMap<String, String>,
-    /// session id -> the provider handle it currently reaches
-    /// (`markdown/STABLE_SESSION_ID_DESIGN.md`). `#[serde(default)]` keeps every
-    /// existing schema-v2 file loadable, which is why this needs no version bump —
-    /// a bump is a hard load error, not a migration.
+    /// session id -> the provider handle it currently reaches. `#[serde(default)]`
+    /// keeps every existing schema-v2 file loadable, which is why this needs no
+    /// version bump — a bump is a hard load error, not a migration.
     ///
     /// Deliberately NOT the whole registry: identity bindings are re-adopted from
     /// each provider's thread list on the first refresh, so writing one per row a

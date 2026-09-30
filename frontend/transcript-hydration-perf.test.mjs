@@ -1,5 +1,3 @@
-// P2 perf regression (see markdown/transcript-perf-freeze-analysis.md).
-//
 // The reported tab-freeze root cause: every streaming snapshot rebuilt the
 // ENTIRE hydrated window — `new Map(allEntries)` + `[...allOrder]` + `order.map`
 // in both `createMergedSnapshotTailPatch` (prepare) and
@@ -115,8 +113,8 @@ test("per-snapshot work stays bounded as the window grows (no O(n) regression)",
 });
 
 // P1 (review): renderedTranscriptFromWindow's array-fallback for an
-// invalidated/absent window entry (invalidateTranscriptWindowEntryForPatch —
-// see .sealwire/PLAN.md, "Invalidate; do not write") builds a lookup Map from
+// invalidated/absent window entry (invalidateTranscriptWindowEntryForPatch)
+// builds a lookup Map from
 // the CURRENT array in ONE linear pass, not a `.find()` per window entry —
 // the latter would turn every settle into O(window * array) instead of
 // O(window + array). Proved with a counter that totals ARRAY ENTRIES VISITED
