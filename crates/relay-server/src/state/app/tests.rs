@@ -33994,6 +33994,162 @@ mod delegate_card_tests {
         }
     }
 
+    #[tokio::test]
+    async fn mcp_delegate_results_mark_their_own_tool_rows_once_even_when_rows_arrive_late() {
+        use crate::protocol::{ToolCallView, TranscriptEntryKind};
+        use crate::state::IdSpace;
+
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let caller = session(&app, &cwd).await;
+        let token = app.ask_token_for_thread(&caller).await;
+        let mut ids = Vec::new();
+        for task in ["check the retry loop", "check the timeout"] {
+            let reply = app
+                .call_peer_tool_with_metadata(
+                    "delegate",
+                    &serde_json::json!({ "message": task, "provider": "fake" }),
+                    &token,
+                )
+                .await
+                .expect("delegate succeeds");
+            let envelope =
+                crate::state::app::orchestrator_dispatch::peer_tool_result_envelope(Ok(reply));
+            ids.push(
+                envelope["structuredContent"]["delegate_ask_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        assert_ne!(ids[0], ids[1]);
+
+        let mut relay = app.relay.write().await;
+        for (index, ask_id) in ids.iter().enumerate() {
+            let item_id = format!("tool:delegate-{index}");
+            relay.mark_delegate_call(ask_id, &caller, &item_id);
+            let mut tool = ToolCallView::command_execution(None);
+            tool.item_type = "mcpToolCall".into();
+            tool.name = "delegate".into();
+            tool.title = "delegate".into();
+            relay.upsert_item_for_thread(
+                &caller,
+                item_id.clone(),
+                IdSpace::Provider,
+                TranscriptEntryKind::ToolCall,
+                None,
+                "completed".into(),
+                None,
+                Some(tool.clone()),
+            );
+            relay.mark_delegate_call(ask_id, &caller, &item_id);
+            tool.result_preview = Some("Delegated. That agent's id is peer.".into());
+            relay.upsert_item_for_thread(
+                &caller,
+                item_id.clone(),
+                IdSpace::Provider,
+                TranscriptEntryKind::ToolCall,
+                None,
+                "completed".into(),
+                None,
+                Some(tool),
+            );
+            relay.mark_delegate_call(ask_id, &caller, &format!("wrong-{index}"));
+        }
+        let marks =
+            relay.thread_injections(&caller, crate::state::relay::InjectionReader::Operator);
+        let rows = relay
+            .runtime_for_thread(&caller)
+            .unwrap()
+            .transcript_page(&caller, None, &marks);
+        let called: Vec<_> = rows
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .injection
+                    .as_ref()
+                    .is_some_and(|mark| mark.kind == InjectionKind::DelegateCall)
+            })
+            .collect();
+        assert_eq!(
+            called.len(),
+            2,
+            "each ask replaces exactly its own tool row"
+        );
+        assert_eq!(
+            called[0].injection.as_ref().unwrap().delegates()[0].id,
+            ids[0]
+        );
+        assert_eq!(
+            called[1].injection.as_ref().unwrap().delegates()[0].id,
+            ids[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_delegate_call_stays_a_card_after_database_and_row_rebuild() {
+        use crate::protocol::{ToolCallView, TranscriptEntryKind};
+        use crate::state::relay::{InjectionReader, ThreadTranscript};
+        use crate::state::IdSpace;
+        use crate::usage::store::UsageStore;
+
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let database = project.path().join("sealwire.db");
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let caller = session(&app, &cwd).await;
+        app.relay
+            .write()
+            .await
+            .install_database(UsageStore::open(&database));
+        let (_, ask_id) = app
+            .delegate_with_id(&caller, request(StartedBy::Agent, "Inspect the retry loop"))
+            .await
+            .expect("delegate succeeds");
+
+        let mut relay = app.relay.write().await;
+        let mut tool = ToolCallView::command_execution(None);
+        tool.item_type = "mcpToolCall".into();
+        tool.name = "delegate".into();
+        tool.title = "delegate".into();
+        relay.upsert_item_for_thread(
+            &caller,
+            "tool:provider-id".into(),
+            IdSpace::Provider,
+            TranscriptEntryKind::ToolCall,
+            None,
+            "completed".into(),
+            None,
+            Some(tool),
+        );
+        relay.mark_delegate_call(&ask_id, &caller, "tool:provider-id");
+        let mut rebuilt = relay
+            .runtime_for_thread(&caller)
+            .unwrap()
+            .transcript
+            .iter()
+            .find(|row| row.provider_item_id.as_deref() == Some("tool:provider-id"))
+            .unwrap()
+            .clone();
+        rebuilt.row_id = "rebuilt-row".into();
+        relay.install_database(UsageStore::open(&database));
+        relay.ensure_runtime_for_thread(&caller).transcript =
+            ThreadTranscript::from_rows(vec![rebuilt]);
+        let marks = relay.thread_injections(&caller, InjectionReader::Operator);
+        let page = relay
+            .runtime_for_thread(&caller)
+            .unwrap()
+            .transcript_page(&caller, None, &marks);
+        assert_eq!(page.entries.len(), 1);
+        let mark = page.entries[0].injection.as_ref().expect("card recovered");
+        assert_eq!(mark.kind, InjectionKind::DelegateCall);
+        assert_eq!(mark.delegates()[0].id, ask_id);
+    }
+
     async fn marked_rows(
         app: &crate::state::AppState,
         thread_id: &str,

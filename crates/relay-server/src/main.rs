@@ -1067,10 +1067,10 @@ async fn call_orchestrator_tool(
     if let Some(token) = input.ask_token.as_deref() {
         let outcome = context
             .app
-            .call_peer_tool(&tool_name, &input.arguments, token)
+            .call_peer_tool_with_metadata(&tool_name, &input.arguments, token)
             .await;
         return Ok(Json(
-            crate::state::app::orchestrator_dispatch::tool_result_envelope(outcome),
+            crate::state::app::orchestrator_dispatch::peer_tool_result_envelope(outcome),
         ));
     }
     let outcome = match input.seat_run_id.as_deref() {

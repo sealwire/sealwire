@@ -25,6 +25,11 @@ const MAX_ROLES_PER_TEAM: usize = 12;
 /// Max chars of a sub-task summary in a status line.
 const SUMMARY_LINE_MAX_CHARS: usize = 160;
 
+pub struct PeerToolReply {
+    pub text: String,
+    pub ask_id: Option<String>,
+}
+
 /// First non-empty summary line, truncated on a char boundary.
 fn first_line_bounded(summary: &str) -> &str {
     let line = summary
@@ -110,6 +115,7 @@ fn delegate_reply(outcome: &super::delegation::DelegateOutcome) -> String {
     use super::delegation::DelegateOutcome;
     match outcome {
         DelegateOutcome::Sent {
+            ask_id: _,
             peer_thread_id,
             provider,
             model,
@@ -457,6 +463,17 @@ impl AppState {
         args: &Value,
         ask_token: &str,
     ) -> Result<String, String> {
+        self.call_peer_tool_with_metadata(name, args, ask_token)
+            .await
+            .map(|reply| reply.text)
+    }
+
+    pub async fn call_peer_tool_with_metadata(
+        &self,
+        name: &str,
+        args: &Value,
+        ask_token: &str,
+    ) -> Result<PeerToolReply, String> {
         if !orchestrator_tools::PEER_TOOLS.contains(&name) {
             return Err(format!(
                 "{name} is not something a session may call — only {}",
@@ -474,7 +491,8 @@ impl AppState {
             let relay = self.relay.read().await;
             self.peer_tool_allowed(&relay, caller_thread_id, name)?;
         }
-        match orchestrator_tools::parse_call(name, args)? {
+        let mut ask_id = None;
+        let text = match orchestrator_tools::parse_call(name, args)? {
             ToolCall::GoalStatus => Ok(self.goal_status_text(caller_thread_id).await),
             ToolCall::GoalComplete { summary } => self
                 .settle_goal(
@@ -524,12 +542,18 @@ impl AppState {
                     message,
                 };
                 match self.delegate_request(caller_thread_id, request).await {
-                    Ok(outcome) => Ok(delegate_reply(&outcome)),
+                    Ok(outcome) => {
+                        if let super::delegation::DelegateOutcome::Sent { ask_id: id, .. } = &outcome {
+                            ask_id = Some(id.clone());
+                        }
+                        Ok(delegate_reply(&outcome))
+                    }
                     Err(error) => Err(error.message()),
                 }
             }
             _ => Err(format!("{name} is not something a session may call")),
-        }
+        }?;
+        Ok(PeerToolReply { text, ask_id })
     }
 
     /// Run a tool; `Err` is a refused call for the model to read (not HTTP 500).
@@ -969,6 +993,19 @@ pub fn tool_result_envelope(outcome: Result<String, String>) -> Value {
         Err(message) => {
             json!({ "content": [{ "type": "text", "text": message }], "isError": true })
         }
+    }
+}
+
+pub fn peer_tool_result_envelope(outcome: Result<PeerToolReply, String>) -> Value {
+    match outcome {
+        Ok(PeerToolReply { text, ask_id }) => {
+            let mut envelope = tool_result_envelope(Ok(text));
+            if let Some(ask_id) = ask_id {
+                envelope["structuredContent"] = json!({ "delegate_ask_id": ask_id });
+            }
+            envelope
+        }
+        Err(error) => tool_result_envelope(Err(error)),
     }
 }
 
@@ -2106,6 +2143,10 @@ it a turn ago"
         let ok = tool_result_envelope(Ok("done".to_string()));
         assert_eq!(ok["isError"], false);
         assert_eq!(ok["content"][0]["text"], "done");
+
+        let refused = peer_tool_result_envelope(Err("cannot delegate".to_string()));
+        assert_eq!(refused["isError"], true);
+        assert!(refused.get("structuredContent").is_none());
     }
 
     #[tokio::test]

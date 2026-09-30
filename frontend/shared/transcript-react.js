@@ -2357,6 +2357,9 @@ function isGroupableFinishedTool(entry) {
   if (!entry || (entry.kind !== "tool_call" && entry.kind !== "command")) {
     return false;
   }
+  if (entry.injection?.kind === "delegate_call" && entry.status === "completed") {
+    return false;
+  }
   // A failure folds too: mid-run it is mostly the agent trying something, and the
   // group line counts it. A declined tool was the reader's own call and stays out.
   const status = entry.status || "completed";
@@ -2806,6 +2809,18 @@ export function TranscriptEntry({
       attrs: transcriptEntryDomAttrs(entry, "chat-message chat-message-assistant"),
       entry,
       members: [entry],
+      answered: options?.delegateAnswered || EMPTY_DELEGATE_ANSWERED,
+      provider,
+      providerIcon: providerIconSvg(provider) || SPARKLES_SVG,
+      showCommand: false,
+    });
+  }
+
+  if (kind === "tool_call" && entry.status === "completed"
+      && entry.injection?.kind === "delegate_call" && entry.injection.delegate?.length) {
+    return h(DelegateRequestEntry, {
+      attrs: transcriptEntryDomAttrs(entry, "chat-message chat-message-assistant"),
+      entry,
       answered: options?.delegateAnswered || EMPTY_DELEGATE_ANSWERED,
       provider,
       providerIcon: providerIconSvg(provider) || SPARKLES_SVG,

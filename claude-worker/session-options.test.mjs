@@ -6,6 +6,24 @@ import { buildSessionOptionsBase, createCwdReporter } from "./session-options.mj
 const noopCanUseTool = () => ({ behavior: "allow", updatedInput: {} });
 const defaults = { canUseTool: noopCanUseTool, defaultSettingSources: ["user"] };
 
+test("PostToolUse links parallel delegate results by tool-use ID without changing output", async () => {
+  const observed = [];
+  const opts = buildSessionOptionsBase({ cwd: "/tmp" }, {
+    ...defaults,
+    observeDelegateCall: (toolId, askId) => observed.push([toolId, askId]),
+  });
+  const hook = opts.hooks.PostToolUse[0].hooks[0];
+  for (const [toolId, askId] of [["tool-a", "ask-a"], ["tool-b", "ask-b"]]) {
+    assert.deepEqual(await hook({
+      tool_name: "mcp__sealwire__delegate",
+      tool_use_id: toolId,
+      tool_response: { structuredContent: { delegate_ask_id: askId } },
+    }), {});
+  }
+  await hook({ tool_name: "mcp__other__delegate", tool_use_id: "failed", tool_response: { isError: true } });
+  assert.deepEqual(observed, [["tool-a", "ask-a"], ["tool-b", "ask-b"]]);
+});
+
 test("default permission mode does not set allowDangerouslySkipPermissions", () => {
   const opts = buildSessionOptionsBase({ cwd: "/tmp", permissionMode: "default" }, defaults);
   assert.equal(opts.permissionMode, "default");

@@ -1096,6 +1096,7 @@ async fn handle_notification_for_provider(
                                 crate::state::unix_now(),
                             );
                             relay.mark_transcript_row_cut_for_thread(&bg_thread_id, &item_id, cut);
+                            mark_codex_delegate_result(&mut relay, &bg_thread_id, &params["item"]);
                             changed = true;
                         }
                     }

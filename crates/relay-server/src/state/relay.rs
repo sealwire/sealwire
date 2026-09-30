@@ -36,6 +36,7 @@ use super::{
 
 pub use self::approval::{ApprovalKind, PendingApproval};
 pub use self::ask_user_question::{parse_ask_user_questions, PendingAskUserQuestion};
+pub(crate) use self::delegate_marks::delegate_ask_id_from_mcp_result;
 pub(crate) use self::device::{
     BrokerPendingMessage, ClaimChallenge, CompletedPairing, CompletedRemoteClaim, DeviceRecord,
     IssuedClaimChallenge, PairedDevice, PendingPairing, PendingPairingRequest,

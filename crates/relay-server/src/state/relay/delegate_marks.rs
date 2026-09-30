@@ -1,6 +1,7 @@
 //! Keeping a delegate's cards in step with its ask.
 
 use relay_api::delegation::StartedBy;
+use serde_json::Value;
 
 use crate::protocol::{InjectionKind, TranscriptEntryKind};
 use crate::state::delegation::{intent_title, Ask};
@@ -8,6 +9,23 @@ use crate::state::delegation::{intent_title, Ask};
 use super::injections::{DelegateMark, InjectedMessage, InjectionTag, MessageAnchor};
 use super::transcript::TranscriptRecord;
 use super::RelayState;
+
+pub(crate) fn delegate_ask_id_from_mcp_result(value: &Value) -> Option<&str> {
+    value
+        .get("structuredContent")
+        .and_then(|content| content.get("delegate_ask_id"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .get("result")
+                .and_then(delegate_ask_id_from_mcp_result)
+        })
+        .or_else(|| {
+            value
+                .get("rawOutput")
+                .and_then(delegate_ask_id_from_mcp_result)
+        })
+}
 
 /// Claude names it `mcp__sealwire__report_back`, Codex plain `report_back`.
 fn is_report_back_call(record: &TranscriptRecord) -> bool {
@@ -19,16 +37,65 @@ fn is_report_back_call(record: &TranscriptRecord) -> bool {
 }
 
 impl RelayState {
+    pub(crate) fn mark_delegate_call(
+        &mut self,
+        ask_id: &str,
+        caller_thread_id: &str,
+        provider_item_id: &str,
+    ) {
+        let Some(ask) = self.asks.get(ask_id) else {
+            tracing::warn!(
+                ask_id,
+                caller_thread_id,
+                "delegate call names an unknown ask"
+            );
+            return;
+        };
+        if ask.asker_thread_id != caller_thread_id
+            || ask.started_by != StartedBy::Agent
+            || ask.sent_at.is_none()
+            || provider_item_id.is_empty()
+        {
+            tracing::warn!(
+                ask_id,
+                caller_thread_id,
+                "delegate call does not match a sent agent ask"
+            );
+            return;
+        }
+        if self
+            .injections
+            .has_anchored_tag(caller_thread_id, InjectionKind::DelegateCall, ask_id)
+        {
+            return;
+        }
+        let anchor = MessageAnchor::Item(provider_item_id.to_string());
+        if self.injections.tag_at(caller_thread_id, &anchor).is_some() {
+            tracing::warn!(
+                ask_id,
+                caller_thread_id,
+                provider_item_id,
+                "delegate call row already belongs to another card"
+            );
+            return;
+        }
+        let message = InjectedMessage {
+            thread_id: caller_thread_id.to_string(),
+            anchor,
+            tag: InjectionTag::delegate(InjectionKind::DelegateCall, &[ask_id.to_string()]),
+            created_at: crate::state::unix_now(),
+        };
+        self.usage_store.record_injected_message(&message);
+        self.injections.anchor(message);
+        self.republish_thread_rows(caller_thread_id);
+    }
+
     /// Written as the ask is accepted, so its first row has a card to carry.
     pub(crate) fn record_delegate_mark(&mut self, ask: &Ask) {
         let mut mark = DelegateMark {
             id: ask.id.clone(),
             asker_thread_id: ask.asker_thread_id.clone(),
-            // Before the brief, a person's ask holds what they typed.
-            task: match ask.started_by {
-                StartedBy::Person => ask.message.trim().to_string(),
-                StartedBy::Agent => String::new(),
-            },
+            task: ask.message.trim().to_string(),
             asked_at: ask.asked_at,
             ..DelegateMark::default()
         };
