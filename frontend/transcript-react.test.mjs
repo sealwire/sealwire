@@ -1655,6 +1655,62 @@ test("groupToolEntries consolidates per turn even when a tool call sits between 
   assert.deepEqual(groupShape(result), ["work-group[bash]", "diff-group[fc,td]"]);
 });
 
+test("groupToolEntries keeps commands together across hidden file changes", () => {
+  const change = (id) => makeTool(id, {
+    tool: { item_type: "fileChange", name: "Edit" },
+    turn_id: "t1",
+  });
+  const runningDiff = makeTool("td", {
+    tool: { item_type: "turnDiff", name: "TurnDiff" },
+    turn_id: "t1",
+    status: "running",
+  });
+  const result = groupToolEntries([
+    makeCommand("a"), change("fc1"), runningDiff,
+    makeCommand("b"), change("fc2"), makeCommand("c"), change("fc3"),
+  ]);
+  assert.deepEqual(groupShape(result), [
+    "work-group[a,b,c]",
+    "diff-group[fc1,td,fc2,fc3]",
+  ]);
+});
+
+test("groupToolEntries recomputes visible command boundaries as edits arrive", () => {
+  const change = (id) => makeTool(id, {
+    tool: { item_type: "fileChange", name: "Edit" },
+    turn_id: "t1",
+  });
+  const entries = [makeCommand("a"), change("fc1"), makeCommand("b")];
+  assert.deepEqual(groupShape(groupToolEntries(entries)), [
+    "work-group[a]", "diff-group[fc1]", "work-group[b]",
+  ]);
+  entries.push(change("fc2"));
+  assert.deepEqual(groupShape(groupToolEntries(entries)), [
+    "work-group[a,b]", "diff-group[fc1,fc2]",
+  ]);
+  entries.push(makeCommand("c"));
+  assert.deepEqual(groupShape(groupToolEntries(entries)), [
+    "work-group[a,b]", "diff-group[fc1,fc2]", "work-group[c]",
+  ]);
+});
+
+test("groupToolEntries preserves visible boundaries between deferred edits", () => {
+  const change = (id) => makeTool(id, {
+    tool: { item_type: "fileChange", name: "Edit" },
+    turn_id: "t1",
+  });
+  const entries = [
+    makeCommand("a"), change("fc1"), makeCommand("b"), makeText("text"),
+    makeCommand("c"), change("fc2"), makeCommand("running", { status: "running" }),
+    makeCommand("d"), change("fc3"), makeCommand("e"), change("fc4"),
+    makeCommand("f"),
+  ];
+  assert.deepEqual(groupShape(groupToolEntries(entries)), [
+    "work-group[a,b]", "text", "work-group[c]", "running", "work-group[d,e]",
+    "diff-group[fc1,fc2,fc3,fc4]", "work-group[f]",
+  ]);
+});
+
 test("groupToolEntries consolidates a turn's edits even without a turnDiff (still streaming)", () => {
   const fc1 = makeTool("fc1", { tool: { item_type: "fileChange", name: "Edit" }, turn_id: "t1" });
   const text = { item_id: "txt", kind: "agent_text", status: "completed", text: "working", turn_id: "t1" };
