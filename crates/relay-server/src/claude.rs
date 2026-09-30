@@ -2000,6 +2000,17 @@ async fn apply_worker_event(
             relay.notify();
         }
 
+        "delegate_call_result" => {
+            if let (Some(thread_id), Some(tool_id), Some(ask_id)) = (
+                event_thread_id.as_deref(),
+                string_at(&payload, &["id"]),
+                string_at(&payload, &["ask_id"]),
+            ) {
+                relay.mark_delegate_call(&ask_id, thread_id, &format!("tool:{tool_id}"));
+                relay.notify();
+            }
+        }
+
         "tool_call_result" => {
             let route = claude_thread_route(&relay, event_thread_id.as_deref());
             if matches!(route, ClaudeThreadRoute::Drop) {

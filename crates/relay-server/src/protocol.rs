@@ -2222,6 +2222,8 @@ pub enum InjectionKind {
     DelegateRequest,
     /// The asker's brief, independently readable without its request row.
     DelegateBrief,
+    /// The agent's MCP delegate tool row, independently readable as the outbound card.
+    DelegateCall,
     /// The peer was given the brief, followed by `DelegateCardView::instruction`.
     DelegateTask,
     /// The peer finished without `report_back` and was reminded once.
@@ -2251,6 +2253,7 @@ impl InjectionKind {
             self,
             Self::DelegateRequest
                 | Self::DelegateBrief
+                | Self::DelegateCall
                 | Self::DelegateTask
                 | Self::DelegateNudge
                 | Self::DelegateAnswer

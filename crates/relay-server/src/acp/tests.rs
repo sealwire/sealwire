@@ -133,6 +133,40 @@ fn tool_call_and_its_update_share_one_item_despite_the_newline_in_acps_id() {
 }
 
 #[test]
+fn acp_delegate_structured_result_keeps_the_original_tool_item() {
+    let mut runtime = session();
+    let started = plan_update(
+        &json!({ "sessionUpdate": "tool_call", "toolCallId": "call-delegate",
+            "title": "MCP: delegate", "status": "pending" }),
+        &mut runtime,
+    );
+    let update = json!({ "sessionUpdate": "tool_call_update", "toolCallId": "call-delegate",
+        "status": "completed", "rawOutput": {
+            "structuredContent": { "delegate_ask_id": "ask-one" }
+        } });
+    let completed = plan_update(&update, &mut runtime);
+    let (
+        TranscriptOp::Tool { item_id: first, .. },
+        TranscriptOp::Tool {
+            item_id: second,
+            title,
+            status,
+            ..
+        },
+    ) = (started, completed)
+    else {
+        panic!("expected tool rows");
+    };
+    assert_eq!(first, second);
+    assert_eq!(title, "MCP: delegate");
+    assert_eq!(status, "completed");
+    assert_eq!(
+        crate::state::delegate_ask_id_from_mcp_result(&update),
+        Some("ask-one")
+    );
+}
+
+#[test]
 fn replay_ids_match_live_ids_because_ordinals_are_per_kind() {
     // ACP reassigns its own ids on `session/load` (a live `call-…` replays as
     // `replay-0-1`), so item identity has to come from per-kind ordering. Live

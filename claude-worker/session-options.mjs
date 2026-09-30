@@ -27,7 +27,7 @@ export function effectivePermissionMode(cmd) {
   return requested === REVIEWER_READ_ONLY_MODE ? "bypassPermissions" : requested;
 }
 
-export function buildSessionOptionsBase(cmd, { canUseTool, defaultSettingSources, observeCwd }) {
+export function buildSessionOptionsBase(cmd, { canUseTool, defaultSettingSources, observeCwd, observeDelegateCall }) {
   const requestedMode = cmd.permissionMode ?? "default";
   const readOnlyReviewer = requestedMode === REVIEWER_READ_ONLY_MODE;
   const permissionMode = effectivePermissionMode(cmd);
@@ -93,8 +93,8 @@ export function buildSessionOptionsBase(cmd, { canUseTool, defaultSettingSources
     options.tools = cmd.tools;
   }
 
-  if (typeof observeCwd === "function") {
-    options.hooks = cwdObservationHooks(observeCwd);
+  if (typeof observeCwd === "function" || typeof observeDelegateCall === "function") {
+    options.hooks = cwdObservationHooks(observeCwd, observeDelegateCall);
   }
 
   return options;
@@ -140,12 +140,21 @@ export function createCwdReporter(observeCwd) {
   };
 }
 
-export function cwdObservationHooks(observeCwd) {
+export function cwdObservationHooks(observeCwd, observeDelegateCall = null) {
   const hook = (source) => async (input) => {
     // Subagent tools report their own cwd; that must not relocate the parent session.
     if (input?.agent_id) return {};
-    if (input?.cwd) {
+    if (input?.cwd && typeof observeCwd === "function") {
       observeCwd(input.cwd, { source, tool_use_id: input.tool_use_id });
+    }
+    if (source === "PostToolUse" && typeof observeDelegateCall === "function"
+        && /^mcp__sealwire(?:[-_][A-Za-z0-9]+)?__delegate$/.test(input?.tool_name || "")
+        && input?.tool_response?.isError !== true) {
+      const askId = input?.tool_response?.structuredContent?.delegate_ask_id
+        ?? input?.tool_response?.result?.structuredContent?.delegate_ask_id;
+      if (typeof askId === "string" && askId && input.tool_use_id) {
+        observeDelegateCall(input.tool_use_id, askId);
+      }
     }
     return {};
   };

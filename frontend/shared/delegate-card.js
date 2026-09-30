@@ -350,7 +350,7 @@ export function DelegateRequestEntry({
         "div",
         { className: "delegate-stack" },
         // Once the answer card below says how it went, this one is a line.
-        h(AskedCard, { ask: first, brief: settledBrief(members), collapsed: answered.has(first.id) })
+        h(AskedCard, { ask: first, brief: entry.injection?.kind === "delegate_call" ? first.task : settledBrief(members), collapsed: answered.has(first.id) })
       )
     );
   }
@@ -562,6 +562,7 @@ export function foldDelegateInjections(entries) {
       if (
         kind === "delegate_answer"
         && (previous?.injection?.kind === "delegate_request"
+          || previous?.injection?.kind === "delegate_call"
           || (previous?.injection?.kind === "delegate_brief"
             && drawsDelegateBriefCard(previousAsk)))
         && previousAsk

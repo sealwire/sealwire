@@ -94,6 +94,65 @@ test("a marked brief is its Delegated card when the older request is on another 
   assert.ok(!markup.includes("chat-message-content"), "the brief is not an ordinary assistant message first");
 });
 
+test("an MCP delegate tool row is its one outbound card across result updates", () => {
+  const delegated = ask({ task: "Inspect the retry loop\nCheck the timeout path.", title: "Inspect the retry loop" });
+  const tool = {
+    item_id: "tool:one",
+    kind: "tool_call",
+    status: "completed",
+    tool: { item_type: "mcpToolCall", name: "mcp__sealwire__delegate", title: "delegate", result_preview: "Delegated." },
+    injection: { kind: "delegate_call", delegate: [delegated] },
+  };
+  for (const row of [tool, { ...tool, tool: { ...tool.tool, result_preview: "Delegated. That agent's id is peer." } }]) {
+    const markup = render([row]);
+    assert.equal(count(markup, "Delegated to Codex"), 1);
+    assert.equal(count(markup, "Check the timeout path"), 1);
+    assert.ok(!markup.includes("mcp__sealwire__delegate"), "the original tool row is replaced");
+    assert.ok(!markup.includes("/delegate"), "an agent did not type a command");
+  }
+});
+
+test("two MCP delegate calls to one peer keep two distinct outbound cards", () => {
+  const calls = ["a", "b"].map((id) => ({
+    item_id: `tool:${id}`,
+    kind: "tool_call",
+    status: "completed",
+    tool: { item_type: "mcpToolCall", name: "delegate", title: "delegate" },
+    injection: { kind: "delegate_call", delegate: [ask({ id: `ask-${id}`, title: `Task ${id}`, task: "" })] },
+  }));
+  const markup = render(calls);
+  assert.equal(count(markup, "Delegated to Codex"), 2);
+  assert.equal(count(markup, "Task a"), 1);
+  assert.equal(count(markup, "Task b"), 1);
+});
+
+test("an MCP delegate card and its later answer remain two different events", () => {
+  const done = ask({ id: "ask-mcp", task: "Inspect the retry loop", status: "done", delivered: true, answer: "The retry is bounded." });
+  const markup = render([
+    {
+      item_id: "tool:delegate",
+      kind: "tool_call",
+      status: "completed",
+      tool: { item_type: "mcpToolCall", name: "delegate", title: "delegate" },
+      injection: { kind: "delegate_call", delegate: [done] },
+    },
+    marked("answer", "delegate_answer", [done], WAKE),
+  ]);
+  assert.equal(count(markup, "Delegated to Codex"), 1);
+  assert.equal(count(markup, "Codex answered"), 1);
+  assert.equal(count(markup, "The retry is bounded"), 1);
+  assert.ok(!markup.includes("mcp__sealwire"));
+});
+
+test("a failed delegate tool result does not claim the task was sent", () => {
+  const markup = render([{
+    item_id: "tool:failed", kind: "tool_call", status: "failed",
+    tool: { item_type: "mcpToolCall", name: "delegate", title: "delegate", result_preview: "The peer could not start." },
+    injection: { kind: "delegate_call", delegate: [ask()] },
+  }]);
+  assert.ok(!markup.includes("Delegated to Codex"));
+});
+
 test("loading the older request keeps one Delegated card and restores the command bubble", () => {
   const delegated = ask();
   const brief = agent("brief", BRIEF, {

@@ -42,7 +42,7 @@ impl MessageAnchor {
     }
 }
 
-const KIND_NAMES: [(InjectionKind, &str); 16] = [
+const KIND_NAMES: [(InjectionKind, &str); 17] = [
     (InjectionKind::HandoverRequest, "handover_request"),
     (InjectionKind::HandoverSummary, "handover_summary"),
     (InjectionKind::HandoverBrief, "handover_brief"),
@@ -55,6 +55,7 @@ const KIND_NAMES: [(InjectionKind, &str); 16] = [
     (InjectionKind::ReviewEscalated, "review_escalated"),
     (InjectionKind::DelegateRequest, "delegate_request"),
     (InjectionKind::DelegateBrief, "delegate_brief"),
+    (InjectionKind::DelegateCall, "delegate_call"),
     (InjectionKind::DelegateTask, "delegate_task"),
     (InjectionKind::DelegateNudge, "delegate_nudge"),
     (InjectionKind::DelegateAnswer, "delegate_answer"),
@@ -731,6 +732,9 @@ impl ThreadInjections {
                     InjectionKind::HandoverSummary
                     | InjectionKind::DelegateBrief
                     | InjectionKind::ReviewReply => record.kind == TranscriptEntryKind::AgentText,
+                    InjectionKind::DelegateCall => {
+                        record.kind == TranscriptEntryKind::ToolCall && record.status == "completed"
+                    }
                     InjectionKind::DelegateReported => record.kind != TranscriptEntryKind::UserText,
                     _ => record.kind == TranscriptEntryKind::UserText,
                 };

@@ -100,6 +100,7 @@ pub(super) enum PeerLiveness {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DelegateOutcome {
     Sent {
+        ask_id: String,
         peer_thread_id: String,
         provider: String,
         /// What the peer runs, which is not always what was asked for.
@@ -747,6 +748,7 @@ Carry on with one of those instead of bringing in another."
                     relay.notify();
                 }
                 Ok(DelegateOutcome::Sent {
+                    ask_id,
                     peer_thread_id,
                     provider: peer_provider,
                     model: peer_model.unwrap_or_default(),

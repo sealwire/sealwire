@@ -3,6 +3,45 @@ use crate::{protocol::SessionSnapshot, state::SecurityProfile};
 use tokio::sync::{watch, RwLock};
 
 #[test]
+fn codex_mcp_result_anchors_only_the_matching_delegate_item() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let mut relay = RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    );
+    let mut ask = crate::state::Ask::new(
+        "ask-one".into(),
+        "caller".into(),
+        "peer".into(),
+        "codex".into(),
+        None,
+        None,
+        "Inspect the retry loop".into(),
+        "/tmp/project".into(),
+        None,
+        relay_api::delegation::StartedBy::Agent,
+    );
+    ask.sent_at = Some(crate::state::unix_now());
+    relay.insert_ask(ask);
+    let item = json!({
+        "type": "mcpToolCall", "id": "item-one", "server": "sealwire-abc", "tool": "delegate",
+        "status": "completed",
+        "result": { "content": [{ "type": "text", "text": "Delegated." }],
+                    "structuredContent": { "delegate_ask_id": "ask-one" } }
+    });
+    mark_codex_delegate_result(&mut relay, "caller", &item);
+    mark_codex_delegate_result(&mut relay, "caller", &item);
+    assert_eq!(relay.injections.anchored_rows("caller"), 1);
+
+    let mut unrelated = item.clone();
+    unrelated["id"] = json!("item-other");
+    unrelated["server"] = json!("unrelated");
+    mark_codex_delegate_result(&mut relay, "caller", &unrelated);
+    assert_eq!(relay.injections.anchored_rows("caller"), 1);
+}
+
+#[test]
 fn summarize_codex_mcp_servers_reports_enabled_and_disabled() {
     let json = r#"[
         {"name":"github","enabled":true,"disabled_reason":null},

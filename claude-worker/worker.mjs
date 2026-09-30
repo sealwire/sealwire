@@ -310,6 +310,7 @@ function buildSessionOptions(
   getProviderSessionId = () => null,
   emitEvent = rawEmit,
   observeCwd = null,
+  observeDelegateCall = null,
 ) {
   return buildSessionOptionsBase(cmd, {
     canUseTool: createPermissionHandler(pendingApprovals, nextApprovalId, {
@@ -321,6 +322,7 @@ function buildSessionOptions(
     }),
     defaultSettingSources: DEFAULT_SETTING_SOURCES,
     observeCwd,
+    observeDelegateCall,
   });
 }
 
@@ -1279,6 +1281,12 @@ function buildEntryOptions(entry, cmd, pendingApprovals, nextApprovalId, pending
     () => entry.providerSessionId || entry.pendingThreadId,
     (event) => emit(event, entry.progressTracker),
     reporter.observeCwd,
+    (toolUseId, askId) => emit({
+      type: "delegate_call_result",
+      id: toolUseId,
+      ask_id: askId,
+      provider_session_id: entry.providerSessionId || entry.pendingThreadId,
+    }, entry.progressTracker),
   );
 }
 

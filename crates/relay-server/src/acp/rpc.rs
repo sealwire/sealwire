@@ -324,8 +324,24 @@ async fn handle_notification(
         .get(session_id)
         .and_then(|session| session.turn_id.clone());
 
+    let delegate_call = match &op {
+        TranscriptOp::Tool {
+            item_id,
+            title,
+            status,
+            ..
+        } if status == "completed" && title.to_ascii_lowercase().ends_with("delegate") => {
+            crate::state::delegate_ask_id_from_mcp_result(update)
+                .map(|ask_id| (ask_id.to_string(), item_id.clone()))
+        }
+        _ => None,
+    };
     let mut relay = state.write().await;
-    if apply_op(&mut relay, session_id, turn_id, op, provider_key) {
+    let changed = apply_op(&mut relay, session_id, turn_id, op, provider_key);
+    if let Some((ask_id, item_id)) = delegate_call {
+        relay.mark_delegate_call(&ask_id, session_id, &item_id);
+    }
+    if changed {
         relay.notify();
     }
 }
