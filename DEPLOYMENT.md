@@ -124,6 +124,20 @@ platforms `npx sealwire` still runs, but it falls back to building
 By default `npx sealwire` starts a **localhost-only** relay; it does not attach
 to a broker unless you tell it to. Commands and flags:
 
+When a broker is configured, the relay reads the broker's minimum supported
+SealWire version and broker protocol version from `GET /api/health` before it
+opens the local server. The broker also checks the version on relay WebSocket
+joins. Set `RELAY_BROKER_MIN_RELAY_VERSION` on the broker to a stable
+`major.minor.patch` release (default `0.11.3`). Deploy the broker and publish
+the client with this handshake as one coordinated release: older clients omit
+`client_version` and are refused by the new broker, while updated clients need
+the new health fields. Clients from before this handshake cannot exit before
+startup; the broker can only reject their remote connection. Subsequent client
+releases can be rolled out before raising the broker minimum. An outdated npm
+client should be restarted with `npx sealwire@latest cloud`, or updated globally
+with `npm install -g sealwire@latest`. Desktop users should install the latest
+app release. Local-only launches have no broker to check.
+
 ```bash
 # pair remote devices through the hosted licensed Cloud broker
 sealwire cloud                          # attach to hosted Cloud (default

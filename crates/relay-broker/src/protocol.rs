@@ -72,6 +72,7 @@ pub struct ConnectQuery {
     pub peer_id: Option<String>,
     pub role: PeerRole,
     pub join_ticket: Option<String>,
+    pub client_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +81,8 @@ pub struct HealthResponse {
     pub service: String,
     pub broker_auth_mode: String,
     pub join_auth_ready: bool,
+    pub minimum_relay_version: String,
+    pub broker_protocol_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
