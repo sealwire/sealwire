@@ -3647,7 +3647,7 @@ fn latest_agent_entry_with_turn(
 /// Addressed by turn, not by recency: "the latest" is a sampling race in its own
 /// right, since an unrelated turn's reply landing afterwards hides this one for
 /// good.
-fn agent_entry_for_turn(
+pub(super) fn agent_entry_for_turn(
     views: &[TranscriptEntryView],
     turn_id: &str,
 ) -> Option<(String, String, Option<String>, String)> {
