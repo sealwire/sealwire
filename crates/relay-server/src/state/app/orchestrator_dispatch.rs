@@ -105,6 +105,38 @@ fn team_block(team: &crate::teams::TeamCatalogTeam) -> String {
     block
 }
 
+/// Always names the model that runs, and says so when it is not the one asked for.
+fn delegate_reply(outcome: &super::delegation::DelegateOutcome) -> String {
+    use super::delegation::DelegateOutcome;
+    match outcome {
+        DelegateOutcome::Sent {
+            peer_thread_id,
+            provider,
+            model,
+            replaced_flagship,
+        } => {
+            let note = replaced_flagship
+                .as_deref()
+                .map(|own| {
+                    format!(" (Sealwire's default: {provider}'s own default, {own}, is a flagship)")
+                })
+                .unwrap_or_default();
+            format!(
+                "Delegated to {provider} on {model}{note}. That agent's id is {peer_thread_id} — \
+name it as `agent` to carry on with it.\n\nEnd your turn now if you have nothing else to do. \
+Do NOT poll, sleep, or check on it: the relay wakes you with the answers when everything you \
+asked for is done, and a turn spent waiting is a turn spent for nothing."
+            )
+        }
+        DelegateOutcome::AwaitingApproval { model, family, .. } => format!(
+            "Nothing has started. {model} is a flagship model ({family}), so the user has to \
+allow it first — they can allow it, run the task on another model, or decline. End your turn \
+now; do not poll, sleep, or ask again. The relay wakes you with the outcome, including which \
+model actually ran."
+        ),
+    }
+}
+
 /// One provider and the models a task may name on it.
 ///
 /// Hidden models are left out: they are not offerable, and a model that names
@@ -112,13 +144,22 @@ fn team_block(team: &crate::teams::TeamCatalogTeam) -> String {
 fn agent_block(provider: &str, models: &[ModelOptionView]) -> String {
     let offerable: Vec<&ModelOptionView> = models.iter().filter(|model| !model.hidden).collect();
     if offerable.is_empty() {
-        return format!("{provider} — no selectable models; omit model to use its default");
+        return format!(
+            "{provider} — no selectable models yet; \"default\" is Sealwire's pick for it"
+        );
     }
     let mut block = format!("{provider} — {} models", offerable.len());
+    // The mark is Sealwire's default, already swapped off a flagship.
+    if let Some(default) = offerable.iter().find(|model| model.is_default) {
+        block.push_str(&format!("; \"default\" = {}", default.model));
+    }
     for model in offerable.iter().take(MAX_MODELS_PER_AGENT) {
         block.push_str(&format!("\n  - {}", model.model));
         if model.is_default {
             block.push_str(" (default)");
+        }
+        if crate::model_policy::flagship_in(&model.model, models).is_some() {
+            block.push_str(" (flagship: starts only once the user confirms it by hand)");
         }
         if !model.supported_reasoning_efforts.is_empty() {
             block.push_str(&format!(
@@ -482,13 +523,8 @@ impl AppState {
                     effort,
                     message,
                 };
-                match self.delegate(caller_thread_id, request).await {
-                    Ok(peer) => Ok(format!(
-                        "Delegated. That agent's id is {peer} — name it as `agent` to carry on \
-with it.\n\nEnd your turn now if you have nothing else to do. Do NOT poll, sleep, \
-or check on it: the relay wakes you with the answers when everything you asked \
-for is done, and a turn spent waiting is a turn spent for nothing."
-                    )),
+                match self.delegate_request(caller_thread_id, request).await {
+                    Ok(outcome) => Ok(delegate_reply(&outcome)),
                     Err(error) => Err(error.message()),
                 }
             }
@@ -598,7 +634,7 @@ for is done, and a turn spent waiting is a turn spent for nothing."
                 for provider in self.available_providers() {
                     let Some(models) = self.cached_provider_model_catalog(&provider).await else {
                         blocks.push(format!(
-                            "{provider} — models not loaded yet; omit model and effort to use its default"
+                            "{provider} — models not loaded yet; \"default\" is Sealwire's pick for it"
                         ));
                         continue;
                     };
@@ -1290,6 +1326,7 @@ mod tests {
             default_reasoning_effort: efforts.first().unwrap_or(&"").to_string(),
             hidden: false,
             is_default,
+            resolved_model: None,
         }
     }
 
@@ -1313,6 +1350,31 @@ mod tests {
             "the model has to know which it gets for free"
         );
         assert!(block.contains("effort low, medium, high"), "{block}");
+        assert!(
+            block.contains("\"default\" = gpt-5.6-codex"),
+            "the keyword must be spelled out as the model it runs: {block}"
+        );
+    }
+
+    #[test]
+    fn a_flagship_is_marked_as_needing_the_users_hand() {
+        let block = agent_block(
+            "codex",
+            &[
+                model_option("gpt-5.6-sol", &["low"], true),
+                model_option("gpt-6-astra", &["low"], false),
+            ],
+        );
+        let astra = block
+            .lines()
+            .find(|line| line.contains("gpt-6-astra"))
+            .expect("listed");
+        assert!(astra.contains("flagship"), "{block}");
+        let sol = block
+            .lines()
+            .find(|line| line.contains("gpt-5.6-sol"))
+            .expect("listed");
+        assert!(!sol.contains("flagship"), "{block}");
     }
 
     /// A hidden model is not offerable. Listing it invites exactly the guess
@@ -1329,7 +1391,7 @@ mod tests {
     #[test]
     fn an_agent_with_nothing_selectable_says_so_rather_than_listing_nothing() {
         let block = agent_block("codex", &[]);
-        assert!(block.contains("omit model"), "{block}");
+        assert!(block.contains("\"default\""), "{block}");
     }
 
     #[test]

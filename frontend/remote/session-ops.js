@@ -2231,6 +2231,22 @@ export async function fetchAskUserQuestionDetail(requestId) {
   return result.ask_user_question_detail?.request || null;
 }
 
+// The user's answer to an agent's flagship request. Throws so the card can say why.
+export async function decideRemoteModelRequest(askId, decision, model) {
+  renderLog("Answering the agent's model request…");
+  try {
+    await dispatchOrRecover("decide_model_request", {
+      ask_id: askId,
+      decision,
+      model: model || null,
+    });
+    await syncRemoteSnapshot("post-model-request", true);
+  } catch (error) {
+    renderLog(`Remote model request failed: ${error.message}`);
+    throw error;
+  }
+}
+
 // Full ask bodies for Agents card hover. The reviews list only ships ledger previews.
 export async function fetchAskDetail(askId) {
   if (!askId) {

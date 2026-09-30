@@ -240,6 +240,15 @@ pub(super) enum RemoteActionRequest {
         #[serde(default)]
         device_id: Option<String>,
     },
+    /// A person's answer to an agent's flagship request: allow, switch or decline.
+    DecideModelRequest {
+        ask_id: String,
+        decision: String,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        device_id: Option<String>,
+    },
     SubmitAskUserAnswer {
         request_id: String,
         input: SubmitAskUserAnswerInput,
@@ -373,6 +382,7 @@ impl RemoteActionRequest {
             Self::FetchProjects { .. } => RemoteActionKind::FetchProjects,
             Self::FetchAskUserQuestionDetail { .. } => RemoteActionKind::FetchAskUserQuestionDetail,
             Self::FetchAsk { .. } => RemoteActionKind::FetchAsk,
+            Self::DecideModelRequest { .. } => RemoteActionKind::DecideModelRequest,
             Self::SubmitAskUserAnswer { .. } => RemoteActionKind::SubmitAskUserAnswer,
             Self::RequestReview { .. } => RemoteActionKind::RequestReview,
             Self::StartWorkflow { .. } => RemoteActionKind::StartWorkflow,
@@ -559,6 +569,17 @@ impl RemoteActionRequest {
                 ask_id,
                 device_id: Some(device_id),
             },
+            Self::DecideModelRequest {
+                ask_id,
+                decision,
+                model,
+                ..
+            } => Self::DecideModelRequest {
+                ask_id,
+                decision,
+                model,
+                device_id: Some(device_id),
+            },
             Self::SubmitAskUserAnswer {
                 request_id,
                 mut input,
@@ -696,6 +717,7 @@ pub(super) enum RemoteActionKind {
     FetchProjects,
     FetchAskUserQuestionDetail,
     FetchAsk,
+    DecideModelRequest,
     SubmitAskUserAnswer,
     RequestReview,
     StartWorkflow,
@@ -751,6 +773,7 @@ impl RemoteActionKind {
             Self::FetchProjects => "fetch_projects",
             Self::FetchAskUserQuestionDetail => "fetch_ask_user_question_detail",
             Self::FetchAsk => "fetch_ask",
+            Self::DecideModelRequest => "decide_model_request",
             Self::SubmitAskUserAnswer => "submit_ask_user_answer",
             Self::RequestReview => "request_review",
             Self::StartWorkflow => "start_workflow",
@@ -2003,6 +2026,26 @@ async fn execute_remote_action(
                 ask_detail: Some(ask_detail),
                 ..RemoteActionOutcome::default()
             }),
+        RemoteActionRequest::DecideModelRequest {
+            ask_id,
+            decision,
+            model,
+            device_id,
+        } => {
+            let device_id = device_id.ok_or_else(|| "missing device id".to_string())?;
+            state
+                .decide_model_request(
+                    &ask_id,
+                    crate::protocol::ModelRequestDecisionInput {
+                        decision,
+                        model,
+                        device_id: Some(device_id.clone()),
+                    },
+                    Some(&device_id),
+                )
+                .await
+                .map(|_| RemoteActionOutcome::default())
+        }
         RemoteActionRequest::SubmitAskUserAnswer { request_id, input } => state
             .submit_ask_user_answer(&request_id, input)
             .await
@@ -2043,6 +2086,8 @@ fn requires_session_claim(action: RemoteActionKind) -> bool {
             // The stop too: unlike `stop_turn` it settles the goal Cancelled and takes the
             // card away, so an unclaimed device could erase the controller's objective.
             | RemoteActionKind::Delegate
+            // Allowing or switching starts an agent, the same as a delegate does.
+            | RemoteActionKind::DecideModelRequest
             | RemoteActionKind::Handover
             | RemoteActionKind::SetGoal
             | RemoteActionKind::StopGoal
@@ -3501,9 +3546,9 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         | RemoteActionKind::FetchProjects
         | RemoteActionKind::FetchAskUserQuestionDetail
         | RemoteActionKind::FetchAsk => RemoteActionResultKind::RemoteTranscriptResult,
-        RemoteActionKind::DecideApproval | RemoteActionKind::SubmitAskUserAnswer => {
-            RemoteActionResultKind::RemoteApprovalResult
-        }
+        RemoteActionKind::DecideApproval
+        | RemoteActionKind::SubmitAskUserAnswer
+        | RemoteActionKind::DecideModelRequest => RemoteActionResultKind::RemoteApprovalResult,
         RemoteActionKind::SendMessage
         | RemoteActionKind::ApplyFileChange
         | RemoteActionKind::ProjectAction

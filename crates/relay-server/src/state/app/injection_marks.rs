@@ -4,7 +4,7 @@
 use crate::protocol::TranscriptEntryKind;
 use crate::state::{AppState, InjectedMessage, InjectionTag, MessageAnchor, RelayState};
 
-use super::review::{DispatchedTurn, ThreadDriveError};
+use super::review::{DeviceFence, DispatchedTurn, ThreadDriveError};
 
 /// How long to wait for a provider that writes the user row after `start_turn`
 /// returns (the fake one does). Claude writes it before, and Codex needs none.
@@ -65,9 +65,22 @@ impl AppState {
         model: Option<&str>,
         effort: Option<&str>,
     ) -> Result<DispatchedTurn, ThreadDriveError> {
+        self.send_injected_fenced(tag, thread_id, text, model, effort, None)
+            .await
+    }
+
+    pub(super) async fn send_injected_fenced(
+        &self,
+        tag: InjectionTag,
+        thread_id: &str,
+        text: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+        fence: Option<&DeviceFence<'_>>,
+    ) -> Result<DispatchedTurn, ThreadDriveError> {
         self.expect_injection(&tag, thread_id, text).await;
         let sent = self
-            .send_message_to_thread(thread_id, text, model, effort)
+            .send_message_to_thread_fenced(thread_id, text, model, effort, fence)
             .await;
         match &sent {
             Ok(dispatched) => {

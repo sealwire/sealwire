@@ -230,6 +230,7 @@ fn team_input(cwd: &str) -> crate::state::app::team::TeamStartRequest {
         tl_provider: "codex".to_string(),
         dev_provider: "codex".to_string(),
         reviewer_provider: "codex".to_string(),
+        seat_models_chosen_by: relay_api::delegation::StartedBy::Person,
     }
 }
 

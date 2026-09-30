@@ -103,12 +103,18 @@ New task button on the Tasks screen."
         let provider_models = self
             .load_provider_model_catalog(provider_name, bridge)
             .await;
-        let model = resolve_provider_model(
-            provider_name,
-            &provider_models,
-            None,
-            super::PROVIDER_DEFAULT_MODEL.to_string(),
-        );
+        let model = self
+            .select_model(
+                ModelTarget {
+                    provider: provider_name,
+                    bridge,
+                    catalog: &provider_models,
+                    cwd: &cwd,
+                },
+                ModelSelection::new(None),
+            )
+            .await?
+            .model;
         let effort = default_effort_for_model(&provider_models, &model)
             .unwrap_or_else(|| DEFAULT_EFFORT.to_string());
         // Never-ask: secretary, not a shell agent prompting on every tool.

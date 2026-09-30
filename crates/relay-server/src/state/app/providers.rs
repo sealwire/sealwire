@@ -160,7 +160,9 @@ impl AppState {
         match bridge.list_models().await {
             // A non-empty live catalog is authoritative: adopt it as the new
             // last-known so future cold reads can fall back to it.
-            Ok(models) if !models.is_empty() => {
+            Ok(mut models) if !models.is_empty() => {
+                self.mark_sealwire_default(provider_name, bridge, &mut models)
+                    .await;
                 self.provider_model_catalogs
                     .write()
                     .await
@@ -568,7 +570,9 @@ impl AppState {
         bridge: &Arc<dyn ProviderBridge>,
     ) -> Option<Vec<ModelOptionView>> {
         match bridge.list_models().await {
-            Ok(models) if !models.is_empty() => {
+            Ok(mut models) if !models.is_empty() => {
+                self.mark_sealwire_default(provider_name, bridge, &mut models)
+                    .await;
                 self.provider_model_catalogs
                     .write()
                     .await

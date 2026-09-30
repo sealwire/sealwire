@@ -1756,6 +1756,61 @@ test("skills/list probes the session's own folder and settings without holding u
   }
 });
 
+test("model/list reads the catalog with the session's own folder and settings", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "models-probe-"));
+  const worker = spawnWorker();
+  try {
+    worker.send({ type: "model/list", id: "models-ctx", cwd });
+    const res = await worker.waitFor(
+      (event) => event.type === "response" && event.id === "models-ctx",
+      { label: "model/list response" },
+    );
+    assert.equal(res.ok, true, JSON.stringify(res));
+    const probe = worker.queries().find((query) => query.cwd === cwd);
+    assert.deepEqual(probe?.settingSources, ["user", "project", "local"]);
+    const aliased = res.result.models.find((model) => model.model === "default");
+    assert.equal(aliased?.resolvedModel, "claude-opus-5-5[1m]");
+  } finally {
+    await worker.close();
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("model/default answers the model a new session in that folder would run", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "default-probe-"));
+  // The fake reports this only when user/project/local settings were loaded.
+  const worker = spawnWorker({ CLAUDE_FAKE_EFFECTIVE_MODEL: "claude-fable-5-1" });
+  try {
+    worker.send({ type: "model/default", id: "default-1", cwd });
+    const res = await worker.waitFor(
+      (event) => event.type === "response" && event.id === "default-1",
+      { label: "model/default response" },
+    );
+    assert.equal(res.ok, true, JSON.stringify(res));
+    assert.equal(res.result.model, "claude-fable-5-1");
+    const probe = worker.queries().find((query) => query.cwd === cwd);
+    assert.deepEqual(probe?.settingSources, ["user", "project", "local"]);
+  } finally {
+    await worker.close();
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("model/default falls back to the default row when the SDK cannot report usage", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_NO_CONTEXT_USAGE: "1" });
+  try {
+    worker.send({ type: "model/default", id: "default-2", cwd: "/tmp" });
+    const res = await worker.waitFor(
+      (event) => event.type === "response" && event.id === "default-2",
+      { label: "model/default response" },
+    );
+    assert.equal(res.ok, true, JSON.stringify(res));
+    assert.equal(res.result.model, "claude-opus-5-5[1m]");
+  } finally {
+    await worker.close();
+  }
+});
+
 test("skills/list falls back to the command list, minus built-ins, on a CLI without reloadSkills", async () => {
   const worker = spawnWorker({ CLAUDE_FAKE_NO_RELOAD_SKILLS: "1" });
   try {

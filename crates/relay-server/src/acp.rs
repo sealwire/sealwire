@@ -802,10 +802,19 @@ impl AcpBridge {
         if available.is_empty() {
             return;
         }
-        let current = from_new_session
-            .then(|| models.get("currentModelId").and_then(Value::as_str))
-            .flatten();
-        let options = protocol::model_options(&available, current, self.provider_name);
+        let known_default = self
+            .models
+            .lock()
+            .await
+            .iter()
+            .find(|model| model.is_default)
+            .map(|model| model.model.clone());
+        let current = default_after(
+            from_new_session,
+            models.get("currentModelId").and_then(Value::as_str),
+            known_default,
+        );
+        let options = protocol::model_options(&available, current.as_deref(), self.provider_name);
         write_cached_models(&models_cache_path(self.provider_name), &options);
         *self.models.lock().await = options;
     }
@@ -1265,6 +1274,19 @@ pub(crate) fn write_cached_models(path: &std::path::Path, models: &[ModelOptionV
 }
 
 /// Where a provider's catalog cache lives — beside the relay's own state file.
+/// A loaded session reports its own model, so it keeps the default already known.
+pub(crate) fn default_after(
+    from_new_session: bool,
+    reported: Option<&str>,
+    known: Option<String>,
+) -> Option<String> {
+    if from_new_session {
+        reported.map(str::to_string)
+    } else {
+        known
+    }
+}
+
 pub(crate) fn models_cache_path(provider_key: &str) -> std::path::PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     crate::state_paths::state_dir(&cwd).join(format!("acp-models-{provider_key}.json"))
@@ -1395,6 +1417,22 @@ impl ProviderBridge for AcpBridge {
 
     async fn list_models(&self) -> Result<Vec<ModelOptionView>, String> {
         Ok(self.models.lock().await.clone())
+    }
+
+    /// Only `session/new` reports it, so a cold bridge with no cached catalog has none.
+    async fn default_model(&self, _cwd: &str) -> Result<String, String> {
+        self.models
+            .lock()
+            .await
+            .iter()
+            .find(|model| model.is_default)
+            .map(|model| model.model.clone())
+            .ok_or_else(|| {
+                format!(
+                    "{} has not reported its default model yet; it does when a new session starts",
+                    self.display_name
+                )
+            })
     }
 
     /// `system_prompt` is IGNORED. ACP's `session/new` carries `cwd` and

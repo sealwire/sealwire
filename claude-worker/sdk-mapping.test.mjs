@@ -290,6 +290,18 @@ test("mapModelInfo flattens Claude SDK model metadata for the relay", () => {
   );
 });
 
+test("mapModelInfo keeps the concrete model an alias row runs", () => {
+  // The relay decides whether an alias is a flagship from this, so it must survive.
+  const row = mapModelInfo({
+    value: "default",
+    resolvedModel: "claude-fable-5-1",
+    displayName: "Default (recommended)",
+  });
+  assert.equal(row.model, "default");
+  assert.equal(row.resolvedModel, "claude-fable-5-1");
+  assert.equal("resolvedModel" in mapModelInfo({ value: "sonnet" }), false);
+});
+
 test("mapModelInfo falls back to the highest available effort when high is absent", () => {
   const model = mapModelInfo({
     value: "claude-haiku-4-5",

@@ -192,12 +192,7 @@ impl AppState {
                     .map(|value| value.model.clone())
                     .filter(|value| !value.is_empty());
                 let model = self
-                    .resolve_model_for_provider(
-                        &provider_name,
-                        &bridge,
-                        remembered_model,
-                        super::PROVIDER_DEFAULT_MODEL.to_string(),
-                    )
+                    .select_cached_thread_model(&provider_name, &bridge, remembered_model)
                     .await;
                 let paged = page.paged;
                 let prev_cursor = page.prev_cursor;

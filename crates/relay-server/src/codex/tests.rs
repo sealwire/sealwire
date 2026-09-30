@@ -4364,6 +4364,39 @@ async fn configure_fake_codex(bridge: &CodexBridge, mode: &str, delay_ms: u64) {
         .expect("configure fake Codex app-server");
 }
 
+#[tokio::test]
+async fn codex_default_is_its_configured_model_not_the_catalogs_recommendation() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    bridge
+        .send_request("fake/configure", json!({ "configModel": "gpt-5.6-sol" }))
+        .await
+        .expect("configure fake Codex");
+    let catalog = bridge.list_models().await.expect("model/list");
+    assert!(
+        catalog
+            .iter()
+            .any(|model| model.model == "gpt-6-astra" && model.is_default),
+        "the fake must recommend a different model than config names"
+    );
+    assert_eq!(
+        ProviderBridge::default_model(&bridge, "/tmp/project").await,
+        Ok("gpt-5.6-sol".to_string())
+    );
+    assert!(codex_recv_methods(&state)
+        .await
+        .contains(&"config/read".to_string()));
+
+    // Nothing configured: Codex starts on its own recommendation.
+    bridge
+        .send_request("fake/configure", json!({}))
+        .await
+        .expect("configure fake Codex");
+    assert_eq!(
+        ProviderBridge::default_model(&bridge, "/tmp/project").await,
+        Ok("gpt-6-astra".to_string())
+    );
+}
+
 async fn configure_fake_codex_reject_turn_start(bridge: &CodexBridge) {
     bridge
         .send_request(

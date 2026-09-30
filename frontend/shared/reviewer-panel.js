@@ -19,6 +19,7 @@ import { useDismissableMenu } from "./use-dismissable-menu.js";
 import { isTerminalReviewStatus } from "./review-state.js";
 import { CODE_FLOW_ENABLED } from "./workflow-state.js";
 import { goalObjectiveLengthNotice } from "./goal-objective.js";
+import { ModelRequestBlock } from "./model-request-card.js";
 
 const h = React.createElement;
 
@@ -610,7 +611,7 @@ function ReviewSlot({
 
 // One delegation subject. Repeat follow-ups to the same agent session are rounds INSIDE
 // it, so the panel stops printing the same subject once per turn.
-function AskThreadCard({ thread, onOpen = null, fetchAskDetail = null }) {
+function AskThreadCard({ thread, onOpen = null, fetchAskDetail = null, onDecideModelRequest = null }) {
   const live = thread.state === "working";
   const open = onOpen && thread.otherThreadId ? () => onOpen(thread.otherThreadId) : null;
   const askId = thread.latest?.id || null;
@@ -701,6 +702,20 @@ function AskThreadCard({ thread, onOpen = null, fetchAskDetail = null }) {
     ),
     // Which way round the delegation runs is not in the title any more, so it rides here.
     thread.inbound ? h("p", { className: "reviewer-ask-inbound" }, "asked you") : null,
+    ...thread.modelRequests.map(({ id, title, request }) =>
+      h(
+        "div",
+        { key: id },
+        id !== thread.latest.id ? h("p", { className: "reviewer-card-note" }, title) : null,
+        h(ModelRequestBlock, {
+          askId: id,
+          request,
+          onDecide: onDecideModelRequest,
+          // Remount after a decision so a picker's choice never carries forward.
+          key: `${id}:${request.decision}`,
+        })
+      )
+    ),
     thread.result
       ? h("p", { className: "reviewer-card-result", title: fullResult || undefined }, thread.result)
       : null,
@@ -708,7 +723,7 @@ function AskThreadCard({ thread, onOpen = null, fetchAskDetail = null }) {
   );
 }
 
-function AgentGroup({ group, onOpen = null, fetchAskDetail = null }) {
+function AgentGroup({ group, onOpen = null, fetchAskDetail = null, onDecideModelRequest = null }) {
   const mark = providerMark(group.provider, "reviewer-agent-mark");
   // Only invent a letter when we have a real name and no shipped mark. Never for
   // the "another agent" placeholder — that used to paint "a", then "?", both of
@@ -738,7 +753,7 @@ function AgentGroup({ group, onOpen = null, fetchAskDetail = null }) {
       )
     ),
     ...group.threads.map((thread) =>
-      h(AskThreadCard, { key: thread.key, onOpen, fetchAskDetail, thread })
+      h(AskThreadCard, { key: thread.key, onOpen, fetchAskDetail, onDecideModelRequest, thread })
     )
   );
 }
@@ -804,6 +819,8 @@ export function ReviewerPanel({
   onDeleteReview,
   fetchReviewerTranscript,
   fetchAskDetail = null,
+  // An agent's flagship request: (askId, "allow" | "switch" | "decline", model).
+  onDecideModelRequest = null,
   panelId = "review-panel",
 }) {
   const review = reviewLedger(reviewJobs);
@@ -866,7 +883,13 @@ export function ReviewerPanel({
         ? h(LedgerHeading, { label: "Asked", meta: askedSummary(agents) })
         : null,
       ...agents.map((group) =>
-        h(AgentGroup, { group, key: group.key, onOpen: onOpenThread, fetchAskDetail })
+        h(AgentGroup, {
+          group,
+          key: group.key,
+          onOpen: onOpenThread,
+          fetchAskDetail,
+          onDecideModelRequest,
+        })
       ),
       // Runs trail the results: a review card answers "what did it conclude", a run
       // answers "what is happening right now".

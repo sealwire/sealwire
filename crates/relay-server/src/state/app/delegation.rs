@@ -5,13 +5,20 @@
 //! or finds the peer, hands over the message, records the pair, and returns —
 //! immediately, so the asker's turn is free to end.
 
-use relay_api::delegation::{AskError, AskRequest};
+use std::sync::Arc;
+
+use relay_api::delegation::{AskError, AskRequest, AskStatus, StartedBy};
 
 use super::super::delegation::{
-    peer_is_wider_than_asker, peer_thread_settings, Ask, MAX_CITED, MAX_CITED_CHARS,
+    peer_is_wider_than_asker, peer_thread_settings, Ask, ModelDecision, ModelRequest, MAX_CITED,
+    MAX_CITED_CHARS,
 };
-use crate::protocol::InjectionKind;
-use crate::provider::StartThreadRequest;
+use super::review::DeviceFence;
+use super::{ModelChooser, ModelRefusal, ModelSelection, ModelTarget};
+use crate::protocol::{
+    AskView, InjectionKind, ModelChoiceView, ModelOptionView, ModelRequestDecisionInput,
+};
+use crate::provider::{ProviderBridge, StartThreadRequest};
 use crate::state::{clip_chars, unix_now, AppState, InjectionTag};
 
 /// How many peers one session may have brought in. A runaway asker is a runaway
@@ -89,6 +96,33 @@ pub(super) enum PeerLiveness {
     LiveTurnOnly,
 }
 
+/// What a delegate did: reached a peer, or is waiting on a person.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DelegateOutcome {
+    Sent {
+        peer_thread_id: String,
+        provider: String,
+        /// What the peer runs, which is not always what was asked for.
+        model: String,
+        /// The provider's own default, when Sealwire's replaced it for being a flagship.
+        replaced_flagship: Option<String>,
+    },
+    AwaitingApproval {
+        ask_id: String,
+        provider: String,
+        model: String,
+        family: String,
+    },
+}
+
+/// Who named the model decides whether a flagship waits for a person.
+fn chooser_for(started_by: StartedBy) -> ModelChooser {
+    match started_by {
+        StartedBy::Person => ModelChooser::Person,
+        StartedBy::Agent => ModelChooser::Agent,
+    }
+}
+
 /// What `precheck_ask` established, so `delegate` does not read it all again.
 struct PrecheckedAsk {
     /// The asker, canonicalized — what every later write must name.
@@ -142,7 +176,13 @@ impl AppState {
             let mut live: Vec<&Ask> = relay
                 .asks
                 .values()
-                .filter(|ask| ask.peer_thread_id == peer_thread_id && !ask.status.is_terminal())
+                // Only work it was actually handed: a held or still-starting request
+                // has no turn this reply could belong to.
+                .filter(|ask| {
+                    ask.peer_thread_id == peer_thread_id
+                        && !ask.status.is_terminal()
+                        && ask.sent_at.is_some()
+                })
                 .collect();
             // Oldest first: if somehow two are open, the one waiting longest is
             // the one this reply is for.
@@ -192,9 +232,10 @@ impl AppState {
         let app = self.clone();
         let asker = prechecked.asker_thread_id.clone();
         let background_ask_id = ask_id.clone();
+        let chooser = chooser_for(request.started_by);
         tokio::spawn(async move {
             if let Err(error) = app
-                .delegate_filling(&asker, request, Some(background_ask_id.clone()))
+                .delegate_filling(&asker, request, Some(background_ask_id.clone()), chooser)
                 .await
             {
                 app.fail_detached_ask(&background_ask_id, error.message())
@@ -243,6 +284,20 @@ impl AppState {
         let mut relay = self.relay.write().await;
         relay.update_ask(ask_id, |ask| ask.fail(reason));
         relay.notify();
+    }
+
+    /// A request that ended while its start was in flight must not start work.
+    async fn ensure_ask_still_live(&self, ask_id: Option<&str>) -> Result<(), AskError> {
+        let Some(ask_id) = ask_id else {
+            return Ok(());
+        };
+        let relay = self.relay.read().await;
+        match relay.ask(ask_id) {
+            Some(ask) if ask.status.is_terminal() => Err(AskError::Failed(
+                "it was settled before its task could be sent".to_string(),
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// The checks a caller is owed an answer to, and the settings the rest needs —
@@ -350,11 +405,26 @@ Carry on with one of those instead of bringing in another."
         })
     }
 
+    /// Tests' shorthand: the peer's id, with a request held for approval as an error.
+    #[cfg(test)]
     pub(crate) async fn delegate(
         &self,
         asker_thread_id: &str,
-        mut request: AskRequest,
+        request: AskRequest,
     ) -> Result<String, AskError> {
+        match self.delegate_request(asker_thread_id, request).await? {
+            DelegateOutcome::Sent { peer_thread_id, .. } => Ok(peer_thread_id),
+            DelegateOutcome::AwaitingApproval { ask_id, .. } => Err(AskError::Failed(format!(
+                "held for the user's approval ({ask_id})"
+            ))),
+        }
+    }
+
+    pub(crate) async fn delegate_request(
+        &self,
+        asker_thread_id: &str,
+        mut request: AskRequest,
+    ) -> Result<DelegateOutcome, AskError> {
         let asker_thread_id = self
             .canonical_session_id(asker_thread_id)
             .await
@@ -366,14 +436,17 @@ Carry on with one of those instead of bringing in another."
                     .map_err(AskError::Failed)?,
             );
         }
-        if request.started_by != relay_api::delegation::StartedBy::Person {
-            return self.delegate_filling(&asker_thread_id, request, None).await;
+        let chooser = chooser_for(request.started_by);
+        if request.started_by != StartedBy::Person {
+            return self
+                .delegate_filling(&asker_thread_id, request, None, chooser)
+                .await;
         }
         // On record before the brief, like a detached one, so its cards have a row to hang on.
         let prechecked = self.precheck_ask(&asker_thread_id, &request, None).await?;
         let ask_id = self.record_accepted_ask(&prechecked, &request).await;
         let filled = self
-            .delegate_filling(&asker_thread_id, request, Some(ask_id.clone()))
+            .delegate_filling(&asker_thread_id, request, Some(ask_id.clone()), chooser)
             .await;
         if let Err(error) = &filled {
             self.fail_detached_ask(&ask_id, error.message()).await;
@@ -388,7 +461,8 @@ Carry on with one of those instead of bringing in another."
         asker_thread_id: &str,
         request: AskRequest,
         existing_ask_id: Option<String>,
-    ) -> Result<String, AskError> {
+        chooser: ModelChooser,
+    ) -> Result<DelegateOutcome, AskError> {
         let PrecheckedAsk {
             asker_thread_id,
             message,
@@ -403,7 +477,7 @@ Carry on with one of those instead of bringing in another."
         // A person's one-liner becomes a brief before anyone else sees it. This
         // costs a turn on the asking agent, which is why it is opt-in: an agent
         // calling the tool already wrote its message with the context in view.
-        let message = if request.started_by == relay_api::delegation::StartedBy::Person {
+        let message = if request.started_by == StartedBy::Person {
             self.brief_from_asker(&asker_thread_id, &message, existing_ask_id.as_deref())
                 .await?
         } else {
@@ -430,50 +504,161 @@ Carry on with one of those instead of bringing in another."
         };
         let (approval_policy, sandbox) =
             peer_thread_settings(&asker_approval, &asker_sandbox, None, None);
+        let held = HeldAsk {
+            asker_thread_id,
+            asker_provider: &asker_provider,
+            asker_cwd: &asker_cwd,
+            request: &request,
+            existing_ask_id: existing_ask_id.as_deref(),
+            message: &message,
+        };
 
         // Carrying on with an agent — one this session brought in, or any other
         // session that is free to take the work — or bringing in a new one.
         //
-        // The provider comes back with it: the card must say what actually ran,
-        // not what was asked for. They differ whenever the caller left it out,
-        // and for an existing peer the request's provider is meaningless.
-        let (peer_thread_id, peer_provider) = match request.peer_thread_id.as_deref() {
-            Some(existing) => {
-                self.check_peer_is_askable(
-                    asker_thread_id,
-                    existing,
-                    &asker_approval,
-                    &asker_sandbox,
-                    PeerLiveness::AnySignOfWork,
-                )
-                .await?;
-                let provider = {
-                    let relay = self.relay.read().await;
-                    relay
-                        .runtime_for_thread(existing)
-                        .and_then(|runtime| runtime.summary.as_ref())
-                        .map(|summary| summary.provider.clone())
-                        .filter(|provider| !provider.is_empty())
-                        // Same source as asks_view: thread list + search routing hints.
-                        // A searched/reopened peer can be routable with an empty summary
-                        // and absent from the normal page; leaving "" here made outbound
-                        // cards "another agent" after restart.
-                        .or_else(|| relay.provider_hint_for_thread(existing))
-                        .unwrap_or_default()
-                };
-                (existing.to_string(), provider)
-            }
-            None => {
-                self.start_peer_thread(
-                    &asker_cwd,
-                    &request,
-                    &approval_policy,
-                    &sandbox,
-                    &asker_provider,
-                )
-                .await?
-            }
-        };
+        // The provider and model come back with it: the card must say what actually
+        // ran, not what was asked for.
+        let (peer_thread_id, peer_provider, peer_model, turn_model, replaced_flagship) =
+            match request.peer_thread_id.as_deref() {
+                Some(existing) => {
+                    self.check_peer_is_askable(
+                        asker_thread_id,
+                        existing,
+                        &asker_approval,
+                        &asker_sandbox,
+                        PeerLiveness::AnySignOfWork,
+                    )
+                    .await?;
+                    let (provider, current_model, peer_cwd) = {
+                        let relay = self.relay.read().await;
+                        (
+                            relay
+                                .runtime_for_thread(existing)
+                                .and_then(|runtime| runtime.summary.as_ref())
+                                .map(|summary| summary.provider.clone())
+                                .filter(|provider| !provider.is_empty())
+                                // Same source as asks_view: thread list + search routing hints.
+                                // A searched/reopened peer can be routable with an empty summary
+                                // and absent from the normal page; leaving "" here made outbound
+                                // cards "another agent" after restart.
+                                .or_else(|| relay.provider_hint_for_thread(existing))
+                                .unwrap_or_default(),
+                            relay
+                                .thread_settings(existing)
+                                .map(|settings| settings.model)
+                                .filter(|model| !model.is_empty()),
+                            relay.thread_cwd(existing).unwrap_or_default(),
+                        )
+                    };
+                    match request.model.clone() {
+                        // Carrying on keeps the model the peer already runs.
+                        None => (existing.to_string(), provider, current_model, None, None),
+                        Some(model) => {
+                            let target = self
+                                .resolve_session_target(existing)
+                                .await
+                                .map_err(AskError::Failed)?;
+                            let catalog = self
+                                .load_provider_model_catalog(&target.provider, target.bridge())
+                                .await;
+                            let selected = match self
+                                .select_model(
+                                    ModelTarget {
+                                        provider: &target.provider,
+                                        bridge: target.bridge(),
+                                        catalog: &catalog,
+                                        cwd: &peer_cwd,
+                                    },
+                                    ModelSelection::new(Some(model))
+                                        .by(chooser)
+                                        .with_inherited(current_model),
+                                )
+                                .await
+                            {
+                                Ok(selected) => selected,
+                                Err(ModelRefusal::NeedsApproval { model, family }) => {
+                                    return Ok(self
+                                        .hold_for_model_approval(
+                                            &held,
+                                            Some(existing),
+                                            &target.provider,
+                                            model,
+                                            family,
+                                            &catalog,
+                                        )
+                                        .await);
+                                }
+                                Err(ModelRefusal::NoDefault(reason)) => {
+                                    return Err(AskError::Failed(reason))
+                                }
+                            };
+                            (
+                                existing.to_string(),
+                                provider,
+                                Some(selected.model.clone()),
+                                Some(selected.model),
+                                selected.replaced_flagship,
+                            )
+                        }
+                    }
+                }
+                None => {
+                    let (provider_name, bridge) = self.peer_provider(&request, &asker_provider)?;
+                    let catalog = self
+                        .load_provider_model_catalog(&provider_name, &bridge)
+                        .await;
+                    let selected = match self
+                        .select_model(
+                            ModelTarget {
+                                provider: &provider_name,
+                                bridge: &bridge,
+                                catalog: &catalog,
+                                cwd: &asker_cwd,
+                            },
+                            ModelSelection::new(request.model.clone()).by(chooser),
+                        )
+                        .await
+                    {
+                        Ok(selected) => selected,
+                        Err(ModelRefusal::NeedsApproval { model, family }) => {
+                            return Ok(self
+                                .hold_for_model_approval(
+                                    &held,
+                                    None,
+                                    &provider_name,
+                                    model,
+                                    family,
+                                    &catalog,
+                                )
+                                .await);
+                        }
+                        Err(ModelRefusal::NoDefault(reason)) => {
+                            return Err(AskError::Failed(reason))
+                        }
+                    };
+                    let effort = request.effort.clone().unwrap_or_default();
+                    self.ensure_ask_still_live(existing_ask_id.as_deref())
+                        .await?;
+                    let peer = self
+                        .start_peer_thread(
+                            &asker_cwd,
+                            &provider_name,
+                            &bridge,
+                            &selected.model,
+                            &effort,
+                            &approval_policy,
+                            &sandbox,
+                        )
+                        .await?;
+                    (
+                        peer,
+                        provider_name,
+                        Some(selected.model),
+                        None,
+                        selected.replaced_flagship,
+                    )
+                }
+            };
 
         // What the peer had already said, so the sweeper can tell "has not picked
         // this up yet" from "answered". Both look idle.
@@ -489,10 +674,19 @@ Carry on with one of those instead of bringing in another."
         let instruction = answer_instruction();
         {
             let mut relay = self.relay.write().await;
+            if relay
+                .ask(&ask_id)
+                .is_some_and(|ask| ask.status.is_terminal())
+            {
+                return Err(AskError::Failed(
+                    "it was settled before its task could be sent".to_string(),
+                ));
+            }
             if existing_ask_id.is_some() {
                 relay.update_ask(&ask_id, |ask| {
                     ask.peer_thread_id = peer_thread_id.clone();
                     ask.peer_provider = peer_provider.clone();
+                    ask.peer_model = peer_model.clone();
                     ask.message = message.clone();
                     ask.baseline_item_id = baseline_item_id.clone();
                     if ask.asker_provider.is_none() {
@@ -507,7 +701,7 @@ Carry on with one of those instead of bringing in another."
                     asker_thread_id.to_string(),
                     peer_thread_id.clone(),
                     peer_provider.clone(),
-                    request.model.clone(),
+                    peer_model.clone(),
                     request.effort.clone(),
                     message.clone(),
                     asker_cwd.to_string(),
@@ -524,13 +718,20 @@ Carry on with one of those instead of bringing in another."
             });
         }
 
+        // A device's delegate or decision stays inside its scope up to the send.
+        let fenced_threads = [asker_thread_id, peer_thread_id.as_str()];
+        let fence = request.device_id.as_deref().map(|device_id| DeviceFence {
+            device_id,
+            threads: &fenced_threads,
+        });
         match self
-            .send_injected(
+            .send_injected_fenced(
                 InjectionTag::delegate(InjectionKind::DelegateTask, &[ask_id.clone()]),
                 &peer_thread_id,
                 &format!("{message}{instruction}"),
-                request.model.as_deref(),
+                turn_model.as_deref(),
                 request.effort.as_deref(),
+                fence.as_ref(),
             )
             .await
         {
@@ -545,7 +746,12 @@ Carry on with one of those instead of bringing in another."
                     });
                     relay.notify();
                 }
-                Ok(peer_thread_id)
+                Ok(DelegateOutcome::Sent {
+                    peer_thread_id,
+                    provider: peer_provider,
+                    model: peer_model.unwrap_or_default(),
+                    replaced_flagship,
+                })
             }
             Err(error) => {
                 let reason = error.to_string();
@@ -555,6 +761,184 @@ Carry on with one of those instead of bringing in another."
                 Err(AskError::Failed(reason))
             }
         }
+    }
+
+    /// Record an agent's flagship request and start nothing. The asker is woken
+    /// the usual way once a person has decided and the peer has answered.
+    async fn hold_for_model_approval(
+        &self,
+        held: &HeldAsk<'_>,
+        existing_peer: Option<&str>,
+        provider: &str,
+        model: String,
+        family: &'static str,
+        catalog: &Option<Vec<ModelOptionView>>,
+    ) -> DelegateOutcome {
+        let rows = catalog.as_deref().unwrap_or(&[]);
+        let options = rows
+            .iter()
+            .filter(|option| !option.hidden)
+            .map(|option| ModelChoiceView {
+                model: option.model.clone(),
+                display_name: option.display_name.clone(),
+                flagship: crate::model_policy::flagship_in(&option.model, rows).is_some(),
+                is_default: option.is_default,
+            })
+            .collect();
+        let model_request = ModelRequest {
+            provider: provider.to_string(),
+            model: model.clone(),
+            family: family.to_string(),
+            options,
+            ..ModelRequest::default()
+        };
+        let mut relay = self.relay.write().await;
+        let ask_id = match held.existing_ask_id {
+            Some(ask_id) => {
+                relay.update_ask(ask_id, |ask| {
+                    ask.peer_thread_id = existing_peer.unwrap_or_default().to_string();
+                    ask.peer_provider = provider.to_string();
+                    ask.message = held.message.to_string();
+                    ask.model_request = Some(model_request);
+                });
+                ask_id.to_string()
+            }
+            None => {
+                let ask_id = new_ask_id();
+                let mut ask = Ask::new(
+                    ask_id.clone(),
+                    held.asker_thread_id.to_string(),
+                    existing_peer.unwrap_or_default().to_string(),
+                    provider.to_string(),
+                    None,
+                    held.request.effort.clone(),
+                    held.message.to_string(),
+                    held.asker_cwd.to_string(),
+                    None,
+                    held.request.started_by,
+                );
+                ask.asker_provider =
+                    Some(held.asker_provider.to_string()).filter(|provider| !provider.is_empty());
+                ask.model_request = Some(model_request);
+                relay.insert_ask(ask);
+                ask_id
+            }
+        };
+        relay.push_log(
+            "info",
+            format!(
+                "An agent asked for {model} ({family}); nothing starts until the user decides."
+            ),
+        );
+        relay.notify();
+        DelegateOutcome::AwaitingApproval {
+            ask_id,
+            provider: provider.to_string(),
+            model,
+            family: family.to_string(),
+        }
+    }
+
+    /// A person's answer to an agent's flagship request. No agent tool reaches
+    /// this; the decision is recorded before anything starts, so it starts once.
+    pub(crate) async fn decide_model_request(
+        &self,
+        ask_id: &str,
+        input: ModelRequestDecisionInput,
+        scope_device: Option<&str>,
+    ) -> Result<AskView, String> {
+        crate::state::require_device_id(input.device_id.clone())?;
+        let (asker_thread_id, retry) = {
+            let mut relay = self.relay.write().await;
+            let ask = relay
+                .ask(ask_id)
+                .cloned()
+                .ok_or_else(|| "that request is gone".to_string())?;
+            // The fence reads use: both ends, and out of scope looks like missing.
+            relay.ask_detail(ask_id, scope_device)?;
+            let Some(pending) = ask
+                .model_request
+                .clone()
+                .filter(|_| ask.awaiting_model_decision())
+            else {
+                return Err("that request has already been decided".to_string());
+            };
+            let (decision, chosen) = match input.decision.trim() {
+                "allow" => (ModelDecision::Allowed, Some(pending.model.clone())),
+                "switch" => (
+                    ModelDecision::Switched,
+                    Some(
+                        input
+                            .model
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|model| !model.is_empty())
+                            .ok_or_else(|| "pick the model to start instead".to_string())?
+                            .to_string(),
+                    ),
+                ),
+                "decline" => (ModelDecision::Declined, None),
+                other => {
+                    return Err(format!(
+                        "unknown decision `{other}` — allow, switch or decline"
+                    ))
+                }
+            };
+            relay.update_ask(ask_id, |ask| {
+                if let Some(request) = ask.model_request.as_mut() {
+                    request.decision = decision;
+                    request.chosen_model = chosen.clone();
+                    request.decided_at = Some(unix_now());
+                }
+                if chosen.is_none() {
+                    ask.error = Some("the user declined it".to_string());
+                    ask.set_status(AskStatus::Cancelled);
+                }
+            });
+            relay.push_log(
+                "info",
+                format!(
+                    "The user {} {} for an agent.",
+                    decision.as_str(),
+                    pending.model
+                ),
+            );
+            relay.notify();
+            let retry = chosen.map(|model| AskRequest {
+                peer_thread_id: Some(ask.peer_thread_id.clone()).filter(|peer| !peer.is_empty()),
+                provider: Some(pending.provider.clone()),
+                model: Some(model),
+                effort: ask.peer_effort.clone(),
+                message: ask.message.clone(),
+                // Re-checked against both ends when the task is actually sent.
+                device_id: scope_device.map(str::to_string),
+                started_by: ask.started_by,
+            });
+            (ask.asker_thread_id.clone(), retry)
+        };
+        if let Some(request) = retry {
+            let app = self.clone();
+            let ask_id = ask_id.to_string();
+            tokio::spawn(async move {
+                if let Err(error) = app
+                    .delegate_filling(
+                        &asker_thread_id,
+                        request,
+                        Some(ask_id.clone()),
+                        ModelChooser::Person,
+                    )
+                    .await
+                {
+                    app.fail_detached_ask(&ask_id, error.message()).await;
+                }
+            });
+        }
+        let relay = self.relay.read().await;
+        relay
+            .asks_view()
+            .into_iter()
+            .find(|view| view.id == ask_id)
+            .ok_or_else(|| "that request is gone".to_string())
     }
 
     /// Block until `turn_id` on `thread_id` publishes a terminal, or the budget runs
@@ -819,8 +1203,6 @@ get around your own permissions"
         Ok(())
     }
 
-    /// Start a peer thread. Visible in the sidebar like any other session — the
-    /// whole point is that a person can open it and take over.
     /// Whoever is not the asker, falling back to the asker's own provider when
     /// it is the only one configured.
     fn default_peer_provider(&self, asker_provider: &str) -> String {
@@ -833,47 +1215,43 @@ get around your own permissions"
             .unwrap_or_else(|| asker_provider.to_string())
     }
 
+    fn peer_provider(
+        &self,
+        request: &AskRequest,
+        asker_provider: &str,
+    ) -> Result<(String, Arc<dyn ProviderBridge>), AskError> {
+        let chosen = request
+            .provider
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .map(str::to_string)
+            // Nobody named one: prefer an agent OTHER than the asker's, so
+            // "go and get another opinion" actually gets another opinion.
+            .unwrap_or_else(|| self.default_peer_provider(asker_provider));
+        let (name, bridge) = self
+            .resolve_provider(Some(&chosen))
+            .map_err(AskError::Failed)?;
+        Ok((name.to_string(), bridge.clone()))
+    }
+
+    /// Start a peer thread. Visible in the sidebar like any other session — the
+    /// whole point is that a person can open it and take over.
+    #[allow(clippy::too_many_arguments)]
     async fn start_peer_thread(
         &self,
         cwd: &str,
-        request: &AskRequest,
+        provider_name: &str,
+        bridge: &Arc<dyn ProviderBridge>,
+        model: &str,
+        effort: &str,
         approval_policy: &str,
         sandbox: &str,
-        asker_provider: &str,
-    ) -> Result<(String, String), AskError> {
-        let (provider_name, bridge) = {
-            let wanted = request
-                .provider
-                .as_deref()
-                .filter(|name| !name.trim().is_empty())
-                .map(str::to_string);
-            let chosen = match wanted {
-                Some(name) => name,
-                // Nobody named one: prefer an agent OTHER than the asker's, so
-                // "go and get another opinion" actually gets another opinion.
-                None => self.default_peer_provider(asker_provider),
-            };
-            let (name, bridge) = self
-                .resolve_provider(Some(&chosen))
-                .map_err(AskError::Failed)?;
-            (name.to_string(), bridge.clone())
-        };
-        let provider_models = self
-            .load_provider_model_catalog(&provider_name, &bridge)
-            .await;
-        let model = super::resolve_provider_model(
-            &provider_name,
-            &provider_models,
-            request.model.clone(),
-            super::PROVIDER_DEFAULT_MODEL.to_string(),
-        );
-        let effort = request.effort.clone().unwrap_or_default();
-
+    ) -> Result<String, AskError> {
         let start = self
             .start_provider_thread(
-                &provider_name,
-                &bridge,
-                StartThreadRequest::new(cwd, &model, approval_policy, sandbox).with_effort(&effort),
+                provider_name,
+                bridge,
+                StartThreadRequest::new(cwd, model, approval_policy, sandbox).with_effort(effort),
             )
             .await
             .map_err(AskError::Failed)?;
@@ -888,22 +1266,25 @@ get around your own permissions"
             // `has_working_thread_in_cwd` assumes everything in it is read-only,
             // so putting a writing peer there would disable the workspace
             // concurrency guard.
-            relay.register_background_thread(
-                thread,
-                cwd,
-                &model,
-                approval_policy,
-                sandbox,
-                &effort,
-            );
+            relay.register_background_thread(thread, cwd, model, approval_policy, sandbox, effort);
             relay.push_log(
                 "info",
-                format!("Brought in a {provider_name} agent in {cwd} to help."),
+                format!("Brought in a {provider_name} agent on {model} in {cwd} to help."),
             );
             relay.notify();
         }
-        Ok((peer_thread_id, provider_name))
+        Ok(peer_thread_id)
     }
+}
+
+/// What a held request needs to become an ask.
+struct HeldAsk<'a> {
+    asker_thread_id: &'a str,
+    asker_provider: &'a str,
+    asker_cwd: &'a str,
+    request: &'a AskRequest,
+    existing_ask_id: Option<&'a str>,
+    message: &'a str,
 }
 
 /// Does this reply answer THIS ask?
@@ -971,9 +1352,21 @@ they said.\n",
     );
     for ask in answered {
         out.push_str("\n---\nYou asked ");
-        out.push_str(&ask.peer_thread_id);
+        if ask.peer_thread_id.is_empty() {
+            out.push_str("for a new agent");
+        } else {
+            out.push_str(&ask.peer_thread_id);
+        }
         out.push_str(":\n");
         out.push_str(ask.message.trim());
+        if let Some(line) = ask
+            .model_request
+            .as_ref()
+            .and_then(|request| request.outcome_line(ask))
+        {
+            out.push_str("\n\n");
+            out.push_str(&line);
+        }
         out.push_str("\n\nIt said:\n");
         match (&ask.answer, &ask.error) {
             (Some(answer), _) => out.push_str(answer.trim()),
@@ -1008,12 +1401,16 @@ impl AppState {
             relay
                 .asks
                 .values()
-                .filter(|ask| !ask.status.is_terminal())
-                .map(|ask| (ask.id.clone(), ask.peer_thread_id.clone(), ask.asked_at))
+                // Only work the peer was handed. A held request waits on a person, and
+                // one still starting has nothing running yet; the clock starts at the send.
+                .filter_map(|ask| {
+                    let sent_at = ask.sent_at.filter(|_| !ask.status.is_terminal())?;
+                    Some((ask.id.clone(), ask.peer_thread_id.clone(), sent_at))
+                })
                 .collect()
         };
 
-        for (ask_id, peer_thread_id, asked_at) in live {
+        for (ask_id, peer_thread_id, sent_at) in live {
             let busy = {
                 let relay = self.relay.read().await;
                 let working = relay
@@ -1032,7 +1429,7 @@ impl AppState {
             // Still working is not stuck. Timing out a peer mid-thought throws
             // away the work AND does not stop it, so the run continues with
             // nobody listening.
-            if !busy && now.saturating_sub(asked_at) >= ASK_TIMEOUT_SECS {
+            if !busy && now.saturating_sub(sent_at) >= ASK_TIMEOUT_SECS {
                 // Take whatever it did say before giving up. A finished answer
                 // sitting in its transcript, discarded because a clock fired, is
                 // the one outcome nobody wants — and it is what happened.
@@ -1126,7 +1523,12 @@ impl AppState {
             relay
                 .asks
                 .values()
-                .filter(|ask| !ask.status.is_terminal() && ask.peer_thread_id == peer_thread_id)
+                // A stop ends a turn; a request never handed over had none.
+                .filter(|ask| {
+                    !ask.status.is_terminal()
+                        && ask.peer_thread_id == peer_thread_id
+                        && ask.sent_at.is_some()
+                })
                 .cloned()
                 .collect()
         };

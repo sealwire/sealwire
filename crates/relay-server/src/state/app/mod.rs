@@ -116,6 +116,7 @@ pub struct AppState {
     review_anchors: Arc<dyn relay_api::ReviewAnchors>,
     providers: HashMap<String, Arc<dyn ProviderBridge>>,
     provider_model_catalogs: Arc<RwLock<HashMap<String, Vec<ModelOptionView>>>>,
+    provider_default_models: model_selection::ProviderDefaultCache,
     provider_skill_catalogs: skills::SkillCatalogs,
     change_tx: watch::Sender<u64>,
     /// Serializes individual session-mutating ops against each other (op-vs-op
@@ -315,6 +316,11 @@ mod goal;
 mod handover;
 mod handover_marks;
 mod injection_marks;
+mod model_selection;
+pub(crate) use model_selection::ModelRefusal;
+use model_selection::{
+    preferred_model, ModelChooser, ModelSelection, ModelTarget, PROVIDER_DEFAULT_MODEL,
+};
 mod orchestrator;
 pub(crate) mod orchestrator_dispatch;
 pub(crate) mod orchestrator_proposals;
@@ -437,6 +443,7 @@ impl AppState {
             review_anchors: Arc::new(crate::usage::review_anchors::UnavailableReviewAnchors),
             providers,
             provider_model_catalogs: Arc::new(RwLock::new(HashMap::new())),
+            provider_default_models: Arc::new(RwLock::new(HashMap::new())),
             provider_skill_catalogs: Arc::new(RwLock::new(HashMap::new())),
             change_tx,
             session_guard: Arc::new(tokio::sync::Mutex::new(())),
@@ -632,6 +639,7 @@ impl AppState {
             review_anchors: Arc::new(crate::usage::review_anchors::UnavailableReviewAnchors),
             providers,
             provider_model_catalogs: Arc::new(RwLock::new(HashMap::new())),
+            provider_default_models: Arc::new(RwLock::new(HashMap::new())),
             provider_skill_catalogs: Arc::new(RwLock::new(HashMap::new())),
             change_tx,
             session_guard: Arc::new(tokio::sync::Mutex::new(())),
@@ -1147,76 +1155,6 @@ in thread {thread_id}: {error}"
         }
     }
 
-    /// Resolve the model a thread should run under against ITS OWN provider's
-    /// catalog.
-    ///
-    /// The `default_model` fallback callers pass is `SessionDefaults.model` —
-    /// i.e. `RelayState.model`, a single relay-wide LAST-USED value with no
-    /// provider dimension, rewritten by every send. Taking it unchecked puts
-    /// the previously-active provider's model id on this thread: run a codex
-    /// turn, then open a Claude thread, and the Claude thread both displays and
-    /// sends the codex model. Route it through `resolve_provider_model` so the
-    /// thread's own provider always gets the last word.
-    pub(super) async fn resolve_model_for_provider(
-        &self,
-        provider_name: &str,
-        bridge: &Arc<dyn ProviderBridge>,
-        remembered_model: Option<String>,
-        default_model: String,
-    ) -> String {
-        // Prefer the cache: this runs on the transcript read, which is polled
-        // for a viewed thread, and Codex's `model/list` RPC is uncached.
-        let models = match self.cached_provider_model_catalog(provider_name).await {
-            Some(models) => Some(models),
-            None => {
-                self.load_provider_model_catalog(provider_name, bridge)
-                    .await
-            }
-        };
-        let remembered_model = match remembered_model {
-            Some(model)
-                if self
-                    .model_belongs_to_another_provider(provider_name, &model)
-                    .await =>
-            {
-                None
-            }
-            other => other,
-        };
-        resolve_provider_model(provider_name, &models, remembered_model, default_model)
-    }
-
-    /// Is this model id demonstrably owned by a DIFFERENT provider?
-    ///
-    /// `resolve_provider_model` honours a named model even when the provider's
-    /// catalog doesn't list it, and rightly so — a reviewer's own model or a
-    /// per-thread override can legitimately be unlisted. So mere absence cannot
-    /// condemn an id. Positive evidence can: an id that this provider does not
-    /// publish and another provider DOES is a leak, not a choice.
-    ///
-    /// This heals threads poisoned before the leak was closed. The damage was
-    /// written into `RelayState.thread_settings`, which is persisted, so it
-    /// outlives a restart and would otherwise keep being forwarded — the Claude
-    /// worker does not validate the id at all, and a foreign one both fails the
-    /// turn and tears down the live SDK session.
-    async fn model_belongs_to_another_provider(&self, provider_name: &str, model: &str) -> bool {
-        if model.is_empty() {
-            return false;
-        }
-        let catalogs = self.provider_model_catalogs.read().await;
-        // Only decide when this provider's own catalog is known. A cold or
-        // erroring `list_models` must never let a legitimate id look foreign.
-        let Some(own) = catalogs.get(provider_name).filter(|own| !own.is_empty()) else {
-            return false;
-        };
-        if own.iter().any(|option| option.model == model) {
-            return false;
-        }
-        catalogs.iter().any(|(other, catalog)| {
-            other != provider_name && catalog.iter().any(|option| option.model == model)
-        })
-    }
-
     async fn expire_stale_controller_if_needed(&self) {
         let mut relay = self.relay.write().await;
         expire_controller_if_needed(&mut relay);
@@ -1313,12 +1251,7 @@ in thread {thread_id}: {error}"
             None => target.read_thread().await?,
         };
         let model = self
-            .resolve_model_for_provider(
-                &provider_name,
-                &bridge,
-                remembered_model,
-                PROVIDER_DEFAULT_MODEL.to_string(),
-            )
+            .select_cached_thread_model(&provider_name, &bridge, remembered_model)
             .await;
         self.relay
             .read()
@@ -2699,18 +2632,6 @@ struct SessionDefaults {
     reasoning_effort: String,
 }
 
-fn preferred_model(models: &Option<Vec<ModelOptionView>>) -> Option<&ModelOptionView> {
-    let models = models.as_ref()?;
-    preferred_model_from_slice(models)
-}
-
-fn preferred_model_from_slice(models: &[ModelOptionView]) -> Option<&ModelOptionView> {
-    models
-        .iter()
-        .find(|model| model.is_default)
-        .or_else(|| models.first())
-}
-
 fn default_effort_for_model(
     models: &Option<Vec<ModelOptionView>>,
     model_name: &str,
@@ -2753,49 +2674,6 @@ fn clamp_effort_to_model(
         return option.default_reasoning_effort.clone();
     }
     supported.first().cloned().unwrap_or(effort)
-}
-
-/// What a BACKGROUND turn falls back to when neither the caller nor the provider's
-/// catalog names a model. Never `SessionDefaults.model` — that is one relay-wide
-/// last-used value with no provider dimension, so a cold catalog (every catalog,
-/// right after a restart) hands this provider whatever the user last chatted with.
-///
-/// Every bridge resolves this locally: claude_code publishes it as a real catalog
-/// row, `resolve_provider_model` maps it to codex's preferred, and ACP treats it as
-/// "you pick" (`acp.rs::model_change_needed`). No provider owns it, so it cannot leak.
-pub(super) const PROVIDER_DEFAULT_MODEL: &str = "default";
-
-fn resolve_provider_model(
-    provider_name: &str,
-    models: &Option<Vec<ModelOptionView>>,
-    requested_model: Option<String>,
-    default_model: String,
-) -> String {
-    let explicit_model = requested_model.is_some();
-    let candidate = requested_model
-        .or_else(|| preferred_model(models).map(|model| model.model.clone()))
-        .unwrap_or(default_model);
-
-    if provider_name == "codex" && candidate == "default" {
-        return preferred_model(models)
-            .map(|model| model.model.clone())
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    }
-
-    // Only heal a model the caller did NOT name. "Absent from the catalog" is
-    // deliberately not treated as "invalid": a reviewer's own model, a per-thread
-    // saved model, and an explicit override are all legitimate ids a provider's
-    // published catalog need not list. Cross-provider leaks are caught by
-    // ownership instead — see `model_belongs_to_another_provider`.
-    if let Some(catalog) = models.as_ref().filter(|models| !models.is_empty()) {
-        if !explicit_model && !catalog.iter().any(|model| model.model == candidate) {
-            if let Some(preferred) = preferred_model_from_slice(catalog) {
-                return preferred.model.clone();
-            }
-        }
-    }
-
-    candidate
 }
 
 #[derive(Clone)]

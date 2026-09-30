@@ -336,6 +336,8 @@ pub(crate) struct TeamStartRequest {
     /// records the run — otherwise a save between the two restarts into a
     /// second start.
     pub(crate) starting_proposal_id: Option<String>,
+    /// Whether a person's Start or a timer set the run going; see `TeamRun`.
+    pub(crate) seat_models_chosen_by: relay_api::delegation::StartedBy,
 }
 
 impl AppState {
@@ -412,6 +414,7 @@ locally and trust it before starting a task team there"
         run.tl_effort = input.tl_effort;
         run.dev_effort = input.dev_effort;
         run.reviewer_effort = input.reviewer_effort;
+        run.seat_models_chosen_by = input.seat_models_chosen_by;
         run.dev_agents = input.dev_agents;
         // Pin the resolved team definition. The ledger's `team_id` is only
         // knowable while the run exists, and the runnable structure must not
@@ -883,7 +886,17 @@ over on resume"
     }
 
     /// The HTTP entry point: resolve a wire request and start the run.
+    /// A person starting a task: the models it names are theirs to authorise.
     pub async fn start_team(&self, input: StartTeamInput) -> Result<StartTeamReceipt, String> {
+        self.start_team_by(input, relay_api::delegation::StartedBy::Person)
+            .await
+    }
+
+    pub(super) async fn start_team_by(
+        &self,
+        input: StartTeamInput,
+        seat_models_chosen_by: relay_api::delegation::StartedBy,
+    ) -> Result<StartTeamReceipt, String> {
         // Enforced server-side: the UI's blur is one devtools click from gone.
         if !self.beta_features_enabled().await {
             return Err(TASKS_LOCKED_MESSAGE.to_string());
@@ -969,6 +982,7 @@ over on resume"
                 tl_provider,
                 dev_provider,
                 reviewer_provider,
+                seat_models_chosen_by,
             })
             .await?;
         let run = self
@@ -2281,12 +2295,12 @@ over on resume"
         role: TeamRole,
         workspace: &LiveDir,
     ) -> Result<StartedTeamThread, ThreadDriveError> {
-        let (provider, model_override, effort_override) = {
+        let (provider, model_override, effort_override, chosen_by) = {
             let relay = self.relay.read().await;
             let run = relay
                 .team_run(run_id)
                 .ok_or_else(|| ThreadDriveError::Provider("task run is gone".to_string()))?;
-            match role {
+            let (provider, model, effort) = match role {
                 TeamRole::Tl => (
                     run.tl_provider.clone(),
                     run.tl_model.clone(),
@@ -2302,7 +2316,8 @@ over on resume"
                     run.reviewer_model.clone(),
                     run.reviewer_effort.clone(),
                 ),
-            }
+            };
+            (provider, model, effort, run.seat_models_chosen_by)
         };
 
         let (provider_name, bridge) = {
@@ -2313,12 +2328,33 @@ over on resume"
         let provider_models = self
             .load_provider_model_catalog(&provider_name, &bridge)
             .await;
-        let model = resolve_provider_model(
-            &provider_name,
-            &provider_models,
-            non_empty(Some(model_override)),
-            super::PROVIDER_DEFAULT_MODEL.to_string(),
-        );
+        // Only a person's Start authorises a flagship seat; a timer's run is held
+        // to the agent rule here too, whatever the check before it saw.
+        let chooser = if chosen_by.is_agent() {
+            ModelChooser::Agent
+        } else {
+            ModelChooser::Person
+        };
+        let model = self
+            .select_model(
+                ModelTarget {
+                    provider: &provider_name,
+                    bridge: &bridge,
+                    catalog: &provider_models,
+                    cwd: workspace.as_str(),
+                },
+                ModelSelection::new(non_empty(Some(model_override))).by(chooser),
+            )
+            .await
+            .map_err(|refusal| match refusal {
+                ModelRefusal::NeedsApproval { model, family } => format!(
+                    "the {} seat names {model}, a flagship model ({family}), and this task was \
+started by a timer rather than by you — start it yourself to run that model",
+                    role.as_str()
+                ),
+                other => other.to_string(),
+            })?
+            .model;
         // A seat that asked for an effort gets it, clamped to what the model
         // actually offers — an unsupported level would otherwise reach the
         // provider and fail the turn rather than degrade. A seat that asked for

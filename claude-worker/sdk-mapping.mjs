@@ -245,6 +245,9 @@ export function mapModelInfo(modelInfo, options = {}) {
     isDefault: typeof options.isDefault === "boolean"
       ? options.isDefault
       : isSonnetModel(model),
+    ...(typeof modelInfo?.resolvedModel === "string" && modelInfo.resolvedModel
+      ? { resolvedModel: modelInfo.resolvedModel }
+      : {}),
   };
 }
 

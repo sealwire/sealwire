@@ -230,6 +230,35 @@ test("RightPanelTabs marks the tab for every goal state that cannot move without
   assert.doesNotMatch(label("cancelled"), /Agents [⚠•]/, "a goal called off needs nothing");
 });
 
+test("RightPanelTabs marks the tab while an agent's flagship request waits on the user", () => {
+  const label = (decision) =>
+    renderToStaticMarkup(
+      h(RightPanelTabs, {
+        store: makeStore({
+          activeTab: "changes",
+          review: {
+            reviewJobs: [],
+            reviewModel: {},
+            canRequest: false,
+            blocked: false,
+            asks: [
+              {
+                id: "ask-1",
+                status: decision === "pending" ? "working" : "done",
+                model_request: { model: "claude-fable-5-1[1m]", decision },
+              },
+            ],
+          },
+        }),
+        panelId: "review-panel-test",
+        reviewer: {},
+        changes: h("div", null, "CHANGES-BODY"),
+      })
+    );
+  assert.match(label("pending"), /Agents ⚠/);
+  assert.doesNotMatch(label("allowed"), /Agents ⚠/);
+});
+
 test("RightPanelTabs flags the Reviewer tab when a review is blocked, and renders the reviewer body when selected", () => {
   const blockedLabel = renderToStaticMarkup(
     h(RightPanelTabs, {

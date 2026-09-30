@@ -10,6 +10,7 @@ export const ACTIONS_REQUIRING_SESSION_CLAIM = new Set([
   "delete_review",
   "accept_review",
   "delegate",
+  "decide_model_request",
   "handover",
   "set_goal",
   "stop_goal",

@@ -4,6 +4,7 @@ import { SegmentedControl } from "./session-settings-panel.js";
 import { GOAL_STATES_NEEDING_USER, ReviewerPanel } from "./reviewer-panel.js";
 import { isTerminalReviewStatus } from "./review-state.js";
 import { CODE_FLOW_ENABLED, isTerminalWorkflowStatus } from "./workflow-state.js";
+import { isPendingModelRequest } from "./model-request-card.js";
 
 const h = React.createElement;
 
@@ -55,13 +56,15 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
   // case left the relay waiting on an answer behind an idle-looking tab, which is
   // how a question sat unseen: the state needing them most was the one shown least.
   const goalNeedsUser = GOAL_STATES_NEEDING_USER.has(review.goal?.status);
+  // An agent's flagship request starts nothing until the user answers it here.
+  const modelRequestNeedsUser = (review.asks || []).some(isPendingModelRequest);
 
   // NEVER auto-switch the tab — the review must not yank the user's view around.
   // A running/blocked review only surfaces PASSIVELY here: the tab label gets a dot
   // ("Reviewer •") or a warning ("Reviewer ⚠"), and the user switches when they want.
   // "Agents", not "Reviewer": a reviewer is just one of the agents this session
   // can bring in, and the panel now lists the others beside it.
-  const reviewerLabel = blocked || goalNeedsUser
+  const reviewerLabel = blocked || goalNeedsUser || modelRequestNeedsUser
     ? "Agents ⚠"
     : inProgress > 0 || workflowInProgress > 0 || asksInProgress > 0 || goalWorking > 0
     ? "Agents •"
@@ -124,6 +127,7 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
           onDeleteReview: reviewer.onDeleteReview,
           fetchReviewerTranscript: reviewer.fetchReviewerTranscript,
           fetchAskDetail: reviewer.fetchAskDetail,
+          onDecideModelRequest: reviewer.onDecideModelRequest || null,
         })
       : changes
   );

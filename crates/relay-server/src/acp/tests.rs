@@ -995,6 +995,21 @@ fn only_a_new_session_defines_the_providers_default_model() {
         loaded.iter().all(|option| !option.is_default),
         "a loaded session's model must not be marketed as the provider default"
     );
+
+    // Nor may a load erase the default a new session already reported.
+    use crate::acp::default_after;
+    assert_eq!(
+        default_after(
+            false,
+            Some("claude-sonnet-4-6[thinking=true]"),
+            Some("default[]".into())
+        ),
+        Some("default[]".to_string())
+    );
+    assert_eq!(
+        default_after(true, Some("default[]"), Some("old".into())),
+        Some("default[]".to_string())
+    );
 }
 
 #[tokio::test]

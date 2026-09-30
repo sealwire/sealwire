@@ -73,8 +73,19 @@ function resultFor(cmd, sessionId) {
             defaultReasoningEffort: "high",
             isDefault: true,
           },
+          {
+            model: "opus[1m]",
+            resolvedModel: "claude-opus-5-5[1m]",
+            displayName: "Opus (1M context)",
+            provider: "anthropic",
+            supportedReasoningEfforts: ["low", "medium", "high"],
+            defaultReasoningEffort: "high",
+            isDefault: false,
+          },
         ],
       };
+    case "model/default":
+      return { model: `claude-opus-5-5[1m]@${cmd.cwd ?? "-"}` };
     case "read_session":
       return { thread: makeThread(sessionId, cmd.cwd), messages: [] };
     case "read_session_page":
