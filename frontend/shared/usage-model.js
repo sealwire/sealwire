@@ -309,6 +309,12 @@ export function stackedSeries({ buckets = [], providers = [] } = {}) {
   });
 }
 
+/** The sessions that spent inside one chart bucket, biggest first as the server sent them. */
+export function sessionsForBucket(report, key) {
+  if (!key) return [];
+  return (report?.sessions || []).find((bucket) => bucket?.key === key)?.sessions || [];
+}
+
 /**
  * Which of four things the screen is looking at.
  *

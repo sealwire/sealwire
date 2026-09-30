@@ -48,9 +48,18 @@ pub(crate) struct TeamRunMeta {
     pub(crate) status: String,
 }
 
+/// A session title the relay holds in memory, and the provider that session runs on.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionTitle {
+    pub(crate) provider: String,
+    pub(crate) title: String,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ReportOptions {
     pub(crate) team_runs: HashMap<String, TeamRunMeta>,
+    /// Keyed by relay session id.
+    pub(crate) session_titles: HashMap<String, SessionTitle>,
     pub(crate) daily_cap: Option<u64>,
     pub(crate) budget_policy: crate::usage::budget::BudgetPolicy,
 }
@@ -59,6 +68,7 @@ impl Default for ReportOptions {
     fn default() -> Self {
         Self {
             team_runs: HashMap::new(),
+            session_titles: HashMap::new(),
             daily_cap: None,
             budget_policy: crate::usage::budget::BudgetPolicy::default(),
         }
@@ -72,6 +82,9 @@ pub(crate) struct UsageReport {
     pub(crate) window: ReportWindow,
     pub(crate) totals: ReportTotals,
     pub(crate) buckets: Vec<ReportBucket>,
+    /// Per-session spend inside each chart bucket, keyed like `buckets`, so a
+    /// selected bar and its session list come from the same rows.
+    pub(crate) sessions: Vec<ReportSessionBucket>,
     pub(crate) by_role: Vec<ReportRole>,
     pub(crate) by_prompt: Vec<ReportPrompt>,
     pub(crate) by_team: Vec<ReportTeam>,
@@ -218,6 +231,24 @@ pub(crate) struct ReportTask {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct ReportSessionBucket {
+    pub(crate) key: String,
+    /// Most tokens first.
+    pub(crate) sessions: Vec<ReportSession>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ReportSession {
+    pub(crate) thread_id: String,
+    pub(crate) provider: String,
+    /// `None` when the relay no longer holds this session's metadata; the spend
+    /// is still listed, because the ledger outlives the session list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) title: Option<String>,
+    pub(crate) total: u64,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct CompareWindow {
     pub(crate) window: ReportWindow,
     pub(crate) totals: ReportTotals,
@@ -296,6 +327,7 @@ pub(crate) fn build_report(
         },
         totals: totals_view(store.window_totals(since, until), &group_rows),
         buckets: materialise_buckets(store, since, until, bucket),
+        sessions: session_buckets(store, since, until, bucket, &options.session_titles),
         by_role: roles_view(store.by_role(attr_since, attr_until)),
         by_prompt: store
             .by_role_phase(attr_since, attr_until)
@@ -576,6 +608,54 @@ fn materialise_buckets(
 
     map.into_iter()
         .map(|(key, groups)| ReportBucket { key, groups })
+        .collect()
+}
+
+/// What `UsageStore::by_hour` / `by_day` / `by_week` / `by_month` group by.
+fn bucket_key_sql(bucket: Bucket) -> &'static str {
+    match bucket {
+        Bucket::None => "'all'",
+        Bucket::Hour => "strftime('%Y-%m-%dT%H', at, 'unixepoch', 'localtime')",
+        Bucket::Day => "date(at, 'unixepoch', 'localtime')",
+        Bucket::Week => "strftime('%Y-W%W', at, 'unixepoch', 'localtime')",
+        Bucket::Month => "strftime('%Y-%m', at, 'unixepoch', 'localtime')",
+    }
+}
+
+/// Every session that spent in each bucket, keyed by `(provider, session id)`.
+///
+/// A title is attached only when the relay's record of that session names the same
+/// provider: one id string under two providers is two sessions, not one.
+fn session_buckets(
+    store: &UsageStore,
+    since: u64,
+    until: u64,
+    bucket: Bucket,
+    titles: &HashMap<String, SessionTitle>,
+) -> Vec<ReportSessionBucket> {
+    let mut map: BTreeMap<String, Vec<ReportSession>> = BTreeMap::new();
+    for row in store.by_session(since, until, bucket_key_sql(bucket)) {
+        let title = titles
+            .get(&row.thread_id)
+            .filter(|meta| meta.provider == row.provider)
+            .map(|meta| meta.title.clone());
+        map.entry(row.bucket).or_default().push(ReportSession {
+            total: effective_total(&row.usage),
+            thread_id: row.thread_id,
+            provider: row.provider,
+            title,
+        });
+    }
+    map.into_iter()
+        .map(|(key, mut sessions)| {
+            sessions.sort_by(|a, b| {
+                b.total
+                    .cmp(&a.total)
+                    .then_with(|| a.provider.cmp(&b.provider))
+                    .then_with(|| a.thread_id.cmp(&b.thread_id))
+            });
+            ReportSessionBucket { key, sessions }
+        })
         .collect()
 }
 
@@ -1076,6 +1156,191 @@ mod tests {
         assert_eq!(report.cap_hits.len(), 1);
         assert_eq!(report.cap_hits[0].hold_count, 2);
         assert_eq!(report.cap_hits[0].cap, 5_000_000);
+    }
+
+    fn session_event(at: u64, provider: &str, thread_id: &str, total: u64) -> TokenEvent {
+        TokenEvent {
+            thread_id: thread_id.into(),
+            ..event(at, provider, total)
+        }
+    }
+
+    fn sessions_for<'a>(report: &'a UsageReport, key: &str) -> Vec<(&'a str, &'a str, u64)> {
+        report
+            .sessions
+            .iter()
+            .find(|bucket| bucket.key == key)
+            .map(|bucket| {
+                bucket
+                    .sessions
+                    .iter()
+                    .map(|s| (s.provider.as_str(), s.thread_id.as_str(), s.total))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn assert_sessions_partition_buckets(report: &UsageReport) {
+        for bucket in &report.buckets {
+            let chart: u64 = bucket.groups.iter().map(|g| g.total).sum();
+            let listed: u64 = sessions_for(report, &bucket.key)
+                .iter()
+                .map(|(_, _, total)| total)
+                .sum();
+            assert_eq!(
+                listed, chart,
+                "sessions under {} must add up to that bar",
+                bucket.key
+            );
+        }
+        for bucket in &report.sessions {
+            assert!(
+                report.buckets.iter().any(|b| b.key == bucket.key),
+                "session bucket {} has no bar",
+                bucket.key
+            );
+        }
+    }
+
+    #[test]
+    fn day_report_files_each_session_under_the_day_it_spent() {
+        let (_dir, store) = open();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let today = store.local_midnight_containing(now);
+        let yesterday = today.saturating_sub(86_400);
+        store.record(&session_event(
+            yesterday + 3_600,
+            "claude_code",
+            "s-a",
+            9_000,
+        ));
+        store.record(&session_event(yesterday + 7_200, "codex", "s-old", 4_000));
+        store.record(&session_event(today + 3_600, "claude_code", "s-a", 300));
+        store.record(&session_event(today + 3_700, "claude_code", "s-a", 200));
+        store.record(&session_event(today + 3_800, "codex", "s-b", 800));
+
+        let report = build_report(
+            &store,
+            today.saturating_sub(13 * 86_400),
+            today + 10 * 3_600,
+            Bucket::Day,
+            false,
+            &["claude_code".into(), "codex".into()],
+            &ReportOptions::default(),
+        )
+        .unwrap();
+
+        let today_key = report.buckets.last().unwrap().key.clone();
+        let yesterday_key = report.buckets[report.buckets.len() - 2].key.clone();
+        assert_eq!(
+            sessions_for(&report, &yesterday_key),
+            vec![("claude_code", "s-a", 9_000), ("codex", "s-old", 4_000)]
+        );
+        assert_eq!(
+            sessions_for(&report, &today_key),
+            vec![("codex", "s-b", 800), ("claude_code", "s-a", 500)]
+        );
+        assert_sessions_partition_buckets(&report);
+    }
+
+    #[test]
+    fn week_and_month_sessions_use_the_charts_own_bucket_keys() {
+        let (_dir, store) = open();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let today = store.local_midnight_containing(now);
+        for (days_back, thread, total) in [
+            (0, "s-now", 700),
+            (9, "s-then", 1_100),
+            (40, "s-old", 2_300),
+        ] {
+            store.record(&session_event(
+                today.saturating_sub(days_back * 86_400) + 3_600,
+                "codex",
+                thread,
+                total,
+            ));
+        }
+
+        for bucket in [Bucket::Week, Bucket::Month] {
+            let report = build_report(
+                &store,
+                today.saturating_sub(120 * 86_400),
+                today + 10 * 3_600,
+                bucket,
+                false,
+                &["codex".into()],
+                &ReportOptions::default(),
+            )
+            .unwrap();
+            assert_sessions_partition_buckets(&report);
+            let current = report.buckets.last().unwrap().key.clone();
+            assert!(
+                sessions_for(&report, &current)
+                    .iter()
+                    .any(|(_, id, _)| *id == "s-now"),
+                "{bucket:?}: the current period lists the session that spent in it"
+            );
+            assert!(
+                sessions_for(&report, &current)
+                    .iter()
+                    .all(|(_, id, _)| *id != "s-old"),
+                "{bucket:?}: a session from 40 days ago is not in the current period"
+            );
+        }
+    }
+
+    #[test]
+    fn session_titles_join_on_provider_and_unknown_sessions_stay_listed() {
+        let (_dir, store) = open();
+        store.record(&session_event(1_000, "claude_code", "s-a", 500));
+        store.record(&session_event(1_100, "codex", "s-a", 100));
+        store.record(&session_event(1_200, "claude_code", "s-gone", 50));
+        let mut options = ReportOptions::default();
+        options.session_titles.insert(
+            "s-a".into(),
+            SessionTitle {
+                provider: "claude_code".into(),
+                title: "Fix the chart".into(),
+            },
+        );
+
+        let report = build_report(
+            &store,
+            0,
+            2_000,
+            Bucket::None,
+            false,
+            &["claude_code".into(), "codex".into()],
+            &options,
+        )
+        .unwrap();
+
+        let rows: Vec<_> = report.sessions[0]
+            .sessions
+            .iter()
+            .map(|s| {
+                (
+                    s.provider.as_str(),
+                    s.thread_id.as_str(),
+                    s.title.as_deref(),
+                    s.total,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("claude_code", "s-a", Some("Fix the chart"), 500),
+                ("codex", "s-a", None, 100),
+                ("claude_code", "s-gone", None, 50),
+            ]
+        );
     }
 
     #[test]

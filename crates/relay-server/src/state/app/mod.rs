@@ -342,6 +342,8 @@ pub(crate) mod tests;
 mod thread_workspace;
 mod threads;
 mod transcript;
+#[cfg(test)]
+mod usage_report_tests;
 pub(crate) use thread_workspace::ThreadWorkspaceError;
 pub(crate) use transcript::TranscriptReadError;
 mod workflow;
@@ -1013,7 +1015,7 @@ in thread {thread_id}: {error}"
             }
         };
         let providers = self.available_providers();
-        let (store, team_runs, budget) = {
+        let (store, team_runs, session_titles, budget) = {
             let relay = self.relay.read().await;
             let mut team_runs = std::collections::HashMap::new();
             for run in relay.team_runs.values() {
@@ -1025,7 +1027,12 @@ in thread {thread_id}: {error}"
                     },
                 );
             }
-            (relay.usage_store.clone(), team_runs, relay.usage_budget)
+            (
+                relay.usage_store.clone(),
+                team_runs,
+                usage_session_titles(&relay),
+                relay.usage_budget,
+            )
         };
         // The persisted setting wins; the env var stays as a fallback so a
         // relay started with USAGE_DAILY_CAP keeps behaving as it did before the
@@ -1040,6 +1047,7 @@ in thread {thread_id}: {error}"
         });
         let options = crate::usage::report::ReportOptions {
             team_runs,
+            session_titles,
             budget_policy: budget.policy,
             daily_cap,
         };
@@ -1505,6 +1513,56 @@ in thread {thread_id}: {error}"
         }
         None
     }
+}
+
+/// Session titles the relay already holds, as the sidebar would show them.
+///
+/// Memory only: a provider list call would make the report wait on every provider, so a
+/// session outside the last listed page keeps its spend and goes untitled.
+fn usage_session_titles(
+    relay: &RelayState,
+) -> std::collections::HashMap<String, crate::usage::report::SessionTitle> {
+    let clipped = |title: &str| {
+        let mut title = title.trim().to_string();
+        crate::protocol::truncate_with_ellipsis(&mut title, threads::MAX_THREAD_NAME_CHARS);
+        title
+    };
+    let mut titles = std::collections::HashMap::new();
+    for thread in &relay.threads {
+        let title = [thread.name.as_deref().unwrap_or_default(), &thread.preview]
+            .into_iter()
+            .find(|title| !title.trim().is_empty());
+        if let Some(title) = title {
+            titles.insert(
+                thread.id.clone(),
+                crate::usage::report::SessionTitle {
+                    provider: thread.provider.clone(),
+                    title: clipped(title),
+                },
+            );
+        }
+    }
+    for (session_id, name) in &relay.thread_custom_name {
+        let provider = titles
+            .get(session_id)
+            .map(|title| title.provider.clone())
+            .or_else(|| {
+                relay
+                    .session_bindings
+                    .binding(session_id)
+                    .map(|binding| binding.provider.clone())
+            });
+        if let Some(provider) = provider {
+            titles.insert(
+                session_id.clone(),
+                crate::usage::report::SessionTitle {
+                    provider,
+                    title: clipped(name),
+                },
+            );
+        }
+    }
+    titles
 }
 
 fn expire_turn_liveness_if_needed(relay: &mut RelayState) -> bool {
