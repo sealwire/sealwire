@@ -743,15 +743,45 @@ impl ProviderBridge for ClaudeCodeBridge {
         if let Some(prompt) = system_prompt.as_deref() {
             cmd["systemPrompt"] = Value::String(prompt.to_string());
         }
+        // This `start` builds the SDK session before the relay has recorded the thread,
+        // so its tools follow the request, as Codex's do, and the token binds once named.
+        let mut ask_token = None;
         if let Some(device_id) = request.orchestrator_tools.as_deref() {
             cmd["mcpServers"] = orchestrator_mcp_config(&self.worker_path, device_id);
             cmd["allowedTools"] = orchestrator_allowed_tools();
             // No built-ins. A secretary with Bash is a coding agent that has been
             // asked nicely not to be one.
             cmd["tools"] = Value::Array(Vec::new());
+        } else {
+            match crate::provider::sealwire_mcp_for_new_session(&request.purpose) {
+                crate::provider::SealwireMcpIdentity::Seat(run_id) => {
+                    cmd["mcpServers"] = seat_mcp_config(&self.worker_path, &run_id);
+                }
+                crate::provider::SealwireMcpIdentity::Peer => {
+                    let unrestricted = crate::state::session_is_unrestricted(
+                        &request.approval_policy,
+                        &request.sandbox,
+                    );
+                    let token = self
+                        .state
+                        .write()
+                        .await
+                        .mint_unbound_ask_token(unrestricted);
+                    cmd["mcpServers"] = peer_mcp_config(&self.worker_path, &token);
+                    cmd["allowedTools"] = peer_allowed_tools(
+                        &crate::provider::relay_mcp_server_name(&token),
+                        unrestricted,
+                    );
+                    ask_token = Some(token);
+                }
+                crate::provider::SealwireMcpIdentity::None => {}
+            }
         }
         let result = self.send_request("start", cmd).await?;
         let thread = parse_thread_summary(value_at(&result, &["thread"]).unwrap_or(&Value::Null))?;
+        if let Some(token) = ask_token.as_deref() {
+            self.state.write().await.bind_ask_token(token, &thread.id);
+        }
         let initial_user_message = value_at(&result, &["initial_user_message"])
             .and_then(|value| serde_json::from_value(value.clone()).ok());
         let started_turn_id = initial_user_message
@@ -4089,6 +4119,142 @@ for await (const line of rl) {
             wait_for_log(&state, "prompt=yes", 5).await,
             "the materializing `start` must include the first user message",
         );
+    }
+
+    /// A start carrying its first message builds the SDK session right there, so the
+    /// peer tools have to go on that `start`, judged from the request's permissions.
+    #[tokio::test]
+    async fn a_start_with_a_first_message_attaches_the_tools_its_permissions_allow() {
+        let Some((bridge, state)) = spawn_fake_bridge().await else {
+            return;
+        };
+        let start_line = |cwd: &'static str| {
+            let state = state.clone();
+            async move {
+                let relay = state.read().await;
+                relay
+                    .snapshot()
+                    .logs
+                    .iter()
+                    .map(|log| log.message.clone())
+                    .find(|line| {
+                        line.contains("type=start") && line.contains(&format!("cwd={cwd} "))
+                    })
+                    .unwrap_or_default()
+            }
+        };
+
+        let wide = ProviderBridge::start_thread(
+            &bridge,
+            StartThreadRequest::new("/tmp/wide", "claude-haiku", "bypass", "workspace-write")
+                .with_initial_prompt(Some("hello")),
+        )
+        .await
+        .expect("immediate start");
+        assert!(wait_for_log(&state, "cwd=/tmp/wide ", 5).await);
+        let line = start_line("/tmp/wide").await;
+        // Minted for this start and now bound to the session it started.
+        let token = state.write().await.ask_token_for_thread(&wide.thread.id);
+        let server = crate::provider::relay_mcp_server_name(&token);
+        assert!(line.contains(&format!("mcp={server} ")), "{line}");
+        assert!(line.contains(&format!("mcp__{server}__delegate")), "{line}");
+
+        ProviderBridge::start_thread(
+            &bridge,
+            StartThreadRequest::new("/tmp/narrow", "claude-haiku", "untrusted", "read-only")
+                .with_initial_prompt(Some("hello")),
+        )
+        .await
+        .expect("immediate start");
+        assert!(wait_for_log(&state, "cwd=/tmp/narrow ", 5).await);
+        let line = start_line("/tmp/narrow").await;
+        assert!(
+            line.contains("__report_back"),
+            "every session can answer: {line}"
+        );
+        assert!(
+            !line.contains("__delegate"),
+            "a narrow session brings in nobody: {line}"
+        );
+    }
+
+    /// Through the relay: the session keeps the token its `start` carried, so the next
+    /// message neither rebuilds the SDK session nor hides `delegate` from the listing.
+    #[tokio::test]
+    async fn a_session_started_with_a_message_keeps_its_tools_on_the_next_message() {
+        use std::collections::HashMap;
+
+        let (tx, _rx) = tokio::sync::watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            "/tmp".to_string(),
+            tx.clone(),
+            crate::state::SecurityProfile::private(),
+        )));
+        let bridge = match ClaudeCodeBridge::spawn_with_worker_path(
+            relay.clone(),
+            &fake_worker_path(),
+        )
+        .await
+        {
+            Ok(bridge) => bridge,
+            Err(_) => {
+                eprintln!("skipping: claude worker not available (node missing)");
+                return;
+            }
+        };
+        let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> =
+            HashMap::new();
+        providers.insert("claude_code".to_string(), Arc::new(bridge));
+        let app = crate::state::AppState::from_parts(relay.clone(), providers, tx);
+
+        let session_id = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some("/tmp".to_string()),
+                initial_prompt: Some("call the delegate tool".to_string()),
+                model: Some("haiku".to_string()),
+                approval_policy: Some("bypass".to_string()),
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("claude_code".to_string()),
+                project_id: None,
+            })
+            .await
+            .expect("start with a first message")
+            .active_thread_id
+            .expect("session");
+        let token = relay.write().await.ask_token_for_thread(&session_id);
+        let listed: Vec<String> = app
+            .list_peer_tools_for(&token)
+            .await
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(listed.iter().any(|name| name == "delegate"), "{listed:?}");
+
+        app.send_message(crate::protocol::SendMessageInput {
+            text: "and again".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            thread_id: session_id.clone(),
+        })
+        .await
+        .expect("second message");
+        assert!(wait_for_log(&relay, "type=send", 5).await);
+        let server = crate::provider::relay_mcp_server_name(&token);
+        let relay = relay.read().await;
+        let lines: Vec<String> = relay
+            .snapshot()
+            .logs
+            .iter()
+            .map(|log| log.message.clone())
+            .filter(|line| line.contains("type=start") || line.contains("type=send"))
+            .collect();
+        assert!(!lines.is_empty());
+        for line in &lines {
+            assert!(line.contains(&format!("mcp={server} ")), "{line}");
+        }
     }
 
     #[tokio::test]
