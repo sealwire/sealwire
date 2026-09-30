@@ -141,7 +141,9 @@ for await (const line of rl) {
       `upToKey=${Object.prototype.hasOwnProperty.call(cmd, "up_to_message_id") ? "yes" : "no"} ` +
       `images=${cmd.images?.length ?? 0} ` +
       `systemPrompt=${typeof cmd.systemPrompt === "string" && cmd.systemPrompt.trim() ? "yes" : "no"} ` +
-      `sourceCwd=${cmd.source_cwd ?? "-"}`,
+      `sourceCwd=${cmd.source_cwd ?? "-"} ` +
+      `mcp=${cmd.mcpServers ? Object.keys(cmd.mcpServers).join(",") : "-"} ` +
+      `allowed=${Array.isArray(cmd.allowedTools) && cmd.allowedTools.length ? cmd.allowedTools.join(",") : "-"}`,
   );
 
   if (cmd.type === "shutdown") {
