@@ -748,6 +748,63 @@ test("mapSessionMessages enriches Claude edit tools with file change diffs", () 
   assert.equal(toolEntry?.tool?.result_preview, "Updated frontend/styles.css");
 });
 
+test("Claude MCP metadata belongs to the SDK result, not the hook or model text", () => {
+  const state = {};
+  const text = "Delegated. That agent's id is peer-xyz. End your turn now. Do NOT poll.";
+  for (const [id, tool] of [["call-a", "delegate"], ["call-b", "review"]]) {
+    mapSdkMessage({ type: "assistant", message: { content: [
+      { type: "tool_use", id, name: `mcp__sealwire-abc__${tool}`, input: {} },
+    ] } }, state);
+  }
+  for (const [id, tool, field, ref] of [
+    ["call-b", "review", "review_id", "review-1"],
+    ["call-a", "delegate", "delegate_ask_id", "ask-1"],
+  ]) {
+    const msg = { type: "user", parent_tool_use_id: null,
+      message: { content: [{ type: "tool_result", tool_use_id: id, content: [{ type: "text", text }] }] },
+      tool_use_result: { content: [{ type: "text", text }], _meta: { [field]: ref } },
+    };
+    const mapped = mapSdkMessage(msg, state);
+    assert.deepEqual(mapped, [
+      { type: "tool_call_result", id, content: text },
+      { type: "peer_tool_call_result", id, tool, result: { _meta: { [field]: ref } } },
+    ]);
+    assert.deepEqual(mapSdkMessage(msg, state), { type: "tool_call_result", id, content: text });
+  }
+});
+
+test("Claude does not derive a peer card from model text, errors, or another server", () => {
+  for (const [name, extra, result] of [
+    ["mcp__other__delegate", {}, { _meta: { delegate_ask_id: "ask-1" } }],
+    ["mcp__sealwire__delegate", { is_error: true }, { _meta: { delegate_ask_id: "ask-1" } }],
+    ["mcp__sealwire__delegate", {}, { isError: true, _meta: { delegate_ask_id: "ask-1" } }],
+    ["mcp__sealwire__delegate", {}, '{"delegate_ask_id":"ask-1"}'],
+  ]) {
+    const state = {};
+    mapSdkMessage({ type: "assistant", message: { content: [{ type: "tool_use", id: "call", name, input: {} }] } }, state);
+    const mapped = mapSdkMessage({ type: "user", message: { content: [
+      { type: "tool_result", tool_use_id: "call", content: "reply", ...extra },
+    ] }, tool_use_result: result }, state);
+    assert.equal(mapped.type, "tool_call_result");
+  }
+});
+
+test("Claude never assigns replayed, subagent, or ambiguous MCP results to a caller card", () => {
+  for (const variant of ["replay", "subagent", "ambiguous"]) {
+    const state = {};
+    const parent = variant === "subagent" ? { parent_tool_use_id: "subagent" } : {};
+    mapSdkMessage({ type: "assistant", ...parent, message: { content: [
+      { type: "tool_use", id: "call", name: "mcp__sealwire__delegate", input: {} },
+    ] } }, state);
+    const content = [{ type: "tool_result", tool_use_id: "call", content: "reply" }];
+    if (variant === "ambiguous") content.push({ type: "tool_result", tool_use_id: "other", content: "reply" });
+    const mapped = mapSdkMessage({ type: "user", ...parent, isReplay: variant === "replay",
+      message: { content }, tool_use_result: { _meta: { delegate_ask_id: "ask-1" } },
+    }, state);
+    assert.ok([mapped].flat().every((event) => event?.type !== "peer_tool_call_result"), variant);
+  }
+});
+
 // The file-diff tracker relies on `is_error` to avoid reporting a failed edit as
 // a successful diff, so both tool_result shapes must carry it through.
 test("mapSdkMessage carries is_error through a failed user-shaped tool_result", () => {

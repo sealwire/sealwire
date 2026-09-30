@@ -11,7 +11,7 @@ fn codex_mcp_result_anchors_only_the_matching_delegate_item() {
         SecurityProfile::private(),
     );
     let mut ask = crate::state::Ask::new(
-        "ask-one".into(),
+        "ask-xyz".into(),
         "caller".into(),
         "peer".into(),
         "codex".into(),
@@ -24,12 +24,8 @@ fn codex_mcp_result_anchors_only_the_matching_delegate_item() {
     );
     ask.sent_at = Some(crate::state::unix_now());
     relay.insert_ask(ask);
-    let item = json!({
-        "type": "mcpToolCall", "id": "item-one", "server": "sealwire-abc", "tool": "delegate",
-        "status": "completed",
-        "result": { "content": [{ "type": "text", "text": "Delegated." }],
-                    "structuredContent": { "delegate_ask_id": "ask-one" } }
-    });
+    let item: Value =
+        serde_json::from_str(include_str!("../fixtures/codex-mcp-delegate-result.json")).unwrap();
     mark_codex_peer_tool_result(&mut relay, "caller", &item);
     mark_codex_peer_tool_result(&mut relay, "caller", &item);
     assert_eq!(relay.injections.anchored_rows("caller"), 1);

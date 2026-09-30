@@ -1,0 +1,28 @@
+{
+  "type": "mcpToolCall",
+  "id": "call_test",
+  "server": "sealwire",
+  "tool": "delegate",
+  "status": "completed",
+  "arguments": {
+    "message": "inspect"
+  },
+  "appContext": null,
+  "mcpAppUi": null,
+  "pluginId": null,
+  "readOnlyHint": null,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Delegated. Peer id: peer-xyz. End your turn now. Do NOT poll."
+      }
+    ],
+    "structuredContent": null,
+    "_meta": {
+      "delegate_ask_id": "ask-xyz"
+    }
+  },
+  "error": null,
+  "durationMs": 6
+}

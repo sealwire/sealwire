@@ -7257,6 +7257,52 @@ mod session_binding_boundary_tests {
     }
 
     #[tokio::test]
+    async fn real_sdk_mcp_events_render_one_card_on_the_bound_tool_row() {
+        let state = bound_relay().await;
+        {
+            let mut relay = state.write().await;
+            let mut ask = crate::state::Ask::new(
+                "ask-xyz".into(),
+                SESSION.into(),
+                "peer-xyz".into(),
+                "codex".into(),
+                None,
+                None,
+                "Inspect changes".into(),
+                "/tmp/b".into(),
+                None,
+                relay_api::delegation::StartedBy::Agent,
+            );
+            ask.sent_at = Some(crate::state::unix_now());
+            relay.insert_ask(ask);
+        }
+        let events: Vec<Value> =
+            serde_json::from_str(include_str!("fixtures/claude-mcp-delegate-events.json")).unwrap();
+        for event in &events {
+            handle_worker_event(event.clone(), &state).await;
+        }
+        handle_worker_event(events.last().unwrap().clone(), &state).await;
+        let relay = state.read().await;
+        let snapshot = relay.snapshot();
+        assert_eq!(snapshot.transcript.len(), 1);
+        let row = &snapshot.transcript[0];
+        assert_eq!(row.item_id.as_deref(), Some("tool:toolu_test"));
+        assert_eq!(
+            row.injection.as_ref().unwrap().kind,
+            crate::protocol::InjectionKind::DelegateCall
+        );
+        assert_eq!(row.injection.as_ref().unwrap().delegates()[0].id, "ask-xyz");
+        assert!(row
+            .tool
+            .as_ref()
+            .unwrap()
+            .result_preview
+            .as_ref()
+            .unwrap()
+            .contains("Do NOT poll"));
+    }
+
+    #[tokio::test]
     async fn an_assistant_message_lands_on_the_session_not_the_sdk_id() {
         let state = bound_relay().await;
 

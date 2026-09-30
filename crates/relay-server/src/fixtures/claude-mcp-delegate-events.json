@@ -1,0 +1,47 @@
+[
+  {
+    "type": "tool_call_requested",
+    "id": "toolu_test",
+    "name": "mcp__sealwire__delegate",
+    "args": {
+      "message": "Inspect changes"
+    },
+    "item_id": "tool:toolu_test",
+    "status": "running",
+    "tool": {
+      "item_type": "toolCall",
+      "name": "mcp__sealwire__delegate",
+      "title": "Mcp  Sealwire  Delegate",
+      "detail": null,
+      "query": null,
+      "path": null,
+      "url": null,
+      "command": null,
+      "input_preview": "{\"message\":\"Inspect changes\"}",
+      "result_preview": null,
+      "diff": null,
+      "file_changes": []
+    },
+    "turn_id": "turn-mcp-test",
+    "provider_session_id": "sdk-session-1"
+  },
+  {
+    "type": "tool_call_result",
+    "id": "toolu_test",
+    "content": "Delegated. Peer id: peer-xyz. End your turn now. Do NOT poll.",
+    "turn_id": "turn-mcp-test",
+    "provider_session_id": "sdk-session-1"
+  },
+  {
+    "type": "peer_tool_call_result",
+    "id": "toolu_test",
+    "tool": "delegate",
+    "result": {
+      "_meta": {
+        "delegate_ask_id": "ask-xyz"
+      }
+    },
+    "turn_id": "turn-mcp-test",
+    "provider_session_id": "sdk-session-1"
+  }
+]
