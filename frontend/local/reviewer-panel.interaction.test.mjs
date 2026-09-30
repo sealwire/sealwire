@@ -428,6 +428,36 @@ test("a review with nothing in the asked-for form shows the reviewer's own words
   }
 });
 
+for (const [label, note, shown] of [
+  ["its short verdict", "Peer tools attach; safe to land.", "Peer tools attach; safe to land."],
+  ["no short verdict", undefined, "The full reply is in the reviewer's session."],
+]) {
+  test(`a clean approval with ${label} has text to click, read from the review itself`, async () => {
+    const reads = [];
+    const opened = [];
+    const approved = reviewWith([]);
+    approved.result.rounds[0].verdict = "approve";
+    approved.result.rounds[0].verdict_note = note;
+    const panel = await mountPanel({
+      reviewJobs: [approved],
+      onOpenThread: (threadId) => opened.push(threadId),
+      fetchReviewerTranscript: async (threadId) => {
+        reads.push(threadId);
+        return [];
+      },
+    });
+    try {
+      const text = panel.container.querySelector(".reviewer-review-open .reviewer-card-result");
+      assert.equal(text?.textContent, shown);
+      assert.deepEqual(reads, [], "the relay already sent it");
+      await act(async () => click(text));
+      assert.deepEqual(opened, ["rev-1"]);
+    } finally {
+      await panel.unmount();
+    }
+  });
+}
+
 test("while the reviewer reads the next round, the card follows it rather than the last one", async () => {
   const reads = [];
   const panel = await mountPanel({

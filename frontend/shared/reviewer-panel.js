@@ -377,8 +377,9 @@ function ReviewSlot({
   const findings = reviewFindings(job);
   const listed = Boolean(findings?.rows.length);
   // The reviewer's own words only while it reads, or where it wrote outside the asked-for
-  // form; a clean approval has nothing more to say.
-  const wantsText = !listed && findings?.verdict !== "approve";
+  // form; a clean approval's short verdict comes with the review itself.
+  const approvedClean = !listed && findings?.verdict === "approve";
+  const wantsText = !listed && !approvedClean;
   const following = !terminal && !findings;
 
   // Polled while the reviewer reads, so a stuck one can be watched from here.
@@ -444,6 +445,14 @@ function ReviewSlot({
           "div",
           { className: "reviewer-review-findings", key: "listed" },
           h(FindingList, { rows: findings.rows, more: findings.more })
+        )
+      : null,
+    // Never empty: the middle of the card is the only way into the reviewer's session.
+    approvedClean
+      ? h(
+          "p",
+          { className: "reviewer-card-result", key: "note" },
+          findings.note || "The full reply is in the reviewer's session."
         )
       : null,
     wantsText && review.status === "loading" && !review.text

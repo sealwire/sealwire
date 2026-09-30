@@ -381,7 +381,7 @@ pub(crate) fn intent_title(message: &str) -> Option<String> {
 
 /// Match `oneLineResult`: markdown-light cleanup, whitespace flattening, and a bounded
 /// result that carries an explicit ellipsis whenever content was omitted.
-fn one_line_result(value: &str) -> Option<String> {
+pub(crate) fn one_line_result(value: &str) -> Option<String> {
     let flat = value
         .lines()
         .map(strip_ledger_markers)

@@ -166,7 +166,14 @@ function reviewResultCard(job) {
 /** What the review's card lists: `{rows, more}` for `FindingList`, or null. */
 export function reviewFindings(job) {
   const card = reviewResultCard(job);
-  return card ? { rows: card.rows, more: card.more, verdict: card.round?.verdict || null } : null;
+  return card
+    ? {
+        rows: card.rows,
+        more: card.more,
+        verdict: card.round?.verdict || null,
+        note: card.round?.verdict_note || null,
+      }
+    : null;
 }
 
 /** What the review DECIDED, in the words its card in the conversation uses. */

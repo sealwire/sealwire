@@ -23250,6 +23250,43 @@ settings update: {error}"
     }
 
     #[tokio::test]
+    async fn the_agents_panel_carries_an_approvals_short_verdict() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+        let codex = providers.get("codex").unwrap();
+        queue_verdicts(codex, &["APPROVE"]).await;
+        codex.reviewer_notes.lock().await.push_back(
+            "## Findings\nNone.\n\n## Verdict\nThe gate holds; safe to land.".to_string(),
+        );
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review starts");
+        assert_eq!(
+            wait_for_review(&app, &receipt.review_job_id).await.status,
+            "complete"
+        );
+        let reviews = app.reviews(None).await;
+        let result = reviews
+            .review_jobs
+            .iter()
+            .find(|job| job.id == receipt.review_job_id)
+            .and_then(|job| job.result.as_ref())
+            .expect("a finished review sends its result");
+        let round = result
+            .rounds
+            .iter()
+            .find(|round| round.round == result.round)
+            .expect("the result's own round");
+        assert_eq!(
+            round.verdict_note.as_deref(),
+            Some("The gate holds; safe to land.")
+        );
+    }
+
+    #[tokio::test]
     async fn the_agents_panel_lists_what_the_last_review_card_lists() {
         use crate::protocol::InjectionKind;
         let dir = TempDir::new().expect("tmpdir");

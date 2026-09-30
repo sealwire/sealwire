@@ -593,6 +593,7 @@ fn card_rounds(
         findings: Vec::new(),
         fixed: Vec::new(),
         change: None,
+        verdict_note: None,
         ..round.clone()
     };
     rounds
@@ -608,6 +609,7 @@ fn card_rounds(
                     if round.round == row_round =>
                 {
                     kept.findings = take(&round.findings);
+                    kept.verdict_note = round.verdict_note.clone();
                 }
                 // Read only for how many of the card's findings the next round fixed.
                 InjectionKind::ReviewResult if round.round == row_round + 1 => {}
@@ -615,6 +617,7 @@ fn card_rounds(
                     kept.fixed = take(&round.fixed);
                     if round.round == last {
                         kept.findings = take(&round.findings);
+                        kept.verdict_note = round.verdict_note.clone();
                     }
                 }
                 // What still stands; what got fixed is only counted.
