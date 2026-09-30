@@ -18053,6 +18053,209 @@ mod review_tests {
     }
 
     #[tokio::test]
+    async fn mcp_review_is_hidden_and_refused_until_enabled() {
+        let dir = TempDir::new().unwrap();
+        let (app, _) = build_review_app(dir.path().to_str().unwrap(), &["codex"]).await;
+        assert!(!crate::orchestrator_tools::peer_tools()
+            .iter()
+            .any(|tool| tool.name == "review"));
+        assert!(!crate::orchestrator_tools::available_tools()
+            .iter()
+            .any(|tool| tool.name == "review"));
+        let args = serde_json::json!({"provider":"codex", "message":"Check the changes"});
+        let result = app
+            .call_peer_tool_with_metadata("review", &args, "unused")
+            .await;
+        assert!(matches!(result, Err(error) if error.contains("not enabled")));
+        assert!(app
+            .call_orchestrator_tool("review", &args, None)
+            .await
+            .unwrap_err()
+            .contains("not enabled"));
+        assert!(crate::orchestrator_tools::parse_call("review", &args).is_ok());
+        assert!(crate::orchestrator_tools::parse_call(
+            "review",
+            &serde_json::json!({"provider":"codex"})
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn mcp_review_returns_before_the_caller_finishes_and_marks_one_persistent_tool_row() {
+        use crate::protocol::{InjectionKind, ToolCallView, TranscriptEntryKind};
+        use crate::state::relay::{InjectionReader, ThreadTranscript};
+        use crate::state::IdSpace;
+        use crate::usage::store::UsageStore;
+
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().to_str().unwrap();
+        let database = dir.path().join("cards.db");
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.install_database(UsageStore::open(&database));
+            let mut settings = relay.thread_settings(&parent.id).unwrap();
+            settings.approval_policy = "bypass".into();
+            settings.sandbox = "danger-full-access".into();
+            relay.thread_settings.insert(parent.id.clone(), settings);
+            relay.set_active_turn(Some("calling-turn".into()));
+            relay.set_thread_status(&parent.id, "active".into(), Vec::new());
+        }
+        let token = app.ask_token_for_thread(&parent.id).await;
+        let args = serde_json::json!({"provider":"codex", "message":"Check the unique MCP brief and retry loop"});
+        let (one, two) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(
+                app.dispatch_peer_tool("review", &args, &token),
+                app.dispatch_peer_tool("review", &args, &token),
+            )
+        })
+        .await
+        .expect("MCP must not wait on its own calling turn");
+        assert_ne!(
+            one.is_ok(),
+            two.is_ok(),
+            "only one review may own the parent"
+        );
+        let reply = one.or(two).unwrap();
+        let review_id = reply.review_id.clone().unwrap();
+        let envelope =
+            crate::state::app::orchestrator_dispatch::peer_tool_result_envelope(Ok(reply));
+        assert_eq!(envelope["structuredContent"]["review_id"], review_id);
+        assert!(providers["codex"].turns.lock().await.is_empty());
+        assert_eq!(
+            app.relay
+                .read()
+                .await
+                .review_job(&review_id)
+                .unwrap()
+                .started_by,
+            relay_api::delegation::StartedBy::Agent
+        );
+        {
+            let mut relay = app.relay.write().await;
+            relay.mark_peer_tool_result("foreign", "wrong", "review", &envelope);
+            let mut failed = envelope.clone();
+            failed["isError"] = serde_json::json!(true);
+            relay.mark_peer_tool_result(&parent.id, "error", "review", &failed);
+            assert_eq!(relay.injections.anchored_rows(&parent.id), 0);
+            relay.mark_peer_tool_result(&parent.id, "review-tool", "review", &envelope);
+            relay.mark_peer_tool_result(&parent.id, "review-tool", "review", &envelope);
+            relay.mark_peer_tool_result(&parent.id, "duplicate-tool", "review", &envelope);
+            assert_eq!(relay.injections.anchored_rows(&parent.id), 1);
+            let mut tool = ToolCallView::command_execution(None);
+            tool.item_type = "mcpToolCall".into();
+            tool.name = "review".into();
+            for _ in 0..2 {
+                relay.upsert_item_for_thread(
+                    &parent.id,
+                    "review-tool".into(),
+                    IdSpace::Provider,
+                    TranscriptEntryKind::ToolCall,
+                    Some("calling-turn".into()),
+                    "completed".into(),
+                    None,
+                    Some(tool.clone()),
+                );
+            }
+            relay.set_active_turn(None);
+            relay.set_thread_status(&parent.id, "idle".into(), Vec::new());
+            relay.notify();
+        }
+        let job = wait_for_review(&app, &review_id).await;
+        assert_eq!(job.status, "complete", "{:?}", job.error);
+        let turns = providers["codex"].turns.lock().await.clone();
+        assert_eq!(
+            turns
+                .iter()
+                .filter(|(id, _)| Some(id) == job.reviewer_thread_id.as_ref())
+                .count(),
+            1
+        );
+        assert!(turns
+            .iter()
+            .any(|(_, text)| text.contains("Check the unique MCP brief and retry loop")));
+        assert!(turns
+            .iter()
+            .all(|(_, text)| !text.contains("recap the changes")));
+
+        let mut relay = app.relay.write().await;
+        let mut row = relay
+            .runtime_for_thread(&parent.id)
+            .unwrap()
+            .transcript
+            .iter()
+            .find(|row| row.provider_item_id.as_deref() == Some("review-tool"))
+            .unwrap()
+            .clone();
+        row.row_id = "rebuilt-row".into();
+        relay.install_database(UsageStore::open(&database));
+        relay.ensure_runtime_for_thread(&parent.id).transcript =
+            ThreadTranscript::from_rows(vec![row]);
+        let marks = relay.thread_injections(&parent.id, InjectionReader::Operator);
+        let page = relay
+            .runtime_for_thread(&parent.id)
+            .unwrap()
+            .transcript_page(&parent.id, None, &marks);
+        assert_eq!(page.entries.len(), 1);
+        let mark = page.entries[0].injection.as_ref().unwrap();
+        assert_eq!(mark.kind, InjectionKind::ReviewCall);
+        assert_eq!(mark.review().unwrap().id, review_id);
+        assert_eq!(mark.review().unwrap().status, "complete");
+    }
+
+    #[tokio::test]
+    async fn mcp_review_wait_failure_keeps_a_late_card_without_interrupting_the_caller() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        let token = app.ask_token_for_thread(&parent.id).await;
+        let args = serde_json::json!({"provider":"codex", "message":"Inspect changes"});
+        {
+            let mut relay = app.relay.write().await;
+            let mut settings = relay.thread_settings(&parent.id).unwrap();
+            settings.approval_policy = "untrusted".into();
+            settings.sandbox = "read-only".into();
+            relay.thread_settings.insert(parent.id.clone(), settings);
+        }
+        let refused = app.dispatch_peer_tool("review", &args, &token).await;
+        assert!(matches!(refused, Err(error) if error.contains("permissions")));
+        {
+            let mut relay = app.relay.write().await;
+            let mut settings = relay.thread_settings(&parent.id).unwrap();
+            settings.approval_policy = "bypass".into();
+            settings.sandbox = "danger-full-access".into();
+            relay.thread_settings.insert(parent.id.clone(), settings);
+            relay.set_active_turn(Some("calling-turn".into()));
+            relay.set_thread_status(&parent.id, "active".into(), Vec::new());
+        }
+        app.set_review_step_timeout_ms(10);
+        let reply = app
+            .dispatch_peer_tool("review", &args, &token)
+            .await
+            .unwrap();
+        let id = reply.review_id.clone().unwrap();
+        let job = wait_for_review(&app, &id).await;
+        assert_eq!(job.status, "failed");
+        assert!(providers["codex"].turns.lock().await.is_empty());
+        let mut relay = app.relay.write().await;
+        assert_eq!(relay.active_turn_id.as_deref(), Some("calling-turn"));
+        assert!(
+            relay.injections.review(&id).is_some(),
+            "a result event can arrive after failure"
+        );
+        let result = crate::state::app::orchestrator_dispatch::peer_tool_result_envelope(Ok(reply));
+        relay.mark_peer_tool_result(
+            &parent.id,
+            "late-tool",
+            "mcp: review",
+            &serde_json::json!({"rawOutput": result}),
+        );
+        assert_eq!(relay.injections.anchored_rows(&parent.id), 1);
+    }
+
+    #[tokio::test]
     async fn a_deferred_start_turn_seeds_the_marker_on_the_stable_session_id() {
         // `send_message_to_thread` seeds the active-turn marker "so the wait loop sees
         // 'working' before the provider's first event". It is guarded on the thread
@@ -29815,7 +30018,10 @@ mod ask_tests {
                 .collect();
             assert_eq!(listed, vec!["report_back".to_string()]);
         }
-        for tool in crate::orchestrator_tools::PEER_TOOLS {
+        for tool in crate::orchestrator_tools::PEER_TOOLS
+            .iter()
+            .filter(|name| crate::orchestrator_tools::tool_enabled(name))
+        {
             if *tool == "report_back" {
                 continue;
             }
@@ -29871,7 +30077,7 @@ mod ask_tests {
         assert_eq!(listed, vec!["report_back".to_string()]);
         assert_eq!(
             app.list_peer_tools_for(&unrestricted).await.len(),
-            crate::orchestrator_tools::PEER_TOOLS.len()
+            crate::orchestrator_tools::peer_tools().len()
         );
     }
 
@@ -32402,7 +32608,10 @@ watchdog settle this Blocked",
             app.list_peer_tools_for(&token).await.is_empty(),
             "nor are they advertised to one"
         );
-        for tool in crate::orchestrator_tools::PEER_TOOLS {
+        for tool in crate::orchestrator_tools::PEER_TOOLS
+            .iter()
+            .filter(|name| crate::orchestrator_tools::tool_enabled(name))
+        {
             app.call_peer_tool(tool, &serde_json::json!({}), &token)
                 .await
                 .expect_err("a reviewer does not get to bring in agents of its own");
@@ -32447,7 +32656,10 @@ watchdog settle this Blocked",
             "nor are they advertised to one — the list rides every request"
         );
 
-        for tool in crate::orchestrator_tools::PEER_TOOLS {
+        for tool in crate::orchestrator_tools::PEER_TOOLS
+            .iter()
+            .filter(|name| crate::orchestrator_tools::tool_enabled(name))
+        {
             let error = app
                 .call_peer_tool(tool, &serde_json::json!({}), &token)
                 .await

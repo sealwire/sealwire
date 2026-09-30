@@ -28,6 +28,7 @@ const SUMMARY_LINE_MAX_CHARS: usize = 160;
 pub struct PeerToolReply {
     pub text: String,
     pub ask_id: Option<String>,
+    pub review_id: Option<String>,
 }
 
 /// First non-empty summary line, truncated on a char boundary.
@@ -474,6 +475,18 @@ impl AppState {
         args: &Value,
         ask_token: &str,
     ) -> Result<PeerToolReply, String> {
+        if !orchestrator_tools::tool_enabled(name) {
+            return Err(format!("{name} is not enabled for MCP yet"));
+        }
+        self.dispatch_peer_tool(name, args, ask_token).await
+    }
+
+    pub(super) async fn dispatch_peer_tool(
+        &self,
+        name: &str,
+        args: &Value,
+        ask_token: &str,
+    ) -> Result<PeerToolReply, String> {
         if !orchestrator_tools::PEER_TOOLS.contains(&name) {
             return Err(format!(
                 "{name} is not something a session may call — only {}",
@@ -492,6 +505,7 @@ impl AppState {
             self.peer_tool_allowed(&relay, caller_thread_id, name)?;
         }
         let mut ask_id = None;
+        let mut review_id = None;
         let text = match orchestrator_tools::parse_call(name, args)? {
             ToolCall::GoalStatus => Ok(self.goal_status_text(caller_thread_id).await),
             ToolCall::GoalComplete { summary } => self
@@ -523,6 +537,22 @@ impl AppState {
                     Err(error) => Err(error.message()),
                 }
             }
+            ToolCall::Review {
+                message,
+                provider,
+                model,
+                effort,
+            } => {
+                let receipt = self
+                    .request_review_from_agent(caller_thread_id, provider, model, effort, message)
+                    .await?;
+                review_id = Some(receipt.review_job_id);
+                Ok(
+                    "Review queued. End your turn now; the reviewer starts after this turn ends. \
+Do not poll or wait. Findings will be delivered here."
+                        .to_string(),
+                )
+            }
             ToolCall::Delegate {
                 message,
                 agent,
@@ -553,7 +583,11 @@ impl AppState {
             }
             _ => Err(format!("{name} is not something a session may call")),
         }?;
-        Ok(PeerToolReply { text, ask_id })
+        Ok(PeerToolReply {
+            text,
+            ask_id,
+            review_id,
+        })
     }
 
     /// Run a tool; `Err` is a refused call for the model to read (not HTTP 500).
@@ -563,6 +597,9 @@ impl AppState {
         args: &Value,
         device_id: Option<String>,
     ) -> Result<String, String> {
+        if !orchestrator_tools::tool_enabled(name) {
+            return Err(format!("{name} is not enabled for MCP yet"));
+        }
         if !self.beta_features_enabled().await {
             return Err(super::team::TASKS_LOCKED_MESSAGE.to_string());
         }
@@ -582,6 +619,7 @@ impl AppState {
             // The Orchestrator drives tasks, not ad-hoc peers. Reached only if
             // someone calls the API directly without a caller thread id.
             ToolCall::Delegate { .. }
+            | ToolCall::Review { .. }
             | ToolCall::ReportBack { .. }
             | ToolCall::GoalStatus
             | ToolCall::GoalComplete { .. }
@@ -998,10 +1036,17 @@ pub fn tool_result_envelope(outcome: Result<String, String>) -> Value {
 
 pub fn peer_tool_result_envelope(outcome: Result<PeerToolReply, String>) -> Value {
     match outcome {
-        Ok(PeerToolReply { text, ask_id }) => {
+        Ok(PeerToolReply {
+            text,
+            ask_id,
+            review_id,
+        }) => {
             let mut envelope = tool_result_envelope(Ok(text));
             if let Some(ask_id) = ask_id {
                 envelope["structuredContent"] = json!({ "delegate_ask_id": ask_id });
+            }
+            if let Some(review_id) = review_id {
+                envelope["structuredContent"] = json!({ "review_id": review_id });
             }
             envelope
         }

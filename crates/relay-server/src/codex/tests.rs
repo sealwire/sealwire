@@ -30,14 +30,14 @@ fn codex_mcp_result_anchors_only_the_matching_delegate_item() {
         "result": { "content": [{ "type": "text", "text": "Delegated." }],
                     "structuredContent": { "delegate_ask_id": "ask-one" } }
     });
-    mark_codex_delegate_result(&mut relay, "caller", &item);
-    mark_codex_delegate_result(&mut relay, "caller", &item);
+    mark_codex_peer_tool_result(&mut relay, "caller", &item);
+    mark_codex_peer_tool_result(&mut relay, "caller", &item);
     assert_eq!(relay.injections.anchored_rows("caller"), 1);
 
     let mut unrelated = item.clone();
     unrelated["id"] = json!("item-other");
     unrelated["server"] = json!("unrelated");
-    mark_codex_delegate_result(&mut relay, "caller", &unrelated);
+    mark_codex_peer_tool_result(&mut relay, "caller", &unrelated);
     assert_eq!(relay.injections.anchored_rows("caller"), 1);
 }
 

@@ -7,6 +7,50 @@ use super::injections::ReviewMark;
 use super::RelayState;
 
 impl RelayState {
+    pub(crate) fn mark_review_call(
+        &mut self,
+        review_id: &str,
+        caller_thread_id: &str,
+        provider_item_id: &str,
+    ) {
+        let valid = self.review_jobs.get(review_id).is_some_and(|job| {
+            job.parent_thread_id == caller_thread_id && job.started_by.is_agent()
+        });
+        if !valid || provider_item_id.is_empty() {
+            tracing::warn!(
+                review_id,
+                caller_thread_id,
+                "review call does not match an agent review"
+            );
+            return;
+        }
+        if self
+            .injections
+            .has_anchored_tag(caller_thread_id, InjectionKind::ReviewCall, review_id)
+        {
+            return;
+        }
+        let anchor = MessageAnchor::Item(provider_item_id.to_string());
+        if self.injections.tag_at(caller_thread_id, &anchor).is_some() {
+            tracing::warn!(
+                review_id,
+                caller_thread_id,
+                provider_item_id,
+                "review call row already belongs to another card"
+            );
+            return;
+        }
+        let message = InjectedMessage {
+            thread_id: caller_thread_id.to_string(),
+            anchor,
+            tag: InjectionTag::review(InjectionKind::ReviewCall, review_id, 0),
+            created_at: crate::state::unix_now(),
+        };
+        self.usage_store.record_injected_message(&message);
+        self.injections.anchor(message);
+        self.republish_thread_rows(caller_thread_id);
+    }
+
     /// The final reply carries its own result line when the request is on an older page.
     pub(crate) fn mark_review_reply(&mut self, review_id: &str, round: u32, item_id: &str) {
         let reviewer_thread_id = self
@@ -124,6 +168,7 @@ impl RelayState {
         let status = job.status.as_str();
         let error = job.error.clone();
         let terminal = job.status.is_terminal();
+        let agent_started = job.started_by.is_agent();
         let Some(mark) = self.injections.review(review_id) else {
             return;
         };
@@ -139,7 +184,7 @@ impl RelayState {
                 });
             }
         }
-        if terminal && !self.injections.marks_any_row(review_id) {
+        if terminal && !agent_started && !self.injections.marks_any_row(review_id) {
             self.injections.forget_mark(review_id);
             self.usage_store.forget_mark(review_id);
             return;

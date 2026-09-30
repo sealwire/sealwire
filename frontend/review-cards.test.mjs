@@ -62,6 +62,36 @@ function render(entries, options = {}) {
   return renderToStaticMarkup(h(TranscriptContent, { entries, options: { provider: "claude_code", ...options } }));
 }
 
+const reviewCall = (id, extra = {}) => ({
+  item_id: id, kind: "tool_call", status: "completed", text: "RAW-MCP-REVIEW-RESULT",
+  tool: { name: "review", title: "review", item_type: "mcpToolCall", result_preview: "RAW-MCP-REVIEW-RESULT" },
+  injection: { kind: "review_call", review: review({ round: 0, rounds: [], status: "pending_parent_recap", ...extra }) },
+});
+
+test("MCP review replaces its tool row and stays one request as results arrive", () => {
+  for (const status of ["pending_parent_recap", "waiting_for_reviewer", "complete", "failed"]) {
+    const markup = render([reviewCall("call", { status })]);
+    assert.equal((markup.match(/data-review-call-id="review-1"/g) || []).length, 1);
+    assert.ok(!markup.includes("RAW-MCP-REVIEW-RESULT"));
+    assert.ok(!markup.includes("Used 1 tool"));
+  }
+});
+
+test("MCP review request and delivered review result are separate events", () => {
+  const markup = render([reviewCall("call"), marked("result", "review_result")]);
+  assert.equal((markup.match(/data-review-call-id="review-1"/g) || []).length, 1);
+  assert.equal((markup.match(/data-review-id="review-1"/g) || []).length, 2);
+  assert.ok(markup.includes("The gate is checked only at creation."));
+});
+
+test("two MCP reviews stay separate, and refused tool calls keep their error", () => {
+  const markup = render([reviewCall("one"), reviewCall("two", { id: "review-2" })]);
+  assert.equal((markup.match(/data-review-call-id=/g) || []).length, 2);
+  const failed = render([{ ...reviewCall("bad"), status: "failed" }], { expandedKeys: new Set(["entry:bad", "tool:bad:result"]) });
+  assert.ok(!failed.includes("data-review-call-id="));
+  assert.ok(failed.includes("RAW-MCP-REVIEW-RESULT"));
+});
+
 test("a result replaces the prompt that carried it, and the recap asked for is not shown", () => {
   const markup = render([
     user("u0", "please fix the gate"),

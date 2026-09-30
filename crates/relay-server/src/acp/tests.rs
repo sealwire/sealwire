@@ -160,10 +160,6 @@ fn acp_delegate_structured_result_keeps_the_original_tool_item() {
     assert_eq!(first, second);
     assert_eq!(title, "MCP: delegate");
     assert_eq!(status, "completed");
-    assert_eq!(
-        crate::state::delegate_ask_id_from_mcp_result(&update),
-        Some("ask-one")
-    );
 }
 
 #[test]
@@ -3704,6 +3700,85 @@ mod session_binding_boundary_tests {
             relay.active_thread_id = Some(SESSION.to_string());
         }
         state
+    }
+
+    #[tokio::test]
+    async fn mcp_cards_use_the_bound_session_in_background_notifications() {
+        let state = bound_relay().await;
+        {
+            let mut relay = state.write().await;
+            relay.active_thread_id = Some("another-session".into());
+            let mut ask = crate::state::Ask::new(
+                "ask-acp".into(),
+                SESSION.into(),
+                "peer".into(),
+                "codex".into(),
+                None,
+                None,
+                "Inspect changes".into(),
+                "/tmp/project".into(),
+                None,
+                relay_api::delegation::StartedBy::Agent,
+            );
+            ask.sent_at = Some(crate::state::unix_now());
+            relay.insert_ask(ask);
+            let job = crate::state::ReviewJob::new(
+                "review-acp".into(),
+                SESSION.into(),
+                "cursor".into(),
+                "codex".into(),
+                None,
+                crate::state::ReviewMode::CleanThread,
+                "/tmp/project".into(),
+                "device".into(),
+                relay_api::delegation::StartedBy::Agent,
+                None,
+                1,
+            );
+            relay.record_review_mark(&job);
+            relay.insert_review_job(job);
+        }
+        let (outbound, _peer) = tokio::io::duplex(8192);
+        let (mut writer, inbound) = tokio::io::duplex(8192);
+        let bridge = AcpBridge::for_test(state.clone(), outbound, inbound, "cursor");
+        bridge.seed_session_for_test(HANDLE, "/tmp/project").await;
+        for (name, field, id) in [
+            ("delegate", "delegate_ask_id", "ask-acp"),
+            ("review", "review_id", "review-acp"),
+        ] {
+            for update in [
+                json!({"sessionUpdate":"tool_call", "toolCallId":name, "title":name, "status":"pending"}),
+                json!({"sessionUpdate":"tool_call_update", "toolCallId":name, "status":"completed",
+                    "rawOutput":{"structuredContent":{field:id}}}),
+            ] {
+                let event = json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":HANDLE,"update":update}});
+                tokio::io::AsyncWriteExt::write_all(&mut writer, format!("{event}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        }
+        for _ in 0..100 {
+            if state
+                .read()
+                .await
+                .runtime_for_thread(SESSION)
+                .is_some_and(|runtime| {
+                    runtime
+                        .transcript
+                        .iter()
+                        .filter(|row| row.status == "completed")
+                        .count()
+                        == 2
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let relay = state.read().await;
+        assert_eq!(relay.injections.anchored_rows(SESSION), 2);
+        assert_eq!(relay.injections.anchored_rows(HANDLE), 0);
+        assert!(relay.runtime_for_thread(HANDLE).is_none());
     }
 
     #[tokio::test]

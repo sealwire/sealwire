@@ -2208,6 +2208,7 @@ pub enum InjectionKind {
     ReviewRecap,
     /// The reviewer was given the change to review.
     ReviewBrief,
+    ReviewCall,
     /// The reviewer's final reply for a round, after delivery to the author.
     ReviewReply,
     /// A round's findings, handed back to the reviewed thread.
@@ -2239,6 +2240,7 @@ impl InjectionKind {
         matches!(
             self,
             Self::ReviewRecap
+                | Self::ReviewCall
                 | Self::ReviewBrief
                 | Self::ReviewReply
                 | Self::ReviewResult

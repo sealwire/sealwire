@@ -457,6 +457,39 @@ function BriefCard({ review, onFold = null }) {
   );
 }
 
+export function ReviewCallEntry({ attrs, entry, provider = "", providerIcon = "" }) {
+  const review = entry.injection.review;
+  const reviewer = agentName(review.reviewer_provider, "another agent");
+  const latest = lastRound(review);
+  const status = {
+    pending_parent_recap: "Review queued",
+    complete: "Review complete",
+    failed: "Review failed",
+    cancelled: "Review cancelled",
+    blocked: "Review blocked",
+    escalated: "Review needs you",
+  }[review.status] || "Review in progress";
+  return h(
+    "article", { ...attrs, className: `${attrs.className} handover-message review-message` },
+    avatar(providerIcon, provider),
+    h("div", { className: "handover-card review-card is-info", "data-review-id": review.id, "data-review-call-id": review.id },
+      h("div", { className: "handover-card-head" },
+        h("span", { className: "handover-card-icon" }, h(CardIcon, { paths: TONE_ICONS.info })),
+        h("div", { className: "handover-card-heading" },
+          h("span", { className: "handover-card-kicker" }, `Review requested · ${reviewer}`),
+          h("span", { className: "handover-card-title" }, review.parent_title || "Review changes")
+        )
+      ),
+      review.error ? h("div", { className: "handover-card-body" }, review.error) : null,
+      h("div", { className: "handover-card-foot" },
+        h("span", null, status),
+        h("span", { className: "handover-card-spacer" }),
+        h(OpenThreadLink, { threadId: latest?.reviewer_thread_id || review.reviewer_thread_id, label: "Reviewer thread" })
+      )
+    )
+  );
+}
+
 /**
  * A review row drawn as what it was for. A result opens the reviewed agent's turn, so it
  * takes that turn's mark; the brief is the reviewer thread's opening, full width.
