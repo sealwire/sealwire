@@ -960,6 +960,20 @@ impl RelayState {
         crate::state::WorkspaceScope::new(&self.allowed_roots, &device_paths)
     }
 
+    pub(crate) fn ensure_thread_history_readable(
+        &self,
+        thread_id: &str,
+        cwd: &str,
+        device_id: Option<&str>,
+    ) -> Result<(), String> {
+        self.workspace_scope(device_id).ensure_with_history(
+            cwd,
+            self.thread_workspace
+                .get(thread_id)
+                .and_then(|workspace| workspace.history.as_ref()),
+        )
+    }
+
     /// The execution grants, copied out so admission can run WITHOUT the relay lock.
     ///
     /// Deciding trust reads `.git` from disk, and `workspace_resolve_lock_lint` exists
