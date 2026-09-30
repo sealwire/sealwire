@@ -13,6 +13,8 @@
 // E2E_BROWSER=webkit runs the phone tap checks in WebKit (playwright install webkit).
 // Chromium additionally exercises finger drift and native scrolling through CDP.
 // ANDROID_E2E=1 attaches those tap checks to a booted Android Chrome over adb.
+// To cover a keyboard that leaves less than one row visible, temporarily set the
+// emulator to 1080x1450, run with ANDROID_EXPECT_KEYBOARD_DISMISS=1, then reset it.
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -496,7 +498,11 @@ async function main() {
     await page.addInitScript(installFakeRelay, FIXTURE);
     await openComposer(page, origin);
     if (ANDROID) {
-      await assertAndroidImeTap(page);
+      await assertAndroidImeTap(page, { expectAutoHide: process.env.ANDROID_EXPECT_KEYBOARD_DISMISS === "1" });
+      if (process.env.ANDROID_EXPECT_KEYBOARD_DISMISS === "1") {
+        console.log("remote-composer-commands-e2e OK — cramped Android IME retracts for first command");
+        return;
+      }
       await assertPhoneTaps(page, { systemTouch: true });
       if (process.env.SKILLS_SCREENSHOT) await page.screenshot({ path: process.env.SKILLS_SCREENSHOT });
       console.log("remote-composer-commands-e2e OK — Android Chrome phone touch picks");
@@ -747,10 +753,9 @@ async function centreInCommandMenu(locator) {
   });
 }
 
-// Programmatic fill never opens Android's IME. Focus with a real touch first, then
-// keep that keyboard open while picking the menu — the state a phone actually uses
-// and desktop mobile emulation cannot reproduce.
-async function assertAndroidImeTap(page) {
+// Programmatic fill never opens Android's IME. Focus with a real touch first,
+// then check menu placement while that keyboard is up.
+async function assertAndroidImeTap(page, { expectAutoHide = false } = {}) {
   await page.fill("#remote-message-input", "");
   const fullHeight = await page.evaluate(() => innerHeight);
   await dispatchAndroidSystemTap(page, page.locator("#remote-message-input"));
@@ -759,8 +764,38 @@ async function assertAndroidImeTap(page) {
     fullHeight,
     { timeout: TIMEOUT_MS }
   );
-  // Keep the real Android keyboard open, but isolate the reported failure to the
-  // menu tap itself. adb's text injection has device-dependent key-event timing.
+  // Enter the filter without adb text timing; on a normal phone the keyboard stays
+  // open, while a cramped screen must dismiss it to expose the first row.
+  await page.fill("#remote-message-input", "/rev");
+  await page.waitForSelector(".composer-command-row.is-provider", { timeout: TIMEOUT_MS });
+  const firstRow = page.locator(".composer-command-row:not(.is-provider)");
+  await page.waitForFunction(() => {
+    const row = document.querySelector(".composer-command-row:not(.is-provider)");
+    const menu = document.querySelector(".composer-command-menu");
+    if (!row || !menu) return false;
+    const box = row.getBoundingClientRect();
+    const frame = menu.getBoundingClientRect();
+    const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+    return box.top >= Math.max(frame.top, visualViewport.offsetTop)
+      && box.bottom <= Math.min(frame.bottom, visualViewport.offsetTop + visualViewport.height)
+      && row.contains(hit);
+  }, null, { timeout: TIMEOUT_MS });
+  const heightAtChoice = await page.evaluate(() => visualViewport.height);
+  if (expectAutoHide) {
+    assert.ok(heightAtChoice > fullHeight * 0.8, "the keyboard retracts when it clips the first row");
+    assert.equal(await page.$eval("#remote-message-input", (input) => input.value), "/rev");
+  } else {
+    assert.ok(heightAtChoice < fullHeight * 0.8, "an accessible first row leaves the keyboard up for filtering");
+  }
+  await dispatchAndroidSystemTap(page, firstRow);
+  await page.waitForFunction(
+    () => [...document.querySelectorAll(".composer-command-pill-label")].some((n) => n.textContent === "/review"),
+    null,
+    { timeout: TIMEOUT_MS }
+  );
+  if (expectAutoHide) return;
+  await page.keyboard.press("Backspace");
+  await page.waitForFunction(() => !document.querySelector(".composer-command-pill"), null, { timeout: TIMEOUT_MS });
   await page.fill("#remote-message-input", "/rev");
   await page.waitForSelector(".composer-command-row.is-provider", { timeout: TIMEOUT_MS });
   const providerRow = page.locator(".composer-command-row.is-provider");
