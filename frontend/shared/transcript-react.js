@@ -2433,8 +2433,6 @@ export function groupToolEntries(entries) {
 
     // Consolidated diff entry: accumulate by turn, emit at the turn's last diff.
     if (diffEntry && turnId && lastDiffIndexByTurn.has(turnId)) {
-      currentGroup = null;
-      currentType = null;
       let group = pendingByTurn.get(turnId);
       if (!group) {
         group = { entries: [], type: "diff-group" };
@@ -2442,6 +2440,9 @@ export function groupToolEntries(entries) {
       }
       group.entries.push(entry);
       if (index === lastDiffIndexByTurn.get(turnId)) {
+        // Only the emitted diff group separates visible work runs.
+        currentGroup = null;
+        currentType = null;
         result.push(group);
         pendingByTurn.delete(turnId);
       }
