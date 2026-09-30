@@ -2644,8 +2644,7 @@ pub struct LogEntryView {
     /// compaction keeps only `remote_safe` lines; the local operator web keeps
     /// all of them. Marked `#[serde(skip)]`: it is a purely internal projection
     /// flag (never on the wire or in persisted state) that fails CLOSED —
-    /// anything restored or received without it is treated as operator-only. See
-    /// `markdown/CLAUDE_TURN_COMPLETION_FOLLOWUPS.md` (P1).
+    /// anything restored or received without it is treated as operator-only.
     #[serde(skip)]
     pub remote_safe: bool,
 }

@@ -9,8 +9,7 @@
 //! requests — the same shape as `codex app-server`, which is why the reader and
 //! response-correlation plumbing mirrors `codex/rpc.rs`.
 //!
-//! Wire shapes here were measured against `cursor-agent 2026.08.04-aaa8809`;
-//! see `markdown/cursor-acp-provider-plan.md`.
+//! Wire shapes here were measured against `cursor-agent 2026.08.04-aaa8809`.
 
 use std::{
     collections::HashMap,

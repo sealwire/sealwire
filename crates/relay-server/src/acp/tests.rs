@@ -3633,7 +3633,8 @@ async fn a_live_acp_seat_resume_restores_seat_mcp_on_provider_reattach() {
     let _ = answerer.await;
 }
 
-/// Phase 2b of `markdown/STABLE_SESSION_ID_DESIGN.md` for the ACP bridge.
+/// ACP events name an ACP session id; each must land on the relay session bound
+/// to it.
 ///
 /// Every binding in production is an identity mapping, so each test here injects
 /// one whose session id and ACP session id are deliberately different strings.

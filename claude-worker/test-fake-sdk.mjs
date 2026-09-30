@@ -83,7 +83,7 @@ export function query({ prompt, options = {} }) {
   const spontaneousTurn = process.env.CLAUDE_FAKE_SPONTANEOUS_TURN === "1";
   // Turn 1 settles, a spontaneous continuation opens and STAYS open until a
   // second user message arrives — the /delegate brief race, in the order the
-  // real CLI produced it (markdown/repro-delegate-alias/probe-RESULTS.md).
+  // real CLI produced it.
   const spontaneousRace = process.env.CLAUDE_FAKE_SPONTANEOUS_RACE === "1";
   // Two sends the host FOLDS into one model turn: only the last is announced
   // started, and the single `result` names both in `user_message_uuids`

@@ -357,7 +357,7 @@ test("buildHydratedTranscriptProgress returns null when thread ids differ", () =
 // progress frame that fetch fired, until the fetch itself settled. Now
 // routed through renderedTranscriptFromWindow, which falls back to the
 // array (the patch's own, always-synchronous write) for an invalidated
-// entry. See .sealwire/PLAN.md, "Invalidate; do not write".
+// entry.
 test("buildHydratedTranscriptProgress must not republish a status a patch already completed as still running", () => {
   const state = hydratedState({
     session: {

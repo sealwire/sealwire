@@ -378,8 +378,8 @@ test("the cached proof cannot go stale across the window lifecycle", () => {
 test("the keyed snapshot path costs the tail, not the window", () => {
   // The reason the proof is cached rather than recomputed. A per-snapshot
   // windowIsOrderKeyed (or a full-window copy) would be O(window) on the hottest
-  // path in the app — the freeze markdown/transcript-perf-freeze-analysis.md
-  // documents. Asserted with the counters, not a clock.
+  // path in the app, which is what once froze the tab. Asserted with the
+  // counters, not a clock.
   const windowSize = 4000;
   const held = Array.from({ length: windowSize }, (_, i) => row(`w${i}`, i * S));
   const state = {

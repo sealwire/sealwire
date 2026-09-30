@@ -287,7 +287,7 @@ export function createSessionRenderer({
   // around the exported property) so internal closures below — teamsCache
   // /reviewsCache/workflowsCache callbacks, the pairing-expiry timer — that
   // call renderSession directly still clear a pending scheduler flush
-  // instead of leaving it to double-render. See .sealwire/PLAN.md.
+  // instead of leaving it to double-render.
   cancelPendingTranscriptFlush = () => false,
   logLine,
   ingestRelayLogs,

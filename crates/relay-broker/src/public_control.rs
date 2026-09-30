@@ -4019,7 +4019,7 @@ fn matches_optional_relay_target(
 
 /// Throttle window for persisting device `last_seen`: refresh it at most once per
 /// hour so the frequent ws-token refresh (~every 5 min) does not write on every
-/// call. See device-limit-plan.md.
+/// call.
 const LAST_SEEN_THROTTLE_SECS: u64 = 3600;
 
 /// Whether a device's `last_seen` should be refreshed to `now`. A never-recorded

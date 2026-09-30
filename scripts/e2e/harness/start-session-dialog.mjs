@@ -205,7 +205,7 @@ async function isVisible(page, selector) {
 }
 
 // Waits for the dialog's refusal alert and proves a person can read it: on screen,
-// not covered, not clipped. Text alone is not evidence (see AGENTS.md).
+// not covered, not clipped. Text alone is not evidence: Chromium reports clipped text in full.
 export async function waitForVisibleStartRefusal(
   page,
   { dialogId, text, timeout = DEFAULT_TIMEOUT } = {}

@@ -1,10 +1,9 @@
 //! Where a relay session reaches its provider.
 //!
-//! Phase 1 of `markdown/STABLE_SESSION_ID_DESIGN.md`: the registry exists and is
-//! kept correct, but every binding it holds is an IDENTITY mapping
-//! (`session_id == provider_handle == provider_thread_id`), so no public id moves.
-//! Phase 2 routes provider calls (2a) and provider events (2b) through it; Phase 3
-//! is the first phase allowed to mint a session id that differs from the handle.
+//! A relay session id never changes; only its binding to a provider handle moves.
+//! Most bindings are IDENTITY (`session_id == provider_handle == provider_thread_id`);
+//! a deferred Claude session's minted id is the exception. Provider calls resolve
+//! through the binding, and provider events come back through the reverse index.
 
 use std::collections::HashMap;
 
@@ -25,8 +24,8 @@ pub(crate) struct SessionBinding {
 }
 
 impl SessionBinding {
-    /// The compatibility shape every Phase-1 binding takes: the relay session id
-    /// IS the provider's native id.
+    /// The compatibility shape: the relay session id IS the provider's native id,
+    /// so ids saved before bindings existed still name the same session.
     pub(crate) fn identity(provider: &str, native_id: &str) -> Self {
         Self {
             provider: provider.to_string(),
@@ -71,8 +70,8 @@ pub(crate) struct ProviderRouteKey {
 pub(crate) enum ProviderEventTarget {
     /// A binding already owns `(provider, handle)`.
     Bound(String),
-    /// Nothing owned the handle, so an identity binding was created for it —
-    /// invariant 7, applied to events rather than list rows.
+    /// Nothing owned the handle, so an identity binding was created for it — the
+    /// same adoption an unknown list row gets.
     Adopted(String),
     /// The handle spells a session id that belongs to a different provider
     /// address. Adopting it would point two providers at one session's state.
@@ -109,15 +108,15 @@ pub(crate) enum SessionBindingError {
     /// A binding with a blank session id / provider / handle would make the reverse
     /// index collide on the empty key and route unrelated sessions together.
     Blank(&'static str),
-    /// Invariant 5: at most one session owns a `(provider, handle)` pair.
+    /// At most one session owns a `(provider, handle)` pair.
     HandleClaimed {
         provider: String,
         handle: String,
         owner: String,
     },
     /// Identity-only adoption cannot expose the same raw string as a second
-    /// provider's public session id. Phase 3 can mint a distinct session id; Phase
-    /// 2c must refuse instead of silently moving the existing binding.
+    /// provider's public session id, so it refuses instead of silently moving the
+    /// existing binding.
     SessionIdClaimed {
         session_id: String,
         owner_provider: String,
@@ -153,7 +152,7 @@ impl std::fmt::Display for SessionBindingError {
 ///
 /// Deliberately uncapped, unlike `search_routing_hints`: entries leave on archive
 /// and delete, and evicting a live session's binding would orphan the session
-/// outright once Phase 3 can mint an id the provider has never heard of.
+/// outright when its id is a minted one the provider has never heard of.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SessionBindingRegistry {
     bindings: HashMap<String, SessionBinding>,
@@ -249,8 +248,8 @@ impl SessionBindingRegistry {
             .binding(&session_id)
             .is_some_and(SessionBinding::is_materialized)
         {
-            // A pre-Phase-3 identity binding may own a public pending id after a
-            // list/discovery pass. It still needs the legacy domain re-key path;
+            // An identity binding from when pending ids were public may own one after
+            // a list/discovery pass. It still needs the legacy domain re-key path;
             // only an explicitly deferred binding is materialized in place.
             return Ok(None);
         }
@@ -448,8 +447,8 @@ impl SessionBindingRegistry {
 mod tests {
     use super::*;
 
-    /// A real Claude session id, bound under a session id that is NOT it — the
-    /// Phase-3 shape, used here to prove Phase 1 already stores and reloads it.
+    /// A real Claude session id, bound under a session id that is NOT it — what a
+    /// deferred session looks like once its first turn has run.
     fn materialized() -> SessionBinding {
         SessionBinding {
             provider: "claude_code".to_string(),
@@ -484,9 +483,9 @@ mod tests {
         );
     }
 
-    // The deferred-Claude shape Phase 3 depends on: the session id stays put while
-    // the handle moves, and the handle it left must stop routing at once — a stale
-    // reverse key is how an event for a recycled handle lands on the wrong session.
+    // The deferred-Claude shape: the session id stays put while the handle moves,
+    // and the handle it left must stop routing at once — a stale reverse key is how
+    // an event for a recycled handle lands on the wrong session.
     #[test]
     fn rebinding_a_session_drops_the_handle_it_left() {
         let mut registry = SessionBindingRegistry::default();
@@ -720,7 +719,7 @@ has no provider history to come back to",
         assert_eq!(registry.reverse_len(), 2);
     }
 
-    // Phase 2b. The routing decision itself, away from any provider.
+    // Provider event routing: the decision itself, away from any provider.
     #[test]
     fn a_bound_handle_routes_to_its_session_and_binds_nothing_new() {
         let mut registry = SessionBindingRegistry::default();

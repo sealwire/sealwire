@@ -1,6 +1,6 @@
-// LocalTranscriptPanel now owns the stableTranscriptOptions cache itself (see
-// .sealwire/PLAN.md): it calls buildTranscriptOptions in its entries branch
-// and hands the cached result to TranscriptPane. This proves that wiring
+// LocalTranscriptPanel now owns the stableTranscriptOptions cache itself: it
+// calls buildTranscriptOptions in its entries branch and hands the cached
+// result to TranscriptPane. This proves that wiring
 // behaviorally — by capturing the actual object TranscriptPane receives
 // across real re-renders — rather than by grepping source text for a ref
 // assignment. A module loader stub swaps ../shared/transcript-pane.js for a

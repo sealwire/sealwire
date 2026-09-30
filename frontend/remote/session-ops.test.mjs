@@ -7239,9 +7239,8 @@ async function pinBackgroundThreadWithWindow() {
   assert.equal(state.session.active_thread_id, "thread-b", "precondition: thread-b stays pinned");
   assert.equal(state.session.view_only, true, "precondition: thread-b renders as a view-only projection");
 
-  // The hydration window follows the PIN (the pinned-thread trade-off —
-  // .sealwire/PLAN.md) — set up directly here rather than depending on a
-  // real fetch to populate it.
+  // The hydration window follows the PIN — set up directly here rather than
+  // depending on a real fetch to populate it.
   state.transcriptHydrationThreadId = "thread-b";
   state.transcriptHydrationEntries = new Map([["b-1", { ...state.session.transcript[0] }]]);
   state.transcriptHydrationOrder = ["b-1"];
@@ -7372,10 +7371,9 @@ test("repairActiveTranscriptTail resyncs the loaded window to the repaired text 
     ],
   });
   // A small (non-truncated) snapshot does not itself load the hydration
-  // window — hydration is gated on transcript_truncated (see
-  // .sealwire/PLAN.md). Load it directly so this test exercises the "window
-  // loaded for this thread" precondition repairActiveTranscriptTail must
-  // invalidate.
+  // window — hydration is gated on transcript_truncated. Load it directly so
+  // this test exercises the "window loaded for this thread" precondition
+  // repairActiveTranscriptTail must invalidate.
   state.transcriptHydrationThreadId = "thread-1";
   state.transcriptHydrationEntries = new Map([
     ["item-1", { ...state.session.transcript[0], content_state: "full" }],

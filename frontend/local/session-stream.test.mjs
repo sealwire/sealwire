@@ -2183,8 +2183,7 @@ test("a completion patch before hydration has loaded anything must not turn an e
 // P1 (review, transcriptPatchOverlay): invalidateTranscriptWindowEntryForPatch
 // deliberately no-ops for an item absent from an otherwise-LOADED window — a
 // patch carries no authoritative body, so it must never be what teaches the
-// window about a new item (see .sealwire/PLAN.md, "Invalidate; do not
-// write"). applyLocalTranscriptEntryPatch still appends the item to
+// window about a new item. applyLocalTranscriptEntryPatch still appends the item to
 // state.session.transcript so it is visible right away, and drives a real
 // hydration merge (ensureConversationTranscript) so the window learns about
 // it properly. A previous attempt at this ALSO blanket-invalidated every
@@ -2228,9 +2227,8 @@ test("a completion patch for an item a LOADED window has never seen survives a l
   // a patch-derived nextSession — a patch carries no content_state field, so
   // exposing agent-2's fabricated entry to hydration's tail merge would
   // default the missing field to "full" and poison the window with an
-  // empty-but-"full" entry, permanently suppressing the real fetch (see
-  // .sealwire/PLAN.md, "Invalidate; do not write" -> "Never route
-  // non-authoritative data through the authoritative path").
+  // empty-but-"full" entry, permanently suppressing the real fetch.
+  // Non-authoritative data must never go through the authoritative path.
   assert.ok(
     !ensureConversationTranscriptCalls[0]?.transcript?.some((entry) => entry.item_id === "agent-2"),
     "the session handed to hydration must not mention the patch-only item at all"
@@ -2264,8 +2262,7 @@ test("a completion patch for an item a LOADED window has never seen survives a l
 // (invalidateTranscriptWindowEntryForPatch), so that same delta's offset (5
 // against a blank cache) reads as a gap and is correctly refused instead of
 // silently corrupting the text — the replacement survives, uncorrupted; the
-// "!" is lost until hydration re-fetches, the "coarser, not cleverer"
-// tradeoff .sealwire/PLAN.md accepts.
+// "!" is lost until hydration re-fetches, which beats corrupted text.
 test("a text-replacement patch is not silently discarded by a later delta for the same item", () => {
   const { controller, state } = makeController();
   state.session.transcript[0].text = "Hello";

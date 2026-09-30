@@ -153,8 +153,8 @@ export { buildHydratedTranscriptProgress };
 // O(1) — a Map write. Projecting it back onto the rendered array
 // (order.map(...).filter(Boolean)) is O(n) in the loaded window, so that step
 // is deferred: a delta only raises a pending flag, and settleTranscriptProjection
-// does the actual rebuild, once, whenever it is next called. See
-// .sealwire/PLAN.md, "The one lesson that keeps costing us".
+// does the actual rebuild, once, whenever it is next called. So anything that
+// reads or rewrites the array must settle first, or it acts on stale text.
 
 // Test/perf instrumentation, mirroring transcriptFullWindowCopyCount's
 // one-counter-many-sites shape (transcript-hydration-store.js:115): every

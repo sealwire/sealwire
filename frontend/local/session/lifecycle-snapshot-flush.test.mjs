@@ -124,8 +124,8 @@ function baseSnapshot(overrides = {}) {
 
 /// Builds the stream + lifecycle controllers sharing ONE real scheduler
 /// instance, the same way session-controller.js wires ctx in production —
-/// this is the seam sub-task 2 exists to fix (a snapshot landing between a
-/// delta's state write and its pending frame used to paint twice).
+/// the seam where a snapshot landing between a delta's state write and its
+/// pending frame used to paint twice.
 function buildHarness() {
   const clock = createManualClock();
   const rendered = [];
@@ -372,7 +372,7 @@ test("a delta for an entry the snapshot just introduced does not erase the snaps
 // an edge case. Nothing then protects the longer text already streamed into
 // state.session from a shorter/compacted snapshot body for the same entry
 // before it overwrites state.session — unlike remote, which guards this
-// unconditionally via preserveVisibleTranscriptText (.sealwire/PLAN.md, "Traps").
+// unconditionally via preserveVisibleTranscriptText.
 test("a snapshot arriving before hydration ever loads does not overwrite longer streamed text with a shorter/compacted body", () => {
   const h = buildHarness();
   h.state.session = baseSnapshot({

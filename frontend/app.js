@@ -1405,7 +1405,7 @@ renderer.renderSession = function wrappedRenderSession(session) {
   }
   // lifecycle.js's applySessionSnapshot now advances state.session
   // synchronously before every render it triggers (queue() defers only the
-  // paint, never the write — see .sealwire/PLAN.md), so state.session can no
+  // paint, never the write), so state.session can no
   // longer be trusted to still hold "the live session a moment ago" by the
   // time this wrap runs. It stashes that value here itself when the active
   // thread just switched; fall back to state.session for every other render

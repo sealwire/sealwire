@@ -5733,9 +5733,8 @@ async fn a_reopened_codex_seat_keeps_the_same_seat_mcp_across_terminal() {
     assert_codex_seat_mcp(mcp, "run-reopen");
 }
 
-/// Phase 2b of `markdown/STABLE_SESSION_ID_DESIGN.md`: a Codex notification names
-/// a PROVIDER handle, and every relay record it touches must be keyed by the
-/// session id bound to that handle.
+/// A Codex notification names a PROVIDER handle, and every relay record it touches
+/// must be keyed by the session id bound to that handle.
 ///
 /// Production bindings are identity mappings, so each test here injects one whose
 /// session id and handle are deliberately different strings — that is the only

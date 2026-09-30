@@ -226,8 +226,7 @@ export function flushRemoteTranscriptRenderForTest() {
 // surface two genuinely different session slots (state.realSession,
 // state.session), and one settle can rebuild BOTH. Incrementing once per
 // call (rather than once per actual renderedTranscriptFromWindow invocation)
-// would silently under-count by half in exactly that case — see
-// .sealwire/PLAN.md, "The criterion-3 proof is currently unsound".
+// would silently under-count by half in exactly that case.
 let transcriptDeltaRebuildCount = 0;
 
 export function __readTranscriptDeltaRebuildCount() {
@@ -430,13 +429,11 @@ export function applyTranscriptDelta({
   // transcript exceeds `max_transcript_entries` (6 remote — see
   // crates/relay-server/src/protocol.rs:467, :846-849) — a bound that, once
   // crossed, never un-crosses, since a thread's history only grows. So this
-  // branch's `n` is capped at 6 by construction; see .sealwire/PLAN.md, "Why
-  // the window is loaded when it matters" — EXCEPT while a background thread
-  // is pinned: the window then follows the PIN, not the live thread, so a
-  // live delta takes this array fallback uncapped for as long as the pin
-  // lasts. Accepted, not a defect — see .sealwire/PLAN.md, "Decided: the
-  // pinned-thread trade-off", and the "pinning a background thread
-  // mid-stream" test (session-ops.test.mjs).
+  // branch's `n` is capped at 6 by construction — EXCEPT while a background
+  // thread is pinned: the window then follows the PIN, not the live thread, so
+  // a live delta takes this array fallback uncapped for as long as the pin
+  // lasts. Accepted: there is one window, and it serves the thread on screen
+  // (see the "pinning a background thread mid-stream" test).
   const windowLoaded = transcriptWindowIsLoaded(state, currentThreadId);
   const viewedThreadId = commit === commitViewedSession ? (currentThreadId || thread_id) : null;
   const deltaEvent = {
@@ -583,12 +580,10 @@ function scheduleTranscriptGapRepair(threadId, reason, targetRevision, detail = 
   // Invalidate the moment the gap is DETECTED, not only once a repair fetch
   // succeeds: repairActiveTranscriptTail only invalidates on its own success
   // path, so a failed fetch (or MAX_TRANSCRIPT_REPAIR_FAILURES giving up)
-  // used to leave incomplete text trusted as `content_state: full` forever
-  // (.sealwire/PLAN.md, "Invalidate; do not write" -> "invalidate when the
-  // problem is detected, not when the repair succeeds"). Gated on this
-  // thread's window actually being the one loaded — markTranscriptWindowNeedsRepair
-  // has no thread param of its own and would otherwise blank whatever OTHER
-  // thread's window happens to be loaded.
+  // used to leave incomplete text trusted as `content_state: full` forever.
+  // Gated on this thread's window actually being the one loaded —
+  // markTranscriptWindowNeedsRepair has no thread param of its own and would
+  // otherwise blank whatever OTHER thread's window happens to be loaded.
   if (transcriptWindowIsLoaded(state, threadId)) {
     // Settle FIRST: renderedTranscriptFromWindow treats a non-"full" entry as
     // untrusted and falls back to the ARRAY's current copy (correct for a
@@ -776,10 +771,9 @@ async function repairActiveTranscriptTail(threadId, targetRevision) {
     // NOT reach (the retained older ids), the same signal a lagged stream raises.
     invalidateTranscriptWindowForRepair(state);
     // Then resync exactly what the repair DID reach — the primitive's own
-    // page-ordered overlay. This is freshly fetched, authoritative content —
-    // a hydration/snapshot-merge case the plan sanctions writing directly
-    // (.sealwire/PLAN.md, "Invalidate; do not write" only bans a PATCH, which
-    // carries no body, from writing). Downgrading to preview without ALSO
+    // page-ordered overlay. This is freshly fetched, authoritative content, so
+    // it may be written directly; only a PATCH, which carries no text offset,
+    // is barred from writing the window. Downgrading to preview without ALSO
     // updating the cached text left the window holding the PRE-repair
     // (wrong, shorter) text at `full`-adjacent trust; the next delta's offset
     // check reads that stale length as `have` (applyTranscriptDelta, above),
@@ -1250,11 +1244,8 @@ function applyTranscriptEntryPatch(event, { defaultStatus = null, reason = null 
     // thread's window has visible entries) would default the missing field
     // to "full" and poison the window with an empty-but-"full" entry —
     // permanently suppressing the real fetch (transcript-hydration-store.js's
-    // contentStateOf; see .sealwire/PLAN.md, "Invalidate; do not write" ->
-    // "Never route non-authoritative data through the authoritative path" ->
-    // "Invalidate and refetch instead of merging a patch-derived session").
-    // currentSession never mentions this item, so the merge can only repair
-    // OTHER already-tracked entries — renderedTranscriptFromWindow's own
+    // contentStateOf). currentSession never mentions this item, so the merge
+    // can only repair OTHER already-tracked entries — renderedTranscriptFromWindow's own
     // array-fallback already renders this one correctly from outcome.nextTranscript
     // until a genuine snapshot teaches the window about it honestly. Mirrors
     // local's applyLocalTranscriptEntryPatch (local/session/stream.js), which

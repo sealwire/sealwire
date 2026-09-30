@@ -1,8 +1,8 @@
 //! Pure translation between ACP (Agent Client Protocol) shapes and relay views.
 //!
 //! Everything here is side-effect free so it can be unit-tested without a live
-//! `cursor-agent acp` process. The measured wire shapes this targets are
-//! recorded in `markdown/cursor-acp-provider-plan.md` (spike, 2026-08-11).
+//! `cursor-agent acp` process. The wire shapes it targets were measured against
+//! a live agent on 2026-08-11.
 
 use serde_json::{json, Value};
 

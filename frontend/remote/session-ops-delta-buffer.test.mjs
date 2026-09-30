@@ -514,10 +514,10 @@ test("with a loaded hydration window, a byte mismatch schedules repair instead o
   );
   // P1 (review): invalidate when the gap/mismatch is DETECTED, not only once
   // the repair fetch succeeds — a failed or exhausted retry must not leave
-  // this trusted `full` forever (.sealwire/PLAN.md, "Invalidate; do not
-  // write"). This inverts a prior assertion that codified the fail-open bug:
-  // scheduleTranscriptGapRepair now downgrades the window synchronously, at
-  // schedule time, rather than only in repairActiveTranscriptTail's success path.
+  // this trusted `full` forever. This inverts a prior assertion that codified
+  // the fail-open bug: scheduleTranscriptGapRepair now downgrades the window
+  // synchronously, at schedule time, rather than only in
+  // repairActiveTranscriptTail's success path.
   assert.equal(
     state.transcriptHydrationEntries.get("item-1").content_state,
     "preview",
