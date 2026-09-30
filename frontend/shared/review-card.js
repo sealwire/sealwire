@@ -142,6 +142,16 @@ const TONE_ICONS = {
   info: ["M2 3v10", "M5 8h9M8.5 4.5 5 8l3.5 3.5"],
 };
 
+// The file name, so the finding keeps the row's width; the full path is on hover.
+function FindingWhere({ location }) {
+  const name = location.split(/[\\/]/).pop();
+  return h(
+    "span",
+    { className: "review-finding-where", title: name === location ? undefined : location },
+    name
+  );
+}
+
 function FindingRow({ finding, state }) {
   const fold = useFold(finding.text);
   return h(
@@ -167,7 +177,7 @@ function FindingRow({ finding, state }) {
           "span",
           { className: "review-finding-meta" },
           state ? h("span", { className: `review-finding-state is-${state}` }, state) : null,
-          finding.location ? h("span", { className: "review-finding-where" }, finding.location) : null
+          finding.location ? h(FindingWhere, { location: finding.location }) : null
         )
       : null
   );
@@ -217,10 +227,7 @@ export function cardFindings(kind, review, round) {
   const fixed = (review.rounds || []).flatMap((entry) =>
     (entry.fixed || []).map((finding) => ({ finding, state: "fixed" }))
   );
-  const open = (round?.findings || []).map((finding) => ({
-    finding,
-    state: kind === "review_escalated" ? "open" : null,
-  }));
+  const open = (round?.findings || []).map((finding) => ({ finding, state: null }));
   const openLeftOut = (round?.findings_total || 0) - open.length;
   // The relay sends a bounded number of rows per card; the totals say what it held back.
   const fixedLeftOut = (review.rounds || []).reduce(

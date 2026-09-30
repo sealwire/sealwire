@@ -126,6 +126,11 @@ test("the review headline is the conversation card's title, in its colour", () =
     },
   };
   assert.deepEqual(reviewOutcome(escalated), { text: "Codex still disagrees on 2 points", tone: "alert" });
+  assert.deepEqual(
+    reviewFindings(escalated).rows.map(({ state }) => state),
+    [null, null],
+    "the panel lists what still stands with no per-row \"open\", as the card does"
+  );
   // A blocked review outranks its verdict: it is the one thing the user must act on.
   assert.equal(reviewOutcome({ ...job, status: "blocked" }).text, "Review blocked — action needed");
   // Reading the next round: what it found last time is not what it is doing now.

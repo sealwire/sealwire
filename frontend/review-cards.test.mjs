@@ -186,6 +186,34 @@ test("a card lists three findings, each folded to two lines, and keeps the rest 
   assert.match(markup, /class="review-finding-text card-fold is-clamped"/);
 });
 
+test("a finding names its file, and the whole path is on hover", () => {
+  // A path eats the row's width from the finding itself, and the file name is what
+  // tells two findings apart at a glance.
+  const markup = render([
+    marked("result", "review_result", {
+      rounds: [
+        round(1, {
+          delivered: true,
+          findings: [
+            finding("high", "Gate checked once.", "crates/relay-server/src/goal/gate.rs:88"),
+            finding("medium", "Archive drops it.", "archive.rs:142"),
+          ],
+          findings_total: 2,
+        }),
+      ],
+    }),
+  ]);
+  assert.match(
+    markup,
+    /class="review-finding-where" title="crates\/relay-server\/src\/goal\/gate\.rs:88">gate\.rs:88</
+  );
+  assert.match(
+    markup,
+    /class="review-finding-where">archive\.rs:142</,
+    "a bare name has nothing more to show on hover"
+  );
+});
+
 test("three findings or fewer need nothing to open", () => {
   const markup = render([marked("result", "review_result")]);
   assert.doesNotMatch(markup, /Show all findings/);
@@ -200,7 +228,8 @@ test("a review out of rounds asks the person, and stops asking once they decide"
   assert.match(asking, /is-needs-you/);
   assert.match(asking, /Review needs you · 2 of 2 rounds used/);
   assert.match(asking, /Codex still disagrees on 1 point</);
-  assert.match(asking, />open</);
+  // Every row it lists is still standing, so a per-row "open" told nothing apart.
+  assert.doesNotMatch(asking, /review-finding-state/);
   assert.match(asking, /1 fixed earlier/);
   assert.match(asking, /data-review-action="rerun"[^>]*data-parent-thread-id="parent"[^>]*data-reviewer-thread-id="rev"[^>]*data-reviewer-provider="codex"[^>]*>One more round/);
   assert.match(asking, /data-review-action="accept"[^>]*>Accept as is/);
