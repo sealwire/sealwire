@@ -6,11 +6,12 @@ use crate::protocol::InjectionKind;
 use crate::state::delegation::one_line_result;
 use crate::state::handover::summary_digest;
 use crate::state::{
-    AppState, HandoverMark, InjectedMessage, InjectionTag, MessageAnchor, TurnOutcome,
+    AppState, HandoverMark, InjectedMessage, InjectionTag, MessageAnchor, RelayState, TurnOutcome,
 };
 
 use super::handover::continue_instruction;
 use super::injection_marks::thread_provider;
+use super::review::agent_entry_for_turn;
 
 impl AppState {
     /// The reply can be the entire tail page, including after a provider history read.
@@ -119,58 +120,111 @@ impl AppState {
         mark.target_turn_id = target_turn_id;
         relay.usage_store.save_handover_mark(&mark);
         relay.injections.put_handover(mark);
+        // A fast turn can end before its id is stored here.
+        relay.settle_handover_if_ended(handover_id);
     }
 
-    /// Settles each delivered handover once the target's turn on it has ended, by the
-    /// outcome the target recorded: an idle target may just as well have failed.
+    /// The fallback for what no turn will ever end: a target that went away, or one
+    /// started without a turn to go by. A recorded outcome is settled as it happens.
     pub(crate) async fn settle_handover_turns(&self) {
-        let ended: Vec<(String, String, Option<String>, Option<TurnOutcome>)> = {
+        let pending: Vec<(String, String, bool)> = {
             let relay = self.relay.read().await;
             relay
                 .injections
                 .handovers()
                 .filter(|mark| mark.status == "done" && mark.finished_at.is_none())
-                .filter_map(|mark| {
-                    let runtime = relay.runtime_for_thread(&mark.target_thread_id);
-                    let outcome = match (runtime, mark.target_turn_id.as_deref()) {
-                        (Some(runtime), Some(turn)) => Some(runtime.finished_turn(turn)?),
-                        (Some(runtime), None) if runtime.is_working() => return None,
-                        // Gone, or started with no turn to go by: how it ended is unknown.
-                        _ => None,
-                    };
-                    Some((
+                .map(|mark| {
+                    (
                         mark.id.clone(),
                         mark.target_thread_id.clone(),
-                        mark.target_turn_id.clone(),
-                        outcome,
-                    ))
+                        mark.target_turn_id.is_some(),
+                    )
                 })
                 .collect()
         };
-        for (handover_id, target, turn_id, outcome) in ended {
-            let reply = match (outcome, turn_id) {
-                (Some(TurnOutcome::Completed), Some(turn_id)) => {
-                    self.assistant_entry_for_turn(&target, &turn_id).await
-                }
-                _ => None,
-            };
-            let mut relay = self.relay.write().await;
-            let Some(mut mark) = relay.injections.handover(&handover_id).cloned() else {
-                continue;
-            };
-            mark.outcome = outcome.map(|outcome| {
-                match outcome {
-                    TurnOutcome::Completed => "completed",
-                    TurnOutcome::Failed => "failed",
-                    TurnOutcome::Stopped => "stopped",
-                }
-                .to_string()
-            });
-            mark.result = reply.and_then(|(_, text, _, _)| one_line_result(&text));
-            mark.finished_at = Some(crate::state::unix_now());
-            relay.usage_store.save_handover_mark(&mark);
-            relay.injections.put_handover(mark);
-            relay.notify();
+        if pending.is_empty() {
+            return;
         }
+        let mut relay = self.relay.write().await;
+        for (handover_id, target, has_turn) in pending {
+            match relay
+                .runtime_for_thread(&target)
+                .map(|runtime| runtime.is_working())
+            {
+                None => relay.settle_handover(&handover_id, None, None),
+                Some(false) if !has_turn => relay.settle_handover(&handover_id, None, None),
+                _ => relay.settle_handover_if_ended(&handover_id),
+            }
+        }
+    }
+}
+
+impl RelayState {
+    /// Called as a turn ends: settles the handover whose brief started it, if any.
+    pub(crate) fn settle_handovers_for_turn(&mut self, thread_id: &str, turn_id: &str) {
+        let ended: Vec<String> = self
+            .injections
+            .handovers()
+            .filter(|mark| {
+                mark.finished_at.is_none()
+                    && mark.target_thread_id == thread_id
+                    && mark.target_turn_id.as_deref() == Some(turn_id)
+            })
+            .map(|mark| mark.id.clone())
+            .collect();
+        for handover_id in ended {
+            self.settle_handover_if_ended(&handover_id);
+        }
+    }
+
+    /// Settles by the outcome the target recorded for its turn, once there is one.
+    pub(crate) fn settle_handover_if_ended(&mut self, handover_id: &str) {
+        let Some(mark) = self.injections.handover(handover_id) else {
+            return;
+        };
+        let (target, Some(turn_id)) = (mark.target_thread_id.clone(), mark.target_turn_id.clone())
+        else {
+            return;
+        };
+        if mark.finished_at.is_some() {
+            return;
+        }
+        let Some(outcome) = self.turn_terminal(&target, &turn_id) else {
+            return;
+        };
+        // Only a completed turn has an answer; a stopped one's text is half of one.
+        let reply = (outcome == TurnOutcome::Completed)
+            .then(|| {
+                let runtime = self.runtime_for_thread(&target)?;
+                agent_entry_for_turn(&runtime.transcript_views(), &turn_id)
+            })
+            .flatten()
+            .map(|(_, text, _, _)| text);
+        self.settle_handover(handover_id, Some(outcome), reply);
+    }
+
+    /// `outcome` is `None` when how the target's turn ended can never be known.
+    pub(crate) fn settle_handover(
+        &mut self,
+        handover_id: &str,
+        outcome: Option<TurnOutcome>,
+        reply: Option<String>,
+    ) {
+        let Some(mut mark) = self.injections.handover(handover_id).cloned() else {
+            return;
+        };
+        mark.outcome = outcome.map(|outcome| {
+            match outcome {
+                TurnOutcome::Completed => "completed",
+                TurnOutcome::Failed => "failed",
+                TurnOutcome::Stopped => "stopped",
+            }
+            .to_string()
+        });
+        mark.result = reply.as_deref().and_then(one_line_result);
+        mark.finished_at = Some(crate::state::unix_now());
+        self.usage_store.save_handover_mark(&mark);
+        self.injections.put_handover(mark);
+        self.notify();
     }
 }

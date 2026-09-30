@@ -39306,8 +39306,6 @@ sharing a directory is not being the person who typed the command",
         );
 
         wait_idle(&app, &target).await;
-        let before = app.relay.read().await.reviews_revision();
-        app.settle_handover_turns().await;
         let links = app.reviews(None).await.handover_links;
         let link = links
             .iter()
@@ -39325,8 +39323,20 @@ sharing a directory is not being the person who typed the command",
             "the result is what the target said in that turn: {:?}",
             link.result
         );
+
+        let handover_id = link.id.clone();
+        let mut relay = app.relay.write().await;
+        let mut mark = relay
+            .injections
+            .handover(&handover_id)
+            .cloned()
+            .expect("mark");
+        mark.finished_at = None;
+        relay.injections.put_handover(mark);
+        let before = relay.reviews_revision();
+        relay.settle_handover(&handover_id, None, None);
         assert_ne!(
-            app.relay.read().await.reviews_revision(),
+            relay.reviews_revision(),
             before,
             "a client only refetches the panel when this key moves"
         );
@@ -39388,37 +39398,98 @@ sharing a directory is not being the person who typed the command",
     }
 
     #[tokio::test]
-    async fn a_deleted_session_takes_its_end_of_the_handover_with_it() {
-        // The other session's rows keep the handover's cards, so its record outlives the
-        // delete — and without this, both the panel and the card link to nothing.
+    async fn a_removed_session_takes_its_end_of_the_handover_with_it() {
+        // Archive and delete both take the session out of the relay's routing, and the
+        // other session's rows keep the handover's cards, so its record outlives them.
         let project = TempDir::new().expect("tempdir");
         let cwd = project.path().to_string_lossy().to_string();
         let (app, _p, _o) = build_app(&cwd).await;
         grant_workspace(&app, &cwd).await;
-        for gone in ["source", "target"] {
-            let source = session(&app, &cwd, "never").await;
-            let target = app
-                .handover(&source, request())
-                .await
-                .expect("the handover goes through");
-            delivered(&app, &target).await;
-            let deleted = if gone == "source" { &source } else { &target };
-            app.relay.write().await.mark_thread_deleted(deleted);
+        for how in ["archive", "delete"] {
+            for gone in ["source", "target"] {
+                let source = session(&app, &cwd, "never").await;
+                let target = app
+                    .handover(&source, request())
+                    .await
+                    .expect("the handover goes through");
+                delivered(&app, &target).await;
+                wait_idle(&app, &target).await;
+                let removed = if gone == "source" { &source } else { &target };
+                if how == "archive" {
+                    app.archive_thread(removed, Some(true))
+                        .await
+                        .expect("archived");
+                } else {
+                    app.relay.write().await.mark_thread_deleted(removed);
+                }
 
-            let links = app.reviews(None).await.handover_links;
-            assert!(
-                !links.iter().any(|link| {
-                    link.source_thread_id == source || link.target_thread_id == target
-                }),
-                "with the {gone} deleted: {links:?}"
-            );
-            let relay = app.relay.read().await;
-            let names_it = relay
+                let links = app.reviews(None).await.handover_links;
+                assert!(
+                    !links.iter().any(|link| {
+                        link.source_thread_id == source || link.target_thread_id == target
+                    }),
+                    "{how} the {gone}: {links:?}"
+                );
+                let relay = app.relay.read().await;
+                let names_it = relay.injections.handovers().any(|mark| {
+                    mark.source_thread_id == *removed || mark.target_thread_id == *removed
+                });
+                assert!(!names_it, "no card may still link to the {how}d {gone}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_target_turn_is_settled_when_it_ends_and_survives_a_restart() {
+        // Waiting for the sweep left a window in which a restart read a completed turn
+        // as interrupted and its result was never kept.
+        use crate::usage::store::UsageStore;
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let database = project.path().join("sealwire.db");
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        app.relay
+            .write()
+            .await
+            .install_database(UsageStore::open(&database));
+        let source = session(&app, &cwd, "never").await;
+        let target = app
+            .handover(&source, written_summary("## Goal\nShip it"))
+            .await
+            .expect("the handover goes through");
+        delivered(&app, &target).await;
+        wait_idle(&app, &target).await;
+
+        let settled = |marks: Vec<crate::state::HandoverMark>| {
+            marks
+                .into_iter()
+                .find(|mark| mark.target_thread_id == target)
+                .expect("mark")
+        };
+        let live = settled(
+            app.relay
+                .read()
+                .await
                 .injections
                 .handovers()
-                .any(|mark| mark.source_thread_id == *deleted || mark.target_thread_id == *deleted);
-            assert!(!names_it, "no card may still link to the deleted {gone}");
-        }
+                .cloned()
+                .collect(),
+        );
+        assert_eq!(
+            live.outcome.as_deref(),
+            Some("completed"),
+            "no sweep has run"
+        );
+        assert!(live.result.is_some());
+
+        let restarted = settled(
+            UsageStore::open(&database)
+                .load_injections("restarted")
+                .handovers,
+        );
+        assert_eq!(restarted.outcome.as_deref(), Some("completed"));
+        assert_eq!(restarted.result, live.result);
     }
 
     #[tokio::test]

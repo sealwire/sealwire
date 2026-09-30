@@ -1249,6 +1249,7 @@ impl RelayState {
         if let Some(runtime) = self.runtimes.get_mut(thread_id) {
             runtime.record_finished_turn(turn_id, outcome);
         }
+        self.settle_handovers_for_turn(thread_id, turn_id);
     }
 
     pub(crate) fn turn_terminal(&self, thread_id: &str, turn_id: &str) -> Option<TurnOutcome> {
@@ -3917,7 +3918,7 @@ so {} never got it — hand over again when you are ready.",
                 None => crate::state::HandoverActor::LocalOperator,
             }),
             // A failed one handed nothing over; the composer that typed it says so. A
-            // deleted end is blanked; absence from the thread page proves nothing.
+            // removed end is blanked; absence from the thread page proves nothing.
             handover_links: self
                 .injections
                 .handovers()
@@ -5658,6 +5659,11 @@ so {} never got it — hand over again when you are ready.",
         // session away takes the only place it could ever be read. Shared by archive and
         // permanent delete, like everything else here.
         self.retire_handovers_for_thread(thread_id);
+        // Archive as well as delete: either way nothing can route to it, so a handover
+        // link to it would open nothing. The other end's cards keep the mark.
+        for mark in self.injections.detach_handover_end(thread_id) {
+            self.usage_store.save_handover_mark(&mark);
+        }
         self.threads.len() != before_len
     }
 
@@ -5677,9 +5683,6 @@ so {} never got it — hand over again when you are ready.",
         let orphaned = self.injections.forget_thread(thread_id);
         self.usage_store
             .forget_thread_injections(thread_id, &orphaned);
-        for mark in self.injections.detach_handover_end(thread_id) {
-            self.usage_store.save_handover_mark(&mark);
-        }
         // The user's title is cleared by `remove_thread` below, which archive shares —
         // unlike project membership above, it needs no permanent-delete-only placement.
         self.remove_thread(thread_id);
