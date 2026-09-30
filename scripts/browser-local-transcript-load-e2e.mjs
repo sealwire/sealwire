@@ -1,13 +1,13 @@
 // End-to-end coverage for the "scroll up to load older messages" path.
 //
 // Specifically verifies:
-//   1. CSS: overflow-anchor isn't pinned to `none` (so browser-native scroll
-//      anchoring is what keeps the viewport stable across prepends).
+//   1. CSS: overflow-anchor is `none`; the transcript controller owns the
+//      reading anchor and native anchoring would correct the same resize twice.
 //   2. DOM: a zero-height history sentinel sits at the very top of the
 //      transcript so the IntersectionObserver in app.js can prefetch the
 //      next older page before the user reaches the top edge.
-//   3. content-visibility: `auto` is applied to chat messages so off-screen
-//      entries don't repaint on every render.
+//   3. content-visibility stays `visible` on chat messages; virtualization
+//      already bounds the rows, and a second placeholder height moves targets.
 //   4. Behavior: with a truncated transcript, scrolling up triggers a
 //      `/api/threads/:thread_id/transcript?before=<cursor>` fetch and the older
 //      entries land in the DOM. The scroll position should not regress.
@@ -159,16 +159,15 @@ async function main() {
       { timeout: LOCAL_TIMEOUT_MS }
     );
 
-    // (1) overflow-anchor must NOT be "none" — we removed the manual override
-    // so the browser can keep the visible content pinned across prepends.
+    // (1) Native anchoring must stay off; see docs/transcript-scrolling.md.
     const overflowAnchor = await page.evaluate(() => {
       const transcript = document.querySelector("#transcript");
       return transcript ? getComputedStyle(transcript).overflowAnchor : null;
     });
-    assert.notEqual(
+    assert.equal(
       overflowAnchor,
       "none",
-      `overflow-anchor should not be disabled on the chat thread (got ${overflowAnchor})`
+      `overflow-anchor must be disabled on the chat thread (got ${overflowAnchor})`
     );
 
     // (2) The history sentinel must be the first DOM child of .thread-content
@@ -195,15 +194,15 @@ async function main() {
       `history sentinel should have zero height (got ${sentinelLayout.height})`
     );
 
-    // (3) content-visibility:auto on chat-message keeps long transcripts cheap.
+    // (3) See docs/transcript-scrolling.md for why rows no longer use `auto`.
     const contentVisibility = await page.evaluate(() => {
       const first = document.querySelector("#transcript .chat-message");
       return first ? getComputedStyle(first).contentVisibility : null;
     });
     assert.equal(
       contentVisibility,
-      "auto",
-      `chat-message should opt into content-visibility:auto (got ${contentVisibility})`
+      "visible",
+      `chat-message must not use content-visibility:auto (got ${contentVisibility})`
     );
 
     // (4) The IntersectionObserver-driven loader should have already issued
