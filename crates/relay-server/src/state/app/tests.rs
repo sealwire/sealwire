@@ -7352,6 +7352,38 @@ tree; got {}",
         )
     }
 
+    #[tokio::test]
+    async fn claude_initial_prompt_waits_for_its_peer_mcp_session() {
+        let project = TempDir::new().expect("project");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        claude
+            .consumes_initial_prompt
+            .store(true, Ordering::Relaxed);
+
+        let snapshot = app
+            .start_session(StartSessionInput {
+                cwd: Some(cwd.to_string()),
+                initial_prompt: Some("Call delegate.".to_string()),
+                model: Some("haiku".to_string()),
+                approval_policy: Some("bypass".to_string()),
+                sandbox: Some("workspace-write".to_string()),
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("claude_code".to_string()),
+                project_id: None,
+            })
+            .await
+            .expect("Claude first prompt starts");
+
+        assert_eq!(
+            claude.turn_texts.lock().await.as_slice(),
+            ["Call delegate."]
+        );
+        assert_eq!(snapshot.model, "haiku");
+    }
+
     fn fake_codex_path() -> &'static str {
         let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let workspace_root = crate_dir
@@ -34173,6 +34205,7 @@ mod delegate_card_tests {
     //! person's delegate that fails waits for the person.
     use super::path_scope_tests::{build_app, grant_workspace};
     use crate::protocol::{InjectionKind, InjectionView, TranscriptEntryView};
+    use crate::state::app::delegation::DelegateOutcome;
     use relay_api::delegation::{AskRequest, StartedBy};
     use tempfile::TempDir;
 
@@ -34223,7 +34256,7 @@ mod delegate_card_tests {
             let reply = app
                 .call_peer_tool_with_metadata(
                     "delegate",
-                    &serde_json::json!({ "message": task, "provider": "fake" }),
+                    &serde_json::json!({ "message": task, "provider": "fake", "model": "default" }),
                     &token,
                 )
                 .await
@@ -34329,10 +34362,13 @@ mod delegate_card_tests {
             .write()
             .await
             .install_database(UsageStore::open(&database));
-        let (_, ask_id) = app
-            .delegate_with_id(&caller, request(StartedBy::Agent, "Inspect the retry loop"))
+        let DelegateOutcome::Sent { ask_id, .. } = app
+            .delegate_request(&caller, request(StartedBy::Agent, "Inspect the retry loop"))
             .await
-            .expect("delegate succeeds");
+            .expect("delegate succeeds")
+        else {
+            panic!("delegate started without a model approval hold");
+        };
 
         let mut relay = app.relay.write().await;
         let mut tool = ToolCallView::command_execution(None);
