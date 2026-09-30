@@ -61,6 +61,7 @@
     "test:private-frontend": "node --test crates/sealwire-private/frontend/*.test.mjs",
     "test:task-team": "node scripts/task-team-e2e.mjs",
     "test:browser:tasks": "npm run build && npm run build:relay:private && E2E_USE_BUILT_BINARIES=1 node scripts/browser-tasks-screen-e2e.mjs",
+    "test:browser:usage-mobile": "npm run build && npm run build:relay:private && E2E_USE_BUILT_BINARIES=1 node scripts/browser-usage-mobile-e2e.mjs",
     "test:browser:orch-proposal-scroll": "node scripts/browser-orchestrator-proposal-scroll-e2e.mjs",
     "test:browser:transcript-expand-scroll": "node scripts/browser-transcript-expand-scroll-e2e.mjs",
     "test:browser:transcript-scroll:webkit": "E2E_BROWSER=webkit node scripts/browser-transcript-expand-scroll-e2e.mjs",

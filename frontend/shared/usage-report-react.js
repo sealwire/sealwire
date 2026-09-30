@@ -25,13 +25,18 @@ import {
   priceAgeNote,
   reportState,
   rollupCost,
+  sessionsForBucket,
   stackedSeries,
   yAxisTicks,
 } from "./usage-model.js";
 import { downloadUsageCsv } from "./usage-csv.js";
+import { BackArrowIcon } from "./panel-icons.js";
 
 const h = React.createElement;
-const { useState } = React;
+const { useId, useState } = React;
+
+// Enough to answer "where did it go" at a glance; every other session is one click away.
+const SESSION_PREVIEW_COUNT = 5;
 
 // Month bucket keys render as a short month name; the year is already stated
 // once in the range above the chart.
@@ -295,12 +300,159 @@ export function dayFocus(report, series, selectedKey) {
   };
 }
 
+// Phone only (styles.css): there the sidebar is hidden while Usage is open, so this
+// is the one way out. On a desktop the sidebar's own Sessions row does the job.
+function UsageBack({ onOpenSessions }) {
+  if (!onOpenSessions) return null;
+  return h(
+    "button",
+    { type: "button", className: "usage-back", "aria-label": "Back to sessions", onClick: () => onOpenSessions() },
+    h(BackArrowIcon),
+    "Sessions"
+  );
+}
+
+function sessionShortId(threadId) {
+  return String(threadId || "").slice(0, 8);
+}
+
+function joinNames(names) {
+  if (names.length <= 1) return names[0] || "";
+  return `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
+
+/**
+ * Per-session spend for one chart bucket. `scope` is the tail of the empty-state
+ * sentence ("today", "on 8/13"), so the heading and the empty line name the same bar.
+ */
+function SessionsSection({ report, bucketKey, heading, scope, onOpenSession }) {
+  const [expanded, setExpanded] = useState(false);
+  const listId = useId();
+  const headingId = useId();
+  const sessions = sessionsForBucket(report, bucketKey).filter((s) => Number(s?.total) > 0);
+  const sum = sessions.reduce((acc, s) => acc + Number(s.total), 0);
+  const top = sessions[0]?.total || 0;
+  const shown = expanded ? sessions : sessions.slice(0, SESSION_PREVIEW_COUNT);
+  const silent = visibleProviders(report)
+    .filter((p) => p.reports_usage === false)
+    .map((p) => p.label || p.key);
+
+  return h(
+    "section",
+    { className: "usage-sessions", "aria-labelledby": headingId },
+    h(
+      "div",
+      { className: "usage-tasks-head usage-sessions-head" },
+      h("h3", { id: headingId }, heading),
+      sessions.length
+        ? h(
+            "span",
+            { className: "usage-sessions-summary" },
+            `${sessions.length} session${sessions.length === 1 ? "" : "s"} · ${formatTokens(sum)}`
+          )
+        : null
+    ),
+    sessions.length
+      ? h(
+          "ul",
+          { className: "usage-session-list", id: listId },
+          ...shown.map((session) => {
+            const meta = providerMeta(report, session.provider);
+            const title = typeof session.title === "string" ? session.title.trim() : "";
+            const name = title || `Session ${sessionShortId(session.thread_id)}`;
+            const tokens = formatTokens(session.total);
+            const openable = Boolean(onOpenSession && session.thread_id);
+            const body = [
+              h(
+                "span",
+                { key: "main", className: "usage-session-main" },
+                h(
+                  "span",
+                  { className: `usage-session-title${title ? "" : " is-untitled"}` },
+                  name
+                ),
+                h(
+                  "span",
+                  { className: "usage-session-meta" },
+                  h("span", {
+                    className: `usage-swatch is-${providerTone(session.provider)}`,
+                    "aria-hidden": "true",
+                  }),
+                  meta.label,
+                  title
+                    ? null
+                    : h("span", { className: "usage-session-note" }, " · title unavailable")
+                )
+              ),
+              h(
+                "span",
+                { key: "spend", className: "usage-session-spend" },
+                h("strong", { className: "usage-session-tokens" }, tokens),
+                h(
+                  "span",
+                  { className: "usage-session-track", "aria-hidden": "true" },
+                  h("span", {
+                    className: `usage-session-fill is-${providerTone(session.provider)}`,
+                    style: { width: `${top > 0 ? (session.total / top) * 100 : 0}%` },
+                  })
+                )
+              ),
+              openable
+                ? h("span", { key: "go", className: "usage-session-go", "aria-hidden": "true" }, "›")
+                : null,
+            ];
+            const label = `${name}${title ? "" : " (title unavailable)"}, ${meta.label}, ${tokens} tokens`;
+            return h(
+              "li",
+              { key: `${session.provider}::${session.thread_id}` },
+              openable
+                ? h(
+                    "button",
+                    {
+                      type: "button",
+                      className: "usage-session-row",
+                      "aria-label": `${label}. Open session`,
+                      onClick: () => onOpenSession(session.thread_id),
+                    },
+                    ...body
+                  )
+                : h("div", { className: "usage-session-row" }, ...body)
+            );
+          })
+        )
+      : h("p", { className: "usage-sessions-empty" }, `No session reported usage ${scope}.`),
+    sessions.length > SESSION_PREVIEW_COUNT
+      ? h(
+          "button",
+          {
+            type: "button",
+            className: "usage-sessions-more",
+            "aria-expanded": expanded ? "true" : "false",
+            "aria-controls": listId,
+            onClick: () => setExpanded((v) => !v),
+          },
+          expanded ? "Show fewer" : `Show all ${sessions.length} sessions`
+        )
+      : null,
+    silent.length
+      ? h(
+          "p",
+          { className: "usage-sessions-footnote" },
+          silent.length === 1
+            ? `${silent[0]} doesn't report token usage, so its sessions aren't listed.`
+            : `${joinNames(silent)} don't report token usage, so their sessions aren't listed.`
+        )
+      : null
+  );
+}
+
 function StackedChart({
   series,
   cap,
   projectToday,
   providers,
   endLabel = "Today",
+  label = "Spend by day",
   selectedKey = null,
   onSelect = null,
 }) {
@@ -322,15 +474,14 @@ function StackedChart({
   const lastKey = series.length ? series[series.length - 1].key : null;
   const activeKey = selectedKey || lastKey;
 
-  function selectBucket(key) {
-    if (!onSelect) return;
-    // Re-clicking the active day keeps it selected (rails always have a focus).
-    onSelect(key);
-  }
+  const selectable = typeof onSelect === "function";
 
   return h(
     "div",
-    { className: "usage-chart", style: { "--usage-cols": String(colCount) } },
+    {
+      className: selectable ? "usage-chart is-selectable" : "usage-chart",
+      style: { "--usage-cols": String(colCount) },
+    },
     h(
       "div",
       { className: "usage-chart-frame" },
@@ -361,7 +512,7 @@ function StackedChart({
           : null,
         h(
           "div",
-          { className: "usage-chart-bars", role: "listbox", "aria-label": "Spend by day" },
+          { className: "usage-chart-bars", role: selectable ? "listbox" : "list", "aria-label": label },
           ...series.map((bucket, i) => {
             const isEnd = i === series.length - 1;
             const height = bucket.total > 0 ? (bucket.total / max) * 100 : 0;
@@ -375,13 +526,26 @@ function StackedChart({
             const hitCap = cap && bucket.total >= cap;
             const isSelected = activeKey === bucket.key;
             const dayLabel = shortBucketLabel(bucket.key, { end: isEnd, endLabel });
+            // Re-clicking the active day keeps it selected (rails always have a focus).
+            const choice = selectable
+              ? {
+                  role: "option",
+                  tabIndex: 0,
+                  "aria-selected": isSelected ? "true" : "false",
+                  onClick: () => onSelect(bucket.key),
+                  onKeyDown: (event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      onSelect(bucket.key);
+                    }
+                  },
+                }
+              : { role: "listitem" };
             return h(
               "div",
               {
                 key: bucket.key,
-                role: "option",
-                tabIndex: 0,
-                "aria-selected": isSelected ? "true" : "false",
+                ...choice,
                 "aria-label": [
                   dayLabel,
                   formatTokens(bucket.total),
@@ -403,13 +567,6 @@ function StackedChart({
                 ]
                   .filter(Boolean)
                   .join(" "),
-                onClick: () => selectBucket(bucket.key),
-                onKeyDown: (event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    selectBucket(bucket.key);
-                  }
-                },
               },
               h(
                 "div",
@@ -505,11 +662,13 @@ function StackedChart({
           )
         )
       : null,
-    h(
-      "p",
-      { className: "usage-chart-day-hint" },
-      "Click a day — left and right panels follow."
-    )
+    selectable
+      ? h(
+          "p",
+          { className: "usage-chart-day-hint" },
+          "Click a day — left and right panels follow."
+        )
+      : null
   );
 }
 
@@ -680,8 +839,9 @@ function CenterDay({
   report,
   series,
   projection,
-  selectedKey,
+  focus,
   onSelectDay,
+  onOpenSession,
   showTopTasks = true,
 }) {
   const windowTotal = series.reduce((s, b) => s + b.total, 0);
@@ -705,8 +865,17 @@ function CenterDay({
       cap: report.daily_cap,
       projectToday: projection,
       providers: visibleProviders(report),
-      selectedKey,
+      selectedKey: focus.key,
       onSelect: onSelectDay,
+    }),
+    h(SessionsSection, {
+      // Keyed by bar so an expanded list collapses when another day is picked.
+      key: focus.key,
+      report,
+      bucketKey: focus.key,
+      heading: focus.isToday ? "Today's sessions" : `Sessions on ${focus.label}`,
+      scope: focus.isToday ? "today" : `on ${focus.label}`,
+      onOpenSession,
     }),
     showTopTasks && (report.top_tasks || []).length
       ? h(
@@ -899,7 +1068,7 @@ function RightRail({ report, focus }) {
   );
 }
 
-function WeekView({ report, mode = "week" }) {
+function WeekView({ report, mode = "week", onOpenSession }) {
   const buckets = report.buckets || [];
   const series = stackedSeries({ buckets });
   const thisWeek = series.at(-1);
@@ -945,6 +1114,15 @@ function WeekView({ report, mode = "week" }) {
       },
       providers: report.providers,
       endLabel: mode === "month" ? "This month" : "This week",
+      label: mode === "month" ? "Spend by month" : "Spend by week",
+    }),
+    h(SessionsSection, {
+      key: `${mode}:${buckets.at(-1)?.key || ""}`,
+      report,
+      bucketKey: buckets.at(-1)?.key,
+      heading: mode === "month" ? "This month's sessions" : "This week's sessions",
+      scope: mode === "month" ? "this month" : "this week",
+      onOpenSession,
     }),
     h(
       "div",
@@ -1062,13 +1240,14 @@ function WeekView({ report, mode = "week" }) {
  * is a CSS property and devtools removes it in one click. Someone's spend is not
  * something to protect with a filter.
  */
-function LockedUsage() {
+function LockedUsage({ onOpenSessions }) {
   // Rough shape of the 14-day chart, so the locked screen reads as "a chart you
   // cannot see yet" rather than an error.
   const bars = [46, 58, 38, 72, 61, 66, 84, 100, 44, 63, 71, 52, 59, 67];
   return h(
     "div",
     { className: "usage-screen usage-locked" },
+    h(UsageBack, { onOpenSessions }),
     h(
       "div",
       { className: "usage-locked-scenery", "aria-hidden": "true" },
@@ -1109,20 +1288,25 @@ export function UsageReportScreen({
   budgetPending = false,
   /** Pin chart selection (SSR / tests). Live UI leaves this null. */
   selectedDayKey = null,
+  /** Opens a session in the client view; must not resume, send to, or control it. */
+  onOpenSession = null,
+  onOpenSessions = null,
 }) {
   // First, ahead of loading and error: those branches describe a fetch this
   // build should never have made. A locked screen has nothing to say about the
   // state of a request it does not want the answer to.
   if (locked) {
-    return h(LockedUsage);
+    return h(LockedUsage, { onOpenSessions });
   }
+  const back = h(UsageBack, { onOpenSessions });
   if (loading && !report) {
-    return h("div", { className: "usage-screen" }, h("p", { className: "usage-empty" }, "Loading…"));
+    return h("div", { className: "usage-screen" }, back, h("p", { className: "usage-empty" }, "Loading…"));
   }
   if (error && !report) {
     return h(
       "div",
       { className: "usage-screen" },
+      back,
       h(
         "div",
         { className: "usage-empty" },
@@ -1140,12 +1324,13 @@ export function UsageReportScreen({
   }
   const state = reportState(report);
   if (state === "loading") {
-    return h("div", { className: "usage-screen" }, h("p", { className: "usage-empty" }, "Loading…"));
+    return h("div", { className: "usage-screen" }, back, h("p", { className: "usage-empty" }, "Loading…"));
   }
   if (state === "disabled") {
     return h(
       "div",
       { className: "usage-screen" },
+      back,
       h(
         "div",
         { className: "usage-empty" },
@@ -1184,6 +1369,7 @@ export function UsageReportScreen({
     h(
       "header",
       { className: "usage-toolbar" },
+      back,
       h(
         "div",
         { className: "usage-tabs", role: "tablist" },
@@ -1239,7 +1425,7 @@ export function UsageReportScreen({
           h("p", null, "Numbers appear here after a turn that reports tokens.")
         )
       : bucket === "week" || bucket === "month"
-        ? h(WeekView, { report, mode: bucket })
+        ? h(WeekView, { report, mode: bucket, onOpenSession })
         : h(DayUsageGrid, {
             report,
             series: daySeries,
@@ -1247,6 +1433,7 @@ export function UsageReportScreen({
             onSetBudget,
             budgetPending,
             selectedDayKey,
+            onOpenSession,
           })
   );
 }
@@ -1259,6 +1446,7 @@ function DayUsageGrid({
   onSetBudget,
   budgetPending,
   selectedDayKey = null,
+  onOpenSession,
 }) {
   const [pickedKey, setPickedKey] = useState(null);
   // Tests can pin a day via selectedDayKey; the chart click path uses pickedKey.
@@ -1272,8 +1460,9 @@ function DayUsageGrid({
       report,
       series,
       projection,
-      selectedKey: focus.key,
+      focus,
       onSelectDay: setPickedKey,
+      onOpenSession,
       showTopTasks: focus.isToday,
     }),
     h(RightRail, { report, focus })

@@ -5368,6 +5368,25 @@ body.sidebar-collapsed .app-shell[data-view="tasks"] #tasks-sidebar-toggle {
     height: auto;
     overflow: hidden;
   }
+  /* Usage takes the whole phone the same way. Flex rather than a grid track because
+   * the desktop `[data-view="usage"]` column rules outrank `.app-shell` above; the way
+   * back is the Sessions button in the Usage toolbar. */
+  .app-shell[data-view="usage"] {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .app-shell[data-view="usage"] > .sidebar {
+    display: none;
+  }
+  .app-shell[data-view="usage"] > .chat-shell {
+    flex: 1 1 0;
+    min-height: 0;
+    height: auto;
+    overflow: hidden;
+  }
   .chat-header {
     grid-template-columns: minmax(0, 1fr) auto;
     padding: 14px 16px 12px;
@@ -10377,6 +10396,49 @@ button.team-role-name.is-link {
   align-items: center;
   gap: 12px;
 }
+.usage-back {
+  display: none;
+  appearance: none;
+  align-items: center;
+  gap: 4px;
+  min-height: 36px;
+  padding: 6px 10px 6px 4px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-strong);
+  cursor: pointer;
+}
+.usage-back:hover {
+  background: var(--surface-2);
+  color: var(--text-1);
+}
+.usage-back:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+@media (max-width: 960px) {
+  .usage-back {
+    display: inline-flex;
+  }
+  .usage-toolbar-right {
+    margin-left: auto;
+  }
+  .usage-screen > .usage-back {
+    align-self: flex-start;
+    margin: 10px 10px 0;
+  }
+  .usage-locked > .usage-back {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    z-index: 1;
+    margin: 0;
+  }
+}
 .usage-range {
   color: var(--text-3);
   font-size: var(--text-sm);
@@ -10667,17 +10729,19 @@ button.team-role-name.is-link {
   height: 100%;
   min-width: 0;
   overflow: visible;
-  cursor: pointer;
   border-radius: 4px 4px 0 0;
   outline: none;
 }
-.usage-chart-col:hover .usage-chart-bar,
+.usage-chart.is-selectable .usage-chart-col {
+  cursor: pointer;
+}
+.usage-chart.is-selectable .usage-chart-col:hover .usage-chart-bar,
 .usage-chart-col:focus-visible .usage-chart-bar,
 .usage-chart-col.is-selected .usage-chart-bar {
   filter: brightness(1.08);
   box-shadow: 0 0 0 1px var(--accent);
 }
-.usage-chart-col:hover .usage-chart-bar.is-empty,
+.usage-chart.is-selectable .usage-chart-col:hover .usage-chart-bar.is-empty,
 .usage-chart-col.is-selected .usage-chart-bar.is-empty {
   opacity: 0.7;
   background: var(--accent);
@@ -10930,6 +10994,170 @@ button.team-role-name.is-link {
 .usage-status.is-paused::before { background: var(--warn-fg); }
 .usage-task-status-note { color: var(--text-3); }
 
+/* Per-session spend under the chart. Rows are full-width buttons: the whole row
+ * is the target, so a phone tap never has to find a small link inside it. */
+.usage-sessions {
+  margin: 4px 0 26px;
+}
+.usage-sessions-summary {
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* Pulled out by the row padding so titles line up with the heading while the
+ * hover fill still has room around the text. */
+.usage-session-list {
+  list-style: none;
+  margin: 0 -8px;
+  padding: 0;
+  border-bottom: 1px solid var(--border-faint);
+}
+.usage-session-list > li {
+  border-top: 1px solid var(--border-faint);
+}
+.usage-session-row {
+  appearance: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(64px, 112px) 12px;
+  gap: 14px;
+  align-items: center;
+  width: 100%;
+  margin: 0;
+  padding: 9px 8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+div.usage-session-row {
+  grid-template-columns: minmax(0, 1fr) minmax(64px, 112px);
+}
+button.usage-session-row {
+  cursor: pointer;
+}
+button.usage-session-row:hover {
+  background: var(--surface-2);
+}
+button.usage-session-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--surface-2);
+}
+.usage-session-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.usage-session-title {
+  font-size: var(--text-ui);
+  font-weight: var(--weight-strong);
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-session-title.is-untitled {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-weight: var(--weight-regular);
+  font-size: var(--text-sm);
+}
+.usage-session-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+.usage-session-meta .usage-swatch {
+  flex: none;
+  margin-top: 0;
+}
+.usage-session-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-style: italic;
+}
+.usage-session-spend {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+  min-width: 0;
+}
+.usage-session-tokens {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-1);
+}
+.usage-session-track {
+  display: block;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.usage-session-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+.usage-session-fill.is-claude { background: var(--provider-claude-series); }
+.usage-session-fill.is-codex { background: var(--provider-codex-series); }
+.usage-session-fill.is-cursor { background: var(--provider-cursor-series); }
+.usage-session-go {
+  color: var(--text-3);
+  font-size: var(--text-lg);
+  line-height: var(--leading-none);
+  text-align: center;
+}
+button.usage-session-row:hover .usage-session-go,
+button.usage-session-row:focus-visible .usage-session-go {
+  color: var(--text-1);
+}
+.usage-sessions-more {
+  appearance: none;
+  margin: 8px 0 0 -8px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.usage-sessions-more:hover {
+  background: var(--surface-2);
+}
+.usage-sessions-more:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.usage-sessions-empty {
+  margin: 0;
+  padding: 14px 0;
+  border-top: 1px solid var(--border-faint);
+  border-bottom: 1px solid var(--border-faint);
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+.usage-sessions-footnote {
+  margin: 8px 0 0;
+  padding: 0;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  line-height: var(--leading-relaxed);
+}
+
 .usage-role-head {
   display: flex;
   justify-content: space-between;
@@ -11081,17 +11309,6 @@ button.team-role-name.is-link {
   }
   .usage-mini-stack,
   .usage-task-status { display: none; }
-  .usage-chart {
-    height: 200px;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-  }
-  .usage-chart-bars {
-    min-width: 520px;
-  }
-  .usage-week .usage-chart-bars {
-    min-width: 360px;
-  }
   .usage-week-table-wrap {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
@@ -11121,6 +11338,24 @@ button.team-role-name.is-link {
   .usage-task-status {
     display: none;
   }
+  /* A narrow centre still has to show whose session it was and its number, so the
+   * title gets two lines instead of an ellipsis after a few words. */
+  .usage-session-row {
+    grid-template-columns: minmax(0, 1fr) minmax(52px, 76px) 10px;
+    gap: 10px;
+    padding: 10px 8px;
+  }
+  div.usage-session-row {
+    grid-template-columns: minmax(0, 1fr) minmax(52px, 76px);
+  }
+  .usage-session-title {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: var(--leading-normal);
+  }
 }
 
 @media (max-width: 720px) {
@@ -11132,6 +11367,11 @@ button.team-role-name.is-link {
   }
   .usage-toolbar-right {
     justify-content: space-between;
+    margin-left: 0;
+  }
+  .usage-toolbar > .usage-back {
+    align-self: flex-start;
+    margin-left: -4px;
   }
   .usage-center,
   .usage-week,
@@ -11156,6 +11396,12 @@ button.team-role-name.is-link {
   }
   .usage-tabs {
     width: 100%;
+  }
+  .usage-session-row {
+    min-height: 52px;
+  }
+  .usage-sessions-more {
+    min-height: 40px;
   }
 }
 

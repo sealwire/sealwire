@@ -89,6 +89,63 @@ function dayBuckets() {
   });
 }
 
+// Today's sessions, as shares of each provider's spend. One has no title, the way
+// a session the relay has since forgotten comes back from the server.
+const TODAY_SESSIONS = {
+  claude_code: [
+    ["fx-claude-usage-list", "Per-session usage under the Usage chart", 0.34],
+    ["fx-claude-android-header", "Android header overflows on narrow phones", 0.24],
+    ["fx-claude-release-notes", "Draft release notes for 0.9", 0.17],
+    ["fx-claude-broker-window", "Explain the broker rotation grace window", 0.13],
+    ["fx-claude-tooltip", "Fix usage chart tooltip clipping on hover", 0.12],
+  ],
+  codex: [
+    ["fx-codex-review-relay", "Review relay reconnect backoff", 0.48],
+    ["019a3f5e-7c21-7d40-b6a2-5f1e0c9d2a88", null, 0.31],
+    ["fx-codex-rename-flake", "Flaky e2e: workspace rename", 0.21],
+  ],
+};
+
+const PAST_TITLES = [
+  "Migrate broker to Postgres",
+  "Tighten the retry budget",
+  "QR pairing scan flow",
+  "Rework the export pipeline",
+  "Sidebar search keyboard navigation",
+];
+
+/**
+ * `ReportSessionBucket`s for the day buckets. Each provider's sessions add up to
+ * that provider's bar, as the server's do; Cursor is silent, so it has none.
+ */
+function sessionBuckets(buckets) {
+  return buckets.map((bucket, i) => {
+    const isToday = i === buckets.length - 1;
+    const sessions = [];
+    for (const g of bucket.groups) {
+      const plan = isToday
+        ? TODAY_SESSIONS[g.provider]
+        : g.provider === "claude_code"
+          ? [
+              [`fx-${bucket.key}-a`, PAST_TITLES[i % PAST_TITLES.length], 0.62],
+              [`fx-${bucket.key}-b`, PAST_TITLES[(i + 2) % PAST_TITLES.length], 0.38],
+            ]
+          : g.provider === "codex"
+            ? [[`fx-${bucket.key}-c`, PAST_TITLES[(i + 1) % PAST_TITLES.length], 1]]
+            : null;
+      if (!plan) continue;
+      let left = g.total;
+      plan.forEach(([thread_id, title, share], n) => {
+        const total = n === plan.length - 1 ? left : Math.round(g.total * share);
+        left -= total;
+        sessions.push({ thread_id, provider: g.provider, ...(title ? { title } : {}), total });
+      });
+    }
+    sessions.sort((a, b) => b.total - a.total);
+    return { key: bucket.key, sessions };
+  });
+}
+
 function weekBuckets() {
   const weeks = [
     { key: "W30", total: 18.4 },
@@ -130,6 +187,8 @@ const PROVIDERS = [
   { key: "cursor", label: "Cursor", reports_usage: false },
 ];
 
+const DAY_BUCKETS = dayBuckets();
+
 export const USAGE_FIXTURE = {
   enabled: true,
   // Fixture flag so the screen can say the numbers are illustrative.
@@ -153,7 +212,8 @@ export const USAGE_FIXTURE = {
     totals: { total: 3_537_000 },
   },
   daily_cap: 5_000_000,
-  buckets: dayBuckets(),
+  buckets: DAY_BUCKETS,
+  sessions: sessionBuckets(DAY_BUCKETS),
   week_buckets: weekBuckets(),
   // Role rollup uses today's names from the mockup; M1 ledger has tl/dev/reviewer.
   by_role: [

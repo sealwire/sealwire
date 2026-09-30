@@ -1959,6 +1959,19 @@ export function createSessionRenderer({
           void loadUsageReport(next);
         },
         onRetry: () => void loadUsageReport(bucket),
+        onOpenSessions: onOpenSessionsScreen,
+        // View only: a usage row is a way to look at a session, never to resume it.
+        onOpenSession: (threadId) => {
+          if (!threadId || typeof viewThread !== "function") {
+            return;
+          }
+          viewThread(threadId, {
+            context: selectOwningContext({
+              threadId,
+              threadProjectId: state.threadProjectId || {},
+            }),
+          });
+        },
       })
     );
   }

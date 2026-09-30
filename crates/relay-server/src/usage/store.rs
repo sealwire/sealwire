@@ -744,6 +744,30 @@ impl UsageStore {
         )
     }
 
+    /// Usage per `(bucket, provider, session)`.
+    ///
+    /// `bucket_key` must be the expression the chart's own bucket query groups by
+    /// (`by_day`, `by_week`, ...); any other boundary files a session under the wrong bar.
+    pub(crate) fn by_session(&self, since: u64, until: u64, bucket_key: &str) -> Vec<SessionUsage> {
+        // `bucket_key` is one of the fixed expressions in `report.rs`, never input.
+        let sql = format!(
+            "SELECT {bucket_key} AS bucket_key, provider, thread_id,
+                    SUM(input), SUM(cached_input), SUM(cache_write),
+                    SUM(output), SUM(reasoning_output), SUM(total)
+             FROM token_event
+             WHERE at >= ?1 AND at < ?2
+             GROUP BY bucket_key, provider, thread_id"
+        );
+        self.query(&sql, since, until, |row| {
+            Ok(SessionUsage {
+                bucket: row.get(0)?,
+                provider: row.get(1)?,
+                thread_id: row.get(2)?,
+                usage: usage_from_row(row, 3)?,
+            })
+        })
+    }
+
     /// Record that the daily cap refused a turn.
     ///
     /// One row per local calendar day. Later refuses on the same day bump
@@ -1400,6 +1424,15 @@ pub(crate) struct TeamRunUsage {
     pub(crate) usage: TokenUsage,
     pub(crate) cost_usd: Option<f64>,
     pub(crate) turns: u64,
+}
+
+/// Tokens one session spent inside one report bucket, on one provider.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SessionUsage {
+    pub(crate) bucket: String,
+    pub(crate) provider: String,
+    pub(crate) thread_id: String,
+    pub(crate) usage: TokenUsage,
 }
 
 /// One local day on which the daily cap refused at least one turn.
