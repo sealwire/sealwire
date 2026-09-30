@@ -18121,7 +18121,7 @@ mod review_tests {
         let review_id = reply.review_id.clone().unwrap();
         let envelope =
             crate::state::app::orchestrator_dispatch::peer_tool_result_envelope(Ok(reply));
-        assert_eq!(envelope["structuredContent"]["review_id"], review_id);
+        assert_eq!(envelope["_meta"]["review_id"], review_id);
         assert!(providers["codex"].turns.lock().await.is_empty());
         assert_eq!(
             app.relay
@@ -18242,8 +18242,8 @@ mod review_tests {
         let mut relay = app.relay.write().await;
         assert_eq!(relay.active_turn_id.as_deref(), Some("calling-turn"));
         assert!(
-            relay.injections.review(&id).is_some(),
-            "a result event can arrive after failure"
+            relay.injections.review(&id).is_none(),
+            "a settled review without any card row does not retain an orphan mark"
         );
         let result = crate::state::app::orchestrator_dispatch::peer_tool_result_envelope(Ok(reply));
         relay.mark_peer_tool_result(
@@ -18253,6 +18253,7 @@ mod review_tests {
             &serde_json::json!({"rawOutput": result}),
         );
         assert_eq!(relay.injections.anchored_rows(&parent.id), 1);
+        assert_eq!(relay.injections.review(&id).unwrap().status, "failed");
     }
 
     #[tokio::test]
@@ -34229,8 +34230,18 @@ mod delegate_card_tests {
                 .expect("delegate succeeds");
             let envelope =
                 crate::state::app::orchestrator_dispatch::peer_tool_result_envelope(Ok(reply));
+            assert!(envelope.get("structuredContent").is_none());
+            let text = envelope["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("End your turn now"));
+            assert!(text.contains("Do NOT poll"));
+            let relay = app.relay.read().await;
+            let ask = relay
+                .asks
+                .get(envelope["_meta"]["delegate_ask_id"].as_str().unwrap())
+                .unwrap();
+            assert!(text.contains(&ask.peer_thread_id));
             ids.push(
-                envelope["structuredContent"]["delegate_ask_id"]
+                envelope["_meta"]["delegate_ask_id"]
                     .as_str()
                     .unwrap()
                     .to_string(),

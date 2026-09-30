@@ -40,6 +40,12 @@ impl RelayState {
             );
             return;
         }
+        // A failed review may settle before its successful MCP result reaches the transcript.
+        if self.injections.review(review_id).is_none() {
+            if let Some(job) = self.review_jobs.get(review_id).cloned() {
+                self.record_review_mark(&job);
+            }
+        }
         let message = InjectedMessage {
             thread_id: caller_thread_id.to_string(),
             anchor,
@@ -168,7 +174,6 @@ impl RelayState {
         let status = job.status.as_str();
         let error = job.error.clone();
         let terminal = job.status.is_terminal();
-        let agent_started = job.started_by.is_agent();
         let Some(mark) = self.injections.review(review_id) else {
             return;
         };
@@ -184,7 +189,7 @@ impl RelayState {
                 });
             }
         }
-        if terminal && !agent_started && !self.injections.marks_any_row(review_id) {
+        if terminal && !self.injections.marks_any_row(review_id) {
             self.injections.forget_mark(review_id);
             self.usage_store.forget_mark(review_id);
             return;

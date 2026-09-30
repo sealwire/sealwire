@@ -1043,10 +1043,10 @@ pub fn peer_tool_result_envelope(outcome: Result<PeerToolReply, String>) -> Valu
         }) => {
             let mut envelope = tool_result_envelope(Ok(text));
             if let Some(ask_id) = ask_id {
-                envelope["structuredContent"] = json!({ "delegate_ask_id": ask_id });
+                envelope["_meta"] = json!({ "delegate_ask_id": ask_id });
             }
             if let Some(review_id) = review_id {
-                envelope["structuredContent"] = json!({ "review_id": review_id });
+                envelope["_meta"] = json!({ "review_id": review_id });
             }
             envelope
         }
@@ -2191,7 +2191,7 @@ it a turn ago"
 
         let refused = peer_tool_result_envelope(Err("cannot delegate".to_string()));
         assert_eq!(refused["isError"], true);
-        assert!(refused.get("structuredContent").is_none());
+        assert!(refused.get("_meta").is_none());
     }
 
     #[tokio::test]

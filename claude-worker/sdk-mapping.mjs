@@ -607,6 +607,12 @@ export function mapSdkMessage(msg, turnState = {}) {
             text += block.text || "";
             break;
           case "tool_use":
+            if (!msg.parent_tool_use_id) {
+              const peerTool = /^mcp__sealwire(?:[-_][A-Za-z0-9]+)?__(delegate|review)$/.exec(block.name || "")?.[1];
+              if (peerTool && block.id) {
+                (turnState.peerToolCalls ??= new Map()).set(block.id, peerTool);
+              }
+            }
             events.push(mapToolCall(block, "running", { provisionalFileChange: true }));
             break;
           case "tool_result":
@@ -646,6 +652,7 @@ export function mapSdkMessage(msg, turnState = {}) {
 
       const events = [];
       const blocks = Array.isArray(msg.message?.content) ? msg.message.content : [];
+      const results = blocks.filter((block) => block?.type === "tool_result");
       for (const block of blocks) {
         if (block?.type !== "tool_result") continue;
         events.push({
@@ -654,6 +661,17 @@ export function mapSdkMessage(msg, turnState = {}) {
           content: toolResultContentText(block.content),
           ...(block.is_error === true ? { is_error: true } : {}),
         });
+        const tool = turnState.peerToolCalls?.get(block.tool_use_id);
+        turnState.peerToolCalls?.delete(block.tool_use_id);
+        // MCP hooks see the model's rendered result; only the SDK message keeps _meta.
+        if (tool && results.length === 1 && !msg.parent_tool_use_id && block.is_error !== true
+            && msg.tool_use_result?.isError !== true) {
+          const field = tool === "delegate" ? "delegate_ask_id" : "review_id";
+          const id = msg.tool_use_result?._meta?.[field];
+          if (typeof id === "string" && id) {
+            events.push({ type: "peer_tool_call_result", id: block.tool_use_id, tool, result: { _meta: { [field]: id } } });
+          }
+        }
       }
 
       // User-shaped stream messages are NOT a channel for chat text:
@@ -672,6 +690,7 @@ export function mapSdkMessage(msg, turnState = {}) {
     }
 
     case "result": {
+      turnState.peerToolCalls?.clear();
       // Authoritative per-turn terminal for the REAL SDK. A Claude turn ends
       // with this `result` message (subtype "success", stop_reason "end_turn");
       // `session_state_changed: idle` is NOT emitted in this mode (see the

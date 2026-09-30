@@ -142,7 +142,7 @@ fn acp_delegate_structured_result_keeps_the_original_tool_item() {
     );
     let update = json!({ "sessionUpdate": "tool_call_update", "toolCallId": "call-delegate",
         "status": "completed", "rawOutput": {
-            "structuredContent": { "delegate_ask_id": "ask-one" }
+            "_meta": { "delegate_ask_id": "ask-one" }
         } });
     let completed = plan_update(&update, &mut runtime);
     let (
@@ -3749,7 +3749,7 @@ mod session_binding_boundary_tests {
             for update in [
                 json!({"sessionUpdate":"tool_call", "toolCallId":name, "title":name, "status":"pending"}),
                 json!({"sessionUpdate":"tool_call_update", "toolCallId":name, "status":"completed",
-                    "rawOutput":{"structuredContent":{field:id}}}),
+                    "rawOutput":{"_meta":{field:id}}}),
             ] {
                 let event = json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":HANDLE,"update":update}});
                 tokio::io::AsyncWriteExt::write_all(&mut writer, format!("{event}\n").as_bytes())

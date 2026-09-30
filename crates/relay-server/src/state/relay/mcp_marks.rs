@@ -7,7 +7,7 @@ fn result_id<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
         return None;
     }
     value
-        .get("structuredContent")
+        .get("_meta")
         .and_then(|content| content.get(field))
         .and_then(Value::as_str)
         .or_else(|| {

@@ -27,7 +27,7 @@ export function effectivePermissionMode(cmd) {
   return requested === REVIEWER_READ_ONLY_MODE ? "bypassPermissions" : requested;
 }
 
-export function buildSessionOptionsBase(cmd, { canUseTool, defaultSettingSources, observeCwd, observePeerToolCall }) {
+export function buildSessionOptionsBase(cmd, { canUseTool, defaultSettingSources, observeCwd }) {
   const requestedMode = cmd.permissionMode ?? "default";
   const readOnlyReviewer = requestedMode === REVIEWER_READ_ONLY_MODE;
   const permissionMode = effectivePermissionMode(cmd);
@@ -93,8 +93,8 @@ export function buildSessionOptionsBase(cmd, { canUseTool, defaultSettingSources
     options.tools = cmd.tools;
   }
 
-  if (typeof observeCwd === "function" || typeof observePeerToolCall === "function") {
-    options.hooks = cwdObservationHooks(observeCwd, observePeerToolCall);
+  if (typeof observeCwd === "function") {
+    options.hooks = cwdObservationHooks(observeCwd);
   }
 
   return options;
@@ -140,22 +140,12 @@ export function createCwdReporter(observeCwd) {
   };
 }
 
-export function cwdObservationHooks(observeCwd, observePeerToolCall = null) {
+export function cwdObservationHooks(observeCwd) {
   const hook = (source) => async (input) => {
     // Subagent tools report their own cwd; that must not relocate the parent session.
     if (input?.agent_id) return {};
     if (input?.cwd && typeof observeCwd === "function") {
       observeCwd(input.cwd, { source, tool_use_id: input.tool_use_id });
-    }
-    const tool = /^mcp__sealwire(?:[-_][A-Za-z0-9]+)?__(delegate|review)$/.exec(input?.tool_name || "")?.[1];
-    if (source === "PostToolUse" && typeof observePeerToolCall === "function" && tool
-        && input?.tool_response?.isError !== true && input.tool_use_id) {
-      const result = input.tool_response?.result ?? input.tool_response;
-      const field = tool === "delegate" ? "delegate_ask_id" : "review_id";
-      const id = result?.structuredContent?.[field];
-      if (result?.isError !== true && typeof id === "string" && id) {
-        observePeerToolCall(input.tool_use_id, tool, { structuredContent: { [field]: id } });
-      }
     }
     return {};
   };

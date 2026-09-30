@@ -138,14 +138,14 @@ for (const [name, field, id] of [["delegate", "delegate_ask_id", "ask-one"], ["r
     const { server, seen, port } = await startStubRelay(() => ({
       body: {
         content: [{ type: "text", text: "Delegated." }],
-        structuredContent: { [field]: id },
+        _meta: { [field]: id },
         isError: false,
       },
     }));
     const { client, transport } = await connect(port, { SEALWIRE_ASK_TOKEN: "test-token" });
     try {
       const result = await client.callTool({ name, arguments: { message: "inspect" } });
-      assert.deepEqual(result.structuredContent, { [field]: id });
+      assert.deepEqual(result._meta, { [field]: id });
       assert.equal(seen.filter((entry) => entry.url === `/api/orchestrator/tools/${name}/call`).length, 1);
     } finally {
       await transport.close();
