@@ -44,6 +44,7 @@ pub(crate) fn seat_tools() -> Vec<&'static ToolSpec> {
 pub(crate) const PEER_TOOLS: &[&str] = &[
     "delegate",
     "report_back",
+    "review",
     // Read it, and three ways to stop. Note what is NOT here and never should
     // be: anything that writes the objective. An agent that can edit its own
     // goal will edit it to one it can finish.
@@ -53,11 +54,18 @@ pub(crate) const PEER_TOOLS: &[&str] = &[
     "goal_needs_you",
 ];
 
+// Keep both discovery and invocation closed until agent-initiated review is released.
+pub(crate) const MCP_REVIEW_ENABLED: bool = false;
+
+pub(crate) fn tool_enabled(name: &str) -> bool {
+    name != "review" || MCP_REVIEW_ENABLED
+}
+
 /// The specs an ordinary session is offered.
 pub(crate) fn peer_tools() -> Vec<&'static ToolSpec> {
     TOOLS
         .iter()
-        .filter(|tool| PEER_TOOLS.contains(&tool.name))
+        .filter(|tool| PEER_TOOLS.contains(&tool.name) && tool_enabled(tool.name))
         .collect()
 }
 
@@ -174,6 +182,7 @@ const ACTING_TOOLS: &[&str] = &[
     // when to ask again. What keeps this safe is not a card but that both
     // threads stay visible and open, so a person can read either and take over.
     "delegate",
+    "review",
     "control_run",
     "respond_to_agent",
     "widen_scope",
@@ -523,6 +532,38 @@ Sealwire's pick. A flagship waits for the user to allow it.",
         ],
     },
     ToolSpec {
+        name: "review",
+        summary: "Review your completed changes. End your turn after calling; \
+the review starts when this turn ends and findings return here. Do not poll or wait.",
+        effect: Effect::Acts,
+        params: &[
+            ToolParam {
+                name: "message",
+                kind: ParamKind::Text,
+                required: true,
+                summary: "Brief the reviewer: changes, intent, checks, and concerns. It cannot see this conversation.",
+            },
+            ToolParam {
+                name: "provider",
+                kind: ParamKind::Text,
+                required: true,
+                summary: "Reviewer provider, e.g. codex or claude_code.",
+            },
+            ToolParam {
+                name: "model",
+                kind: ParamKind::Text,
+                required: false,
+                summary: "Reviewer model. Omit for the provider default.",
+            },
+            ToolParam {
+                name: "effort",
+                kind: ParamKind::Text,
+                required: false,
+                summary: "Reviewer reasoning effort. Omit for the default.",
+            },
+        ],
+    },
+    ToolSpec {
         name: "task_definition",
         summary: "The task a run is working to: its scope, acceptance criteria \
 and quality rules, as they stand now.",
@@ -729,7 +770,10 @@ pub(crate) struct WorkspaceFacts {
 /// the list is what the model caches for the session, so it must not be able
 /// to depend on state that has moved on by the time it calls.
 pub(crate) fn available_tools() -> Vec<&'static ToolSpec> {
-    TOOLS.iter().collect()
+    TOOLS
+        .iter()
+        .filter(|tool| tool_enabled(tool.name))
+        .collect()
 }
 
 /// Why this tool cannot run right now, or `None` if it can.
@@ -792,6 +836,12 @@ pub(crate) enum ToolCall {
         /// An agent already asked, to carry on with. `None` brings in a new one.
         agent: Option<String>,
         provider: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+    },
+    Review {
+        message: String,
+        provider: String,
         model: Option<String>,
         effort: Option<String>,
     },
@@ -1142,6 +1192,12 @@ pub(crate) fn parse_call(name: &str, args: &Value) -> Result<ToolCall, String> {
                 effort: get("effort")?,
             })
         }
+        "review" => Ok(ToolCall::Review {
+            message: get("message")?.expect("required param yields Some"),
+            provider: get("provider")?.expect("required param yields Some"),
+            model: get("model")?,
+            effort: get("effort")?,
+        }),
         "task_definition" => Ok(ToolCall::TaskDefinition {
             run_id: get("run_id")?,
         }),
@@ -1661,7 +1717,11 @@ still inherit",
     #[test]
     fn every_tool_is_offered_whatever_the_workspace_looks_like() {
         let names: Vec<_> = available_tools().iter().map(|tool| tool.name).collect();
-        assert_eq!(names.len(), TOOLS.len(), "{names:?}");
+        assert_eq!(
+            names.len(),
+            TOOLS.iter().filter(|tool| tool_enabled(tool.name)).count(),
+            "{names:?}"
+        );
         // Named rather than counted: these four are the ones a state-derived
         // list drops, because none of them is reachable in the workspace the
         // session opens in.

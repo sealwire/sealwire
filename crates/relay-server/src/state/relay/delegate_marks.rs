@@ -1,7 +1,6 @@
 //! Keeping a delegate's cards in step with its ask.
 
 use relay_api::delegation::StartedBy;
-use serde_json::Value;
 
 use crate::protocol::{InjectionKind, TranscriptEntryKind};
 use crate::state::delegation::{intent_title, Ask};
@@ -9,23 +8,6 @@ use crate::state::delegation::{intent_title, Ask};
 use super::injections::{DelegateMark, InjectedMessage, InjectionTag, MessageAnchor};
 use super::transcript::TranscriptRecord;
 use super::RelayState;
-
-pub(crate) fn delegate_ask_id_from_mcp_result(value: &Value) -> Option<&str> {
-    value
-        .get("structuredContent")
-        .and_then(|content| content.get("delegate_ask_id"))
-        .and_then(Value::as_str)
-        .or_else(|| {
-            value
-                .get("result")
-                .and_then(delegate_ask_id_from_mcp_result)
-        })
-        .or_else(|| {
-            value
-                .get("rawOutput")
-                .and_then(delegate_ask_id_from_mcp_result)
-        })
-}
 
 /// Claude names it `mcp__sealwire__report_back`, Codex plain `report_back`.
 fn is_report_back_call(record: &TranscriptRecord) -> bool {

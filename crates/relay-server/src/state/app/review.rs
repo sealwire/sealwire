@@ -281,6 +281,40 @@ impl AppState {
         &self,
         input: RequestReviewInput,
     ) -> Result<RequestReviewReceipt, String> {
+        self.request_review_with_brief(input, None).await
+    }
+
+    pub(super) async fn request_review_from_agent(
+        &self,
+        parent_thread_id: &str,
+        provider: String,
+        model: Option<String>,
+        effort: Option<String>,
+        brief: String,
+    ) -> Result<RequestReviewReceipt, String> {
+        self.request_review_with_brief(
+            RequestReviewInput {
+                parent_thread_id: Some(parent_thread_id.to_string()),
+                reviewer_provider: provider,
+                reviewer_model: model,
+                reviewer_effort: effort,
+                reviewer_thread_id: None,
+                instructions: None,
+                recap_source: None,
+                max_rounds: Some(1),
+                continues_review_id: None,
+                device_id: Some(format!("mcp-review:{parent_thread_id}")),
+            },
+            Some(brief),
+        )
+        .await
+    }
+
+    async fn request_review_with_brief(
+        &self,
+        input: RequestReviewInput,
+        agent_brief: Option<String>,
+    ) -> Result<RequestReviewReceipt, String> {
         let device_id = require_device_id(input.device_id.clone())?;
         self.expire_stale_controller_if_needed().await;
 
@@ -364,10 +398,11 @@ starting a review"
                 );
             }
             // Liveness is checked on the NAMED parent, not the active thread.
-            if relay
-                .runtime_for_thread(&parent_thread_id)
-                .map(|runtime| runtime.has_live_turn())
-                .unwrap_or(false)
+            if agent_brief.is_none()
+                && relay
+                    .runtime_for_thread(&parent_thread_id)
+                    .map(|runtime| runtime.has_live_turn())
+                    .unwrap_or(false)
             {
                 return Err("cannot start a review while a turn is in progress".to_string());
             }
@@ -385,10 +420,11 @@ starting a review"
             // wrongly refused on an idle-but-not-running thread. The live-turn check above
             // is the authoritative in-flight signal; this is the per-thread mirror of
             // `active_agent_is_working` for the named parent.
-            if relay
-                .runtime_for_thread(&parent_thread_id)
-                .map(|runtime| runtime.is_working())
-                .unwrap_or(false)
+            if agent_brief.is_none()
+                && relay
+                    .runtime_for_thread(&parent_thread_id)
+                    .map(|runtime| runtime.is_working())
+                    .unwrap_or(false)
             {
                 return Err("cannot start a review while the agent is still working".to_string());
             }
@@ -530,9 +566,11 @@ reviewer thread"
             reviewer_mode,
             cwd,
             device_id.clone(),
-            // Only a person can ask for a review today; the tool that let an agent do it
-            // was withdrawn. If it returns, it passes `Agent` here and nothing else moves.
-            relay_api::delegation::StartedBy::Person,
+            if agent_brief.is_some() {
+                relay_api::delegation::StartedBy::Agent
+            } else {
+                relay_api::delegation::StartedBy::Person
+            },
             non_empty(input.instructions.clone()),
             // Round budget for the iterative loop: default 1 (single-shot), clamp 1..=10.
             input.max_rounds.unwrap_or(1).clamp(1, MAX_REVIEW_ROUNDS),
@@ -579,7 +617,7 @@ reviewer thread"
                 app: app.clone(),
                 job_id: task_job_id.clone(),
             };
-            app.run_review_job(task_job_id).await;
+            app.run_review_job(task_job_id, agent_brief).await;
         });
 
         Ok(RequestReviewReceipt {
@@ -805,7 +843,7 @@ to this thread."
         }
     }
 
-    async fn run_review_job(&self, job_id: String) {
+    async fn run_review_job(&self, job_id: String, agent_brief: Option<String>) {
         let Some(fields) = self.review_job_fields(&job_id).await else {
             return;
         };
@@ -824,11 +862,30 @@ to this thread."
             max_rounds,
         } = fields;
 
+        // The MCP response must return before the calling turn can finish.
+        if agent_brief.is_some() {
+            match self
+                .wait_for_thread_idle_outcome(&job_id, &parent_thread_id)
+                .await
+            {
+                WaitOutcome::Completed => {}
+                WaitOutcome::Cancelled => return,
+                _ => {
+                    self.fail_job(
+                        &job_id,
+                        "The calling turn did not finish; review was not started.",
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+
         self.push_runtime_log(
             "info",
             format!(
                 "Review {job_id}: started (parent={parent_thread_id}, reviewer={reviewer_provider}, \
-max_rounds={max_rounds}). Step 1: asking the author to recap its changes."
+max_rounds={max_rounds}). Step 1: preparing the reviewer brief."
             ),
         )
         .await;
@@ -844,53 +901,57 @@ max_rounds={max_rounds}). Step 1: asking the author to recap its changes."
         // read-only behavior without a separate check-then-use window.
         let mut recovered_missing_last_message = false;
         let mut recovery_base_sha: Option<String> = None;
-        let recap = match recap_source {
-            ReviewRecapSource::LastMessage => {
-                match self.latest_assistant_entry(&parent_thread_id).await {
-                    Some((_, text)) if !text.trim().is_empty() => {
-                        self.push_runtime_log(
-                            "info",
-                            format!(
+        let recap = if let Some(brief) = agent_brief {
+            brief
+        } else {
+            match recap_source {
+                ReviewRecapSource::LastMessage => {
+                    match self.latest_assistant_entry(&parent_thread_id).await {
+                        Some((_, text)) if !text.trim().is_empty() => {
+                            self.push_runtime_log(
+                                "info",
+                                format!(
                                 "Review {job_id}: Step 1 — briefing the reviewer with the author's \
 last message (no recap turn)."
                             ),
-                        )
-                        .await;
-                        text
-                    }
-                    _ => {
-                        recovered_missing_last_message = true;
-                        recovery_base_sha = match self
-                            .current_review_head(&parent_thread_id, &device_id)
-                            .await
-                        {
-                            Ok(base) => base,
-                            Err(error) => {
-                                self.fail_job(
+                            )
+                            .await;
+                            text
+                        }
+                        _ => {
+                            recovered_missing_last_message = true;
+                            recovery_base_sha = match self
+                                .current_review_head(&parent_thread_id, &device_id)
+                                .await
+                            {
+                                Ok(base) => base,
+                                Err(error) => {
+                                    self.fail_job(
                                     &job_id,
                                     format!(
                                         "failed to record the repository state before the author recovery turn: {error}"
                                     ),
                                 )
                                 .await;
-                                return;
+                                    return;
+                                }
+                            };
+                            match self.drive_parent_recap(&job_id, &parent_thread_id).await {
+                                RecapOutcome::Text(text) => text,
+                                RecapOutcome::WorkspaceGone => workspace_gone_recap(),
+                                RecapOutcome::Aborted => return,
                             }
-                        };
-                        match self.drive_parent_recap(&job_id, &parent_thread_id).await {
-                            RecapOutcome::Text(text) => text,
-                            RecapOutcome::WorkspaceGone => workspace_gone_recap(),
-                            RecapOutcome::Aborted => return,
                         }
                     }
                 }
-            }
-            ReviewRecapSource::Recap => {
-                match self.drive_parent_recap(&job_id, &parent_thread_id).await {
-                    RecapOutcome::Text(text) => text,
-                    // Lost the race: the workspace vanished as the recap turn reached the
-                    // provider. Continue read-only rather than failing the review.
-                    RecapOutcome::WorkspaceGone => workspace_gone_recap(),
-                    RecapOutcome::Aborted => return,
+                ReviewRecapSource::Recap => {
+                    match self.drive_parent_recap(&job_id, &parent_thread_id).await {
+                        RecapOutcome::Text(text) => text,
+                        // Lost the race: the workspace vanished as the recap turn reached the
+                        // provider. Continue read-only rather than failing the review.
+                        RecapOutcome::WorkspaceGone => workspace_gone_recap(),
+                        RecapOutcome::Aborted => return,
+                    }
                 }
             }
         };

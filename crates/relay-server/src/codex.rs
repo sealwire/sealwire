@@ -1673,7 +1673,7 @@ fn upsert_transcript_item_from_value(
         entry.tool,
     );
     if let Some(thread_id) = relay.active_thread_id.clone() {
-        mark_codex_delegate_result(relay, &thread_id, item);
+        mark_codex_peer_tool_result(relay, &thread_id, item);
     }
     relay.mark_transcript_row_cut(&item_id, cut);
     if let Some(turn_id) = refresh_turn_id {
@@ -1682,7 +1682,7 @@ fn upsert_transcript_item_from_value(
     true
 }
 
-fn mark_codex_delegate_result(relay: &mut RelayState, thread_id: &str, item: &Value) {
+fn mark_codex_peer_tool_result(relay: &mut RelayState, thread_id: &str, item: &Value) {
     if string_at(item, &["type"]).as_deref() != Some("mcpToolCall") {
         return;
     }
@@ -1694,16 +1694,8 @@ fn mark_codex_delegate_result(relay: &mut RelayState, thread_id: &str, item: &Va
         .or_else(|| string_at(item, &["toolName"]))
         .or_else(|| string_at(item, &["tool"]))
         .unwrap_or_default();
-    if name != "delegate" && !name.ends_with("__delegate") {
-        return;
-    }
-    let Some(ask_id) =
-        value_at(item, &["result"]).and_then(crate::state::delegate_ask_id_from_mcp_result)
-    else {
-        return;
-    };
-    if let Some(item_id) = string_at(item, &["id"]) {
-        relay.mark_delegate_call(ask_id, thread_id, &item_id);
+    if let (Some(result), Some(item_id)) = (item.get("result"), string_at(item, &["id"])) {
+        relay.mark_peer_tool_result(thread_id, &item_id, &name, result);
     }
 }
 

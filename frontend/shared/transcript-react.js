@@ -42,6 +42,7 @@ import {
   opensReviewedTurn,
   REVIEW_RESULT_LINE_KIND,
   ReviewEntry,
+  ReviewCallEntry,
   ReviewProgressLine,
   ReviewResultLine,
 } from "./review-card.js";
@@ -2357,7 +2358,7 @@ function isGroupableFinishedTool(entry) {
   if (!entry || (entry.kind !== "tool_call" && entry.kind !== "command")) {
     return false;
   }
-  if (entry.injection?.kind === "delegate_call" && entry.status === "completed") {
+  if (["delegate_call", "review_call"].includes(entry.injection?.kind) && entry.status === "completed") {
     return false;
   }
   // A failure folds too: mid-run it is mostly the agent trying something, and the
@@ -2825,6 +2826,14 @@ export function TranscriptEntry({
       provider,
       providerIcon: providerIconSvg(provider) || SPARKLES_SVG,
       showCommand: false,
+    });
+  }
+
+  if (kind === "tool_call" && entry.status === "completed"
+      && entry.injection?.kind === "review_call" && entry.injection.review) {
+    return h(ReviewCallEntry, {
+      attrs: transcriptEntryDomAttrs(entry, "chat-message chat-message-assistant"),
+      entry, provider, providerIcon: providerIconSvg(provider) || SPARKLES_SVG,
     });
   }
 

@@ -10,7 +10,7 @@ test("PostToolUse links parallel delegate results by tool-use ID without changin
   const observed = [];
   const opts = buildSessionOptionsBase({ cwd: "/tmp" }, {
     ...defaults,
-    observeDelegateCall: (toolId, askId) => observed.push([toolId, askId]),
+    observePeerToolCall: (toolId, tool, result) => observed.push([toolId, tool, result]),
   });
   const hook = opts.hooks.PostToolUse[0].hooks[0];
   for (const [toolId, askId] of [["tool-a", "ask-a"], ["tool-b", "ask-b"]]) {
@@ -21,7 +21,19 @@ test("PostToolUse links parallel delegate results by tool-use ID without changin
     }), {});
   }
   await hook({ tool_name: "mcp__other__delegate", tool_use_id: "failed", tool_response: { isError: true } });
-  assert.deepEqual(observed, [["tool-a", "ask-a"], ["tool-b", "ask-b"]]);
+  await hook({
+    tool_name: "mcp__sealwire-123__review", tool_use_id: "review-call",
+    tool_response: { result: { structuredContent: { review_id: "review-1" }, content: [{ text: "large result" }] } },
+  });
+  await hook({
+    tool_name: "mcp__sealwire__review", tool_use_id: "failed",
+    tool_response: { isError: true, structuredContent: { review_id: "review-failed" } },
+  });
+  assert.deepEqual(observed, [
+    ["tool-a", "delegate", { structuredContent: { delegate_ask_id: "ask-a" } }],
+    ["tool-b", "delegate", { structuredContent: { delegate_ask_id: "ask-b" } }],
+    ["review-call", "review", { structuredContent: { review_id: "review-1" } }],
+  ]);
 });
 
 test("default permission mode does not set allowDangerouslySkipPermissions", () => {

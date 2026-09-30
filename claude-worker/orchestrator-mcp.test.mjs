@@ -133,24 +133,26 @@ test("a tool call is forwarded with its arguments and the device id", async () =
   }
 });
 
-test("delegate keeps its structured ask ID through one MCP call", async () => {
-  const { server, seen, port } = await startStubRelay(() => ({
-    body: {
-      content: [{ type: "text", text: "Delegated." }],
-      structuredContent: { delegate_ask_id: "ask-one" },
-      isError: false,
-    },
-  }));
-  const { client, transport } = await connect(port, { SEALWIRE_ASK_TOKEN: "test-token" });
-  try {
-    const result = await client.callTool({ name: "delegate", arguments: { message: "inspect" } });
-    assert.deepEqual(result.structuredContent, { delegate_ask_id: "ask-one" });
-    assert.equal(seen.filter((entry) => entry.url === "/api/orchestrator/tools/delegate/call").length, 1);
-  } finally {
-    await transport.close();
-    server.close();
-  }
-});
+for (const [name, field, id] of [["delegate", "delegate_ask_id", "ask-one"], ["review", "review_id", "review-one"]]) {
+  test(`${name} keeps its structured ID through one MCP call`, async () => {
+    const { server, seen, port } = await startStubRelay(() => ({
+      body: {
+        content: [{ type: "text", text: "Delegated." }],
+        structuredContent: { [field]: id },
+        isError: false,
+      },
+    }));
+    const { client, transport } = await connect(port, { SEALWIRE_ASK_TOKEN: "test-token" });
+    try {
+      const result = await client.callTool({ name, arguments: { message: "inspect" } });
+      assert.deepEqual(result.structuredContent, { [field]: id });
+      assert.equal(seen.filter((entry) => entry.url === `/api/orchestrator/tools/${name}/call`).length, 1);
+    } finally {
+      await transport.close();
+      server.close();
+    }
+  });
+}
 
 test("a refused call reaches the model as a readable result, not a thrown error", async () => {
   // The distinction that matters: a model shown a REASON corrects itself; a model

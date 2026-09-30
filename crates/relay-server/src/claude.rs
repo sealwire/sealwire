@@ -2000,13 +2000,14 @@ async fn apply_worker_event(
             relay.notify();
         }
 
-        "delegate_call_result" => {
-            if let (Some(thread_id), Some(tool_id), Some(ask_id)) = (
+        "peer_tool_call_result" => {
+            if let (Some(thread_id), Some(tool_id), Some(name), Some(result)) = (
                 event_thread_id.as_deref(),
                 string_at(&payload, &["id"]),
-                string_at(&payload, &["ask_id"]),
+                string_at(&payload, &["tool"]),
+                payload.get("result"),
             ) {
-                relay.mark_delegate_call(&ask_id, thread_id, &format!("tool:{tool_id}"));
+                relay.mark_peer_tool_result(thread_id, &format!("tool:{tool_id}"), &name, result);
                 relay.notify();
             }
         }
@@ -3017,14 +3018,17 @@ mod tests {
             .iter()
             .map(|tool| tool.as_str().expect("each is a string"))
             .collect();
-        for tool in crate::orchestrator_tools::PEER_TOOLS {
+        for tool in crate::orchestrator_tools::PEER_TOOLS
+            .iter()
+            .filter(|name| crate::orchestrator_tools::tool_enabled(name))
+        {
             let expected = format!("mcp__{server}__{tool}");
             assert!(
                 allowed.contains(&expected.as_str()),
                 "{expected} must be auto-allowed",
             );
         }
-        assert_eq!(allowed.len(), crate::orchestrator_tools::PEER_TOOLS.len());
+        assert_eq!(allowed.len(), crate::orchestrator_tools::peer_tools().len());
     }
     use super::*;
 
