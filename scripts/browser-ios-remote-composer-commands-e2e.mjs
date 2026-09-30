@@ -220,16 +220,20 @@ async function openProviderMenu(driverOrigin, sessionId) {
   );
 }
 
-async function tapProviderCommand(driverOrigin, sessionId) {
+async function tapElement(driverOrigin, sessionId, selector) {
   const element = await command(driverOrigin, sessionId, "/element", {
-    body: { using: "css selector", value: ".composer-command-row.is-provider" },
+    body: { using: "css selector", value: selector },
   });
-  assert.ok(element[ELEMENT_KEY], "SafariDriver did not return the provider command row");
+  assert.ok(element[ELEMENT_KEY], `SafariDriver did not return ${selector}`);
   await command(driverOrigin, sessionId, `/element/${element[ELEMENT_KEY]}/click`, { body: {} });
 
   // On the iOS driver, element click begins the native finger contact. Releasing
   // input sources ends that contact and emits the pointerup/touchend side of the tap.
   await command(driverOrigin, sessionId, "/actions", { method: "DELETE" });
+}
+
+async function tapProviderCommand(driverOrigin, sessionId) {
+  await tapElement(driverOrigin, sessionId, ".composer-command-row.is-provider");
   return waitFor(
     async () => {
       const state = await execute(
@@ -319,11 +323,23 @@ async function main() {
       `the tap reached the command row through Mobile Safari's pointer chain — ${JSON.stringify(selected.events)}`
     );
 
+    for (const selector of [".composer-command-pill-label", ".composer-command-pill-clear"]) {
+      await tapElement(driverOrigin, sessionId, selector);
+      await waitFor(
+        () => execute(driverOrigin, sessionId, "return !document.querySelector('.composer-command-pill');"),
+        `removing the pill through ${selector}`
+      );
+      if (selector === ".composer-command-pill-label") {
+        await openProviderMenu(driverOrigin, sessionId);
+        await tapProviderCommand(driverOrigin, sessionId);
+      }
+    }
+
     if (process.env.IOS_SCREENSHOT) {
       run("xcrun", ["simctl", "io", simulator.udid, "screenshot", process.env.IOS_SCREENSHOT]);
     }
     console.log(
-      `ios-remote-composer-commands-e2e OK — ${simulator.name} (${simulator.udid}) selected $review`
+      `ios-remote-composer-commands-e2e OK — ${simulator.name} (${simulator.udid}) selected and removed $review`
     );
   } catch (error) {
     if (driverOutput.trim()) console.error(driverOutput.trim());
