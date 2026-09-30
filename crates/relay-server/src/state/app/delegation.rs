@@ -1649,6 +1649,7 @@ impl AppState {
             loop {
                 interval.tick().await;
                 app.settle_and_deliver_asks_at(unix_now()).await;
+                app.settle_handover_turns().await;
             }
         });
     }

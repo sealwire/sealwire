@@ -22,7 +22,14 @@ export function createReviewsCache() {
   let loaded = false;
   // Every list the channel carries. A field left out here is fetched, returned,
   // and then silently dropped — which looks exactly like the relay never sent it.
-  let data = { review_jobs: [], reviewer_threads: [], asks: [], goals: [], handovers: [] };
+  let data = {
+    review_jobs: [],
+    reviewer_threads: [],
+    asks: [],
+    goals: [],
+    handovers: [],
+    handover_links: [],
+  };
   let inflightRevision = null;
 
   return {
@@ -64,6 +71,7 @@ export function createReviewsCache() {
           asks: resp?.asks || [],
           goals: resp?.goals || [],
           handovers: resp?.handovers || [],
+          handover_links: resp?.handover_links || [],
         };
         if (typeof onUpdate === "function") {
           onUpdate();
@@ -204,6 +212,17 @@ export function asksForThread(reviews, viewedThreadId, threads) {
     });
 }
 
+/** The handovers the viewed thread is either end of. */
+export function handoversForThread(reviews, viewedThreadId) {
+  if (!viewedThreadId) {
+    return [];
+  }
+  return (reviews?.handover_links || []).filter(
+    (link) =>
+      link?.source_thread_id === viewedThreadId || link?.target_thread_id === viewedThreadId
+  );
+}
+
 /**
  * Everything the Agents panel shows that depends only on the viewed thread. One call so a
  * surface cannot pick up the review cards and quietly miss the goal, which is how remote
@@ -218,6 +237,7 @@ export function agentsPanelSlice(reviews, viewedThreadId, threads) {
     reviewJobs: reviewCardsForViewedThread(reviews, viewedThreadId),
     goal: goalForThread(reviews, viewedThreadId),
     asks: asksForThread(reviews, viewedThreadId, threads),
+    handovers: handoversForThread(reviews, viewedThreadId),
     // Every reviewer thread, so a card can name its own by joining on reviewer_thread_id.
     reviewerThreads: reviews?.reviewer_threads || [],
     parentThreadId: viewedThreadId || null,

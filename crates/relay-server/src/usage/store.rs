@@ -15,7 +15,7 @@ use super::{pricing, TokenUsage};
 
 /// Bumped only by adding a numbered migration below. `user_version` is a plain
 /// integer SQLite keeps in the file header, so this needs no table of its own.
-const LEDGER_SCHEMA_VERSION: i64 = 13;
+const LEDGER_SCHEMA_VERSION: i64 = 14;
 
 /// The relay's one database, beside `session.json`.
 pub(crate) fn database_path(state_path: &Path) -> PathBuf {
@@ -1983,6 +1983,34 @@ fn migrate(conn: &Connection) -> Result<(), String> {
              COMMIT;",
         )
         .map_err(|error| format!("migrate to 13: {error}"))?;
+    }
+
+    if version < 14 {
+        // The Agents panel's handover lines, and how the target's turn on it ended.
+        let mut batch = String::from("BEGIN;\n");
+        for (name, kind) in [
+            ("goal", "TEXT"),
+            ("state", "TEXT"),
+            ("next_step", "TEXT"),
+            ("target_turn_id", "TEXT"),
+            ("finished_at", "INTEGER"),
+            ("outcome", "TEXT"),
+            ("result", "TEXT"),
+        ] {
+            let present: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('handover') WHERE name = ?1",
+                    [name],
+                    |row| row.get(0),
+                )
+                .map_err(|error| format!("migrate to 14: {error}"))?;
+            if present == 0 {
+                batch.push_str(&format!("ALTER TABLE handover ADD COLUMN {name} {kind};\n"));
+            }
+        }
+        batch.push_str("PRAGMA user_version = 14;\nCOMMIT;");
+        conn.execute_batch(&batch)
+            .map_err(|error| format!("migrate to 14: {error}"))?;
     }
 
     Ok(())

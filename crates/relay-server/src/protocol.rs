@@ -366,6 +366,42 @@ pub struct ReviewsResponse {
     /// typed at, and then to that device's workspace.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub handovers: Vec<HandoverView>,
+    /// Every handover still drawn in a transcript, for the Agents panel's Picked up and
+    /// Handed over. Fenced like `asks`: both sessions must be in the reader's scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handover_links: Vec<HandoverLinkView>,
+}
+
+/// One handover as the Agents panel links it from either end.
+#[derive(Debug, Clone, Serialize)]
+pub struct HandoverLinkView {
+    pub id: String,
+    pub source_thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_title: Option<String>,
+    pub source_provider: String,
+    pub target_thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_title: Option<String>,
+    pub target_provider: String,
+    /// `working` while the source writes it, `done` once the target has it.
+    pub status: String,
+    /// The summary's Goal, Current state and Remaining work, one bounded line each.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+    /// When the target's turn on the handover ended, how, and what it said in it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
+    /// `completed`, `failed`, `stopped` or `interrupted`; absent when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    pub created_at: u64,
 }
 
 /// Uncompacted device/security payload served on demand. Device records are
@@ -3731,6 +3767,9 @@ pub struct AskView {
     pub asker_provider: Option<String>,
     pub peer_model: Option<String>,
     pub peer_effort: Option<String>,
+    /// The peer session's name, which titles every round with it in the panel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_title: Option<String>,
     /// Ledger intent title (76 Unicode scalars at most, plus an ellipsis when cut).
     /// Presence of this field is what tells a new client the row is already projected.
     pub title: String,

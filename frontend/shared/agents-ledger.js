@@ -298,7 +298,8 @@ export function askLedger(asks, viewedThreadId) {
             inbound: group.inbound,
             latest,
             state: askState(latest),
-            title: cardTitle(latest),
+            // Delegated to you, the peer session is this one, so its name says nothing.
+            title: (!group.inbound && latest.peer_title) || cardTitle(latest),
             result: cardResult(latest),
             updatedAt: latest.updated_at || 0,
             // An unanswered request is still actionable even when a later round
@@ -335,16 +336,72 @@ export function askLedger(asks, viewedThreadId) {
     .sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-/** The "3 threads · 1 running" line beside the Asked heading. */
-export function askedSummary(groups) {
-  const threads = (groups || []).reduce((total, group) => total + group.threads.length, 0);
-  if (!threads) {
-    return null;
+/** How many delegation subjects a section heading counts. */
+export function threadCount(groups) {
+  return (groups || []).reduce((total, group) => total + group.threads.length, 0);
+}
+
+function handoverRow(label, text) {
+  return text ? { label, text } : null;
+}
+
+/**
+ * The viewed thread's handovers, split by which end it is. A handover still being
+ * written has given the target nothing yet, so only its source shows it.
+ */
+export function handoverLedger(links, viewedThreadId) {
+  const pickedUp = [];
+  const handedOver = [];
+  const newest = (links || [])
+    .filter(Boolean)
+    .slice()
+    .sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  for (const link of newest) {
+    if (link.target_thread_id === viewedThreadId && link.status === "done") {
+      pickedUp.push({
+        key: link.id,
+        direction: "from",
+        name: link.source_title || providerLabel(link.source_provider) || "Another session",
+        provider: link.source_provider || null,
+        title: null,
+        state: null,
+        at: link.created_at || 0,
+        rows: [
+          handoverRow("Goal", link.goal),
+          handoverRow("State", link.state),
+          handoverRow("Next", link.next),
+        ].filter(Boolean),
+        otherThreadId: link.source_thread_id,
+        linkLabel: "Source thread",
+      });
+    } else if (link.source_thread_id === viewedThreadId) {
+      const agent = providerLabel(link.target_provider) || "Another agent";
+      const state =
+        link.status === "working"
+          ? "handing over"
+          : !link.finished_at
+            ? "working"
+            : link.outcome === "completed"
+              ? "done"
+              : link.outcome || null;
+      handedOver.push({
+        key: link.id,
+        direction: "to",
+        name: agent,
+        provider: link.target_provider || null,
+        title: link.target_title || null,
+        state,
+        at: link.created_at || 0,
+        // Once the target has answered, its words replace what it was handed.
+        rows: link.result
+          ? [handoverRow("Result", link.result)]
+          : [handoverRow("Next", link.next), { label: "Since", at: link.created_at || 0 }].filter(
+              Boolean
+            ),
+        otherThreadId: link.target_thread_id,
+        linkLabel: `${agent} thread`,
+      });
+    }
   }
-  const running = (groups || []).reduce(
-    (total, group) => total + group.threads.filter((thread) => thread.state === "working").length,
-    0
-  );
-  const label = `${threads} thread${threads === 1 ? "" : "s"}`;
-  return running ? `${label} · ${running} running` : label;
+  return { pickedUp, handedOver };
 }

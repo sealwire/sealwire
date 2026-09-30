@@ -7827,10 +7827,74 @@ body.is-resizing-panel {
    happened, so it says so rather than reading as "answered". */
 .reviewer-ask-state.is-not-handed-back { color: var(--text-warning); }
 .reviewer-ask-state.is-needs-you { color: var(--text-warning); }
-.reviewer-ask-inbound {
-  margin: 0;
-  font-size: var(--text-xs);
+/* Only a finished handover turns green, like an answered delegation. */
+.reviewer-ask-state.is-done { color: var(--ok-fg); }
+.reviewer-ask-state.is-interrupted { color: var(--warn-fg); }
+
+/* Handover items: an agent row, plus the direction and the summary's lines. */
+.reviewer-handover .reviewer-ask-state {
+  margin-top: 0;
+  margin-left: auto;
+}
+.reviewer-handover-direction {
+  flex: none;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
+}
+.reviewer-handover-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Indented to the name, past the 19px mark and the head's 8px gap. */
+.reviewer-handover-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 2px 6px 29px;
+}
+.reviewer-handover-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+}
+.reviewer-handover-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 10px;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+.reviewer-handover-row dt {
+  color: var(--text-secondary);
+}
+.reviewer-handover-row dd {
+  margin: 0;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.reviewer-handover-foot {
+  display: flex;
+  justify-content: flex-end;
+}
+.reviewer-handover-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--accent);
+  cursor: pointer;
+}
+.reviewer-handover-link:hover {
+  text-decoration: underline;
+}
+.reviewer-handover-link:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
 }
 
 /* Overflow menu ------------------------------------------------------------

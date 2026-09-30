@@ -302,6 +302,7 @@ impl Ask {
             asker_provider: self.asker_provider.clone(),
             peer_model: self.peer_model.clone(),
             peer_effort: self.peer_effort.clone(),
+            peer_title: None,
             title: title.clone(),
             result: result.clone(),
             // Legacy names: same previews, so an old panel still shows a useful card.

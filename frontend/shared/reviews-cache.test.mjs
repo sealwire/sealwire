@@ -188,7 +188,7 @@ test("the cache keeps every list the channel carries, not just the ones it start
 // from the surface is indistinguishable from the relay never sending it.
 test("no list the channel carries is left out of the assignment", () => {
   const cache = createReviewsCache();
-  const carried = ["review_jobs", "reviewer_threads", "asks", "goals", "handovers"];
+  const carried = ["review_jobs", "reviewer_threads", "asks", "goals", "handovers", "handover_links"];
   const response = Object.fromEntries(carried.map((name) => [name, [{ id: name }]]));
   return cache.sync(11, async () => ({ reviews_revision: 11, ...response }), () => {}).then(() => {
     const data = cache.current();

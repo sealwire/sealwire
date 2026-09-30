@@ -3791,6 +3791,17 @@ so {} never got it — hand over again when you are ready.",
             // A different rotation again, for the same reason.
             acc ^= h.finish().rotate_left(2);
         }
+        for mark in self.injections.handovers() {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            mark.id.hash(&mut h);
+            mark.source_thread_id.hash(&mut h);
+            mark.target_thread_id.hash(&mut h);
+            mark.status.hash(&mut h);
+            mark.updated_at.hash(&mut h);
+            mark.goal.hash(&mut h);
+            mark.finished_at.hash(&mut h);
+            acc ^= h.finish().rotate_left(4);
+        }
         for goal in self.goals.values() {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             goal.id.hash(&mut h);
@@ -3803,6 +3814,31 @@ so {} never got it — hand over again when you are ready.",
             goal.objective.hash(&mut h);
             goal.outcome.hash(&mut h);
             acc ^= h.finish().rotate_left(3);
+        }
+        // The session names the panel is sent: a session is often named after it starts.
+        let named: std::collections::HashSet<&str> = self
+            .asks
+            .values()
+            .map(|ask| ask.peer_thread_id.as_str())
+            .chain(self.injections.handovers().flat_map(|mark| {
+                [
+                    mark.source_thread_id.as_str(),
+                    mark.target_thread_id.as_str(),
+                ]
+            }))
+            .filter(|id| !id.is_empty())
+            .collect();
+        if !named.is_empty() {
+            for thread in self
+                .threads
+                .iter()
+                .filter(|t| named.contains(t.id.as_str()))
+            {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                thread.id.hash(&mut h);
+                thread.name.hash(&mut h);
+                acc ^= h.finish().rotate_left(5);
+            }
         }
         acc
     }
@@ -3862,6 +3898,10 @@ so {} never got it — hand over again when you are ready.",
                         && (ask.peer_thread_id.is_empty()
                             || self.thread_history_in_scope(&ask.peer_thread_id, device_id))
                 })
+                .map(|mut ask| {
+                    ask.peer_title = self.thread_display_name(&ask.peer_thread_id);
+                    ask
+                })
                 .collect(),
             // Same fence: the objective is the user's own words.
             goals: self
@@ -3876,6 +3916,35 @@ so {} never got it — hand over again when you are ready.",
                 Some(device_id) => crate::state::HandoverActor::Device(device_id.to_string()),
                 None => crate::state::HandoverActor::LocalOperator,
             }),
+            // A failed one handed nothing over; the composer that typed it says so. A
+            // deleted end is blanked; absence from the thread page proves nothing.
+            handover_links: self
+                .injections
+                .handovers()
+                .filter(|mark| mark.status != "failed")
+                .filter(|mark| {
+                    [&mark.source_thread_id, &mark.target_thread_id]
+                        .into_iter()
+                        .all(|id| !id.is_empty() && in_scope(id))
+                })
+                .map(|mark| crate::protocol::HandoverLinkView {
+                    id: mark.id.clone(),
+                    source_thread_id: mark.source_thread_id.clone(),
+                    source_title: self.thread_display_name(&mark.source_thread_id),
+                    source_provider: mark.source_provider.clone(),
+                    target_thread_id: mark.target_thread_id.clone(),
+                    target_title: self.thread_display_name(&mark.target_thread_id),
+                    target_provider: mark.target_provider.clone(),
+                    status: mark.status.clone(),
+                    goal: mark.goal.clone(),
+                    state: mark.state.clone(),
+                    next: mark.next.clone(),
+                    finished_at: mark.finished_at,
+                    outcome: mark.outcome.clone(),
+                    result: mark.result.clone(),
+                    created_at: mark.created_at,
+                })
+                .collect(),
         }
     }
 
@@ -5608,6 +5677,9 @@ so {} never got it — hand over again when you are ready.",
         let orphaned = self.injections.forget_thread(thread_id);
         self.usage_store
             .forget_thread_injections(thread_id, &orphaned);
+        for mark in self.injections.detach_handover_end(thread_id) {
+            self.usage_store.save_handover_mark(&mark);
+        }
         // The user's title is cleared by `remove_thread` below, which archive shares —
         // unlike project membership above, it needs no permanent-delete-only placement.
         self.remove_thread(thread_id);
@@ -7982,6 +8054,71 @@ mod tests {
             relay.ask("ask-large").and_then(|ask| ask.answer.as_deref()),
             Some(full_answer.as_str()),
             "the peer transcript handoff still needs the complete stored answer"
+        );
+    }
+
+    #[test]
+    fn a_listed_ask_is_titled_by_the_session_it_went_to() {
+        // Every round with one peer is one group in the panel, and a group reads by the
+        // session's name, as a handover card does — not by whichever brief came last.
+        use crate::state::Ask;
+
+        let mut relay = test_relay();
+        let mut peer = test_thread("peer", "/tmp");
+        peer.name = Some("Held failure → remove feature".to_string());
+        relay.threads = vec![
+            test_thread("asker", "/tmp"),
+            peer,
+            test_thread("unnamed", "/tmp"),
+        ];
+        for (id, peer) in [("ask-named", "peer"), ("ask-unnamed", "unnamed")] {
+            relay.insert_ask(Ask::new(
+                id.to_string(),
+                "asker".to_string(),
+                peer.to_string(),
+                "codex".to_string(),
+                None,
+                None,
+                "Fixed the MAXASKS finding; please look again".to_string(),
+                "/tmp".to_string(),
+                None,
+                relay_api::delegation::StartedBy::Agent,
+            ));
+        }
+
+        let asks = relay.reviews_response(None).asks;
+        let title = |id: &str| {
+            asks.iter()
+                .find(|ask| ask.id == id)
+                .and_then(|ask| ask.peer_title.clone())
+        };
+        assert_eq!(
+            title("ask-named").as_deref(),
+            Some("Held failure → remove feature")
+        );
+        assert_eq!(title("ask-unnamed"), None);
+
+        // A session is named after it starts, so the name has to move the key the panel
+        // refetches on, or a delegation keeps its brief's first line until it settles.
+        let before = relay.reviews_revision();
+        relay
+            .threads
+            .iter_mut()
+            .find(|thread| thread.id == "unnamed")
+            .expect("peer")
+            .name = Some("Audit round 6".to_string());
+        assert_ne!(relay.reviews_revision(), before);
+        let before = relay.reviews_revision();
+        relay
+            .threads
+            .iter_mut()
+            .find(|thread| thread.id == "asker")
+            .expect("asker")
+            .name = Some("Not a peer".to_string());
+        assert_eq!(
+            relay.reviews_revision(),
+            before,
+            "only the sessions the panel names move it"
         );
     }
 

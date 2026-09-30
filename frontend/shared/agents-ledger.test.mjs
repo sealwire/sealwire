@@ -3,13 +3,14 @@ import { test } from "node:test";
 
 import {
   askLedger,
-  askedSummary,
+  handoverLedger,
   intentTitle,
   oneLineResult,
   reviewFindings,
   reviewLedger,
   reviewOutcome,
   shortSha,
+  threadCount,
 } from "./agents-ledger.js";
 
 test("an intent title is the first real line, stripped of markdown", () => {
@@ -378,10 +379,122 @@ test("a request waiting on the user reads as needing them, not as running", () =
   assert.equal(group.working, false, "nothing is running until the user answers");
 });
 
-test("the Asked heading counts threads, not asks", () => {
-  assert.equal(askedSummary(askLedger(ASKS, "me")), "2 threads · 1 running");
-  assert.equal(askedSummary(askLedger(ASKS.slice(0, 1), "me")), "1 thread");
-  assert.equal(askedSummary([]), null);
+test("a section heading counts threads, not asks", () => {
+  assert.equal(threadCount(askLedger(ASKS, "me")), 2);
+  assert.equal(threadCount(askLedger(ASKS.slice(0, 1), "me")), 1);
+  assert.equal(threadCount([]), 0);
+});
+
+test("a delegation is titled by the session it went to, whichever round is latest", () => {
+  // Every round with one peer is one group; its title is that session's name, as on a
+  // handover card, so it stays put while each brief says something new.
+  const rounds = [
+    { ...ASKS[1], peer_title: "Held failure → remove feature" },
+    { ...ASKS[2], peer_title: "Held failure → remove feature" },
+  ];
+  const [codex] = askLedger(rounds, "me");
+  assert.equal(codex.threads[0].title, "Held failure → remove feature");
+
+  const [unnamed] = askLedger(ASKS.slice(1), "me");
+  assert.equal(
+    unnamed.threads[0].title,
+    "Would the tests still pass if I revert it",
+    "a session with no name falls back to what it was asked"
+  );
+
+  const [inbound] = askLedger([{ ...ASKS[1], peer_title: "Me" }], "codex-2");
+  assert.equal(
+    inbound.threads[0].title,
+    "Would the tests still pass if I revert it",
+    "delegated to you, the session it went to is this one: its name says nothing"
+  );
+});
+
+const HANDOVER = {
+  id: "handover-1",
+  source_thread_id: "source",
+  source_title: "Fix goal gate",
+  source_provider: "claude_code",
+  target_thread_id: "target",
+  target_title: "Selection Ask remote",
+  target_provider: "codex",
+  status: "done",
+  goal: "Selection Ask: quote a selection into the composer",
+  state: "Local done, 5/5 tests pass",
+  next: "Remote ask handler reads data-ask-message",
+  created_at: 1_790_000_000,
+};
+
+test("the session that picked a handover up is shown where it came from", () => {
+  const { pickedUp, handedOver } = handoverLedger([HANDOVER], "target");
+  assert.deepEqual(handedOver, []);
+  assert.equal(pickedUp.length, 1);
+  const [item] = pickedUp;
+  assert.equal(item.name, "Fix goal gate");
+  assert.equal(item.provider, "claude_code");
+  assert.equal(item.otherThreadId, "source");
+  assert.deepEqual(
+    item.rows.map((row) => row.label),
+    ["Goal", "State", "Next"]
+  );
+  assert.equal(item.rows[2].text, "Remote ask handler reads data-ask-message");
+});
+
+test("the session that handed over follows the target until its turn ends", () => {
+  const working = handoverLedger([HANDOVER], "source").handedOver[0];
+  assert.equal(working.name, "Codex");
+  assert.equal(working.title, "Selection Ask remote");
+  assert.equal(working.otherThreadId, "target");
+  assert.equal(working.state, "working");
+  assert.deepEqual(
+    working.rows.map((row) => row.label),
+    ["Next", "Since"]
+  );
+
+  const done = handoverLedger(
+    [
+      {
+        ...HANDOVER,
+        finished_at: 1_790_000_600,
+        outcome: "completed",
+        result: "Remote reads data-ask-message; 8/8 pass",
+      },
+    ],
+    "source"
+  ).handedOver[0];
+  assert.equal(done.state, "done");
+  assert.deepEqual(done.rows, [{ label: "Result", text: "Remote reads data-ask-message; 8/8 pass" }]);
+
+  const quiet = handoverLedger(
+    [{ ...HANDOVER, finished_at: 1_790_000_600, outcome: "completed" }],
+    "source"
+  ).handedOver[0];
+  assert.equal(quiet.state, "done");
+  assert.deepEqual(
+    quiet.rows.map((row) => row.label),
+    ["Next", "Since"],
+    "with nothing said, the item keeps what it was handed"
+  );
+});
+
+test("a target turn that did not complete never reads as done", () => {
+  const ended = (outcome) =>
+    handoverLedger([{ ...HANDOVER, finished_at: 1_790_000_600, outcome }], "source").handedOver[0];
+  assert.equal(ended("failed").state, "failed");
+  assert.equal(ended("stopped").state, "stopped");
+  assert.equal(ended("interrupted").state, "interrupted", "the relay restarted under it");
+  assert.equal(ended(undefined).state, null, "how it ended is unknown, so it says nothing");
+  assert.deepEqual(
+    ended("failed").rows.map((row) => row.label),
+    ["Next", "Since"]
+  );
+});
+
+test("a handover still being written is only the source's to see", () => {
+  const writing = { ...HANDOVER, status: "working", goal: null, state: null, next: null };
+  assert.equal(handoverLedger([writing], "source").handedOver[0].state, "handing over");
+  assert.deepEqual(handoverLedger([writing], "target").pickedUp, []);
+  assert.deepEqual(handoverLedger([HANDOVER], "elsewhere"), { pickedUp: [], handedOver: [] });
 });
 
 test("a checkpoint commit is not offered as a sha the user can look up", () => {
