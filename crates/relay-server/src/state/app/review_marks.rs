@@ -72,6 +72,7 @@ impl AppState {
                 entry.findings = parsed.findings;
                 entry.fixed_total = parsed.fixed.len();
                 entry.fixed = parsed.fixed;
+                entry.verdict_note = parsed.verdict_note;
                 entry.finished_at = Some(unix_now());
             }
         });

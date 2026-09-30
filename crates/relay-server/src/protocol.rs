@@ -2377,6 +2377,9 @@ pub struct ReviewRoundView {
     /// `approve`, `needs_changes`, `unsure` or `unknown`; absent while the reviewer works.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict: Option<String>,
+    /// The reviewer's `## Verdict` in one line, bounded like an ask card's result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_note: Option<String>,
     /// What still stands after this round, most severe first.
     #[serde(default)]
     pub findings: Vec<ReviewFindingView>,

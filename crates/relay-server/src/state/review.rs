@@ -14,6 +14,7 @@ use crate::protocol::{
 };
 use relay_api::GitReviewTarget;
 
+use super::delegation::one_line_result;
 use super::unix_now;
 
 /// How the reviewer thread is sourced. `CleanThread` spawns a fresh background
@@ -817,6 +818,7 @@ Inspect the affected files directly to see the full changes.",
 
 pub(crate) const FINDINGS_HEADING: &str = "Findings";
 pub(crate) const FIXED_HEADING: &str = "Fixed since the last review";
+pub(crate) const VERDICT_HEADING: &str = "Verdict";
 
 /// How every reviewer prompt asks for the reply. `parse_review_findings` reads only
 /// this form, so the two change together.
@@ -847,7 +849,7 @@ Put any detail on indented lines under its finding. Write None. when there are n
 Assumptions you made, or questions for the author.\n\n\
 ## Test gaps\n\
 Checks you recommend.\n\n\
-## Verdict\n\
+## {VERDICT_HEADING}\n\
 A short verdict.\n\n\
 End your reply with exactly one line, on its own, one of:\n\
 VERDICT: APPROVE\n\
@@ -861,6 +863,7 @@ VERDICT: UNSURE\n"
 pub(crate) struct ReviewFindings {
     pub(crate) findings: Vec<ReviewFindingView>,
     pub(crate) fixed: Vec<ReviewFindingView>,
+    pub(crate) verdict_note: Option<String>,
 }
 
 /// Reads only the form `reply_format` asks for. A line written any other way stays
@@ -870,12 +873,16 @@ pub(crate) fn parse_review_findings(review: &str) -> ReviewFindings {
     enum Section {
         Findings,
         Fixed,
+        Verdict,
         Other,
     }
     let mut parsed = ReviewFindings::default();
     let mut section = Section::Other;
     let mut fence: Option<String> = None;
-    for line in review.lines() {
+    let verdict_at = verdict_line(review).map(|(index, _)| index);
+    let mut verdict = Vec::new();
+    let mut section_level = 0;
+    for (index, line) in review.lines().enumerate() {
         let trimmed = line.trim_start();
         let marker: String = trimmed
             .chars()
@@ -892,11 +899,19 @@ pub(crate) fn parse_review_findings(review: &str) -> ReviewFindings {
         if fence.is_some() {
             continue;
         }
-        if let Some(title) = markdown_heading(line) {
+        if let Some((level, title)) = markdown_heading(line) {
+            // A deeper heading is part of the Verdict, as a handover summary keeps one.
+            if section == Section::Verdict && level > section_level {
+                verdict.push(line);
+                continue;
+            }
+            section_level = level;
             section = if title.eq_ignore_ascii_case(FINDINGS_HEADING) {
                 Section::Findings
             } else if title.eq_ignore_ascii_case(FIXED_HEADING) {
                 Section::Fixed
+            } else if title.eq_ignore_ascii_case(VERDICT_HEADING) {
+                Section::Verdict
             } else {
                 Section::Other
             };
@@ -905,16 +920,23 @@ pub(crate) fn parse_review_findings(review: &str) -> ReviewFindings {
         let list = match section {
             Section::Findings => &mut parsed.findings,
             Section::Fixed => &mut parsed.fixed,
+            Section::Verdict => {
+                if Some(index) != verdict_at {
+                    verdict.push(line);
+                }
+                continue;
+            }
             Section::Other => continue,
         };
         if let Some(finding) = finding_line(line) {
             list.push(finding);
         }
     }
+    parsed.verdict_note = one_line_result(&verdict.join("\n"));
     parsed
 }
 
-fn markdown_heading(line: &str) -> Option<&str> {
+fn markdown_heading(line: &str) -> Option<(usize, &str)> {
     let indent = line.len() - line.trim_start_matches(' ').len();
     if indent > 3 {
         return None;
@@ -925,7 +947,7 @@ fn markdown_heading(line: &str) -> Option<&str> {
         return None;
     }
     let title = rest[hashes..].strip_prefix(' ')?;
-    Some(title.trim().trim_end_matches('#').trim())
+    Some((hashes, title.trim().trim_end_matches('#').trim()))
 }
 
 /// `- [high] \`path:line\` text`, with the location optional.
@@ -1014,14 +1036,11 @@ impl Verdict {
 /// `APPROVE` must be unhedged (a trailing `?` makes it `Unknown`), and only an
 /// explicit approval keyword ends the iterative loop early.
 pub(crate) fn parse_verdict(review: &str) -> Verdict {
-    let Some(rest) = review.lines().rev().find_map(|line| {
-        line.trim()
-            .to_ascii_lowercase()
-            .strip_prefix("verdict:")
-            .map(|rest| rest.trim().to_string())
-    }) else {
+    let Some((_, line)) = verdict_line(review) else {
         return Verdict::Unknown;
     };
+    let lower = line.trim().to_ascii_lowercase();
+    let rest = lower["verdict:".len()..].trim();
     // Leading keyword = the first run of letters/underscore (stops at space, `—`,
     // `?`, etc.), so "not approved" -> "not", "needs_changes — …" -> "needs_changes".
     let token: String = rest
@@ -1037,6 +1056,15 @@ pub(crate) fn parse_verdict(review: &str) -> Verdict {
         "unsure" | "uncertain" | "unclear" => Verdict::Unsure,
         _ => Verdict::Unknown,
     }
+}
+
+/// The line `parse_verdict` reads, with its index: the last to open with `VERDICT:`.
+fn verdict_line(review: &str) -> Option<(usize, &str)> {
+    review
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.trim().to_ascii_lowercase().starts_with("verdict:"))
+        .last()
 }
 
 /// Prompt that drives the PARENT agent to address a reviewer's findings between
@@ -1186,6 +1214,46 @@ mod tests {
             location: location.map(str::to_string),
             text: text.to_string(),
         }
+    }
+
+    #[test]
+    fn the_verdict_note_is_the_verdict_section_less_the_line_the_verdict_is_read_from() {
+        let cases = [
+            (
+                "## Findings\nNone.\n\n## Verdict\nPeer tools attach; safe to land.\n\nVERDICT: APPROVE",
+                Some("Peer tools attach; safe to land."),
+            ),
+            // Only the line `parse_verdict` reads is the marker; another is the reviewer's.
+            ("## Verdict\nVerdict: safe\n\nVERDICT: APPROVE", Some("Verdict: safe")),
+            ("## Verdict\nSafe to land.\n\nVERDICT: approve — ship it", Some("Safe to land.")),
+            (
+                "## Verdict\nSafe.\nVERDICT: APPROVE\nThe log says VERDICT: APPROVE",
+                Some("Safe. The log says VERDICT: APPROVE"),
+            ),
+            ("## Verdict\nGood.\n\n## Notes\nextra\n\nVERDICT: APPROVE", Some("Good.")),
+            // A deeper heading is part of the section, as a handover summary treats one.
+            (
+                "## Verdict\n### Decision\nSafe to land.\n\nVERDICT: APPROVE",
+                Some("Decision Safe to land."),
+            ),
+            (
+                "## Verdict\nOk.\n### Caveat\nWatch the gate.\n## Notes\nx\nVERDICT: APPROVE",
+                Some("Ok. Caveat Watch the gate."),
+            ),
+            ("## Findings\nNone.\n\n## Verdict\n\nVERDICT: APPROVE", None),
+            ("VERDICT: APPROVE", None),
+            ("Looked at the gate; it holds.\n\nVERDICT: APPROVE", None),
+        ];
+        for (review, note) in cases {
+            assert_eq!(
+                parse_review_findings(review).verdict_note.as_deref(),
+                note,
+                "{review:?}"
+            );
+        }
+        let long = format!("## Verdict\n{}\n\nVERDICT: APPROVE", "word ".repeat(80));
+        let note = parse_review_findings(&long).verdict_note.expect("a note");
+        assert!(note.chars().count() <= 161 && note.ends_with('…'), "{note}");
     }
 
     #[test]
