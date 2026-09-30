@@ -292,7 +292,8 @@ your own choice.",
                 name: "model",
                 kind: ParamKind::Text,
                 required: false,
-                summary: "Model for every seat. Omit for the provider's default.",
+                summary: "Model for every seat, or \"default\" for Sealwire's pick. Omit for \
+the standard lineup.",
             },
             ToolParam {
                 name: "effort",
@@ -311,8 +312,8 @@ provider/model/effort. Overrides only the fields it names.",
                 name: "auto_start",
                 kind: ParamKind::Bool,
                 required: false,
-                summary: "Let the card confirm itself when its start time arrives. \
-Default false — the user confirms by hand.",
+                summary: "Let the card confirm itself when its start time arrives; never \
+for a flagship seat. Default false.",
             },
             ToolParam {
                 name: "start_in_minutes",
@@ -495,8 +496,8 @@ cannot see this conversation, so say everything it needs.",
                 name: "agent",
                 kind: ParamKind::Text,
                 required: false,
-                summary: "An agent you already asked, to carry on with it. Omit \
-to bring in a new one.",
+                summary: "An agent you already asked, to carry on with it; it keeps \
+its model unless you name one. Omit for a new agent.",
             },
             ToolParam {
                 name: "provider",
@@ -504,12 +505,14 @@ to bring in a new one.",
                 required: false,
                 summary: "Which agent to bring in (e.g. codex). Omit for the default.",
             },
+            // Not `required` in the schema: carrying on with `agent` needs none.
+            // `parse_call` refuses a new agent without one.
             ToolParam {
                 name: "model",
                 kind: ParamKind::Text,
                 required: false,
-                summary: "Omit for the provider default; only name a flagship \
-(claude fable, gpt6-astrol) when the user names it explicitly.",
+                summary: "Required for a new agent: a model id, or \"default\" for \
+Sealwire's pick. A flagship waits for the user to allow it.",
             },
             ToolParam {
                 name: "effort",
@@ -1121,13 +1124,24 @@ pub(crate) fn parse_call(name: &str, args: &Value) -> Result<ToolCall, String> {
             answer: get("answer")?.expect("required param yields Some"),
             cited: parse_optional_text_list(spec.name, "cited", object.get("cited"))?,
         }),
-        "delegate" => Ok(ToolCall::Delegate {
-            message: get("message")?.expect("required param yields Some"),
-            agent: get("agent")?,
-            provider: get("provider")?,
-            model: get("model")?,
-            effort: get("effort")?,
-        }),
+        "delegate" => {
+            let agent = get("agent")?;
+            let model = get("model")?;
+            if agent.is_none() && model.is_none() {
+                return Err(format!(
+                    "{name}: 'model' is required for a new agent — name a model id, or \
+\"{}\" for Sealwire's default",
+                    crate::model_policy::DEFAULT_MODEL_KEYWORD
+                ));
+            }
+            Ok(ToolCall::Delegate {
+                message: get("message")?.expect("required param yields Some"),
+                agent,
+                provider: get("provider")?,
+                model,
+                effort: get("effort")?,
+            })
+        }
         "task_definition" => Ok(ToolCall::TaskDefinition {
             run_id: get("run_id")?,
         }),
@@ -1232,7 +1246,7 @@ that it is acting on a CARD, not on the task",
     #[test]
     fn every_tool_parses_its_own_name() {
         for tool in TOOLS {
-            let required: Map<String, Value> = tool
+            let mut required: Map<String, Value> = tool
                 .params
                 .iter()
                 .filter(|param| param.required)
@@ -1248,6 +1262,10 @@ that it is acting on a CARD, not on the task",
                     (param.name.to_string(), value)
                 })
                 .collect();
+            // Required only for a new agent, which a bare call is.
+            if tool.name == "delegate" {
+                required.insert("model".to_string(), json!("default"));
+            }
             assert!(
                 parse_call(tool.name, &Value::Object(required)).is_ok(),
                 "{} must accept a call carrying exactly its required params",
@@ -1821,13 +1839,47 @@ it failed",
             .expect("delegate takes a model");
         let model_summary = model.summary.to_lowercase();
         assert!(
-            model_summary.contains("omit")
-                && model_summary.contains("explicitly")
-                && model_summary.contains("claude fable")
-                && model_summary.contains("gpt6-astrol"),
-            "model must require an explicit user ask for flagships, got: {}",
+            model_summary.contains("required")
+                && model_summary.contains("\"default\"")
+                && model_summary.contains("flagship"),
+            "model must say it is required, what \"default\" means, and that a \
+flagship waits for the user, got: {}",
             model.summary
         );
+    }
+
+    #[test]
+    fn a_new_agent_needs_a_model_and_carrying_on_does_not() {
+        for args in [
+            json!({ "message": "m" }),
+            json!({ "message": "m", "model": "" }),
+            json!({ "message": "m", "model": "  " }),
+            json!({ "message": "m", "model": null }),
+        ] {
+            let err = parse_call("delegate", &args).expect_err("a new agent needs a model");
+            assert!(err.contains("'model'"), "{args}: {err}");
+        }
+        match parse_call("delegate", &json!({ "message": "m", "model": "default" })) {
+            Ok(ToolCall::Delegate { model, agent, .. }) => {
+                assert_eq!(model.as_deref(), Some("default"));
+                assert_eq!(agent, None);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            parse_call("delegate", &json!({ "message": "m", "agent": "peer-1" })),
+            Ok(ToolCall::Delegate { model: None, .. })
+        ));
+    }
+
+    #[test]
+    fn an_agent_cannot_hand_itself_approval() {
+        for key in ["user_approved", "approved", "approval"] {
+            let mut args = json!({ "message": "m", "model": "claude-fable-5-1[1m]" });
+            args[key] = json!(true);
+            let err = parse_call("delegate", &args).expect_err("approval is not an argument");
+            assert!(err.contains("unknown argument"), "{key}: {err}");
+        }
     }
 
     #[test]

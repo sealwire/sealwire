@@ -447,6 +447,9 @@ pub struct SkillInputRef {
 pub trait ProviderBridge: Send + Sync {
     async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String>;
     async fn list_models(&self) -> Result<Vec<ModelOptionView>, String>;
+    /// The model a new session in `cwd` would run if the relay named none, as the
+    /// provider's own configuration decides it. Not a catalog's "recommended" flag.
+    async fn default_model(&self, cwd: &str) -> Result<String, String>;
     async fn start_thread(&self, request: StartThreadRequest) -> Result<StartThreadResult, String>;
     async fn fork_thread(
         &self,

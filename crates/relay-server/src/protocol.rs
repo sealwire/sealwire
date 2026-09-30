@@ -429,7 +429,12 @@ pub struct ModelOptionView {
     pub supported_reasoning_efforts: Vec<String>,
     pub default_reasoning_effort: String,
     pub hidden: bool,
+    /// Sealwire's default once the relay has adopted the catalog, not the
+    /// provider's own flag: a flagship provider default is replaced before this is set.
     pub is_default: bool,
+    /// The concrete id an alias row runs (Claude's `opus[1m]` → `claude-opus-5-5[1m]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
 }
 
 const ELLIPSIS_LEN: usize = 3;
@@ -3733,6 +3738,52 @@ pub struct AskView {
     pub error: Option<String>,
     pub delivered: bool,
     pub updated_at: u64,
+    /// Set when an agent named a flagship; `decision: "pending"` asks the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_request: Option<ModelRequestView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelRequestView {
+    pub provider: String,
+    /// What the agent asked for.
+    pub model: String,
+    pub family: String,
+    /// `pending`, `allowed`, `switched` or `declined`.
+    pub decision: String,
+    /// What the person picked; `"default"` is resolved when the peer starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_model: Option<String>,
+    /// What the peer actually runs, set only once it has been handed the task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_model: Option<String>,
+    /// Why a request the person allowed never started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_error: Option<String>,
+    /// While pending, what the user may start instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<ModelChoiceView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelChoiceView {
+    pub model: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub flagship: bool,
+    /// Sealwire's default for the provider: what the card preselects.
+    #[serde(default)]
+    pub is_default: bool,
+}
+
+/// `decision`: `allow`, `switch` (with `model`), or `decline`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelRequestDecisionInput {
+    pub decision: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 /// Full ask bodies for on-demand reads (hover tooltip, expand). Not bounded —

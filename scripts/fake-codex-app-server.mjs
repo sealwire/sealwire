@@ -45,6 +45,21 @@ let rejectTurnStart = false;
 let dropTurnStart = false;
 // Answer skills/list about this folder instead of the one asked for.
 let skillsAnswerCwd = null;
+// What config/read reports as the configured model; null means none is set.
+let configModel = null;
+
+// The shape Codex 0.156.1 answered with: its recommended row is not its config.
+const modelCatalog = [
+  { model: "gpt-6-astra", displayName: "GPT-6-Astra", isDefault: true },
+  { model: "gpt-6-sol", displayName: "GPT-6-Sol", isDefault: false },
+  { model: "gpt-5.6-sol", displayName: "GPT-5.6-Sol", isDefault: false },
+].map((row) => ({
+  ...row,
+  id: row.model,
+  hidden: false,
+  defaultReasoningEffort: "medium",
+  supportedReasoningEfforts: [{ reasoningEffort: "medium" }, { reasoningEffort: "high" }],
+}));
 
 function send(obj) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
@@ -93,7 +108,14 @@ function handle(payload) {
       rejectTurnStart = Boolean(params?.rejectTurnStart);
       dropTurnStart = Boolean(params?.dropTurnStart);
       skillsAnswerCwd = params?.skillsAnswerCwd ?? null;
+      configModel = params?.configModel ?? null;
       return ok(id, {});
+
+    case "model/list":
+      return ok(id, { data: modelCatalog, nextCursor: null });
+
+    case "config/read":
+      return ok(id, { config: { model: configModel } });
 
     case "thread/start": {
       const started = `thread-${++counter}`;

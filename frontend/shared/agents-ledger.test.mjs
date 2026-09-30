@@ -358,6 +358,26 @@ test("an answer nobody has been handed yet says so", () => {
   assert.equal(group.threads[0].state, "not handed back");
 });
 
+test("a request waiting on the user reads as needing them, not as running", () => {
+  const [group] = askLedger(
+    [
+      {
+        id: "ask-1",
+        asker_thread_id: "t1",
+        peer_thread_id: "",
+        peer_provider: "claude_code",
+        title: "Review it",
+        status: "working",
+        updated_at: 1,
+        model_request: { model: "claude-fable-5-1[1m]", decision: "pending" },
+      },
+    ],
+    "t1"
+  );
+  assert.equal(group.threads[0].state, "needs you");
+  assert.equal(group.working, false, "nothing is running until the user answers");
+});
+
 test("the Asked heading counts threads, not asks", () => {
   assert.equal(askedSummary(askLedger(ASKS, "me")), "2 threads · 1 running");
   assert.equal(askedSummary(askLedger(ASKS.slice(0, 1), "me")), "1 thread");

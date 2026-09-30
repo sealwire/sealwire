@@ -1315,6 +1315,8 @@ function RemoteApp() {
         Promise.resolve(handlersRef.current.onFetchAskDetail?.(askId)).then(
           (detail) => detail || null
         ),
+      onDecideModelRequest: (askId, decision, model) =>
+        handlersRef.current.onDecideModelRequest?.(askId, decision, model),
     }),
     []
   );

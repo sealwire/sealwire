@@ -15,6 +15,28 @@ use relay_api::team::{
 };
 
 pub(crate) const MAX_PENDING_PROPOSALS: usize = 16;
+
+/// Only a person's Start authorises the models a card shows; a timer firing the
+/// same confirm must not.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfirmedBy {
+    Person,
+    Schedule,
+}
+
+enum ConfirmError {
+    /// Waiting for a person, not broken.
+    Held(String),
+    Failed(String),
+}
+
+impl ConfirmError {
+    fn into_message(self) -> String {
+        match self {
+            ConfirmError::Held(reason) | ConfirmError::Failed(reason) => reason,
+        }
+    }
+}
 const MAX_PROPOSAL_TITLE_CHARS: usize = 200;
 const MAX_PROPOSAL_FIELD_CHARS: usize = 8_000;
 
@@ -371,23 +393,54 @@ impl AppState {
         })
     }
 
-    /// Apply a pending proposal via the ordinary `start_team` path.
+    /// A person pressing Start: authorises every model the card shows.
     pub async fn confirm_orchestrator_proposal(
         &self,
         proposal_id: &str,
         input: ConfirmOrchestratorProposalInput,
     ) -> Result<StartTeamReceipt, String> {
+        self.confirm_orchestrator_proposal_by(proposal_id, input, ConfirmedBy::Person)
+            .await
+            .map_err(ConfirmError::into_message)
+    }
+
+    /// Apply a pending proposal via the ordinary `start_team` path.
+    async fn confirm_orchestrator_proposal_by(
+        &self,
+        proposal_id: &str,
+        input: ConfirmOrchestratorProposalInput,
+        confirmed_by: ConfirmedBy,
+    ) -> Result<StartTeamReceipt, ConfirmError> {
         if !self.beta_features_enabled().await {
-            return Err(super::team::TASKS_LOCKED_MESSAGE.to_string());
+            return Err(ConfirmError::Failed(
+                super::team::TASKS_LOCKED_MESSAGE.to_string(),
+            ));
         }
-        let device_id = require_device_id(input.device_id)?;
+        let device_id = require_device_id(input.device_id).map_err(ConfirmError::Failed)?;
+        if confirmed_by == ConfirmedBy::Schedule {
+            let card = {
+                let relay = self.relay.read().await;
+                relay
+                    .orchestrator_proposals
+                    .iter()
+                    .find(|entry| entry.id == proposal_id)
+                    .cloned()
+            };
+            if let Some(card) = card {
+                self.check_scheduled_seats(&card).await?;
+            }
+        }
         let proposal = {
             let mut relay = self.relay.write().await;
             let index = relay
                 .orchestrator_proposals
                 .iter()
                 .position(|entry| entry.id == proposal_id)
-                .ok_or_else(|| format!("proposal `{proposal_id}` is gone or already settled"))?;
+                .ok_or_else(|| {
+                    ConfirmError::Failed(format!(
+                        "proposal `{proposal_id}` is gone or already settled"
+                    ))
+                })?;
             // Drop before start so a double-click cannot start twice.
             relay.orchestrator_proposals.remove(index)
         };
@@ -401,7 +454,8 @@ impl AppState {
                     &proposal.spec_updates,
                     Some(device_id),
                 )
-                .await?;
+                .await
+                .map_err(ConfirmError::Failed)?;
             let run = self.team_run_snapshot(&target.unwrap_or_default()).await;
             return Ok(StartTeamReceipt {
                 team_run_id: run.as_ref().map(|run| run.id.clone()).unwrap_or_default(),
@@ -412,32 +466,39 @@ impl AppState {
             });
         }
 
+        let seat_models_chosen_by = match confirmed_by {
+            ConfirmedBy::Person => relay_api::delegation::StartedBy::Person,
+            ConfirmedBy::Schedule => relay_api::delegation::StartedBy::Agent,
+        };
         let receipt = self
-            .start_team(StartTeamInput {
-                title: proposal.title.clone(),
-                context: proposal.context.clone(),
-                acceptance_criteria: proposal.acceptance_criteria.clone(),
-                agreed_scope: proposal.agreed_scope.clone(),
-                quality_rules: proposal.quality_rules.clone(),
-                cwd: None,
-                target_branch: None,
-                team_id: Some(proposal.team_id.clone()),
-                // The card's whole point is that what the user confirmed is
-                // what runs. Dropping these here would start every task on the
-                // relay default while the card said otherwise.
-                tl_provider: proposal.agents.tl.provider.clone(),
-                dev_agents: Some(1),
-                dev_provider: proposal.agents.dev.provider.clone(),
-                reviewer_provider: proposal.agents.reviewer.provider.clone(),
-                tl_model: proposal.agents.tl.model.clone(),
-                dev_model: proposal.agents.dev.model.clone(),
-                reviewer_model: proposal.agents.reviewer.model.clone(),
-                tl_effort: proposal.agents.tl.effort.clone(),
-                dev_effort: proposal.agents.dev.effort.clone(),
-                reviewer_effort: proposal.agents.reviewer.effort.clone(),
-                device_id: Some(device_id),
-                starting_proposal_id: Some(proposal.id.clone()),
-            })
+            .start_team_by(
+                StartTeamInput {
+                    title: proposal.title.clone(),
+                    context: proposal.context.clone(),
+                    acceptance_criteria: proposal.acceptance_criteria.clone(),
+                    agreed_scope: proposal.agreed_scope.clone(),
+                    quality_rules: proposal.quality_rules.clone(),
+                    cwd: None,
+                    target_branch: None,
+                    team_id: Some(proposal.team_id.clone()),
+                    // The card's whole point is that what the user confirmed is
+                    // what runs. Dropping these here would start every task on the
+                    // relay default while the card said otherwise.
+                    tl_provider: proposal.agents.tl.provider.clone(),
+                    dev_agents: Some(1),
+                    dev_provider: proposal.agents.dev.provider.clone(),
+                    reviewer_provider: proposal.agents.reviewer.provider.clone(),
+                    tl_model: proposal.agents.tl.model.clone(),
+                    dev_model: proposal.agents.dev.model.clone(),
+                    reviewer_model: proposal.agents.reviewer.model.clone(),
+                    tl_effort: proposal.agents.tl.effort.clone(),
+                    dev_effort: proposal.agents.dev.effort.clone(),
+                    reviewer_effort: proposal.agents.reviewer.effort.clone(),
+                    device_id: Some(device_id),
+                    starting_proposal_id: Some(proposal.id.clone()),
+                },
+                seat_models_chosen_by,
+            )
             .await;
 
         if receipt.is_err() {
@@ -454,7 +515,59 @@ impl AppState {
             self.relay.write().await.notify();
         }
 
-        receipt
+        receipt.map_err(ConfirmError::Failed)
+    }
+
+    /// The same selection each seat will get when it starts, with a timer's
+    /// authority: a flagship (by name or by what its alias runs) waits for a person.
+    async fn check_scheduled_seats(
+        &self,
+        card: &OrchestratorProposalView,
+    ) -> Result<(), ConfirmError> {
+        let default_provider = self.available_providers().first().cloned();
+        for (label, seat) in [
+            ("Planner", &card.agents.tl),
+            ("Implementer", &card.agents.dev),
+            ("Reviewer", &card.agents.reviewer),
+        ] {
+            let Some(provider) = non_empty(seat.provider.clone()).or(default_provider.clone())
+            else {
+                continue;
+            };
+            // An unknown provider is start_team's refusal to give, in its words.
+            let Ok((provider_name, bridge)) = self.resolve_provider(Some(&provider)) else {
+                continue;
+            };
+            let bridge = bridge.clone();
+            // Asked live: a cold cache would read an alias as ordinary.
+            let catalog = self
+                .load_provider_model_catalog(provider_name, &bridge)
+                .await;
+            let chosen = self
+                .select_model(
+                    ModelTarget {
+                        provider: provider_name,
+                        bridge: &bridge,
+                        catalog: &catalog,
+                        cwd: "",
+                    },
+                    ModelSelection::new(seat.model.clone()).by(ModelChooser::Agent),
+                )
+                .await;
+            match chosen {
+                Ok(_) => {}
+                Err(ModelRefusal::NeedsApproval { model, family }) => {
+                    return Err(ConfirmError::Held(format!(
+                        "Not started automatically: the {label} seat names {model}, a flagship \
+model ({family}). Only you can start that — press Start if you want it."
+                    )))
+                }
+                Err(ModelRefusal::NoDefault(reason)) => {
+                    return Err(ConfirmError::Failed(format!("the {label} seat: {reason}")))
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Start every card whose scheduled time has arrived.
@@ -506,11 +619,12 @@ impl AppState {
             // The same call the Confirm button makes, so the timer and the
             // button cannot drift apart.
             let outcome = self
-                .confirm_orchestrator_proposal(
+                .confirm_orchestrator_proposal_by(
                     &proposal_id,
                     ConfirmOrchestratorProposalInput {
                         device_id: Some(device_id),
                     },
+                    ConfirmedBy::Schedule,
                 )
                 .await;
             let mut relay = self.relay.write().await;
@@ -528,7 +642,12 @@ impl AppState {
                     .iter_mut()
                     .find(|entry| entry.id == proposal_id)
                 {
-                    proposal.schedule_error = Some(format!("automatic start failed: {error}"));
+                    proposal.schedule_error = Some(match error {
+                        ConfirmError::Held(reason) => reason,
+                        ConfirmError::Failed(error) => {
+                            format!("automatic start failed: {error}")
+                        }
+                    });
                 }
             }
             relay.notify();
@@ -600,7 +719,9 @@ fn truncate_chars(value: String, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::app::tests::path_scope_tests::{build_app, pair_device};
+    use crate::state::app::tests::path_scope_tests::{
+        build_app, build_app_with_bridge, pair_device,
+    };
     use relay_api::team::BUILTIN_PAIR_TEAM_ID;
     use tempfile::TempDir;
 
@@ -1234,6 +1355,205 @@ mod tests {
         .await
         .expect("propose")
         .proposal
+    }
+
+    /// `startable_app`, with the fake provider in reach.
+    async fn startable_app_with_bridge(
+        cwd: &str,
+    ) -> (
+        AppState,
+        std::sync::Arc<crate::fake_provider::FakeProviderBridge>,
+    ) {
+        let (app, bridge, _p, _o) = build_app_with_bridge(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        app.set_beta_features_enabled(true).await;
+        let app = app.with_team_driver(std::sync::Arc::new(IdleTeamDriver));
+        app.relay
+            .write()
+            .await
+            .trusted_workspaces
+            .push(cwd.to_string());
+        (app, bridge)
+    }
+
+    async fn schedule_with_dev_model(app: &AppState, dev_model: &str) -> OrchestratorProposalView {
+        let on_fake = |model: Option<&str>| SeatAgentView {
+            provider: Some("fake".to_string()),
+            model: model.map(str::to_string),
+            effort: None,
+        };
+        app.propose_orchestrator_task(ProposeOrchestratorTaskInput {
+            title: "Add a parser".to_string(),
+            device_id: Some("device-1".to_string()),
+            auto_start: Some(true),
+            start_in_minutes: Some(30),
+            agents: TaskSeatAgentsView {
+                tl: on_fake(None),
+                dev: on_fake(Some(dev_model)),
+                reviewer: on_fake(None),
+            },
+            ..Default::default()
+        })
+        .await
+        .expect("propose")
+        .proposal
+    }
+
+    /// Nothing cached yet, and the name says nothing: only the provider's own
+    /// catalog knows `best` runs Fable, so the check has to ask it.
+    #[tokio::test]
+    async fn a_cold_alias_for_a_flagship_still_waits_for_a_person() {
+        let (_repo, cwd) = init_repo().await;
+        let (app, bridge) = startable_app_with_bridge(&cwd).await;
+        bridge.set_extra_models(&["best"]);
+        bridge.set_model_resolutions(&[("best", "claude-fable-5-1")]);
+        let staged = schedule_with_dev_model(&app, "best").await;
+        let due_at = staged.scheduled_start_at.expect("a start time");
+        app.provider_model_catalogs.write().await.clear();
+        app.relay.write().await.available_models.clear();
+
+        app.start_due_scheduled_proposals_at(due_at).await;
+
+        assert!(
+            app.teams().await.teams.is_empty(),
+            "the timer must not start it"
+        );
+        let card = app.orchestrator_proposals().await.proposals[0].clone();
+        let why = card.schedule_error.unwrap_or_default();
+        assert!(
+            why.contains("best") && why.contains("Claude Fable"),
+            "{why}"
+        );
+    }
+
+    /// The last line: a run a timer started cannot start a flagship seat, whatever
+    /// the check before it missed. A person's Start can.
+    #[tokio::test]
+    async fn a_seat_of_a_run_a_timer_started_cannot_be_a_flagship() {
+        let (_repo, cwd) = init_repo().await;
+        let (app, bridge) = startable_app_with_bridge(&cwd).await;
+        bridge.set_extra_models(&["best"]);
+        bridge.set_model_resolutions(&[("best", "claude-fable-5-1")]);
+        let run_id = "team-timer-started".to_string();
+        {
+            let mut run = crate::state::TeamRun::new(
+                run_id.clone(),
+                crate::state::TaskSpec::default(),
+                cwd.clone(),
+                "device-1".to_string(),
+            );
+            run.tl_provider = "fake".to_string();
+            run.dev_provider = "fake".to_string();
+            run.reviewer_provider = "fake".to_string();
+            run.dev_model = "best".to_string();
+            run.seat_models_chosen_by = relay_api::delegation::StartedBy::Agent;
+            app.relay.write().await.insert_team_run(run);
+        }
+
+        let refused =
+            relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Dev).await;
+        assert!(refused.is_err(), "{:?}", refused.map(|seat| seat.thread_id));
+        assert!(!bridge.started_models().await.contains(&"best".to_string()));
+
+        app.relay.write().await.update_team_run(&run_id, |run| {
+            run.seat_models_chosen_by = relay_api::delegation::StartedBy::Person;
+        });
+        relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Dev)
+            .await
+            .expect("a person's Start authorises what the card showed");
+        assert!(bridge.started_models().await.contains(&"best".to_string()));
+    }
+
+    /// "default" is Sealwire's default, which never needs approval: a flagship
+    /// provider default is swapped for the fallback, and the seat runs that.
+    #[tokio::test]
+    async fn a_scheduled_default_seat_runs_sealwires_fallback() {
+        let (_repo, cwd) = init_repo().await;
+        let (app, bridge) = startable_app_with_bridge(&cwd).await;
+        // Claude's shape: a `default` row whose resolvedModel is the flagship.
+        bridge.set_extra_models(&["default", "claude-fable-5-1[1m]"]);
+        bridge.set_model_resolutions(&[("default", "claude-fable-5-1")]);
+        bridge.set_default_model(Some("claude-fable-5-1"));
+        let staged = schedule_with_dev_model(&app, "default").await;
+        let due_at = staged.scheduled_start_at.expect("a start time");
+        // Warm, as a running relay's prewarm leaves it.
+        app.provider_models("fake").await.expect("catalog");
+
+        app.start_due_scheduled_proposals_at(due_at).await;
+
+        let teams = app.teams().await.teams;
+        assert_eq!(
+            teams.len(),
+            1,
+            "{:?}",
+            app.orchestrator_proposals().await.proposals
+        );
+        relay_api::TeamPort::start_thread(
+            &app,
+            &teams[0].team_run_id,
+            relay_api::team::TeamRole::Dev,
+        )
+        .await
+        .expect("the dev seat starts");
+        assert_eq!(
+            bridge.started_models().await.last().map(String::as_str),
+            Some("fake-echo")
+        );
+    }
+
+    /// A timer is not a person: a card naming a flagship waits for the Start button,
+    /// which does run it as shown.
+    #[tokio::test]
+    async fn a_scheduled_card_naming_a_flagship_waits_for_a_person() {
+        let (_repo, cwd) = init_repo().await;
+        let app = startable_app(&cwd).await;
+        let on_fake = |model: Option<&str>| SeatAgentView {
+            provider: Some("fake".to_string()),
+            model: model.map(str::to_string),
+            effort: None,
+        };
+        let staged = app
+            .propose_orchestrator_task(ProposeOrchestratorTaskInput {
+                title: "Add a parser".to_string(),
+                device_id: Some("device-1".to_string()),
+                auto_start: Some(true),
+                start_in_minutes: Some(30),
+                agents: TaskSeatAgentsView {
+                    tl: on_fake(None),
+                    dev: on_fake(Some("claude-fable-5-1[1m]")),
+                    reviewer: on_fake(None),
+                },
+                ..Default::default()
+            })
+            .await
+            .expect("propose")
+            .proposal;
+        let due_at = staged.scheduled_start_at.expect("a start time");
+
+        app.start_due_scheduled_proposals_at(due_at).await;
+
+        assert!(
+            app.teams().await.teams.is_empty(),
+            "the timer must not start it"
+        );
+        let card = app.orchestrator_proposals().await.proposals[0].clone();
+        assert!(
+            !card.auto_start,
+            "disarmed, so the next tick does not retry"
+        );
+        let why = card.schedule_error.clone().unwrap_or_default();
+        assert!(why.contains("claude-fable-5-1[1m]"), "{why}");
+        assert!(!why.contains("failed"), "held, not broken: {why}");
+
+        app.confirm_orchestrator_proposal(
+            &card.id,
+            ConfirmOrchestratorProposalInput {
+                device_id: Some("device-1".to_string()),
+            },
+        )
+        .await
+        .expect("the person's Start runs what the card showed");
+        assert_eq!(app.teams().await.teams.len(), 1);
     }
 
     /// Acceptance criterion 1: a staged schedule starts NOTHING until its time.

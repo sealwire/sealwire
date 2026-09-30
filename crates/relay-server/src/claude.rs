@@ -658,6 +658,19 @@ impl ProviderBridge for ClaudeCodeBridge {
         Ok(models)
     }
 
+    /// Asked of an idle SDK session in `cwd`, so user/project/local settings count.
+    async fn default_model(&self, cwd: &str) -> Result<String, String> {
+        let result = self
+            .send_request("model/default", json!({ "cwd": cwd }))
+            .await?;
+        value_at(&result, &["model"])
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| "Claude did not report which model a new session would use".to_string())
+    }
+
     /// The one bridge that can honour `system_prompt`: the SDK takes a real
     /// `systemPrompt`, so the persona reaches the model without becoming a turn.
     async fn start_thread(&self, request: StartThreadRequest) -> Result<StartThreadResult, String> {
@@ -1417,6 +1430,7 @@ fn parse_claude_model_option(model: &Value) -> Result<ModelOptionView, String> {
         default_reasoning_effort: string_at(model, &["defaultReasoningEffort"]).unwrap_or_default(),
         hidden: bool_at(model, &["hidden"]).unwrap_or(false),
         is_default: bool_at(model, &["isDefault"]).unwrap_or(false),
+        resolved_model: string_at(model, &["resolvedModel"]).filter(|id| !id.is_empty()),
     })
 }
 
@@ -3391,6 +3405,26 @@ for await (const line of rl) {
     }
 
     #[tokio::test]
+    async fn claude_reports_alias_targets_and_the_default_for_a_folder() {
+        let Some((bridge, _state)) = spawn_fake_bridge().await else {
+            return;
+        };
+        let catalog = ProviderBridge::list_models(&bridge)
+            .await
+            .expect("model/list");
+        let opus = catalog.iter().find(|row| row.model == "opus[1m]");
+        assert_eq!(
+            opus.and_then(|row| row.resolved_model.as_deref()),
+            Some("claude-opus-5-5[1m]")
+        );
+        // The fake echoes the folder, proving the probe is made for it.
+        assert_eq!(
+            ProviderBridge::default_model(&bridge, "/work/repo").await,
+            Ok("claude-opus-5-5[1m]@/work/repo".to_string())
+        );
+    }
+
+    #[tokio::test]
     async fn claude_lists_skills_for_the_folder_it_is_asked_about() {
         let Some((bridge, _state)) = spawn_fake_bridge().await else {
             return;
@@ -3444,7 +3478,7 @@ for await (const line of rl) {
             .start_session(crate::protocol::StartSessionInput {
                 cwd: Some("/tmp".to_string()),
                 initial_prompt: None,
-                model: None,
+                model: Some("claude-sonnet-4-6".to_string()),
                 approval_policy: None,
                 sandbox: None,
                 effort: None,
@@ -4095,7 +4129,7 @@ for await (const line of rl) {
             .start_session(crate::protocol::StartSessionInput {
                 cwd: Some("/tmp".to_string()),
                 initial_prompt: None,
-                model: None,
+                model: Some("claude-sonnet-4-6".to_string()),
                 approval_policy: None,
                 sandbox: None,
                 effort: None,
@@ -4148,7 +4182,7 @@ for await (const line of rl) {
             .start_session(crate::protocol::StartSessionInput {
                 cwd: Some("/tmp".to_string()),
                 initial_prompt: None,
-                model: None,
+                model: Some("claude-sonnet-4-6".to_string()),
                 approval_policy: None,
                 sandbox: None,
                 effort: None,
@@ -4232,7 +4266,7 @@ for await (const line of rl) {
             .start_session(crate::protocol::StartSessionInput {
                 cwd: Some("/tmp".to_string()),
                 initial_prompt: None,
-                model: None,
+                model: Some("claude-sonnet-4-6".to_string()),
                 approval_policy: None,
                 sandbox: None,
                 effort: None,
@@ -6670,6 +6704,7 @@ for await (const line of rl) {
                     default_reasoning_effort: "high".to_string(),
                     hidden: false,
                     is_default: true,
+                    resolved_model: None,
                 },
                 ModelOptionView {
                     model: "claude-sonnet-4-6".to_string(),
@@ -6679,6 +6714,7 @@ for await (const line of rl) {
                     default_reasoning_effort: "high".to_string(),
                     hidden: false,
                     is_default: false,
+                    resolved_model: None,
                 },
             ]);
             // User is on the default alias — a catalog value the picker matches.

@@ -7,6 +7,7 @@
  *   {"type":"start",  "cwd":"...", "model":"...", "prompt":"...", "permissionMode":"..."}
  *   {"type":"resume","cwd":"...", "provider_session_id":"...", "prompt":"...", "model":"..."}
  *   {"type":"model/list","id":"...","cwd":"..."}
+ *   {"type":"model/default","id":"...","cwd":"..."}
  *   {"type":"list_sessions","id":"...","cwd":"...","limit":80}
  *   {"type":"read_session","id":"...","provider_session_id":"...","cwd":"..."}
  *   {"type":"read_session_page","id":"...","provider_session_id":"...","cwd":"...","before_cursor":123}
@@ -549,7 +550,9 @@ async function hydrateMissingSessionCwds(sessions) {
   );
 }
 
-async function readSupportedModels(sdk, cmd) {
+// Same folder and setting sources as a real session, so an alias row's resolvedModel
+// is what that session would actually run.
+async function withIdleModelProbe(sdk, cmd, read) {
   let releasePrompt = () => {};
   async function* idlePrompt() {
     await new Promise((resolve) => {
@@ -561,17 +564,40 @@ async function readSupportedModels(sdk, cmd) {
   await ensureWorkspaceCwdUsable(cmd.cwd);
   const query = sdk.query({
     prompt: idlePrompt(),
-    options: { cwd: cmd.cwd || process.cwd() },
+    options: { cwd: cmd.cwd || process.cwd(), settingSources: DEFAULT_SETTING_SOURCES },
   });
 
   try {
-    return await query.supportedModels();
+    return await read(query);
   } finally {
     releasePrompt();
     if (typeof query.close === "function") {
       query.close();
     }
   }
+}
+
+function readSupportedModels(sdk, cmd) {
+  return withIdleModelProbe(sdk, cmd, (query) => query.supportedModels());
+}
+
+// The model a new session in `cmd.cwd` starts on, before any turn. The catalog's
+// `default` row is the fallback for an SDK that cannot report usage while idle.
+function readDefaultModel(sdk, cmd) {
+  return withIdleModelProbe(sdk, cmd, async (query) => {
+    if (typeof query.getContextUsage === "function") {
+      const usage = await query.getContextUsage({ detail: "summary" });
+      if (typeof usage?.model === "string" && usage.model) {
+        return usage.model;
+      }
+    }
+    const models = await query.supportedModels();
+    const row = models.find((model) => model?.value === "default");
+    if (typeof row?.resolvedModel === "string" && row.resolvedModel) {
+      return row.resolvedModel;
+    }
+    throw new Error("Claude did not report which model a new session would use");
+  });
 }
 
 // The skills a session in `cmd.cwd` would load, from an idle probe that never takes a
@@ -1694,6 +1720,15 @@ async function main() {
         } catch (err) {
           emitErrorResponse(cmd.id, String(err));
         }
+        break;
+      }
+
+      case "model/default": {
+        // Detached: the relay asks before starting sessions, and a probe spawns a CLI.
+        void readDefaultModel(sdk, cmd).then(
+          (model) => emitResponse(cmd.id, { model }),
+          (err) => emitErrorResponse(cmd.id, String(err)),
+        );
         break;
       }
 

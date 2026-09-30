@@ -6249,6 +6249,7 @@ tree; got {}",
                 default_reasoning_effort: "high".to_string(),
                 hidden: false,
                 is_default: true,
+                resolved_model: None,
             }]);
         }
 
@@ -6994,7 +6995,13 @@ tree; got {}",
                 default_reasoning_effort: "medium".to_string(),
                 hidden: false,
                 is_default: true,
+                resolved_model: None,
             }])
+        }
+
+        async fn default_model(&self, _cwd: &str) -> Result<String, String> {
+            // Not via `list_models`: tests count those calls.
+            Ok(format!("{}-model", self.name))
         }
 
         async fn start_thread(
@@ -8638,6 +8645,7 @@ tree; got {}",
                 default_reasoning_effort: "high".to_string(),
                 hidden: false,
                 is_default: true,
+                resolved_model: None,
             }]);
         }
 
@@ -9726,6 +9734,7 @@ tree; got {}",
                 default_reasoning_effort: "medium".to_string(),
                 hidden: false,
                 is_default: true,
+                resolved_model: None,
             }]);
         }
 
@@ -9882,6 +9891,7 @@ tree; got {}",
                 default_reasoning_effort: "high".to_string(),
                 hidden: false,
                 is_default: true,
+                resolved_model: None,
             }]);
         }
 
@@ -11475,6 +11485,7 @@ tree; got {}",
                     default_reasoning_effort: "medium".to_string(),
                     hidden: false,
                     is_default: true,
+                    resolved_model: None,
                 },
                 crate::protocol::ModelOptionView {
                     model: format!("{}-fancy", self.name),
@@ -11484,8 +11495,18 @@ tree; got {}",
                     default_reasoning_effort: "low".to_string(),
                     hidden: false,
                     is_default: false,
+                    resolved_model: None,
                 },
             ])
+        }
+
+        async fn default_model(&self, _cwd: &str) -> Result<String, String> {
+            self.list_models()
+                .await?
+                .into_iter()
+                .find(|model| model.is_default)
+                .map(|model| model.model)
+                .ok_or_else(|| "no default model".to_string())
         }
 
         async fn start_thread(
@@ -11663,6 +11684,7 @@ tree; got {}",
                 default_reasoning_effort: "medium".to_string(),
                 hidden: false,
                 is_default: true,
+                resolved_model: None,
             }
         }
 
@@ -11702,6 +11724,15 @@ tree; got {}",
 
         async fn list_models(&self) -> Result<Vec<crate::protocol::ModelOptionView>, String> {
             Ok(vec![Self::model()])
+        }
+
+        async fn default_model(&self, _cwd: &str) -> Result<String, String> {
+            self.list_models()
+                .await?
+                .into_iter()
+                .find(|model| model.is_default)
+                .map(|model| model.model)
+                .ok_or_else(|| "no default model".to_string())
         }
 
         async fn start_thread(
@@ -15217,11 +15248,18 @@ tree; got {}",
             Ok(Vec::new())
         }
 
-        // Simulate a transient catalog miss so the relay falls back to the
-        // session default model (the inherited "default" alias) instead of a
-        // concrete catalog id.
+        // The catalog can fail while the configured default remains readable.
         async fn list_models(&self) -> Result<Vec<crate::protocol::ModelOptionView>, String> {
             Err("model catalog temporarily unavailable".to_string())
+        }
+
+        async fn default_model(&self, _cwd: &str) -> Result<String, String> {
+            Ok(if self.name == "claude_code" {
+                "claude-sonnet-4-6"
+            } else {
+                DEFAULT_MODEL
+            }
+            .to_string())
         }
 
         async fn start_thread(
@@ -15393,9 +15431,8 @@ tree; got {}",
         // (and persisted) model.
         relay.write().await.model = "default".to_string();
 
-        // User starts a codex session WITHOUT picking a model. The codex
-        // catalog momentarily fails to load, so the inherited "default" is
-        // normalized before reaching codex.
+        // The catalog is unavailable, but the configured default is known.
+        // The previous provider's keyword must never reach Codex.
         let snap = app
             .start_session(crate::protocol::StartSessionInput {
                 device_id: Some("device-1".to_string()),
@@ -15448,7 +15485,7 @@ tree; got {}",
             vec![DEFAULT_MODEL, DEFAULT_MODEL]
         );
 
-        // Identical conditions, but claude resolves "default" → it starts fine.
+        // Claude also uses its reported concrete default despite the cold catalog.
         relay.write().await.model = "default".to_string();
         app.start_session(StartSessionInput {
             device_id: Some("device-1".to_string()),
@@ -15463,7 +15500,10 @@ tree; got {}",
         })
         .await
         .expect("claude resolves \"default\" and should start successfully");
-        assert_eq!(claude_provider.models_seen().await, vec!["default"]);
+        assert_eq!(
+            claude_provider.models_seen().await,
+            vec!["claude-sonnet-4-6"]
+        );
     }
     /// Seed `count` listable threads on a provider, newest first, and return the id of
     /// the OLDEST one — the row that a `limit`-sized page can never reach.
@@ -16995,7 +17035,13 @@ mod review_tests {
                 default_reasoning_effort: "medium".to_string(),
                 hidden: false,
                 is_default: true,
+                resolved_model: None,
             }])
+        }
+
+        async fn default_model(&self, _cwd: &str) -> Result<String, String> {
+            // Default configuration is independent of model-list availability.
+            Ok(format!("{}-model", self.name))
         }
 
         async fn start_thread(
@@ -25312,11 +25358,8 @@ forwarded: a Claude turn on a codex id fails and tears down the SDK session \
 
     #[tokio::test]
     async fn a_cold_catalog_falls_back_to_the_providers_own_default_not_the_global() {
-        // Right after a restart every catalog is cold, and that is exactly when the
-        // ownership guard goes blind too: `resolve_provider_model` reaches the
-        // relay-wide last-used model and the healing block is skipped in the same
-        // breath. Every provider understands the literal "default"; none of them
-        // understands another provider's id.
+        // A cold catalog must not import another provider's last-used model.
+        // This provider can still report its configured default independently.
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["codex", "claude_code"]).await;
@@ -25350,7 +25393,7 @@ forwarded: a Claude turn on a codex id fails and tears down the SDK session \
             .map(|(_, model, _)| model.clone())
             .expect("the claude thread should have run a turn");
         assert_eq!(
-            sent, "default",
+            sent, "claude_code-model",
             "with no catalog to check against, the fallback must be the provider's \
 own default, never the relay-wide last-used model ({turn_models:?})"
         );
@@ -25404,7 +25447,7 @@ own default, never the relay-wide last-used model ({turn_models:?})"
             .map(|(_, model, _)| model.clone())
             .expect("the claude thread should have run a turn");
         assert_eq!(
-            sent, "default",
+            sent, "claude_code-model",
             "a person's send must not carry the last-used model across providers \
 either ({turn_models:?})"
         );
@@ -28664,6 +28707,7 @@ mod late_catalog_tests {
                 supported_reasoning_efforts: vec!["medium".to_string()],
                 default_reasoning_effort: "medium".to_string(),
                 is_default,
+                resolved_model: None,
                 hidden: false,
                 provider: self.name.to_string(),
             };
@@ -28672,6 +28716,15 @@ mod late_catalog_tests {
                 catalog.push(option(DEFAULT_MODEL, false));
             }
             Ok(catalog)
+        }
+
+        async fn default_model(&self, _cwd: &str) -> Result<String, String> {
+            self.list_models()
+                .await?
+                .into_iter()
+                .find(|model| model.is_default)
+                .map(|model| model.model)
+                .ok_or_else(|| "no default model".to_string())
         }
 
         async fn start_thread(
@@ -28857,11 +28910,10 @@ mod late_catalog_tests {
     }
 
     #[tokio::test]
-    async fn a_new_thread_never_records_the_global_seed_model_either() {
-        // The sibling of the resume case. A provider that publishes its catalog
-        // on thread creation cannot answer beforehand, so the model the relay
-        // picks for `start_thread` is the seed — and without healing afterwards
-        // that seed is what gets recorded and persisted on the new thread.
+    async fn a_new_thread_with_an_unknown_default_starts_nothing() {
+        // Creating a thread can consume its initial prompt. An unknown default
+        // must therefore refuse before start_thread, even if the provider would
+        // report a model afterward. Cursor Auto has its own explicit exception.
         let project = TempDir::new().expect("project tempdir");
         let cwd = project.path().to_str().unwrap();
         let (change_tx, _) = watch::channel(0_u64);
@@ -28879,11 +28931,11 @@ mod late_catalog_tests {
             relay.set_provider_name("late".to_string());
         }
 
-        let snapshot = app
+        let refused = app
             .start_session(crate::protocol::StartSessionInput {
                 cwd: Some(cwd.to_string()),
-                initial_prompt: None,
-                model: None,
+                initial_prompt: Some("do the task".to_string()),
+                model: Some("default".to_string()),
                 approval_policy: None,
                 sandbox: None,
                 effort: None,
@@ -28892,13 +28944,14 @@ mod late_catalog_tests {
                 project_id: None,
             })
             .await
-            .expect("start should succeed");
+            .expect_err("a default must be checked before a provider can run the task");
 
-        assert_ne!(
-            snapshot.model, DEFAULT_MODEL,
-            "a brand-new thread recorded another provider's seed model id"
+        assert!(refused.contains("name a model"), "{refused}");
+        assert!(
+            !*bridge.catalog_known.lock().await,
+            "start_thread must not run"
         );
-        assert_eq!(snapshot.model, "agent-default");
+        assert!(!bridge.threads.lock().await.contains_key("late-new-thread"));
     }
 
     #[tokio::test]
@@ -32261,7 +32314,7 @@ watchdog settle this Blocked",
         let reply = app
             .call_peer_tool(
                 "delegate",
-                &serde_json::json!({ "message": "take a look at this" }),
+                &serde_json::json!({ "message": "take a look at this", "model": "default" }),
                 &token,
             )
             .await
@@ -32301,7 +32354,7 @@ watchdog settle this Blocked",
         let err = app
             .call_peer_tool(
                 "delegate",
-                &serde_json::json!({ "message": "look", "provider": "claude" }),
+                &serde_json::json!({ "message": "look", "provider": "claude", "model": "default" }),
                 &token,
             )
             .await
@@ -33614,7 +33667,7 @@ watchdog settle this Blocked",
         // Unrestricted, because only that kind may call `delegate`.
         let asker = goal_session(&app, &cwd).await;
 
-        let args = serde_json::json!({ "message": "do the thing", "provider": "fake" });
+        let args = serde_json::json!({ "message": "do the thing", "provider": "fake", "model": "default" });
 
         // The thread id itself is not a credential.
         assert!(
@@ -38887,5 +38940,1057 @@ mod provider_account_tests {
             2,
             "a provider already signed in is not asked again"
         );
+    }
+}
+
+#[cfg(test)]
+mod flagship_request_tests {
+    //! An agent's own pick of a flagship waits for a person; nothing else does.
+    use std::sync::Arc;
+
+    use super::path_scope_tests::{build_app_with_bridge, grant_workspace};
+    use crate::fake_provider::FakeProviderBridge;
+    use crate::protocol::ModelRequestDecisionInput;
+    use crate::state::app::delegation::DelegateOutcome;
+    use crate::state::AppState;
+    use relay_api::delegation::{AskRequest, AskStatus, StartedBy};
+    use tempfile::TempDir;
+
+    const FABLE: &str = "claude-fable-5-1[1m]";
+
+    struct Setup {
+        app: AppState,
+        bridge: Arc<FakeProviderBridge>,
+        asker: String,
+        token: String,
+        _dirs: (TempDir, TempDir, TempDir),
+    }
+
+    /// The flagship is on offer before the first catalog read, so the cache has it.
+    async fn setup() -> Setup {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, p, o) = build_app_with_bridge(&cwd).await;
+        bridge.set_extra_models(&[FABLE, "opus[1m]"]);
+        grant_workspace(&app, &cwd).await;
+        let asker = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("bypass".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+                sandbox: None,
+            })
+            .await
+            .expect("session starts")
+            .active_thread_id
+            .clone()
+            .expect("thread");
+        let token = app.ask_token_for_thread(&asker).await;
+        Setup {
+            app,
+            bridge,
+            asker,
+            token,
+            _dirs: (project, p, o),
+        }
+    }
+
+    fn agent_request(model: &str) -> AskRequest {
+        AskRequest {
+            device_id: None,
+            started_by: StartedBy::Agent,
+            peer_thread_id: None,
+            provider: Some("fake".to_string()),
+            model: Some(model.to_string()),
+            effort: None,
+            message: "review the retry loop".to_string(),
+        }
+    }
+
+    fn decision(kind: &str, model: Option<&str>) -> ModelRequestDecisionInput {
+        ModelRequestDecisionInput {
+            decision: kind.to_string(),
+            model: model.map(str::to_string),
+            device_id: Some("dev".to_string()),
+        }
+    }
+
+    async fn only_ask(app: &AppState, asker: &str) -> crate::state::Ask {
+        let relay = app.relay.read().await;
+        let mine = relay.asks_of_asker(asker);
+        assert_eq!(mine.len(), 1, "one delegate on record");
+        mine[0].clone()
+    }
+
+    async fn held(setup: &Setup) -> String {
+        let reply = setup
+            .app
+            .call_peer_tool(
+                "delegate",
+                &serde_json::json!({ "message": "review the retry loop", "provider": "fake", "model": FABLE }),
+                &setup.token,
+            )
+            .await
+            .expect("a held request is not a refusal");
+        assert!(
+            reply.contains("Nothing has started") && reply.contains(FABLE),
+            "{reply}"
+        );
+        only_ask(&setup.app, &setup.asker).await.id
+    }
+
+    /// The decision starts the peer in the background.
+    async fn peer_started(app: &AppState, asker: &str) -> crate::state::Ask {
+        for _ in 0..200 {
+            let ask = only_ask(app, asker).await;
+            if ask.sent_at.is_some() || ask.status.is_terminal() {
+                return ask;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the peer never started");
+    }
+
+    #[tokio::test]
+    async fn an_agents_flagship_starts_nothing_until_a_person_decides() {
+        let setup = setup().await;
+        let before = setup.bridge.started_models().await.len();
+        let ask_id = held(&setup).await;
+
+        assert_eq!(setup.bridge.started_models().await.len(), before);
+        let ask = only_ask(&setup.app, &setup.asker).await;
+        assert!(ask.awaiting_model_decision());
+        let view = ask.view();
+        let request = view.model_request.expect("the card carries the request");
+        assert_eq!(request.decision, "pending");
+        assert_eq!(request.model, FABLE);
+        let fable = request.options.iter().find(|option| option.model == FABLE);
+        assert!(fable.is_some_and(|option| option.flagship));
+        assert!(request
+            .options
+            .iter()
+            .any(|option| option.model == "fake-echo" && option.is_default && !option.flagship));
+
+        // A person, not a clock, ends it.
+        setup
+            .app
+            .settle_and_deliver_asks_at(crate::state::unix_now() + 24 * 60 * 60)
+            .await;
+        let ask = only_ask(&setup.app, &setup.asker).await;
+        assert!(ask.awaiting_model_decision(), "{:?}", ask.status);
+        assert_eq!(ask.id, ask_id);
+        assert_eq!(setup.bridge.started_models().await.len(), before);
+    }
+
+    #[tokio::test]
+    async fn allowing_starts_the_requested_model_once() {
+        let setup = setup().await;
+        let before = setup.bridge.started_models().await;
+        let ask_id = held(&setup).await;
+
+        setup
+            .app
+            .decide_model_request(&ask_id, decision("allow", None), None)
+            .await
+            .expect("allowed");
+        let ask = peer_started(&setup.app, &setup.asker).await;
+        assert_eq!(ask.peer_model.as_deref(), Some(FABLE));
+        let settings = setup
+            .app
+            .relay
+            .read()
+            .await
+            .thread_settings(&ask.peer_thread_id)
+            .expect("peer settings");
+        assert_eq!(settings.model, FABLE);
+
+        let again = setup
+            .app
+            .decide_model_request(&ask_id, decision("switch", Some("opus[1m]")), None)
+            .await;
+        assert!(again.is_err(), "a decided request cannot be decided twice");
+        let mut started = setup.bridge.started_models().await;
+        started.drain(..before.len());
+        assert_eq!(started, vec![FABLE.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn switching_runs_the_chosen_model_and_says_which() {
+        let setup = setup().await;
+        let before = setup.bridge.started_models().await.len();
+        let ask_id = held(&setup).await;
+
+        let view = setup
+            .app
+            .decide_model_request(&ask_id, decision("switch", Some("opus[1m]")), None)
+            .await
+            .expect("switched");
+        let request = view.model_request.expect("still on record");
+        assert_eq!(request.decision, "switched");
+        assert_eq!(request.chosen_model.as_deref(), Some("opus[1m]"));
+        assert!(request.options.is_empty(), "nothing left to pick from");
+
+        let ask = peer_started(&setup.app, &setup.asker).await;
+        assert_eq!(ask.peer_model.as_deref(), Some("opus[1m]"));
+        assert_eq!(ask.message, "review the retry loop", "the task is kept");
+        let started = setup.bridge.started_models().await;
+        assert_eq!(&started[before..], &["opus[1m]".to_string()]);
+        let wake = crate::state::app::delegation::wake_message(&[&ask]);
+        assert!(
+            wake.contains(&format!(
+                "You asked for {FABLE}; the user ran it on opus[1m] instead."
+            )),
+            "{wake}"
+        );
+    }
+
+    /// "default" is a pick, not a model: the card and the asker are told what ran.
+    #[tokio::test]
+    async fn switching_to_default_reports_the_model_that_actually_ran() {
+        let setup = setup().await;
+        let ask_id = held(&setup).await;
+        setup
+            .app
+            .decide_model_request(&ask_id, decision("switch", Some("default")), None)
+            .await
+            .expect("switch accepted");
+        let ask = peer_started(&setup.app, &setup.asker).await;
+        assert_eq!(ask.peer_model.as_deref(), Some("fake-echo"));
+
+        let request = ask.view().model_request.expect("request");
+        assert_eq!(
+            request.chosen_model.as_deref(),
+            Some("default"),
+            "the person's pick"
+        );
+        assert_eq!(
+            request.started_model.as_deref(),
+            Some("fake-echo"),
+            "what ran"
+        );
+        let wake = crate::state::app::delegation::wake_message(&[&ask]);
+        assert!(wake.contains("which ran as fake-echo"), "{wake}");
+        assert!(!wake.contains("ran it on default"), "{wake}");
+    }
+
+    /// Deciding is not starting: until the peer has the task nothing may say it ran,
+    /// and a start that fails says so instead.
+    #[tokio::test]
+    async fn a_decision_whose_start_fails_never_claims_it_ran() {
+        let setup = setup().await;
+        let ask_id = held(&setup).await;
+        setup.bridge.refuse_next_start();
+        let view = setup
+            .app
+            .decide_model_request(&ask_id, decision("switch", Some("opus[1m]")), None)
+            .await
+            .expect("switch accepted");
+        assert_eq!(view.model_request.and_then(|r| r.started_model), None);
+
+        let ask = peer_started(&setup.app, &setup.asker).await;
+        assert_eq!(ask.status, AskStatus::Failed, "{:?}", ask.error);
+        let request = ask.view().model_request.expect("request");
+        assert_eq!(request.started_model, None);
+        assert!(request.start_error.is_some(), "{request:?}");
+        let wake = crate::state::app::delegation::wake_message(&[&ask]);
+        assert!(wake.contains("never started"), "{wake}");
+        assert!(
+            !wake.contains("ran it on") && !wake.contains("ran as"),
+            "{wake}"
+        );
+    }
+
+    #[tokio::test]
+    async fn declining_starts_nothing_and_wakes_the_asker_with_why() {
+        let setup = setup().await;
+        let before = setup.bridge.started_models().await.len();
+        let ask_id = held(&setup).await;
+
+        setup
+            .app
+            .decide_model_request(&ask_id, decision("decline", None), None)
+            .await
+            .expect("declined");
+        let ask = only_ask(&setup.app, &setup.asker).await;
+        assert_eq!(ask.status, AskStatus::Cancelled);
+        assert!(ask.peer_thread_id.is_empty());
+        assert_eq!(setup.bridge.started_models().await.len(), before);
+
+        setup
+            .app
+            .settle_and_deliver_asks_at(crate::state::unix_now())
+            .await;
+        let ask = only_ask(&setup.app, &setup.asker).await;
+        assert!(ask.delivered, "the asker hears the outcome the usual way");
+        let wake = crate::state::app::delegation::wake_message(&[&ask]);
+        assert!(wake.contains("for a new agent"), "{wake}");
+        assert!(wake.contains("the user declined"), "{wake}");
+    }
+
+    #[tokio::test]
+    async fn a_persons_pick_of_a_flagship_is_never_held() {
+        let setup = setup().await;
+        let outcome = setup
+            .app
+            .delegate_request(
+                &setup.asker,
+                AskRequest {
+                    started_by: StartedBy::Person,
+                    ..agent_request(FABLE)
+                },
+            )
+            .await
+            .expect("a person's delegate goes through");
+        assert!(
+            matches!(&outcome, DelegateOutcome::Sent { model, .. } if model == FABLE),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_allowed_thread_keeps_its_model_but_cannot_pass_the_approval_on() {
+        let setup = setup().await;
+        let ask_id = held(&setup).await;
+        setup
+            .app
+            .decide_model_request(&ask_id, decision("allow", None), None)
+            .await
+            .expect("allowed");
+        let peer = peer_started(&setup.app, &setup.asker).await.peer_thread_id;
+        for _ in 0..200 {
+            setup
+                .app
+                .settle_and_deliver_asks_at(crate::state::unix_now())
+                .await;
+            if only_ask(&setup.app, &setup.asker)
+                .await
+                .status
+                .is_terminal()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // Carrying on with the allowed peer on the model it already runs.
+        let carry_on = setup
+            .app
+            .delegate_request(
+                &setup.asker,
+                AskRequest {
+                    peer_thread_id: Some(peer.clone()),
+                    ..agent_request(FABLE)
+                },
+            )
+            .await
+            .expect("carrying on is fine");
+        assert!(
+            matches!(carry_on, DelegateOutcome::Sent { .. }),
+            "{carry_on:?}"
+        );
+
+        // The peer bringing in its own agent on the same flagship asks again.
+        let passed_on = setup
+            .app
+            .delegate_request(&peer, agent_request(FABLE))
+            .await
+            .expect("held, not refused");
+        assert!(
+            matches!(passed_on, DelegateOutcome::AwaitingApproval { .. }),
+            "{passed_on:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_default_keyword_runs_sealwires_default_and_names_it() {
+        let setup = setup().await;
+        setup.bridge.set_default_model(Some(FABLE));
+        setup.app.provider_default_models.write().await.clear();
+        let before = setup.bridge.started_models().await.len();
+
+        let reply = setup
+            .app
+            .call_peer_tool(
+                "delegate",
+                &serde_json::json!({ "message": "look", "provider": "fake", "model": "default" }),
+                &setup.token,
+            )
+            .await
+            .expect("the keyword starts an agent");
+        assert!(
+            reply.contains("on fake-echo") && reply.contains(FABLE) && reply.contains("flagship"),
+            "{reply}"
+        );
+        let started = setup.bridge.started_models().await;
+        assert_eq!(&started[before..], &["fake-echo".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_model_starts_straight_away() {
+        let setup = setup().await;
+        let outcome = setup
+            .app
+            .delegate_request(&setup.asker, agent_request("opus[1m]"))
+            .await
+            .expect("ordinary");
+        assert!(
+            matches!(&outcome, DelegateOutcome::Sent { model, .. } if model == "opus[1m]"),
+            "{outcome:?}"
+        );
+        assert!(only_ask(&setup.app, &setup.asker)
+            .await
+            .model_request
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_thread_keeps_its_model_when_the_default_moves() {
+        let setup = setup().await;
+        let before = {
+            let relay = setup.app.relay.read().await;
+            relay.thread_settings(&setup.asker).expect("settings").model
+        };
+        assert_eq!(before, "fake-echo");
+        setup.bridge.set_default_model(Some("opus[1m]"));
+        setup.app.provider_default_models.write().await.clear();
+        setup
+            .app
+            .load_provider_model_catalog(
+                "fake",
+                &(setup.bridge.clone() as Arc<dyn crate::provider::ProviderBridge>),
+            )
+            .await;
+
+        setup
+            .app
+            .send_message(crate::protocol::SendMessageInput {
+                text: "carry on".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("dev".to_string()),
+                thread_id: setup.asker.clone(),
+            })
+            .await
+            .expect("sent");
+        let after = {
+            let relay = setup.app.relay.read().await;
+            relay.thread_settings(&setup.asker).expect("settings").model
+        };
+        assert_eq!(
+            after, "fake-echo",
+            "a plain send must not re-pick the model"
+        );
+    }
+
+    #[tokio::test]
+    async fn carrying_on_with_a_peer_on_another_flagship_waits_too() {
+        let setup = setup().await;
+        let outcome = setup
+            .app
+            .delegate_request(&setup.asker, agent_request("opus[1m]"))
+            .await
+            .expect("ordinary");
+        let DelegateOutcome::Sent { peer_thread_id, .. } = outcome else {
+            panic!("{outcome:?}");
+        };
+        for _ in 0..200 {
+            setup
+                .app
+                .settle_and_deliver_asks_at(crate::state::unix_now())
+                .await;
+            if only_ask(&setup.app, &setup.asker)
+                .await
+                .status
+                .is_terminal()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let held = setup
+            .app
+            .delegate_request(
+                &setup.asker,
+                AskRequest {
+                    peer_thread_id: Some(peer_thread_id.clone()),
+                    ..agent_request(FABLE)
+                },
+            )
+            .await
+            .expect("held, not refused");
+        let DelegateOutcome::AwaitingApproval { ask_id, .. } = held else {
+            panic!("{held:?}");
+        };
+        setup
+            .app
+            .decide_model_request(&ask_id, decision("allow", None), None)
+            .await
+            .expect("allowed");
+        for _ in 0..200 {
+            let ask = setup
+                .app
+                .relay
+                .read()
+                .await
+                .ask(&ask_id)
+                .cloned()
+                .expect("ask");
+            if ask.sent_at.is_some() {
+                assert_eq!(
+                    ask.peer_thread_id, peer_thread_id,
+                    "the same peer carries on"
+                );
+                assert_eq!(ask.peer_model.as_deref(), Some(FABLE));
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the allowed turn never went out");
+    }
+
+    #[tokio::test]
+    async fn a_held_request_survives_a_restart() {
+        let setup = setup().await;
+        held(&setup).await;
+        let persisted: std::collections::HashMap<String, crate::state::Ask> = {
+            let relay = setup.app.relay.read().await;
+            relay.asks.clone()
+        };
+        let restored = crate::state::RelayState::restored_asks_for_test(&persisted);
+        let ask = restored.values().next().expect("restored");
+        assert!(ask.awaiting_model_decision(), "{:?}", ask.error);
+    }
+
+    // --- Only work that was actually sent is settled, and only within its scope ---
+
+    /// An ordinary peer that has finished its first task.
+    async fn idle_peer(setup: &Setup) -> String {
+        let outcome = setup
+            .app
+            .delegate_request(&setup.asker, agent_request("opus[1m]"))
+            .await
+            .expect("ordinary peer");
+        let DelegateOutcome::Sent { peer_thread_id, .. } = outcome else {
+            panic!("{outcome:?}")
+        };
+        for _ in 0..200 {
+            setup
+                .app
+                .settle_and_deliver_asks_at(crate::state::unix_now())
+                .await;
+            if only_ask(&setup.app, &setup.asker)
+                .await
+                .status
+                .is_terminal()
+            {
+                return peer_thread_id;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("ordinary task never settled");
+    }
+
+    async fn held_on(setup: &Setup, peer: &str) -> String {
+        let outcome = setup
+            .app
+            .delegate_request(
+                &setup.asker,
+                AskRequest {
+                    peer_thread_id: Some(peer.to_string()),
+                    ..agent_request(FABLE)
+                },
+            )
+            .await
+            .expect("held request");
+        let DelegateOutcome::AwaitingApproval { ask_id, .. } = outcome else {
+            panic!("{outcome:?}")
+        };
+        ask_id
+    }
+
+    /// An ordinary follow-up to the same peer, sent while the held one waits.
+    async fn ordinary_follow_up(setup: &Setup, peer: &str) -> String {
+        let outcome = setup
+            .app
+            .delegate_request(
+                &setup.asker,
+                AskRequest {
+                    peer_thread_id: Some(peer.to_string()),
+                    message: "check the flaky test".to_string(),
+                    ..agent_request("opus[1m]")
+                },
+            )
+            .await
+            .expect("an ordinary follow-up goes through");
+        assert!(
+            matches!(outcome, DelegateOutcome::Sent { .. }),
+            "{outcome:?}"
+        );
+        let relay = setup.app.relay.read().await;
+        relay
+            .asks_of_asker(&setup.asker)
+            .into_iter()
+            .find(|ask| ask.message == "check the flaky test")
+            .expect("follow-up on record")
+            .id
+            .clone()
+    }
+
+    async fn ask(app: &AppState, ask_id: &str) -> crate::state::Ask {
+        app.relay.read().await.ask(ask_id).cloned().expect("ask")
+    }
+
+    #[tokio::test]
+    async fn report_back_cannot_answer_a_request_that_was_never_sent() {
+        let setup = setup().await;
+        let peer = idle_peer(&setup).await;
+        let held = held_on(&setup, &peer).await;
+        let token = setup.app.ask_token_for_thread(&peer).await;
+
+        let refused = setup
+            .app
+            .call_peer_tool(
+                "report_back",
+                &serde_json::json!({ "answer": "Answer to an unrelated turn" }),
+                &token,
+            )
+            .await;
+        assert!(refused.is_err(), "{refused:?}");
+        assert!(ask(&setup.app, &held).await.awaiting_model_decision());
+
+        // Beside it, work that was sent is still answered the usual way.
+        let sent = ordinary_follow_up(&setup, &peer).await;
+        setup
+            .app
+            .call_peer_tool(
+                "report_back",
+                &serde_json::json!({ "answer": "The flaky test is fixed" }),
+                &token,
+            )
+            .await
+            .expect("the sent task takes the answer");
+        let sent = ask(&setup.app, &sent).await;
+        assert_eq!(sent.status, AskStatus::Done);
+        assert_eq!(sent.answer.as_deref(), Some("The flaky test is fixed"));
+        assert!(ask(&setup.app, &held).await.awaiting_model_decision());
+    }
+
+    #[tokio::test]
+    async fn stopping_a_peer_settles_its_sent_work_but_not_a_held_request() {
+        let setup = setup().await;
+        let peer = idle_peer(&setup).await;
+        let held = held_on(&setup, &peer).await;
+
+        // A plain turn the person sent into the peer.
+        setup.bridge.hold_terminals();
+        setup
+            .app
+            .send_message(crate::protocol::SendMessageInput {
+                text: "Work on a separate ordinary task".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("dev".to_string()),
+                thread_id: peer.clone(),
+            })
+            .await
+            .expect("ordinary turn sent");
+        setup.bridge.wait_for_held_turn().await;
+        setup
+            .app
+            .stop_active_turn(crate::protocol::StopTurnInput {
+                thread_id: peer.clone(),
+                device_id: Some("dev".to_string()),
+            })
+            .await
+            .expect("stopped");
+        setup.bridge.release_terminals();
+        let still = ask(&setup.app, &held).await;
+        assert!(
+            still.awaiting_model_decision(),
+            "{:?} {:?}",
+            still.status,
+            still.answer
+        );
+
+        // An ordinary delegated task on the same peer is still settled by a stop.
+        setup.bridge.hold_terminals();
+        let sent = ordinary_follow_up(&setup, &peer).await;
+        setup.bridge.wait_for_held_turn().await;
+        setup
+            .app
+            .stop_active_turn(crate::protocol::StopTurnInput {
+                thread_id: peer.clone(),
+                device_id: Some("dev".to_string()),
+            })
+            .await
+            .expect("stopped");
+        setup.bridge.release_terminals();
+        assert!(ask(&setup.app, &sent).await.status.is_terminal());
+        assert!(ask(&setup.app, &held).await.awaiting_model_decision());
+    }
+
+    #[tokio::test]
+    async fn approving_yesterdays_request_does_not_time_out_its_start() {
+        let setup = setup().await;
+        let ask_id = held(&setup).await;
+        let now = crate::state::unix_now();
+        setup
+            .app
+            .relay
+            .write()
+            .await
+            .update_ask(&ask_id, |ask| ask.asked_at = now - 24 * 60 * 60);
+        setup.bridge.set_start_thread_delay_ms(150);
+        setup
+            .app
+            .decide_model_request(&ask_id, decision("allow", None), None)
+            .await
+            .expect("approved");
+        setup.app.settle_and_deliver_asks_at(now).await;
+        let started = peer_started(&setup.app, &setup.asker).await;
+        assert_eq!(started.status, AskStatus::Working, "{:?}", started.error);
+        assert!(started.sent_at.is_some());
+    }
+
+    /// Four hours of silence counts from the hand-over, not from the asking.
+    #[tokio::test]
+    async fn the_clock_runs_from_when_the_task_was_sent() {
+        let setup = setup().await;
+        let now = crate::state::unix_now();
+        let hours = |n: u64| now - n * 60 * 60;
+        {
+            let mut relay = setup.app.relay.write().await;
+            for (id, asked_at, sent_at) in [
+                ("sent-long-ago", hours(6), Some(hours(5))),
+                ("sent-just-now", hours(30), Some(hours(1))),
+            ] {
+                let mut ask = crate::state::Ask::new(
+                    id.to_string(),
+                    setup.asker.clone(),
+                    format!("quiet-peer-{id}"),
+                    "fake".to_string(),
+                    None,
+                    None,
+                    "look".to_string(),
+                    "/tmp".to_string(),
+                    None,
+                    StartedBy::Agent,
+                );
+                ask.asked_at = asked_at;
+                ask.sent_at = sent_at;
+                relay.insert_ask(ask);
+            }
+        }
+        setup.app.settle_and_deliver_asks_at(now).await;
+        let timed_out = ask(&setup.app, "sent-long-ago").await;
+        assert_eq!(timed_out.status, AskStatus::Failed);
+        assert_eq!(
+            timed_out.error.as_deref(),
+            Some("it stopped without answering")
+        );
+        assert_eq!(
+            ask(&setup.app, "sent-just-now").await.status,
+            AskStatus::Working,
+            "asked long ago, but only handed over an hour ago"
+        );
+    }
+
+    /// Whatever ended a request while its peer was starting, the task is not sent.
+    #[tokio::test]
+    async fn a_request_settled_while_its_peer_starts_is_never_sent() {
+        let setup = setup().await;
+        let ask_id = held(&setup).await;
+        setup.bridge.set_start_thread_delay_ms(300);
+        setup
+            .app
+            .decide_model_request(&ask_id, decision("allow", None), None)
+            .await
+            .expect("approved");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        setup
+            .app
+            .relay
+            .write()
+            .await
+            .update_ask(&ask_id, |ask| ask.fail("ended elsewhere"));
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let ask = ask(&setup.app, &ask_id).await;
+        assert_eq!(ask.sent_at, None, "the task must not go out");
+        assert_eq!(ask.turn_id, None);
+        assert_eq!(ask.error.as_deref(), Some("ended elsewhere"));
+    }
+
+    #[tokio::test]
+    async fn a_phone_can_only_decide_for_an_exchange_it_can_see() {
+        let setup = setup().await;
+        let outside = TempDir::new().expect("outside workspace");
+        let outside_cwd = outside.path().to_string_lossy().to_string();
+        grant_workspace(&setup.app, &outside_cwd).await;
+        let peer = setup
+            .app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(outside_cwd.clone()),
+                provider: Some("fake".to_string()),
+                model: Some("opus[1m]".to_string()),
+                approval_policy: Some("bypass".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                effort: None,
+                project_id: None,
+                sandbox: None,
+            })
+            .await
+            .expect("peer session")
+            .active_thread_id
+            .expect("peer");
+        let held = held_on(&setup, &peer).await;
+        let inside = setup
+            .app
+            .relay
+            .read()
+            .await
+            .thread_cwd(&setup.asker)
+            .expect("asker cwd");
+        super::path_scope_tests::pair_device(&setup.app, "phone", vec![inside.clone()]).await;
+        super::path_scope_tests::pair_device(&setup.app, "laptop", vec![inside, outside_cwd]).await;
+
+        for (kind, model) in [
+            ("allow", None),
+            ("switch", Some("opus[1m]")),
+            ("decline", None),
+        ] {
+            let refused = setup
+                .app
+                .decide_model_request(
+                    &held,
+                    ModelRequestDecisionInput {
+                        device_id: Some("phone".to_string()),
+                        ..decision(kind, model)
+                    },
+                    Some("phone"),
+                )
+                .await;
+            assert!(refused.is_err(), "{kind}: {refused:?}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let still = ask(&setup.app, &held).await;
+        assert!(still.awaiting_model_decision());
+        assert_eq!(still.sent_at, None);
+
+        // A device that may see both ends decides as usual.
+        setup
+            .app
+            .decide_model_request(
+                &held,
+                ModelRequestDecisionInput {
+                    device_id: Some("laptop".to_string()),
+                    ..decision("allow", None)
+                },
+                Some("laptop"),
+            )
+            .await
+            .expect("in scope of both ends");
+        for _ in 0..200 {
+            if ask(&setup.app, &held).await.sent_at.is_some() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!(
+            "the allowed task never went out: {:?}",
+            ask(&setup.app, &held).await
+        );
+    }
+
+    /// The decided task keeps the deciding device's fence until it is sent. This
+    /// test runs on one thread, so the send cannot start before the narrowing.
+    #[tokio::test]
+    async fn a_decision_keeps_the_deciding_phones_fence_until_the_task_is_sent() {
+        let setup = setup().await;
+        let peer = idle_peer(&setup).await;
+        let held = held_on(&setup, &peer).await;
+        let inside = setup
+            .app
+            .relay
+            .read()
+            .await
+            .thread_cwd(&setup.asker)
+            .expect("asker cwd");
+        let elsewhere = TempDir::new().expect("elsewhere");
+        super::path_scope_tests::pair_device(&setup.app, "phone", vec![inside]).await;
+        setup
+            .app
+            .decide_model_request(
+                &held,
+                ModelRequestDecisionInput {
+                    device_id: Some("phone".to_string()),
+                    ..decision("allow", None)
+                },
+                Some("phone"),
+            )
+            .await
+            .expect("both ends were in scope when it was decided");
+        super::path_scope_tests::pair_device(
+            &setup.app,
+            "phone",
+            vec![elsewhere.path().to_string_lossy().to_string()],
+        )
+        .await;
+        for _ in 0..100 {
+            if ask(&setup.app, &held).await.status.is_terminal() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let ask = ask(&setup.app, &held).await;
+        assert_eq!(ask.sent_at, None, "{ask:?}");
+        assert_eq!(ask.status, AskStatus::Failed, "{ask:?}");
+    }
+
+    #[tokio::test]
+    async fn a_decided_task_that_was_never_sent_does_not_survive_a_restart_as_live() {
+        let setup = setup().await;
+        let peer = idle_peer(&setup).await;
+        let held = held_on(&setup, &peer).await;
+        let mut persisted: std::collections::HashMap<String, crate::state::Ask> = {
+            let relay = setup.app.relay.read().await;
+            relay.asks.clone()
+        };
+        persisted
+            .get_mut(&held)
+            .expect("held")
+            .model_request
+            .as_mut()
+            .expect("request")
+            .decision = crate::state::delegation::ModelDecision::Allowed;
+        let restored = crate::state::RelayState::restored_asks_for_test(&persisted);
+        let unsent = restored.get(&held).expect("restored");
+        assert_eq!(unsent.status, AskStatus::Failed, "{unsent:?}");
+        // The ordinary task was handed over, so its answer can still be read back.
+        let sent = restored
+            .values()
+            .find(|ask| ask.id != held)
+            .expect("sent one");
+        assert!(sent.sent_at.is_some());
+    }
+
+    // --- The deciding device's fence holds until the task actually goes out ---
+
+    async fn approve_from_phone(setup: &Setup, ask_id: &str) {
+        setup
+            .app
+            .decide_model_request(
+                ask_id,
+                ModelRequestDecisionInput {
+                    device_id: Some("phone".to_string()),
+                    ..decision("allow", None)
+                },
+                Some("phone"),
+            )
+            .await
+            .expect("in scope when decided");
+    }
+
+    async fn phone_sees_only(setup: &Setup, folder: String) {
+        super::path_scope_tests::pair_device(&setup.app, "phone", vec![folder]).await;
+    }
+
+    async fn settled_or_sent(setup: &Setup, ask_id: &str) -> crate::state::Ask {
+        for _ in 0..200 {
+            let ask = ask(&setup.app, ask_id).await;
+            if ask.sent_at.is_some() || ask.status.is_terminal() {
+                return ask;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!(
+            "neither sent nor settled: {:?}",
+            ask(&setup.app, ask_id).await
+        );
+    }
+
+    /// The background check has passed; the phone loses the folder while the
+    /// provider is still starting the new peer. Nothing may be sent after that.
+    #[tokio::test]
+    async fn a_scope_narrowed_while_the_peer_starts_blocks_the_send() {
+        let setup = setup().await;
+        let ask_id = held(&setup).await;
+        let inside = setup
+            .app
+            .relay
+            .read()
+            .await
+            .thread_cwd(&setup.asker)
+            .unwrap();
+        let elsewhere = TempDir::new().expect("elsewhere");
+        phone_sees_only(&setup, inside).await;
+        setup.bridge.set_start_thread_delay_ms(500);
+        approve_from_phone(&setup, &ask_id).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        phone_sees_only(&setup, elsewhere.path().to_string_lossy().to_string()).await;
+
+        let ask = settled_or_sent(&setup, &ask_id).await;
+        assert_eq!(ask.sent_at, None, "{ask:?}");
+        assert_eq!(ask.turn_id, None, "{ask:?}");
+        assert_eq!(ask.status, AskStatus::Failed, "{ask:?}");
+    }
+
+    /// Same slow start, fence unchanged: the approved task goes out as usual.
+    #[tokio::test]
+    async fn a_phone_still_in_scope_after_a_slow_start_gets_its_task_sent() {
+        let setup = setup().await;
+        let ask_id = held(&setup).await;
+        let inside = setup
+            .app
+            .relay
+            .read()
+            .await
+            .thread_cwd(&setup.asker)
+            .unwrap();
+        phone_sees_only(&setup, inside).await;
+        setup.bridge.set_start_thread_delay_ms(500);
+        approve_from_phone(&setup, &ask_id).await;
+
+        let ask = settled_or_sent(&setup, &ask_id).await;
+        assert!(ask.sent_at.is_some(), "{ask:?}");
+        assert_eq!(ask.status, AskStatus::Working, "{ask:?}");
+        assert_eq!(ask.peer_model.as_deref(), Some(FABLE));
+    }
+
+    /// Carrying on with an existing peer: the phone loses the folder while the
+    /// relay is still reading the peer's catalog, after every earlier check passed.
+    #[tokio::test]
+    async fn a_scope_narrowed_while_an_existing_peer_is_prepared_blocks_the_send() {
+        let setup = setup().await;
+        let peer = idle_peer(&setup).await;
+        let held = held_on(&setup, &peer).await;
+        let inside = setup
+            .app
+            .relay
+            .read()
+            .await
+            .thread_cwd(&setup.asker)
+            .unwrap();
+        let elsewhere = TempDir::new().expect("elsewhere");
+        phone_sees_only(&setup, inside).await;
+        setup.bridge.hold_list_models(true);
+        approve_from_phone(&setup, &held).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            ask(&setup.app, &held).await.sent_at.is_none(),
+            "parked in the catalog read"
+        );
+        phone_sees_only(&setup, elsewhere.path().to_string_lossy().to_string()).await;
+        setup.bridge.hold_list_models(false);
+
+        let ask = settled_or_sent(&setup, &held).await;
+        assert_eq!(ask.sent_at, None, "{ask:?}");
+        assert_eq!(ask.status, AskStatus::Failed, "{ask:?}");
     }
 }

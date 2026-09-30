@@ -29,24 +29,25 @@ impl AppState {
                 return Err(TEAM_LOCKED_THREAD_MSG.to_string());
             }
         }
-        let requested_model = non_empty(input.model);
-        // An id the CALLER named is never healed, even when it happens to equal
-        // `DEFAULT_MODEL`.
-        let model_was_requested = requested_model.is_some();
+        let model_selection = ModelSelection::new(input.model);
         let approval_policy = non_empty(input.approval_policy).unwrap_or(defaults.approval_policy);
         let sandbox = non_empty(input.sandbox).unwrap_or(defaults.sandbox);
         let (provider_name, bridge) = self.resolve_provider(input.provider.as_deref())?;
         let provider_models = self
             .load_provider_model_catalog(provider_name, bridge)
             .await;
-        // `mut`: healed below, once the provider has had a chance to publish a
-        // catalog it could not publish before the thread existed.
-        let mut model = resolve_provider_model(
-            provider_name,
-            &provider_models,
-            requested_model,
-            defaults.model.clone(),
-        );
+        let model = self
+            .select_model(
+                ModelTarget {
+                    provider: provider_name,
+                    bridge,
+                    catalog: &provider_models,
+                    cwd: &cwd,
+                },
+                model_selection.clone(),
+            )
+            .await?
+            .model;
         let effort = non_empty(input.effort)
             .or_else(|| default_effort_for_model(&provider_models, &model))
             .unwrap_or(defaults.reasoning_effort);
@@ -92,27 +93,26 @@ impl AppState {
             }
         };
 
+        // A late catalog can replace an invented fallback, while a named
+        // model or a fallback the provider actually offers remains selected.
+        let model = self
+            .select_model(
+                ModelTarget {
+                    provider: provider_name,
+                    bridge,
+                    catalog: &provider_models,
+                    cwd: &cwd,
+                },
+                model_selection.with_known_fallback(model),
+            )
+            .await?
+            .model;
+
         {
             let mut relay = self.relay.write().await;
             relay.set_provider_name(provider_name.to_string());
             if let Some(models) = provider_models {
-                let invented = !model_was_requested && !models.iter().any(|m| m.model == model);
                 relay.set_available_models(models);
-                // Heal ONLY the value the relay itself invented, and read that
-                // off the catalog rather than off the seed constant.
-                //
-                // "It equals `DEFAULT_MODEL`" is not the same question: that id
-                // is "gpt-5.5", which for Codex is a real, choosable model — so
-                // the test fired on a choice, and *only* on a brand-new relay,
-                // missing the case where the fallback carried another provider's
-                // real id. "The provider does not offer it" separates the two
-                // exactly. A caller-named id is left alone either way; absent
-                // from a catalog is deliberately not treated as invalid for
-                // those (see `resolve_provider_model`).
-                if invented {
-                    // The initial turn below uses the same healed value.
-                    model = relay.model.clone();
-                }
             }
             // Before the notify() below, so the session does not visibly jump groups.
             if let Some(project_id) = non_empty(input.project_id.clone()) {
@@ -269,14 +269,13 @@ impl AppState {
             })
             .or_else(|| default_effort_for_model(&provider_models, &defaults.model))
             .unwrap_or(defaults.reasoning_effort);
-        // Split out so the heal below can tell "this thread is pinned to that
-        // model" from "we fell back to the relay's global because nothing else
-        // was known". Merged, the two are indistinguishable.
-        let remembered_model = remembered_settings
-            .as_ref()
-            .map(|settings| settings.model.clone())
-            .filter(|model| !model.is_empty());
-        let model = remembered_model.clone().unwrap_or(defaults.model);
+        let model_selection = ModelSelection::new(None)
+            .with_inherited(
+                remembered_settings
+                    .as_ref()
+                    .map(|settings| settings.model.clone()),
+            )
+            .with_known_fallback(defaults.model);
         let read_started_at_revision = {
             let relay = self.relay.read().await;
             relay.transcript_clock()
@@ -373,26 +372,24 @@ impl AppState {
             }
         };
 
+        let model = self
+            .select_model(
+                ModelTarget {
+                    provider: &provider_name,
+                    bridge: target.bridge(),
+                    catalog: &provider_models,
+                    cwd: &thread_data.thread.cwd,
+                },
+                model_selection,
+            )
+            .await?
+            .model;
+
         {
             let mut relay = self.relay.write().await;
             relay.set_provider_name(provider_name.clone());
-            // `set_available_models` heals the relay's model when it is still
-            // the untouched seed. Recording the seed on the thread here would
-            // undo that immediately — and persist another provider's model id,
-            // which then survives every later restart. Guarded on a catalog
-            // actually landing, so a deliberate no-catalog normalisation stands.
-            let mut model = model;
             if let Some(models) = provider_models {
-                // Only the value the relay invented — i.e. one it fell back to
-                // and this provider does not offer. A thread PINNED to a model
-                // keeps it even when the catalog has since dropped it, and a
-                // catalog read that merely failed is not evidence of anything.
-                let invented =
-                    remembered_model.is_none() && !models.iter().any(|m| m.model == model);
                 relay.set_available_models(models);
-                if invented {
-                    model = relay.model.clone();
-                }
             }
             // Fold the provider's reported last-activity time into the honest
             // sort key. Only Claude's `read_thread` reports a resume-safe value
@@ -512,12 +509,23 @@ impl AppState {
         let provider_models = self
             .load_provider_model_catalog(&provider_name, target.bridge())
             .await;
-        let next_model = resolve_provider_model(
-            &provider_name,
-            &provider_models,
-            requested_model,
-            current_model.clone(),
-        );
+        // Settings changes that name no model keep the one the thread runs.
+        let thread_cwd = {
+            let relay = self.relay.read().await;
+            relay.thread_cwd(&thread_id).unwrap_or_default()
+        };
+        let next_model = self
+            .select_model(
+                ModelTarget {
+                    provider: &provider_name,
+                    bridge: target.bridge(),
+                    catalog: &provider_models,
+                    cwd: &thread_cwd,
+                },
+                ModelSelection::new(requested_model).with_inherited(Some(current_model.clone())),
+            )
+            .await?
+            .model;
         let next_effort = requested_effort
             .or_else(|| {
                 if next_model != current_model {
@@ -728,12 +736,24 @@ impl AppState {
             .map(|settings| settings.model.clone())
             .filter(|model| !model.is_empty())
             .unwrap_or_else(|| super::PROVIDER_DEFAULT_MODEL.to_string());
-        let model = resolve_provider_model(
-            &provider_name,
-            &provider_models,
-            requested_model,
-            fallback_model.clone(),
-        );
+        // A send that names no model continues on the thread's own, whatever the
+        // global default has become since.
+        let thread_cwd = {
+            let relay = self.relay.read().await;
+            relay.thread_cwd(&target_thread).unwrap_or_default()
+        };
+        let model = self
+            .select_model(
+                ModelTarget {
+                    provider: &provider_name,
+                    bridge: target.bridge(),
+                    catalog: &provider_models,
+                    cwd: &thread_cwd,
+                },
+                ModelSelection::new(requested_model).with_inherited(Some(fallback_model.clone())),
+            )
+            .await?
+            .model;
         let effort = requested_effort
             .or_else(|| {
                 (model != fallback_model)

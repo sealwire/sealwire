@@ -541,9 +541,63 @@ pub struct FakeProviderBridge {
     /// where the provider refused and the relay must keep the session.
     refuse_next_archive: Arc<AtomicBool>,
     fail_lists: Arc<AtomicBool>,
+    /// Ids appended to the catalog (`FAKE_PROVIDER_EXTRA_MODELS`, comma-separated),
+    /// so a flagship can be offered without a real provider.
+    extra_models: Arc<std::sync::Mutex<Vec<String>>>,
+    /// What `default_model` answers (`FAKE_PROVIDER_DEFAULT_MODEL`); the first
+    /// catalog row when unset.
+    default_model: Arc<std::sync::Mutex<Option<String>>>,
+    /// The model every `start_thread` was asked for, in order.
+    started_models: Arc<Mutex<Vec<String>>>,
+    default_model_fails: Arc<AtomicBool>,
+    /// Catalog id -> the model it runs, like Claude's `resolvedModel`.
+    model_resolutions: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    /// One-shot: the next `start_thread` fails.
+    refuse_next_start: Arc<AtomicBool>,
+    /// While true, `list_models` waits: a test can stand inside a catalog read.
+    list_models_hold: watch::Sender<bool>,
 }
 
 impl FakeProviderBridge {
+    #[cfg(test)]
+    pub(crate) fn set_extra_models(&self, models: &[&str]) {
+        *self.extra_models.lock().expect("extra models") =
+            models.iter().map(|model| model.to_string()).collect();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_default_model(&self, model: Option<&str>) {
+        *self.default_model.lock().expect("default model") = model.map(str::to_string);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_model_resolutions(&self, resolutions: &[(&str, &str)]) {
+        *self.model_resolutions.lock().expect("model resolutions") = resolutions
+            .iter()
+            .map(|(id, resolved)| (id.to_string(), resolved.to_string()))
+            .collect();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_list_models(&self, held: bool) {
+        self.list_models_hold.send_replace(held);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn refuse_next_start(&self) {
+        self.refuse_next_start.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_default_model(&self, fail: bool) {
+        self.default_model_fails.store(fail, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn started_models(&self) -> Vec<String> {
+        self.started_models.lock().await.clone()
+    }
+
     /// Whether a stop was asked for this exact turn. Read by tests that need to prove a
     /// turn left working against a superseded objective was actually told to stop.
     pub async fn stop_was_requested_for(&self, turn_id: &str) -> bool {
@@ -756,6 +810,26 @@ impl FakeProviderBridge {
             native_fork: Arc::new(AtomicBool::new(false)),
             refuse_next_archive: Arc::new(AtomicBool::new(false)),
             fail_lists: Arc::new(AtomicBool::new(false)),
+            extra_models: Arc::new(std::sync::Mutex::new(
+                non_empty_env("FAKE_PROVIDER_EXTRA_MODELS")
+                    .map(|value| {
+                        value
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|id| !id.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            )),
+            default_model: Arc::new(std::sync::Mutex::new(non_empty_env(
+                "FAKE_PROVIDER_DEFAULT_MODEL",
+            ))),
+            started_models: Arc::new(Mutex::new(Vec::new())),
+            default_model_fails: Arc::new(AtomicBool::new(false)),
+            model_resolutions: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            refuse_next_start: Arc::new(AtomicBool::new(false)),
+            list_models_hold: watch::channel(false).0,
         })
     }
 
@@ -798,29 +872,56 @@ impl ProviderBridge for FakeProviderBridge {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelOptionView>, String> {
-        Ok((0..self.model_count)
-            .map(|index| ModelOptionView {
-                model: if index == 0 {
-                    "fake-echo".to_string()
+        let mut hold = self.list_models_hold.subscribe();
+        while *hold.borrow_and_update() {
+            if hold.changed().await.is_err() {
+                break;
+            }
+        }
+        let row = |model: String, display_name: String, is_default: bool| ModelOptionView {
+            model,
+            display_name,
+            provider: self.model_vendor.clone(),
+            supported_reasoning_efforts: vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+            ],
+            default_reasoning_effort: "medium".to_string(),
+            hidden: false,
+            is_default,
+            resolved_model: None,
+        };
+        let mut models: Vec<ModelOptionView> = (0..self.model_count)
+            .map(|index| {
+                if index == 0 {
+                    row("fake-echo".to_string(), self.model_label.clone(), true)
                 } else {
-                    format!("fake-echo-{}", index + 1)
-                },
-                display_name: if index == 0 {
-                    self.model_label.clone()
-                } else {
-                    format!("{} {}", self.model_label, index + 1)
-                },
-                provider: self.model_vendor.clone(),
-                supported_reasoning_efforts: vec![
-                    "low".to_string(),
-                    "medium".to_string(),
-                    "high".to_string(),
-                ],
-                default_reasoning_effort: "medium".to_string(),
-                hidden: false,
-                is_default: index == 0,
+                    row(
+                        format!("fake-echo-{}", index + 1),
+                        format!("{} {}", self.model_label, index + 1),
+                        false,
+                    )
+                }
             })
-            .collect())
+            .collect();
+        let extra = self.extra_models.lock().expect("extra models").clone();
+        models.extend(extra.into_iter().map(|id| row(id.clone(), id, false)));
+        let resolutions = self.model_resolutions.lock().expect("model resolutions");
+        for model in &mut models {
+            model.resolved_model = resolutions.get(&model.model).cloned();
+        }
+        Ok(models)
+    }
+
+    async fn default_model(&self, _cwd: &str) -> Result<String, String> {
+        if self.default_model_fails.load(Ordering::Relaxed) {
+            return Err("fake default probe failed".to_string());
+        }
+        if let Some(model) = self.default_model.lock().expect("default model").clone() {
+            return Ok(model);
+        }
+        Ok("fake-echo".to_string())
     }
 
     /// Records `system_prompt` so a test can assert the relay asked for a persona
@@ -833,6 +934,10 @@ impl ProviderBridge for FakeProviderBridge {
             sleep(Duration::from_millis(delay)).await;
         }
         let cwd = request.cwd.as_str();
+        if self.refuse_next_start.swap(false, Ordering::Relaxed) {
+            return Err("fake provider refused to start a session".to_string());
+        }
+        self.started_models.lock().await.push(request.model.clone());
         if let Some(prompt) = request.system_prompt.as_deref() {
             self.system_prompts
                 .lock()

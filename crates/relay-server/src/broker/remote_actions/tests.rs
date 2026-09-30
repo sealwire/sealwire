@@ -2009,6 +2009,39 @@ fn delegating_from_a_paired_device_round_trips_and_binds_it() {
     ));
 }
 
+// The flagship card on a phone. The device comes from the broker, never the body.
+#[test]
+fn deciding_a_model_request_from_a_paired_device_binds_it_and_needs_the_session() {
+    let decision: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "decide_model_request",
+        "ask_id": "ask-1",
+        "decision": "switch",
+        "model": "opus[1m]",
+        "device_id": "forged"
+    }))
+    .expect("decide_model_request should parse");
+    assert_eq!(decision.kind(), RemoteActionKind::DecideModelRequest);
+    assert_eq!(
+        RemoteActionKind::DecideModelRequest.as_str(),
+        "decide_model_request"
+    );
+    match decision.bind_device("device-6".to_string(), "surface-test", test_origin()) {
+        RemoteActionRequest::DecideModelRequest {
+            ask_id,
+            decision,
+            model,
+            device_id,
+        } => {
+            assert_eq!(ask_id, "ask-1");
+            assert_eq!(decision, "switch");
+            assert_eq!(model.as_deref(), Some("opus[1m]"));
+            assert_eq!(device_id.as_deref(), Some("device-6"));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    assert!(requires_session_claim(RemoteActionKind::DecideModelRequest));
+}
+
 // `/handover` from a phone. Same door as `delegate`, and deliberately a different
 // action: a delegate insists on a message, a handover carries only an optional note.
 #[test]

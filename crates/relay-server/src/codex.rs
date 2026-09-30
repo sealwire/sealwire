@@ -91,6 +91,10 @@ impl ProviderBridge for CodexBridge {
         self.list_models().await
     }
 
+    async fn default_model(&self, cwd: &str) -> Result<String, String> {
+        self.default_model(cwd).await
+    }
+
     /// `system_prompt` is IGNORED: `thread/start` has no instruction surface,
     /// and smuggling the persona in as a user turn is deliberately not done —
     /// see `StartThreadRequest::system_prompt`.
@@ -660,6 +664,27 @@ impl CodexBridge {
         }
 
         Ok(models)
+    }
+
+    /// `model/list`'s `isDefault` is only Codex's recommendation; the user's config
+    /// for this folder wins over it, and only an unconfigured Codex falls back to it.
+    pub async fn default_model(&self, cwd: &str) -> Result<String, String> {
+        let result = self
+            .send_request("config/read", json!({ "includeLayers": false, "cwd": cwd }))
+            .await?;
+        if let Some(model) = value_at(&result, &["config", "model"])
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        {
+            return Ok(model.to_string());
+        }
+        self.list_models()
+            .await?
+            .into_iter()
+            .find(|model| model.is_default)
+            .map(|model| model.model)
+            .ok_or_else(|| "Codex names no configured model and recommends none".to_string())
     }
 
     pub async fn start_thread(
@@ -1392,6 +1417,7 @@ fn parse_model_option(model: &Value) -> Result<ModelOptionView, String> {
             .ok_or_else(|| "model/list item missing defaultReasoningEffort".to_string())?,
         hidden: bool_at(model, &["hidden"]).unwrap_or(false),
         is_default: bool_at(model, &["isDefault"]).unwrap_or(false),
+        resolved_model: None,
     })
 }
 

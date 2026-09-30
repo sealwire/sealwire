@@ -91,6 +91,114 @@ pub(crate) struct Ask {
     pub(crate) answered_with_tool: bool,
     /// When the peer was handed the task; until then the asker is writing it.
     pub(crate) sent_at: Option<u64>,
+    /// An agent named a flagship: what it asked for, and what a person decided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) model_request: Option<ModelRequest>,
+}
+
+/// Held until a person decides, then kept so the card and the asker can both be
+/// told what actually ran.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct ModelRequest {
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) family: String,
+    pub(crate) decision: ModelDecision,
+    /// What the user picked; `default` is resolved before handing over the task.
+    pub(crate) chosen_model: Option<String>,
+    pub(crate) decided_at: Option<u64>,
+    /// The provider's catalog when the agent asked, for picking another model.
+    pub(crate) options: Vec<crate::protocol::ModelChoiceView>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ModelDecision {
+    #[default]
+    Pending,
+    Allowed,
+    Switched,
+    /// Also where an unknown name lands: terminal, so nothing starts on a guess.
+    #[serde(other)]
+    Declined,
+}
+
+impl ModelDecision {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            ModelDecision::Pending => "pending",
+            ModelDecision::Allowed => "allowed",
+            ModelDecision::Switched => "switched",
+            ModelDecision::Declined => "declined",
+        }
+    }
+}
+
+impl ModelRequest {
+    /// Deciding is not starting: set only once the peer has been handed the task.
+    fn started_model(&self, ask: &Ask) -> Option<String> {
+        let decided_to_run = matches!(
+            self.decision,
+            ModelDecision::Allowed | ModelDecision::Switched
+        );
+        ask.sent_at
+            .filter(|_| decided_to_run)
+            .and(ask.peer_model.clone())
+    }
+
+    fn start_error(&self, ask: &Ask) -> Option<String> {
+        let decided_to_run = matches!(
+            self.decision,
+            ModelDecision::Allowed | ModelDecision::Switched
+        );
+        (decided_to_run && ask.sent_at.is_none() && ask.status.is_terminal()).then(|| {
+            ask.error
+                .clone()
+                .unwrap_or_else(|| "it did not start".to_string())
+        })
+    }
+
+    pub(crate) fn view(&self, ask: &Ask) -> crate::protocol::ModelRequestView {
+        crate::protocol::ModelRequestView {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            family: self.family.clone(),
+            decision: self.decision.as_str().to_string(),
+            chosen_model: self.chosen_model.clone(),
+            started_model: self.started_model(ask),
+            start_error: self.start_error(ask),
+            options: if self.decision == ModelDecision::Pending {
+                self.options.clone()
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// One line for the woken asker: what was decided, and what actually ran.
+    pub(crate) fn outcome_line(&self, ask: &Ask) -> Option<String> {
+        let asked = &self.model;
+        let chosen = self.chosen_model.as_deref().unwrap_or("another model");
+        let line = match (self.decision, self.started_model(ask)) {
+            (ModelDecision::Pending, _) => return None,
+            (ModelDecision::Declined, _) => "the user declined, so nothing ran".to_string(),
+            (ModelDecision::Allowed, Some(_)) => "the user allowed it".to_string(),
+            (ModelDecision::Allowed, None) => {
+                "the user allowed it, but it never started".to_string()
+            }
+            (ModelDecision::Switched, Some(ran)) if ran == chosen => {
+                format!("the user ran it on {ran} instead")
+            }
+            (ModelDecision::Switched, Some(ran)) => {
+                format!("the user picked {chosen}, which ran as {ran}")
+            }
+            (ModelDecision::Switched, None) => {
+                format!("the user picked {chosen}, but it never started")
+            }
+        };
+        Some(format!("You asked for {asked}; {line}."))
+    }
 }
 
 impl Ask {
@@ -131,7 +239,17 @@ impl Ask {
             finished_at: None,
             answered_with_tool: false,
             sent_at: None,
+            model_request: None,
         }
+    }
+
+    /// Nothing may start, and the sweep must not read a reply as the answer.
+    pub(crate) fn awaiting_model_decision(&self) -> bool {
+        !self.status.is_terminal()
+            && self
+                .model_request
+                .as_ref()
+                .is_some_and(|request| request.decision == ModelDecision::Pending)
     }
 
     /// Settled and not yet handed back to the asker.
@@ -193,6 +311,10 @@ impl Ask {
             error: self.error.as_deref().and_then(one_line_result),
             delivered: self.delivered,
             updated_at: self.updated_at,
+            model_request: self
+                .model_request
+                .as_ref()
+                .map(|request| request.view(self)),
         }
     }
 

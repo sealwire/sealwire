@@ -206,6 +206,23 @@ export async function getAskDetail(apiFetch, askId) {
   return payload.data;
 }
 
+// The user's answer to an agent's flagship request. Throws so the card can say why.
+export async function decideModelRequest(apiFetch, askId, { decision, model = null }, deviceId) {
+  const response = await apiFetch(
+    `/api/session/asks/${encodeURIComponent(askId)}/model-request`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision, model, device_id: deviceId }),
+    }
+  );
+  const payload = await response.json();
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.error?.message || "Could not answer the model request");
+  }
+  return payload.data;
+}
+
 export async function getWorkflows(apiFetch, deviceId) {
   const suffix = deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : "";
   const response = await apiFetch(`/api/session/workflows${suffix}`, { method: "GET" });

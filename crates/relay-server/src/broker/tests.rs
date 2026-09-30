@@ -2075,6 +2075,10 @@ impl crate::provider::ProviderBridge for PanickingProvider {
     async fn list_models(&self) -> Result<Vec<crate::protocol::ModelOptionView>, String> {
         Ok(Vec::new())
     }
+
+    async fn default_model(&self, _cwd: &str) -> Result<String, String> {
+        Err("no default model".to_string())
+    }
     async fn start_thread(
         &self,
         _request: crate::provider::StartThreadRequest,
@@ -2169,6 +2173,10 @@ impl crate::provider::ProviderBridge for GatedThreadsProvider {
     async fn list_models(&self) -> Result<Vec<crate::protocol::ModelOptionView>, String> {
         Ok(Vec::new())
     }
+
+    async fn default_model(&self, _cwd: &str) -> Result<String, String> {
+        Err("no default model".to_string())
+    }
     async fn start_thread(
         &self,
         _request: crate::provider::StartThreadRequest,
@@ -2260,6 +2268,10 @@ impl crate::provider::ProviderBridge for NeverAnswersProvider {
     }
     async fn list_models(&self) -> Result<Vec<crate::protocol::ModelOptionView>, String> {
         std::future::pending().await
+    }
+
+    async fn default_model(&self, _cwd: &str) -> Result<String, String> {
+        Err("no default model".to_string())
     }
     async fn start_thread(
         &self,

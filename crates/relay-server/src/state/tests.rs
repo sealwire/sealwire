@@ -478,6 +478,7 @@ fn available_models_update_default_model_and_effort() {
             provider: "codex".to_string(),
             hidden: false,
             is_default: true,
+            resolved_model: None,
         },
         ModelOptionView {
             model: "gpt-5.1-codex-mini".to_string(),
@@ -487,6 +488,7 @@ fn available_models_update_default_model_and_effort() {
             provider: "codex".to_string(),
             hidden: false,
             is_default: false,
+            resolved_model: None,
         },
     ]);
 
@@ -510,6 +512,7 @@ fn switching_active_provider_drops_the_previous_providers_catalog() {
         provider: "anthropic".to_string(),
         hidden: false,
         is_default: true,
+        resolved_model: None,
     }]);
     assert_eq!(relay.available_models.len(), 1);
 
@@ -549,6 +552,7 @@ fn set_available_models_preserves_user_chosen_effort_across_catalog_reload() {
         provider: "claude_code".to_string(),
         hidden: false,
         is_default: true,
+        resolved_model: None,
     }]);
 
     // BUG: merely loading the model list silently rewrote the user's choice.

@@ -98,6 +98,7 @@ import {
   getDevices,
   getReviews,
   getAskDetail,
+  decideModelRequest,
   getWorkflows,
   getTeams,
   getOrchestratorProposals,
@@ -829,6 +830,9 @@ const reviewerActions = {
   // On-demand full ask bodies. The reviews list only ships ledger previews so a
   // fat prompt cannot sit in every Agents paint; hover loads the complete text.
   fetchAskDetail: (askId) => getAskDetail(apiFetch, askId),
+  // An agent's flagship request, answered on its Agents card.
+  onDecideModelRequest: (askId, decision, model) =>
+    decideModelRequest(apiFetch, askId, { decision, model }, state.deviceId),
 };
 
 const workspaceDiffSheet = createWorkspaceDiffSheet({

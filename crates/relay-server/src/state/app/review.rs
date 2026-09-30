@@ -208,6 +208,12 @@ impl std::fmt::Display for ThreadDriveError {
 
 impl std::error::Error for ThreadDriveError {}
 
+/// A paired device's path scope, and the threads a turn sent for it must stay inside.
+pub(super) struct DeviceFence<'a> {
+    pub(super) device_id: &'a str,
+    pub(super) threads: &'a [&'a str],
+}
+
 impl From<String> for ThreadDriveError {
     fn from(error: String) -> Self {
         Self::Provider(error)
@@ -2398,25 +2404,32 @@ available; pick another one under Working tree to review"
         model: Option<&str>,
         effort: Option<&str>,
     ) -> Result<DispatchedTurn, ThreadDriveError> {
-        // When the caller doesn't pin a model/effort, use the TARGET thread's OWN
-        // remembered settings — not the active session's — passed as the EXPLICIT
-        // model so it's honored verbatim (resolve_provider_model otherwise prefers the
-        // provider catalog default over a fallback). This keeps a background turn on
-        // the thread's configured model: the iterative author fix turn (which writes
-        // code) and the parent recap must run under the parent's model, never silently
-        // the relay/provider default. Only when neither caller nor thread has a model
-        // does it fall back to the session default.
-        let thread_settings = {
+        self.send_message_to_thread_fenced(thread_id, text, model, effort, None)
+            .await
+    }
+
+    /// `fence`: a paired device this turn acts for, checked against every thread
+    /// it names immediately before the provider is called.
+    pub(super) async fn send_message_to_thread_fenced(
+        &self,
+        thread_id: &str,
+        text: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+        fence: Option<&DeviceFence<'_>>,
+    ) -> Result<DispatchedTurn, ThreadDriveError> {
+        // Autonomous continuations inherit the target thread's own settings.
+        // A named model here was already vetted by whoever passed it.
+        let (thread_settings, thread_cwd) = {
             let relay = self.relay.read().await;
-            relay.thread_settings(thread_id)
+            (
+                relay.thread_settings(thread_id),
+                relay.thread_cwd(thread_id).unwrap_or_default(),
+            )
         };
-        let caller_named_model = model.is_some();
-        let target_model = model.map(str::to_string).or_else(|| {
-            thread_settings
-                .as_ref()
-                .map(|settings| settings.model.clone())
-                .filter(|value| !value.is_empty())
-        });
+        let inherited_model = thread_settings
+            .as_ref()
+            .map(|settings| settings.model.clone());
         let target_effort = effort.map(str::to_string).or_else(|| {
             thread_settings
                 .as_ref()
@@ -2428,30 +2441,19 @@ available; pick another one under Working tree to review"
         let provider_models = self
             .load_provider_model_catalog(&provider_name, target.bridge())
             .await;
-        // The read paths drop a leaked id via `resolve_model_for_provider`; this is the
-        // path that SENDS one, and `resolve_provider_model` honours a named model
-        // verbatim — so without this a PERSISTED id another provider owns goes out
-        // as-is. Only persisted ids: a model this call named is a choice, and
-        // `resolve_provider_model` never heals those. Ids are not unique across
-        // providers and a legitimate override need not be listed, so "someone else
-        // publishes this string" would condemn deliberate overrides too.
-        let target_model = match target_model {
-            Some(model)
-                if !caller_named_model
-                    && self
-                        .model_belongs_to_another_provider(&provider_name, &model)
-                        .await =>
-            {
-                None
-            }
-            other => other,
-        };
-        let model = resolve_provider_model(
-            &provider_name,
-            &provider_models,
-            target_model,
-            super::PROVIDER_DEFAULT_MODEL.to_string(),
-        );
+        let model = self
+            .select_model(
+                ModelTarget {
+                    provider: &provider_name,
+                    bridge: target.bridge(),
+                    catalog: &provider_models,
+                    cwd: &thread_cwd,
+                },
+                ModelSelection::new(model.map(str::to_string)).with_inherited(inherited_model),
+            )
+            .await
+            .map_err(String::from)?
+            .model;
         let effort = target_effort
             .or_else(|| default_effort_for_model(&provider_models, &model))
             .unwrap_or_else(|| DEFAULT_EFFORT.to_string());
@@ -2473,6 +2475,17 @@ available; pick another one under Working tree to review"
         }
 
         let workspace = self.drivable_thread(thread_id).await?;
+        // After every await above, which can take seconds: a scope narrowed meanwhile binds.
+        if let Some(fence) = fence {
+            let relay = self.relay.read().await;
+            for thread in fence.threads {
+                crate::state::app::goal::ensure_thread_in_device_scope(
+                    &relay,
+                    thread,
+                    Some(fence.device_id),
+                )?;
+            }
+        }
         // Snapshot the thread's turn clock BEFORE crossing into the provider. The
         // relay reads provider output on its own task, so this turn can start AND
         // finish while we are still queued for the write lock below; the revision is
@@ -2544,12 +2557,19 @@ available; pick another one under Working tree to review"
         let provider_models = self
             .load_provider_model_catalog(&provider_name, &bridge)
             .await;
-        let model = resolve_provider_model(
-            &provider_name,
-            &provider_models,
-            reviewer_model.map(str::to_string),
-            super::PROVIDER_DEFAULT_MODEL.to_string(),
-        );
+        let model = self
+            .select_model(
+                ModelTarget {
+                    provider: &provider_name,
+                    bridge: &bridge,
+                    catalog: &provider_models,
+                    cwd: workspace.as_str(),
+                },
+                ModelSelection::new(reviewer_model.map(str::to_string)),
+            )
+            .await
+            .map_err(String::from)?
+            .model;
         // An explicit effort override wins; otherwise use the model's default effort,
         // falling back to the session default.
         let effort = reviewer_effort

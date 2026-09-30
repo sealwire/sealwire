@@ -1073,6 +1073,10 @@ pub struct TeamRun {
     pub reviewer_model: String,
     #[serde(default)]
     pub reviewer_effort: String,
+    /// Who authorised the seat models. A person's Start covers a flagship seat; a
+    /// timer's does not, so an unset record falls on the timer's side.
+    #[serde(default)]
+    pub seat_models_chosen_by: crate::delegation::StartedBy,
 
     /// How many dev sessions the sub-tasks may be spread over, if the user said.
     /// `None` is one shared session (default). Clamped to `[1, sub_tasks]` once

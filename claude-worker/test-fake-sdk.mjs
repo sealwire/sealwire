@@ -380,12 +380,27 @@ export function query({ prompt, options = {} }) {
     async supportedModels() {
       return [
         {
+          value: "default",
+          resolvedModel: "claude-opus-5-5[1m]",
+          displayName: "Default (recommended)",
+          supportedEffortLevels: ["low", "medium", "high"],
+        },
+        {
           model: "claude-sonnet-4-6",
           displayName: "Sonnet 4.6",
           supportedEffortLevels: ["low", "medium", "high"],
         },
       ];
     },
+    // A settings-level model only shows when the probe loaded the setting sources.
+    getContextUsage:
+      process.env.CLAUDE_FAKE_NO_CONTEXT_USAGE === "1"
+        ? undefined
+        : async () => ({
+            model: (options.settingSources || []).includes("user")
+              ? process.env.CLAUDE_FAKE_EFFECTIVE_MODEL || "claude-opus-5-5[1m]"
+              : "model-without-settings",
+          }),
     // The real SDK's command list mixes skills with terminal-only built-ins, which
     // is why the worker asks `reloadSkills` first.
     async initializationResult() {

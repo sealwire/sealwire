@@ -178,24 +178,21 @@ impl AppState {
             .map(|settings| settings.reasoning_effort.clone())
             .filter(|effort| !effort.is_empty());
 
-        // Resolve inheritance HERE rather than leaning on
-        // `resolve_provider_model`'s fallback: that helper prefers the catalog
-        // default whenever the request omits a model, so the source model it is
-        // handed is only reached with an empty catalog. A thread on a
-        // non-default model therefore forked onto the provider default — the
-        // dialog's "Inherit from source session" promising the opposite.
-        //
-        // Only within the same provider: a codex model id means nothing to
-        // Claude, and effort options are model-specific. The helper is shared
-        // by seven call sites, so its ordering is left alone.
-        let requested_model = non_empty(input.model)
-            .or_else(|| same_provider.then(|| source_model.clone()).flatten());
-        let model = resolve_provider_model(
-            &target_provider_name,
-            &provider_models,
-            requested_model.clone(),
-            defaults.model.clone(),
-        );
+        // A fork inherits only within the same provider. Keep that source
+        // separate from a model explicitly named in the fork request.
+        let model = self
+            .select_model(
+                ModelTarget {
+                    provider: &target_provider_name,
+                    bridge: &target_bridge,
+                    catalog: &provider_models,
+                    cwd: &cwd,
+                },
+                ModelSelection::new(input.model)
+                    .with_inherited(same_provider.then(|| source_model.clone()).flatten()),
+            )
+            .await?
+            .model;
 
         // Inherited effort applies only while the model is also the inherited
         // one — carrying an effort across a model switch can name a level the

@@ -374,6 +374,7 @@ pub(crate) fn model_options(
                 default_reasoning_effort: effort.unwrap_or_default(),
                 hidden: false,
                 is_default: Some(model) == current_model_id,
+                resolved_model: None,
             })
         })
         .collect()

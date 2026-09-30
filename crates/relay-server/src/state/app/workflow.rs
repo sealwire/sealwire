@@ -985,12 +985,19 @@ the drain window; it may still be running."
         let provider_models = self
             .load_provider_model_catalog(&provider_name, &bridge)
             .await;
-        let model = resolve_provider_model(
-            &provider_name,
-            &provider_models,
-            model_override.map(str::to_string),
-            super::PROVIDER_DEFAULT_MODEL.to_string(),
-        );
+        let model = self
+            .select_model(
+                ModelTarget {
+                    provider: &provider_name,
+                    bridge: &bridge,
+                    catalog: &provider_models,
+                    cwd: workspace.as_str(),
+                },
+                ModelSelection::new(model_override.map(str::to_string)),
+            )
+            .await
+            .map_err(String::from)?
+            .model;
         let effort = default_effort_for_model(&provider_models, &model)
             .unwrap_or_else(|| DEFAULT_EFFORT.to_string());
         // Keep the reviewer read-only where the provider supports it (Codex

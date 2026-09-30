@@ -209,6 +209,10 @@ function cardResult(ask) {
 }
 
 function askState(ask) {
+  // Nothing runs until the user answers an agent's flagship request.
+  if (ask.status === "working" && ask.model_request?.decision === "pending") {
+    return "needs you";
+  }
   if (ask.status === "working") {
     return "working";
   }
@@ -222,6 +226,13 @@ function askState(ask) {
 }
 
 function askRoundSummary(ask) {
+  if (ask.model_request?.started_model) {
+    const result = cardResult(ask);
+    return `Started on ${ask.model_request.started_model}${result ? ` · ${result}` : ""}`;
+  }
+  if (ask.model_request?.start_error) {
+    return `Did not start · ${ask.model_request.start_error}`;
+  }
   return cardResult(ask) || askState(ask);
 }
 
@@ -270,6 +281,10 @@ export function askLedger(asks, viewedThreadId) {
         .map((thread) => {
           const asks = thread.asks.slice().sort(byUpdatedAsc);
           const latest = asks[asks.length - 1];
+          const modelRequests = asks.filter(
+            (ask) => ask.model_request && (ask === latest || ask.status === "working")
+          );
+          const shownRequests = new Set(modelRequests.map((ask) => ask.id));
           return {
             key: thread.key,
             otherThreadId: thread.otherThreadId,
@@ -279,15 +294,25 @@ export function askLedger(asks, viewedThreadId) {
             title: cardTitle(latest),
             result: cardResult(latest),
             updatedAt: latest.updated_at || 0,
+            // An unanswered request is still actionable even when a later round
+            // exists. Keep its subject with its controls so the decision is clear.
+            modelRequests: modelRequests
+              .reverse()
+              .map((ask) => ({ id: ask.id, title: cardTitle(ask), request: ask.model_request })),
             rounds: asks
               .slice(0, -1)
               .reverse()
-              .map((ask, index) => ({
-                id: ask.id,
-                label: `R${asks.length - 1 - index}`,
-                summary: askRoundSummary(ask),
-                at: ask.updated_at || 0,
-              })),
+              .map((ask, index) =>
+                shownRequests.has(ask.id)
+                  ? null
+                  : {
+                      id: ask.id,
+                      label: `R${asks.length - 1 - index}`,
+                      summary: askRoundSummary(ask),
+                      at: ask.updated_at || 0,
+                    }
+              )
+              .filter(Boolean),
           };
         })
         .sort((a, b) => b.updatedAt - a.updatedAt);

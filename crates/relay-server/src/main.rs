@@ -11,6 +11,7 @@ mod host_guard;
 mod instance_lock;
 #[cfg(test)]
 mod legacy_promotion_audit;
+mod model_policy;
 mod orchestrator_tools;
 mod protocol;
 #[cfg(test)]
@@ -482,6 +483,10 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route("/api/session/workflow/resolve", post(resolve_workflow))
         .route("/api/session/reviews", get(list_reviews))
         .route("/api/session/asks/:ask_id", get(get_ask_detail))
+        .route(
+            "/api/session/asks/:ask_id/model-request",
+            post(decide_model_request),
+        )
         .route("/api/session/workflows", get(list_workflows))
         .route("/api/session/team", post(start_team))
         .route("/api/session/team/pause", post(pause_team))
@@ -2014,6 +2019,24 @@ async fn get_ask_detail(
         .ask_detail(ask_id, None)
         .await
         .map(|detail| Json(ApiEnvelope::ok(detail)))
+        .map_err(bad_request)
+}
+
+/// A person's answer to an agent's flagship request, from the Agents panel.
+async fn decide_model_request(
+    Path(ask_id): Path<String>,
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(input): Json<crate::protocol::ModelRequestDecisionInput>,
+) -> Result<Json<ApiEnvelope<crate::protocol::AskView>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    // Local operator surface: no device scope, same as `get_ask_detail`.
+    context
+        .app
+        .decide_model_request(&ask_id, input, None)
+        .await
+        .map(|view| Json(ApiEnvelope::ok(view)))
         .map_err(bad_request)
 }
 

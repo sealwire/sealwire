@@ -7385,6 +7385,75 @@ body.is-resizing-panel {
 .reviewer-card-actions .review-launch-button:hover:not(:disabled) {
   background: var(--surface-3);
 }
+/* An agent's flagship request: nothing starts until the user answers here. */
+.reviewer-model-request {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--surface-1);
+  cursor: default;
+}
+.reviewer-model-request.is-decided {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.reviewer-model-request p {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--text-secondary);
+}
+.reviewer-model-request code {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.reviewer-model-request .reviewer-card-actions {
+  flex-wrap: wrap;
+  margin-top: 0;
+}
+.reviewer-model-request .reviewer-card-button {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reviewer-model-request-instead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.reviewer-model-request-label {
+  display: flex;
+  flex: 1 1 200px;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+.reviewer-model-request-label > span {
+  flex: none;
+}
+.reviewer-model-request-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--surface-0);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+.reviewer-model-request p.reviewer-model-request-error {
+  color: var(--text-warning);
+}
 /* Findings / rounds are the open action — no separate "Open review" link. */
 .reviewer-review-open {
   display: flex;
@@ -7738,6 +7807,7 @@ body.is-resizing-panel {
 /* An answer that exists but has not been handed back to its asker looks like nothing
    happened, so it says so rather than reading as "answered". */
 .reviewer-ask-state.is-not-handed-back { color: var(--text-warning); }
+.reviewer-ask-state.is-needs-you { color: var(--text-warning); }
 .reviewer-ask-inbound {
   margin: 0;
   font-size: var(--text-xs);

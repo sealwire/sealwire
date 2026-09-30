@@ -3551,16 +3551,24 @@ happened, then hand over again."
     /// Settle the delegations a restart left unrecoverable. One whose peer exists stays
     /// live on purpose: the sweep reads that peer's transcript, so failing it here would
     /// overwrite an answer with a failure that did not happen.
+    #[cfg(test)]
+    pub(crate) fn restored_asks_for_test(persisted: &HashMap<String, Ask>) -> HashMap<String, Ask> {
+        Self::restored_asks(persisted)
+    }
+
     fn restored_asks(persisted: &HashMap<String, Ask>) -> HashMap<String, Ask> {
         persisted
             .iter()
             .map(|(id, ask)| {
                 let mut ask = ask.clone();
-                // A peer that exists may have answered already, and the sweep settles a
-                // live ask by reading its transcript — failing it here would take it out
-                // of reach and overwrite the answer with a failure that did not happen.
-                // One with no peer has nothing to recover from.
-                if !ask.status.is_terminal() && ask.peer_thread_id.is_empty() {
+                // A sent task may have been answered already, and the sweep settles it by
+                // reading the peer's transcript — failing it here would overwrite that.
+                // One never sent has nothing to read back, unless it still waits on a
+                // person: that decision can still be made.
+                if !ask.status.is_terminal()
+                    && ask.sent_at.is_none()
+                    && !ask.awaiting_model_decision()
+                {
                     ask.fail("it never got started before the relay restarted".to_string());
                 }
                 (id.clone(), ask)
@@ -3744,6 +3752,15 @@ so {} never got it — hand over again when you are ready.",
             ask.updated_at.hash(&mut h);
             ask.peer_thread_id.hash(&mut h);
             ask.delivered.hash(&mut h);
+            // Starting can follow the decision within the same second, including
+            // on an existing peer. The card must then show the effective model.
+            ask.sent_at.hash(&mut h);
+            ask.peer_model.hash(&mut h);
+            // A decision moves nothing above, and the card must stop offering it.
+            ask.model_request
+                .as_ref()
+                .map(|request| request.decision.as_str())
+                .hash(&mut h);
             // A different rotation again, for the same reason.
             acc ^= h.finish().rotate_left(2);
         }
@@ -4814,10 +4831,16 @@ so {} never got it — hand over again when you are ready.",
     }
 
     pub fn set_available_models(&mut self, models: Vec<ModelOptionView>) {
+        // Never heal onto a flagship just because nothing was marked.
         let preferred = models
             .iter()
             .find(|model| model.is_default)
-            .or_else(|| models.first())
+            .or_else(|| {
+                models.iter().find(|model| {
+                    !model.hidden
+                        && crate::model_policy::flagship_in(&model.model, &models).is_none()
+                })
+            })
             .cloned();
         self.available_models = models;
 
@@ -7599,6 +7622,8 @@ mod tests {
                 None,
                 relay_api::delegation::StartedBy::Agent,
             );
+            // Handed to its peer, which is what makes a live one worth keeping.
+            ask.sent_at = Some(1);
             ask.set_status(status);
             ask
         }
@@ -7626,8 +7651,8 @@ mod tests {
         let mut restored = test_relay();
         restored.apply_persisted(&reloaded);
 
-        // Both have a peer, so both stay reachable by the sweep rather than being failed
-        // on the way in. What the restore side must not do is invent a peer for one that
+        // Both were handed to a peer, so both stay reachable by the sweep rather than
+        // being failed on the way in. What the restore side must not do is invent a peer for one that
         // never had one — that case is covered by the peerless test above.
         for id in ["live", "smuggled"] {
             assert!(
@@ -7685,6 +7710,53 @@ mod tests {
             relay.asks.contains_key("answered"),
             "better past the cap than an answer lost"
         );
+    }
+
+    /// The Agents panel only refetches when this key moves, so a decision that
+    /// changes nothing else must still move it or the card stays "pending".
+    #[test]
+    fn deciding_a_model_request_moves_the_reviews_revision() {
+        use crate::state::delegation::{ModelDecision, ModelRequest};
+        use crate::state::Ask;
+
+        let mut relay = test_relay();
+        let mut ask = Ask::new(
+            "ask-1".to_string(),
+            "asker".to_string(),
+            "peer".to_string(),
+            "fake".to_string(),
+            None,
+            None,
+            "have a look".to_string(),
+            "/tmp".to_string(),
+            None,
+            relay_api::delegation::StartedBy::Agent,
+        );
+        ask.model_request = Some(ModelRequest {
+            model: "claude-fable-5-1[1m]".to_string(),
+            ..ModelRequest::default()
+        });
+        relay.insert_ask(ask);
+        let before = relay.reviews_revision();
+        relay.update_ask("ask-1", |ask| {
+            if let Some(request) = ask.model_request.as_mut() {
+                request.decision = ModelDecision::Allowed;
+            }
+        });
+        assert_ne!(relay.reviews_revision(), before);
+
+        // Reusing a peer keeps its id; starting within the same second must
+        // still refresh "Starting…" into the actual model shown on the card.
+        relay.update_ask("ask-1", |ask| {
+            ask.peer_model = Some("fake-echo".to_string());
+        });
+        let before_start = relay.reviews_revision();
+        let timestamp = relay.ask("ask-1").unwrap().updated_at;
+        relay.update_ask("ask-1", |ask| {
+            ask.sent_at = Some(timestamp);
+            ask.updated_at = timestamp;
+        });
+        assert_ne!(relay.reviews_revision(), before_start);
     }
 
     #[test]
@@ -7961,10 +8033,12 @@ mod tests {
             relay_api::delegation::StartedBy::Agent,
         );
         started.set_status(AskStatus::Working);
+        started.sent_at = Some(1);
 
         let mut never_started = started.clone();
         never_started.id = "never-started".to_string();
         never_started.peer_thread_id = String::new();
+        never_started.sent_at = None;
 
         let mut relay = test_relay();
         relay.insert_ask(started);

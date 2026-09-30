@@ -15,6 +15,7 @@ use relay_api::handover::{HandoverError, HandoverRequest};
 
 use super::super::delegation::{brief_from_reply, peer_thread_settings};
 use super::delegation::{PeerLiveness, BRIEF_WAIT_BUDGET};
+use super::{ModelSelection, ModelTarget};
 use crate::protocol::InjectionKind;
 use crate::provider::StartThreadRequest;
 use crate::state::{AppState, InjectionTag};
@@ -787,12 +788,19 @@ handover — try again"
         let provider_models = self
             .load_provider_model_catalog(&provider_name, &bridge)
             .await;
-        let model = super::resolve_provider_model(
-            &provider_name,
-            &provider_models,
-            request.model.clone(),
-            super::PROVIDER_DEFAULT_MODEL.to_string(),
-        );
+        let model = self
+            .select_model(
+                ModelTarget {
+                    provider: &provider_name,
+                    bridge: &bridge,
+                    catalog: &provider_models,
+                    cwd,
+                },
+                ModelSelection::new(request.model.clone()),
+            )
+            .await
+            .map_err(|refusal| HandoverError::Failed(refusal.to_string()))?
+            .model;
         let effort = request.effort.clone().unwrap_or_default();
 
         let start = self
