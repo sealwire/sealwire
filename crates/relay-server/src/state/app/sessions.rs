@@ -53,11 +53,9 @@ impl AppState {
             .unwrap_or(defaults.reasoning_effort);
         let initial_prompt = non_empty(input.initial_prompt);
 
-        // Providers that consume an initial prompt as part of thread creation
-        // cannot consume image attachments through `start_thread`. When images
-        // are present, create an empty thread and send the complete first turn
-        // through the image-aware `start_turn` path below.
-        let provider_initial_prompt = if images.is_empty() {
+        // Activate a Claude session before its first turn so peer MCP calls
+        // resolve to its thread; images likewise need the `start_turn` path.
+        let provider_initial_prompt = if images.is_empty() && provider_name != "claude_code" {
             initial_prompt.as_deref()
         } else {
             None

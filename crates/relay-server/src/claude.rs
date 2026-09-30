@@ -4247,6 +4247,13 @@ for await (const line of rl) {
             .collect();
         assert!(listed.iter().any(|name| name == "delegate"), "{listed:?}");
 
+        // The fake worker does not finish turns started by `start`.
+        {
+            let mut relay = relay.write().await;
+            relay.set_active_turn(None);
+            relay.set_thread_status(&session_id, "idle".to_string(), Vec::new());
+        }
+
         app.send_message(crate::protocol::SendMessageInput {
             text: "and again".to_string(),
             model: None,

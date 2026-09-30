@@ -573,7 +573,9 @@ Do not poll or wait. Findings will be delivered here."
                 };
                 match self.delegate_request(caller_thread_id, request).await {
                     Ok(outcome) => {
-                        if let super::delegation::DelegateOutcome::Sent { ask_id: id, .. } = &outcome {
+                        if let super::delegation::DelegateOutcome::Sent { ask_id: id, .. } =
+                            &outcome
+                        {
                             ask_id = Some(id.clone());
                         }
                         Ok(delegate_reply(&outcome))
