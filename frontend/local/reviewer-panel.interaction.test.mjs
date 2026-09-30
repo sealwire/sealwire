@@ -426,7 +426,9 @@ test("a finished review lists its findings and does not read the reviewer's mess
   try {
     const tags = [...panel.container.querySelectorAll(".review-finding-tag")].map((tag) => tag.textContent);
     assert.deepEqual(tags, ["HIGH", "MED"]);
-    assert.equal(panel.container.querySelector(".review-finding-where")?.textContent, "src/gate.rs:88");
+    const where = panel.container.querySelector(".review-finding-where");
+    assert.equal(where?.textContent, "gate.rs:88");
+    assert.equal(where?.title, "src/gate.rs:88");
     assert.deepEqual(reads, []);
     assert.equal(panel.container.querySelector(".reviewer-findings"), null);
   } finally {

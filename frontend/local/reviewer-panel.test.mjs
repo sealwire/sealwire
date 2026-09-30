@@ -424,7 +424,7 @@ test("a finished review lists its findings as the conversation card does", () =>
   );
   assert.match(html, /review-finding-tag is-high[^>]*>HIGH</);
   assert.match(html, /review-finding-tag is-medium[^>]*>MED</);
-  assert.match(html, /review-finding-where[^>]*>src\/gate.rs:88</);
+  assert.match(html, /review-finding-where" title="src\/gate.rs:88">gate.rs:88</);
   assert.match(html, /Archive drops the goal/);
   assert.match(html, /1 more in the reviewer(?:&#x27;|')s thread/);
   assert.doesNotMatch(html, /class="reviewer-findings/, "no second rendering of the reviewer's prose");

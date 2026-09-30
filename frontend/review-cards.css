@@ -111,9 +111,6 @@
 .review-finding-state.is-fixed {
   color: var(--ok-fg);
 }
-.review-finding-state.is-open {
-  color: var(--warn-fg);
-}
 .review-finding-where {
   flex: 0 1 auto;
   min-width: 0;
