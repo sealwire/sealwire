@@ -12,6 +12,34 @@ use std::path::{Path, PathBuf};
 
 use super::normalize_cwd;
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct ThreadHistoryWorkspace {
+    cwd: String,
+    repositories: Vec<String>,
+}
+
+impl ThreadHistoryWorkspace {
+    pub(crate) fn capture(cwd: &str) -> Self {
+        let cwd = normalize_cwd(cwd);
+        let repositories = if Path::new(&cwd).is_absolute() {
+            linked_worktree_roots(Path::new(&cwd))
+                .map(|root| root.to_string_lossy().into_owned())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Self { cwd, repositories }
+    }
+
+    pub(crate) fn matches(&self, cwd: &str) -> bool {
+        self.cwd == cwd || self.cwd == normalize_cwd(cwd)
+    }
+
+    pub(crate) fn cwd(&self) -> &str {
+        &self.cwd
+    }
+}
+
 /// Nothing here reads more than this from a directory the caller named.
 const MAX_GIT_METADATA_BYTES: u64 = 64 * 1024;
 
@@ -44,8 +72,20 @@ impl WorkspaceScope {
     }
 
     pub(crate) fn ensure(&self, path: &str) -> Result<(), String> {
+        self.ensure_with_history(path, None)
+    }
+
+    // A removed worktree loses its Git back-pointer, but the session's saved history
+    // still belongs to the repository verified while that directory existed.
+    pub(crate) fn ensure_with_history(
+        &self,
+        path: &str,
+        history: Option<&ThreadHistoryWorkspace>,
+    ) -> Result<(), String> {
         let normalized = normalize_cwd(path);
-        if !self.relay_covers(&normalized) {
+        if !self.relay_covers(&normalized)
+            && !history.is_some_and(|history| self.history_covers(&normalized, history))
+        {
             let hint = match self.relay_roots.as_slice() {
                 [root] => format!("choose a directory under {root}"),
                 _ => "choose a directory under one of this relay's allowed roots".to_string(),
@@ -66,6 +106,22 @@ impl WorkspaceScope {
         Ok(())
     }
 
+    pub(crate) fn allows_history(&self, path: &str, history: &ThreadHistoryWorkspace) -> bool {
+        let normalized = normalize_cwd(path);
+        self.history_covers(&normalized, history)
+            && (self.device_paths.is_empty() || under_any(&normalized, &self.device_paths))
+    }
+
+    fn history_covers(&self, normalized: &str, history: &ThreadHistoryWorkspace) -> bool {
+        history.matches(normalized)
+            && history
+                .repositories
+                .iter()
+                .any(|repo| under_any(repo, &self.relay_roots))
+            && std::fs::symlink_metadata(normalized)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    }
+
     fn relay_covers(&self, normalized: &str) -> bool {
         if self.relay_roots.is_empty() || under_any(normalized, &self.relay_roots) {
             return true;
@@ -77,13 +133,15 @@ impl WorkspaceScope {
         }
         // Any ancestor, not the nearest `.git`: a nested repo inside the worktree is reachable
         // the way one under a root is. Blocking, like `normalize_cwd`'s canonicalize above.
-        path.ancestors()
-            .take(MAX_REPO_DISCOVERY_DEPTH)
-            .any(|dir| match linked_worktree_main(dir) {
-                Some(main) => under_any(&main.to_string_lossy(), &self.relay_roots),
-                None => false,
-            })
+        linked_worktree_roots(path)
+            .any(|main| under_any(&main.to_string_lossy(), &self.relay_roots))
     }
+}
+
+fn linked_worktree_roots(path: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+    path.ancestors()
+        .take(MAX_REPO_DISCOVERY_DEPTH)
+        .filter_map(linked_worktree_main)
 }
 
 /// The main checkout `dir` is a verified linked worktree of, if it is one.
@@ -243,6 +301,51 @@ mod tests {
         assert!(scope.allows(&format!("{sibling}/src/deep")));
     }
 
+    #[test]
+    fn saved_history_outlives_a_worktree_without_granting_workspace_access() {
+        let (_dir, main, sibling) = repo_with_sibling();
+        let history = ThreadHistoryWorkspace::capture(&sibling);
+        let history: ThreadHistoryWorkspace =
+            serde_json::from_str(&serde_json::to_string(&history).unwrap()).unwrap();
+        git(Path::new(&main), &["worktree", "remove", &sibling]);
+        let scope = WorkspaceScope::new(&[main.clone()], &[]);
+
+        assert!(scope.ensure_with_history(&sibling, Some(&history)).is_ok());
+        assert!(!scope.allows(&sibling));
+        assert!(scope
+            .ensure_with_history(&format!("{sibling}/file"), Some(&history))
+            .is_err());
+        assert!(WorkspaceScope::new(&[format!("{main}/narrowed")], &[])
+            .ensure_with_history(&sibling, Some(&history))
+            .is_err());
+        assert!(WorkspaceScope::new(&[main.clone()], &[main.clone()])
+            .ensure_with_history(&sibling, Some(&history))
+            .unwrap_err()
+            .contains("device's allowed paths"));
+        assert!(WorkspaceScope::new(&[main], &[sibling.clone()])
+            .ensure_with_history(&sibling, Some(&history))
+            .is_ok());
+
+        std::fs::create_dir(&sibling).unwrap();
+        assert!(
+            scope.ensure_with_history(&sibling, Some(&history)).is_err(),
+            "a replacement directory must not inherit the removed worktree's scope"
+        );
+    }
+
+    #[test]
+    fn history_cannot_acquire_a_repository_from_a_forged_worktree_pointer() {
+        let (dir, main, sibling) = repo_with_sibling();
+        let outsider = dir.path().join("outsider");
+        std::fs::create_dir(&outsider).unwrap();
+        std::fs::copy(Path::new(&sibling).join(".git"), outsider.join(".git")).unwrap();
+        let history = ThreadHistoryWorkspace::capture(outsider.to_str().unwrap());
+        std::fs::remove_dir_all(&outsider).unwrap();
+        assert!(WorkspaceScope::new(&[main], &[])
+            .ensure_with_history(outsider.to_str().unwrap(), Some(&history))
+            .is_err());
+    }
+
     // Under an allowed root a nested repo or submodule is reachable by prefix; inside a sibling
     // worktree it must be too, or the two layouts disagree.
     #[test]
@@ -258,6 +361,61 @@ mod tests {
 
         assert!(scope.allows(&nested.to_string_lossy()));
         assert!(scope.allows(&submodule.to_string_lossy()));
+    }
+
+    #[test]
+    fn nested_repo_and_submodule_history_keep_the_outer_worktree_scope() {
+        let (_dir, main, sibling) = repo_with_sibling();
+        let nested = Path::new(&sibling).join("vendor/clone");
+        std::fs::create_dir_all(&nested).unwrap();
+        git(&nested, &["init", "-q"]);
+        let submodule = Path::new(&sibling).join("libs/sub");
+        std::fs::create_dir_all(&submodule).unwrap();
+        std::fs::write(submodule.join(".git"), "gitdir: ../../.git/modules/sub\n").unwrap();
+        let scope = WorkspaceScope::new(&[main.clone()], &[]);
+        let histories: Vec<_> = [&nested, &submodule]
+            .into_iter()
+            .map(|path| {
+                assert!(scope.allows(path.to_str().unwrap()));
+                let saved = ThreadHistoryWorkspace::capture(path.to_str().unwrap());
+                serde_json::from_str::<ThreadHistoryWorkspace>(
+                    &serde_json::to_string(&saved).unwrap(),
+                )
+                .unwrap()
+            })
+            .collect();
+        git(
+            Path::new(&main),
+            &["worktree", "remove", "--force", "--force", &sibling],
+        );
+        for history in histories {
+            assert!(!scope.allows(history.cwd()));
+            assert!(scope.allows_history(history.cwd(), &history));
+            assert!(scope
+                .ensure_with_history(history.cwd(), Some(&history))
+                .is_ok());
+            assert!(!WorkspaceScope::new(&[main.clone()], &[main.clone()])
+                .allows_history(history.cwd(), &history));
+            assert!(!WorkspaceScope::new(&[format!("{main}/narrower")], &[])
+                .allows_history(history.cwd(), &history));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_non_utf8_repository_target_does_not_break_history_serialization() {
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::symlink;
+
+        let (dir, main, sibling) = repo_with_sibling();
+        let raw = dir
+            .path()
+            .join(std::ffi::OsString::from_vec(b"repo-\xff".to_vec()));
+        std::fs::rename(&main, &raw).unwrap();
+        symlink(&raw, &main).unwrap();
+        let history = ThreadHistoryWorkspace::capture(&sibling);
+        assert!(!history.repositories.is_empty());
+        serde_json::to_string(&history).expect("an unusual path must not prevent saving state");
     }
 
     #[test]

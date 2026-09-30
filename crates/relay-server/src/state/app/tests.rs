@@ -24050,7 +24050,7 @@ settings update: {error}"
     /// A repo plus a SIBLING linked worktree, both with a committed `seed.txt`. Sibling
     /// (not nested) on purpose: the two trees' diffs then share no files at all, so
     /// "which tree did the reviewer actually get" is unambiguous in these tests.
-    fn init_repo_with_sibling_worktree(root: &std::path::Path) -> (String, String) {
+    pub(super) fn init_repo_with_sibling_worktree(root: &std::path::Path) -> (String, String) {
         let main = root.join("mainwt");
         std::fs::create_dir_all(&main).unwrap();
         let main_cwd = main.to_str().unwrap().to_string();
@@ -24178,6 +24178,15 @@ settings update: {error}"
     // there too, or the Agents panel shows a refusal for a review that succeeded.
     #[tokio::test]
     async fn a_reviewer_in_a_sibling_worktree_is_readable() {
+        reviewer_history_after_worktree_cleanup(false).await;
+    }
+
+    #[tokio::test]
+    async fn reviewer_cards_survive_the_parents_worktree_cleanup() {
+        reviewer_history_after_worktree_cleanup(true).await;
+    }
+
+    async fn reviewer_history_after_worktree_cleanup(parent_in_worktree: bool) {
         let dir = TempDir::new().expect("tmpdir");
         let (main_cwd, linked_cwd) = init_repo_with_sibling_worktree(dir.path());
         std::fs::write(
@@ -24189,7 +24198,12 @@ settings update: {error}"
         let (app, _providers) = build_review_app(&main_cwd, &["codex"]).await;
         app.relay.write().await.allowed_roots =
             normalize_allowed_roots(vec![main_cwd.clone()]).expect("allowed roots");
-        let parent = start_parent(&app, &main_cwd, "codex").await;
+        let parent_cwd = if parent_in_worktree {
+            &linked_cwd
+        } else {
+            &main_cwd
+        };
+        let parent = start_parent(&app, parent_cwd, "codex").await;
         seed_landed_edit(&app, &parent.id, &format!("{linked_cwd}/seed.txt")).await;
 
         let receipt = app
@@ -24202,7 +24216,7 @@ settings update: {error}"
 
         let page = app
             .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
-                thread_id: reviewer,
+                thread_id: reviewer.clone(),
                 before: None,
                 device_id: None,
             })
@@ -24210,6 +24224,111 @@ settings update: {error}"
         if let Err(error) = page {
             panic!("the reviewer's messages: {error}");
         }
+
+        let assert_cards = |relay: &RelayState| {
+            for reader in [None, Some("history-device")] {
+                let cards = relay.reviews_response(reader);
+                assert!(cards
+                    .review_jobs
+                    .iter()
+                    .any(|job| job.id == receipt.review_job_id));
+                assert!(cards
+                    .reviewer_threads
+                    .iter()
+                    .any(|view| view.reviewer_thread_id == reviewer));
+            }
+        };
+        assert_cards(&*app.relay.read().await);
+
+        let persisted: PersistedRelayState = {
+            let relay = app.relay.read().await;
+            serde_json::from_str(
+                &serde_json::to_string(&PersistedRelayState::from_relay(&relay)).unwrap(),
+            )
+            .unwrap()
+        };
+        let removed = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force", &linked_cwd])
+            .current_dir(&main_cwd)
+            .output()
+            .unwrap();
+        assert!(removed.status.success(), "{removed:?}");
+        assert_cards(&*app.relay.read().await);
+
+        let page = app
+            .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+                thread_id: reviewer.clone(),
+                before: None,
+                device_id: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("review history after worktree cleanup: {error}"));
+        assert!(
+            !page.entries.is_empty(),
+            "the review must still have messages"
+        );
+        let row_id = page.entries.last().unwrap().row_id.clone().expect("row id");
+        let rows = app
+            .read_thread_transcript_rows(crate::protocol::ReadThreadTranscriptRowsInput {
+                thread_id: reviewer.clone(),
+                row_ids: vec![row_id.clone()],
+                device_id: None,
+            })
+            .await
+            .expect("rows after worktree cleanup");
+        assert_eq!(rows.entries.len(), 1);
+        let detail = app
+            .read_thread_entry_detail(crate::protocol::ReadThreadEntryDetailInput {
+                thread_id: reviewer.clone(),
+                item_id: row_id,
+                field: None,
+                cursor: None,
+                device_id: None,
+            })
+            .await
+            .expect("detail after worktree cleanup");
+        assert!(detail.entry.is_some());
+
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_watched_threads("history-surface", "history-device", vec![reviewer.clone()]);
+            assert!(relay.device_watches_thread("history-device", &reviewer));
+            assert!(relay.workspace_scope(None).ensure(&linked_cwd).is_err());
+            relay.apply_persisted(&persisted);
+            relay.threads.clear();
+            assert!(relay.runtime_for_thread(&reviewer).is_none());
+            assert_cards(&relay);
+        }
+        let page = app
+            .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+                thread_id: reviewer.clone(),
+                before: None,
+                device_id: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("cold review history after restart: {error}"));
+        assert!(!page.entries.is_empty());
+        app.relay.write().await.allowed_roots = vec![format!("{main_cwd}/narrowed")];
+        if parent_in_worktree {
+            let relay = app.relay.read().await;
+            let cards = relay.reviews_response(None);
+            assert!(cards.review_jobs.is_empty());
+            assert!(cards.reviewer_threads.is_empty());
+        }
+        let error = app
+            .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+                thread_id: reviewer.clone(),
+                before: None,
+                device_id: None,
+            })
+            .await
+            .expect_err("tightening roots must revoke historical reads");
+        assert!(error.to_string().contains("allowed roots"));
+        assert!(!app
+            .relay
+            .read()
+            .await
+            .thread_is_readable_by_device(&reviewer, "history-device"));
     }
 
     // Multi-round: the reviewed worktree can vanish BETWEEN rounds (its work landed and it
@@ -34278,6 +34397,225 @@ mod delegate_card_tests {
     }
 
     #[tokio::test]
+    async fn delegate_cards_survive_worktree_cleanup_and_cold_history() {
+        use super::path_scope_tests::pair_device;
+        use crate::state::persistence::PersistedRelayState;
+
+        let project = TempDir::new().unwrap();
+        let (main, cwd) = super::review_tests::init_repo_with_sibling_worktree(project.path());
+        let main = crate::state::normalize_cwd(&main);
+        let cwd = crate::state::normalize_cwd(&cwd);
+        let (app, _p, _o) = build_app(&main).await;
+        let database = project.path().join("sealwire.db");
+        app.relay
+            .write()
+            .await
+            .install_database(crate::usage::store::UsageStore::open(&database));
+        grant_workspace(&app, &main).await;
+        app.relay.write().await.allowed_roots = vec![main.clone()];
+        pair_device(&app, "phone", vec![cwd.clone()]).await;
+        let asker = session(&app, &cwd).await;
+        let peer = app
+            .delegate(&asker, request(StartedBy::Person, "check history"))
+            .await
+            .unwrap();
+        let (_, answered) = row_marked(&app, &asker, InjectionKind::DelegateAnswer).await;
+        let ask_id = answered.delegates()[0].id.clone();
+        let removed = std::process::Command::new("git")
+            .args(["worktree", "remove", &cwd])
+            .current_dir(&main)
+            .output()
+            .unwrap();
+        assert!(removed.status.success(), "{removed:?}");
+
+        for cold in [false, true] {
+            if cold {
+                let mut relay = app.relay.write().await;
+                let saved: PersistedRelayState = serde_json::from_str(
+                    &serde_json::to_string(&PersistedRelayState::from_relay(&relay)).unwrap(),
+                )
+                .unwrap();
+                relay.apply_persisted(&saved);
+                relay.install_database(crate::usage::store::UsageStore::open(&database));
+                relay.threads.clear();
+            }
+            {
+                let relay = app.relay.read().await;
+                for reader in [None, Some("phone")] {
+                    assert!(
+                        relay
+                            .reviews_response(reader)
+                            .asks
+                            .iter()
+                            .any(|ask| ask.id == ask_id),
+                        "delegate must remain in Agents, cold={cold}"
+                    );
+                    assert!(relay.ask_detail(&ask_id, reader).unwrap().answer.is_some());
+                }
+                assert!(relay.workspace_scope(None).ensure(&cwd).is_err());
+            }
+            for reader in [None, Some("phone".to_string())] {
+                let listed = app.list_threads(100, reader).await.unwrap();
+                for id in [&asker, &peer] {
+                    assert!(
+                        listed.threads.iter().any(|thread| &thread.id == id),
+                        "history must remain listed, cold={cold}"
+                    );
+                }
+            }
+            for (thread, other) in [(&asker, &peer), (&peer, &asker)] {
+                let page = app
+                    .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+                        thread_id: thread.clone(),
+                        before: None,
+                        device_id: Some("phone".into()),
+                    })
+                    .await
+                    .unwrap();
+                let cards: Vec<_> = page
+                    .entries
+                    .iter()
+                    .filter_map(|row| row.injection.as_ref())
+                    .flat_map(|mark| mark.delegates())
+                    .collect();
+                assert!(!cards.is_empty(), "transcript cards, cold={cold}");
+                assert!(cards
+                    .iter()
+                    .any(|card| &card.peer_thread_id == other || &card.asker_thread_id == other));
+            }
+        }
+        let send = app
+            .send_message(crate::protocol::SendMessageInput {
+                thread_id: peer.clone(),
+                device_id: Some("phone".into()),
+                text: "must not run".into(),
+                model: None,
+                effort: None,
+            })
+            .await
+            .unwrap_err();
+        let takeover = app
+            .take_over_control(crate::protocol::TakeOverInput {
+                thread_id: peer.clone(),
+                device_id: Some("phone".into()),
+            })
+            .await
+            .unwrap_err();
+        let settings = app
+            .update_session_settings(crate::protocol::UpdateSessionSettingsInput {
+                thread_id: peer.clone(),
+                device_id: Some("phone".into()),
+                model: None,
+                effort: None,
+                approval_policy: Some("never".into()),
+                sandbox: None,
+            })
+            .await
+            .unwrap_err();
+        for error in [send, takeover, settings] {
+            assert!(
+                error.contains("allowed roots") || error.contains("no longer exists"),
+                "{error}"
+            );
+        }
+        pair_device(&app, "phone", vec![main.clone()]).await;
+        assert!(app
+            .list_threads(100, Some("phone".into()))
+            .await
+            .unwrap()
+            .threads
+            .is_empty());
+        {
+            let relay = app.relay.read().await;
+            assert!(relay.reviews_response(Some("phone")).asks.is_empty());
+            assert!(relay.ask_detail(&ask_id, Some("phone")).is_err());
+            assert!(!relay.reviews_response(None).asks.is_empty());
+        }
+        app.relay.write().await.allowed_roots = vec![format!("{main}/narrower")];
+        let relay = app.relay.read().await;
+        assert!(relay.reviews_response(None).asks.is_empty());
+        assert!(relay.ask_detail(&ask_id, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn deleted_worktree_history_does_not_disclose_an_out_of_scope_delegate() {
+        use crate::state::relay::InjectionReader;
+
+        let project = TempDir::new().unwrap();
+        let (main, cwd) = super::review_tests::init_repo_with_sibling_worktree(project.path());
+        let main = crate::state::normalize_cwd(&main);
+        let cwd = crate::state::normalize_cwd(&cwd);
+        let (app, _p, _o) = build_app(&main).await;
+        grant_workspace(&app, &main).await;
+        app.relay.write().await.allowed_roots = vec![main.clone()];
+        super::path_scope_tests::pair_device(&app, "phone", vec![main.clone()]).await;
+        let asker = session(&app, &main).await;
+        let peer = session(&app, &cwd).await;
+        app.delegate(
+            &asker,
+            AskRequest {
+                peer_thread_id: Some(peer.clone()),
+                ..request(StartedBy::Person, "check history")
+            },
+        )
+        .await
+        .unwrap();
+        let (_, answered) = row_marked(&app, &asker, InjectionKind::DelegateAnswer).await;
+        let ask_id = answered.delegates()[0].id.clone();
+        let removed = std::process::Command::new("git")
+            .args(["worktree", "remove", &cwd])
+            .current_dir(&main)
+            .output()
+            .unwrap();
+        assert!(removed.status.success(), "{removed:?}");
+
+        let page = app
+            .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+                thread_id: asker.clone(),
+                before: None,
+                device_id: Some("phone".into()),
+            })
+            .await
+            .unwrap();
+        let cards: Vec<_> = page
+            .entries
+            .iter()
+            .filter_map(|row| row.injection.as_ref())
+            .flat_map(|mark| mark.delegates())
+            .collect();
+        assert!(!cards.is_empty());
+        assert!(cards.iter().all(|card| card.peer_thread_id.is_empty()));
+        let relay = app.relay.read().await;
+        assert!(relay.reviews_response(Some("phone")).asks.is_empty());
+        assert!(relay.ask_detail(&ask_id, Some("phone")).is_err());
+        assert!(!relay.reviews_response(None).asks.is_empty());
+        for reader in [InjectionReader::Operator, InjectionReader::Everyone] {
+            let marks = relay.thread_injections(&asker, reader);
+            let page = relay
+                .runtime_for_thread(&asker)
+                .unwrap()
+                .transcript_page(&asker, None, &marks);
+            let cards: Vec<_> = page
+                .entries
+                .iter()
+                .filter_map(|row| row.injection.as_ref())
+                .flat_map(|mark| mark.delegates())
+                .collect();
+            assert!(!cards.is_empty());
+            for card in cards {
+                assert_eq!(
+                    card.peer_thread_id,
+                    if matches!(reader, InjectionReader::Operator) {
+                        peer.as_str()
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn mcp_delegate_results_mark_their_own_tool_rows_once_even_when_rows_arrive_late() {
         use crate::protocol::{ToolCallView, TranscriptEntryKind};
         use crate::state::IdSpace;
@@ -36749,6 +37087,128 @@ mod handover_tests {
             provider: Some("fake".to_string()),
             ..HandoverRequest::default()
         }
+    }
+
+    #[tokio::test]
+    async fn handover_cards_survive_worktree_cleanup_and_cold_history() {
+        use crate::state::persistence::PersistedRelayState;
+
+        let project = TempDir::new().unwrap();
+        let (main, cwd) = super::review_tests::init_repo_with_sibling_worktree(project.path());
+        let main = crate::state::normalize_cwd(&main);
+        let cwd = crate::state::normalize_cwd(&cwd);
+        let (app, bridge, _p, _o) = super::path_scope_tests::build_app_with_bridge(&main).await;
+        let database = project.path().join("sealwire.db");
+        app.relay
+            .write()
+            .await
+            .install_database(crate::usage::store::UsageStore::open(&database));
+        grant_workspace(&app, &main).await;
+        app.relay.write().await.allowed_roots = vec![main.clone()];
+        pair_device(&app, "phone", vec![cwd.clone()]).await;
+        let source = session(&app, &cwd, "never").await;
+        let target = app
+            .handover(
+                &source,
+                HandoverRequest {
+                    device_id: Some("phone".into()),
+                    ..request()
+                },
+            )
+            .await
+            .unwrap();
+        delivered(&app, &target).await;
+        let mut stored = false;
+        for _ in 0..200 {
+            let history = crate::provider::ProviderBridge::read_thread(bridge.as_ref(), &target)
+                .await
+                .unwrap();
+            if history.transcript.len() >= 2 {
+                stored = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(stored, "the target finished and saved its reply");
+        let mut failed = crate::state::Handover::new(
+            "handover-history-failure".into(),
+            source.clone(),
+            target.clone(),
+            false,
+            Some("phone".into()),
+            None,
+        );
+        failed.fail("could not write the summary");
+        app.relay.write().await.reserve_handover(failed).unwrap();
+        let removed = std::process::Command::new("git")
+            .args(["worktree", "remove", &cwd])
+            .current_dir(&main)
+            .output()
+            .unwrap();
+        assert!(removed.status.success(), "{removed:?}");
+
+        for cold in [false, true] {
+            if cold {
+                let mut relay = app.relay.write().await;
+                let saved: PersistedRelayState = serde_json::from_str(
+                    &serde_json::to_string(&PersistedRelayState::from_relay(&relay)).unwrap(),
+                )
+                .unwrap();
+                relay.apply_persisted(&saved);
+                relay.install_database(crate::usage::store::UsageStore::open(&database));
+                relay.threads.clear();
+            }
+            {
+                let relay = app.relay.read().await;
+                assert_eq!(
+                    relay.reviews_response(Some("phone")).handovers.len(),
+                    1,
+                    "the owner keeps its outcome, cold={cold}"
+                );
+                assert!(relay.reviews_response(None).handovers.is_empty());
+                assert!(relay.workspace_scope(None).ensure(&cwd).is_err());
+            }
+            for (thread, other) in [(&source, &target), (&target, &source)] {
+                let page = app
+                    .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+                        thread_id: thread.clone(),
+                        before: None,
+                        device_id: Some("phone".into()),
+                    })
+                    .await
+                    .unwrap();
+                let cards: Vec<_> = page
+                    .entries
+                    .iter()
+                    .filter_map(|row| row.injection.as_ref())
+                    .filter_map(|mark| mark.handover())
+                    .collect();
+                assert!(!cards.is_empty(), "transcript cards, cold={cold}");
+                assert!(
+                    cards
+                        .iter()
+                        .any(|card| &card.source_thread_id == other
+                            || &card.target_thread_id == other)
+                );
+            }
+        }
+        pair_device(&app, "phone", vec![main.clone()]).await;
+        assert!(app
+            .relay
+            .read()
+            .await
+            .reviews_response(Some("phone"))
+            .handovers
+            .is_empty());
+        pair_device(&app, "phone", Vec::new()).await;
+        app.relay.write().await.allowed_roots = vec![format!("{main}/narrower")];
+        assert!(app
+            .relay
+            .read()
+            .await
+            .reviews_response(Some("phone"))
+            .handovers
+            .is_empty());
     }
 
     /// Every message a thread was SENT, oldest first.

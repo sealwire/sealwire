@@ -1190,6 +1190,30 @@ in thread {thread_id}: {error}"
         thread_id: &str,
         device_id: &str,
     ) -> Result<(), String> {
+        self.load_thread_runtime(thread_id, device_id, false).await
+    }
+
+    async fn ensure_thread_history_loaded(
+        &self,
+        thread_id: &str,
+        device_id: &str,
+    ) -> Result<(), String> {
+        self.load_thread_runtime(thread_id, device_id, true).await
+    }
+
+    async fn load_thread_runtime(
+        &self,
+        thread_id: &str,
+        device_id: &str,
+        history_only: bool,
+    ) -> Result<(), String> {
+        let ensure_scope = |relay: &RelayState, cwd: &str| {
+            if history_only {
+                relay.ensure_thread_history_readable(thread_id, cwd, Some(device_id))
+            } else {
+                relay.workspace_scope(Some(device_id)).ensure(cwd)
+            }
+        };
         let recorded_cwd = {
             let mut relay = self.relay.write().await;
             if relay.active_thread_id.as_deref() == Some(thread_id)
@@ -1199,7 +1223,12 @@ in thread {thread_id}: {error}"
             }
             let recorded_cwd = relay.thread_cwd(thread_id).or_else(|| {
                 let workspace = relay.thread_workspace(thread_id);
-                workspace.pinned.or(workspace.proven)
+                workspace
+                    .history
+                    .filter(|_| history_only)
+                    .map(|history| history.cwd().to_string())
+                    .or(workspace.pinned)
+                    .or(workspace.proven)
             });
             let runtime_cwd_is_empty = relay
                 .runtime_for_thread(thread_id)
@@ -1215,9 +1244,7 @@ in thread {thread_id}: {error}"
                 }
             }
             if let Some(runtime) = relay.runtime_for_thread(thread_id) {
-                relay
-                    .workspace_scope(Some(device_id))
-                    .ensure(&runtime.current_cwd)?;
+                ensure_scope(&relay, &runtime.current_cwd)?;
                 return Ok(());
             }
             recorded_cwd
@@ -1253,12 +1280,8 @@ in thread {thread_id}: {error}"
         let model = self
             .select_cached_thread_model(&provider_name, &bridge, remembered_model)
             .await;
-        self.relay
-            .read()
-            .await
-            .workspace_scope(Some(device_id))
-            .ensure(&data.thread.cwd)?;
         let mut relay = self.relay.write().await;
+        ensure_scope(&relay, &data.thread.cwd)?;
         if settings.is_some() {
             relay.hydrate_background_runtime(data, &approval_policy, &sandbox, &effort, &model);
         } else {

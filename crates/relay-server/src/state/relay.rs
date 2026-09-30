@@ -247,11 +247,13 @@ pub(crate) struct ThreadWorkspace {
     /// Transcript clock when this tree was proven. Live writes with `seq > proven_at` are newer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) proven_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) history: Option<super::workspace_scope::ThreadHistoryWorkspace>,
 }
 
 impl ThreadWorkspace {
     fn is_empty(&self) -> bool {
-        self.pinned.is_none() && self.proven.is_none()
+        self.pinned.is_none() && self.proven.is_none() && self.history.is_none()
     }
 }
 
@@ -1049,17 +1051,17 @@ impl RelayState {
             if matches!(reader, InjectionReader::Operator) {
                 return true;
             }
-            let Some(peer_cwd) = self.thread_cwd(peer) else {
+            let Some(peer_cwd) = self.thread_history_cwd(peer) else {
                 return false;
             };
             match reader {
                 InjectionReader::Operator => true,
-                InjectionReader::Device(device_id) => {
-                    self.workspace_scope(Some(device_id)).allows(&peer_cwd)
-                }
+                InjectionReader::Device(device_id) => self
+                    .ensure_thread_history_readable(peer, &peer_cwd, Some(device_id))
+                    .is_ok(),
                 // One payload for every device: only a peer in the same folder is
                 // visible to exactly whoever can see this thread.
-                InjectionReader::Everyone => self.thread_cwd(thread_id) == Some(peer_cwd),
+                InjectionReader::Everyone => self.thread_history_cwd(thread_id) == Some(peer_cwd),
             }
         };
         self.injections
@@ -1354,6 +1356,25 @@ impl RelayState {
                     .map(|thread| thread.cwd.clone())
                     .filter(|cwd| !cwd.is_empty())
             })
+    }
+
+    fn thread_history_cwd(&self, thread_id: &str) -> Option<String> {
+        self.thread_cwd(thread_id).or_else(|| {
+            self.thread_workspace
+                .get(thread_id)?
+                .history
+                .as_ref()
+                .map(|history| history.cwd().to_string())
+        })
+    }
+
+    fn thread_history_in_scope(&self, thread_id: &str, device_id: Option<&str>) -> bool {
+        match self.thread_history_cwd(thread_id) {
+            Some(cwd) => self
+                .ensure_thread_history_readable(thread_id, &cwd, device_id)
+                .is_ok(),
+            None => self.workspace_scope(device_id).is_unrestricted(),
+        }
     }
 
     /// What is remembered about this thread's working tree. Empty → birth cwd.
@@ -2819,11 +2840,16 @@ impl RelayState {
         }
         match actor {
             crate::state::HandoverActor::LocalOperator => true,
-            crate::state::HandoverActor::Device(device_id) => {
-                let scope = self.workspace_scope(Some(device_id));
-                self.thread_cwd(&handover.source_thread_id)
-                    .is_some_and(|cwd| scope.allows(&cwd))
-            }
+            crate::state::HandoverActor::Device(device_id) => self
+                .thread_history_cwd(&handover.source_thread_id)
+                .is_some_and(|cwd| {
+                    self.ensure_thread_history_readable(
+                        &handover.source_thread_id,
+                        &cwd,
+                        Some(device_id),
+                    )
+                    .is_ok()
+                }),
         }
     }
 
@@ -3808,7 +3834,7 @@ so {} never got it — hand over again when you are ready.",
             review_jobs: self
                 .active_review_jobs_view()
                 .into_iter()
-                .filter(|job| in_scope(&job.parent_thread_id))
+                .filter(|job| self.thread_history_in_scope(&job.parent_thread_id, device_id))
                 .map(|mut job| {
                     // Here, not in `review_job_view`: that one is hashed on every snapshot.
                     job.result = self
@@ -3821,7 +3847,7 @@ so {} never got it — hand over again when you are ready.",
             reviewer_threads: self
                 .reviewer_thread_views()
                 .into_iter()
-                .filter(|view| in_scope(&view.parent_thread_id))
+                .filter(|view| self.thread_history_in_scope(&view.parent_thread_id, device_id))
                 .collect(),
             // BOTH ends, not either: an exchange is only visible to a device that may see
             // the whole of it. Even previews disclose user work, so half a fence is no fence.
@@ -3832,8 +3858,9 @@ so {} never got it — hand over again when you are ready.",
                 // is about not surfacing an agent from another workspace; an agent that
                 // does not exist reveals nothing, and hiding it hides the card entirely.
                 .filter(|ask| {
-                    in_scope(&ask.asker_thread_id)
-                        && (ask.peer_thread_id.is_empty() || in_scope(&ask.peer_thread_id))
+                    self.thread_history_in_scope(&ask.asker_thread_id, device_id)
+                        && (ask.peer_thread_id.is_empty()
+                            || self.thread_history_in_scope(&ask.peer_thread_id, device_id))
                 })
                 .collect(),
             // Same fence: the objective is the user's own words.
@@ -3863,13 +3890,7 @@ so {} never got it — hand over again when you are ready.",
         let ask = self
             .ask(ask_id)
             .ok_or_else(|| "there is no such ask".to_string())?;
-        let scope = self.workspace_scope(device_id);
-        let in_scope = |parent_thread_id: &str| -> bool {
-            match self.thread_cwd(parent_thread_id) {
-                Some(cwd) => scope.allows(&cwd),
-                None => scope.is_unrestricted(),
-            }
-        };
+        let in_scope = |thread_id: &str| self.thread_history_in_scope(thread_id, device_id);
         if !in_scope(&ask.asker_thread_id)
             || (!ask.peer_thread_id.is_empty() && !in_scope(&ask.peer_thread_id))
         {
@@ -5161,6 +5182,18 @@ so {} never got it — hand over again when you are ready.",
         if self.locally_deleted_thread_ids.contains(&thread.id) {
             return;
         }
+        if !thread.cwd.is_empty() {
+            let workspace = self.thread_workspace.entry(thread.id.clone()).or_default();
+            if !workspace
+                .history
+                .as_ref()
+                .is_some_and(|history| history.matches(&thread.cwd))
+            {
+                workspace.history = Some(super::workspace_scope::ThreadHistoryWorkspace::capture(
+                    &thread.cwd,
+                ));
+            }
+        }
         // A user-renamed session keeps its title through every provider event. This is
         // the live-event funnel (a turn finishing re-derives Claude's summary), so
         // without the override here a rename would visibly revert mid-conversation
@@ -6141,7 +6174,6 @@ so {} never got it — hand over again when you are ready.",
                 return false;
             }
         }
-        let scope = self.workspace_scope(Some(device_id));
         let next: HashSet<String> = thread_ids
             .into_iter()
             .filter(|id| !id.is_empty())
@@ -6157,7 +6189,7 @@ so {} never got it — hand over again when you are ready.",
             // delivery is the gate.
             .filter(|thread_id| match self.runtime_for_thread(thread_id) {
                 Some(runtime) if !runtime.current_cwd.trim().is_empty() => {
-                    Self::thread_is_readable_by(Some(runtime.current_cwd.as_str()), &scope)
+                    self.thread_is_readable_by_device(thread_id, device_id)
                 }
                 _ => true,
             })
@@ -6297,25 +6329,14 @@ so {} never got it — hand over again when you are ready.",
     /// device whose scope (or the relay's allowed roots) is tightened afterwards must
     /// stop receiving a thread it was already watching.
     pub fn thread_is_readable_by_device(&self, thread_id: &str, device_id: &str) -> bool {
-        Self::thread_is_readable_by(
-            self.runtime_for_thread(thread_id)
-                .map(|r| r.current_cwd.as_str()),
-            &self.workspace_scope(Some(device_id)),
-        )
-    }
-
-    /// A thread is readable when its cwd is inside the relay's allowed roots AND (when
-    /// the device is scoped) inside that device's grant.
-    ///
-    /// An unknown cwd — no runtime loaded yet, or a runtime with a blank cwd — cannot be
-    /// PROVEN in scope, so it is refused whenever there is a restriction to enforce.
-    /// When neither a device scope nor relay roots exist there is nothing to violate, so
-    /// an unloaded thread stays declarable (a client may legitimately declare a thread
-    /// before its runtime materializes).
-    fn thread_is_readable_by(cwd: Option<&str>, scope: &crate::state::WorkspaceScope) -> bool {
-        match cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) {
-            Some(cwd) => scope.allows(cwd),
-            None => scope.is_unrestricted(),
+        match self
+            .runtime_for_thread(thread_id)
+            .map(|r| r.current_cwd.trim())
+        {
+            Some(cwd) if !cwd.is_empty() => self
+                .ensure_thread_history_readable(thread_id, cwd, Some(device_id))
+                .is_ok(),
+            _ => self.workspace_scope(Some(device_id)).is_unrestricted(),
         }
     }
 

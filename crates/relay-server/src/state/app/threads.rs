@@ -229,10 +229,15 @@ impl AppState {
         let scope = relay.workspace_scope(device_id.as_deref());
         // Many rows share a folder, and a folder outside the roots costs disk reads under this lock.
         let mut verdicts = std::collections::HashMap::<String, bool>::new();
-        let mut in_scope = |cwd: &str| {
+        let mut in_scope = |thread: &ThreadSummaryView| {
             *verdicts
-                .entry(cwd.to_string())
-                .or_insert_with(|| scope.allows(cwd))
+                .entry(thread.cwd.clone())
+                .or_insert_with(|| scope.allows(&thread.cwd))
+                || relay
+                    .thread_workspace(&thread.id)
+                    .history
+                    .as_ref()
+                    .is_some_and(|history| scope.allows_history(&thread.cwd, history))
         };
         for thread in &mut all_threads {
             if thread.cwd.is_empty() {
@@ -250,7 +255,7 @@ impl AppState {
         let (scoped, out_of_scope): (Vec<_>, Vec<_>) = relay
             .filter_deleted_threads(all_threads)
             .into_iter()
-            .partition(|thread| in_scope(&thread.cwd));
+            .partition(|thread| in_scope(thread));
         let out_of_scope_ids = out_of_scope
             .into_iter()
             .map(|thread| thread.id)
@@ -280,7 +285,7 @@ impl AppState {
                     .threads
                     .iter()
                     .find(|thread| thread.id == active_id)
-                    .filter(|thread| in_scope(&thread.cwd))
+                    .filter(|thread| in_scope(thread))
                     .cloned()
                 {
                     threads.push(active_thread);
