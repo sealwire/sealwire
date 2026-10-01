@@ -323,6 +323,7 @@ export function DelegateRequestEntry({
   answered = EMPTY_SET,
   provider = "",
   providerIcon = "",
+  showAvatar = true,
   showCommand = true,
   showOutcome = true,
 }) {
@@ -344,8 +345,11 @@ export function DelegateRequestEntry({
   } else if (first) {
     outcomeNode = h(
       "article",
-      { className: "chat-message chat-message-assistant handover-message delegate-message", "data-transcript-anchor": `request:${transcriptRowKey(entry)}` },
-      avatar(providerIcon, provider),
+      {
+        className: `chat-message chat-message-assistant handover-message delegate-message${showAvatar ? "" : " is-turn-continued"}`,
+        "data-transcript-anchor": `request:${transcriptRowKey(entry)}`,
+      },
+      showAvatar ? avatar(providerIcon, provider) : null,
       h(
         "div",
         { className: "delegate-stack" },
@@ -362,19 +366,12 @@ export function DelegateRequestEntry({
   );
 }
 
-/**
- * What came back, where the wake used to be (25a / 25c); it opens the asker's turn. Right
- * under its own asked card it joins that card's column rather than taking a second mark.
- */
-export function DelegateAnswerEntry({ attrs, entry, joined = false, provider = "", providerIcon = "" }) {
+/** What came back, where the wake used to be (25a / 25c). The peer said it, so it wears no mark. */
+export function DelegateAnswerEntry({ attrs, entry }) {
   const asks = entry.injection.delegate || [];
   return h(
     "article",
-    {
-      ...attrs,
-      className: `${attrs.className} handover-message delegate-message${joined ? " is-turn-continued" : ""}`,
-    },
-    joined ? null : avatar(providerIcon, provider),
+    { ...attrs, className: `${attrs.className} handover-message delegate-message is-turn-continued` },
     h(
       "div",
       { className: "delegate-stack" },
@@ -503,7 +500,7 @@ function toolInput(entry) {
 export function foldDelegateInjections(entries) {
   const list = entries || [];
   if (!list.some((entry) => entry?.injection?.delegate)) {
-    return { entries: list, members: EMPTY_MEMBERS, answered: EMPTY_SET, joined: EMPTY_SET, briefs: EMPTY_SET };
+    return { entries: list, members: EMPTY_MEMBERS, answered: EMPTY_SET, briefs: EMPTY_SET };
   }
   const briefs = new Set(
     list
@@ -519,7 +516,6 @@ export function foldDelegateInjections(entries) {
   const result = [];
   const members = new Map();
   const hidden = new Set();
-  const joined = new Set();
   let absorbing = null;
   let span = null;
   const opensTurn = (at) => result[at - 1]?.kind === "user_text";
@@ -557,18 +553,6 @@ export function foldDelegateInjections(entries) {
       closeSpan();
       absorbing = null;
       const first = injection?.delegate?.[0];
-      const previous = result[result.length - 1];
-      const previousAsk = (previous?.injection?.delegate || []).find((ask) => ask.id === first?.id);
-      if (
-        kind === "delegate_answer"
-        && (previous?.injection?.kind === "delegate_request"
-          || previous?.injection?.kind === "delegate_call"
-          || (previous?.injection?.kind === "delegate_brief"
-            && drawsDelegateBriefCard(previousAsk)))
-        && previousAsk
-      ) {
-        joined.add(transcriptRowKey(entry) || "");
-      }
       if (kind === "delegate_request" && first && (first.sent_at || outcome(first) === "working")) {
         absorbing = [];
         members.set(transcriptRowKey(entry) || "", absorbing);
@@ -604,12 +588,11 @@ export function foldDelegateInjections(entries) {
     entries: hidden.size ? result.filter((_, index) => !hidden.has(index)) : result,
     members,
     answered,
-    joined,
     briefs,
   };
 }
 
-/** An answer card is where the asker's turn begins, so the reply under it takes no second mark. */
+/** An answer card sits in the asker's column, since it is what the asker replies to. */
 export function opensAnsweredTurn(entry) {
   return entry?.kind === "user_text" && entry.injection?.kind === "delegate_answer" && Boolean(entry.injection?.delegate);
 }

@@ -123,10 +123,66 @@ test("a result card sits in the agent's column, not the person's", () => {
   assert.doesNotMatch(article, /chat-message-user/, "a right-aligned row shrinks the card to nothing");
 });
 
-test("the reply under a result card does not take a second mark: the card opened its turn", () => {
+test("a result card is the reviewer's, so the mark goes on the agent's reply under it", () => {
   const markup = render([marked("result", "review_result"), agent("a1", "On it.")]);
-  const marks = markup.match(/class="message-avatar"/g) || [];
-  assert.equal(marks.length, 1, markup);
+  const card = markup.slice(0, markup.indexOf('data-transcript-entry-id="a1"'));
+  assert.doesNotMatch(card, /class="message-avatar"/, "no mark on the reviewer's result");
+  assert.match(card, /is-turn-continued/, "it keeps the agent column's text edge");
+  assert.equal((markup.match(/class="message-avatar"/g) || []).length, 1, "the reply opens the turn");
+});
+
+const peerAsk = (id, extra = {}) => ({
+  id,
+  asker_thread_id: "parent",
+  asker_provider: "claude_code",
+  peer_thread_id: `peer-${id}`,
+  peer_provider: "codex",
+  task: "Check the gate",
+  title: "Check the gate",
+  instruction: "",
+  status: "working",
+  delivered: false,
+  asked_at: 1_790_000_000,
+  sent_at: 1_790_000_030,
+  ...extra,
+});
+const OWN_CARDS = {
+  "review call": () => reviewCall("own"),
+  "delegate call": () => ({
+    item_id: "own",
+    kind: "tool_call",
+    status: "completed",
+    tool: { item_type: "mcpToolCall", name: "delegate", title: "delegate" },
+    injection: { kind: "delegate_call", delegate: [peerAsk("sent")] },
+  }),
+};
+const marks = (markup) => (markup.match(/class="message-avatar"/g) || []).length;
+
+test("a turn that starts with the agent's own review or delegate card wears one mark, on that card", () => {
+  const incoming = {
+    "a delegate's answer": user("in", "W", {
+      injection: { kind: "delegate_answer", delegate: [peerAsk("answered", { status: "done", delivered: true, answer: "Bounded.", finished_at: 1_790_000_100 })] },
+    }),
+    "a review result": marked("in", "review_result"),
+    "your message": user("in", "go on"),
+  };
+  for (const [from, row] of Object.entries(incoming)) {
+    for (const [card, call] of Object.entries(OWN_CARDS)) {
+      const markup = render([row, call(), agent("reply", "Waiting on it.")]);
+      const where = `${from}, then a ${card}`;
+      assert.equal(marks(markup), 1, `${where}: one mark for the turn`);
+      const reply = markup.slice(markup.indexOf('data-transcript-entry-id="reply"'));
+      assert.doesNotMatch(reply, /class="message-avatar"/, `${where}: the card opened the turn, not the reply`);
+    }
+  }
+});
+
+test("an own review or delegate card later in a turn takes no second mark", () => {
+  for (const [card, call] of Object.entries(OWN_CARDS)) {
+    const markup = render([user("u1", "go"), agent("first", "Asking."), call()]);
+    assert.equal(marks(markup), 1, `${card}: the turn's first reply has it`);
+    assert.match(markup, /is-turn-continued[^>]*>(?:(?!<article)[\s\S])*(?:data-review-call-id|Delegated to)/, `${card}: it keeps the reply's text edge`);
+  }
 });
 
 test("an approval with nothing found is green and says so", () => {

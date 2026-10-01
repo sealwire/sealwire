@@ -464,7 +464,7 @@ function BriefCard({ review, onFold = null }) {
   );
 }
 
-export function ReviewCallEntry({ attrs, entry, provider = "", providerIcon = "" }) {
+export function ReviewCallEntry({ attrs, entry, provider = "", providerIcon = "", showAvatar = true }) {
   const review = entry.injection.review;
   const reviewer = agentName(review.reviewer_provider, "another agent");
   const latest = lastRound(review);
@@ -478,7 +478,7 @@ export function ReviewCallEntry({ attrs, entry, provider = "", providerIcon = ""
   }[review.status] || "Review in progress";
   return h(
     "article", { ...attrs, className: `${attrs.className} handover-message review-message` },
-    avatar(providerIcon, provider),
+    showAvatar ? avatar(providerIcon, provider) : null,
     h("div", { className: "handover-card review-card is-info", "data-review-id": review.id, "data-review-call-id": review.id },
       h("div", { className: "handover-card-head" },
         h("span", { className: "handover-card-icon" }, h(CardIcon, { paths: TONE_ICONS.info })),
@@ -498,10 +498,10 @@ export function ReviewCallEntry({ attrs, entry, provider = "", providerIcon = ""
 }
 
 /**
- * A review row drawn as what it was for. A result opens the reviewed agent's turn, so it
- * takes that turn's mark; the brief is the reviewer thread's opening, full width.
+ * A review row drawn as what it was for. A result sits in the reviewed agent's column but is
+ * the reviewer's, so it wears no mark; the brief is the reviewer thread's opening, full width.
  */
-export function ReviewEntry({ attrs, entry, folded = false, provider = "", providerIcon = "" }) {
+export function ReviewEntry({ attrs, entry, folded = false, provider = "" }) {
   const [open, setOpen] = useState(false);
   const review = entry.injection.review;
   const kind = entry.injection.kind;
@@ -525,8 +525,7 @@ export function ReviewEntry({ attrs, entry, folded = false, provider = "", provi
   }
   return h(
     "article",
-    { ...attrs, className: `${attrs.className} handover-message review-message` },
-    avatar(providerIcon, provider),
+    { ...attrs, className: `${attrs.className} handover-message review-message is-turn-continued` },
     card
   );
 }
