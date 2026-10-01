@@ -18,10 +18,6 @@ const DEFAULT_MODELS = {
 // `bypass` is the unified YOLO knob: the rust shim translates it to
 // `permissionMode=bypassPermissions` for Claude and to
 // `approvalPolicy=never` + `sandbox=danger-full-access` for Codex.
-const OPENCODE_ASKS =
-  "OpenCode's config decides which tools ask. By default it runs most tools without asking; the ones that ask wait for you here.";
-const OPENCODE_DENIES = "Tools OpenCode's config denies stay denied.";
-
 const PROVIDER_SETTINGS = {
   claude_code: {
     approvalLabel: "Permission mode",
@@ -85,14 +81,12 @@ const PROVIDER_SETTINGS = {
     sandboxLabel: "File access",
   },
   opencode: {
-    approvalLabel: "Permission requests",
-    // Sealwire only answers the requests OpenCode sends, so the two asking modes
-    // behave the same and neither auto-approve mode can lift an OpenCode deny.
+    approvalLabel: "Permission mode",
     approvalOptions: [
-      { label: "Review requests", value: "untrusted", description: `Same as Use OpenCode rules. ${OPENCODE_ASKS}`, tone: "neutral" },
-      { label: "Use OpenCode rules", value: "on-request", description: `Same as Review requests. ${OPENCODE_ASKS}`, tone: "neutral" },
-      { label: "Auto-approve requests", value: "never", description: `Sealwire allows each request OpenCode sends, once. ${OPENCODE_DENIES}`, tone: "elevated" },
-      { label: "Auto-approve, unrestricted", value: "bypass", description: `Same answers as Auto-approve requests. Sealwire also counts this session as unrestricted, so only agents with the same or wider permissions can hand it work. ${OPENCODE_DENIES}`, tone: "danger" },
+      { label: "Ask first", value: "untrusted", description: "Tools need approval, except Sealwire session tools. Native subagents are disabled; use /delegate.", tone: "safe" },
+      { label: "Ask before changes", value: "on-request", description: "File reads and searches run automatically; .env files, changes, shell and network tools need approval. Use /delegate for subagents.", tone: "neutral" },
+      { label: "Auto-approve", value: "never", description: "Sealwire allows OpenCode tools without prompts, overriding the session's OpenCode permission rules.", tone: "elevated" },
+      { label: "Full access (YOLO)", value: "bypass", description: "Tools run without prompts. Sealwire also treats this session as unrestricted for delegation and Goal mode. No OS sandbox.", tone: "danger" },
     ],
     effortLabel: "Reasoning effort",
     effortLabels: {
@@ -218,14 +212,6 @@ const FILESYSTEM_SANDBOX_PROVIDERS = new Set(["codex", "fake"]);
 
 export function providerHasFilesystemSandbox(provider) {
   return FILESYSTEM_SANDBOX_PROVIDERS.has(normalizeProvider(provider));
-}
-
-// The relay refuses these as reviewers: OpenCode's ACP sessions have no read-only
-// mode. A denylist, so a provider added later is still offered.
-const PROVIDERS_WITHOUT_READ_ONLY_REVIEW = new Set(["opencode"]);
-
-export function providerCanReview(provider) {
-  return !PROVIDERS_WITHOUT_READ_ONLY_REVIEW.has(normalizeProvider(provider));
 }
 
 export function providerSettings(provider) {

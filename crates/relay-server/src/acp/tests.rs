@@ -4011,6 +4011,58 @@ async fn announced_commands_become_the_sessions_skills_and_nothing_is_guessed_be
     assert!(other.is_err(), "one session's commands are not another's");
 }
 
+async fn attach_opencode_test_api(bridge: &mut AcpBridge) {
+    use axum::{
+        body::Bytes,
+        extract::{Query, State},
+        http::{Method, Uri},
+        routing::any,
+        Json, Router,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let values = std::sync::Arc::new(tokio::sync::Mutex::new(serde_json::Map::<
+        String,
+        serde_json::Value,
+    >::new()));
+    let app = Router::new()
+        .fallback(any(
+            |State(values): State<
+                std::sync::Arc<tokio::sync::Mutex<serde_json::Map<String, serde_json::Value>>>,
+            >,
+             Query(query): Query<std::collections::HashMap<String, String>>,
+             method: Method,
+             uri: Uri,
+             body: Bytes| async move {
+                let mut values = values.lock().await;
+                if uri.path().starts_with("/mcp/") {
+                    let server = uri.path().split('/').nth(2).unwrap();
+                    values.insert(server.into(), json!({"status": "connected"}));
+                    return Json(json!(true));
+                }
+                if uri.path() == "/mcp" {
+                    return Json(json!(*values));
+                }
+                let entry = values
+                    .entry(uri.path().to_string())
+                    .or_insert_with(|| json!({"directory": query["directory"], "permission": []}));
+                if method == Method::PATCH {
+                    let update: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    entry["permission"]
+                        .as_array_mut()
+                        .unwrap()
+                        .extend(update["permission"].as_array().unwrap().clone());
+                }
+                Json(entry.clone())
+            },
+        ))
+        .with_state(values);
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    bridge.opencode_api = Some(super::opencode::Api::for_test(port));
+}
+
 fn opencode_config(model: &str, effort: &str, mode: &str) -> serde_json::Value {
     json!({"configOptions": [
         {"id":"model","category":"model","type":"select","currentValue":model,
@@ -4090,7 +4142,8 @@ async fn opencode_config_is_applied_before_prompt_and_early_commands_survive() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let (outbound, peer) = tokio::io::duplex(16384);
     let (mut writer, inbound) = tokio::io::duplex(16384);
-    let bridge = AcpBridge::for_test(relay_state(), outbound, inbound, "opencode");
+    let mut bridge = AcpBridge::for_test(relay_state(), outbound, inbound, "opencode");
+    attach_opencode_test_api(&mut bridge).await;
     let answerer = tokio::spawn(async move {
         let mut lines = BufReader::new(peer).lines();
         let mut methods = Vec::new();
@@ -4102,11 +4155,7 @@ async fn opencode_config_is_applied_before_prompt_and_early_commands_survive() {
             methods.push(method.to_string());
             let result = match method {
                 "session/new" => {
-                    assert_eq!(
-                        sent["params"]["mcpServers"],
-                        json!([]),
-                        "OpenCode cannot isolate per-session MCP identities"
-                    );
+                    assert_eq!(sent["params"]["mcpServers"].as_array().unwrap().len(), 1);
                     let commands = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_test","update":{
                         "sessionUpdate":"available_commands_update","availableCommands":[{"name":"compact","description":"Compact session"}]
                     }}});
@@ -4190,31 +4239,57 @@ async fn opencode_config_is_applied_before_prompt_and_early_commands_survive() {
 }
 
 #[tokio::test]
-async fn opencode_read_only_requests_fail_before_creating_a_session() {
-    use crate::provider::{ProviderBridge, StartThreadRequest};
-    let (outbound, mut peer) = tokio::io::duplex(8192);
+async fn opencode_applies_and_reasserts_its_session_permission_rules() {
+    let (outbound, _peer) = tokio::io::duplex(8192);
     let (_writer, inbound) = tokio::io::duplex(8192);
-    let bridge = AcpBridge::for_test(relay_state(), outbound, inbound, "opencode");
-    for (approval, sandbox) in [
-        ("untrusted", "read-only"),
-        ("review_read_only", "workspace-write"),
+    let mut bridge = AcpBridge::for_test(relay_state(), outbound, inbound, "opencode");
+    attach_opencode_test_api(&mut bridge).await;
+    bridge
+        .seed_session_for_test("ses_permissions", "/tmp/project")
+        .await;
+    for (approval, sandbox, expected) in [
+        ("untrusted", "workspace-write", "ask"),
+        ("bypass", "workspace-write", "allow"),
+        ("review_read_only", "workspace-write", "deny"),
+        ("never", "read-only", "deny"),
+        ("on-request", "workspace-write", "ask"),
     ] {
-        let result = bridge
-            .start_thread(StartThreadRequest::new(
+        bridge
+            .apply_mode("ses_permissions", approval, sandbox)
+            .await
+            .unwrap();
+        let native = bridge
+            .opencode_request(
+                reqwest::Method::GET,
+                "/session/ses_permissions",
                 "/tmp/project",
-                "",
-                approval,
-                sandbox,
-            ))
-            .await;
-        assert!(result.err().unwrap().contains("does not enforce read-only"));
+                None,
+            )
+            .await
+            .unwrap();
+        let rules = native["permission"].as_array().unwrap();
+        assert_eq!(
+            rules.iter().rev().find(|r| r["permission"] == "*").unwrap()["action"],
+            expected
+        );
+        bridge
+            .apply_mode("ses_permissions", approval, sandbox)
+            .await
+            .unwrap();
+        let again = bridge
+            .opencode_request(
+                reqwest::Method::GET,
+                "/session/ses_permissions",
+                "/tmp/project",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            again, native,
+            "unchanged policy must not grow the stored rules"
+        );
     }
-    assert!(tokio::time::timeout(
-        std::time::Duration::from_millis(30),
-        tokio::io::AsyncReadExt::read(&mut peer, &mut [0; 1])
-    )
-    .await
-    .is_err());
 }
 
 #[tokio::test]
@@ -4395,12 +4470,89 @@ async fn opencode_never_loads_or_remembers_a_foreign_directory_hint() {
 }
 
 #[tokio::test]
+async fn opencode_reattach_uses_saved_policy_without_appending_intermediate_rules() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    for (approval, sandbox) in [
+        ("untrusted", "workspace-write"),
+        ("bypass", "workspace-write"),
+        ("never", "read-only"),
+    ] {
+        let state = relay_state();
+        state.write().await.remember_thread_settings(
+            "ses_reattach",
+            approval,
+            sandbox,
+            "default",
+            "test/echo",
+        );
+        let (outbound, peer) = tokio::io::duplex(16384);
+        let (mut writer, inbound) = tokio::io::duplex(16384);
+        let mut bridge = AcpBridge::for_test(state, outbound, inbound, "opencode");
+        attach_opencode_test_api(&mut bridge).await;
+        bridge.capabilities.lock().await.load_session = true;
+        let answerer = tokio::spawn(async move {
+            let mut lines = BufReader::new(peer).lines();
+            for _ in 0..2 {
+                let request: serde_json::Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(request["method"], "session/load");
+                let result = opencode_config("test/echo", "default", "build");
+                writer
+                    .write_all(
+                        format!(
+                            "{}\n",
+                            json!({"jsonrpc":"2.0", "id":request["id"], "result":result})
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut previous = None;
+        for _ in 0..2 {
+            bridge.sessions.lock().await.insert(
+                "ses_reattach".into(),
+                SessionRuntime {
+                    cwd: "/tmp/project".into(),
+                    has_content: true,
+                    ..Default::default()
+                },
+            );
+            bridge
+                .ensure_opencode_attached("ses_reattach")
+                .await
+                .unwrap();
+            bridge.sync_thread_policy("ses_reattach").await.unwrap();
+            let native = bridge
+                .opencode_request(
+                    reqwest::Method::GET,
+                    "/session/ses_reattach",
+                    "/tmp/project",
+                    None,
+                )
+                .await
+                .unwrap();
+            if let Some(previous) = previous {
+                assert_eq!(
+                    native, previous,
+                    "reattaching {approval}/{sandbox} must not grow the stored policy"
+                );
+            }
+            previous = Some(native);
+        }
+        answerer.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn opencode_release_refuses_live_turns_and_reload_precedes_the_next_prompt() {
     use crate::provider::ProviderBridge;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let (outbound, peer) = tokio::io::duplex(16384);
     let (mut writer, inbound) = tokio::io::duplex(16384);
-    let bridge = AcpBridge::for_test(relay_state(), outbound, inbound, "opencode");
+    let mut bridge = AcpBridge::for_test(relay_state(), outbound, inbound, "opencode");
+    attach_opencode_test_api(&mut bridge).await;
     bridge.capabilities.lock().await.close_session = true;
     bridge.capabilities.lock().await.load_session = true;
     bridge
@@ -4439,7 +4591,7 @@ async fn opencode_release_refuses_live_turns_and_reload_precedes_the_next_prompt
             let result = match method {
                 "session/load" => {
                     assert_eq!(sent["params"]["cwd"], "/tmp/project");
-                    assert_eq!(sent["params"]["mcpServers"], json!([]));
+                    assert_eq!(sent["params"]["mcpServers"].as_array().unwrap().len(), 1);
                     opencode_config("test/echo", "high", "build")
                 }
                 "session/set_config_option" => {

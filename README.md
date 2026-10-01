@@ -75,31 +75,47 @@ long jobs keep going even with your laptop closed.
 
 ### OpenCode
 
-Sealwire launches `opencode acp` and uses your OpenCode configuration, models,
-permissions, commands, and MCP servers. The integration is verified with
-OpenCode 1.18.34. To run only this provider, use `AGENT_PROVIDERS=opencode npx sealwire`.
+Sealwire launches one `opencode acp` process per session, using your OpenCode
+models, agents, commands, and MCP configuration. Idle processes are reclaimed,
+keeping at most two warm sessions; active turns are retained. Verified with OpenCode 1.18.34.
+To run only this provider, use `AGENT_PROVIDERS=opencode npx sealwire`.
 
-OpenCode decides which tools require approval. **Review requests** and
-**Use OpenCode rules** show those requests in Sealwire; both auto-approve options
-answer them automatically, without overriding OpenCode's configured denials.
-OpenCode's default configuration allows most tools without asking; these settings
-do not make every tool ask. Read-only sessions and OpenCode
-reviewers are refused because ACP cannot guarantee read-only execution. You can
-use another provider to review an OpenCode session.
+Sealwire applies its permission selection to each native OpenCode session,
+overriding OpenCode's agent and project permission rules. **Ask first** asks for
+tool calls; **Ask before changes** allows file reads and searches but asks for writes,
+shell commands and other tools. **Auto-approve** and **Full access (YOLO)** allow
+tools without prompts. YOLO also enables unrestricted delegation and Goal mode.
+Sealwire's own session tools authorize each call in the relay and need no extra
+approval. In the two ask modes, native subagents and commands that start them are
+disabled because OpenCode does not pass approval requirements to subagents; use
+Sealwire `/delegate` instead. Native commands that expand shell/file references
+or have an opaque template are also refused in restricted modes because their
+expansion bypasses OpenCode tool approvals. Send a normal message to use tool
+approvals instead. Reads of `.env` files still ask for approval.
+These controls are at the tool level, without an OS filesystem sandbox.
+OpenCode persists these rules on the native session: they also apply when you
+continue that session outside Sealwire, including auto-approval if selected.
 
-Model discovery opens a temporary session without sending a prompt, then closes
-and deletes it. Session deletion uses OpenCode's own `session delete` command.
-History is discovered only in directories already used by OpenCode through
-Sealwire. OpenCode's ACP history listing matches exact directories and loads
-their plugins. Background model discovery uses a separate relay-owned directory;
-starting a session reads the chosen workspace's OpenCode configuration.
-Sealwire's per-session MCP tools (including delegation and goal tools) are not
-injected: OpenCode shares injected MCP servers across sessions in the same
-directory, which would mix their identities. Your own OpenCode MCP configuration
-still applies. Goal mode and Task seats are currently unavailable with OpenCode.
-You can delegate work to OpenCode; Sealwire forwards its final answer.
-Forks use Sealwire's transcript replay; native OpenCode forks and archiving are
-not exposed.
+Ordinary OpenCode reviewers use best-effort read-only permissions: dedicated
+write tools, subagents, and external MCP tools are denied; inspection tools and
+shell commands are allowed. Shell commands can still write, so this does not
+qualify OpenCode for Code Flow's hard read-only reviewer guarantee.
+
+Sealwire Goal and `/review`, `/delegate`, `/handover`, and `/goal` are available
+for ordinary sessions. Each process carries only its own Sealwire MCP identity,
+including after reattachment. Task and Task Team seats remain unsupported.
+
+Model discovery opens a temporary session without a prompt, then closes and
+deletes it. The complete model and effort catalog is fetched once per relay
+launch and reused in memory; only unsuccessful discovery is retried. Background
+discovery uses a relay-owned directory; new sessions read the selected workspace's
+configuration. The model menu includes each model's
+native effort options before starting a session. History queries scan only directories
+already used by OpenCode through Sealwire, and may load their OpenCode plugins.
+Native forks preserve OpenCode context at the session tip or a complete message
+boundary. Points inside a native message use transcript replay.
+Archiving sets OpenCode's native archive timestamp and hides the session from
+history. Permanent deletion uses OpenCode's `session delete` command.
 
 ### Connect your phone
 

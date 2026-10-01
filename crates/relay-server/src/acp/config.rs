@@ -90,10 +90,3 @@ pub(super) fn models(
         })
         .collect()
 }
-
-pub(super) fn validate_policy(provider: &str, approval: &str, sandbox: &str) -> Result<(), String> {
-    if provider == "opencode" && (sandbox == "read-only" || approval == "review_read_only") {
-        return Err("OpenCode ACP does not enforce read-only sessions; choose another provider for a read-only session or reviewer".into());
-    }
-    Ok(())
-}
