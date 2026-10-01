@@ -83,6 +83,7 @@
     "test:browser:desktop-launcher": "npm run build && node scripts/browser-desktop-launcher-e2e.mjs",
     "test:claude:provider": "node scripts/claude-provider-e2e.mjs",
     "test:cursor:provider": "node scripts/cursor-provider-e2e.mjs",
+    "test:opencode:provider": "node scripts/opencode-provider-e2e.mjs",
     "test:cursor:delete": "node scripts/cursor-session-delete-e2e.mjs",
     "test:browser:cursor-delete": "npm run build && node scripts/browser-cursor-delete-e2e.mjs",
     "test:browser:cursor-view-only-history": "npm run build && node scripts/browser-cursor-view-only-history-e2e.mjs",

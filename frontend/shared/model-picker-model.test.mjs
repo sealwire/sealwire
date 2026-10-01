@@ -244,3 +244,31 @@ test("a provider the relay does not offer produces no group to pick from", () =>
     "and nothing is ticked, because the held selection is not choosable"
   );
 });
+
+test("OpenCode's menu offers its folder default and tags no catalog model as default", () => {
+  // The catalog's default belongs to the folder it was discovered in, not the new session's.
+  const groups = buildModelPickerGroups({
+    offerProviderDefault: true,
+    providerModels: {
+      opencode: [
+        { model: "test/echo", display_name: "Echo", is_default: true },
+        { model: "test/second", display_name: "Second" },
+      ],
+    },
+    providers: ["opencode"],
+    selectedModel: "",
+    selectedProvider: "opencode",
+  });
+  assert.deepEqual(
+    groups[0].options.map((option) => [option.value, option.tag, option.selected]),
+    [["", null, true], ["test/echo", null, false], ["test/second", null, false]]
+  );
+  assert.equal(
+    selectedModelChip({
+      providerModels: { opencode: [{ model: "test/echo", display_name: "Echo", is_default: true }] },
+      selectedModel: "test/echo",
+      selectedProvider: "opencode",
+    }).tag,
+    null
+  );
+});

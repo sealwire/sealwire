@@ -51,6 +51,7 @@ impl AppState {
         let effort = non_empty(input.effort)
             .or_else(|| default_effort_for_model(&provider_models, &model))
             .unwrap_or(defaults.reasoning_effort);
+        let effort = clamp_effort_to_model(effort, &model, &provider_models);
         let initial_prompt = non_empty(input.initial_prompt);
 
         // Activate a Claude session before its first turn so peer MCP calls
@@ -70,6 +71,7 @@ impl AppState {
                 provider_name,
                 bridge,
                 StartThreadRequest::new(&cwd, &model, &approval_policy, &sandbox)
+                    .with_effort(&effort)
                     .with_initial_prompt(provider_initial_prompt),
             )
             .await?;

@@ -454,6 +454,46 @@ async fn reopen_pins_a_new_cycle_base_without_rewriting_the_original_fork_point(
 }
 
 #[tokio::test]
+async fn start_team_refuses_a_seat_without_seat_tools_before_provisioning() {
+    let (_repo, root) = init_team_repo().await;
+    let heads = || async {
+        let out = tokio::process::Command::new("git")
+            .args(["for-each-ref", "--format=%(refname)", "refs/heads"])
+            .current_dir(&root)
+            .output()
+            .await
+            .expect("git");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let before = heads().await;
+
+    // Named, and reached as the default when it is the only provider there is.
+    for (providers, dev_provider, seat) in [
+        (&["codex", "opencode"][..], Some("opencode"), "developer"),
+        (&["opencode"][..], None, "team lead"),
+    ] {
+        let (app, _) = build_review_app(&root, providers).await;
+        let app = app.with_team_driver(std::sync::Arc::new(ReturningTeamDriver));
+        let error = app
+            .start_team(crate::protocol::StartTeamInput {
+                title: "Parser".to_string(),
+                cwd: Some(root.clone()),
+                dev_provider: dev_provider.map(str::to_string),
+                device_id: Some("device-1".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect_err("an OpenCode seat would fail only after the worktree exists");
+        assert!(
+            error.contains(seat) && error.contains("OpenCode"),
+            "{error}"
+        );
+        assert!(app.teams().await.teams.is_empty());
+    }
+    assert_eq!(heads().await, before, "no task branch may be created");
+}
+
+#[tokio::test]
 async fn start_team_pins_the_requested_pair_structure() {
     let (_repo, root) = init_team_repo().await;
     let (app, _) = build_review_app(&root, &["codex"]).await;

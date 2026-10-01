@@ -1,7 +1,42 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { resolveOutgoingEffort } from "./reasoning-efforts.js";
+import {
+  buildReasoningEffortOptions,
+  buildReasoningEffortOptionsWithSelection,
+  resolveOutgoingEffort,
+  resolveReasoningEffortValue,
+} from "./reasoning-efforts.js";
+
+test("OpenCode offers model default until ACP reports that model's variants", () => {
+  const unknown = { model: "test/second", provider: "opencode", supported_reasoning_efforts: [] };
+  for (const models of [[], [unknown]]) {
+    assert.deepEqual(buildReasoningEffortOptions(models, "test/second", "opencode"), [
+      { label: "Model default", value: "default" },
+    ]);
+    assert.equal(resolveReasoningEffortValue(models, "test/second", "medium", "opencode"), "default");
+  }
+});
+
+test("OpenCode clamps a previous provider's effort against the selected model", () => {
+  const models = [{ model: "test/echo", provider: "opencode",
+    supported_reasoning_efforts: ["low", "high", "default"], default_reasoning_effort: "low" }];
+  assert.equal(resolveReasoningEffortValue(models, "test/echo", "medium", "opencode"), "low");
+  assert.equal(resolveReasoningEffortValue(models, "test/echo", "high", "opencode"), "high");
+  assert.deepEqual(buildReasoningEffortOptions(models, "test/echo", "opencode").map((row) => row.value), ["low", "high", "default"]);
+});
+
+test("a catalog that does not know a model's efforts keeps the effort it was given", () => {
+  // Opening the launch dialog before Claude's catalog arrived turned `max` into `low`.
+  for (const models of [[], [{ model: "claude-sonnet-4-6", supported_reasoning_efforts: [] }]]) {
+    assert.equal(resolveReasoningEffortValue(models, "claude-sonnet-4-6", "max", "claude_code"), "max");
+  }
+  assert.equal(resolveReasoningEffortValue([], "gpt-5.5", "minimal", "codex"), "minimal");
+  assert.deepEqual(
+    buildReasoningEffortOptionsWithSelection([], "claude-sonnet-4-6", "claude_code", "max").at(-1),
+    { label: "Max", value: "max" }
+  );
+});
 
 const CODEX = [
   {

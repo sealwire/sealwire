@@ -32,6 +32,19 @@ pub(crate) const TASKS_LOCKED_MESSAGE: &str =
     "Tasks is still in development and is off in this build; relaunch with \
 `sealwire --beta` to try it";
 
+/// OpenCode's current policies cannot guarantee unattended seats or read-only
+/// reviewers. Refuse the lineup before provisioning any part of the run.
+pub(crate) fn refuse_seat_without_seat_tools(provider: &str, seat: &str) -> Result<(), String> {
+    if crate::provider::supports_session_mcp(provider) {
+        return Ok(());
+    }
+    Err(format!(
+        "the {seat} cannot run on {}: Task seats are not supported by this provider; \
+choose another provider",
+        crate::provider::provider_display_name(provider)
+    ))
+}
+
 use crate::protocol::{
     StartTeamInput, StartTeamReceipt, TeamActionInput, TeamActionReceipt, TeamAwaitingView,
     TeamMarkInput, TeamRunView, TeamSubTaskView, TeamsResponse,
@@ -947,6 +960,13 @@ over on resume"
         let tl_provider = resolve_provider(input.tl_provider, "team lead")?;
         let dev_provider = resolve_provider(input.dev_provider, "developer")?;
         let reviewer_provider = resolve_provider(input.reviewer_provider, "reviewer")?;
+        for (provider, seat) in [
+            (&tl_provider, "team lead"),
+            (&dev_provider, "developer"),
+            (&reviewer_provider, "reviewer"),
+        ] {
+            refuse_seat_without_seat_tools(provider, seat)?;
+        }
         // Model and effort are NOT validated here. The provider's catalogue is
         // loaded per seat when its thread starts, and a name checked now could
         // be gone by then; `start_team_thread` resolves and clamps against the

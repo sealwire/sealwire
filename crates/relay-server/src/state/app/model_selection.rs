@@ -298,6 +298,15 @@ offers none of the models Sealwire uses instead ({}) — name a model",
         bridge: &Arc<dyn ProviderBridge>,
         models: &mut [ModelOptionView],
     ) {
+        // OpenCode discovers defaults by starting a session, which executes cwd plugins.
+        // A background catalog refresh must not enter another provider's workspace.
+        if provider == "opencode" {
+            let catalog = models.to_vec();
+            for model in models.iter_mut() {
+                model.is_default &= model_policy::flagship_in(&model.model, &catalog).is_none();
+            }
+            return;
+        }
         let catalog = Some(models.to_vec());
         let chosen = self
             .sealwire_default_model(&ModelTarget {

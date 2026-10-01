@@ -200,6 +200,7 @@ export function StartSessionDialog({
       { key: "pills" },
       h(SettingPill, {
         groups: buildModelPickerGroups({
+          offerProviderDefault: true,
           providerModels,
           providers,
           selectedModel: fields.model || "",

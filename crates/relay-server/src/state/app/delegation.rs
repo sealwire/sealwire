@@ -27,9 +27,10 @@ use crate::state::{clip_chars, unix_now, AppState, InjectionTag, TurnOutcome};
 /// capped — the goal turn budget already bounds the loop that drives them.
 const MAX_PEERS_PER_ASKER: usize = 5;
 
-/// Appended to every task handed to a peer. Every ordinary session has `report_back`,
-/// whatever its permissions.
-fn answer_instruction() -> &'static str {
+fn answer_instruction(provider: &str) -> &'static str {
+    if !crate::provider::supports_session_mcp(provider) {
+        return "\n\n---\nAnother agent asked for this and cannot see your session. Finish with a self-contained final answer; Sealwire will forward it to that agent.";
+    }
     "\n\n---\nAnother agent asked for this and cannot see your session. When \
 you are done, call the `report_back` tool with what it needs to know. That is \
 what it will be shown."
@@ -705,7 +706,7 @@ Carry on with one of those instead of bringing in another."
         // peer working with nobody waiting for it. The reverse — recorded but not
         // sent — is visible and settles as a failure.
         let ask_id = existing_ask_id.clone().unwrap_or_else(new_ask_id);
-        let instruction = answer_instruction();
+        let instruction = answer_instruction(&peer_provider);
         {
             let mut relay = self.relay.write().await;
             if relay
@@ -1638,7 +1639,7 @@ impl AppState {
             // It finished its turn without calling `report_back`. Ask once; a peer
             // that ignores it twice is not going to start, and waiting forever
             // would keep the asker asleep.
-            if !nudged {
+            if !nudged && crate::provider::supports_session_mcp(&peer_provider) {
                 let tag = InjectionTag::delegate(InjectionKind::DelegateNudge, &[ask_id.clone()]);
                 let dispatched = self
                     .send_injected(tag, &peer_thread_id, answer_nudge(), None, None)
@@ -1664,7 +1665,8 @@ impl AppState {
                 relay.notify();
                 continue;
             }
-            // Nudged and still nothing. Its last message beats silence.
+            // Providers without session MCP return their answer through the transcript.
+            // Otherwise this is the final reply after a report_back reminder.
             let mut relay = self.relay.write().await;
             relay.update_ask(&ask_id, |ask| ask.finish(text));
             relay.mark_delegate_reply(&ask_id, &peer_thread_id, &item_id);
@@ -1818,6 +1820,14 @@ impl AppState {
 mod wake_tests {
     use super::*;
     use relay_api::delegation::AskStatus;
+
+    #[test]
+    fn opencode_is_asked_for_a_final_answer_without_an_unavailable_tool() {
+        let instruction = answer_instruction("opencode");
+        assert!(instruction.contains("final answer"));
+        assert!(!instruction.contains("report_back"));
+        assert!(answer_instruction("claude_code").contains("report_back"));
+    }
 
     #[test]
     fn a_rehydrated_error_matches_only_its_own_turn() {
