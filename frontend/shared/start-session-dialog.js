@@ -42,10 +42,7 @@ export function StartSessionDialog({
   // would start a session that cannot be talked to until it is re-prompted.
   requireInitialPrompt = true,
   startPending = false,
-  threadActivity = null,
-  threadAttention = null,
   threadProjectId = {},
-  threadReviewing = null,
   threads = [],
   workspaceSuggestions = [],
 }) {
@@ -162,10 +159,7 @@ export function StartSessionDialog({
         onCreateProject,
         onSelectProject: (projectId) => changeField("projectId", projectId),
         projects,
-        threadActivity,
-        threadAttention,
         threadProjectId,
-        threadReviewing,
         threads,
       }),
       workspace: h(WorkspacePicker, {

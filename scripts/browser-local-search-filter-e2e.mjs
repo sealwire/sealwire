@@ -39,6 +39,7 @@ import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
 import { getFreePort } from "./e2e/harness/ports.mjs";
 import { dumpProcessLogs, stopManagedProcess, waitForHealth } from "./e2e/harness/process.mjs";
 import { projectSwitcherOption } from "./e2e/harness/project-switcher.mjs";
+import { confirmThreadMenuRemoval } from "./e2e/harness/thread-menu.mjs";
 
 const TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
 const DEVICE = "search-filter-device";
@@ -378,8 +379,8 @@ async function main() {
     await page.waitForSelector("#thread-context-menu:not([hidden]) #archive-thread-button", {
       timeout: TIMEOUT_MS,
     });
-    page.once("dialog", (dialog) => dialog.accept());
     await page.click("#archive-thread-button");
+    await confirmThreadMenuRemoval(page, { timeoutMs: TIMEOUT_MS });
     await waitForRowCount(
       page,
       0,
@@ -526,7 +527,7 @@ async function main() {
     // every bucket assertion below.
     await page.click(".project-switcher-trigger");
     await page.waitForSelector(".project-switcher-menu", { timeout: TIMEOUT_MS });
-    await projectSwitcherOption(page, "Default Workspace").click({ timeout: TIMEOUT_MS });
+    await projectSwitcherOption(page, "All sessions").click({ timeout: TIMEOUT_MS });
     await page.waitForFunction(
       () => !document.querySelector("#threads-list .thread-group-header-project"),
       undefined,

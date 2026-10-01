@@ -15,6 +15,7 @@ import { dumpBrowserState, launchBrowser } from "./e2e/harness/browser.mjs";
 import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
 import { startLocalSession } from "./e2e/harness/local-session.mjs";
 import { getFreePort } from "./e2e/harness/ports.mjs";
+import { confirmThreadMenuRemoval } from "./e2e/harness/thread-menu.mjs";
 import {
   dumpProcessLogs,
   stopManagedProcess,
@@ -196,7 +197,7 @@ async function main() {
       timeout: STEP_TIMEOUT_MS,
     });
     const batchMenu = await page.evaluate(menuState);
-    assert.equal(batchMenu.deleteLabel, "Delete 3 sessions permanently");
+    assert.equal(batchMenu.deleteLabel, "Delete 3 sessions…");
     // Every other action takes ONE session. Leaving them live would act on a different
     // set than the rows the user can see highlighted.
     for (const action of ["fork", "archive", "rename", "projects"]) {
@@ -210,7 +211,7 @@ async function main() {
     const outsider = order.find((id) => !range.includes(id));
     await page.click(sel(outsider), { button: "right" });
     await page.waitForFunction(
-      () => document.querySelector("#delete-thread-button")?.textContent === "Delete permanently",
+      () => document.querySelector("#delete-thread-button")?.textContent === "Delete…",
       null,
       { timeout: STEP_TIMEOUT_MS }
     );
@@ -229,7 +230,7 @@ async function main() {
     await page.waitForFunction(
       () =>
         document.querySelector("#delete-thread-button")?.textContent
-        === "Delete 2 sessions permanently",
+        === "Delete 2 sessions…",
       null,
       { timeout: STEP_TIMEOUT_MS }
     );
@@ -269,7 +270,7 @@ async function main() {
     await page.waitForFunction(
       () =>
         document.querySelector("#delete-thread-button")?.textContent
-        === "Delete 3 sessions permanently",
+        === "Delete 3 sessions…",
       null,
       { timeout: STEP_TIMEOUT_MS }
     );
@@ -317,11 +318,12 @@ async function main() {
     await page.waitForFunction(
       () =>
         document.querySelector("#delete-thread-button")?.textContent
-        === "Delete 2 sessions permanently",
+        === "Delete 2 sessions…",
       null,
       { timeout: STEP_TIMEOUT_MS }
     );
     await page.click("#delete-thread-button");
+    const confirmCopy = await confirmThreadMenuRemoval(page, { timeoutMs: STEP_TIMEOUT_MS });
     await page.waitForFunction(
       (ids) =>
         ids.every((id) => !document.querySelector(`.conversation-item[data-thread-id="${id}"]`)),
@@ -329,10 +331,8 @@ async function main() {
       { timeout: STEP_TIMEOUT_MS }
     );
 
-    assert.ok(
-      dialogs.some((message) => /Permanently delete 2 sessions\?/.test(message)),
-      `the confirm must name the count; saw ${JSON.stringify(dialogs)}`
-    );
+    assert.equal(confirmCopy.title, "Delete 2 sessions?", "the confirm must name the count");
+    assert.deepEqual(dialogs, [], "the confirm is the menu's own, not a browser dialog");
     now = await page.evaluate(rows);
     for (const id of survivors) {
       assert.ok(now.some((row) => row.id === id), `unselected session ${id} must survive`);

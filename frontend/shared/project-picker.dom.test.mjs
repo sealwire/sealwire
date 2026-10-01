@@ -15,7 +15,7 @@ const React = (await import("react")).default;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { ProjectPicker } = await import("./project-picker.js");
-const { DEFAULT_WORKSPACE_LABEL } = await import("./project-labels.js");
+const { NO_PROJECT_LABEL } = await import("./project-labels.js");
 
 const PROJECTS = [
   { id: "proj_pay", name: "Payments rework" },
@@ -67,9 +67,9 @@ test("the chip names the active project", () => {
   view.cleanup();
 });
 
-test("with no project chosen the chip reads as the default workspace", () => {
+test("with no project chosen the chip says so", () => {
   const view = mount({ activeProjectId: null });
-  assert.match(trigger(view.host).textContent, new RegExp(DEFAULT_WORKSPACE_LABEL));
+  assert.match(trigger(view.host).textContent, new RegExp(NO_PROJECT_LABEL));
   view.cleanup();
 });
 
@@ -122,7 +122,7 @@ test("clicking outside closes the menu", () => {
   view.cleanup();
 });
 
-test("rows carry the activity subtitle the picker is for", () => {
+test("rows count their sessions, and no-project is named for what it means here", () => {
   const view = mount({
     activeProjectId: null,
     threadProjectId: { t1: "proj_pay", t2: "proj_pay" },
@@ -130,16 +130,16 @@ test("rows carry the activity subtitle the picker is for", () => {
       { id: "t1", updated_at: 1_700_000_000 },
       { id: "t2", updated_at: 1_700_000_000 },
     ],
-    threadActivity: new Map([["t1", { tool: "bash" }]]),
   });
   open(view.host);
   const row = [...view.host.querySelectorAll(".project-switcher-option")].find(
     (candidate) => optionLabel(candidate) === "Payments rework"
   );
-
+  assert.equal(row.querySelector(".project-switcher-option-count").textContent, "2");
   assert.equal(
-    row.querySelector(".project-switcher-option-subtitle").textContent,
-    "2 sessions · 1 running"
+    optionLabel(view.host.querySelector(".project-switcher-option")),
+    "No project",
+    "a new session joins no project; it does not join 'All sessions'"
   );
   view.cleanup();
 });

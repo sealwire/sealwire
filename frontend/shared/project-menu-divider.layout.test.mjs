@@ -1,6 +1,6 @@
-// New / rename / delete are actions, not places to go, so the menu shows them as one
-// group under a single divider. Measured in a browser: a later generic rule once
-// reset the divider's border, so reading the declaration proved nothing.
+// The project menu's groups — where you can go, then what you can do — are told apart
+// by dividers, measured in a browser: a later generic rule once reset a divider's
+// border, so reading the declaration proved nothing.
 
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -14,58 +14,77 @@ import { ProjectMenu } from "./project-menu-react.js";
 const h = React.createElement;
 const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 
-const rows = [
-  { id: null, label: "Default Workspace", active: false },
-  { id: "p1", label: "Operation", active: true },
-  { id: "p2", label: "RN", active: false },
-];
+const props = {
+  defaultRow: { id: null, label: "All sessions", count: 3, active: false },
+  projectRows: [
+    { id: "p1", label: "Operation", count: 2, active: true },
+    { id: "p2", label: "RN", count: 1, active: false },
+  ],
+};
 const noop = () => {};
 
-async function dividersByLabel(page, props) {
-  const markup = renderToStaticMarkup(h(ProjectMenu, { rows, ...props }));
+async function render(page, extra) {
+  const markup = renderToStaticMarkup(h(ProjectMenu, { ...props, ...extra }));
   await page.setContent(
-    `<!doctype html><html><head><style>${styles}</style></head><body>${markup}</body></html>`,
+    `<!doctype html><html data-theme="light"><head><style>${styles}</style></head><body>${markup}</body></html>`,
     { waitUntil: "load" }
   );
+}
+
+// The menu's children in order: a visible divider reads "—", the heading "#…".
+function layout(page) {
   return page.evaluate(() =>
-    [...document.querySelectorAll(".project-switcher-menu button")].map((node) => {
-      const style = getComputedStyle(node);
-      const divider = style.borderTopStyle !== "none" && parseFloat(style.borderTopWidth) > 0;
-      return [node.textContent.replace("✓", "").trim(), divider];
+    [...document.querySelector(".project-switcher-menu").children].map((node) => {
+      if (node.matches(".context-menu-separator")) {
+        const box = node.getBoundingClientRect();
+        const painted = getComputedStyle(node).backgroundColor !== "rgba(0, 0, 0, 0)";
+        return box.height >= 1 && box.width > 0 && painted ? "—" : "invisible divider";
+      }
+      if (node.matches(".context-menu-heading")) return `#${node.textContent}`;
+      if (node.matches(".context-menu-filter")) return "filter";
+      return node.querySelector(".context-menu-label")?.textContent ?? node.textContent;
     })
   );
 }
 
-test("the project menu separates actions from projects with exactly one divider", async () => {
+test("places and actions are separate groups, each behind a visible divider", async () => {
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
 
     // Local: create is the only action.
-    assert.deepEqual(await dividersByLabel(page, { onCreateProject: noop }), [
-      ["Default Workspace", false],
-      ["Operation", false],
-      ["RN", false],
-      ["New project", true],
+    await render(page, { onCreateProject: noop });
+    assert.deepEqual(await layout(page), [
+      "filter",
+      "All sessions",
+      "—",
+      "#Projects",
+      "Operation",
+      "RN",
+      "—",
+      "New project…",
     ]);
 
-    // Remote: create joins rename/delete, destructive last.
-    assert.deepEqual(
-      await dividersByLabel(page, {
-        activeProject: { id: "p1", name: "Operation" },
-        onCreateProject: noop,
-        onDeleteProject: noop,
-        onRenameProject: noop,
-      }),
-      [
-        ["Default Workspace", false],
-        ["Operation", false],
-        ["RN", false],
-        ["New project", true],
-        ["Rename project", false],
-        ["Delete project", false],
-      ]
-    );
+    // Remote: rename/delete for the active project come last, after their own divider.
+    await render(page, {
+      activeProject: { id: "p1", name: "Operation" },
+      onCreateProject: noop,
+      onDeleteProject: noop,
+      onRenameProject: noop,
+    });
+    assert.deepEqual(await layout(page), [
+      "filter",
+      "All sessions",
+      "—",
+      "#Projects",
+      "Operation",
+      "RN",
+      "—",
+      "New project…",
+      "—",
+      "Rename project…",
+      "Delete project…",
+    ]);
   } finally {
     await browser.close();
   }
@@ -75,18 +94,11 @@ test("delete paints in the danger colour, unlike rename", async () => {
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
-    const markup = renderToStaticMarkup(
-      h(ProjectMenu, {
-        activeProject: { id: "p1", name: "Operation" },
-        onDeleteProject: noop,
-        onRenameProject: noop,
-        rows,
-      })
-    );
-    await page.setContent(
-      `<!doctype html><html><head><style>${styles}</style></head><body>${markup}</body></html>`,
-      { waitUntil: "load" }
-    );
+    await render(page, {
+      activeProject: { id: "p1", name: "Operation" },
+      onDeleteProject: noop,
+      onRenameProject: noop,
+    });
     const [rename, del] = await page.evaluate(() =>
       [...document.querySelectorAll(".project-switcher-manage")].map((node) => getComputedStyle(node).color)
     );

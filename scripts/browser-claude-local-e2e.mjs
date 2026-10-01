@@ -150,10 +150,6 @@ async function main() {
     );
     await page.click("#close-session-details-modal");
 
-    page.once("dialog", (dialog) => {
-      assert.match(dialog.message(), /Claude Code storage/);
-      dialog.dismiss();
-    });
     await renderedThread.click({ button: "right" });
     await page.waitForFunction(
       () => {
@@ -165,6 +161,14 @@ async function main() {
       { timeout: LOCAL_TIMEOUT_MS }
     );
     await page.click("#delete-thread-button");
+    await page.waitForSelector("#thread-menu-confirm:not([hidden])", { timeout: LOCAL_TIMEOUT_MS });
+    assert.match(
+      await page.textContent("#thread-menu-confirm-body"),
+      /Claude Code storage/,
+      "the confirm names the provider whose files go"
+    );
+    // Backing out: nothing is deleted here.
+    await page.keyboard.press("Escape");
 
     // Archive is NOT offered for Claude: its bridge has no archive, and the relay
     // has no stand-in — "archive" means dropping the thread from local history,

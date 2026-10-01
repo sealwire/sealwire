@@ -1,6 +1,7 @@
 import React from "react";
 
 import { InlineTitleEditor } from "./inline-title-editor.js";
+import { ContextMenu, MenuItem, MenuSeparator } from "./context-menu-react.js";
 import { selectThreadDot } from "./thread-dot.js";
 // The idle slot's content. A provider we ship no mark for leaves it empty rather
 // than borrowing another vendor's logo, which would mislabel the session.
@@ -48,6 +49,25 @@ const h = React.createElement;
 // match), and every action is an explicit control (a × button, a pin button) —
 // there is no right-click or hover affordance to depend on. Closing a tab only
 // closes the view; the session is untouched.
+//
+// A click only ever switches. Renaming is a double click on a kept tab, F2, or the
+// right-click menu — never a click, which the switch and the drag already share.
+
+/**
+ * Which tabs "Close other tabs" and "Close tabs to the right" would close. Pinned tabs
+ * are never swept up by either, as in a browser: pinning is how you say "keep this".
+ */
+export function tabCloseTargets(items, tabId) {
+  const index = items.findIndex((item) => item.tabId === tabId);
+  if (index < 0) {
+    return { others: [], right: [] };
+  }
+  const closable = (item) => !item.pinned && item.tabId !== tabId;
+  return {
+    others: items.filter(closable).map((item) => item.tabId),
+    right: items.slice(index + 1).filter(closable).map((item) => item.tabId),
+  };
+}
 
 function CloseGlyph() {
   return h(
@@ -98,6 +118,7 @@ function SessionTab({
   onBeginRename,
   onCommitRename,
   onCancelRename,
+  onOpenMenu,
 }) {
   // One source of truth for the activity dot, shared with the thread list and
   // project cards — a tab must never disagree with the sidebar about a session.
@@ -122,18 +143,13 @@ function SessionTab({
       // Read by the e2e suite, which has no way to ask about an italic title.
       "data-preview": item.preview ? "true" : undefined,
       "data-editing": editing ? "true" : undefined,
-      // Right-click is the rename gesture. It goes straight into the editor rather
-      // than opening a one-item menu: the tab IS the target and the label IS the
-      // thing being changed, so a menu would only add a click. Double-click is not
-      // available — it already promotes a preview tab (see onDoubleClick below).
-      onContextMenu: renamable
+      onContextMenu: onOpenMenu && !editing
         ? (event) => {
             event.preventDefault();
             // The sidebar row's own context menu lives on an ancestor; without this
-            // a right-click on a tab would also open that session menu behind the
-            // editor.
+            // a right-click on a tab would also open that session menu.
             event.stopPropagation();
-            onBeginRename(item.tabId);
+            onOpenMenu(item.tabId, event.clientX, event.clientY);
           }
         : undefined,
     },
@@ -186,12 +202,15 @@ function SessionTab({
                   }
                 }
               : undefined,
-            // Same keep gesture as the sidebar row, on the other end of the journey:
-            // you peeked, you stayed, now double click to stop it being replaceable.
-            // Bound to the tab's own button so a double click on the close or pin
-            // control — which stop their own clicks — can never promote a tab that is
-            // on its way out.
-            onDoubleClick: () => onPromote?.(item.tabId),
+            // A provisional (italic) tab is kept by a double click, as in the sidebar; only
+            // a tab already kept renames on one, so a double click never means both.
+            onDoubleClick: () => {
+              if (item.preview || !renamable) {
+                onPromote?.(item.tabId);
+              } else {
+                onBeginRename(item.tabId);
+              }
+            },
             title: item.tooltip || item.title,
           },
           h(
@@ -204,35 +223,41 @@ function SessionTab({
           h("span", { className: "session-tab-title" }, item.title),
           dot ? h("span", { className: "sr-only" }, dot.label) : null
         ),
-    h(
-      "button",
-      {
-        type: "button",
-        className: `session-tab-pin${item.pinned ? " is-pinned" : ""}`,
-        title: item.pinned ? "Unpin tab" : "Pin tab",
-        "aria-label": item.pinned ? `Unpin ${item.title}` : `Pin ${item.title}`,
-        "aria-pressed": item.pinned ? "true" : "false",
-        onClick: (event) => {
-          event.stopPropagation();
-          onTogglePin?.(item.tabId, !item.pinned);
-        },
-      },
-      h(PinGlyph, { filled: item.pinned })
-    ),
-    h(
-      "button",
-      {
-        type: "button",
-        className: "session-tab-close",
-        title: "Close tab",
-        "aria-label": `Close ${item.title}`,
-        onClick: (event) => {
-          event.stopPropagation();
-          onClose?.(item.tabId);
-        },
-      },
-      h(CloseGlyph)
-    )
+    // Hidden while renaming: the box widens over where they sit, and a stray click
+    // there would close or re-pin the tab being edited.
+    editing
+      ? null
+      : h(
+          "button",
+          {
+            type: "button",
+            className: `session-tab-pin${item.pinned ? " is-pinned" : ""}`,
+            title: item.pinned ? "Unpin tab" : "Pin tab",
+            "aria-label": item.pinned ? `Unpin ${item.title}` : `Pin ${item.title}`,
+            "aria-pressed": item.pinned ? "true" : "false",
+            onClick: (event) => {
+              event.stopPropagation();
+              onTogglePin?.(item.tabId, !item.pinned);
+            },
+          },
+          h(PinGlyph, { filled: item.pinned })
+        ),
+    editing
+      ? null
+      : h(
+          "button",
+          {
+            type: "button",
+            className: "session-tab-close",
+            title: "Close tab",
+            "aria-label": `Close ${item.title}`,
+            onClick: (event) => {
+              event.stopPropagation();
+              onClose?.(item.tabId);
+            },
+          },
+          h(CloseGlyph)
+        )
   );
 }
 
@@ -251,6 +276,8 @@ export function SessionTabStrip({
   focusedTabId = null,
   onFocus = null,
   onClose = null,
+  // `(tabIds, { keepTabId })`: "Close other tabs" / "Close tabs to the right" as one act.
+  onCloseTabs = null,
   onPromote = null,
   onTogglePin = null,
   onMove = null,
@@ -269,6 +296,8 @@ export function SessionTabStrip({
   // edit is transient UI, not navigation state — it must not survive a reload or land
   // in the canonical session-view store.
   const [editingTabId, setEditingTabId] = useState(null);
+  // The right-click menu: which tab, and where.
+  const [menu, setMenu] = useState(null);
 
   const stripRef = useRef(null);
   const gestureRef = useRef(null);
@@ -634,6 +663,43 @@ export function SessionTabStrip({
 
   const cancelRename = () => setEditingTabId(null);
 
+  // F2 renames the tab on screen from anywhere the key is not already someone else's:
+  // a field being typed in, or an open dialog.
+  const focusedRef = useRef(null);
+  focusedRef.current = items.find((item) => item.tabId === focusedTabId) || null;
+  useEffect(() => {
+    if (!onRename) {
+      return undefined;
+    }
+    const doc =
+      stripRef.current?.ownerDocument || (typeof document !== "undefined" ? document : null);
+    if (!doc) {
+      return undefined;
+    }
+    const onKeyDown = (event) => {
+      if (event.key !== "F2" || event.defaultPrevented) {
+        return;
+      }
+      const target = event.target;
+      const typing =
+        target?.closest?.("input, textarea, select, [contenteditable=''], [contenteditable='true']");
+      if (typing || doc.querySelector("dialog[open]")) {
+        return;
+      }
+      const tab = focusedRef.current;
+      if (!tab?.threadId) {
+        return;
+      }
+      event.preventDefault();
+      setEditingTabId(tab.tabId);
+    };
+    doc.addEventListener("keydown", onKeyDown);
+    return () => doc.removeEventListener("keydown", onKeyDown);
+  }, [Boolean(onRename), items.length > 0]);
+
+  const openMenu = (tabId, x, y) => setMenu({ tabId, x, y });
+  const closeMenu = () => setMenu(null);
+
   const commitRename = (tabId, value) => {
     setEditingTabId(null);
     const item = items.find((entry) => entry.tabId === tabId);
@@ -695,6 +761,7 @@ export function SessionTabStrip({
         onBeginRename: onRename ? beginRename : null,
         onCommitRename: commitRename,
         onCancelRename: cancelRename,
+        onOpenMenu: openMenu,
       })
     ),
     onNewTab
@@ -709,7 +776,75 @@ export function SessionTabStrip({
           },
           "+"
         )
-      : null
+      : null,
+    menu ? h(TabMenu, {
+      items,
+      menu,
+      onBeginRename: onRename ? beginRename : null,
+      onClose,
+      onCloseTabs,
+      onDismiss: closeMenu,
+      onTogglePin,
+    }) : null
+  );
+}
+
+// The tab's right-click menu: this tab's own actions first, then the closing ones —
+// the grouping a browser uses. Closing a tab never deletes the session.
+function TabMenu({ items, menu, onBeginRename, onClose, onCloseTabs, onDismiss, onTogglePin }) {
+  const item = items.find((entry) => entry.tabId === menu.tabId);
+  if (!item) {
+    return null;
+  }
+  const { others, right } = tabCloseTargets(items, item.tabId);
+  const run = (action) => () => {
+    onDismiss();
+    action();
+  };
+  const own = [
+    onBeginRename && item.threadId
+      ? h(MenuItem, {
+          hint: "F2",
+          key: "rename",
+          label: "Rename…",
+          onSelect: run(() => onBeginRename(item.tabId)),
+        })
+      : null,
+    onTogglePin
+      ? h(MenuItem, {
+          key: "pin",
+          label: item.pinned ? "Unpin tab" : "Pin tab",
+          onSelect: run(() => onTogglePin(item.tabId, !item.pinned)),
+        })
+      : null,
+  ].filter(Boolean);
+  const closing = [
+    onClose
+      ? h(MenuItem, { key: "close", label: "Close", onSelect: run(() => onClose(item.tabId)) })
+      : null,
+    onCloseTabs
+      ? h(MenuItem, {
+          disabled: others.length === 0,
+          key: "others",
+          label: "Close other tabs",
+          onSelect: run(() => onCloseTabs(others, { keepTabId: item.tabId })),
+        })
+      : null,
+    onCloseTabs
+      ? h(MenuItem, {
+          disabled: right.length === 0,
+          key: "right",
+          label: "Close tabs to the right",
+          onSelect: run(() => onCloseTabs(right, { keepTabId: item.tabId })),
+        })
+      : null,
+  ].filter(Boolean);
+  return h(
+    ContextMenu,
+    { anchor: { x: menu.x, y: menu.y }, ariaLabel: `Tab ${item.title}`, onClose: onDismiss },
+    ...own,
+    own.length && closing.length ? h(MenuSeparator, { key: "sep" }) : null,
+    ...closing
   );
 }
 

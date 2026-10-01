@@ -109,10 +109,7 @@ export function ForkSessionDialog({
   // at submit time — a value read when the dialog opened can be stale by then.
   sourceSettings = null,
   sourceProjectId = null,
-  threadActivity = null,
-  threadAttention = null,
   threadProjectId = {},
-  threadReviewing = null,
   threads = [],
   workspaceSuggestions = [],
 }) {
@@ -266,13 +263,13 @@ export function ForkSessionDialog({
           || shownFields.projectId === FORK_PROJECT_NONE
             ? null
             : shownFields.projectId,
-        // Inheriting is NOT the Default Workspace: one omits `project_id` and the
-        // relay files the fork with its source, the other explicitly unassigns.
+        // Inheriting is NOT "no project": one omits `project_id` and the relay files
+        // the fork with its source, the other explicitly unassigns.
         inheritRow: {
           active: shownFields.projectId === FORK_PROJECT_INHERIT,
           chipLabel: sourceProjectName || INHERIT_LABEL,
+          hint: sourceProjectName || null,
           label: INHERIT_LABEL,
-          subtitle: sourceProjectName || "resolved when the fork is created",
         },
         label: "Project",
         onCreateProject,
@@ -286,10 +283,7 @@ export function ForkSessionDialog({
                 : projectId
           ),
         projects,
-        threadActivity,
-        threadAttention,
         threadProjectId,
-        threadReviewing,
         threads,
       }),
       workspace: h(WorkspacePicker, {

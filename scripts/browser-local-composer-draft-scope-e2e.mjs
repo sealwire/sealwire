@@ -25,6 +25,7 @@ import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
 import { startLocalSession } from "./e2e/harness/local-session.mjs";
 import { getFreePort } from "./e2e/harness/ports.mjs";
 import { stopManagedProcess, waitForHealth } from "./e2e/harness/process.mjs";
+import { confirmThreadMenuRemoval } from "./e2e/harness/thread-menu.mjs";
 
 const ROOT = process.cwd();
 const SHOTS = path.join(ROOT, ".tmp-composer-draft-scope-e2e");
@@ -294,9 +295,8 @@ async function main() {
     await pasteAnImage(page);
     step("A holds a draft again, and is about to be deleted");
 
-    // Deleting permanently asks first; Playwright dismisses dialogs unless told.
-    page.once("dialog", (dialog) => dialog.accept());
     await threadContextAction(page, threadA, "#delete-thread-button");
+    await confirmThreadMenuRemoval(page, { timeoutMs: 20000 });
     await page.waitForFunction(
       (id) => !document.querySelector(`#threads-list [data-thread-id="${id}"]`),
       threadA,

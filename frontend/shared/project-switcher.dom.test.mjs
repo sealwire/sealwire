@@ -1,7 +1,7 @@
 // The Project switcher's behaviour contract.
 //
 // The switcher is navigation, not filtering: every selection leaves the session
-// list complete, so the default workspace is a real destination rather than a way
+// list complete, so "All sessions" is a real destination rather than a way
 // out of a narrowed state. These tests pin the parts that are easy to get subtly wrong —
 // a stale selection, and Escape.
 //
@@ -21,7 +21,7 @@ const React = (await import("react")).default;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { ProjectSwitcher } = await import("./project-switcher.js");
-const { DEFAULT_WORKSPACE_LABEL } = await import("./project-labels.js");
+const { ALL_SESSIONS_LABEL } = await import("./project-labels.js");
 
 const PROJECTS = [
   { id: "proj_pay", name: "Payments rework" },
@@ -55,20 +55,21 @@ function trigger(host) {
   return host.querySelector(".project-switcher-trigger");
 }
 
-// A row's textContent now concatenates label, subtitle and tick; the action rows
-// are still plain text buttons.
+// A row's textContent also carries its count, so read the label span.
 function optionLabel(node) {
-  return node.querySelector(".project-switcher-option-label")?.textContent ?? node.textContent;
+  return node.querySelector(".context-menu-label")?.textContent ?? node.textContent;
+}
+
+function rows(host) {
+  return [...host.querySelectorAll(".project-switcher-menu .context-menu-button")];
 }
 
 function options(host) {
-  return [...host.querySelectorAll(".project-switcher-option")].map(optionLabel);
+  return rows(host).map(optionLabel);
 }
 
 function clickOption(host, label) {
-  const node = [...host.querySelectorAll(".project-switcher-option")].find(
-    (candidate) => optionLabel(candidate) === label
-  );
+  const node = rows(host).find((candidate) => optionLabel(candidate) === label);
   assert.ok(node, `no option labelled "${label}"`);
   act(() => {
     node.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
@@ -81,9 +82,9 @@ function open(host) {
   });
 }
 
-test("with nothing selected it reads as the default workspace", () => {
+test("with nothing selected it reads as All sessions", () => {
   const view = mount({ activeProjectId: null });
-  assert.equal(trigger(view.host).textContent, DEFAULT_WORKSPACE_LABEL);
+  assert.equal(trigger(view.host).textContent, ALL_SESSIONS_LABEL);
   view.cleanup();
 });
 
@@ -97,20 +98,20 @@ test("with a project selected it names the project", () => {
 // grouper independently falls back to plain cwd grouping for an id it cannot
 // resolve, so the control has to reach the same answer or the header would name a
 // project the list is no longer showing.
-test("a selection whose project is gone falls back to the default workspace, not a dangling name", () => {
+test("a selection whose project is gone falls back to All sessions, not a dangling name", () => {
   const view = mount({ activeProjectId: "proj_deleted" });
-  assert.equal(trigger(view.host).textContent, DEFAULT_WORKSPACE_LABEL);
+  assert.equal(trigger(view.host).textContent, ALL_SESSIONS_LABEL);
   view.cleanup();
 });
 
-test("the menu lists the default workspace, every project, and the create action", () => {
+test("the menu lists All sessions, every project, and the create action", () => {
   const view = mount({ activeProjectId: null, onCreateProject() {} });
   open(view.host);
   assert.deepEqual(options(view.host), [
-    DEFAULT_WORKSPACE_LABEL,
-    "Payments rework",
+    ALL_SESSIONS_LABEL,
     "Docs",
-    "New project",
+    "Payments rework",
+    "New project…",
   ]);
   view.cleanup();
 });
@@ -118,7 +119,7 @@ test("the menu lists the default workspace, every project, and the create action
 test("without a create handler the create action is absent rather than inert", () => {
   const view = mount({ activeProjectId: null });
   open(view.host);
-  assert.equal(options(view.host).includes("New project"), false);
+  assert.equal(options(view.host).includes("New project…"), false);
   view.cleanup();
 });
 
@@ -136,11 +137,11 @@ test("choosing a project reports its id and closes the menu", () => {
 // Null, not the string "sessions" or an empty string: the caller maps it to the
 // sessions context, and a falsy-but-not-null id would read as "some project" to a
 // truthiness check downstream.
-test("choosing the default workspace reports null", () => {
+test("choosing All sessions reports null", () => {
   const chosen = [];
   const view = mount({ activeProjectId: "proj_pay", onSelectProject: (id) => chosen.push(id) });
   open(view.host);
-  clickOption(view.host, DEFAULT_WORKSPACE_LABEL);
+  clickOption(view.host, ALL_SESSIONS_LABEL);
 
   assert.deepEqual(chosen, [null]);
   view.cleanup();
@@ -202,10 +203,10 @@ test("renderHeading:false drops the heading element and keeps the control whole"
 
   open(view.host);
   assert.deepEqual(options(view.host), [
-    DEFAULT_WORKSPACE_LABEL,
-    "Payments rework",
+    ALL_SESSIONS_LABEL,
     "Docs",
-    "New project",
+    "Payments rework",
+    "New project…",
   ]);
   view.cleanup();
 });
@@ -249,29 +250,25 @@ test("the icon trigger is marked active only while a project is pinned", () => {
   none.cleanup();
 });
 
-// Rename/delete moved INTO this menu. The handover recorded the opposite decision —
-// "not in the switcher menu; two places to keep in step, and a destructive action one
-// keystroke from a navigation action" — but its premise was that the pinned group's
-// own header offered them. On a touch surface that header could not: the buttons were
-// opacity 0 behind :hover, and the row itself is now gone. The user reversed the call
-// deliberately; the divider keeps the destructive pair off the navigation list.
+// Remote's drawer has no group header to carry these, so the switcher does — for the
+// active project only, behind a divider.
 test("the menu offers rename/delete for the ACTIVE project only", () => {
   const view = mount({ activeProjectId: "proj_pay", onRenameProject() {}, onDeleteProject() {} });
   open(view.host);
 
   assert.deepEqual(options(view.host), [
-    DEFAULT_WORKSPACE_LABEL,
-    "Payments rework",
+    ALL_SESSIONS_LABEL,
     "Docs",
-    "Rename project",
-    "Delete project",
+    "Payments rework",
+    "Rename project…",
+    "Delete project…",
   ]);
   view.cleanup();
 });
 
 // PRODUCTION passes all three handlers, and none of the tests above did — so the order
 // they actually render in was never asserted. It was wrong: rename/delete came out
-// ABOVE "New project", i.e. destructive actions sitting in the middle of the list of
+// ABOVE "New project…", i.e. destructive actions sitting in the middle of the list of
 // places you can navigate to, which is the arrangement the whole "put them behind a
 // divider" argument exists to avoid.
 test("with create AND management enabled, the destructive pair is last", () => {
@@ -284,12 +281,12 @@ test("with create AND management enabled, the destructive pair is last", () => {
   open(view.host);
 
   assert.deepEqual(options(view.host), [
-    DEFAULT_WORKSPACE_LABEL,
-    "Payments rework",
+    ALL_SESSIONS_LABEL,
     "Docs",
-    "New project",
-    "Rename project",
-    "Delete project",
+    "Payments rework",
+    "New project…",
+    "Rename project…",
+    "Delete project…",
   ]);
   view.cleanup();
 });
@@ -303,7 +300,7 @@ test("choosing delete reports the active project's id and name, and closes", () 
     onDeleteProject: (id, name) => deleted.push([id, name]),
   });
   open(view.host);
-  clickOption(view.host, "Delete project");
+  clickOption(view.host, "Delete project…");
 
   assert.deepEqual(deleted, [["proj_docs", "Docs"]]);
   assert.equal(view.host.querySelector(".project-switcher-menu"), null, "menu closes");
@@ -315,7 +312,7 @@ test("choosing delete reports the active project's id and name, and closes", () 
 // the `is-active` highlight and the menu's tick all still used the raw id — so after
 // deleting the selected project the icon stayed lit and no menu row was marked, while
 // the list had already gone back to plain cwd grouping. Three surfaces, two answers.
-test("a stale selection reads as the default workspace in the marking too, not just the label", () => {
+test("a stale selection reads as All sessions in the marking too, not just the label", () => {
   const view = mount({
     activeProjectId: "proj_deleted",
     triggerIcon: React.createElement("i", null),
@@ -328,7 +325,7 @@ test("a stale selection reads as the default workspace in the marking too, not j
 
   open(view.host);
   const active = view.host.querySelector(".project-switcher-option.is-active");
-  assert.equal(optionLabel(active), DEFAULT_WORKSPACE_LABEL, "the default is the marked row");
+  assert.equal(optionLabel(active), ALL_SESSIONS_LABEL, "the default is the marked row");
   view.cleanup();
 });
 
@@ -339,7 +336,7 @@ test("with no project selected there is nothing to rename or delete", () => {
   const pinned = mount({ activeProjectId: "proj_pay", onRenameProject() {}, onDeleteProject() {} });
   open(pinned.host);
   assert.equal(
-    options(pinned.host).includes("Rename project"),
+    options(pinned.host).includes("Rename project…"),
     true,
     "precondition: the menu can offer rename at all"
   );
@@ -348,8 +345,8 @@ test("with no project selected there is nothing to rename or delete", () => {
   const view = mount({ activeProjectId: null, onRenameProject() {}, onDeleteProject() {} });
   open(view.host);
 
-  assert.equal(options(view.host).includes("Rename project"), false);
-  assert.equal(options(view.host).includes("Delete project"), false);
+  assert.equal(options(view.host).includes("Rename project…"), false);
+  assert.equal(options(view.host).includes("Delete project…"), false);
   view.cleanup();
 });
 
@@ -361,16 +358,207 @@ test("choosing rename reports the active project's id and name, and closes", () 
     onDeleteProject() {},
   });
   open(view.host);
-  clickOption(view.host, "Rename project");
+  clickOption(view.host, "Rename project…");
 
   assert.deepEqual(renamed, [["proj_docs", "Docs"]]);
   assert.equal(view.host.querySelector(".project-switcher-menu"), null, "menu closes");
   view.cleanup();
 });
 
-test("an empty project list still offers the default workspace and creating one", () => {
+test("an empty project list still offers All sessions and creating one", () => {
   const view = mount({ activeProjectId: null, onCreateProject() {}, projects: [] });
   open(view.host);
-  assert.deepEqual(options(view.host), [DEFAULT_WORKSPACE_LABEL, "New project"]);
+  assert.deepEqual(options(view.host), [ALL_SESSIONS_LABEL, "New project…"]);
+  view.cleanup();
+});
+
+function typeFilter(host, value) {
+  const input = host.querySelector(".project-switcher-menu .context-menu-filter input");
+  assert.ok(input, "the menu opens with a filter");
+  const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value").set;
+  act(() => {
+    setter.call(input, value);
+    input.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+  });
+  return input;
+}
+
+function press(target, key, init = {}) {
+  act(() => {
+    target.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key, bubbles: true, ...init }));
+  });
+}
+
+test("rows count sessions, and the most recently used project comes first", () => {
+  const view = mount({
+    activeProjectId: null,
+    threadProjectId: { t1: "proj_pay", t2: "proj_pay" },
+    threads: [
+      { id: "t1", updated_at: 200 },
+      { id: "t2", updated_at: 100 },
+      { id: "t3", updated_at: 50 },
+    ],
+  });
+  open(view.host);
+  const counts = rows(view.host).map((row) => [
+    optionLabel(row),
+    row.querySelector(".context-menu-hint")?.textContent ?? null,
+  ]);
+  assert.deepEqual(counts, [
+    [ALL_SESSIONS_LABEL, "3"],
+    ["Payments rework", "2"],
+    ["Docs", "0"],
+  ]);
+  view.cleanup();
+});
+
+test("the filter takes focus on open and narrows to matching projects", () => {
+  const view = mount({ activeProjectId: null, onCreateProject() {} });
+  open(view.host);
+  const input = view.host.querySelector(".context-menu-filter input");
+  assert.equal(document.activeElement, input, "typing works without a click first");
+
+  typeFilter(view.host, "pay");
+  assert.deepEqual(options(view.host), ["Payments rework", "Create “pay”"]);
+  assert.equal(view.host.querySelector(".context-menu-heading"), null, "the heading steps aside");
+  view.cleanup();
+});
+
+test("with nothing matching, the typed name is offered as a new project", () => {
+  const created = [];
+  const view = mount({ activeProjectId: null, onCreateProject: (name) => created.push(name) });
+  open(view.host);
+  typeFilter(view.host, "Ops");
+  assert.deepEqual(options(view.host), ["Create “Ops”"]);
+  clickOption(view.host, "Create “Ops”");
+  assert.deepEqual(created, ["Ops"]);
+  view.cleanup();
+});
+
+test("New project without a typed name asks the host for one", () => {
+  const created = [];
+  const view = mount({ activeProjectId: null, onCreateProject: (name) => created.push(name) });
+  open(view.host);
+  clickOption(view.host, "New project…");
+  assert.deepEqual(created, [null]);
+  view.cleanup();
+});
+
+test("arrow keys move through the rows and Enter chooses", () => {
+  const chosen = [];
+  const view = mount({ activeProjectId: null, onSelectProject: (id) => chosen.push(id) });
+  open(view.host);
+  const input = view.host.querySelector(".context-menu-filter input");
+  // Opens on the current row (All sessions); one step down is the first project.
+  press(input, "ArrowDown");
+  press(input, "Enter");
+  assert.deepEqual(chosen, ["proj_docs"]);
+  view.cleanup();
+});
+
+test("a typed filter puts Enter on the first match", () => {
+  const chosen = [];
+  const view = mount({ activeProjectId: null, onSelectProject: (id) => chosen.push(id) });
+  open(view.host);
+  const input = typeFilter(view.host, "pay");
+  press(input, "Enter");
+  assert.deepEqual(chosen, ["proj_pay"]);
+  view.cleanup();
+});
+
+test("the shortcut opens the menu from anywhere, and only with a modifier", () => {
+  const view = mount({ activeProjectId: null, shortcut: { key: "p", hint: "⌘P" } });
+  press(document.body, "p");
+  assert.equal(view.host.querySelector(".project-switcher-menu"), null, "a bare P is typing");
+  press(document.body, "p", { metaKey: true });
+  assert.ok(view.host.querySelector(".project-switcher-menu"));
+  assert.equal(view.host.querySelector(".context-menu-filter .context-menu-hint").textContent, "⌘P");
+  view.cleanup();
+});
+
+test("deleting a project with sessions asks in place first", () => {
+  const deleted = [];
+  const view = mount({
+    activeProjectId: "proj_pay",
+    onDeleteProject: (id, name) => deleted.push([id, name]),
+    threadProjectId: { t1: "proj_pay" },
+    threads: [{ id: "t1", updated_at: 1 }],
+  });
+  open(view.host);
+  clickOption(view.host, "Delete project…");
+  assert.deepEqual(deleted, [], "nothing goes before the confirm");
+  const confirm = view.host.querySelector(".project-switcher-menu .context-menu-confirm");
+  assert.match(confirm.textContent, /Delete project “Payments rework”\?/);
+  assert.match(confirm.textContent, /Its 1 session leaves the project\. No sessions are deleted\./);
+  assert.equal(document.activeElement?.textContent, "Cancel", "Cancel holds focus");
+
+  act(() => {
+    confirm
+      .querySelector(".context-menu-confirm-danger")
+      .dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+  });
+  assert.deepEqual(deleted, [["proj_pay", "Payments rework"]]);
+  assert.equal(view.host.querySelector(".project-switcher-menu"), null);
+  view.cleanup();
+});
+
+// The current row is said by its check alone; a highlight on it at rest would also
+// stop it reacting to the cursor.
+test("nothing is highlighted when the menu opens", () => {
+  const view = mount({ activeProjectId: "proj_docs" });
+  open(view.host);
+  assert.equal(view.host.querySelector(".project-switcher-menu .is-highlighted"), null);
+  view.cleanup();
+});
+
+test("a project with members outside the loaded list still asks before deleting", () => {
+  const deleted = [];
+  const view = mount({
+    activeProjectId: "proj_pay",
+    onDeleteProject: (...args) => deleted.push(args),
+    threadProjectId: { old_1: "proj_pay", old_2: "proj_pay" },
+    threads: [],
+  });
+  open(view.host);
+  clickOption(view.host, "Delete project…");
+  assert.deepEqual(deleted, [], "an empty screen is not an empty project");
+  assert.match(
+    view.host.querySelector(".context-menu-confirm").textContent,
+    /Its 2 sessions leave the project/
+  );
+  view.cleanup();
+});
+
+test("an empty project goes at once and says so, for the host to offer an Undo", () => {
+  const deleted = [];
+  const view = mount({ activeProjectId: "proj_pay", onDeleteProject: (...args) => deleted.push(args) });
+  open(view.host);
+  clickOption(view.host, "Delete project…");
+  assert.deepEqual(deleted, [["proj_pay", "Payments rework", { sessionCount: 0 }]]);
+  view.cleanup();
+});
+
+// Confirming a pinyin candidate is an Enter too; it must pick the characters, not the row.
+test("keys pressed while an input method is composing never act on the menu", () => {
+  const chosen = [];
+  const created = [];
+  const view = mount({
+    activeProjectId: null,
+    onCreateProject: (name) => created.push(name),
+    onSelectProject: (id) => chosen.push(id),
+  });
+  open(view.host);
+  const input = typeFilter(view.host, "pay");
+  press(input, "ArrowDown", { isComposing: true });
+  press(input, "Enter", { isComposing: true });
+  press(input, "Enter", { keyCode: 229 });
+  assert.deepEqual(chosen, []);
+  assert.deepEqual(created, []);
+  assert.ok(view.host.querySelector(".project-switcher-menu"), "the menu stays open");
+  assert.equal(
+    optionLabel(view.host.querySelector(".project-switcher-menu .is-highlighted")),
+    "Payments rework",
+    "and the highlight did not move"
+  );
   view.cleanup();
 });

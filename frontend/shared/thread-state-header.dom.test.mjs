@@ -41,9 +41,6 @@ function renderHeader(group, extra = {}) {
         collapsible: true,
         isCollapsed: false,
         normalizedCwd: group.key,
-        onSelectWorkspace: () => {
-          throw new Error("a state bucket must not be selectable as a workspace");
-        },
         ...extra,
       })
     );
@@ -64,13 +61,12 @@ const [workingBucket] = buildThreadStateGroups(
   { stateOf: () => "working" }
 );
 
-test("a state bucket's label is not a workspace selector", () => {
-  const view = renderHeader(workingBucket);
+test("a state bucket names its state and offers no project actions", () => {
+  const view = renderHeader(workingBucket, { onToggleGroup() {} });
   try {
     assert.equal(view.host.querySelector("[data-select-workspace]"), null);
     assert.equal(view.host.querySelector(".thread-group-name")?.textContent, "Working");
-    assert.equal(view.host.querySelector(".thread-group-name-button"), null);
-    assert.equal(view.host.querySelector(".thread-group-header.is-clickable"), null);
+    assert.equal(view.host.querySelector(".thread-group-more"), null);
   } finally {
     view.cleanup();
   }
@@ -88,22 +84,13 @@ test("a state bucket is tagged so its folder glyph can be dropped", () => {
   }
 });
 
-// The tag is opt-in: an ordinary workspace group must render exactly as it always has,
-// glyph and clickable label included.
+// The tag is opt-in: an ordinary workspace group keeps its glyph.
 test("a workspace group is untouched by the state tag", () => {
-  const view = renderHeader(
-    { key: "/repos/relay", cwd: "/repos/relay", label: "relay", threads: [] },
-    { onSelectWorkspace: () => {} }
-  );
+  const view = renderHeader({ key: "/repos/relay", cwd: "/repos/relay", label: "relay", threads: [] });
   try {
     const header = view.host.querySelector(".thread-group-header");
     assert.equal(header?.dataset.groupKind, undefined);
-    assert.ok(header?.classList.contains("is-clickable"));
-    assert.equal(
-      view.host.querySelector("[data-select-workspace]")?.dataset.selectWorkspace,
-      "/repos/relay"
-    );
-    assert.ok(view.host.querySelector(".thread-group-icon"));
+    assert.ok(view.host.querySelector(".thread-group-icon .thread-group-kind svg"));
   } finally {
     view.cleanup();
   }

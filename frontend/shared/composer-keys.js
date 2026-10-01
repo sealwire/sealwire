@@ -17,6 +17,12 @@ export function enterShouldSubmit(event = {}, { enterSubmits = false } = {}) {
   return true;
 }
 
+// An input method is mid-composition: Enter and the arrows belong to its candidate
+// list, not to whatever the field is in. Takes a native or a React synthetic event.
+export function isImeComposing(event = {}) {
+  return Boolean(event.isComposing || event.nativeEvent?.isComposing || event.keyCode === 229);
+}
+
 function clamp(value, min, max) {
   if (value < min) return min;
   if (value > max) return max;

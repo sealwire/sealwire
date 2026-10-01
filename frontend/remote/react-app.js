@@ -221,6 +221,8 @@ import {
   readThreadFilter,
 } from "../shared/thread-list-store.js";
 import { ProjectSwitcher } from "../shared/project-switcher.js";
+import { offerProjectUndo } from "../shared/project-undo.js";
+import { UndoToast } from "../shared/undo-toast.js";
 import {
   SidebarBellToggle,
   SidebarBrand,
@@ -435,6 +437,10 @@ function RemoteApp() {
   // Which session the actions sheet is open for (null = closed). Held by id, not by
   // object, so the sheet keeps tracking the thread across list refreshes.
   const [actionsSheetThreadId, setActionsSheetThreadId] = useState(null);
+  // The bottom note that offers to undo deleting an empty project. Keyed so a newer one
+  // restarts its own timer; tied to the relay it was raised on.
+  const [undoToast, setUndoToast] = useState(null);
+  const undoRelayRef = useRef(null);
   const [progressVerb, setProgressVerb] = useState(null);
   const verbCyclerRef = useRef(null);
   if (!verbCyclerRef.current) verbCyclerRef.current = createVerbCycler();
@@ -859,11 +865,18 @@ function RemoteApp() {
   useEffect(() => {
     resetRelayScopedState({ threadListStore });
   }, [activeRelayId, threadListStore]);
+  // An Undo is about the relay it was raised on: it goes when you leave that relay, and
+  // the ref lets a click already in flight find out it has.
+  undoRelayRef.current = activeRelayId;
+  useEffect(() => {
+    setUndoToast((current) => (current && current.relayId !== activeRelayId ? null : current));
+  }, [activeRelayId]);
   // Refresh rides the projects_revision snapshot bump, but the broker drops the write
   // receipt, so also refetch eagerly for snappier remote feedback.
   // Must SELECT it, not just refresh the list.
-  const createRemoteProjectForDraft = async (apply, isCurrent) => {
-    const name = promptRemoteProjectName();
+  const createRemoteProjectForDraft = async (apply, isCurrent, presetName = null) => {
+    const name =
+      presetName != null ? String(presetName).trim() || null : promptRemoteProjectName();
     if (!name) return;
     try {
       const projectId = await createProjectAndSelect({
@@ -883,8 +896,10 @@ function RemoteApp() {
     }
   };
 
-  const createRemoteProjectFromToolbar = async () => {
-    const name = promptRemoteProjectName();
+  // `presetName` is what was typed into the switcher's filter; without one, ask.
+  const createRemoteProjectFromToolbar = async (presetName = null) => {
+    const name =
+      presetName != null ? String(presetName).trim() || null : promptRemoteProjectName();
     if (!name) return;
     try {
       await createRemoteProject(name);
@@ -905,11 +920,9 @@ function RemoteApp() {
       renderLog(`Failed to rename project: ${error.message}`);
     }
   };
-  const handleDeleteRemoteProject = async (projectId, name) => {
-    const confirmed = window.confirm(
-      `Delete project "${name}"?\n\nIts sessions become Unassigned — the sessions themselves are not deleted.`
-    );
-    if (!confirmed) return;
+  // The switcher's menu has already confirmed in place — or, for an empty project,
+  // skipped the confirm, which is why it gets an Undo.
+  const handleDeleteRemoteProject = async (projectId, name, { sessionCount = 0 } = {}) => {
     try {
       await deleteRemoteProject(projectId);
       // Move the LOCATION out of the dead project, before the refetch. Writing the
@@ -920,6 +933,14 @@ function RemoteApp() {
       await sessionTabsHost.forgetProject(projectId);
       refreshRemoteProjects();
       renderLog(`Deleted project "${name}".`);
+      const deletedOn = activeRelayId;
+      offerProjectUndo({
+        name,
+        sessionCount,
+        isStillCurrent: () => undoRelayRef.current === deletedOn,
+        recreate: (projectName) => createRemoteProjectFromToolbar(projectName),
+        showUndo: (toast) => setUndoToast({ ...toast, key: Date.now(), relayId: deletedOn }),
+      });
     } catch (error) {
       renderLog(`Failed to delete project: ${error.message}`);
     }
@@ -985,13 +1006,14 @@ function RemoteApp() {
     threads: currentState.threads,
     threadProjectId: remoteProjects.threadProjectId,
     onCreateProject: remoteProjectsReady
-      ? () => {
+      ? (name = null) => {
           const opening = remoteUi.launchDialogGeneration;
           return createRemoteProjectForDraft(
             (projectId) => updateSessionDraft({ projectId }),
             () =>
               remoteUiStore.getState().launchDialogGeneration === opening
-              && document.getElementById("remote-start-session-dialog")?.open === true
+              && document.getElementById("remote-start-session-dialog")?.open === true,
+            name
           );
         }
       : null,
@@ -2392,6 +2414,7 @@ function RemoteApp() {
         activeProjectId,
         projects: remoteProjects.projects,
         projectsReady: remoteProjectsReady,
+        threadProjectId: remoteProjects.threadProjectId || {},
         onSelectProject: setActiveProject,
         onCreateProject: createRemoteProjectFromToolbar,
         onRenameProject: handleRenameRemoteProject,
@@ -2426,6 +2449,15 @@ function RemoteApp() {
           remoteUiStore.getState().setSessionPanelOpen(open);
         },
       }),
+      undoToast
+        ? h(UndoToast, {
+            key: undoToast.key,
+            message: undoToast.message,
+            onDismiss: () =>
+              setUndoToast((current) => (current?.key === undoToast.key ? null : current)),
+            onUndo: undoToast.onUndo,
+          })
+        : null,
       h("div", {
         className: "remote-nav-backdrop",
         hidden: currentState.remoteNavMode !== "drawer",
@@ -2451,6 +2483,7 @@ function RemoteApp() {
           projectsError: remoteProjects.error,
           projectsLoaded: remoteProjects.loaded,
           projectsReady: remoteProjectsReady,
+          threadProjectId: remoteProjects.threadProjectId || {},
           onCreateProject: createRemoteProjectFromToolbar,
           onDeleteProject: handleDeleteRemoteProject,
           onRenameProject: handleRenameRemoteProject,
@@ -2490,6 +2523,12 @@ function RemoteApp() {
               onClose(tabId) {
                 void sessionTabsHost.controller.closeTab(tabId, {
                   context: sessionTabsContext,
+                });
+              },
+              onCloseTabs(tabIds, { keepTabId = null } = {}) {
+                void sessionTabsHost.controller.closeTabs(tabIds, {
+                  context: sessionTabsContext,
+                  keepTabId,
                 });
               },
               onPromote(tabId) {
@@ -2689,7 +2728,7 @@ function RemoteApp() {
           id: "remote-fork-session-dialog",
           sourceThread: forkDialog.sourceThread,
           onCreateProject: remoteProjectsReady
-            ? () => {
+            ? (name = null) => {
                 // The generation, not the source id: reopening on the SAME thread is
                 // still a different opening.
                 const opening = forkDialog.generation || 0;
@@ -2698,7 +2737,8 @@ function RemoteApp() {
                   () => {
                     const current = remoteUiStore.getState().forkDialog;
                     return current?.open && (current.generation || 0) === opening;
-                  }
+                  },
+                  name
                 );
               }
             : null,
@@ -2889,6 +2929,7 @@ function RemoteSidebar({
   activeProjectId,
   projects,
   projectsReady,
+  threadProjectId = {},
   onSelectProject,
   onCreateProject,
   onRenameProject,
@@ -3023,12 +3064,14 @@ function RemoteSidebar({
           ? h(ProjectSwitcher, {
               activeProjectId,
               className: "project-switcher-top",
-              onCreateProject: projectsReady ? () => onCreateProject() : null,
+              onCreateProject: projectsReady ? (name) => onCreateProject(name) : null,
               onDeleteProject: projectsReady ? onDeleteProject : null,
               onRenameProject: projectsReady ? onRenameProject : null,
               onSelectProject,
               projects,
               renderHeading: false,
+              threadProjectId,
+              threads: currentState.threads || [],
               // The same tag the tree marks project groups with. This used to be a
               // bespoke folder outline, on the reasoning that a second mark at 16px
               // would be noise — which held only while projects and cwds shared a
@@ -3290,6 +3333,7 @@ function RemoteHeader({
   projectsError = null,
   projectsLoaded = false,
   projectsReady = false,
+  threadProjectId = {},
   onCreateProject,
   onDeleteProject,
   onOpenInfo,
@@ -3323,6 +3367,8 @@ function RemoteHeader({
         onRenameProject: projectsReady ? onRenameProject : null,
         onSelectProject,
         projects,
+        threadProjectId,
+        threads: currentState.threads || [],
         titleId: "remote-workspace-title",
       })
     : null;

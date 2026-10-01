@@ -308,3 +308,21 @@ test("pinnedProjectId is inert without it, so today's callers are unaffected", (
   assert.deepEqual(idsIn(withoutPin, "/srv/payments"), ["t_hook", "t_e2e", "t_stray"]);
   assertEveryThreadAppearsExactlyOnce(withoutPin, THREADS);
 });
+
+// The list holds only the most recent sessions, so the rows can say "empty" about a
+// project that still has members. Deleting it on that word would drop them for good.
+test("a pinned project counts its members from the full membership, not the loaded rows", () => {
+  const groups = pinned("proj_docs", {
+    threadProjectId: { ...MEMBERSHIP, t_old_1: "proj_docs", t_old_2: "proj_docs" },
+  });
+  const group = groups.find((candidate) => candidate.key === "proj_docs");
+  assert.equal(group.threads.length, 1, "one member is loaded");
+  assert.equal(group.memberCount, 3, "three are members");
+
+  const unloaded = pinned("proj_docs", {
+    threadProjectId: { t_old_1: "proj_docs" },
+  });
+  const empty = unloaded.find((candidate) => candidate.key === "proj_docs");
+  assert.equal(empty.threads.length, 0);
+  assert.equal(empty.memberCount, 1, "no row on screen is not the same as no member");
+});

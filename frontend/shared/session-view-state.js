@@ -19,6 +19,7 @@ import {
   createTabWorkspace,
   findTab,
   findTabByThread,
+  focusTab,
   focusedTab,
   layoutHasThread,
   layoutThreadIds,
@@ -47,7 +48,7 @@ function stringSet(values) {
 // selected" — a state that only existed because a toggle could put you in that mode
 // without a selection. With the toggle gone there is no way to reach it and nothing
 // for it to mean: "no project selected" IS the sessions context, which is what the
-// switcher calls Default Workspace.
+// switcher calls "All sessions".
 //
 // Everything that used to produce it now produces `sessions`, including a persisted
 // entry naming a project that no longer exists.
@@ -584,6 +585,38 @@ function reduceSessionViewCases(snapshot, action = {}, facts = {}) {
         && layoutHasThread(closing.layout, state.location.threadId)
       );
       const closed = closeTab(current, tabId);
+      const next = withWorkspace(state, context, closed);
+      return createSessionViewState({
+        location: closesVisibleThread
+          ? { context: state.location.context, threadId: focusedThreadId(closed) }
+          : state.location,
+        workspaces: next.workspaces,
+      });
+    }
+
+    // "Close other tabs" / "Close tabs to the right": one transition, one history entry.
+    // When the session on screen goes, the tab the menu was opened on takes its place,
+    // not whichever neighbour happened to survive.
+    case "CLOSE_TABS": {
+      const tabIds = [...new Set((action.tabIds || []).map(stringId).filter(Boolean))];
+      const context = action.context
+        ? normalizeSessionViewContext(action.context)
+        : state.location.context;
+      const current = workspaceFor(state, context);
+      const closing = tabIds.map((id) => findTab(current, id)).filter(Boolean);
+      if (!closing.length) {
+        return state;
+      }
+      const closesVisibleThread = Boolean(
+        sameContext(context, state.location.context)
+        && state.location.threadId
+        && closing.some((tab) => layoutHasThread(tab.layout, state.location.threadId))
+      );
+      let closed = closing.reduce((workspace, tab) => closeTab(workspace, tab.id), current);
+      const keepTabId = stringId(action.keepTabId);
+      if (closesVisibleThread && keepTabId && findTab(closed, keepTabId)) {
+        closed = focusTab(closed, keepTabId);
+      }
       const next = withWorkspace(state, context, closed);
       return createSessionViewState({
         location: closesVisibleThread

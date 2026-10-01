@@ -9,6 +9,7 @@ import { ConversationHeader, ConversationHeadingBody } from "../shared/conversat
 import { ToggleRightPanelIcon } from "../shared/panel-icons.js";
 import {
   CHEVRON_RIGHT_SVG,
+  SEARCH_SVG,
   SETTINGS_SVG,
 } from "../svg.js";
 import {
@@ -132,8 +133,8 @@ function Sidebar() {
     h("div", { className: "sidebar-teams-list", id: "sidebar-teams-list" }),
     h(ThreadDrawer),
     h(ThreadContextMenu),
-    h(ProjectContextMenu),
     h("div", { id: "fork-session-dialog-root" }),
+    h("div", { id: "undo-toast-root" }),
     // Footer: what the relay is doing on the left, the way into Settings on the
     // right. The gear is the DESKTOP entry now that the icon rail only exists
     // while the sidebar is collapsed. It is not the only one — this whole bar is
@@ -262,67 +263,91 @@ function ThreadDrawer() {
   );
 }
 
+// Labels live in their own span so app.js can swap the words (a running session's
+// "cannot be forked") without wiping the hint beside them.
+function MenuRow({ id, label, hint = null, danger = false, className = "", children = null, ...rest }) {
+  return h(
+    "button",
+    {
+      className: `context-menu-button${danger ? " context-menu-button-danger" : ""}${className ? ` ${className}` : ""}`,
+      id,
+      role: "menuitem",
+      type: "button",
+      ...rest,
+    },
+    h("span", { className: "context-menu-label" }, label),
+    hint ? h("span", { className: "context-menu-hint" }, hint) : null,
+    children
+  );
+}
+
 function ThreadContextMenu() {
   return h(
     React.Fragment,
     null,
     h(
       "div",
-      { className: "context-menu", hidden: true, id: "thread-context-menu" },
-      h("button", { className: "context-menu-button", id: "fork-thread-button", type: "button" }, "Fork session"),
-      h("button", { className: "context-menu-button", id: "rename-thread-button", type: "button" }, "Rename session…"),
-      h("button", { className: "context-menu-button", id: "flag-thread-button", type: "button" }, "Flag for follow-up"),
-      h("button", { className: "context-menu-button", id: "archive-thread-button", type: "button" }, "Archive session"),
-      h("button", {
-        className: "context-menu-button context-menu-button-danger",
-        id: "delete-thread-button",
-        type: "button",
-      }, "Delete permanently"),
-      // Per-session Project assignment is one row here — "Projects  <current> ›" — that
-      // opens the submenu below. Flat-listing every Project at this level buried the
-      // session actions once a few Projects existed.
-      h("div", { className: "context-menu-separator", role: "separator" }),
+      { className: "context-menu", hidden: true, id: "thread-context-menu", role: "menu" },
       h(
-        "button",
-        {
-          className: "context-menu-button context-menu-submenu-trigger",
-          id: "thread-project-submenu-trigger",
-          type: "button",
-          "aria-haspopup": "true",
-          "aria-expanded": "false",
-          "aria-controls": "thread-project-submenu",
-        },
-        h("span", { className: "context-menu-submenu-title" }, "Projects"),
-        h("span", { className: "context-menu-submenu-value", id: "thread-project-current-label" }, "None"),
-        iconNode(CHEVRON_RIGHT_SVG, "context-menu-submenu-chevron")
+        "div",
+        { className: "context-menu-items", id: "thread-context-menu-items" },
+        h(MenuRow, { id: "fork-thread-button", label: "Fork session" }),
+        h(MenuRow, { id: "rename-thread-button", label: "Rename…", hint: "F2" }),
+        h(MenuRow, { id: "flag-thread-button", label: "Flag for follow-up" }),
+        h(MenuRow, { id: "archive-thread-button", label: "Archive session" }),
+        h("div", { className: "context-menu-separator", role: "separator" }),
+        // One row naming the session's project, opening the flyout below. Listing every
+        // project at this level buried the session actions once there were a few.
+        h(
+          MenuRow,
+          {
+            className: "context-menu-submenu-trigger",
+            id: "thread-project-submenu-trigger",
+            label: "Project",
+            "aria-haspopup": "true",
+            "aria-expanded": "false",
+            "aria-controls": "thread-project-submenu",
+          },
+          h("span", { className: "context-menu-hint", id: "thread-project-current-label" }, "None"),
+          iconNode(CHEVRON_RIGHT_SVG, "context-menu-chevron")
+        ),
+        h("div", { className: "context-menu-separator", role: "separator" }),
+        h(MenuRow, { danger: true, id: "delete-thread-button", label: "Delete…" })
+      ),
+      // What Delete… and Archive turn the menu into. Filled by app.js.
+      h(
+        "div",
+        { className: "context-menu-confirm", hidden: true, id: "thread-menu-confirm", role: "alertdialog" },
+        h("p", { className: "context-menu-confirm-title", id: "thread-menu-confirm-title" }),
+        h("p", { className: "context-menu-confirm-body", id: "thread-menu-confirm-body" }),
+        h(
+          "div",
+          { className: "context-menu-confirm-actions" },
+          h("button", { className: "context-menu-confirm-cancel", id: "thread-menu-confirm-cancel", type: "button" }, "Cancel"),
+          h("button", { className: "context-menu-confirm-danger", id: "thread-menu-confirm-ok", type: "button" }, "Delete session")
+        )
       )
     ),
-    // Second level, a SIBLING of the menu (not a child): the menu scrolls its own
-    // overflow, and nesting the submenu inside would let that clip it. Positioned
-    // imperatively against the trigger in app.js, and populated there when it opens
-    // (one button per Project + unassign + "New project…") from state.projects and the
-    // thread's current membership.
+    // Second level, a SIBLING of the menu: the menu scrolls its own overflow and would
+    // clip a nested flyout. Placed and filled by app.js when it opens.
     h(
       "div",
       { className: "context-menu context-menu-submenu", hidden: true, id: "thread-project-submenu", role: "menu" },
+      h(
+        "label",
+        { className: "context-menu-filter", hidden: true, id: "thread-project-filter" },
+        iconNode(SEARCH_SVG),
+        h("input", {
+          "aria-label": "Filter projects",
+          autoComplete: "off",
+          id: "thread-project-filter-input",
+          placeholder: "Filter projects",
+          spellCheck: false,
+          type: "text",
+        })
+      ),
       h("div", { className: "context-menu-projects", id: "thread-project-actions" })
     )
-  );
-}
-
-// Right-click menu for a project row in the sidebar (Projects mode). Rename/Delete
-// reuse the existing renameProject/deleteProject handlers (app.js). Positioned +
-// toggled imperatively by id, mirroring #thread-context-menu.
-function ProjectContextMenu() {
-  return h(
-    "div",
-    { className: "context-menu", hidden: true, id: "project-context-menu" },
-    h("button", { className: "context-menu-button", id: "rename-project-button", type: "button" }, "Rename project"),
-    h("button", {
-      className: "context-menu-button context-menu-button-danger",
-      id: "delete-project-button",
-      type: "button",
-    }, "Delete project")
   );
 }
 

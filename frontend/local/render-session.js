@@ -269,11 +269,11 @@ export function createSessionRenderer({
   renderSettings = () => {},
   renderPairingApprovalModal,
   resolveActiveThread,
-  setSelectedCwd,
   resumeSession,
   openThreadContextMenu,
   closeThreadContextMenu,
   onSelectThread,
+  onBeginThreadRename,
   onCommitThreadRename,
   onCancelThreadRename,
   onRenameProject,
@@ -336,7 +336,6 @@ export function createSessionRenderer({
   renderSessionTabs = () => {},
   enterProjectOverview,
   startProjectAgent,
-  openProjectContextMenu,
   // ---- Task screen ----
   // `getViewContext` rather than a derived boolean: the context is the canonical
   // answer to "what is on screen", and the Task screen needs both halves of it
@@ -1525,8 +1524,10 @@ export function createSessionRenderer({
 
   function renderThreads() {
     // The session tab strip shows the same per-thread activity as this list, so it
-    // refreshes on the same beat — otherwise a tab's dot would lag the sidebar's.
+    // refreshes on the same beat — otherwise a tab's dot would lag the sidebar's. The
+    // switcher counts these sessions per project, so it follows too.
     renderSessionTabs();
+    renderProjectSwitcher();
     const threadListUi = readThreadListUi(state.threadListStore);
     const selectedCwd = canonicalizeWorkspace(threadListUi.selectedCwd || state.selectedCwd);
     const viewedThreadId = state.viewThreadId || null;
@@ -1708,6 +1709,7 @@ export function createSessionRenderer({
         onSelectThread,
         selectedThreadIds: readThreadSelection(state.threadListStore).ids,
         renamingThreadId: readRenamingThreadId(state.threadListStore),
+        onBeginRename: onBeginThreadRename,
         onCommitRename: onCommitThreadRename,
         onCancelRename: onCancelThreadRename,
         // Rename/delete render only for a group carrying a projectId, which since the
@@ -1717,11 +1719,6 @@ export function createSessionRenderer({
         activeProjectId: pinnedProjectId,
         onRenameProject,
         onDeleteProject,
-        onContextProject(projectId, name, clientX, clientY) {
-          if (typeof openProjectContextMenu === "function") {
-            openProjectContextMenu(projectId, name, clientX, clientY);
-          }
-        },
         onResumeThread(threadId, { preview = true } = {}) {
           // Opening a thread clears its completed dot immediately; the click also
           // doubles as the user gesture that unlocks notification permission.
@@ -1750,16 +1747,6 @@ export function createSessionRenderer({
               transition: !preview,
             });
           }
-        },
-        onSelectWorkspace(cwd) {
-          // Defence in depth: the Unknown-workspace header is not rendered as a
-          // button, but this value ends up in the workspace input verbatim, so
-          // refuse the display sentinel here too. Project group headers carry an
-          // empty cwd — they're not workspaces, so ignore them as well.
-          if (!cwd || isUnknownWorkspace(cwd)) return;
-          setSelectedCwd(cwd || "");
-          renderThreads();
-          renderOverviewState(state.session);
         },
         onToggleExpandedGroup(cwd) {
           state.threadListStore.getState().toggleExpandedGroup(cwd);

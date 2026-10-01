@@ -137,8 +137,8 @@ test("an assigned session can be moved, removed, or filed under a new project", 
   assert.deepEqual(labels(sections, "projects"), [
     "Alpha",
     "Beta",
-    "Remove from project",
     "New project…",
+    "Remove from project",
   ]);
 });
 

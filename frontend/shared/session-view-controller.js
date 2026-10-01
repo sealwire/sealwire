@@ -451,6 +451,12 @@ export function createSessionViewController({
         { history: replace ? "replace" : null }
       );
     },
+    closeTabs(tabIds, { context = null, keepTabId = null, replace = false } = {}) {
+      return commit(
+        { type: "CLOSE_TABS", tabIds, keepTabId, context },
+        { history: replace ? "replace" : null }
+      );
+    },
     pinTab(tabId, pinned, { context = null } = {}) {
       return commit(
         { type: "PIN_TAB", tabId, pinned, context },

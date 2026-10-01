@@ -53,7 +53,11 @@ async function shot(page, name) {
 
 async function renameFocusedTab(page, threadId, text, shotName = "") {
   const tab = `\.session-tab[data-thread-id="${threadId}"]`;
+  // Right-click opens the tab's menu; its Rename… opens the box in place.
   await page.click(tab, { button: "right" });
+  await page
+    .locator('.context-menu[aria-label^="Tab "] .context-menu-button', { hasText: "Rename…" })
+    .click({ timeout: TIMEOUT_MS });
   await page.waitForSelector(`${tab} .session-tab-title-input`, { timeout: TIMEOUT_MS });
   await page.fill(`${tab} .session-tab-title-input`, text);
   if (shotName) {

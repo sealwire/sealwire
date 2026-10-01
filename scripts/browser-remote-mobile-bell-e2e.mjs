@@ -320,7 +320,11 @@ async function main() {
                 projects: {
                   projects: window.__projectsGone
                     ? []
-                    : [{ id: "project-alpha", name: "Alpha project" }],
+                    : [
+                        { id: "project-alpha", name: "Alpha project" },
+                        // No members: deleting it skips the confirm and offers an Undo.
+                        { id: "project-empty", name: "Empty project" },
+                      ],
                   // The WORKING thread is the member, and the other two stay out. Under
                   // the pin that makes all three visible at once — one lifted into the
                   // project group, two left in their cwd group — which is what lets step
@@ -500,7 +504,7 @@ async function main() {
       await page.waitForFunction(
         (expected) => {
           const chip = document.querySelector("#remote-pinned-project .pinned-project-chip-name");
-          return expected === "Default Workspace"
+          return expected === "All sessions"
             ? !document.querySelector("#remote-pinned-project")
             : chip?.textContent?.trim() === expected;
         },
@@ -509,7 +513,7 @@ async function main() {
       );
     };
 
-    const selectDefaultWorkspaceInSwitcher = () => chooseSwitcherOption("Default Workspace");
+    const selectDefaultWorkspaceInSwitcher = () => chooseSwitcherOption("All sessions");
 
     await openDrawer();
     await page.waitForFunction((n) =>
@@ -981,13 +985,17 @@ async function main() {
     // The stub keeps returning the project after the delete, which is what makes this
     // test about the STORE rather than about the payload: if the selection were not
     // cleared, the refetch would resolve it again and the chip would come straight back.
-    page.on("dialog", (dialog) => void dialog.accept());
     await chooseSwitcherOption("Alpha project");
     await openSwitcherMenu();
     await page
-      .locator(".sidebar .project-switcher-option", { hasText: /^Delete project$/ })
+      .locator(".sidebar .project-switcher-danger", { hasText: /^Delete project…$/ })
       .first()
       .tap({ timeout: TIMEOUT_MS });
+    // A project with sessions asks in the menu itself; an empty one goes at once.
+    const confirmDelete = page.locator(".sidebar .context-menu-confirm-danger");
+    if (await confirmDelete.isVisible().catch(() => false)) {
+      await confirmDelete.tap({ timeout: TIMEOUT_MS });
+    }
 
     await page.waitForFunction(
       () => !document.querySelector("#remote-pinned-project"),
@@ -1011,10 +1019,40 @@ async function main() {
           ?.querySelector(".project-switcher-option-label")
           ?.textContent?.trim()
       ),
-      "Default Workspace",
+      "All sessions",
       "and the menu marks where you actually are"
     );
     await page.keyboard.press("Escape");
+
+    // An empty project goes without a confirm, so the only way back is the Undo — and
+    // the Undo has to reach the relay, not just close the note.
+    await chooseSwitcherOption("Empty project");
+    await openSwitcherMenu();
+    await page
+      .locator(".sidebar .project-switcher-danger", { hasText: /^Delete project…$/ })
+      .first()
+      .tap({ timeout: TIMEOUT_MS });
+    assert.equal(
+      await page.locator(".sidebar .context-menu-confirm").count(),
+      0,
+      "an empty project has nothing to confirm"
+    );
+    await page.locator(".undo-toast-action").tap({ timeout: TIMEOUT_MS });
+    await page.waitForFunction(
+      () => (window.__projectActions || []).some((input) => input?.action === "create"),
+      undefined,
+      { timeout: TIMEOUT_MS }
+    );
+    const actions = await page.evaluate(() => window.__projectActions);
+    const deleteAt = actions.findIndex(
+      (input) => input?.action === "delete" && input.project_id === "project-empty"
+    );
+    const createAt = actions.findIndex(
+      (input) => input?.action === "create" && input.name === "Empty project"
+    );
+    assert.ok(deleteAt >= 0, `the delete went out: ${JSON.stringify(actions)}`);
+    assert.ok(createAt > deleteAt, `Undo created it again afterwards: ${JSON.stringify(actions)}`);
+    assert.equal(await page.locator(".undo-toast").count(), 0, "and the note is gone");
 
     console.log("REMOTE_MOBILE_BELL_E2E: PASS");
   } catch (error) {

@@ -19,7 +19,7 @@ const { INHERIT, FORK_PROJECT_NONE, forkFieldsToPayload } = await import(
   "./shared/fork-fields.js"
 );
 // Imported, not spelled out: `header-labels.test.mjs` guards the single definition.
-const { DEFAULT_WORKSPACE_LABEL } = await import("./shared/project-labels.js");
+const { NO_PROJECT_LABEL } = await import("./shared/project-labels.js");
 
 const PROVIDER_MODELS = {
   claude_code: [
@@ -260,7 +260,7 @@ test("the project picker distinguishes inherit from explicitly-unassigned", () =
     [...view.host.querySelectorAll(".project-switcher-option")].find(
       (n) =>
         n.querySelector(".project-switcher-option-label")?.textContent ===
-        DEFAULT_WORKSPACE_LABEL
+        NO_PROJECT_LABEL
     )
   );
 
@@ -331,9 +331,9 @@ test("an inherited pill shows the source's REAL value while still submitting nul
   view.cleanup();
 });
 
-test("the project chip names the source's project, not Default Workspace", () => {
+test("the project chip names the source's project, not \"No project\"", () => {
   // The two states looked identical: an untouched fork of a Project A thread read
-  // "Default Workspace" while the request omitted project_id and inherited A.
+  // "no project" while the request omitted project_id and inherited A.
   const view = mount({
     projects: [{ id: "proj_a", name: "Payments" }],
     sourceProjectId: "proj_a",
@@ -341,7 +341,7 @@ test("the project chip names the source's project, not Default Workspace", () =>
 
   const chip = view.host.querySelector(".project-picker-trigger");
   assert.match(chip.textContent, /Payments/);
-  assert.doesNotMatch(chip.textContent, new RegExp(DEFAULT_WORKSPACE_LABEL));
+  assert.doesNotMatch(chip.textContent, new RegExp(NO_PROJECT_LABEL));
   view.cleanup();
 });
 

@@ -16,6 +16,7 @@ import { startLocalSession } from "./e2e/harness/local-session.mjs";
 import { getFreePort } from "./e2e/harness/ports.mjs";
 import { stopManagedProcess, waitForHealth } from "./e2e/harness/process.mjs";
 import { projectSwitcherOption } from "./e2e/harness/project-switcher.mjs";
+import { confirmThreadMenuRemoval } from "./e2e/harness/thread-menu.mjs";
 
 const TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
 // A second tab bucket now means a second real PROJECT. It used to mean "Projects mode
@@ -146,7 +147,7 @@ async function selectDefaultWorkspaceInSwitcher(page) {
     await page.click(".project-switcher-trigger", { timeout: TIMEOUT_MS });
   }
   await page.waitForSelector(".project-switcher-menu", { timeout: TIMEOUT_MS });
-  await projectSwitcherOption(page, "Default Workspace").click({ timeout: TIMEOUT_MS });
+  await projectSwitcherOption(page, "All sessions").click({ timeout: TIMEOUT_MS });
   await page.waitForFunction(
     () => !window.history.state?.context?.projectId,
     { timeout: TIMEOUT_MS }
@@ -667,7 +668,7 @@ async function run() {
     await page.click(".project-switcher-trigger");
     await page.waitForSelector(".project-switcher-menu", { timeout: TIMEOUT_MS });
     await page
-      .locator(".project-switcher-option", { hasText: /^New project$/ })
+      .locator(".project-switcher-create")
       .first()
       .click({ timeout: TIMEOUT_MS });
     // Wait for the NAME, not merely for "some project is pinned" — the previously
@@ -809,6 +810,7 @@ async function run() {
     await page.click(`button.conversation-item[data-thread-id="${threadA}"]`, { button: "right" });
     await page.waitForSelector("#delete-thread-button", { timeout: TIMEOUT_MS });
     await page.click("#delete-thread-button");
+    await confirmThreadMenuRemoval(page, { timeoutMs: TIMEOUT_MS });
     await page.waitForFunction(
       (id) => ![...document.querySelectorAll(".session-tab")].some((tab) => tab.dataset.threadId === id),
       threadA,
@@ -979,6 +981,7 @@ async function run() {
     await page.click(`button.conversation-item[data-thread-id="${threadB}"]`, { button: "right" });
     await page.waitForSelector("#delete-thread-button", { timeout: TIMEOUT_MS });
     await page.click("#delete-thread-button");
+    await confirmThreadMenuRemoval(page, { timeoutMs: TIMEOUT_MS });
     await page.waitForTimeout(1000);
 
     // B still has the dead tab rendered. Clicking it is the most direct path and does

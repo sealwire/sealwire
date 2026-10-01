@@ -116,49 +116,26 @@ test("every thread-list surface groups through the navigation policy", async () 
   }
 });
 
-// The sentinel must not be renderable as a selectable workspace.
-test("the unknown group header is not a workspace button", async () => {
+// The sentinel is a display key, never a path: whatever the header renders, it must
+// not show it.
+test("the unknown group header never shows its internal key", async () => {
   const React = (await import("react")).default;
   const { renderToStaticMarkup } = await import("react-dom/server");
   const { ThreadGroupHeader } = await import("./thread-list-react.js");
 
-  const render = (cwd, label) =>
-    renderToStaticMarkup(
+  for (const collapsible of [false, true]) {
+    const markup = renderToStaticMarkup(
       React.createElement(ThreadGroupHeader, {
-        collapsible: false,
-        group: { cwd, label },
+        collapsible,
+        group: { cwd: UNKNOWN_WORKSPACE_CWD, label: UNKNOWN_WORKSPACE_LABEL },
         isCollapsed: false,
-        normalizedCwd: cwd,
-        onSelectWorkspace: () => {},
-        onToggleGroup: null,
+        normalizedCwd: UNKNOWN_WORKSPACE_CWD,
+        onToggleGroup: collapsible ? () => {} : null,
       })
     );
-
-  const unknown = render(UNKNOWN_WORKSPACE_CWD, UNKNOWN_WORKSPACE_LABEL);
-  assert.match(unknown, /Unknown workspace/, "the group is still labelled");
-  assert.doesNotMatch(unknown, /data-select-workspace/, "but not selectable");
-  assert.doesNotMatch(unknown, /<button/, "and not a button at all");
-  assert.doesNotMatch(
-    unknown,
-    /__unknown_workspace__/,
-    "and the internal key is never shown to the user"
-  );
-
-  // Remote renders collapsible headers; the internal key must not leak there
-  // either (it is a tooltip, not a directory operation, but it is still shown
-  // to the user).
-  const collapsible = renderToStaticMarkup(
-    React.createElement(ThreadGroupHeader, {
-      collapsible: true,
-      group: { cwd: UNKNOWN_WORKSPACE_CWD, label: UNKNOWN_WORKSPACE_LABEL },
-      isCollapsed: false,
-      normalizedCwd: UNKNOWN_WORKSPACE_CWD,
-      onToggleGroup: () => {},
-    })
-  );
-  assert.doesNotMatch(collapsible, /__unknown_workspace__/);
-  assert.match(collapsible, /Unknown workspace/);
-
-  const real = render("/repo", "repo");
-  assert.match(real, /data-select-workspace="\/repo"/, "real workspaces stay selectable");
+    assert.match(markup, /Unknown workspace/, "the group is still labelled");
+    assert.doesNotMatch(markup, /__unknown_workspace__/);
+    assert.doesNotMatch(markup, /data-select-workspace/);
+  }
 });
+

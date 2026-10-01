@@ -43,10 +43,32 @@ async function createProjectFromSwitcher(page) {
     await page.click(".project-switcher-trigger", { timeout: TIMEOUT_MS });
   }
   await page.waitForSelector(".project-switcher-menu", { timeout: TIMEOUT_MS });
+  await page.locator(".project-switcher-create").first().click({ timeout: TIMEOUT_MS });
+}
+
+// Scoped to the header's own menu: the session menu also has a (hidden) "Rename…".
+const headerMenuRow = (page, label) =>
+  page.locator('.context-menu[aria-label^="Project "] .context-menu-button', { hasText: label }).first();
+
+// Rename the pinned project in place, once its header's menu is open.
+async function renameFromHeaderMenu(page, name) {
+  await headerMenuRow(page, "Rename…").click({ timeout: TIMEOUT_MS });
+  await page.fill("#threads-list .thread-group-name-input", name, { timeout: TIMEOUT_MS });
+  await page.press("#threads-list .thread-group-name-input", "Enter");
+}
+
+// Right-click a project's header and delete it. A project with sessions asks first, in
+// the menu itself; an empty one goes at once.
+async function deleteFromHeader(page, name) {
   await page
-    .locator(".project-switcher-option", { hasText: /^New project$/ })
+    .locator("#threads-list .thread-group-header-project", { hasText: name })
     .first()
-    .click({ timeout: TIMEOUT_MS });
+    .click({ button: "right" });
+  await headerMenuRow(page, "Delete project…").click({ timeout: TIMEOUT_MS });
+  const confirm = page.locator(".context-menu .context-menu-confirm-danger");
+  if (await confirm.isVisible().catch(() => false)) {
+    await confirm.click({ timeout: TIMEOUT_MS });
+  }
 }
 
 // The switcher's way back to an unpinned list.
@@ -59,7 +81,7 @@ async function selectDefaultWorkspaceInSwitcher(page) {
     await page.click(".project-switcher-trigger", { timeout: TIMEOUT_MS });
   }
   await page.waitForSelector(".project-switcher-menu", { timeout: TIMEOUT_MS });
-  await projectSwitcherOption(page, "Default Workspace").click({ timeout: TIMEOUT_MS });
+  await projectSwitcherOption(page, "All sessions").click({ timeout: TIMEOUT_MS });
   await page.waitForFunction(
     () => !document.querySelector("#threads-list .thread-group-header-project"),
     { timeout: TIMEOUT_MS }
@@ -323,10 +345,8 @@ async function run() {
     await openThreadDrawer(page);
     await createProjectFromSwitcher(page);
     await selectProjectInSwitcher(page, "Alpha Project");
-    // Projects mode now lists each project as a GROUP HEADER with its sessions nested
-    // underneath, so project actions moved from a "⋯ opens a menu" row onto inline
-    // buttons on the header. The three access paths this guards are unchanged:
-    // visible/tappable, mouse (right-click), and keyboard.
+    // A project's actions live behind the header's "⋯" and its right-click. The three
+    // access paths this guards: visible/tappable, mouse (right-click), and keyboard.
     await page.waitForSelector("#threads-list .thread-group-header-project", {
       state: "visible",
       timeout: TIMEOUT_MS,
@@ -336,33 +356,34 @@ async function run() {
         () => document.querySelector("#threads-list .thread-group-name")?.textContent || ""
       );
 
-    // (a) the inline Rename button (keyboard/touch reachable) renames directly
-    promptValue = "Beta Project";
-    await page.locator('#threads-list .thread-group-action[title="Rename project"]').first().click();
+    // (a) the "⋯" button (keyboard/touch reachable) opens the menu; Rename edits in place
+    await page.locator("#threads-list .thread-group-more").first().click();
+    await renameFromHeaderMenu(page, "Beta Project");
     await page.waitForFunction(
       () => (document.querySelector("#threads-list .thread-group-name")?.textContent || "").includes("Beta"),
       { timeout: TIMEOUT_MS }
     );
 
-    // (b) right-click on the project header still opens the actions menu (mouse path)
-    promptValue = "Gamma Project";
+    // (b) right-click on the project header opens the same menu (mouse path)
     await page.locator("#threads-list .thread-group-header-project").first().click({ button: "right" });
-    await page.waitForSelector("#project-context-menu:not([hidden])", { timeout: TIMEOUT_MS });
-    await page.click("#rename-project-button");
+    await renameFromHeaderMenu(page, "Gamma Project");
     await page.waitForFunction(
       () => (document.querySelector("#threads-list .thread-group-name")?.textContent || "").includes("Gamma"),
       { timeout: TIMEOUT_MS }
     );
     assert.match(await projectName(), /Gamma/, "the header shows the renamed project");
 
-    // (c) keyboard path: the inline action buttons are focusable, so project
-    // management is not mouse-only.
-    const renameButton = page.locator('#threads-list .thread-group-action[title="Rename project"]').first();
-    await renameButton.focus();
-    const renameFocusable = await page.evaluate(
-      () => document.activeElement?.getAttribute("title") === "Rename project"
+    // (c) keyboard path: "⋯" is focusable, and F2 on the focused row renames, so
+    // project management is not mouse-only.
+    await page.locator("#threads-list .thread-group-more").first().focus();
+    const moreFocusable = await page.evaluate(
+      () => document.activeElement?.classList.contains("thread-group-more")
     );
-    assert.ok(renameFocusable, "Rename is keyboard-focusable on the project header");
+    assert.ok(moreFocusable, "the actions button is keyboard-focusable on the project header");
+    await page.locator("#threads-list .thread-group-header-project .thread-group-toggle").first().focus();
+    await page.keyboard.press("F2");
+    await page.waitForSelector("#threads-list .thread-group-name-input", { timeout: TIMEOUT_MS });
+    await page.keyboard.press("Escape");
 
     // --- Deleting the selected project must not strand a stale selection ---
     // Add a sibling so there's something to fall back to after deletion.
@@ -412,9 +433,7 @@ async function run() {
       }
     });
 
-    await page.locator("#threads-list .thread-group-header-project", { hasText: "Gamma" }).first().click({ button: "right" });
-    await page.waitForSelector("#project-context-menu:not([hidden])", { timeout: TIMEOUT_MS });
-    await page.click("#delete-project-button");
+    await deleteFromHeader(page, "Gamma");
     // Settle on the REFRESHED switcher, not on the header disappearing. "No project
     // header" is also true for a frame in the middle of the refetch, so waiting for it
     // can pass against a fallback navigation that has not run yet — and then the next
@@ -448,7 +467,7 @@ async function run() {
       null,
       `deleting the selected project must land in the default workspace, got ${afterDelete.routedProjectId}`
     );
-    assert.equal(afterDelete.activeOption, "Default Workspace", "and the menu says so");
+    assert.equal(afterDelete.activeOption, "All sessions", "and the menu says so");
     assert.equal(afterDelete.projectHeaders, 0, "with no project pinned in the list");
 
     const strayed = await page.evaluate(
@@ -467,9 +486,7 @@ async function run() {
     // Delete the remaining project too. Its header exists only while it is pinned, so
     // reaching it goes through the switcher — which is the point of the control.
     await selectProjectInSwitcher(page, "Second Project");
-    await page.locator("#threads-list .thread-group-header-project", { hasText: "Second" }).first().click({ button: "right" });
-    await page.waitForSelector("#project-context-menu:not([hidden])", { timeout: TIMEOUT_MS });
-    await page.click("#delete-project-button");
+    await deleteFromHeader(page, "Second");
     await page.waitForFunction(
       () =>
         document.querySelectorAll("#threads-list .thread-group-header-project").length === 0
@@ -514,9 +531,7 @@ async function run() {
       return route.continue();
     });
 
-    await page.locator("#threads-list .thread-group-header-project", { hasText: "Race Project" }).first().click({ button: "right" });
-    await page.waitForSelector("#project-context-menu:not([hidden])", { timeout: TIMEOUT_MS });
-    await page.click("#delete-project-button");
+    await deleteFromHeader(page, "Race Project");
 
     // ...and while it is in flight, go somewhere else on purpose.
     await selectProjectInSwitcher(page, "Fresh Project");

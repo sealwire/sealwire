@@ -3,7 +3,7 @@
 //
 // It is not a filter and it is not a mode. The list below it is always the full
 // list; selecting a project only lifts that project's sessions into a group at the
-// top (see `buildThreadGroups`' `pinnedProjectId`). The default workspace is
+// top (see `buildThreadGroups`' `pinnedProjectId`). "All sessions" is
 // therefore a real destination rather than an escape hatch — nothing is hidden in
 // any state.
 //
@@ -12,34 +12,26 @@
 // is the caller's business. Writing it twice is how the two sidebars drifted
 // before.
 //
-// Rename/delete ARE here, in a group of their own at the bottom, and that reverses an
-// earlier decision this comment used to record. The original reasoning — two places to
-// keep in step, and a destructive action one keystroke from a navigation action — was
-// sound while the pinned group's own header offered them instead. It does not survive a
-// touch surface: that header's buttons sit at `opacity: 0` behind `:hover`, remote never
-// wired the `contextmenu` path, and on the phone the header is not rendered at all
-// (the switcher and a chip name the pin between them). This menu is the only place
-// left, so the concern is answered with layout instead: they come last, behind a
-// divider, and the destructive one is coloured as such.
-//
-// They are offered for the ACTIVE project only. The menu names many projects and can
-// act on exactly one — a rename that silently landed on a different row would not be
-// recoverable.
+// Rename/delete for the ACTIVE project sit at the bottom, behind a divider, for the
+// surfaces with no other home for them (remote's drawer, where the group header is
+// not rendered). The menu names many projects and can act on exactly one; a rename
+// that landed on a different row would not be recoverable.
 
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 
-import { DEFAULT_WORKSPACE_LABEL } from "./project-labels.js";
+import { ALL_SESSIONS_LABEL } from "./project-labels.js";
 import { ProjectMenu } from "./project-menu-react.js";
 import { MenuPortal, useAnchoredMenu } from "./use-anchored-menu.js";
 import { useDismissableMenu } from "./use-dismissable-menu.js";
 import { buildProjectPickerRows } from "./project-picker-model.js";
+import { CHEVRON_DOWN_SVG } from "../svg.js";
 
 const h = React.createElement;
 
 export function ProjectSwitcher({
   activeProjectId = null,
   className = "",
-  createLabel = "New project",
+  createLabel = "New project…",
   // The trigger's text and tooltip. Supplied by the surface rather than derived
   // here, because on local this control IS the header title and that decision
   // lives in `header-labels.js` — one tested place for "what does the header
@@ -47,22 +39,17 @@ export function ProjectSwitcher({
   label = "",
   labelTooltip = "",
   onCreateProject = null,
-  // Rename/delete for the ACTIVE project, offered at the bottom of the menu behind a
-  // divider. This reverses an earlier decision recorded in the handover ("not in this
-  // menu — two places to keep in step, and a destructive action one keystroke from a
-  // navigation action"). Its premise was that the pinned group's own header carried
-  // them; on a touch surface that header could not (the buttons sat at opacity 0
-  // behind :hover) and the row itself is now gone, so this is the only place left.
+  // Rename/delete for the ACTIVE project; see the note at the top of the file.
   onDeleteProject = null,
   onRenameProject = null,
   onSelectProject = null,
   projects = [],
-  // Live signals for the rows' second line; all optional.
+  // `{ key, hint }`: a ⌘/Ctrl+key that opens the menu from anywhere, and the hint the
+  // filter shows for it. Only where nothing else on the page wants that key.
+  shortcut = null,
+  // For the per-row session counts and the recency order.
   threads = [],
   threadProjectId = {},
-  threadActivity = null,
-  threadAttention = null,
-  threadReviewing = null,
   // Whether this control is the PAGE HEADING. True in the local and remote chat
   // headers, where the switcher replaced the title outright. False for compact
   // placements such as remote's drawer icon, where surrounding chrome already names
@@ -85,6 +72,27 @@ export function ProjectSwitcher({
 
   const close = useCallback(() => setOpen(false), []);
 
+  useEffect(() => {
+    if (!shortcut?.key) {
+      return undefined;
+    }
+    const onKeyDown = (event) => {
+      if (
+        (event.metaKey || event.ctrlKey)
+        && !event.altKey
+        && !event.shiftKey
+        && event.key.toLowerCase() === shortcut.key
+        // A modal owns the keyboard; switching projects behind it would be invisible.
+        && !document.querySelector("dialog[open]")
+      ) {
+        event.preventDefault();
+        setOpen(true);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [shortcut?.key]);
+
   // Dismissal and placement both come from the shared hooks: a menu here is the
   // same kind of object as a picker menu, and used to hand-roll both.
   useDismissableMenu({ menuRef, onClose: close, open, rootRef });
@@ -99,7 +107,7 @@ export function ProjectSwitcher({
   // either having to tell the other.
   const derivedLabel = activeProject
     ? activeProject.name || activeProject.id
-    : DEFAULT_WORKSPACE_LABEL;
+    : ALL_SESSIONS_LABEL;
   const currentLabel = label || derivedLabel;
   // The RESOLVED id, and the only one anything below is allowed to read. An id whose
   // project is gone (deleted from another device, payload not loaded) already fell back
@@ -141,7 +149,11 @@ export function ProjectSwitcher({
         ),
     triggerIcon
       ? null
-      : h("span", { "aria-hidden": "true", className: "project-switcher-caret" })
+      : h("span", {
+          "aria-hidden": "true",
+          className: "project-switcher-caret",
+          dangerouslySetInnerHTML: { __html: CHEVRON_DOWN_SVG },
+        })
   );
 
   return h(
@@ -165,39 +177,39 @@ export function ProjectSwitcher({
       MenuPortal,
       { anchorRef: triggerRef, open },
       h(ProjectMenu, {
-          activeProject,
-          createLabel,
-          id: menuId,
-          menuRef: assignMenuRef,
-          onCreateProject: onCreateProject
-            ? () => {
-                close();
-                onCreateProject();
-              }
-            : null,
-          onDeleteProject: onDeleteProject
-            ? (projectId, name) => {
-                close();
-                onDeleteProject(projectId, name);
-              }
-            : null,
-          onRenameProject: onRenameProject
-            ? (projectId, name) => {
-                close();
-                onRenameProject(projectId, name);
-              }
-            : null,
-          onSelect: choose,
-          rows: buildProjectPickerRows({
-            activeProjectId: resolvedProjectId,
-            projects,
-            threadActivity,
-            threadAttention,
-            threadProjectId,
-            threadReviewing,
-            threads,
-          }),
-        })
+        activeProject,
+        createLabel,
+        ...buildProjectPickerRows({
+          activeProjectId: resolvedProjectId,
+          defaultCount: threads.length,
+          projects,
+          threadProjectId,
+          threads,
+        }),
+        id: menuId,
+        menuRef: assignMenuRef,
+        onClose: close,
+        onCreateProject: onCreateProject
+          ? (name) => {
+              close();
+              onCreateProject(name);
+            }
+          : null,
+        onDeleteProject: onDeleteProject
+          ? (projectId, name, details) => {
+              close();
+              onDeleteProject(projectId, name, details);
+            }
+          : null,
+        onRenameProject: onRenameProject
+          ? (projectId, name) => {
+              close();
+              onRenameProject(projectId, name);
+            }
+          : null,
+        onSelect: choose,
+        shortcutHint: shortcut?.hint || null,
+      })
     )
   );
 }

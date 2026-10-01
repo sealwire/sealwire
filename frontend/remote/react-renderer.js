@@ -168,9 +168,6 @@ export function SessionPanel({
     projects: model.projects,
     threads: model.threads,
     threadProjectId: model.threadProjectId,
-    threadActivity: model.threadActivity,
-    threadAttention: model.threadAttention,
-    threadReviewing: model.threadReviewing,
     onCreateProject: model.onCreateProject,
     // Remote passes no attachment mount: a paired device cannot send image
     // bytes, so the placeholder must not invite a paste.
