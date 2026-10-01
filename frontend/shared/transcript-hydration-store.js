@@ -1771,10 +1771,17 @@ function mergeTranscriptEntry(existing, incoming) {
   };
 }
 
-// A snapshot clips a delegate card's answer and cited places with the row; the copy read
-// whole keeps its own.
+// A snapshot clips a delegate card's answer and cited places with the row, and a goal
+// card's report; the copy read whole keeps its own.
 function mergeInjection(existing, incoming, incomingFull) {
-  if (incomingFull || !existing?.delegate || !incoming.delegate) {
+  if (incomingFull) {
+    return incoming;
+  }
+  if (existing?.goal_settled?.report && incoming.goal_settled
+      && existing.goal_settled.goal_id === incoming.goal_settled.goal_id) {
+    return { ...incoming, goal_settled: { ...incoming.goal_settled, report: existing.goal_settled.report } };
+  }
+  if (!existing?.delegate || !incoming.delegate) {
     return incoming;
   }
   const held = new Map(existing.delegate.map((ask) => [ask.id, ask]));

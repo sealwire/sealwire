@@ -941,6 +941,8 @@ impl AppState {
             );
             relay.notify();
         }
+        // Only once the turn is really underway: a refused send answered nothing.
+        self.resume_goal_on_reply(&effective_thread_id).await;
 
         Ok(self.snapshot().await)
     }

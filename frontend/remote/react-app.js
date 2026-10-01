@@ -167,6 +167,8 @@ import {
 } from "../shared/workflow-state.js";
 import { ReviewLauncher } from "../shared/review-panel.js";
 import { createGoalActions } from "../shared/goal-actions.js";
+import { dispatchGoalAction } from "../shared/goal-card.js";
+import { focusComposer, prefillComposer } from "../shared/composer-prefill.js";
 import {
   agentsPanelSlice,
   createReviewsCache,
@@ -1285,12 +1287,28 @@ function RemoteApp() {
       }),
     []
   );
+  // The composer on screen, registered by the thread panel that renders it. The goal
+  // card's Reply… and Edit reach it from here, outside that panel.
+  const composerInputRef = useRef(null);
+  // A goal option is sent as the person's own message, with the composer's settings.
+  const sendToViewedThreadRef = useRef(null);
+  sendToViewedThreadRef.current = (text) =>
+    handlersRef.current.onSendMessage(
+      text,
+      remoteUi.composerEffort || session?.reasoning_effort || "",
+      remoteUi.composerModel || session?.model || ""
+    );
   const reviewerActions = useMemo(
     () => ({
+      onEditGoal: (objective) => prefillComposer(composerInputRef.current, `/goal ${objective}`),
+      onReplyGoal: () => focusComposer(composerInputRef.current),
+      onSendGoalOption: (text) => void sendToViewedThreadRef.current?.(text),
       ...createGoalActions({
         getThreadId: () => viewedThreadIdRef.current,
         setGoal: (threadId, objective) => handlersRef.current.onSetGoal?.(threadId, objective),
         stopGoal: (threadId) => handlersRef.current.onStopGoal?.(threadId),
+        goalCard: (threadId, seq, action) =>
+          handlersRef.current.onGoalCard?.(threadId, seq, action),
         setGoalError: (threadId, message, generation) =>
           handlersRef.current.onGoalError?.(threadId, message, generation),
         beginGoalAction: (threadId) => handlersRef.current.onBeginGoalAction?.(threadId) || 0,
@@ -2510,6 +2528,13 @@ function RemoteApp() {
             void dispatchDelegateAction(action, {
               cancel: () => handleStopTurn(),
             }),
+          onGoalAction: (action) =>
+            void dispatchGoalAction(action, {
+              card: reviewerActions.onGoalCard,
+              send: (_threadId, text) => sendToViewedThreadRef.current?.(text),
+              reply: () => focusComposer(composerInputRef.current),
+            }),
+          composerInputRef,
           composerModel,
           composerDraft,
           composerScope,
@@ -3362,6 +3387,8 @@ function RemoteThreadPanel({
   onOpenThread = null,
   onReviewAction = null,
   onDelegateAction = null,
+  onGoalAction = null,
+  composerInputRef = null,
   reviewJobs = null,
   agentWorkingIndicatorModel,
   composerModel,
@@ -3409,6 +3436,9 @@ function RemoteThreadPanel({
   composerScopeRef.current = composerScope;
   const commandInputRef = useRef(null);
   commandInputRef.current = commandInput;
+  useEffect(() => {
+    if (composerInputRef) composerInputRef.current = commandInput;
+  }, [commandInput, composerInputRef]);
   // Ask never sends: the quote waits above the box, the caret after what is typed.
   const askAboutMessage = useCallback((quote) => {
     const scope = composerScopeRef.current;
@@ -3470,6 +3500,7 @@ function RemoteThreadPanel({
         onOpenThread,
         onReviewAction,
         onDelegateAction,
+        onGoalAction,
         reviewJobs,
         onAskMessage: askAboutMessage,
         onSelectRelay,

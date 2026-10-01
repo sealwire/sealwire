@@ -29,6 +29,7 @@ export function RemoteTranscriptPanel({
   onOpenThread = null,
   onReviewAction = null,
   onDelegateAction = null,
+  onGoalAction = null,
   reviewJobs = null,
   onAskMessage = null,
   onSelectRelay,
@@ -209,6 +210,10 @@ export function RemoteTranscriptPanel({
         delegateAction: (action, event) => {
           event.preventDefault();
           onDelegateAction?.(action);
+        },
+        goalAction: (action, event) => {
+          event.preventDefault();
+          onGoalAction?.(action);
         },
       }),
     });

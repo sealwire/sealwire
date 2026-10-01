@@ -6,8 +6,8 @@ use rusqlite::{params, Connection};
 use tracing::warn;
 
 use crate::state::{
-    injection_kind_from_name, injection_kind_name, DelegateMark, HandoverMark, InjectedMessage,
-    InjectionTag, MessageAnchor, ReviewMark,
+    injection_kind_from_name, injection_kind_name, DelegateMark, GoalMark, HandoverMark,
+    InjectedMessage, InjectionTag, MessageAnchor, ReviewMark,
 };
 
 use super::UsageStore;
@@ -91,6 +91,22 @@ impl UsageStore {
             conn.execute(
                 "INSERT OR REPLACE INTO delegation (id, body, updated_at) VALUES (?1, ?2, ?3)",
                 params![delegate.id, body, delegate.updated_at as i64],
+            )
+        });
+    }
+
+    pub(crate) fn save_goal_mark(&self, goal: &GoalMark) {
+        let body = match serde_json::to_string(goal) {
+            Ok(body) => body,
+            Err(error) => {
+                warn!(%error, "database: could not encode goal {}", goal.id);
+                return;
+            }
+        };
+        self.with_conn("save goal", |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO goal_mark (id, body, updated_at) VALUES (?1, ?2, ?3)",
+                params![goal.id, body, goal.updated_at as i64],
             )
         });
     }
@@ -198,6 +214,21 @@ impl UsageStore {
                     },
                 )
                 .collect();
+            let goals = conn
+                .prepare("SELECT id, body FROM goal_mark ORDER BY updated_at, id")?
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .filter_map(|(id, body)| match serde_json::from_str::<GoalMark>(&body) {
+                    Ok(goal) => Some(goal),
+                    Err(error) => {
+                        warn!(%error, "database: skipping unreadable goal {id}");
+                        None
+                    }
+                })
+                .collect();
             let messages = conn
                 .prepare(
                     "SELECT thread_id, anchor, kind, ref_id, round, created_at
@@ -232,6 +263,7 @@ impl UsageStore {
                 handovers,
                 reviews,
                 delegates,
+                goals,
                 messages,
             })
         });
@@ -278,7 +310,8 @@ impl UsageStore {
         self.with_conn("forget mark", |conn| {
             conn.execute("DELETE FROM handover WHERE id = ?1", [ref_id])?;
             conn.execute("DELETE FROM review WHERE id = ?1", [ref_id])?;
-            conn.execute("DELETE FROM delegation WHERE id = ?1", [ref_id])
+            conn.execute("DELETE FROM delegation WHERE id = ?1", [ref_id])?;
+            conn.execute("DELETE FROM goal_mark WHERE id = ?1", [ref_id])
         });
     }
 
@@ -301,5 +334,6 @@ pub(crate) struct LoadedInjections {
     pub(crate) handovers: Vec<HandoverMark>,
     pub(crate) reviews: Vec<ReviewMark>,
     pub(crate) delegates: Vec<DelegateMark>,
+    pub(crate) goals: Vec<GoalMark>,
     pub(crate) messages: Vec<InjectedMessage>,
 }

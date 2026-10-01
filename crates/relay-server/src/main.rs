@@ -404,6 +404,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
             post(acknowledge_handover_outcome),
         )
         .route("/api/session/goal", post(set_session_goal))
+        .route("/api/session/goal/card", post(act_on_goal_card))
         .route("/api/orchestrator/tools", get(list_orchestrator_tools))
         .route(
             "/api/orchestrator/tools/:tool_name/call",
@@ -842,6 +843,16 @@ struct GoalInput {
     reset_turns: bool,
 }
 
+/// `POST /api/session/goal/card` — a goal card's button. Refused unless the goal is
+/// still on card `seq`, so a stale card cannot move a goal that has since changed.
+#[derive(serde::Deserialize)]
+struct GoalCardInput {
+    thread_id: String,
+    seq: u32,
+    /// `keep_going` or `stop`.
+    action: String,
+}
+
 #[derive(serde::Deserialize)]
 struct DelegateInput {
     thread_id: String,
@@ -931,6 +942,26 @@ async fn set_session_goal(
             )
             .await
             .map(|()| "Goal set. This session will work toward it and come back when it is done, stuck, or needs you.".to_string())
+    };
+    Ok(Json(
+        crate::state::app::orchestrator_dispatch::tool_result_envelope(outcome),
+    ))
+}
+
+async fn act_on_goal_card(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(input): Json<GoalCardInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    let outcome = match crate::state::app::GoalCardAction::parse(&input.action) {
+        Some(action) => context
+            .app
+            .act_on_goal_card(&input.thread_id, input.seq, action, None, None)
+            .await
+            .map(|()| "Done.".to_string()),
+        None => Err(format!("unknown goal card action: {}", input.action)),
     };
     Ok(Json(
         crate::state::app::orchestrator_dispatch::tool_result_envelope(outcome),

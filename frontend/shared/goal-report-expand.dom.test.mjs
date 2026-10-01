@@ -39,9 +39,11 @@ async function mount() {
   return panel;
 }
 
-test("a finished goal's report opens on click and closes again", async () => {
+// A completion's report is on its transcript card; the panel keeps the relay's word on a
+// goal that stopped short.
+test("a stopped goal's report opens on click and closes again", async () => {
   const panel = await mount();
-  await panel.render(goal("complete_claimed", "first report"));
+  await panel.render(goal("interrupted", "first report"));
   assert.equal(panel.report().getAttribute("aria-expanded"), "false");
   await panel.clickReport();
   assert.match(panel.report().className, /is-expanded/);
@@ -54,14 +56,14 @@ test("a finished goal's report opens on click and closes again", async () => {
 // Found in review: opening one report left every later report open too.
 test("a new report starts clamped, even after the last one was opened", async () => {
   const panel = await mount();
-  await panel.render(goal("complete_claimed", "first report"));
+  await panel.render(goal("interrupted", "first report"));
   await panel.clickReport();
   await panel.render(goal("active", null));
-  await panel.render(goal("complete_claimed", "second report"));
+  await panel.render(goal("interrupted", "second report"));
   assert.doesNotMatch(panel.report().className, /is-expanded/, "resumed then finished again");
 
   await panel.clickReport();
-  await panel.render({ ...goal("complete_claimed", "another goal's report"), objective: "other" });
+  await panel.render({ ...goal("out_of_turns", "another goal's report"), objective: "other" });
   assert.doesNotMatch(panel.report().className, /is-expanded/, "switched to another goal");
   await panel.unmount();
 });

@@ -333,6 +333,15 @@ pub(super) enum RemoteActionRequest {
         #[serde(default)]
         device_id: Option<String>,
     },
+    /// A goal card's own button: refused unless the goal is still on card `seq`.
+    GoalCard {
+        thread_id: String,
+        seq: u32,
+        /// `keep_going` or `stop`.
+        action: String,
+        #[serde(default)]
+        device_id: Option<String>,
+    },
     RegisterPushSubscription {
         input: PushSubscriptionInput,
     },
@@ -395,6 +404,7 @@ impl RemoteActionRequest {
             Self::AckHandover { .. } => RemoteActionKind::AckHandover,
             Self::SetGoal { .. } => RemoteActionKind::SetGoal,
             Self::StopGoal { .. } => RemoteActionKind::StopGoal,
+            Self::GoalCard { .. } => RemoteActionKind::GoalCard,
             Self::RegisterPushSubscription { .. } => RemoteActionKind::RegisterPushSubscription,
             Self::UnregisterPushSubscription { .. } => RemoteActionKind::UnregisterPushSubscription,
         }
@@ -666,6 +676,17 @@ impl RemoteActionRequest {
                 thread_id,
                 device_id: Some(device_id),
             },
+            Self::GoalCard {
+                thread_id,
+                seq,
+                action,
+                ..
+            } => Self::GoalCard {
+                thread_id,
+                seq,
+                action,
+                device_id: Some(device_id),
+            },
             Self::RegisterPushSubscription { mut input } => {
                 input.device_id = Some(device_id);
                 Self::RegisterPushSubscription { input }
@@ -730,6 +751,7 @@ pub(super) enum RemoteActionKind {
     AckHandover,
     SetGoal,
     StopGoal,
+    GoalCard,
     RegisterPushSubscription,
     UnregisterPushSubscription,
 }
@@ -786,6 +808,7 @@ impl RemoteActionKind {
             Self::AckHandover => "ack_handover",
             Self::SetGoal => "set_goal",
             Self::StopGoal => "stop_goal",
+            Self::GoalCard => "goal_card",
             Self::RegisterPushSubscription => "register_push_subscription",
             Self::UnregisterPushSubscription => "unregister_push_subscription",
         }
@@ -1991,6 +2014,20 @@ async fn execute_remote_action(
                 .await
                 .map(|()| RemoteActionOutcome::default())
         }
+        RemoteActionRequest::GoalCard {
+            thread_id,
+            seq,
+            action,
+            device_id,
+        } => {
+            let device_id = device_id.ok_or_else(|| "missing device id".to_string())?;
+            let action = crate::state::app::GoalCardAction::parse(&action)
+                .ok_or_else(|| format!("unknown goal card action: {action}"))?;
+            state
+                .act_on_goal_card(&thread_id, seq, action, Some(&device_id), Some(ingress))
+                .await
+                .map(|()| RemoteActionOutcome::default())
+        }
         RemoteActionRequest::FetchWorkflows { device_id } => Ok(RemoteActionOutcome {
             workflows: Some(state.workflows(device_id).await),
             ..RemoteActionOutcome::default()
@@ -2091,6 +2128,7 @@ fn requires_session_claim(action: RemoteActionKind) -> bool {
             | RemoteActionKind::Handover
             | RemoteActionKind::SetGoal
             | RemoteActionKind::StopGoal
+            | RemoteActionKind::GoalCard
     )
 }
 
@@ -3566,6 +3604,7 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         | RemoteActionKind::AckHandover
         | RemoteActionKind::SetGoal
         | RemoteActionKind::StopGoal
+        | RemoteActionKind::GoalCard
         | RemoteActionKind::RegisterPushSubscription
         | RemoteActionKind::UnregisterPushSubscription => RemoteActionResultKind::RemoteActionAck,
     }

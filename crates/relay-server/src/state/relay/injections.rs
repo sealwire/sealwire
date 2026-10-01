@@ -8,8 +8,9 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
-    DelegateCardView, HandoverCardView, InjectionCard, InjectionKind, InjectionView,
-    ReviewCardView, ReviewFindingView, ReviewResultView, ReviewRoundView, TranscriptEntryKind,
+    DelegateCardView, GoalSettledCardView, GoalStepRefView, GoalStepView, GoalTurnCardView,
+    HandoverCardView, InjectionCard, InjectionKind, InjectionView, ReviewCardView,
+    ReviewFindingView, ReviewResultView, ReviewRoundView, TranscriptEntryKind,
 };
 
 use super::transcript::TranscriptRecord;
@@ -42,7 +43,7 @@ impl MessageAnchor {
     }
 }
 
-const KIND_NAMES: [(InjectionKind, &str); 18] = [
+const KIND_NAMES: [(InjectionKind, &str); 20] = [
     (InjectionKind::HandoverRequest, "handover_request"),
     (InjectionKind::HandoverSummary, "handover_summary"),
     (InjectionKind::HandoverBrief, "handover_brief"),
@@ -61,6 +62,8 @@ const KIND_NAMES: [(InjectionKind, &str); 18] = [
     (InjectionKind::DelegateNudge, "delegate_nudge"),
     (InjectionKind::DelegateAnswer, "delegate_answer"),
     (InjectionKind::DelegateReported, "delegate_reported"),
+    (InjectionKind::GoalTurn, "goal_turn"),
+    (InjectionKind::GoalSettled, "goal_settled"),
 ];
 
 pub(crate) fn injection_kind_name(kind: InjectionKind) -> &'static str {
@@ -101,6 +104,15 @@ impl InjectionTag {
             kind,
             ref_id: review_id.to_string(),
             round,
+        }
+    }
+
+    /// `seq` names the line or settlement within the goal's mark.
+    pub(crate) fn goal(kind: InjectionKind, goal_id: &str, seq: u32) -> Self {
+        Self {
+            kind,
+            ref_id: goal_id.to_string(),
+            round: seq,
         }
     }
 
@@ -260,6 +272,104 @@ impl DelegateMark {
     }
 }
 
+/// The lasting side of a goal. `Goal` is rewritten in place and dropped once
+/// cancelled; each turn line and settlement card needs the goal as it stood then.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct GoalMark {
+    pub(crate) id: String,
+    pub(crate) thread_id: String,
+    pub(crate) provider: String,
+    pub(crate) next_seq: u32,
+    pub(crate) turns: Vec<GoalTurnMark>,
+    pub(crate) settlements: Vec<GoalSettlementMark>,
+    pub(crate) updated_at: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct GoalTurnMark {
+    pub(crate) seq: u32,
+    pub(crate) turn: u32,
+    pub(crate) max_turns: u32,
+    pub(crate) step: Option<GoalStepRefView>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct GoalSettlementMark {
+    pub(crate) seq: u32,
+    pub(crate) status: String,
+    pub(crate) objective: String,
+    pub(crate) turns: u32,
+    pub(crate) max_turns: u32,
+    pub(crate) steps: Vec<GoalStepView>,
+    pub(crate) left_for_you: Vec<String>,
+    pub(crate) report: String,
+    pub(crate) options: Vec<String>,
+    pub(crate) settled_at: u64,
+    pub(crate) resolution: Option<String>,
+}
+
+impl GoalMark {
+    pub(crate) fn take_seq(&mut self) -> u32 {
+        self.next_seq = self.next_seq.saturating_add(1);
+        self.next_seq
+    }
+
+    pub(crate) fn turn_mut(&mut self, seq: u32) -> Option<&mut GoalTurnMark> {
+        self.turns.iter_mut().find(|turn| turn.seq == seq)
+    }
+
+    pub(crate) fn settlement_mut(&mut self, seq: u32) -> Option<&mut GoalSettlementMark> {
+        self.settlements
+            .iter_mut()
+            .find(|settlement| settlement.seq == seq)
+    }
+}
+
+/// The card shows the objective on one line; the panel has the whole of it.
+const CARD_OBJECTIVE_CHARS: usize = 300;
+
+fn goal_card(mark: &GoalMark, tag: &InjectionTag) -> Option<InjectionCard> {
+    match tag.kind {
+        InjectionKind::GoalTurn => {
+            let turn = mark.turns.iter().find(|turn| turn.seq == tag.round)?;
+            Some(InjectionCard::GoalTurn(GoalTurnCardView {
+                goal_id: mark.id.clone(),
+                turn: turn.turn,
+                max_turns: turn.max_turns,
+                step: turn.step.clone(),
+            }))
+        }
+        InjectionKind::GoalSettled => {
+            let settled = mark
+                .settlements
+                .iter()
+                .find(|settlement| settlement.seq == tag.round)?;
+            Some(InjectionCard::GoalSettled(GoalSettledCardView {
+                goal_id: mark.id.clone(),
+                thread_id: mark.thread_id.clone(),
+                seq: settled.seq,
+                status: settled.status.clone(),
+                objective: clip_chars(&settled.objective, CARD_OBJECTIVE_CHARS),
+                turns: settled.turns,
+                max_turns: settled.max_turns,
+                provider: mark.provider.clone(),
+                steps: settled.steps.clone(),
+                left_for_you: settled.left_for_you.clone(),
+                // Whole: this card is the only place the report is shown. A snapshot
+                // still clips it, as a preview the client reads in full from the page.
+                report: settled.report.clone(),
+                options: settled.options.clone(),
+                settled_at: settled.settled_at,
+                resolution: settled.resolution.clone(),
+            }))
+        }
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug)]
 enum Match {
     Anchor(MessageAnchor),
@@ -273,6 +383,7 @@ pub(crate) struct Injections {
     handovers: HashMap<String, HandoverMark>,
     reviews: HashMap<String, ReviewMark>,
     delegates: HashMap<String, DelegateMark>,
+    goals: HashMap<String, GoalMark>,
     anchored: HashMap<String, Vec<InjectedMessage>>,
     pending: HashMap<String, Vec<(String, InjectionTag)>>,
 }
@@ -282,9 +393,13 @@ impl Injections {
         handovers: Vec<HandoverMark>,
         reviews: Vec<ReviewMark>,
         delegates: Vec<DelegateMark>,
+        goals: Vec<GoalMark>,
         messages: Vec<InjectedMessage>,
     ) -> Self {
         let mut injections = Self::default();
+        for goal in goals {
+            injections.put_goal(goal);
+        }
         for handover in handovers {
             injections.put_handover(handover);
         }
@@ -345,6 +460,14 @@ impl Injections {
 
     pub(crate) fn put_delegate(&mut self, delegate: DelegateMark) {
         self.delegates.insert(delegate.id.clone(), delegate);
+    }
+
+    pub(crate) fn goal(&self, id: &str) -> Option<&GoalMark> {
+        self.goals.get(id)
+    }
+
+    pub(crate) fn put_goal(&mut self, goal: GoalMark) {
+        self.goals.insert(goal.id.clone(), goal);
     }
 
     pub(crate) fn reviews_continued_by(&self, review_id: &str) -> Vec<String> {
@@ -427,6 +550,7 @@ impl Injections {
         self.handovers.remove(ref_id);
         self.reviews.remove(ref_id);
         self.delegates.remove(ref_id);
+        self.goals.remove(ref_id);
     }
 
     /// Drops the thread's rows, and every mark only they carried. Returns those marks'
@@ -470,6 +594,8 @@ impl Injections {
         let view = |tag: &InjectionTag| {
             let card = if tag.kind.is_review() {
                 InjectionCard::Review(self.review_card(tag, &named, &title)?)
+            } else if tag.kind.is_goal() {
+                goal_card(self.goals.get(&tag.ref_id)?, tag)?
             } else if tag.kind.is_delegate() {
                 InjectionCard::Delegate(self.delegate_cards(tag, &named, &title)?)
             } else {
@@ -773,7 +899,9 @@ impl ThreadInjections {
                     InjectionKind::HandoverSummary
                     | InjectionKind::DelegateBrief
                     | InjectionKind::ReviewReply => record.kind == TranscriptEntryKind::AgentText,
-                    InjectionKind::DelegateCall | InjectionKind::ReviewCall => {
+                    InjectionKind::DelegateCall
+                    | InjectionKind::ReviewCall
+                    | InjectionKind::GoalSettled => {
                         record.kind == TranscriptEntryKind::ToolCall && record.status == "completed"
                     }
                     InjectionKind::DelegateReported => record.kind != TranscriptEntryKind::UserText,
@@ -848,6 +976,7 @@ mod tests {
         let mut injections = Injections::load(
             Vec::new(),
             vec![review("carried"), review("waiting")],
+            Vec::new(),
             Vec::new(),
             vec![row("gone", "carried", InjectionKind::ReviewResult)],
         );
@@ -957,6 +1086,7 @@ mod tests {
                 error: Some("failed in /elsewhere".to_string()),
                 ..review("r")
             }],
+            Vec::new(),
             Vec::new(),
             vec![row("parent", "r", InjectionKind::ReviewResult)],
         );

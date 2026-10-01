@@ -7,6 +7,9 @@ export function createGoalActions({
   getThreadId,
   setGoal,
   stopGoal,
+  // (threadId, seq, "keep_going" | "stop"): the relay refuses unless the goal is still on
+  // that card and keeps the words it holds, so a stale card cannot undo a revision.
+  goalCard = null,
   log = () => {},
   // Reported onto the CARD, not the composer: on a phone this panel is opened as a
   // native <dialog>, so the composer sits behind an inert layer where the message
@@ -18,8 +21,7 @@ export function createGoalActions({
   // (from here or from the composer) cannot land on the goal that replaced it.
   beginGoalAction = () => 0,
 }) {
-  const write = (capability, ...args) => {
-    const threadId = getThreadId();
+  const write = (threadId, capability, ...args) => {
     if (!threadId) return;
     // Cleared when this attempt STARTS, never when it finishes. These buttons are
     // fire-and-forget and nothing disables them, so a success clearing on its way out
@@ -42,8 +44,9 @@ export function createGoalActions({
       });
   };
   return {
-    onStopGoal: () => write(stopGoal),
+    onStopGoal: () => write(getThreadId(), stopGoal),
     // Re-sending the same objective is how "keep going" answers a completion claim.
-    onResumeGoal: (objective) => write(setGoal, objective || ""),
+    onResumeGoal: (objective) => write(getThreadId(), setGoal, objective || ""),
+    onGoalCard: (threadId, seq, action) => write(threadId, goalCard, seq, action),
   };
 }

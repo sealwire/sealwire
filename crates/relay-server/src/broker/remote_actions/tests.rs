@@ -1964,12 +1964,45 @@ fn goal_actions_round_trip_and_bind_device() {
     }
 }
 
+#[test]
+fn a_goal_card_action_names_its_card_and_binds_the_device() {
+    let card: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "goal_card",
+        "thread_id": "thread-1",
+        "seq": 4,
+        "action": "keep_going"
+    }))
+    .expect("goal_card should parse");
+    assert_eq!(card.kind(), RemoteActionKind::GoalCard);
+    assert_eq!(RemoteActionKind::GoalCard.as_str(), "goal_card");
+    match card.bind_device("device-3".to_string(), "surface-test", test_origin()) {
+        RemoteActionRequest::GoalCard {
+            thread_id,
+            seq,
+            action,
+            device_id,
+        } => {
+            assert_eq!(
+                (thread_id.as_str(), seq, action.as_str()),
+                ("thread-1", 4, "keep_going")
+            );
+            assert_eq!(device_id.as_deref(), Some("device-3"));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    assert!(matches!(
+        remote_action_result_kind(RemoteActionKind::GoalCard),
+        RemoteActionResultKind::RemoteActionAck
+    ));
+}
+
 // Stopping a goal is not the brake `stop_turn` is: it settles the goal Cancelled and the
 // card goes away.
 #[test]
 fn both_goal_actions_need_the_session_claim() {
     assert!(requires_session_claim(RemoteActionKind::SetGoal));
     assert!(requires_session_claim(RemoteActionKind::StopGoal));
+    assert!(requires_session_claim(RemoteActionKind::GoalCard));
     assert!(!requires_session_claim(RemoteActionKind::StopTurn));
 }
 

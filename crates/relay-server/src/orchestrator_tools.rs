@@ -49,6 +49,8 @@ pub(crate) const PEER_TOOLS: &[&str] = &[
     // be: anything that writes the objective. An agent that can edit its own
     // goal will edit it to one it can finish.
     "goal_status",
+    "goal_plan",
+    "goal_step",
     "goal_complete",
     "goal_blocked",
     "goal_needs_you",
@@ -176,6 +178,9 @@ const ACTING_TOOLS: &[&str] = &[
     "goal_complete",
     "goal_blocked",
     "goal_needs_you",
+    // The agent's own plan against the goal, not the goal: it may rewrite it freely.
+    "goal_plan",
+    "goal_step",
     // Deliberate, and the biggest thing on this list: an agent may bring in
     // another agent without a confirmation card. Requiring one per ask would
     // break the whole point — the asking agent runs its own loop and decides
@@ -430,16 +435,64 @@ objective is the user's; you cannot change it.",
         params: &[],
     },
     ToolSpec {
+        name: "goal_plan",
+        summary: "Write your plan for the goal as a few milestone steps, in order. \
+Call it again to change the plan; a step you keep word for word keeps its progress.",
+        effect: Effect::Acts,
+        params: &[ToolParam {
+            name: "steps",
+            kind: ParamKind::TextList,
+            required: true,
+            summary: "One short line per step, 3–7 steps, at most 12.",
+        }],
+    },
+    ToolSpec {
+        name: "goal_step",
+        summary: "Mark a step of your plan active when you start it and done when it \
+is. Give a done step a one-line note of what it came to.",
+        effect: Effect::Acts,
+        params: &[
+            ToolParam {
+                name: "step",
+                kind: ParamKind::Integer,
+                required: true,
+                summary: "The step's number in your plan, from 1.",
+            },
+            ToolParam {
+                name: "status",
+                kind: ParamKind::OneOf(&["active", "done", "pending"]),
+                required: true,
+                summary: "Where the step stands now.",
+            },
+            ToolParam {
+                name: "note",
+                kind: ParamKind::Text,
+                required: false,
+                summary: "One line: the result, e.g. \"all 103 tests pass\". Evidence goes in \
+goal_complete.",
+            },
+        ],
+    },
+    ToolSpec {
         name: "goal_complete",
         summary: "Report the goal met. Say what you did and the evidence — the \
 user decides whether to accept it, so an unevidenced claim just comes back.",
         effect: Effect::Acts,
-        params: &[ToolParam {
-            name: "summary",
-            kind: ParamKind::Text,
-            required: true,
-            summary: "What was done, and how you know each part of the goal is met.",
-        }],
+        params: &[
+            ToolParam {
+                name: "summary",
+                kind: ParamKind::Text,
+                required: true,
+                summary: "What was done, and how you know each part of the goal is met.",
+            },
+            ToolParam {
+                name: "left_for_you",
+                kind: ParamKind::TextList,
+                required: false,
+                summary: "What the user still has to do or know — uncommitted work, a restart, \
+a failure you did not fix. One line each.",
+            },
+        ],
     },
     ToolSpec {
         name: "goal_blocked",
@@ -458,12 +511,21 @@ grinding on: the user can unblock you.",
         summary: "Stop and ask the user to decide something only they can. Work \
 resumes when they answer.",
         effect: Effect::Acts,
-        params: &[ToolParam {
-            name: "question",
-            kind: ParamKind::Text,
-            required: true,
-            summary: "The decision you need, with the options as you see them.",
-        }],
+        params: &[
+            ToolParam {
+                name: "question",
+                kind: ParamKind::Text,
+                required: true,
+                summary: "The decision you need, with the options as you see them.",
+            },
+            ToolParam {
+                name: "options",
+                kind: ParamKind::TextList,
+                required: false,
+                summary: "Up to 4 short answers the user can pick with one tap, e.g. \
+\"Use opus 5.5 high\". They can always write their own.",
+            },
+        ],
     },
     ToolSpec {
         name: "report_back",
@@ -814,14 +876,25 @@ dismiss one before you can stage another",
 pub(crate) enum ToolCall {
     /// Read the objective. There is no variant for writing one.
     GoalStatus,
+    /// The agent's plan. Never the objective.
+    GoalPlan {
+        steps: Vec<String>,
+    },
+    GoalStep {
+        step: i64,
+        status: String,
+        note: Option<String>,
+    },
     GoalComplete {
         summary: String,
+        left_for_you: Vec<String>,
     },
     GoalBlocked {
         reason: String,
     },
     GoalNeedsYou {
         question: String,
+        options: Vec<String>,
     },
     /// Reply to whoever asked you. The relay finds the ask from the caller's own
     /// token, so a peer cannot answer on somebody else's behalf.
@@ -1161,14 +1234,28 @@ pub(crate) fn parse_call(name: &str, args: &Value) -> Result<ToolCall, String> {
         }),
         "list_agents" => Ok(ToolCall::ListAgents),
         "goal_status" => Ok(ToolCall::GoalStatus),
+        "goal_plan" => Ok(ToolCall::GoalPlan {
+            steps: parse_optional_text_list(spec.name, "steps", object.get("steps"))?,
+        }),
+        "goal_step" => Ok(ToolCall::GoalStep {
+            step: get_integer("step")?.expect("required param yields Some"),
+            status: get("status")?.expect("required param yields Some"),
+            note: get("note")?,
+        }),
         "goal_complete" => Ok(ToolCall::GoalComplete {
             summary: get("summary")?.expect("required param yields Some"),
+            left_for_you: parse_optional_text_list(
+                spec.name,
+                "left_for_you",
+                object.get("left_for_you"),
+            )?,
         }),
         "goal_blocked" => Ok(ToolCall::GoalBlocked {
             reason: get("reason")?.expect("required param yields Some"),
         }),
         "goal_needs_you" => Ok(ToolCall::GoalNeedsYou {
             question: get("question")?.expect("required param yields Some"),
+            options: parse_optional_text_list(spec.name, "options", object.get("options"))?,
         }),
         "report_back" => Ok(ToolCall::ReportBack {
             answer: get("answer")?.expect("required param yields Some"),

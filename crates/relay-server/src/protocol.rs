@@ -1042,6 +1042,14 @@ impl SessionSnapshot {
                     entry_previewed |= truncate_with_ellipsis(answer, budget.max_transcript_chars);
                 }
             }
+            if let Some(InjectionView {
+                card: InjectionCard::GoalSettled(settled),
+                ..
+            }) = &mut entry.injection
+            {
+                entry_previewed |=
+                    truncate_with_ellipsis(&mut settled.report, budget.max_transcript_chars);
+            }
             if entry_previewed {
                 transcript_truncated = true;
                 // The entry's content was ellipsis-truncated but is still
@@ -1275,6 +1283,16 @@ impl SessionSnapshot {
                             for ask in asks {
                                 ask.answer = None;
                                 ask.cited.clear();
+                            }
+                        }
+                        Some(InjectionView {
+                            card: InjectionCard::GoalSettled(settled),
+                            ..
+                        }) => {
+                            settled.report.clear();
+                            settled.left_for_you.clear();
+                            for step in &mut settled.steps {
+                                step.note = None;
                             }
                         }
                         _ => {}
@@ -2269,6 +2287,10 @@ pub enum InjectionKind {
     DelegateAnswer,
     /// Not a user row: the peer's `report_back` call or reply that answered the ask.
     DelegateReported,
+    /// The prompt that started a goal turn.
+    GoalTurn,
+    /// Not a user row: the `goal_complete` / `goal_blocked` / `goal_needs_you` call.
+    GoalSettled,
 }
 
 impl InjectionKind {
@@ -2297,6 +2319,10 @@ impl InjectionKind {
                 | Self::DelegateAnswer
                 | Self::DelegateReported
         )
+    }
+
+    pub fn is_goal(self) -> bool {
+        matches!(self, Self::GoalTurn | Self::GoalSettled)
     }
 }
 
@@ -2328,6 +2354,20 @@ impl InjectionView {
             _ => &[],
         }
     }
+
+    pub fn goal_turn(&self) -> Option<&GoalTurnCardView> {
+        match &self.card {
+            InjectionCard::GoalTurn(turn) => Some(turn),
+            _ => None,
+        }
+    }
+
+    pub fn goal_settled(&self) -> Option<&GoalSettledCardView> {
+        match &self.card {
+            InjectionCard::GoalSettled(settled) => Some(settled),
+            _ => None,
+        }
+    }
 }
 
 /// Serialized as a field named after the variant, beside `kind`.
@@ -2338,6 +2378,8 @@ pub enum InjectionCard {
     Review(ReviewCardView),
     /// Several only on an answer row, when one wake handed back more than one ask.
     Delegate(Vec<DelegateCardView>),
+    GoalTurn(GoalTurnCardView),
+    GoalSettled(GoalSettledCardView),
 }
 
 /// One `/delegate` or peer ask, as the cards at both ends draw it.
@@ -3748,6 +3790,75 @@ pub struct GoalView {
     pub max_turns: u32,
     pub outcome: Option<String>,
     pub updated_at: u64,
+    /// The thread's provider, so a claim can say who is making it.
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<GoalStepView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_for_you: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// The `seq` of the card it is waiting on. Its id survives a revision; this does not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_seq: Option<u32>,
+}
+
+/// One line of an agent's plan for a goal.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalStepView {
+    pub title: String,
+    /// `pending`, `active` or `done`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<u32>,
+}
+
+/// The step a goal turn is working on, 1-based as the agent was shown it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalStepRefView {
+    pub index: u32,
+    pub total: u32,
+    pub title: String,
+}
+
+/// Drawn in place of the prompt the relay sends to start a goal turn.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalTurnCardView {
+    pub goal_id: String,
+    pub turn: u32,
+    pub max_turns: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<GoalStepRefView>,
+}
+
+/// How the agent left a goal, as it stood when it said so.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalSettledCardView {
+    pub goal_id: String,
+    pub thread_id: String,
+    pub seq: u32,
+    /// `complete_claimed`, `blocked` or `awaiting_user`.
+    pub status: String,
+    /// Clipped: the card shows one line, the panel has the whole of it.
+    pub objective: String,
+    pub turns: u32,
+    pub max_turns: u32,
+    pub provider: String,
+    #[serde(default)]
+    pub steps: Vec<GoalStepView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_for_you: Vec<String>,
+    /// The completion summary, the reason it is stuck, or the question.
+    pub report: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    pub settled_at: u64,
+    /// How the person moved the goal on from here: `reopened`, `answered`,
+    /// `accepted` or `cancelled`. Absent while it still waits on them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
 }
 
 /// One ask: A handed B a message and is waiting. This is a list/card projection.

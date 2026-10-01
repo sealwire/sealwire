@@ -14,4 +14,5 @@ export const ACTIONS_REQUIRING_SESSION_CLAIM = new Set([
   "handover",
   "set_goal",
   "stop_goal",
+  "goal_card",
 ]);

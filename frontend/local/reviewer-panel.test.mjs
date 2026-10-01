@@ -1089,8 +1089,8 @@ test("a long goal objective is clamped on the Agents card, and can be expanded",
 });
 
 // Reported as "the goal card is always this long": a finished goal's report was shown
-// in full because "complete_claimed" needs the user, yet its text is a report, not a question.
-test("a finished goal's report is clamped and expandable; a question is not", () => {
+// in full because it needs the user, yet its text is a report, not a question.
+test("a stopped goal's report is clamped and expandable; a question is not", () => {
   const card = (status) =>
     renderToStaticMarkup(
       h(ReviewerPanel, {
@@ -1099,12 +1099,16 @@ test("a finished goal's report is clamped and expandable; a question is not", ()
         canRequest: false,
       })
     );
-  const report = card("complete_claimed").match(/<p[^>]*reviewer-card-result[^>]*>/)?.[0] || "";
-  assert.doesNotMatch(report, /is-question/, "a report is a preview, not something to answer");
-  assert.match(report, /aria-expanded="false"/, "the full report is one click away");
+  for (const status of ["interrupted", "out_of_turns"]) {
+    const report = card(status).match(/<p[^>]*reviewer-card-result[^>]*>/)?.[0] || "";
+    assert.doesNotMatch(report, /is-question/, "a report is a preview, not something to answer");
+    assert.match(report, /aria-expanded="false"/, "the full report is one click away");
+  }
   for (const status of ["awaiting_user", "blocked"]) {
     assert.match(card(status), /reviewer-card-result is-question/, `${status} is read in full`);
   }
+  // The full completion report lives on the transcript's card, not in the side panel.
+  assert.doesNotMatch(card("complete_claimed"), /a long report/);
 });
 
 test("goal title focus ring uses box-shadow like other controls", () => {
@@ -1214,4 +1218,76 @@ test("a goal that stopped for the user reads as needing attention, not as done",
   // Whatever the state, the tooltip must not talk about reviews when the panel is
   // carrying a goal.
   assert.doesNotMatch(/title="([^"]*)"/.exec(chipFor("active"))[1], /[Rr]eview/);
+});
+
+const STEPS = [
+  { title: "Design usage view", status: "done", note: "shipped the per-session table", turn: 1 },
+  { title: "Review round 2", status: "active", note: "mobile width fixed", turn: 4 },
+  { title: "Independent verification", status: "pending" },
+];
+const goalPanel = (goal) =>
+  renderToStaticMarkup(
+    h(ReviewerPanel, {
+      goal: { id: "g1", thread_id: "t1", objective: "ship usage", turns: 4, max_turns: 20, ...goal },
+      reviewJobs: [],
+      canRequest: false,
+      onStopGoal() {},
+      onResumeGoal() {},
+      onEditGoal() {},
+    })
+  );
+
+// Design 27b: while the goal runs the rows only say where it is; once it settles each
+// step says what came of it.
+test("a running goal lists its steps without their notes, and counts what is done", () => {
+  const html = goalPanel({ status: "active", steps: STEPS });
+  assert.match(html, /Design usage view/);
+  assert.match(html, /Independent verification/);
+  assert.doesNotMatch(html, /shipped the per-session table/, "notes wait until it settles");
+  assert.doesNotMatch(html, /mobile width fixed/);
+  assert.match(html, /goal-step is-active is-working/, "the step in progress is the one marked");
+  assert.match(html, /1 of 3 done/);
+  assert.match(html, /turn 4 of 20/);
+  assert.match(html, /Working/);
+  assert.match(html, />turn 1</, "each step says the turn it moved in");
+});
+
+test("a settled goal's steps carry their notes, and a claim lists what is left for you", () => {
+  const html = goalPanel({
+    status: "complete_claimed",
+    provider: "claude_code",
+    outcome: "the whole report",
+    steps: STEPS.map((step) => ({ ...step, status: "done" })),
+    left_for_you: ["Not committed; restart relay 8787"],
+  });
+  assert.match(html, /shipped the per-session table/);
+  assert.match(html, /Left for you/);
+  assert.match(html, /Not committed; restart relay 8787/);
+  assert.match(html, /Claude says done/, "the agent's claim, never the relay's verdict");
+  assert.match(html, /4 turns used/);
+  assert.doesNotMatch(html, /the whole report/);
+  assert.doesNotMatch(html, /of 3 done/, "progress is a running goal's footer");
+});
+
+test("what is left for you shows only on a completion claim", () => {
+  for (const status of ["awaiting_user", "blocked", "out_of_turns"]) {
+    const html = goalPanel({ status, steps: STEPS, left_for_you: ["restart the relay"] });
+    assert.doesNotMatch(html, /Left for you/, status);
+  }
+});
+
+test("a goal waiting on the person marks the step it stopped on and shows the question whole", () => {
+  const waiting = goalPanel({ status: "awaiting_user", outcome: "Which model?", steps: STEPS });
+  assert.match(waiting, /goal-step-mark is-flag is-needs-you/);
+  assert.match(waiting, /Needs you/);
+  assert.match(waiting, /reviewer-card-result is-question[^>]*>Which model\?/);
+  const stuck = goalPanel({ status: "blocked", outcome: "No such model", steps: STEPS });
+  assert.match(stuck, /goal-step-mark is-flag is-blocker/);
+  assert.match(stuck, /Stuck/);
+});
+
+test("the heading's trailing word follows the goal's state", () => {
+  assert.match(goalPanel({ status: "out_of_turns" }), /Out of turns/);
+  assert.match(goalPanel({ status: "interrupted" }), /Stopped/);
+  assert.match(goalPanel({ status: "complete_claimed" }), /The agent says done/, "no provider, no name");
 });

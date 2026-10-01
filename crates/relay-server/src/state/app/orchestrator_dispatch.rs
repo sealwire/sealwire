@@ -29,6 +29,8 @@ pub struct PeerToolReply {
     pub text: String,
     pub ask_id: Option<String>,
     pub review_id: Option<String>,
+    /// The goal and settlement a settling call's row is drawn as.
+    pub goal_settlement: Option<(String, u32)>,
 }
 
 /// First non-empty summary line, truncated on a char boundary.
@@ -506,31 +508,69 @@ impl AppState {
         }
         let mut ask_id = None;
         let mut review_id = None;
+        let mut goal_settlement = None;
         let text = match orchestrator_tools::parse_call(name, args)? {
             ToolCall::GoalStatus => Ok(self.goal_status_text(caller_thread_id).await),
-            ToolCall::GoalComplete { summary } => self
+            ToolCall::GoalPlan { steps } => {
+                self.plan_goal(caller_thread_id, &steps).await.map(|total| {
+                    format!(
+                        "Planned {total} steps. Mark each one with goal_step as you start and \
+finish it."
+                    )
+                })
+            }
+            ToolCall::GoalStep { step, status, note } => self
+                .move_goal_step(caller_thread_id, step, &status, note.as_deref())
+                .await
+                .map(|()| format!("Step {step} is {status}.")),
+            ToolCall::GoalComplete {
+                summary,
+                left_for_you,
+            } => self
                 .settle_goal(
                     caller_thread_id,
                     crate::state::GoalStatus::CompleteClaimed,
-                    summary,
+                    crate::state::GoalSettlement {
+                        outcome: summary,
+                        left_for_you,
+                        options: Vec::new(),
+                    },
                 )
                 .await
-                .map(|()| {
+                .map(|settled| {
+                    goal_settlement = settled;
                     "Reported. The user sees it as a claim, not as done, and can reopen it."
                         .to_string()
                 }),
             ToolCall::GoalBlocked { reason } => self
-                .settle_goal(caller_thread_id, crate::state::GoalStatus::Blocked, reason)
+                .settle_goal(
+                    caller_thread_id,
+                    crate::state::GoalStatus::Blocked,
+                    crate::state::GoalSettlement {
+                        outcome: reason,
+                        ..Default::default()
+                    },
+                )
                 .await
-                .map(|()| "Reported. The user can unblock you or change the goal.".to_string()),
-            ToolCall::GoalNeedsYou { question } => self
+                .map(|settled| {
+                    goal_settlement = settled;
+                    "Reported. The user can unblock you or change the goal.".to_string()
+                }),
+            ToolCall::GoalNeedsYou { question, options } => self
                 .settle_goal(
                     caller_thread_id,
                     crate::state::GoalStatus::AwaitingUser,
-                    question,
+                    crate::state::GoalSettlement {
+                        outcome: question,
+                        options,
+                        ..Default::default()
+                    },
                 )
                 .await
-                .map(|()| "Asked. Work resumes when they answer.".to_string()),
+                .map(|settled| {
+                    goal_settlement = settled;
+                    "Asked. End your turn now; work resumes when they answer.".to_string()
+                }),
             ToolCall::ReportBack { answer, cited } => {
                 match self.report_back(caller_thread_id, answer, cited).await {
                     Ok(()) => Ok("Sent. The agent that asked will be given it.".to_string()),
@@ -589,6 +629,7 @@ Do not poll or wait. Findings will be delivered here."
             text,
             ask_id,
             review_id,
+            goal_settlement,
         })
     }
 
@@ -624,6 +665,8 @@ Do not poll or wait. Findings will be delivered here."
             | ToolCall::Review { .. }
             | ToolCall::ReportBack { .. }
             | ToolCall::GoalStatus
+            | ToolCall::GoalPlan { .. }
+            | ToolCall::GoalStep { .. }
             | ToolCall::GoalComplete { .. }
             | ToolCall::GoalBlocked { .. }
             | ToolCall::GoalNeedsYou { .. } => {
@@ -1042,6 +1085,7 @@ pub fn peer_tool_result_envelope(outcome: Result<PeerToolReply, String>) -> Valu
             text,
             ask_id,
             review_id,
+            goal_settlement,
         }) => {
             let mut envelope = tool_result_envelope(Ok(text));
             if let Some(ask_id) = ask_id {
@@ -1049,6 +1093,10 @@ pub fn peer_tool_result_envelope(outcome: Result<PeerToolReply, String>) -> Valu
             }
             if let Some(review_id) = review_id {
                 envelope["_meta"] = json!({ "review_id": review_id });
+            }
+            // A string, like the other ids: the row marker reads every id as one.
+            if let Some((goal_id, seq)) = goal_settlement {
+                envelope["_meta"] = json!({ "goal_id": goal_id, "goal_seq": seq.to_string() });
             }
             envelope
         }

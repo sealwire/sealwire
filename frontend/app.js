@@ -188,6 +188,8 @@ import { canRequestReview, selectReviewLaunchModel } from "./shared/review-state
 import { dispatchDelegateAction } from "./shared/delegate-card.js";
 import { dispatchReviewAction } from "./shared/review-card.js";
 import { createGoalActions } from "./shared/goal-actions.js";
+import { dispatchGoalAction } from "./shared/goal-card.js";
+import { focusComposer, prefillComposer } from "./shared/composer-prefill.js";
 import { createDelegateAuthor } from "./local/delegate-authoring.js";
 import { createHandoverAuthor } from "./local/handover-authoring.js";
 import { createHandoverOutcomeReporter } from "./shared/handover-outcomes.js";
@@ -810,10 +812,15 @@ const reviewerActions = {
     setGoal: (threadId, objective) => postSessionGoal(threadId, objective),
     // The loopback route's own contract: an empty objective is how it cancels.
     stopGoal: (threadId) => postSessionGoal(threadId, ""),
+    goalCard: (threadId, seq, action) =>
+      postRelayCommand("/api/session/goal/card", { thread_id: threadId, seq, action }),
     log: logLine,
     setGoalError: showGoalError,
     beginGoalAction: openGoalAction,
   }),
+  onEditGoal: (objective) => prefillComposer(messageInput, `/goal ${objective}`),
+  onReplyGoal: () => focusComposer(messageInput),
+  onSendGoalOption: (text) => void sendMessage(text, viewedThreadId()),
   // The warning a cancelled goal leaves behind has no buttons of its own to supersede it.
   onDismissGoalError: () => {
     clearGoalError(viewedThreadId());
@@ -3272,6 +3279,12 @@ transcript.addEventListener(
     delegateAction: (action) =>
       void dispatchDelegateAction(action, {
         cancel: (threadId) => state.controller?.stopActiveTurn(threadId),
+      }),
+    goalAction: (action) =>
+      void dispatchGoalAction(action, {
+        card: reviewerActions.onGoalCard,
+        send: (threadId, text) => sendMessage(text, threadId),
+        reply: () => focusComposer(messageInput),
       }),
     goHome: () => void runViewTransition(() => clearThreadRoute()),
   })
