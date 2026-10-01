@@ -79,6 +79,7 @@ import { claudeProjectsDir, moveForkIntoFolder } from "./fork-folder.mjs";
 import {
   findLocalSessionFile,
   readSessionCwdFromFile,
+  readSessionErrors,
   readSessionMessagePage,
 } from "./session-page.mjs";
 
@@ -938,6 +939,8 @@ function settleUnexpectedStreamEnd(sessions, entry, context) {
         type: "session_stopped",
         provider_session_id: providerSessionId,
         turn_id: settledId,
+        failed: true,
+        reason: "Claude session stream ended before the turn became idle",
       });
     }
   }
@@ -1769,13 +1772,24 @@ async function main() {
         try {
           const sessionId = cmd.provider_session_id;
           if (!sessionId) throw new Error("read_session requires provider_session_id");
-          const [info, messages] = await Promise.all([
+          const filePath = await findLocalSessionFile({
+            cwd: cmd.cwd || "",
+            projectsDir: claudeProjectsDir(),
+            sessionId,
+          });
+          const [info, messages, errors] = await Promise.all([
             sdk.getSessionInfo(sessionId, { dir: cmd.cwd || undefined }),
             sdk.getSessionMessages(sessionId, {
               dir: cmd.cwd || undefined,
               includeSystemMessages: false,
             }),
+            filePath ? readSessionErrors({ filePath }) : new Map(),
           ]);
+          // Keep the SDK's chain repair and filtering; it drops only the error metadata we need.
+          for (const message of messages) {
+            const error = errors.get(message.uuid);
+            if (message.type === "assistant" && error) message.error = error;
+          }
           const thread = mapSessionInfo(sessionInfoWithRecordedCwd(sessionId, info, cmd.cwd));
           // Prefer the last real message time over the session-file mtime: a
           // resume appends a session-init line that bumps mtime without being

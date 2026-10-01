@@ -4,7 +4,40 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { readSessionCwdFromFile, readSessionMessagePage } from "./session-page.mjs";
+import { readSessionCwdFromFile, readSessionErrors, readSessionMessagePage } from "./session-page.mjs";
+
+test("error scanning reads only structured assistant errors across chunks and parent gaps", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "sealwire-claude-error-scan-"));
+  const filePath = path.join(dir, "session.jsonl");
+  try {
+    const records = [
+      { ...message("user", null), type: "user", message: { role: "user", content: "Question" }, error: "not-an-assistant-error" },
+      { ...message("answer", "missing"), type: "assistant", message: { content: "模型不可用".repeat(20_000) } },
+      { ...message("error", "answer"), type: "assistant", error: "model_not_found" },
+    ];
+    await writeFile(filePath, records.map(JSON.stringify).join("\n"));
+    assert.deepEqual([...await readSessionErrors({ filePath })], [["error", "model_not_found"]]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("session pages preserve the provider's structured assistant error", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "sealwire-claude-error-page-"));
+  const filePath = path.join(dir, "session.jsonl");
+  try {
+    await writeFile(filePath, `${JSON.stringify({
+      ...message("error-message", null),
+      type: "assistant",
+      error: "model_not_found",
+      isApiErrorMessage: true,
+    })}\n`);
+    const page = await readSessionMessagePage({ filePath });
+    assert.equal(page.messages[0].error, "model_not_found");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test("cold transcript page parses only the tail chain instead of the whole session", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "sealwire-claude-page-"));

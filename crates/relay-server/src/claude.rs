@@ -1838,7 +1838,42 @@ async fn apply_worker_event(
                 };
                 let status =
                     string_at(&payload, &["status"]).unwrap_or_else(|| "completed".to_string());
-                if let ClaudeThreadRoute::Background(thread_id) = route.clone() {
+                if status == "failed" {
+                    // SDK errors are not answers for delegation to salvage.
+                    let thread_id = event_thread_id
+                        .clone()
+                        .or_else(|| relay.active_thread_id.clone())
+                        .unwrap_or_default();
+                    let space = if provider_named {
+                        crate::state::IdSpace::Provider
+                    } else {
+                        crate::state::IdSpace::Relay
+                    };
+                    if matches!(route, ClaudeThreadRoute::Background(_)) {
+                        relay.bg_upsert_transcript_item(
+                            &thread_id,
+                            space,
+                            item_id,
+                            TranscriptEntryKind::Error,
+                            Some(text.clone()),
+                            status,
+                            Some(turn_id),
+                            None,
+                            crate::state::unix_now(),
+                        );
+                    } else {
+                        relay.upsert_item_for_thread(
+                            &thread_id,
+                            item_id,
+                            space,
+                            TranscriptEntryKind::Error,
+                            Some(text.clone()),
+                            status,
+                            Some(turn_id),
+                            None,
+                        );
+                    }
+                } else if let ClaudeThreadRoute::Background(thread_id) = route.clone() {
                     if status == "completed" {
                         if provider_named {
                             relay.bg_complete_agent_message(
@@ -2501,7 +2536,7 @@ async fn apply_worker_event(
 /// The sanitized failure reason if a Claude terminal reported a FAILED turn.
 /// Only the worker's failed `result` sets `failed: true` (mapped onto `done`),
 /// carrying a bounded, subtype-only `reason`; a clean `done` and an explicit
-/// `session_stopped` (user cancel) do not. Returns `None` for non-failures, so
+/// a plain `session_stopped` (user cancel) do not. Returns `None` for non-failures, so
 /// the failure entry is injected exactly for genuine turn failures.
 fn claude_failed_turn_reason(payload: &Value) -> Option<String> {
     if !payload
@@ -6485,11 +6520,52 @@ for await (const line of rl) {
         let relay = state.read().await;
         assert_eq!(relay.active_turn_id, None);
         assert_eq!(relay.current_status, "idle");
+        assert_eq!(
+            relay.turn_terminal("claude-thread", "claude-turn"),
+            Some(TurnOutcome::Stopped)
+        );
+        assert!(relay.last_turn_failure("claude-thread").is_none());
         assert!(relay
             .snapshot()
             .logs
             .iter()
             .any(|entry| entry.message == "Claude session stopped."));
+    }
+
+    #[tokio::test]
+    async fn unexpected_session_stop_records_a_failed_turn() {
+        let state = new_test_state();
+        {
+            let mut relay = state.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some("claude-thread".to_string());
+            relay.set_active_turn(Some("claude-turn".to_string()));
+            relay.set_thread_status("claude-thread", "active".to_string(), Vec::new());
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "session_stopped",
+                "provider_session_id": "claude-thread",
+                "turn_id": "claude-turn",
+                "failed": true,
+                "reason": "Claude session stream ended before the turn became idle"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert_eq!(
+            relay.turn_terminal("claude-thread", "claude-turn"),
+            Some(TurnOutcome::Failed)
+        );
+        assert_eq!(
+            relay
+                .last_turn_failure("claude-thread")
+                .map(|failure| failure.reason.as_str()),
+            Some("Claude session stream ended before the turn became idle")
+        );
     }
 
     #[tokio::test]
@@ -6552,6 +6628,125 @@ for await (const line of rl) {
         let relay = state.read().await;
         assert_eq!(relay.active_turn_id.as_deref(), Some("turn-active"));
         assert_eq!(relay.current_status, "active");
+    }
+
+    #[tokio::test]
+    async fn failed_assistant_message_cannot_recreate_a_deleted_background_thread() {
+        let state = test_relay_with_active_b().await;
+        state.write().await.mark_thread_deleted("thread-a");
+        handle_worker_event(
+            json!({
+                "type": "assistant_message",
+                "provider_session_id": "thread-a",
+                "turn_id": "turn-a",
+                "item_id": "assistant:error",
+                "status": "failed",
+                "text": "The selected model is unavailable."
+            }),
+            &state,
+        )
+        .await;
+        assert!(state.read().await.runtime_for_thread("thread-a").is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_assistant_messages_are_errors_in_active_and_background_threads() {
+        for peer in ["thread-a", "thread-b"] {
+            let state = test_relay_with_active_b().await;
+            for (item_id, status) in [("answer", "completed"), ("provider-error", "failed")] {
+                handle_worker_event(
+                    json!({
+                        "type": "assistant_message",
+                        "provider_session_id": peer,
+                        "turn_id": "turn-1",
+                        "item_id": item_id,
+                        "text": "The selected model is unavailable.",
+                        "status": status
+                    }),
+                    &state,
+                )
+                .await;
+            }
+
+            let relay = state.read().await;
+            let rows = relay.runtime_for_thread(peer).unwrap().transcript_views();
+            let answer = rows
+                .iter()
+                .find(|row| row.item_id.as_deref() == Some("answer"))
+                .unwrap();
+            assert_eq!(answer.kind, TranscriptEntryKind::AgentText);
+            let error = rows
+                .iter()
+                .find(|row| row.item_id.as_deref() == Some("provider-error"))
+                .unwrap();
+            assert_eq!(
+                error.kind,
+                TranscriptEntryKind::Error,
+                "structured status, not prose, determines the kind on {peer}"
+            );
+            assert_eq!(error.status, "failed");
+            assert_eq!(error.turn_id.as_deref(), Some("turn-1"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_claude_provider_error_cannot_become_a_delegate_answer() {
+        let state = test_relay_with_active_b().await;
+        let (tx, _rx) = tokio::sync::watch::channel(0_u64);
+        let app = crate::state::AppState::from_parts(state.clone(), Default::default(), tx);
+        {
+            let mut relay = state.write().await;
+            relay.set_active_turn(Some("asker-turn".to_string()));
+            relay.bg_set_active_turn(
+                "thread-a",
+                Some("peer-turn".to_string()),
+                crate::state::unix_now(),
+            );
+            let mut ask = crate::state::Ask::new(
+                "ask-1".to_string(),
+                "thread-b".to_string(),
+                "thread-a".to_string(),
+                "claude_code".to_string(),
+                None,
+                None,
+                "Review this".to_string(),
+                "/tmp/a".to_string(),
+                None,
+                relay_api::delegation::StartedBy::Agent,
+            );
+            ask.turn_id = Some("peer-turn".to_string());
+            ask.sent_at = Some(crate::state::unix_now());
+            relay.insert_ask(ask);
+        }
+        for event in [
+            json!({
+                "type": "assistant_message",
+                "provider_session_id": "thread-a",
+                "turn_id": "peer-turn",
+                "item_id": "assistant:error",
+                "status": "failed",
+                "text": "The selected model is unavailable."
+            }),
+            json!({
+                "type": "done",
+                "provider_session_id": "thread-a",
+                "turn_id": "peer-turn",
+                "failed": true,
+                "reason": "Claude turn failed."
+            }),
+        ] {
+            handle_worker_event(event, &state).await;
+        }
+
+        app.settle_and_deliver_asks_at(crate::state::unix_now())
+            .await;
+
+        let relay = state.read().await;
+        let ask = relay.ask("ask-1").unwrap();
+        assert_eq!(ask.status, relay_api::delegation::AskStatus::Failed);
+        assert_eq!(ask.error.as_deref(), Some("Claude turn failed."));
+        assert!(ask.answer.is_none());
+        assert!(!ask.nudged, "a provider error has no answer to request");
     }
 
     #[tokio::test]

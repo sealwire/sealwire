@@ -875,9 +875,9 @@ export function mapSessionMessages(messages, cwd = null) {
       if (text) {
         entries.push({
           item_id: `assistant:${itemId}`,
-          kind: "agent_text",
+          kind: item.error ? "error" : "agent_text",
           text,
-          status: "completed",
+          status: item.error ? "failed" : "completed",
           turn_id: itemId,
           tool: null,
         });

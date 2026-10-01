@@ -569,6 +569,20 @@ test("mapSessionMessages emits transcript kinds using relay JSON names", () => {
   );
 });
 
+test("history distinguishes structured assistant errors from identical normal text", () => {
+  const messages = [undefined, "model_not_found"].map((error, index) => ({
+    type: "assistant",
+    uuid: `message-${index}`,
+    error,
+    message: { content: [{ type: "text", text: "The selected model is unavailable." }] },
+  }));
+  const entries = mapSessionMessages(messages);
+  assert.deepEqual(entries.map(({ kind, status }) => ({ kind, status })), [
+    { kind: "agent_text", status: "completed" },
+    { kind: "error", status: "failed" },
+  ]);
+});
+
 test("mapSessionMessages keeps an image-only user turn visible after history reload", () => {
   const entries = mapSessionMessages([
     {

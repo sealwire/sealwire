@@ -317,6 +317,8 @@ test("a stream that ends with no terminal at all still settles via session_stopp
       { label: "abrupt-end session_stopped" },
     );
     assert.equal(stopped.turn_id, "relay-turn-abrupt-end");
+    assert.equal(stopped.failed, true);
+    assert.match(stopped.reason || "", /stream ended before the turn became idle/);
   } finally {
     await worker.close();
   }
@@ -544,6 +546,112 @@ test("read_session_page refuses to synthesize a thread with an empty cwd", async
     assert.match(String(response.error?.message), /did not report a workspace/);
   } finally {
     await worker.close();
+  }
+});
+
+async function spawnHistoryWorker(configDir, messages) {
+  const sdkPath = path.join(configDir, "history-sdk.mjs");
+  await writeFile(sdkPath,
+    `export * from ${JSON.stringify(pathToFileURL(FAKE_SDK).href)};\n` +
+    `export async function getSessionMessages() { return ${JSON.stringify(messages)}; }\n`,
+  );
+  return spawnWorker({ CLAUDE_CONFIG_DIR: configDir, CLAUDE_WORKER_SDK_MODULE: pathToFileURL(sdkPath).href });
+}
+
+for (const command of ["read_session", "read_session_page"]) {
+  test(`${command} keeps local provider errors out of assistant answers`, async () => {
+    const configDir = await mkdtemp(path.join(os.tmpdir(), "sealwire-error-history-"));
+    const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionCwd = "/test/error-history";
+    const projectDir = path.join(configDir, "projects", "-test-error-history");
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(path.join(projectDir, `${sessionId}.jsonl`), `${JSON.stringify({
+      cwd: sessionCwd,
+      type: "assistant",
+      uuid: "provider-error",
+      parentUuid: null,
+      sessionId,
+      error: "model_not_found",
+      isApiErrorMessage: true,
+      message: { content: [{ type: "text", text: "The selected model is unavailable." }] },
+    })}\n`);
+    const worker = await spawnHistoryWorker(configDir, [{
+      type: "assistant",
+      uuid: "provider-error",
+      message: { content: [{ type: "text", text: "The selected model is unavailable." }] },
+    }]);
+    try {
+      worker.send({ type: command, id: "read-error", provider_session_id: sessionId, cwd: sessionCwd });
+      const response = await worker.waitFor(isResponse("read-error"));
+      assert.equal(response.ok, true);
+      assert.equal(response.result.transcript.length, 1);
+      assert.equal(response.result.transcript[0].kind, "error");
+      assert.equal(response.result.transcript[0].status, "failed");
+    } finally {
+      await worker.close();
+      await rm(configDir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("read_session preserves the SDK result across a missing parent", async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), "sealwire-history-gap-"));
+  const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const cwd = "/test/history-gap";
+  const projectDir = path.join(configDir, "projects", "-test-history-gap");
+  const rows = [
+    { type: "user", uuid: "u1", parentUuid: null, message: { content: "first question" } },
+    { type: "assistant", uuid: "a1", parentUuid: "u1", message: { content: [{ type: "text", text: "first answer" }] } },
+    { type: "user", uuid: "u2", parentUuid: "never-written", isMeta: true, message: { content: "Retry the tool call." } },
+    { type: "assistant", uuid: "a2", parentUuid: "u2", message: { content: [{ type: "text", text: "second answer" }] } },
+  ];
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(path.join(projectDir, `${sessionId}.jsonl`), rows.map(row => JSON.stringify({ ...row, sessionId, cwd })).join("\n") + "\n");
+  const worker = await spawnHistoryWorker(configDir, [rows[3]]);
+  try {
+    worker.send({ type: "read_session", id: "read-gap", provider_session_id: sessionId, cwd });
+    const response = await worker.waitFor(isResponse("read-gap"));
+    assert.equal(response.ok, true, JSON.stringify(response.error));
+    assert.deepEqual(response.result.transcript.map(row => row.text), ["second answer"]);
+  } finally {
+    await worker.close();
+    await rm(configDir, { recursive: true, force: true });
+  }
+});
+
+test("read_session preserves SDK message selection and order when restoring errors", async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), "sealwire-history-selection-"));
+  const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const cwd = "/test/history-selection";
+  const projectDir = path.join(configDir, "projects", "-test-history-selection");
+  const rows = [
+    { type: "user", uuid: "question", parentUuid: null, message: { content: "Question" } },
+    { type: "assistant", uuid: "branch", parentUuid: "question", message: { content: [{ type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "README.md" } }] } },
+    { type: "user", uuid: "notification", parentUuid: "branch", message: { content: "<task-notification>Finished</task-notification>" } },
+    { type: "assistant", uuid: "off-branch-error", parentUuid: "notification", error: "model_not_found", message: { content: [{ type: "text", text: "Unselected error" }] } },
+    { type: "user", uuid: "meta", parentUuid: "question", isMeta: true, message: { content: "Base directory for this skill: /test" } },
+    { type: "assistant", uuid: "answer", parentUuid: "meta", message: { content: [{ type: "text", text: "The selected model is unavailable." }] } },
+    { type: "assistant", uuid: "provider-error", parentUuid: "answer", error: "model_not_found", message: { content: [{ type: "text", text: "The selected model is unavailable." }] } },
+  ];
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(path.join(projectDir, `${sessionId}.jsonl`), rows.map(row => JSON.stringify({ ...row, sessionId, cwd })).join("\n") + "\n");
+  const sdkMessages = [rows[0], rows[1], rows[2], rows[5], rows[6]].map(({ error, ...row }) => row);
+  const worker = await spawnHistoryWorker(configDir, sdkMessages);
+  try {
+    worker.send({ type: "read_session", id: "read-selection", provider_session_id: sessionId, cwd });
+    const response = await worker.waitFor(isResponse("read-selection"));
+    assert.equal(response.ok, true, JSON.stringify(response.error));
+    assert.deepEqual(response.result.transcript.map(row => [row.item_id, row.kind]), [
+      ["user:question", "user_text"],
+      ["tool:tool-1", "tool_call"],
+      ["user:notification", "user_text"],
+      ["assistant:answer", "agent_text"],
+      ["assistant:provider-error", "error"],
+    ]);
+    assert.equal(response.result.transcript.at(-1).status, "failed");
+  } finally {
+    await worker.close();
+    await rm(configDir, { recursive: true, force: true });
   }
 });
 
@@ -798,6 +906,7 @@ test("cancel tears the live session down and emits session_stopped", async () =>
     worker.send({ type: "cancel", id: "cancel-1", provider_session_id: "sess-1" });
     const stopped = await worker.waitFor(isStopped, { label: "session_stopped" });
     assert.equal(stopped.turn_id, "relay-turn-cancel");
+    assert.notEqual(stopped.failed, true);
     const response = await worker.waitFor(
       (event) => event.type === "response" && event.id === "cancel-1",
       { label: "cancel response" },

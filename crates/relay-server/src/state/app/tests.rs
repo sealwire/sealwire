@@ -34396,6 +34396,30 @@ mod delegate_card_tests {
         }
     }
 
+    fn working_ask(
+        id: &str,
+        asker: &str,
+        peer: &str,
+        cwd: &str,
+        turn_id: &str,
+    ) -> crate::state::Ask {
+        let mut ask = crate::state::Ask::new(
+            id.to_string(),
+            asker.to_string(),
+            peer.to_string(),
+            "fake".to_string(),
+            None,
+            None,
+            "review this".to_string(),
+            cwd.to_string(),
+            None,
+            StartedBy::Agent,
+        );
+        ask.turn_id = Some(turn_id.to_string());
+        ask.sent_at = Some(crate::state::unix_now());
+        ask
+    }
+
     #[tokio::test]
     async fn delegate_cards_survive_worktree_cleanup_and_cold_history() {
         use super::path_scope_tests::pair_device;
@@ -35043,6 +35067,331 @@ mod delegate_card_tests {
         assert_eq!(card.error.as_deref(), Some("it stopped without answering"));
         let relay = app.relay.read().await;
         assert!(was_woken(&relay, &asker));
+    }
+
+    #[tokio::test]
+    async fn a_failed_peer_turn_reports_back_without_waiting_for_the_timeout() {
+        use crate::state::TurnOutcome;
+
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = session(&app, &cwd).await;
+        let peer = session(&app, &cwd).await;
+        let turn_id = "failed-peer-turn".to_string();
+        {
+            let mut relay = app.relay.write().await;
+            relay.insert_ask(working_ask(
+                "failed-peer-ask",
+                &asker,
+                &peer,
+                &cwd,
+                &turn_id,
+            ));
+            relay.set_last_turn_failure(
+                &peer,
+                turn_id.clone(),
+                None,
+                "The turn ended with an error.".to_string(),
+            );
+            relay.record_turn_terminal(&peer, &turn_id, TurnOutcome::Failed);
+        }
+
+        app.settle_and_deliver_asks_at(crate::state::unix_now())
+            .await;
+
+        let settled = only_ask(&app, &asker).await;
+        assert_eq!(settled.status, relay_api::delegation::AskStatus::Failed);
+        assert_eq!(
+            settled.error.as_deref(),
+            Some("The turn ended with an error.")
+        );
+        assert!(
+            settled.delivered,
+            "the asking agent must hear about the failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_peer_turn_with_a_reply_gets_a_chance_to_report_it() {
+        use crate::protocol::TranscriptEntryKind;
+        use crate::state::{IdSpace, TurnOutcome};
+
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = session(&app, &cwd).await;
+        let peer = session(&app, &cwd).await;
+        let turn_id = "failed-with-reply";
+        {
+            let mut relay = app.relay.write().await;
+            relay.insert_ask(working_ask("ask-with-reply", &asker, &peer, &cwd, turn_id));
+            relay.upsert_item_for_thread(
+                &peer,
+                "reply-in-failed-turn".to_string(),
+                IdSpace::Provider,
+                TranscriptEntryKind::AgentText,
+                Some("Here is what I found".to_string()),
+                "completed".to_string(),
+                Some(turn_id.to_string()),
+                None,
+            );
+            relay.set_last_turn_failure(
+                &peer,
+                turn_id.to_string(),
+                None,
+                "the turn failed after replying".to_string(),
+            );
+            relay.record_turn_terminal(&peer, turn_id, TurnOutcome::Failed);
+        }
+
+        app.settle_and_deliver_asks_at(crate::state::unix_now())
+            .await;
+
+        let ask = only_ask(&app, &asker).await;
+        assert_eq!(ask.status, relay_api::delegation::AskStatus::Working);
+        assert!(
+            ask.nudged,
+            "a reply in the failed turn must reach the nudge path"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_nudge_delivers_the_answer_it_was_nudging_about() {
+        use crate::protocol::TranscriptEntryKind;
+        use crate::state::{IdSpace, TurnOutcome};
+
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = session(&app, &cwd).await;
+        let peer = session(&app, &cwd).await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.upsert_item_for_thread(
+                &peer,
+                "original-reply".to_string(),
+                IdSpace::Provider,
+                TranscriptEntryKind::AgentText,
+                Some("The review found no issue".to_string()),
+                "completed".to_string(),
+                Some("original-turn".to_string()),
+                None,
+            );
+            let baseline = relay
+                .runtime_for_thread(&peer)
+                .expect("peer runtime")
+                .transcript_views()
+                .into_iter()
+                .find(|entry| entry.item_id.as_deref() == Some("original-reply"))
+                .and_then(|entry| entry.row_id)
+                .expect("original reply row");
+            let mut ask = working_ask("failed-nudge-ask", &asker, &peer, &cwd, "nudge-turn");
+            ask.nudged = true;
+            ask.baseline_item_id = Some(baseline);
+            relay.insert_ask(ask);
+            relay.set_last_turn_failure(
+                &peer,
+                "nudge-turn".to_string(),
+                None,
+                "The nudge failed".to_string(),
+            );
+            relay.record_turn_terminal(&peer, "nudge-turn", TurnOutcome::Failed);
+        }
+
+        app.settle_and_deliver_asks_at(crate::state::unix_now())
+            .await;
+
+        let ask = only_ask(&app, &asker).await;
+        assert_eq!(ask.status, relay_api::delegation::AskStatus::Done);
+        assert_eq!(ask.answer.as_deref(), Some("The review found no issue"));
+        assert!(ask.delivered);
+    }
+
+    #[tokio::test]
+    async fn a_failed_peer_turn_waits_for_the_peers_live_sub_ask() {
+        use crate::state::TurnOutcome;
+
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = session(&app, &cwd).await;
+        let peer = session(&app, &cwd).await;
+        let child = session(&app, &cwd).await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.insert_ask(working_ask(
+                "parent-ask",
+                &asker,
+                &peer,
+                &cwd,
+                "failed-parent",
+            ));
+            relay.insert_ask(working_ask("child-ask", &peer, &child, &cwd, "child-turn"));
+            relay.set_last_turn_failure(
+                &peer,
+                "failed-parent".to_string(),
+                None,
+                "the parent turn failed".to_string(),
+            );
+            relay.record_turn_terminal(&peer, "failed-parent", TurnOutcome::Failed);
+        }
+
+        app.settle_and_deliver_asks_at(crate::state::unix_now())
+            .await;
+
+        let ask = only_ask(&app, &asker).await;
+        assert_eq!(ask.status, relay_api::delegation::AskStatus::Working);
+        assert!(!ask.delivered);
+    }
+
+    #[tokio::test]
+    async fn a_cold_idle_ask_reads_provider_history_only_once() {
+        use crate::protocol::TranscriptEntryKind;
+        use crate::state::IdSpace;
+
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = session(&app, &cwd).await;
+        let peer = session(&app, &cwd).await;
+        let handle = app
+            .relay
+            .read()
+            .await
+            .resolve_session_target(&peer)
+            .expect("peer route")
+            .provider_handle;
+        {
+            let mut relay = app.relay.write().await;
+            relay.insert_ask(working_ask("cold-ask", &asker, &peer, &cwd, "missing-turn"));
+            relay.upsert_item_for_thread(
+                &peer,
+                "unrelated-reply".to_string(),
+                IdSpace::Provider,
+                TranscriptEntryKind::AgentText,
+                Some("A different turn replied".to_string()),
+                "completed".to_string(),
+                Some("other-turn".to_string()),
+                None,
+            );
+        }
+
+        app.settle_and_deliver_asks_at(crate::state::unix_now())
+            .await;
+        let first = bridge
+            .thread_ids_seen_by("read_thread")
+            .await
+            .into_iter()
+            .filter(|id| id == &handle)
+            .count();
+        app.settle_and_deliver_asks_at(crate::state::unix_now())
+            .await;
+        let second = bridge
+            .thread_ids_seen_by("read_thread")
+            .await
+            .into_iter()
+            .filter(|id| id == &handle)
+            .count();
+        assert_eq!(
+            second, first,
+            "an unchanged cold ask reread full provider history"
+        );
+        assert_eq!(
+            only_ask(&app, &asker).await.status,
+            relay_api::delegation::AskStatus::Working
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cold_cursor_reply_without_turn_ids_is_still_nudged() {
+        use crate::protocol::TranscriptEntryKind;
+        use crate::state::IdSpace;
+
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = session(&app, &cwd).await;
+        let peer = session(&app, &cwd).await;
+        {
+            let mut relay = app.relay.write().await;
+            let mut ask = working_ask("cold-cursor-ask", &asker, &peer, &cwd, "acp-turn-1");
+            ask.peer_provider = "cursor".to_string();
+            relay.insert_ask(ask);
+            relay.upsert_item_for_thread(
+                &peer,
+                "cursor-reply".to_string(),
+                IdSpace::Provider,
+                TranscriptEntryKind::AgentText,
+                Some("Here is the review".to_string()),
+                "completed".to_string(),
+                None,
+                None,
+            );
+        }
+
+        app.settle_and_deliver_asks_at(crate::state::unix_now())
+            .await;
+
+        let ask = only_ask(&app, &asker).await;
+        assert!(
+            ask.nudged,
+            "Cursor's turnless history should reach the nudge path"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cold_failed_turn_in_provider_history_reports_back() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, bridge, _p, _o) = super::path_scope_tests::build_app_with_bridge(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = session(&app, &cwd).await;
+        let peer = session(&app, &cwd).await;
+        let handle = app
+            .relay
+            .read()
+            .await
+            .resolve_session_target(&peer)
+            .expect("peer route")
+            .provider_handle;
+        bridge
+            .seed_history_entry(
+                &handle,
+                serde_json::from_value(serde_json::json!({
+                    "kind": "error",
+                    "text": "The turn ended with an error.",
+                    "status": "failed",
+                    "turn_id": "cold-failed-turn"
+                }))
+                .expect("error row"),
+            )
+            .await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.insert_ask(working_ask(
+                "cold-failed-ask",
+                &asker,
+                &peer,
+                &cwd,
+                "cold-failed-turn",
+            ));
+            relay.set_thread_status(&peer, "systemError".to_string(), Vec::new());
+        }
+
+        app.settle_and_deliver_asks_at(crate::state::unix_now())
+            .await;
+
+        let ask = only_ask(&app, &asker).await;
+        assert_eq!(ask.status, relay_api::delegation::AskStatus::Failed);
+        assert_eq!(ask.error.as_deref(), Some("The turn ended with an error."));
+        assert!(ask.delivered);
     }
 
     /// Timing out takes what the peer said in the task's own turn, never a reply to
