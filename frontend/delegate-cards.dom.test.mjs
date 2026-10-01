@@ -14,6 +14,13 @@ global.ResizeObserver = class {
   disconnect() {}
 };
 global.IS_REACT_ACT_ENVIRONMENT = true;
+// jsdom lays nothing out: a folded value "overflows" when it holds more than a short line.
+Object.defineProperty(dom.window.HTMLElement.prototype, "clientHeight", { get: () => 40 });
+Object.defineProperty(dom.window.HTMLElement.prototype, "scrollHeight", {
+  get() {
+    return this.textContent.length > 40 ? 120 : 20;
+  },
+});
 
 const React = (await import("react")).default;
 const { act } = await import("react");
@@ -93,4 +100,72 @@ test("Cancel on the brief line stops the asker's own turn", async () => {
   assert.equal(resolved.threadId, "asker");
   assert.equal(container.querySelectorAll("[data-delegate-action]").length, 1, "the only button a card has");
   await unmount();
+});
+
+// A brief puts its whole to-do list before its one `## Context` heading.
+test("the part of a brief before its first heading folds and opens like the rest", async () => {
+  const lead = [
+    "Review the uncommitted change in the worktree and report correctness bugs.",
+    "",
+    "What to do:",
+    "- Read AGENTS.md and CLAUDE.md in the worktree first.",
+    "- Look for real defects in the parser, the sort and the picker.",
+    "- You are done when every changed file has been checked.",
+  ].join("\n");
+  const brief = `${ask().title}\n\n${lead}\n\n## Context\nThe user asked for two things.`;
+  const cards = {
+    asked: [request({ sent_at: 10 }), { item_id: "brief", kind: "agent_text", status: "completed", text: brief }],
+    task: [{
+      item_id: "task",
+      kind: "user_text",
+      status: "completed",
+      text: brief,
+      injection: { kind: "delegate_task", delegate: [ask({ sent_at: 10 })] },
+    }],
+  };
+  for (const [name, entries] of Object.entries(cards)) {
+    const { container, unmount } = await mount(entries);
+    try {
+      const opening = container.querySelector(".delegate-card .handover-section.is-untitled .handover-section-value");
+      assert.ok(opening?.textContent.includes("What to do"), `${name}: the opening is drawn`);
+      assert.ok(opening.classList.contains("is-clamped"), `${name}: the opening is folded`);
+      assert.equal(opening.getAttribute("role"), "button", `${name}: it has no heading to press, so it is the button`);
+
+      await act(async () => opening.click());
+      assert.ok(!opening.classList.contains("is-clamped"), `${name}: pressing it opens it`);
+    } finally {
+      await unmount();
+    }
+  }
+});
+
+test("Enter or Space on a link inside folded text is the link's, and Enter on the text opens it", async () => {
+  const lead = "Read [the review notes](https://example.com/review) and then check every changed module.";
+  const briefs = {
+    headed: `${ask().title}\n\n${lead}\n\n## Context\nThe user asked for two things.`,
+    plain: `${ask().title}\n\n${lead}`,
+  };
+  for (const [name, brief] of Object.entries(briefs)) {
+    const { container, unmount } = await mount([
+      request({ sent_at: 10 }),
+      { item_id: "brief", kind: "agent_text", status: "completed", text: brief },
+    ]);
+    try {
+      const value = container.querySelector(".delegate-card .card-fold");
+      const link = value?.querySelector("a");
+      assert.ok(link, `${name}: the link is drawn`);
+      for (const key of ["Enter", " "]) {
+        const event = new window.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+        await act(async () => link.dispatchEvent(event));
+        assert.equal(event.defaultPrevented, false, `${name}: ${JSON.stringify(key)} still reaches the link`);
+        assert.ok(value.classList.contains("is-clamped"), `${name}: ${JSON.stringify(key)} on the link leaves the text folded`);
+      }
+
+      const own = new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+      await act(async () => value.dispatchEvent(own));
+      assert.ok(!value.classList.contains("is-clamped"), `${name}: Enter on the text itself opens it`);
+    } finally {
+      await unmount();
+    }
+  }
 });
