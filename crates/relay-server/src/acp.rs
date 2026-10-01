@@ -39,6 +39,7 @@ use crate::{
 
 mod config;
 mod opencode;
+pub(crate) use opencode::OpenCodeBridge;
 mod protocol;
 mod rpc;
 
@@ -148,6 +149,7 @@ const MAX_LIST_PAGES: usize = 50;
 pub(crate) struct SessionRuntime {
     pub(crate) cwd: String,
     pub(crate) approval_policy: String,
+    pub(crate) sandbox: String,
     /// The ACP model id this session is currently configured with.
     ///
     /// ACP models are session config, not a per-turn
@@ -186,6 +188,7 @@ pub(crate) struct SessionRuntime {
     pub(crate) ordinals: HashMap<&'static str, u64>,
     /// ACP `toolCallId` → the stable relay item id minted for it.
     pub(crate) tool_items: HashMap<String, String>,
+    pub(crate) native_event_refs: HashMap<String, NativeEventRange>,
     /// The name the relay's own MCP server was attached under, when it was. A
     /// permission request names a tool only by `<server>-<tool>`.
     pub(crate) relay_mcp_server: Option<String>,
@@ -205,6 +208,21 @@ pub(crate) struct SessionRuntime {
     pub(crate) thought_text: String,
     /// The agent's last `available_commands_update`. `None` until it sends one.
     pub(crate) available_commands: Option<Vec<crate::protocol::ProviderSkillView>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NativeEventRange {
+    first: String,
+    last: String,
+}
+
+impl From<&str> for NativeEventRange {
+    fn from(id: &str) -> Self {
+        Self {
+            first: id.into(),
+            last: id.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -282,6 +300,7 @@ impl SessionRuntime {
         self.close_streams();
         self.ordinals.clear();
         self.tool_items.clear();
+        self.native_event_refs.clear();
         self.tool_meta.clear();
     }
 
@@ -410,6 +429,24 @@ pub struct AcpBridge {
     capabilities: Arc<Mutex<protocol::AgentCapabilities>>,
     authenticated: AtomicBool,
     discovery_lock: Mutex<()>,
+    opencode_api: Option<opencode::Api>,
+    closing: Arc<AtomicBool>,
+    stream_closed: Arc<AtomicBool>,
+    #[cfg(unix)]
+    process_group: Option<u32>,
+}
+
+impl Drop for AcpBridge {
+    fn drop(&mut self) {
+        self.closing.store(true, Ordering::Release);
+        #[cfg(unix)]
+        if let Some(group) = self.process_group {
+            // MCP and language servers belong to this isolated OpenCode process too.
+            unsafe {
+                libc::kill(-(group as i32), libc::SIGTERM);
+            }
+        }
+    }
 }
 
 use crate::provider::relay_mcp_server_name;
@@ -494,7 +531,18 @@ impl AcpBridge {
         let Some(token) = token else {
             return json!([]);
         };
-        json!([peer_mcp_server_entry(token)])
+        let mut entry = peer_mcp_server_entry(token);
+        if self.provider_name == "opencode" {
+            if let Some(path) = entry["args"][0].as_str() {
+                let path = std::path::Path::new(path);
+                if path.is_relative() {
+                    if let Ok(cwd) = std::env::current_dir() {
+                        entry["args"][0] = json!(cwd.join(path));
+                    }
+                }
+            }
+        }
+        json!([entry])
     }
 
     /// Seat MCP for ACP: array shape, env as name/value pairs, run id only.
@@ -550,15 +598,41 @@ impl AcpBridge {
         display_name: &'static str,
         provider_key: &'static str,
     ) -> Result<Self, String> {
+        Self::spawn_connection(
+            state,
+            binary_name,
+            launch_args,
+            display_name,
+            provider_key,
+            true,
+        )
+        .await
+    }
+
+    async fn spawn_connection(
+        state: Arc<RwLock<RelayState>>,
+        binary_name: &'static str,
+        launch_args: &'static [&'static str],
+        display_name: &'static str,
+        provider_key: &'static str,
+        owns_provider_connection: bool,
+    ) -> Result<Self, String> {
         // Resolved, not bare: the binary may only exist in `~/.local/bin`, which
         // is where cursor's installer puts it and is often not on `$PATH`. The
         // error text below stays bare — it names a command for a human to run.
         let mut command = Command::new(crate::provider::resolve_binary(binary_name));
-        if provider_key == "opencode" {
+        command.args(launch_args);
+        let opencode_api = if provider_key == "opencode" {
+            let api = opencode::Api::new()?;
             command.current_dir(opencode::discovery_directory().await?);
-        }
+            api.configure(&mut command);
+            #[cfg(unix)]
+            command.process_group(0);
+            Some(api)
+        } else {
+            None
+        };
         command
-            .args(launch_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -584,17 +658,29 @@ impl AcpBridge {
             .take()
             .ok_or_else(|| format!("failed to capture {binary_name} stderr"))?;
 
+        #[cfg(unix)]
+        let process_group = (provider_key == "opencode").then(|| child.id()).flatten();
         let child = Arc::new(Mutex::new(child));
         let pending_responses: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
         let captures: Captures = Arc::new(Mutex::new(HashMap::new()));
         let stdin: Outbound = Arc::new(Mutex::new(Box::new(stdin)));
-        let models_cache = Some(models_cache_path(provider_key));
-        let models = Arc::new(Mutex::new(read_cached_models(
-            models_cache.as_ref().unwrap(),
-        )));
+        let cache_path = models_cache_path(provider_key);
+        // Refresh OpenCode membership once per launch; session configs must not overwrite it.
+        let initial_models = if provider_key == "opencode" && owns_provider_connection {
+            Vec::new()
+        } else {
+            read_cached_models(&cache_path)
+        };
+        let models_cache = owns_provider_connection.then_some(cache_path);
+        let models = Arc::new(Mutex::new(initial_models));
 
+        let closing = Arc::new(AtomicBool::new(false));
+        let stream_closed = Arc::new(AtomicBool::new(false));
         rpc::spawn_stdout_reader(rpc::ReaderContext {
+            closing: closing.clone(),
+            stream_closed: stream_closed.clone(),
+            owns_provider_connection,
             stdout: Box::new(stdout),
             stdin: stdin.clone(),
             pending_responses: pending_responses.clone(),
@@ -625,11 +711,16 @@ impl AcpBridge {
             capabilities: Arc::new(Mutex::new(protocol::AgentCapabilities::default())),
             authenticated: AtomicBool::new(false),
             discovery_lock: Mutex::new(()),
+            opencode_api,
+            closing,
+            stream_closed,
+            #[cfg(unix)]
+            process_group,
         };
 
         bridge.initialize().await?;
 
-        {
+        if owns_provider_connection {
             let mut relay = bridge.state.write().await;
             relay.set_provider_connection(provider_key, true);
             relay.push_log("info", format!("Connected to {display_name} (ACP)."));
@@ -802,6 +893,9 @@ impl AcpBridge {
     }
 
     fn mint_turn_id(&self) -> String {
+        if self.provider_name == "opencode" {
+            return format!("acp-turn-{}", crate::state::new_uuid_v4());
+        }
         format!(
             "acp-turn-{}",
             self.next_turn_id.fetch_add(1, Ordering::Relaxed)
@@ -899,7 +993,12 @@ impl AcpBridge {
         let stdin: Outbound = Arc::new(Mutex::new(Box::new(outbound)));
         let models = Arc::new(Mutex::new(Vec::new()));
 
+        let closing = Arc::new(AtomicBool::new(false));
+        let stream_closed = Arc::new(AtomicBool::new(false));
         rpc::spawn_stdout_reader(rpc::ReaderContext {
+            closing: closing.clone(),
+            stream_closed: stream_closed.clone(),
+            owns_provider_connection: true,
             stdout: Box::new(inbound),
             stdin: stdin.clone(),
             pending_responses: pending_responses.clone(),
@@ -931,6 +1030,11 @@ impl AcpBridge {
             capabilities: Arc::new(Mutex::new(protocol::AgentCapabilities::default())),
             authenticated: AtomicBool::new(true),
             discovery_lock: Mutex::new(()),
+            opencode_api: None,
+            closing,
+            stream_closed,
+            #[cfg(unix)]
+            process_group: None,
         }
     }
 
@@ -1221,11 +1325,17 @@ impl AcpBridge {
             return Ok(());
         };
 
-        config::validate_policy(
-            self.provider_name,
-            &settings.approval_policy,
-            &settings.sandbox,
-        )?;
+        if self.provider_name == "opencode" {
+            self.sessions
+                .lock()
+                .await
+                .entry(thread_id.to_string())
+                .or_default()
+                .approval_policy = settings.approval_policy.clone();
+            return self
+                .apply_mode(thread_id, &settings.approval_policy, &settings.sandbox)
+                .await;
+        }
         let mode = protocol::acp_mode_for_policy(&settings.approval_policy, &settings.sandbox);
         let needs_mode_push = {
             let mut sessions = self.sessions.lock().await;
@@ -1259,9 +1369,16 @@ impl AcpBridge {
         approval_policy: &str,
         sandbox: &str,
     ) -> Result<(), String> {
-        config::validate_policy(self.provider_name, approval_policy, sandbox)?;
         if self.provider_name == "opencode" {
-            return Ok(());
+            self.sessions
+                .lock()
+                .await
+                .entry(thread_id.into())
+                .or_default()
+                .sandbox = sandbox.into();
+            return self
+                .apply_opencode_policy(thread_id, approval_policy, sandbox)
+                .await;
         }
         let mode = protocol::acp_mode_for_policy(approval_policy, sandbox);
         let outcome = self
@@ -1490,9 +1607,6 @@ pub(crate) fn absorb_thread_cwds(
 
 #[async_trait]
 impl ProviderBridge for AcpBridge {
-    fn supports_read_only_reviews(&self) -> bool {
-        self.provider_name != "opencode"
-    }
     async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String> {
         let _discovery = self.discovery_lock.lock().await;
         // Optional in ACP. An agent without it simply has no history to offer;
@@ -1634,7 +1748,7 @@ impl ProviderBridge for AcpBridge {
     async fn list_models(&self) -> Result<Vec<ModelOptionView>, String> {
         if self.provider_name == "opencode" && self.models.lock().await.is_empty() {
             let cwd = opencode::discovery_directory().await?;
-            self.discover_opencode_models(&cwd.to_string_lossy())
+            self.discover_opencode_models(&cwd.to_string_lossy(), true)
                 .await?;
         }
         Ok(self.models.lock().await.clone())
@@ -1643,7 +1757,7 @@ impl ProviderBridge for AcpBridge {
     /// Only `session/new` reports it, so a cold bridge with no cached catalog has none.
     async fn default_model(&self, cwd: &str) -> Result<String, String> {
         if self.provider_name == "opencode" {
-            return self.discover_opencode_models(cwd).await;
+            return self.discover_opencode_models(cwd, false).await;
         }
         self.models
             .lock()
@@ -1663,11 +1777,6 @@ impl ProviderBridge for AcpBridge {
     /// `mcpServers` and nothing resembling an instruction field. Not smuggled in
     /// as a user turn: see `StartThreadRequest::system_prompt`.
     async fn start_thread(&self, request: StartThreadRequest) -> Result<StartThreadResult, String> {
-        config::validate_policy(
-            self.provider_name,
-            &request.approval_policy,
-            &request.sandbox,
-        )?;
         let cwd = request.cwd.as_str();
         // Minted before the session exists, bound to it below. What it is for decides
         // whether it gets one at all — permissions alone handed a task seat the tools of
@@ -1773,7 +1882,6 @@ impl ProviderBridge for AcpBridge {
         approval_policy: &str,
         sandbox: &str,
     ) -> Result<(), String> {
-        config::validate_policy(self.provider_name, approval_policy, sandbox)?;
         // Same lock as `read_thread`: two replays into one session would
         // overwrite each other's capture and leak replay events into live state.
         let lock = self.load_lock(thread_id).await;
@@ -2150,9 +2258,13 @@ impl ProviderBridge for AcpBridge {
 
         // Same reason: this turn's permissions must be decided against the
         // policy the relay holds now.
-        self.sync_thread_policy(thread_id).await?;
         if self.provider_name == "opencode" {
             self.ensure_opencode_attached(thread_id).await?;
+            self.refresh_opencode_tools(thread_id).await?;
+        }
+        self.sync_thread_policy(thread_id).await?;
+        if self.provider_name == "opencode" {
+            self.validate_opencode_command(thread_id, text).await?;
         }
         self.apply_model(thread_id, model).await?;
         self.apply_effort(thread_id, effort).await?;

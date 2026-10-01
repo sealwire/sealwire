@@ -134,15 +134,14 @@ test("the active provider with an EMPTY catalog reports 'ready' (snapshot is aut
   assert.equal(state.modelsStatus, "ready", "authoritative-empty, not a perpetual 'loading'");
 });
 
-test("OpenCode is never offered as a reviewer, but its models stay in the shared catalog", () => {
-  // The relay refuses an OpenCode reviewer only after the dialog has closed.
+test("OpenCode is offered as a reviewer with its provider model catalog", () => {
   const launch = selectReviewLaunchModel({
     providers: ["codex", "opencode", "some-future-agent"],
     providerModels: { opencode: [{ model: "test/echo", provider: "opencode" }] },
     session: { provider: "codex", available_models: [] },
   });
-  assert.deepEqual(launch.providerOptions.map((option) => option.value), ["codex", "some-future-agent"]);
-  assert.equal(launch.defaultProvider, "some-future-agent");
+  assert.deepEqual(launch.providerOptions.map((option) => option.value), ["codex", "opencode", "some-future-agent"]);
+  assert.equal(launch.defaultProvider, "opencode");
   // The composer's slash commands read this catalog to hand work to OpenCode.
   assert.deepEqual(launch.models.map((model) => model.model), ["test/echo"]);
 
@@ -150,6 +149,6 @@ test("OpenCode is never offered as a reviewer, but its models stay in the shared
     providers: ["opencode"],
     session: { provider: "opencode", available_models: [] },
   });
-  assert.deepEqual(onlyOpenCode.providerOptions, []);
-  assert.equal(onlyOpenCode.defaultProvider, "");
+  assert.deepEqual(onlyOpenCode.providerOptions.map((option) => option.value), ["opencode"]);
+  assert.equal(onlyOpenCode.defaultProvider, "opencode");
 });

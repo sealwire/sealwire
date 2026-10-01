@@ -28,6 +28,9 @@ use super::{protocol, Captures, PendingResponses, SessionRuntime, Sessions};
 
 pub(crate) struct ReaderContext {
     pub(crate) stdout: super::Inbound,
+    pub(crate) closing: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) stream_closed: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) owns_provider_connection: bool,
     pub(crate) stdin: super::Outbound,
     pub(crate) pending_responses: PendingResponses,
     pub(crate) state: Arc<RwLock<RelayState>>,
@@ -62,6 +65,9 @@ pub(crate) async fn write_line(
 pub(crate) fn spawn_stdout_reader(context: ReaderContext) {
     let ReaderContext {
         stdout,
+        closing,
+        stream_closed,
+        owns_provider_connection,
         stdin,
         pending_responses,
         state,
@@ -91,27 +97,43 @@ pub(crate) fn spawn_stdout_reader(context: ReaderContext) {
                     .await;
                 }
                 Ok(None) => {
+                    stream_closed.store(true, std::sync::atomic::Ordering::Release);
                     fail_pending(
                         &pending_responses,
                         format!("{provider_key} ACP stream closed"),
                     )
                     .await;
+                    if closing.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
                     let mut relay = state.write().await;
-                    relay.set_provider_connection(provider_key, false);
-                    relay.fail_in_flight_turns_for_provider(provider_key);
+                    if owns_provider_connection {
+                        relay.set_provider_connection(provider_key, false);
+                    }
+                    if provider_key != "opencode" {
+                        relay.fail_in_flight_turns_for_provider(provider_key);
+                    }
                     relay.push_log("error", format!("{provider_key} ACP stdout closed."));
                     relay.notify();
                     break;
                 }
                 Err(error) => {
+                    stream_closed.store(true, std::sync::atomic::Ordering::Release);
                     fail_pending(
                         &pending_responses,
                         format!("{provider_key} ACP stream failed: {error}"),
                     )
                     .await;
+                    if closing.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
                     let mut relay = state.write().await;
-                    relay.set_provider_connection(provider_key, false);
-                    relay.fail_in_flight_turns_for_provider(provider_key);
+                    if owns_provider_connection {
+                        relay.set_provider_connection(provider_key, false);
+                    }
+                    if provider_key != "opencode" {
+                        relay.fail_in_flight_turns_for_provider(provider_key);
+                    }
                     relay.push_log(
                         "error",
                         format!("Failed to read {provider_key} stdout: {error}"),
@@ -436,6 +458,31 @@ fn tool_output(update: &Value) -> Option<String> {
 }
 
 pub(crate) fn plan_update(update: &Value, session: &mut SessionRuntime) -> TranscriptOp {
+    let op = plan_update_inner(update, session);
+    let item = match &op {
+        TranscriptOp::User { item_id, .. }
+        | TranscriptOp::AgentChunk { item_id, .. }
+        | TranscriptOp::ThoughtChunk { item_id, .. }
+        | TranscriptOp::Tool { item_id, .. } => Some(item_id),
+        _ => None,
+    };
+    if let (Some(item), Some(native)) = (
+        item,
+        update
+            .get("messageId")
+            .or_else(|| update.get("toolCallId"))
+            .and_then(Value::as_str),
+    ) {
+        session
+            .native_event_refs
+            .entry(item.clone())
+            .and_modify(|range| range.last = native.to_string())
+            .or_insert_with(|| native.into());
+    }
+    op
+}
+
+fn plan_update_inner(update: &Value, session: &mut SessionRuntime) -> TranscriptOp {
     let kind = update
         .get("sessionUpdate")
         .and_then(Value::as_str)
@@ -1207,10 +1254,14 @@ async fn handle_server_request(
         .await
         .get(&session_id)
         .and_then(|session| session.relay_mcp_server.clone());
-    let relay_tool = protocol::relay_tool_in_permission_title(
-        tool_call.get("title").and_then(Value::as_str),
-        relay_server.as_deref(),
-    );
+    let relay_tool = (provider_key == "cursor")
+        .then(|| {
+            protocol::relay_tool_in_permission_title(
+                tool_call.get("title").and_then(Value::as_str),
+                relay_server.as_deref(),
+            )
+        })
+        .flatten();
     // Its `tool_call` said only "MCP: tool", and the relay finds a `report_back` by name.
     if let (Some(tool), Some(raw_id)) = (
         relay_tool,
@@ -1316,7 +1367,14 @@ async fn handle_server_request(
     };
     relay.add_pending_approval(PendingApproval {
         request_id: {
-            let id = format!("{PERMISSION_APPROVAL_PREFIX}{}", normalize_id(&request_id));
+            let id = if provider_key == "opencode" {
+                format!(
+                    "{PERMISSION_APPROVAL_PREFIX}{session_id}:{}",
+                    normalize_id(&request_id)
+                )
+            } else {
+                format!("{PERMISSION_APPROVAL_PREFIX}{}", normalize_id(&request_id))
+            };
             // Load-bearing in the dangerous direction: a permission id that
             // started with the plan prefix would be answered `accepted`,
             // granting a tool call nobody approved. The two prefixes are

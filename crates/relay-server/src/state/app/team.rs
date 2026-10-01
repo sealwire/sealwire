@@ -32,10 +32,9 @@ pub(crate) const TASKS_LOCKED_MESSAGE: &str =
     "Tasks is still in development and is off in this build; relaunch with \
 `sealwire --beta` to try it";
 
-/// OpenCode's current policies cannot guarantee unattended seats or read-only
-/// reviewers. Refuse the lineup before provisioning any part of the run.
+/// Ordinary session tools do not imply support for unattended Task seats.
 pub(crate) fn refuse_seat_without_seat_tools(provider: &str, seat: &str) -> Result<(), String> {
-    if crate::provider::supports_session_mcp(provider) {
+    if provider != "opencode" && crate::provider::supports_session_mcp(provider) {
         return Ok(());
     }
     Err(format!(

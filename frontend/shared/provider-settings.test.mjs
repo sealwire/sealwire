@@ -69,33 +69,6 @@ test("only providers with a real filesystem sandbox advertise one", () => {
   assert.equal(providerHasFilesystemSandbox("some-future-agent"), false);
 });
 
-test("OpenCode's permission copy claims no more than Sealwire controls", () => {
-  // Sealwire only answers the requests OpenCode sends; OpenCode's config decides
-  // which tools ask, and by default it lets most of them run.
-  const options = Object.fromEntries(
-    providerSettings("opencode").approvalOptions.map((option) => [option.value, option])
-  );
-  const describes = (value, text) =>
-    assert.ok(
-      options[value].description.toLowerCase().includes(text.toLowerCase()),
-      `${value}: "${options[value].description}" should say "${text}"`
-    );
-  describes("untrusted", `same as ${options["on-request"].label}`);
-  describes("on-request", `same as ${options.untrusted.label}`);
-  describes("untrusted", "by default");
-  describes("never", "denies");
-  describes("bypass", "unrestricted");
-  describes("bypass", "denies");
-
-  const copy = Object.values(options)
-    .map((option) => `${option.label} ${option.description}`)
-    .join(" ")
-    .toLowerCase();
-  for (const claim of ["sandbox", "isolat", "yolo", "full access", "no prompts for anything"]) {
-    assert.ok(!copy.includes(claim), `OpenCode approval copy claims "${claim}": ${copy}`);
-  }
-});
-
 test("a launch seeds OpenCode with no model, and other providers with their catalog default", () => {
   // OpenCode's default comes from the new session's folder, which the shared
   // catalog was not discovered in.

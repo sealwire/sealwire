@@ -244,7 +244,10 @@ impl AppState {
         let mut relay = self.relay.write().await;
         ensure_thread_in_device_scope(&relay, thread_id, device_id)?;
         if !thread_has_goal_tools(&relay, thread_id) {
-            return Err("OpenCode cannot run Sealwire goals because its ACP sessions cannot isolate the required per-session MCP tools; use another provider for goal mode".into());
+            return Err(
+                "This provider does not expose the session tools required for Sealwire goals"
+                    .into(),
+            );
         }
         if !thread_can_end_a_goal(&relay, thread_id) {
             return Err(

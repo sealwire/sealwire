@@ -1822,10 +1822,9 @@ mod wake_tests {
     use relay_api::delegation::AskStatus;
 
     #[test]
-    fn opencode_is_asked_for_a_final_answer_without_an_unavailable_tool() {
+    fn opencode_is_asked_to_report_back_through_its_session_tools() {
         let instruction = answer_instruction("opencode");
-        assert!(instruction.contains("final answer"));
-        assert!(!instruction.contains("report_back"));
+        assert!(instruction.contains("report_back"));
         assert!(answer_instruction("claude_code").contains("report_back"));
     }
 

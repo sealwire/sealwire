@@ -33405,7 +33405,7 @@ watchdog settle this Blocked",
     }
 
     #[tokio::test]
-    async fn an_unrestricted_opencode_session_cannot_start_a_goal_without_goal_tools() {
+    async fn an_unrestricted_opencode_session_has_goal_tools_from_its_binding() {
         let project = TempDir::new().expect("tempdir");
         let cwd = project.path().to_string_lossy().to_string();
         let (app, _p, _o) = build_app(&cwd).await;
@@ -33417,15 +33417,10 @@ watchdog settle this Blocked",
             relay.threads.retain(|row| row.id != thread);
             assert!(relay.provider_hint_for_thread(&thread).is_none());
         }
-        let error = app
-            .set_goal(&thread, "finish the work", None, false, None)
+        app.set_goal(&thread, "finish the work", None, false, None)
             .await
-            .expect_err("a goal needs its settlement tools");
-        assert!(
-            error.contains("OpenCode") && error.contains("MCP"),
-            "{error}"
-        );
-        assert!(app.relay.read().await.goal_for_thread(&thread).is_none());
+            .expect("OpenCode has goal tools");
+        assert!(app.relay.read().await.goal_for_thread(&thread).is_some());
     }
 
     #[tokio::test]

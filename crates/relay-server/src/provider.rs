@@ -281,8 +281,10 @@ pub fn session_gets_peer_tools(purpose: &SessionPurpose) -> bool {
 }
 
 pub fn supports_session_mcp(provider: &str) -> bool {
-    // OpenCode registers ACP MCP servers per directory, mixing session identities.
-    provider != "opencode"
+    matches!(
+        provider,
+        "codex" | "claude" | "claude_code" | "cursor" | "opencode" | "fake"
+    )
 }
 
 /// Which sealwire MCP identity a provider session should carry.
@@ -1016,6 +1018,9 @@ async fn spawn_provider(
             bridge_arc(crate::fake_provider::FakeProviderBridge::spawn(state).await)
         }
         ProviderKind::ClaudeCode => bridge_arc(crate::claude::ClaudeCodeBridge::spawn(state).await),
+        ProviderKind::Acp if entry.provider_key == "opencode" => {
+            bridge_arc(crate::acp::OpenCodeBridge::spawn(state).await)
+        }
         ProviderKind::Acp => bridge_arc(
             crate::acp::AcpBridge::spawn(
                 state,

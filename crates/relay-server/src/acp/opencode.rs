@@ -1,6 +1,101 @@
 use super::*;
+mod api;
+mod bridge;
+pub(super) use api::Api;
+pub(crate) use bridge::OpenCodeBridge;
 
 impl AcpBridge {
+    async fn list_opencode_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String> {
+        let _discovery = self.discovery_lock.lock().await;
+        let api = self
+            .opencode_api
+            .as_ref()
+            .ok_or("OpenCode HTTP API is unavailable")?;
+        let mut threads = Vec::new();
+        let mut last_error = None;
+        let mut succeeded = false;
+        for cwd in self.opencode_history_directories().await {
+            let mut cursor = None;
+            for _ in 0..MAX_LIST_PAGES {
+                let mut query = vec![("limit", "100".into()), ("roots", "true".into())];
+                if let Some(value) = cursor {
+                    query.push(("cursor", value));
+                }
+                let page = match timeout(
+                    Duration::from_secs(15),
+                    api.request(
+                        reqwest::Method::GET,
+                        "/experimental/session",
+                        &cwd,
+                        &query,
+                        None,
+                    ),
+                )
+                .await
+                .map_err(|_| format!("OpenCode history timed out in {cwd}"))
+                .and_then(|result| result)
+                {
+                    Ok(page) => {
+                        succeeded = true;
+                        page
+                    }
+                    Err(error) => {
+                        let mut relay = self.state.write().await;
+                        relay.push_log(
+                            "warn",
+                            format!("Could not list OpenCode history in {cwd}: {error}"),
+                        );
+                        relay.notify();
+                        last_error = Some(error);
+                        break;
+                    }
+                };
+                let rows = page
+                    .as_array()
+                    .ok_or("OpenCode returned an invalid session list")?;
+                for row in rows {
+                    if row["directory"].as_str() != Some(cwd.as_str())
+                        || !row["time"]["archived"].is_null()
+                    {
+                        continue;
+                    }
+                    let Some(id) = row["id"].as_str() else {
+                        continue;
+                    };
+                    let mut thread = protocol::thread_summary(
+                        &json!({"sessionId": id, "cwd": cwd, "title": row["title"]}),
+                        "opencode",
+                        crate::state::unix_now(),
+                    )
+                    .unwrap();
+                    thread.updated_at = row["time"]["updated"].as_u64().unwrap_or_default() / 1000;
+                    threads.push(thread);
+                }
+                if rows.len() < 100 {
+                    break;
+                }
+                cursor = rows
+                    .last()
+                    .and_then(|row| row["time"]["updated"].as_u64())
+                    .map(|v| v.to_string());
+                if cursor.is_none() {
+                    break;
+                }
+            }
+        }
+        if !succeeded {
+            if let Some(error) = last_error {
+                return Err(error);
+            }
+        }
+        threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        let mut seen = std::collections::HashSet::new();
+        threads.retain(|thread| seen.insert(thread.id.clone()));
+        absorb_thread_cwds(&mut *self.sessions.lock().await, &threads);
+        threads.truncate(limit);
+        Ok(threads)
+    }
+
     pub(super) async fn opencode_history_directories(&self) -> Vec<String> {
         let runtimes: Vec<_> = self
             .sessions
@@ -34,21 +129,38 @@ impl AcpBridge {
     }
 
     pub(super) async fn ensure_opencode_attached(&self, id: &str) -> Result<(), String> {
-        let approval = {
+        let (mut approval, mut sandbox) = {
             let sessions = self.sessions.lock().await;
             if sessions.get(id).is_some_and(|s| s.attached) {
                 return Ok(());
             }
-            sessions
-                .get(id)
-                .map(|s| s.approval_policy.clone())
-                .filter(|p| !p.is_empty())
-                .unwrap_or_else(|| "on-request".into())
+            let session = sessions.get(id);
+            (
+                session
+                    .map(|s| s.approval_policy.clone())
+                    .filter(|p| !p.is_empty())
+                    .unwrap_or_else(|| "on-request".into()),
+                session
+                    .map(|s| s.sandbox.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "workspace-write".into()),
+            )
         };
+        let settings = {
+            let relay = self.state.read().await;
+            let session_id = relay
+                .session_for_provider_handle(self.provider_name, id)
+                .unwrap_or_else(|| id.to_string());
+            relay.thread_settings(&session_id)
+        };
+        if let Some(settings) = settings {
+            approval = settings.approval_policy;
+            sandbox = settings.sandbox;
+        }
         if !self.capabilities.lock().await.load_session {
             return Err("OpenCode does not support reattaching a closed session".into());
         }
-        self.resume_thread(id, &approval, "workspace-write").await
+        self.resume_thread(id, &approval, &sandbox).await
     }
 
     pub(super) async fn cleanup_opencode_session(&self, id: &str) {
@@ -67,7 +179,11 @@ impl AcpBridge {
         }
     }
 
-    pub(super) async fn discover_opencode_models(&self, cwd: &str) -> Result<String, String> {
+    pub(super) async fn discover_opencode_models(
+        &self,
+        cwd: &str,
+        update_catalog: bool,
+    ) -> Result<String, String> {
         if !self.capabilities.lock().await.close_session {
             return Err(
                 "OpenCode must support ACP session/close for model discovery; update OpenCode"
@@ -85,7 +201,9 @@ impl AcpBridge {
             .ok_or("OpenCode returned no sessionId during model discovery")?;
         let mut session = SessionRuntime::default();
         absorb_session_settings(&mut session, &result);
-        self.absorb_catalog(&result, true).await;
+        if update_catalog {
+            self.absorb_catalog(&result, true).await;
+        }
 
         self.cleanup_opencode_session(id).await;
         if session.model.is_empty() {

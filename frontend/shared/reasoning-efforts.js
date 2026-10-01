@@ -26,7 +26,7 @@ export function buildReasoningEffortOptions(models = [], modelName = "", provide
 // What this model is known to accept, or null when the catalog cannot say.
 function knownEfforts(models, model, provider = "") {
   if (model?.supported_reasoning_efforts?.length) return model.supported_reasoning_efforts;
-  // OpenCode announces variants only for a session's selected model.
+  // Until OpenCode's native variants arrive, only offer its default sentinel.
   const isOpenCode = provider === "opencode" || model?.provider === "opencode"
     || (models.length > 0 && models.every((row) => row.provider === "opencode"));
   return isOpenCode ? ["default"] : null;
