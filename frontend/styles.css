@@ -1639,6 +1639,31 @@ input:focus, textarea:focus, select:focus {
   align-items: center;
   gap: 6px;
 }
+/* While renaming, the row is a <div>, so it no longer gets the global `button` rule's
+   type metrics; without these it grows a few pixels as the box opens. */
+.conversation-item.is-renaming {
+  font-size: var(--text-body);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+}
+/* Negative margins cancel the box's padding and border, so the text stays exactly where
+   the title was and the row keeps its height. */
+.conversation-title-input {
+  flex: 1;
+  min-width: 0;
+  padding: 1px 4px;
+  margin: -2px 0 -2px -5px;
+  background: var(--bg-input, var(--bg-elevated));
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--text-1);
+  font-family: inherit;
+  font-size: var(--text-ui);
+  font-weight: var(--weight-regular);
+  line-height: inherit;
+  /* The accent border is the focus signal; the UA ring would only thicken the row. */
+  outline: none;
+}
 .conversation-activity-dot {
   flex: none;
   width: 7px;

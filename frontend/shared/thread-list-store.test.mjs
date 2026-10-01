@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   createThreadListStore,
   readActiveProjectId,
+  readRenamingThreadId,
   readSearchUi,
   readThreadFilter,
   readThreadSelection,
@@ -341,4 +342,21 @@ test("a malformed selection normalizes to an empty one rather than poisoning the
   store.getState().setThreadSelection({ ids: ["a", "b"] });
   assert.ok(readThreadSelection(store).ids instanceof Set);
   assert.equal(readThreadSelection(store).ids.size, 0);
+});
+
+test("a rename starts on one session and only that session's end clears it", () => {
+  const store = createThreadListStore();
+  assert.equal(readRenamingThreadId(store), null);
+
+  store.getState().beginThreadRename("a");
+  assert.equal(readRenamingThreadId(store), "a");
+
+  // A late settle from an editor that already gave way to a newer one must not
+  // close the newer one.
+  store.getState().beginThreadRename("b");
+  store.getState().endThreadRename("a");
+  assert.equal(readRenamingThreadId(store), "b");
+
+  store.getState().endThreadRename("b");
+  assert.equal(readRenamingThreadId(store), null);
 });

@@ -1,5 +1,6 @@
 import React from "react";
 
+import { InlineTitleEditor } from "./inline-title-editor.js";
 import { selectThreadDot } from "./thread-dot.js";
 // The idle slot's content. A provider we ship no mark for leaves it empty rather
 // than borrowing another vendor's logo, which would mislabel the session.
@@ -84,83 +85,6 @@ function PinGlyph({ filled }) {
   );
 }
 
-
-// The inline title editor. A tab is a small, dense target, so renaming happens in
-// place rather than in a dialog: you see the result in the strip as you type it, next
-// to the other tabs it has to be distinguishable from.
-//
-// Committing on BLUR (not cancelling) is deliberate — the box is tiny and easy to click
-// away from, and silently discarding a typed name would be the worse surprise. Escape
-// is the explicit "forget it".
-function TabTitleEditor({ defaultValue, onCommit, onCancel }) {
-  const inputRef = useRef(null);
-  // Guards the commit against running twice: Enter commits and then blurs, and the
-  // blur handler would otherwise submit the same name again.
-  const settledRef = useRef(false);
-
-  useEffect(() => {
-    const input = inputRef.current;
-    if (!input) {
-      return;
-    }
-    input.focus();
-    // Select rather than place a caret: the common case is replacing the agent's
-    // title wholesale, and a selection makes "type over it" the default while still
-    // allowing an edit (arrow key first).
-    input.select();
-  }, []);
-
-  const settle = (commit) => {
-    if (settledRef.current) {
-      return;
-    }
-    settledRef.current = true;
-    if (commit) {
-      onCommit?.(inputRef.current?.value ?? "");
-    } else {
-      onCancel?.();
-    }
-  };
-
-  return h("input", {
-    ref: inputRef,
-    type: "text",
-    className: "session-tab-title-input",
-    defaultValue,
-    "aria-label": "Session name",
-    // The strip turns a press into a pan/reorder gesture. Inside the editor a press
-    // is a caret placement, and a drag is a text selection.
-    onPointerDown: (event) => event.stopPropagation(),
-    onClick: (event) => event.stopPropagation(),
-    // A double click inside the editor selects a word; it must not also promote the
-    // tab out of preview state.
-    onDoubleClick: (event) => event.stopPropagation(),
-    // The tab container preventDefault()s `contextmenu` to open this editor. Inside the
-    // editor a right-click means cut/copy/paste, so the event must not reach it —
-    // otherwise the one control where a text menu is genuinely useful is the one place
-    // it is suppressed.
-    onContextMenu: (event) => event.stopPropagation(),
-    onBlur: () => settle(true),
-    onKeyDown: (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        settle(true);
-        // Return focus to the strip rather than leaving it on a removed node.
-        event.currentTarget.blur();
-      } else if (event.key === "Escape") {
-        event.preventDefault();
-        settle(false);
-        event.currentTarget.blur();
-      } else if (event.key === "Tab") {
-        // Let focus move on, but commit first — a tabbed-away edit is a finished one.
-        settle(true);
-      }
-      // Arrow keys, Home/End etc. must edit text, not pan the strip.
-      event.stopPropagation();
-    },
-  });
-}
-
 function SessionTab({
   item,
   focused,
@@ -234,7 +158,9 @@ function SessionTab({
               ? h("span", { className: dot.className })
               : providerMark(item.provider, "session-tab-provider")
           ),
-          h(TabTitleEditor, {
+          h(InlineTitleEditor, {
+            className: "session-tab-title-input",
+            ariaLabel: "Session name",
             // Seeded from the DISPLAYED title so a never-renamed session opens with
             // the agent's name to edit, not an empty box.
             defaultValue: item.renameDraft ?? item.title,
