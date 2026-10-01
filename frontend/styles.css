@@ -7525,6 +7525,11 @@ body.is-resizing-panel {
   flex: 1 1 0;
   text-align: center;
 }
+.right-panel-tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
 .right-panel-tabs-header .settings-segmented-option.is-selected {
   background: var(--bg-elevated);
   box-shadow: var(--shadow-1);

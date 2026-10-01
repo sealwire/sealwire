@@ -177,7 +177,9 @@ test("ReviewerChip surfaces a running review with a badge", () => {
   assert.match(html, /reviewer-chip/);
   assert.match(html, />Agents</);
   assert.match(html, /is-active/);
-  assert.match(html, /workspace-diff-chip-review/);
+  // The same dot as a working session in the sidebar, not a "•" glyph too small to see.
+  assert.match(html, /class="conversation-activity-dot"/);
+  assert.doesNotMatch(html, /•/);
 });
 
 test("RightPanelTabs shows the Changes body by default and both tab labels", () => {
@@ -226,8 +228,9 @@ test("RightPanelTabs marks the tab for every goal state that cannot move without
     );
   }
 
-  assert.match(label("active"), /Agents •/, "a running goal is busy, not asking");
-  assert.doesNotMatch(label("cancelled"), /Agents [⚠•]/, "a goal called off needs nothing");
+  assert.match(label("active"), /conversation-activity-dot/, "a running goal is busy, not asking");
+  assert.doesNotMatch(label("active"), /Agents ⚠/);
+  assert.doesNotMatch(label("cancelled"), /Agents ⚠|conversation-activity-dot/, "a goal called off needs nothing");
 });
 
 test("RightPanelTabs marks the tab while an agent's flagship request waits on the user", () => {
@@ -302,12 +305,13 @@ test("RightPanelTabs shows the in-progress dot for a running review", () => {
       changes: h("div", null, "CHANGES-BODY"),
     })
   );
-  assert.match(html, /Agents •/);
+  assert.match(html, /class="conversation-activity-dot"/);
+  assert.doesNotMatch(html, /•/);
 });
 
 test("RightPanelTabs treats an escalated review as terminal (no in-progress dot)", () => {
   // `escalated` is terminal: the tab label must read a plain "Agents" — not the
-  // in-progress "Agents •" — so the tab agrees with review-state.js + the backend
+  // in-progress dot — so the tab agrees with review-state.js + the backend
   // (regression guard for the duplicated terminal-status set that omitted escalated).
   const html = renderToStaticMarkup(
     h(RightPanelTabs, {
@@ -325,7 +329,7 @@ test("RightPanelTabs treats an escalated review as terminal (no in-progress dot)
       changes: h("div", null, "CHANGES-BODY"),
     })
   );
-  assert.doesNotMatch(html, /Agents •/);
+  assert.doesNotMatch(html, /conversation-activity-dot/);
   assert.doesNotMatch(html, /Agents ⚠/);
   assert.match(html, />Agents</);
 });
