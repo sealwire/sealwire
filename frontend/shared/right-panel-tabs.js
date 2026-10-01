@@ -61,13 +61,19 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
 
   // NEVER auto-switch the tab — the review must not yank the user's view around.
   // A running/blocked review only surfaces PASSIVELY here: the tab label gets a dot
-  // ("Reviewer •") or a warning ("Reviewer ⚠"), and the user switches when they want.
+  // or a warning ("Agents ⚠"), and the user switches when they want.
   // "Agents", not "Reviewer": a reviewer is just one of the agents this session
   // can bring in, and the panel now lists the others beside it.
+  // Running uses the sidebar's working-session dot, so "busy" looks the same everywhere.
   const reviewerLabel = blocked || goalNeedsUser || modelRequestNeedsUser
     ? "Agents ⚠"
     : inProgress > 0 || workflowInProgress > 0 || asksInProgress > 0 || goalWorking > 0
-    ? "Agents •"
+    ? h(
+        "span",
+        { className: "right-panel-tab-label" },
+        "Agents",
+        h("span", { className: "conversation-activity-dot", "aria-label": "Working" })
+      )
     : "Agents";
 
   return h(

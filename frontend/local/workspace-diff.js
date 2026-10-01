@@ -977,8 +977,9 @@ export function ReviewerChip({ store, onTap }) {
   // space with the diff chip and the "Want a second opinion?" idle nudge already
   // shown there, so stay hidden and let those handle discovery + launch.
   if (!hasReviews) return null;
-  const badge = blocked ? "⚠" : active || activeWorkflow ? "•" : "✓";
-  const modifier = blocked ? "is-blocked" : active || activeWorkflow ? "is-active" : "is-done";
+  const running = !blocked && (active || activeWorkflow);
+  const badge = blocked ? "⚠" : running ? null : "✓";
+  const modifier = blocked ? "is-blocked" : running ? "is-active" : "is-done";
   // The pill is one door to several things, so the tooltip names whichever is loudest —
   // a goal outranks a review the same way it does in the panel.
   const title = goal
@@ -1000,13 +1001,14 @@ export function ReviewerChip({ store, onTap }) {
     // "Agents", matching the desktop tab: the panel behind this pill stopped being about
     // reviews alone once it grew the goal and the asks. Class names stay as styling hooks.
     h("span", { className: "workspace-diff-chip-label" }, "Agents"),
-    badge
-      ? h(
+    // Running borrows the sidebar's working-session dot; a "•" glyph was too small to see.
+    running
+      ? h("span", { className: "conversation-activity-dot", "aria-hidden": "true" })
+      : h(
           "span",
           { className: `workspace-diff-chip-review ${modifier}`, "aria-hidden": "true" },
           badge
         )
-      : null
   );
 }
 
