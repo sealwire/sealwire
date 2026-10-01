@@ -12,7 +12,7 @@
 //   • Claude hardcodes `idle`
 //   • Codex passes through its own `status.type`: `notLoaded` for a saved
 //     thread the app-server has not opened, and a `thread/list` summary with no
-//     live status parses to `unknown`
+//     live status parses to `unknown`, and `systemError` once a turn died on an error
 // Classifying any of those as working freezes UI affordances (Stop / Take-over /
 // Request review / Fork) that the backend then rejects.
 //
@@ -26,6 +26,7 @@ const NON_WORKING_STATUSES = new Set([
   "completed",
   "unknown",
   "notloaded",
+  "systemerror",
 ]);
 
 export function normalizeThreadStatus(status) {
