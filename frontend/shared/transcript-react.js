@@ -2842,23 +2842,22 @@ export function TranscriptEntry({
     });
   }
 
-  if (kind === "tool_call" && entry.status === "completed"
-      && entry.injection?.kind === "delegate_call" && entry.injection.delegate?.length) {
+  if (drawsOwnToolCard(entry) && entry.injection.kind === "delegate_call") {
     return h(DelegateRequestEntry, {
       attrs: transcriptEntryDomAttrs(entry, "chat-message chat-message-assistant"),
       entry,
       answered: options?.delegateAnswered || EMPTY_DELEGATE_ANSWERED,
       provider,
       providerIcon: providerIconSvg(provider) || SPARKLES_SVG,
+      showAvatar,
       showCommand: false,
     });
   }
 
-  if (kind === "tool_call" && entry.status === "completed"
-      && entry.injection?.kind === "review_call" && entry.injection.review) {
+  if (drawsOwnToolCard(entry)) {
     return h(ReviewCallEntry, {
-      attrs: transcriptEntryDomAttrs(entry, "chat-message chat-message-assistant"),
-      entry, provider, providerIcon: providerIconSvg(provider) || SPARKLES_SVG,
+      attrs: transcriptEntryDomAttrs(entry, `chat-message chat-message-assistant${showAvatar ? "" : " is-turn-continued"}`),
+      entry, provider, providerIcon: providerIconSvg(provider) || SPARKLES_SVG, showAvatar,
     });
   }
 
@@ -2885,8 +2884,8 @@ export function TranscriptEntry({
     if (injection) {
       const attrs = transcriptEntryDomAttrs(
         entry,
-        // A review result or a delegate's answer opens the agent's turn, so it sits in
-        // the agent's column.
+        // A review result or a delegate's answer is what the agent replies to, so it sits
+        // in the agent's column.
         opensReviewedTurn(entry) || opensAnsweredTurn(entry)
           ? "chat-message chat-message-assistant"
           : "chat-message chat-message-user",
@@ -2899,7 +2898,6 @@ export function TranscriptEntry({
           entry,
           folded: Boolean(options?.reviewFolded?.has(rowKey)),
           provider,
-          providerIcon: providerIconSvg(provider) || SPARKLES_SVG,
         });
       }
       if (injection.kind === "handover_request") {
@@ -2929,13 +2927,7 @@ export function TranscriptEntry({
               showOutcome: !options?.delegateBriefs?.has(injection.delegate[0]?.id),
             });
           case "delegate_answer":
-            return h(DelegateAnswerEntry, {
-              attrs,
-              entry,
-              joined: Boolean(options?.delegateJoined?.has(rowKey)),
-              provider,
-              providerIcon,
-            });
+            return h(DelegateAnswerEntry, { attrs, entry });
           case "delegate_task":
             return h(DelegateTaskEntry, { attrs, entry });
           case "delegate_nudge":
@@ -3380,14 +3372,24 @@ export function collapseDuplicateTranscriptRows(entries) {
   return collapsed || entries;
 }
 
+/** A delegate or review tool call the agent made, drawn as its card instead of a tool row. */
+function drawsOwnToolCard(entry) {
+  if (entry?.kind !== "tool_call" || entry.status !== "completed") return false;
+  const injection = entry.injection;
+  return injection?.kind === "delegate_call"
+    ? Boolean(injection.delegate?.length)
+    : injection?.kind === "review_call" && Boolean(injection.review);
+}
+
 // Design 20c-3: the logo marks where a turn's replies start; your message ends a turn.
+// Another agent's result drawn in the column is not this agent's, so it opens nothing.
 function computeTurnOpenerIds(entries) {
   const openers = new Set();
   let opened = false;
   for (const entry of entries) {
     if (entry?.kind === "user_text") {
-      opened = opensReviewedTurn(entry) || opensAnsweredTurn(entry);
-    } else if ((entry?.kind === "agent_text" || drawsGoalSettledCard(entry)) && !opened) {
+      opened = false;
+    } else if ((entry?.kind === "agent_text" || drawsGoalSettledCard(entry) || drawsOwnToolCard(entry)) && !opened) {
       opened = true;
       const id = transcriptRowKey(entry);
       if (id) openers.add(id);
@@ -3454,7 +3456,6 @@ export function TranscriptContent({
   const reviewFolded = reviewFold.folded;
   const delegateMembers = delegateFold.members;
   const delegateAnswered = delegateFold.answered;
-  const delegateJoined = delegateFold.joined;
   const delegateBriefs = delegateFold.briefs;
   const effectiveOptions = React.useMemo(() => {
     const derived = {
@@ -3467,7 +3468,6 @@ export function TranscriptContent({
       reviewFolded,
       delegateMembers,
       delegateAnswered,
-      delegateJoined,
       delegateBriefs,
     };
     return options ? { ...options, ...derived } : derived;
@@ -3482,7 +3482,6 @@ export function TranscriptContent({
     reviewFolded,
     delegateMembers,
     delegateAnswered,
-    delegateJoined,
     delegateBriefs,
   ]);
   const justPrependedItemIds = useJustPrependedItemIds(entries);

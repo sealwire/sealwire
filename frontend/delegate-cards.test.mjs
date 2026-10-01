@@ -51,6 +51,12 @@ function count(markup, needle) {
   return markup.split(needle).length - 1;
 }
 
+function article(markup, id) {
+  const start = markup.indexOf(`data-transcript-entry-id="${id}"`);
+  const open = markup.lastIndexOf("<article", start);
+  return markup.slice(open, markup.indexOf("</article>", start) + 10);
+}
+
 test("while the brief is written there is one line, and the prompt that asked for it is not shown", () => {
   const markup = render([
     marked("req", "delegate_request", [ask({ sent_at: undefined, peer_thread_id: "" })], "BRIEF-PROMPT"),
@@ -189,14 +195,11 @@ test("a brief remains readable when starting the peer fails before it was sent",
     "the completed brief remains an ordinary assistant message"
   );
   assert.ok(!markup.includes("Delegated to Codex"));
-  assert.equal(
-    count(markup, "message-avatar"),
-    2,
-    "the failed answer starts a new agent turn after the ordinary brief"
-  );
+  assert.doesNotMatch(article(markup, "wake"), /message-avatar/, "the answer is not this agent's to mark");
+  assert.match(article(markup, "decision"), /message-avatar/, "its own reply opens its turn");
 });
 
-test("the answer replaces the wake, folds the asked card to a line, and opens the asker's turn", () => {
+test("the answer replaces the wake and folds the asked card to a line; the asker's reply wears its mark", () => {
   const done = ask({ status: "done", delivered: true, answer: "From innerText, so it carries the button label.", finished_at: 1_790_000_160 });
   const markup = render([
     marked("req", "delegate_request", [done], "BRIEF-PROMPT"),
@@ -215,11 +218,44 @@ test("the answer replaces the wake, folds the asked card to a line, and opens th
   const answerAt = markup.indexOf("Codex answered");
   const decisionAt = markup.indexOf("Confirmed — switching");
   assert.ok(answerAt < decisionAt, "the decision follows the card");
-  assert.equal(
-    count(markup, "message-avatar"),
-    1,
-    "one mark for the folded card, the answer under it, and the reply that follows"
-  );
+  assert.doesNotMatch(article(markup, "wake"), /message-avatar/, "Codex's answer does not wear Claude's mark");
+  assert.match(article(markup, "wake"), /is-turn-continued/, "it keeps the agent column's text edge");
+  assert.match(article(markup, "decision"), /message-avatar/, "Claude's own reply under it does");
+});
+
+test("two answers back at once wear no mark either, and the asker's reply still does", () => {
+  const first = ask({ status: "done", delivered: true, answer: "From innerText.", finished_at: 1_790_000_160 });
+  const second = ask({
+    id: "ask-2",
+    peer_thread_id: "peer-2",
+    peer_provider: "claude_code",
+    title: "Is the local Ask the same?",
+    status: "done",
+    delivered: true,
+    answer: "Local reads data-ask-message.",
+    finished_at: 1_790_000_200,
+  });
+  const cases = {
+    "one wake": [marked("wake", "delegate_answer", [first, second], WAKE)],
+    "two wakes": [marked("wake", "delegate_answer", [first], WAKE), marked("wake-2", "delegate_answer", [second], WAKE)],
+  };
+  for (const [name, wakes] of Object.entries(cases)) {
+    const markup = render([
+      marked("req", "delegate_request", [first], "BRIEF-PROMPT"),
+      agent("brief", BRIEF, { injection: { kind: "delegate_brief", delegate: [first] } }),
+      marked("req-2", "delegate_request", [second], "BRIEF-PROMPT-2"),
+      agent("brief-2", "Is the local Ask the same?\n\nCheck local.", { injection: { kind: "delegate_brief", delegate: [second] } }),
+      ...wakes,
+      agent("decision", "Both agree; switching remote to data-ask-message."),
+    ]);
+    assert.ok(markup.includes("Codex answered") && markup.includes("Claude answered"), `${name}: both answers are drawn`);
+    for (const wake of wakes) {
+      const card = article(markup, wake.item_id);
+      assert.ok(card.includes("answered"), `${name}: ${wake.item_id} is an answer card`);
+      assert.doesNotMatch(card, /message-avatar/, `${name}: ${wake.item_id} wears no mark`);
+    }
+    assert.match(article(markup, "decision"), /message-avatar/, `${name}: the asker's reply opens its turn`);
+  }
 });
 
 test("no answer: the answer row is amber with the reason, and there is nothing to press", () => {
