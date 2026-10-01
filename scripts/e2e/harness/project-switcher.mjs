@@ -1,5 +1,5 @@
-// Match the label span, never the row. The row also renders an always-present "✓"
-// (and an optional subtitle), so an anchored regex on the row's text cannot match.
+// Match the label span, never the row. The row also renders its session count, so an
+// anchored regex on the row's text cannot match.
 
 export function projectSwitcherOption(page, label, { scope = "" } = {}) {
   const prefix = scope ? `${scope} ` : "";

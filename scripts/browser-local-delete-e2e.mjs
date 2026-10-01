@@ -16,6 +16,7 @@ import {
 import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
 import { startLocalSession } from "./e2e/harness/local-session.mjs";
 import { getFreePort } from "./e2e/harness/ports.mjs";
+import { confirmThreadMenuRemoval } from "./e2e/harness/thread-menu.mjs";
 import {
   dumpProcessLogs,
   stopManagedProcess,
@@ -113,9 +114,9 @@ async function main() {
     assert.notEqual(threadId, fallbackThreadId, "delete target should be different from fallback");
     await waitForThreadIdle(relayPort, threadId);
 
-    page.once("dialog", (dialog) => dialog.accept());
     await openThreadContextMenu(page, threadId, "#delete-thread-button");
     await page.click("#delete-thread-button");
+    await confirmThreadMenuRemoval(page, { timeoutMs: LOCAL_TIMEOUT_MS });
 
     await waitForThreadMissing(relayPort, workspaceDir, threadId);
     await page.waitForFunction(

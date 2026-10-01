@@ -86,7 +86,7 @@ test("buildProjectMenuItems: unassigned thread → assign options + create, no u
   );
 });
 
-test("buildProjectMenuItems: assigned thread → current project leads, unassign trails the list", () => {
+test("buildProjectMenuItems: assigned thread → current project leads, unassign comes last", () => {
   const items = buildProjectMenuItems({
     projects: [
       { id: "a", name: "Alpha" },
@@ -103,8 +103,8 @@ test("buildProjectMenuItems: assigned thread → current project leads, unassign
       ["assign", "Beta", true],
       ["assign", "Alpha", false],
       ["assign", "Gamma", false],
-      ["unassign", "Remove from project", null],
       ["create", "New project…", null],
+      ["unassign", "Remove from project", null],
     ]
   );
 });

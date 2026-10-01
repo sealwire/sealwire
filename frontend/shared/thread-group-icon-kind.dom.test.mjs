@@ -93,7 +93,7 @@ test("a project and a working directory do not render the same mark", () => {
     onRenameProject: () => {},
     onDeleteProject: () => {},
   });
-  const workspace = render(CWD_GROUP, { onSelectWorkspace: () => {} });
+  const workspace = render(CWD_GROUP);
 
   try {
     assert.notEqual(
@@ -112,7 +112,7 @@ test("a project and a working directory do not render the same mark", () => {
 test("a pinned project keeps the project mark even without rename/delete handlers", () => {
   const pinned = render(
     { ...PROJECT_GROUP, pinned: true },
-    { onSelectWorkspace: () => {} }
+    {}
   );
   const project = render(PROJECT_GROUP, {
     onRenameProject: () => {},
@@ -137,7 +137,7 @@ test("a pinned project keeps the project mark even without rename/delete handler
 test("the Unassigned bucket does not wear the project mark", () => {
   const unassigned = render(
     { key: "__unassigned__", cwd: "", projectId: null, label: "Unassigned", threads: [] },
-    { onSelectWorkspace: () => {} }
+    {}
   );
   const project = render(PROJECT_GROUP, {
     onRenameProject: () => {},
@@ -156,42 +156,25 @@ test("the Unassigned bucket does not wear the project mark", () => {
   }
 });
 
-// ThreadGroupHeader has FOUR render branches, and the mark has to survive all of
-// them. The two non-collapsible ones are easy to forget: both shipped surfaces
-// pass `collapsible: true`, so nothing on screen exercises them — but
-// `ThreadGroupList` defaults the prop to false, and the Unknown-workspace group
-// reaches the static branch through `thread-groups-unknown-workspace.test.mjs`.
-//
-// Forgetting one is not a no-op, it is a HOLE: the old glyph was drawn by CSS on
-// the empty span, so a branch that still emitted the bare span kept its folder.
-// The mark is a child element now, so the same branch renders 16px of nothing.
-// That is exactly how this regressed the first time — a replace-all keyed on an
-// indentation that three of the four branches happened to share.
-test("every header branch renders the mark, collapsible or not", () => {
-  const reference = render(CWD_GROUP, { onSelectWorkspace: () => {} });
+// ThreadGroupHeader renders a fold button or, with nothing to fold, a static row; the
+// mark has to survive both. The static one is easy to forget: both shipped surfaces
+// fold, but `ThreadGroupList` defaults `collapsible` to false.
+test("both header shapes render the mark, foldable or not", () => {
+  const reference = render(CWD_GROUP);
   const expected = mark(reference.host);
-
-  // Not collapsible, but selectable: the <button> branch.
-  const selectable = render(CWD_GROUP, {
-    collapsible: false,
-    onSelectWorkspace: () => {},
-    onToggleGroup: null,
-  });
-  // Not collapsible and not selectable: the static fallback. The Unknown-workspace
-  // sentinel lands here even WITH an onSelectWorkspace handler, because its key is
-  // a display sentinel rather than a path and must not become a workspace button.
-  const staticFallback = render(
+  const staticRow = render(CWD_GROUP, { collapsible: false, onToggleGroup: null });
+  const unknown = render(
     { key: "__unknown_workspace__", cwd: "__unknown_workspace__", label: "Unknown workspace" },
-    { collapsible: false, onSelectWorkspace: () => {}, onToggleGroup: null }
+    { collapsible: false, onToggleGroup: null }
   );
 
   try {
-    assert.equal(mark(selectable.host), expected, "the non-collapsible selectable branch");
-    assert.equal(mark(staticFallback.host), expected, "the static fallback branch");
+    assert.equal(mark(staticRow.host), expected, "the static row");
+    assert.equal(mark(unknown.host), expected, "the Unknown-workspace row");
   } finally {
     reference.cleanup();
-    selectable.cleanup();
-    staticFallback.cleanup();
+    staticRow.cleanup();
+    unknown.cleanup();
   }
 });
 

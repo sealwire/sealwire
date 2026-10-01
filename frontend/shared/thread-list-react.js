@@ -4,6 +4,7 @@ import React, {
   useMemo,
   useReducer,
   useRef,
+  useState,
 } from "react";
 import {
   Virtualizer,
@@ -24,6 +25,15 @@ import { ProjectTagIcon, WorkspaceFolderIcon } from "./panel-icons.js";
 import { selectThreadDot } from "./thread-dot.js";
 import { InlineTitleEditor } from "./inline-title-editor.js";
 import { threadNameDraft } from "./thread-rename.js";
+import {
+  ContextMenu,
+  MenuConfirm,
+  MenuGlyph,
+  MenuItem,
+  MenuSeparator,
+} from "./context-menu-react.js";
+import { describeProjectDelete } from "./destructive-confirm-copy.js";
+import { CHEVRON_DOWN_SVG, CHEVRON_RIGHT_SVG } from "../svg.js";
 
 const h = React.createElement;
 
@@ -35,29 +45,8 @@ function shortId(value) {
   return value ? String(value).slice(0, 8) : "unknown";
 }
 
-// Small stroked glyphs for the project-header rename/delete affordances.
-function renameGlyph() {
-  return h(
-    "svg",
-    {
-      "aria-hidden": "true",
-      width: "13",
-      height: "13",
-      viewBox: "0 0 16 16",
-      fill: "none",
-      stroke: "currentColor",
-      strokeWidth: "1.4",
-      strokeLinecap: "round",
-      strokeLinejoin: "round",
-    },
-    h("path", { d: "M10.5 3.5 12.5 5.5" }),
-    h("path", { d: "M3 11 10 4 12 6 5 13 2.5 13.5 3 11Z" })
-  );
-}
-
-// Filled, unlike the stroked glyphs above — it needs to read as a persistent
-// "starred" mark rather than an outline action icon, since it sits on the row
-// whether or not the row is being interacted with.
+// Filled rather than stroked: it has to read as a persistent "starred" mark, not
+// as an outline action icon, since it sits on the row whatever the pointer does.
 function flagGlyph() {
   return h(
     "svg",
@@ -74,65 +63,6 @@ function flagGlyph() {
   );
 }
 
-function deleteGlyph() {
-  return h(
-    "svg",
-    {
-      "aria-hidden": "true",
-      width: "13",
-      height: "13",
-      viewBox: "0 0 16 16",
-      fill: "none",
-      stroke: "currentColor",
-      strokeWidth: "1.4",
-      strokeLinecap: "round",
-      strokeLinejoin: "round",
-    },
-    h("path", { d: "M3.25 4.5H12.75" }),
-    h("path", { d: "M6.5 4.5V3H9.5V4.5" }),
-    h("path", { d: "M5 4.5 5.5 12.5H10.5L11 4.5" })
-  );
-}
-
-// The one control that folds a group: "+" to unfold, "−" to fold. A chevron read
-// as decoration on a row that was already clickable; a +/− reads as the button it
-// is, which matters now that folding and selecting are deliberately separate
-// targets (see thread-list-collapse.dom.test.mjs).
-function DisclosureButton({ isCollapsed, label, onToggle }) {
-  return h(
-    "button",
-    {
-      type: "button",
-      className: "thread-group-disclosure",
-      "data-state": isCollapsed ? "collapsed" : "expanded",
-      "aria-expanded": isCollapsed ? "false" : "true",
-      "aria-label": `${isCollapsed ? "Expand" : "Collapse"} ${label}`,
-      title: isCollapsed ? "Expand" : "Collapse",
-      onClick: (event) => {
-        // Never let a fold bubble into the row's select handler.
-        event.stopPropagation();
-        onToggle();
-      },
-    },
-    h(
-      "svg",
-      {
-        "aria-hidden": "true",
-        width: "13",
-        height: "13",
-        viewBox: "0 0 16 16",
-        fill: "none",
-        stroke: "currentColor",
-        strokeWidth: "1.6",
-        strokeLinecap: "round",
-      },
-      h("path", { d: "M3.5 8h9" }),
-      // The vertical stroke is the only difference between "−" and "+".
-      isCollapsed ? h("path", { d: "M8 3.5v9" }) : null
-    )
-  );
-}
-
 export function ThreadGroupList({
   activeThreadId = null,
   collapsedGroupCwds = new Set(),
@@ -143,18 +73,18 @@ export function ThreadGroupList({
   formatThreadMeta = (thread) => thread.updated_at || "",
   groups = [],
   includePreview = false,
+  onBeginRename = null,
   onCancelRename = null,
   onCommitRename = null,
   onContextThread = null,
+  // `(projectId, name, { sessionCount })`, after the header's own confirm.
   onDeleteProject = null,
   activeProjectId = null,
-  onContextProject = null,
   hidePinnedGroupHeader = false,
+  // `(projectId, nextName)`: the header edits the name in place.
   onRenameProject = null,
-  onSelectProject = null,
   onResumeThread = null,
   onSelectThread = null,
-  onSelectWorkspace = null,
   onThreadActions = null,
   onToggleExpandedGroup = null,
   onToggleGroup = null,
@@ -255,17 +185,15 @@ export function ThreadGroupList({
             formatThreadMeta,
             includePreview,
             normalizedSelectedCwd,
+            onBeginRename,
             onCancelRename,
             onCommitRename,
             onContextThread: onContextThread ? handleContextThread : null,
             onDeleteProject,
             activeProjectId,
-            onContextProject,
             onRenameProject,
-            onSelectProject,
             onResumeThread,
             onSelectThread: onSelectThread ? handleSelectThread : null,
-            onSelectWorkspace,
             onThreadActions,
             onToggleExpandedGroup,
             onToggleGroup,
@@ -289,17 +217,15 @@ function ThreadListRow({
   formatThreadMeta,
   includePreview,
   normalizedSelectedCwd,
+  onBeginRename,
   onCancelRename,
   onCommitRename,
   onContextThread,
   onDeleteProject,
   activeProjectId,
-  onContextProject,
   onRenameProject,
-  onSelectProject,
   onResumeThread,
   onSelectThread,
-  onSelectWorkspace,
   onThreadActions,
   onToggleExpandedGroup,
   onToggleGroup,
@@ -326,10 +252,7 @@ function ThreadListRow({
         normalizedCwd: row.normalizedCwd,
         onDeleteProject,
         activeProjectId,
-        onContextProject,
         onRenameProject,
-        onSelectProject,
-        onSelectWorkspace,
         onToggleGroup,
       })
     );
@@ -345,6 +268,7 @@ function ThreadListRow({
       formatThreadMeta,
       group: row.group,
       includePreview,
+      onBeginRename,
       onCancelRename,
       onCommitRename,
       onContextThread,
@@ -484,252 +408,251 @@ function measureScrollMargin(node, scrollElement) {
   return rootRect.top - scrollRect.top + scrollElement.scrollTop;
 }
 
-// The header's leading mark: a tag for a project, a folder for a working
-// directory. Both kinds used to render the same CSS-drawn folder, which made
-// them indistinguishable in a column that shows them side by side — and the
-// folder was wrong for a project, which is deliberately not bound to a cwd.
-//
-// The kind is read from the GROUP, not from whichever branch below happens to
-// render it. A pinned project carries a projectId but no rename/delete handlers,
-// so it falls through to the generic collapsible branch — and that is the case
-// actually on screen, since both surfaces group by cwd today and lift one
-// project to the top. Anything keyed on the branch (a CSS rule on
-// `.thread-group-header-project`, say) gets exactly that row wrong.
-//
-// `projectId: null` is the Unassigned bucket — the absence of a project — so it
-// takes the folder rather than claiming to be one.
-//
-// No workspace-trust marker here, and that is a decision rather than an omission. This
-// header is passive — it renders because sessions exist, not because anyone asked about
-// the folder — and an ungranted folder is the ordinary case that blocks nothing. A tag on
-// most rows forever is a tag people stop reading, and it would spend the attention the
-// in-context offer needs. `thread-groups.js` withholds the flag for the same reason.
-function groupIcon(group) {
+// No workspace-trust marker on a header, deliberately: it renders because sessions
+// exist, an ungranted folder blocks nothing, and a tag on most rows gets tuned out.
+function MoreGlyphSmall() {
   return h(
-    "span",
-    { "aria-hidden": "true", className: "thread-group-icon" },
-    h(group.projectId ? ProjectTagIcon : WorkspaceFolderIcon)
+    "svg",
+    { "aria-hidden": "true", width: "14", height: "14", viewBox: "0 0 16 16", fill: "currentColor" },
+    h("circle", { cx: "3.5", cy: "8", r: "1.2" }),
+    h("circle", { cx: "8", cy: "8", r: "1.2" }),
+    h("circle", { cx: "12.5", cy: "8", r: "1.2" })
   );
 }
 
-// Exported for unit tests: the list itself virtualizes and renders nothing
-// under SSR, so the sentinel guard below cannot be observed through it.
+// Read from `group.summary`, not the rows: the group folds and truncates, and the counts
+// have to survive both. No plain session count — the rows below already say it.
+function groupActivity(group) {
+  const working = group.summary?.working || 0;
+  const needsInput = group.summary?.needsInput || 0;
+  if (!working && !needsInput) {
+    return null;
+  }
+  const count = (n, kind, label) =>
+    h(
+      "span",
+      {
+        "aria-label": `${n} ${label}`,
+        className: `thread-group-count is-${kind}`,
+        role: "img",
+        title: `${n} ${label}`,
+      },
+      h("span", { "aria-hidden": "true", className: "thread-group-count-dot" }),
+      h("span", { "aria-hidden": "true" }, String(n))
+    );
+  return h(
+    "span",
+    { className: "thread-group-badges" },
+    needsInput ? count(needsInput, "attention", "needs input") : null,
+    working ? count(working, "working", "working") : null
+  );
+}
+
+// Exported for unit tests: the list virtualizes and renders nothing under SSR.
+// The whole row folds the group; selecting lives in the switcher, so the row no longer
+// has to split into a label and a separate +/− that nobody found.
 export function ThreadGroupHeader({
   activeProjectId = null,
   collapsible,
   group,
   isCollapsed,
   normalizedCwd,
-  onDeleteProject,
-  onContextProject = null,
-  onRenameProject,
-  onSelectProject = null,
-  onSelectWorkspace,
+  onDeleteProject = null,
+  onRenameProject = null,
   onToggleGroup,
 }) {
+  const [menu, setMenu] = useState(null);
+  const [confirming, setConfirming] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const moreRef = useRef(null);
+
   // The unknown-workspace key is internal; every branch shows the label
   // instead so it is never presented to the user as a path.
   const headerTitle = isUnknownWorkspace(group.cwd) ? group.label : group.cwd;
-
-  // Real Project groups (project mode) carry a truthy `projectId`; cwd groups omit
-  // the field and the Unassigned bucket is `projectId: null`, so neither gets the
-  // rename/delete affordances. Rendered as a <div> (not a button) so the action
-  // <button>s are valid children and there's no header-level click to fight.
+  // Real project groups carry a truthy `projectId`; cwd groups omit it and the
+  // Unassigned bucket is `projectId: null`, so neither has actions.
   const projectId = group.projectId || null;
-  // Collapse is only offered where a surface actually wired it; otherwise the
-  // chevron would be a control that does nothing.
+  const canRename = Boolean(projectId && onRenameProject);
+  const canDelete = Boolean(projectId && onDeleteProject);
+  const hasMenu = canRename || canDelete;
   const canToggle = Boolean(collapsible && onToggleGroup);
-  if (projectId && (onRenameProject || onDeleteProject)) {
-    const isActiveProject = Boolean(activeProjectId) && activeProjectId === projectId;
-    // The whole row selects — the label is only a few characters wide, and a user
-    // aiming at "the project" hits the row. Selecting must NOT also fold: making
-    // an already-active project active again would hide the sessions you were
-    // reaching for. Folding lives on the disclosure button alone.
-    const activateRow = () => {
-      onSelectProject?.(projectId);
-    };
-    const rowClickable = Boolean(onSelectProject);
-    return h(
-      "div",
-      {
-        className:
-          "thread-group-header thread-group-header-static thread-group-header-project"
-          + (isActiveProject ? " is-active" : "")
-          // A <div> gets no pointer cursor for free.
-          + (rowClickable ? " is-clickable" : ""),
-        "data-project-id": projectId,
-        title: headerTitle,
-        onClick: rowClickable ? activateRow : undefined,
-        // Right-click opens the same project actions the inline buttons expose. The
-        // inline buttons keep it reachable without a mouse; this keeps the mouse path
-        // that the previous project-row sidebar had.
-        onContextMenu: onContextProject
-          ? (event) => {
-              event.preventDefault();
-              onContextProject(projectId, group.label, event.clientX, event.clientY);
-            }
-          : undefined,
-      },
-      groupIcon(group),
-      // Still a real <button> so the row's action is keyboard-reachable — the
-      // header itself is a <div> (it hosts the action <button>s) and cannot be
-      // one. stopPropagation keeps it from ALSO firing the row handler, which
-      // would double-toggle straight back to where it started.
-      onSelectProject
-        ? h(
-            "button",
-            {
-              type: "button",
-              className: "thread-group-name thread-group-name-button",
-              onClick: (event) => {
-                event.stopPropagation();
-                activateRow();
-              },
-            },
-            group.label
-          )
-        : h("span", { className: "thread-group-name" }, group.label),
-      // At-a-glance activity, carried on the group as `summary`. Only the states
-      // worth acting on: a plain "N sessions" restated what the nested rows
-      // already show, and it crowded the collapse chevron off the right edge.
-      // These two must NOT be derived from the visible rows — the group collapses
-      // and the list truncates past a limit, and the counts have to survive both.
-      group.summary && (group.summary.working || group.summary.needsInput)
-        ? h(
-            "span",
-            { className: "thread-group-badges" },
-            group.summary.working
-              ? h(
-                  "span",
-                  { className: "project-sidebar-badge is-working" },
-                  `${group.summary.working} working`
-                )
-              : null,
-            group.summary.needsInput
-              ? h(
-                  "span",
-                  { className: "project-sidebar-badge is-attention" },
-                  `${group.summary.needsInput} needs input`
-                )
-              : null
-          )
-        : null,
-      h(
-        "span",
-        { className: "thread-group-actions" },
-        onRenameProject &&
-          h(
-            "button",
-            {
-              type: "button",
-              className: "thread-group-action",
-              title: "Rename project",
-              "aria-label": `Rename project ${group.label}`,
-              onClick: (event) => {
-                event.stopPropagation();
-                onRenameProject(projectId, group.label);
-              },
-            },
-            renameGlyph()
-          ),
-        onDeleteProject &&
-          h(
-            "button",
-            {
-              type: "button",
-              className: "thread-group-action thread-group-action-danger",
-              title: "Delete project",
-              "aria-label": `Delete project ${group.label}`,
-              onClick: (event) => {
-                event.stopPropagation();
-                onDeleteProject(projectId, group.label);
-              },
-            },
-            deleteGlyph()
-          )
-      ),
-      canToggle
-        ? h(DisclosureButton, {
-            isCollapsed,
-            label: `project ${group.label}`,
-            onToggle: () => onToggleGroup(normalizedCwd),
-          })
-        : null
-    );
-  }
+  const isActiveProject = Boolean(projectId) && activeProjectId === projectId;
+  // Members, not rows: an empty screen is not an empty project (see `memberCount`).
+  const sessionCount = Math.max(group.memberCount || 0, group.threads?.length || 0);
 
-  if (collapsible) {
-    // A <div>, not a <button>: it hosts the disclosure <button>, and nesting
-    // buttons is invalid. Same shape as a project header — the label is its own
-    // button so the selection stays keyboard-reachable.
-    //
-    // The Unknown-workspace key is a display sentinel rather than a directory. It
-    // would be sent to the relay verbatim as a path, so it never leaves the
-    // display layer: that group folds, but its label is inert.
-    const selectable = Boolean(onSelectWorkspace) && Boolean(group.cwd) && !isUnknownWorkspace(group.cwd);
-    const selectWorkspace = () => onSelectWorkspace(group.cwd);
-    return h(
-      "div",
-      {
-        className: "thread-group-header" + (selectable ? " is-clickable" : ""),
-        onClick: selectable ? selectWorkspace : undefined,
-        title: headerTitle,
-        // Present only for the bell's state buckets, so CSS can drop the folder glyph.
-        // "Needs input" is not a directory, and absent renders exactly as before.
-        "data-group-kind": group.state ? "state" : undefined,
-      },
-      groupIcon(group),
-      selectable
-        ? h(
-            "button",
-            {
-              type: "button",
-              className: "thread-group-name thread-group-name-button",
-              "data-select-workspace": group.cwd,
-              onClick: (event) => {
-                // Don't also fire the row handler — one selection per click.
-                event.stopPropagation();
-                selectWorkspace();
-              },
-            },
-            group.label
-          )
-        : h("span", { className: "thread-group-name" }, group.label),
-      h(DisclosureButton, {
-        isCollapsed,
-        label: group.label,
-        onToggle: () => onToggleGroup?.(normalizedCwd),
+  const openMenu = (x, y) => {
+    setConfirming(false);
+    setMenu({ x, y });
+  };
+  const closeMenu = () => {
+    setMenu(null);
+    setConfirming(false);
+  };
+  const beginRename = () => {
+    closeMenu();
+    setRenaming(true);
+  };
+  const deleteNow = () => {
+    closeMenu();
+    onDeleteProject(projectId, group.label, { sessionCount });
+  };
+  const deleteCopy = canDelete
+    ? describeProjectDelete({ name: group.label, sessionCount })
+    : null;
+
+  const lead = h(
+    "span",
+    { "aria-hidden": "true", className: "thread-group-icon" },
+    // `projectId: null` is the Unassigned bucket — the absence of a project — so it
+    // takes the folder, not the tag.
+    h("span", { className: "thread-group-kind" }, h(projectId ? ProjectTagIcon : WorkspaceFolderIcon)),
+    canToggle
+      ? h(MenuGlyph, {
+          className: "thread-group-chevron",
+          svg: isCollapsed ? CHEVRON_RIGHT_SVG : CHEVRON_DOWN_SVG,
+        })
+      : null
+  );
+
+  const name = renaming
+    ? h(InlineTitleEditor, {
+        ariaLabel: "Project name",
+        className: "thread-group-name-input",
+        defaultValue: group.label,
+        onCancel: () => setRenaming(false),
+        onCommit: (value) => {
+          setRenaming(false);
+          const next = String(value || "").trim();
+          // A project has to have a name; blank is a cancel, not a reset.
+          if (next && next !== group.label) {
+            onRenameProject(projectId, next);
+          }
+        },
       })
-    );
-  }
+    : h("span", { className: "thread-group-name" }, group.label);
 
-  // The Unknown-workspace group key is a display sentinel, not a directory —
-  // selecting it would write "__unknown_workspace__" into the workspace input
-  // and then send it to the relay as a path. Render its header as a static
-  // label so the value cannot leave the display layer.
-  if (onSelectWorkspace && !isUnknownWorkspace(group.cwd)) {
-    return h(
-      "button",
-      {
-        className: "thread-group-header",
-        "data-select-workspace": group.cwd,
-        onClick: () => onSelectWorkspace(group.cwd),
-        title: headerTitle,
-        type: "button",
-      },
-      groupIcon(group),
-      h("span", { className: "thread-group-name" }, group.label)
-    );
-  }
+  // A project's roll-up only: a folder's rows already say it all, and the bell's state
+  // buckets are themselves the state.
+  const activity = projectId ? groupActivity(group) : null;
+
+  const onContextMenu = hasMenu
+    ? (event) => {
+        event.preventDefault();
+        openMenu(event.clientX, event.clientY);
+      }
+    : undefined;
+
+  // While renaming, the row stops being a <button>: an <input> inside one is invalid,
+  // and the button would eat the clicks that place a caret.
+  const main = canToggle && !renaming
+    ? h(
+        "button",
+        {
+          "aria-expanded": isCollapsed ? "false" : "true",
+          "aria-label": `${isCollapsed ? "Expand" : "Collapse"} ${group.label}`,
+          className: "thread-group-toggle",
+          onClick: () => onToggleGroup(normalizedCwd),
+          onContextMenu,
+          onKeyDown: canRename
+            ? (event) => {
+                if (event.key === "F2") {
+                  event.preventDefault();
+                  setRenaming(true);
+                }
+              }
+            : undefined,
+          title: headerTitle,
+          type: "button",
+        },
+        lead,
+        name,
+        activity
+      )
+    : h(
+        "div",
+        {
+          className: `thread-group-toggle is-static${renaming ? " is-editing" : ""}`,
+          onContextMenu,
+          title: headerTitle,
+        },
+        lead,
+        name,
+        activity
+      );
 
   return h(
     "div",
     {
-      className: "thread-group-header thread-group-header-static",
-      title: headerTitle,
+      className:
+        "thread-group-header"
+        + (projectId ? " thread-group-header-project" : "")
+        + (isActiveProject ? " is-active" : "")
+        + (canToggle ? " is-foldable" : "")
+        + (isCollapsed ? " is-collapsed" : "")
+        + (menu ? " is-menu-open" : ""),
+      "data-project-id": projectId || undefined,
+      // Present only for the bell's state buckets, so CSS can drop the folder glyph.
+      "data-group-kind": group.state ? "state" : undefined,
     },
-    groupIcon(group),
-    h("span", { className: "thread-group-name" }, group.label)
+    main,
+    hasMenu && !renaming
+      ? h(
+          "button",
+          {
+            "aria-expanded": menu ? "true" : "false",
+            "aria-haspopup": "menu",
+            "aria-label": `Actions for project ${group.label}`,
+            className: "thread-group-more",
+            onClick: (event) => {
+              if (menu) {
+                closeMenu();
+                return;
+              }
+              const box = event.currentTarget.getBoundingClientRect();
+              openMenu(box.left, box.bottom + 4);
+            },
+            ref: moreRef,
+            title: "Project actions",
+            type: "button",
+          },
+          h(MoreGlyphSmall)
+        )
+      : null,
+    menu
+      ? h(
+          ContextMenu,
+          {
+            anchor: menu,
+            ariaLabel: `Project ${group.label}`,
+            confirming,
+            ignoreRef: moreRef,
+            onClose: closeMenu,
+          },
+          confirming && deleteCopy
+            ? h(MenuConfirm, {
+                ...deleteCopy,
+                onCancel: closeMenu,
+                onConfirm: deleteNow,
+              })
+            : h(
+                React.Fragment,
+                null,
+                canRename
+                  ? h(MenuItem, { hint: "F2", label: "Rename…", onSelect: beginRename })
+                  : null,
+                canRename && canDelete ? h(MenuSeparator) : null,
+                canDelete
+                  ? h(MenuItem, {
+                      danger: true,
+                      label: "Delete project…",
+                      // An empty project has nothing to warn about: it goes at once and
+                      // the host offers an Undo.
+                      onSelect: () => (deleteCopy ? setConfirming(true) : deleteNow()),
+                    })
+                  : null
+              )
+        )
+      : null
   );
 }
 
@@ -742,6 +665,7 @@ export function ThreadGroupItem({
   formatThreadMeta,
   group,
   includePreview,
+  onBeginRename = null,
   onCancelRename = null,
   onCommitRename = null,
   onContextThread,
@@ -883,6 +807,16 @@ export function ThreadGroupItem({
             onResumeThread?.(thread.id, { preview: true });
           },
           onDoubleClick: () => onResumeThread?.(thread.id, { preview: false }),
+          // F2 renames the focused row, the key the menu's "Rename… F2" names.
+          onKeyDown: onBeginRename && onCommitRename
+            ? (event) => {
+                if (event.key === "F2") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onBeginRename(thread.id);
+                }
+              }
+            : undefined,
           onContextMenu: onContextThread
             ? (event) => {
                 event.preventDefault();

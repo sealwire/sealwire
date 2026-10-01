@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import { DEFAULT_WORKSPACE_LABEL } from "../frontend/shared/header-labels.js";
+import { ALL_SESSIONS_LABEL } from "../frontend/shared/header-labels.js";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -74,7 +74,7 @@ async function main() {
     const launchWorkspaceTitle = (await page.textContent("#workspace-title")) || "";
     assert.equal(
       launchWorkspaceTitle,
-      DEFAULT_WORKSPACE_LABEL,
+      ALL_SESSIONS_LABEL,
       `header names the selected container, not the product or the folder (got "${launchWorkspaceTitle}")`
     );
     assert.ok(

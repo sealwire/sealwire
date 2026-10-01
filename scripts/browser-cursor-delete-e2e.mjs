@@ -32,6 +32,7 @@ import { openSessionsDrawer } from "./e2e/harness/drawer.mjs";
 import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
 import { getFreePort } from "./e2e/harness/ports.mjs";
 import { stopManagedProcess, waitForHealth } from "./e2e/harness/process.mjs";
+import { confirmThreadMenuRemoval } from "./e2e/harness/thread-menu.mjs";
 
 const TIMEOUT_MS = Number(process.env.CURSOR_DELETE_E2E_TIMEOUT_MS || 60000);
 // Two clones: one to delete for real, one whose directory is removed behind the
@@ -131,6 +132,7 @@ async function main() {
     const dialogs = watchDialogs(page);
     await openMenu(page, doomedRow);
     await page.click("#delete-thread-button");
+    await confirmThreadMenuRemoval(page, { timeoutMs: TIMEOUT_MS });
     await page.waitForFunction(
       (id) => document.querySelector(`#threads-list [data-thread-id="${id}"]`) == null,
       DOOMED_ID,
@@ -157,6 +159,7 @@ async function main() {
     dialogs.reset();
     await openMenu(page, vanishedRow);
     await page.click("#delete-thread-button");
+    await confirmThreadMenuRemoval(page, { timeoutMs: TIMEOUT_MS });
 
     const alerted = await waitForAlert(dialogs);
     assert.match(

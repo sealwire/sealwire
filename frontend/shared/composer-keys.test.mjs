@@ -399,3 +399,13 @@ test("Cmd/Ctrl+Home is left to the browser even with remapHomeEnd on (document n
   assert.equal(event.defaultPrevented, false);
   assert.equal(textarea.setSelectionCalls.length, 0);
 });
+
+test("isImeComposing sees a composition on the native event or the synthetic one", async () => {
+  const { isImeComposing } = await import("./composer-keys.js");
+  assert.equal(isImeComposing({ key: "Enter", isComposing: true }), true);
+  // React's synthetic event carries no isComposing of its own.
+  assert.equal(isImeComposing({ key: "Enter", nativeEvent: { isComposing: true } }), true);
+  // Safari reports the confirming Enter as keyCode 229 with isComposing already false.
+  assert.equal(isImeComposing({ key: "Enter", keyCode: 229 }), true);
+  assert.equal(isImeComposing({ key: "Enter", keyCode: 13 }), false);
+});

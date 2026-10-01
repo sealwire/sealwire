@@ -40,8 +40,6 @@ function renderHeader(group, extra = {}) {
         group,
         isCollapsed: false,
         normalizedCwd: "",
-        // A project header only renders its project branch when it can act on the
-        // project, so these have to be present for the badges to be reachable at all.
         onRenameProject: () => {},
         onDeleteProject: () => {},
         ...extra,
@@ -49,7 +47,8 @@ function renderHeader(group, extra = {}) {
     );
   });
   return {
-    badges: [...host.querySelectorAll(".project-sidebar-badge")].map((n) => n.textContent),
+    // A dot and a number on screen; the words are the badge's accessible name.
+    badges: [...host.querySelectorAll(".thread-group-count")].map((n) => n.getAttribute("aria-label")),
     cleanup() {
       act(() => root.unmount());
       host.remove();
@@ -66,9 +65,8 @@ const projectGroup = (summary, threads = []) => ({
   summary,
 });
 
-// `thread-list-collapse.dom.test.mjs` already asserts that a populated summary renders
-// "2 working" / "1 needs input" and that no raw session-count badge appears. What is
-// left to pin here is the exact badge SET for the edge cases it does not cover.
+// The exact badge SET for each summary shape: only states worth acting on, never a
+// plain session count.
 
 test("an idle project shows no badge, however many sessions it holds", () => {
   const view = renderHeader(projectGroup({ working: 0, needsInput: 0, total: 4 }));

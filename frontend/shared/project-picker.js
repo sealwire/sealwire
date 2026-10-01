@@ -3,7 +3,7 @@
 
 import React, { useCallback, useId, useRef, useState } from "react";
 
-import { DEFAULT_WORKSPACE_LABEL } from "./project-labels.js";
+import { NO_PROJECT_LABEL } from "./project-labels.js";
 import { ProjectMenu } from "./project-menu-react.js";
 import { buildProjectPickerRows } from "./project-picker-model.js";
 import { MenuPortal, useAnchoredMenu } from "./use-anchored-menu.js";
@@ -11,8 +11,8 @@ import { useDismissableMenu } from "./use-dismissable-menu.js";
 
 const h = React.createElement;
 
-// Sentinel row id for "resolve from the source". Not null — null is the Default
-// Workspace, and the whole point is that those are different requests.
+// Sentinel row id for "resolve from the source". Not null — null is "no project", and
+// the whole point is that those are different requests.
 export const INHERIT_ROW_ID = "__fork_inherit__";
 // An id no project can have, so every real row reads as unselected while the
 // inherit row holds the mark.
@@ -24,17 +24,14 @@ export function ProjectPicker({
   createLabel = "New project…",
   disabled = false,
   // Fork only: an explicit row for "resolve from the source at submit time",
-  // which is a different request from choosing the Default Workspace.
+  // which is a different request from choosing no project.
   inheritRow = null,
   id = null,
   label = "Project",
   onCreateProject = null,
   onSelectProject = null,
   projects = [],
-  threadActivity = null,
-  threadAttention = null,
   threadProjectId = {},
-  threadReviewing = null,
   threads = [],
 }) {
   const [open, setOpen] = useState(false);
@@ -62,7 +59,7 @@ export function ProjectPicker({
     ? inheritRow.chipLabel || inheritRow.label
     : activeProject
       ? activeProject.name || activeProject.id
-      : DEFAULT_WORKSPACE_LABEL;
+      : NO_PROJECT_LABEL;
 
   const choose = (projectId) => {
     close();
@@ -107,40 +104,38 @@ export function ProjectPicker({
       MenuPortal,
       { anchorRef: triggerRef, open },
       h(ProjectMenu, {
-          createLabel,
-          id: menuId,
-          menuRef: assignMenuRef,
-          onCreateProject: onCreateProject
-            ? () => {
-                close();
-                onCreateProject();
-              }
-            : null,
-          onSelect: (rowId) => choose(rowId === INHERIT_ROW_ID ? INHERIT_ROW_ID : rowId),
-          // No rename/delete: a destructive act should not sit one keystroke from
-          // a routine one, and the switcher already carries that pair.
-          rows: (inheritRow
-            ? [
-                {
-                  active: inheriting,
-                  id: INHERIT_ROW_ID,
-                  label: inheritRow.label,
-                  subtitle: inheritRow.subtitle || null,
-                },
-              ]
-            : []
-          ).concat(
-            buildProjectPickerRows({
-              activeProjectId: inheriting ? NO_MATCH : resolvedProjectId,
-              projects,
-              threadActivity,
-              threadAttention,
-              threadProjectId,
-              threadReviewing,
-              threads,
-            })
-          ),
-        })
+        createLabel,
+        ...buildProjectPickerRows({
+          activeProjectId: inheriting ? NO_MATCH : resolvedProjectId,
+          defaultLabel: NO_PROJECT_LABEL,
+          projects,
+          threadProjectId,
+          threads,
+        }),
+        filterPlaceholder: "Find a project…",
+        id: menuId,
+        menuRef: assignMenuRef,
+        onClose: close,
+        onCreateProject: onCreateProject
+          ? (name) => {
+              close();
+              onCreateProject(name);
+            }
+          : null,
+        onSelect: (rowId) => choose(rowId === INHERIT_ROW_ID ? INHERIT_ROW_ID : rowId),
+        // No rename/delete: a destructive act should not sit one keystroke from
+        // a routine one, and the switcher already carries that pair.
+        topRows: inheritRow
+          ? [
+              {
+                active: inheriting,
+                id: INHERIT_ROW_ID,
+                hint: inheritRow.hint || null,
+                label: inheritRow.label,
+              },
+            ]
+          : [],
+      })
       )
   );
 }

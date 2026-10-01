@@ -1026,3 +1026,42 @@ test("two tickets keep separate workspaces through the reducer", () => {
   assert.equal(keys.includes(undefined), false);
   assert.equal(keys.includes("undefined"), false);
 });
+
+test("closing several tabs at once keeps the chosen tab on screen", () => {
+  let state = createSessionViewState();
+  for (const threadId of ["a", "b", "c", "d"]) {
+    state = transition(state, { type: "OPEN_THREAD", threadId });
+  }
+  // "d" is on screen; "Close other tabs" on "b" closes the one being viewed.
+  state = transition(state, {
+    type: "CLOSE_TABS",
+    tabIds: [tabIdForThread("a"), tabIdForThread("c"), tabIdForThread("d")],
+    keepTabId: tabIdForThread("b"),
+  });
+  assert.deepEqual(workspaceThreadIds(state, SESSIONS_KEY), ["b"]);
+  assert.equal(state.location.threadId, "b", "the kept tab, not whichever neighbour survived");
+  assert.equal(state.workspaces[SESSIONS_KEY].focusedTabId, tabIdForThread("b"));
+});
+
+test("closing background tabs at once leaves the route alone", () => {
+  let state = createSessionViewState();
+  for (const threadId of ["a", "b", "c"]) {
+    state = transition(state, { type: "OPEN_THREAD", threadId });
+  }
+  state = transition(state, { type: "OPEN_THREAD", threadId: "a" });
+  state = transition(state, {
+    type: "CLOSE_TABS",
+    tabIds: [tabIdForThread("b"), tabIdForThread("c")],
+    keepTabId: tabIdForThread("b"),
+  });
+  assert.deepEqual(workspaceThreadIds(state, SESSIONS_KEY), ["a"]);
+  assert.equal(state.location.threadId, "a");
+});
+
+test("closing no known tabs is not a transition", () => {
+  let state = createSessionViewState();
+  state = transition(state, { type: "OPEN_THREAD", threadId: "a" });
+  const before = state;
+  state = reduceSessionView(state, { type: "CLOSE_TABS", tabIds: ["nope"] });
+  assert.deepEqual(state, before);
+});

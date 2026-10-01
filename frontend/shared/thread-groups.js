@@ -147,6 +147,9 @@ function buildCwdGroupsWithPinnedProject(threads, options, project) {
     projectId: project.id,
     pinned: true,
     label: project.name || project.id,
+    // From the full membership map, not `members`: the list holds only the most recent
+    // sessions, and "nothing loaded" must not read as "nothing in it".
+    memberCount: countMembers(threadProjectId, project.id),
     latestUpdatedAt: members.reduce(
       (latest, thread) => Math.max(latest, Number(thread.updated_at) || 0),
       0,
@@ -218,7 +221,8 @@ function buildProjectGroups(threads, options) {
   };
 
   for (const project of options.projects || []) {
-    ensureGroup(project.id, project.name || project.id, project.id);
+    ensureGroup(project.id, project.name || project.id, project.id).memberCount =
+      countMembers(threadProjectId, project.id);
   }
 
   for (const thread of threads || []) {
@@ -232,6 +236,10 @@ function buildProjectGroups(threads, options) {
   }
 
   return sortThreadGroups([...groups.values()]);
+}
+
+export function countMembers(threadProjectId, projectId) {
+  return Object.values(threadProjectId || {}).filter((id) => id === projectId).length;
 }
 
 function sortThreadGroups(groups) {

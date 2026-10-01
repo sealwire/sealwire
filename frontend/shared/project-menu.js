@@ -4,10 +4,10 @@
 // wires the actual API calls.
 
 /**
- * Ordered descriptors for the thread menu's "Projects ›" submenu: the thread's OWN
+ * Ordered descriptors for the thread menu's "Project ›" submenu: the thread's OWN
  * Project first (marked current, so the submenu opens showing where the thread lives),
- * then the other Projects alphabetically (one click = move), then "unassign" (only when
- * assigned) and a trailing "create" (new Project + assign).
+ * then the other Projects alphabetically (one click = move), then "create" (new Project
+ * + assign) and, only when assigned, a trailing "unassign".
  *
  * Current-first — not strictly alphabetical — because the list is primarily a "where am
  * I / move me" control: membership must be readable without scanning, and the checkmark
@@ -31,10 +31,10 @@ export function buildProjectMenuItems({ projects, currentProjectId } = {}) {
       isCurrent: project.id === current,
     });
   }
+  items.push({ kind: "create", label: "New project…" });
   if (current) {
     items.push({ kind: "unassign", label: "Remove from project" });
   }
-  items.push({ kind: "create", label: "New project…" });
   return items;
 }
 

@@ -778,8 +778,8 @@ test("double-clicking the close control never promotes", () => {
 // --- inline rename --------------------------------------------------------------
 //
 // Renaming a tab is the one action whose target IS the label, so it happens in place.
-// The gestures it has to coexist with are already spoken for: double-click promotes a
-// preview tab, press-and-hold reorders, drag pans. Right-click was the only one free.
+// A click only switches; a double click renames a kept tab (it keeps a preview one),
+// and F2 and the right-click menu reach the same box.
 
 function contextMenu(element) {
   const event = new dom.window.MouseEvent("contextmenu", { bubbles: true, cancelable: true });
@@ -805,6 +805,32 @@ function blur(element) {
   });
 }
 
+function doubleClick(element) {
+  act(() => {
+    element.dispatchEvent(new dom.window.MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+  });
+}
+
+function openEditor(host, tabId) {
+  doubleClick(tabEl(host, tabId).querySelector(".session-tab-main"));
+  return editorIn(host, tabId);
+}
+
+function menuRows() {
+  return [...document.querySelectorAll(".context-menu .context-menu-button")].map((row) => ({
+    label: row.querySelector(".context-menu-label")?.textContent,
+    disabled: row.disabled,
+  }));
+}
+
+function chooseMenuRow(label) {
+  const row = [...document.querySelectorAll(".context-menu .context-menu-button")].find(
+    (candidate) => candidate.querySelector(".context-menu-label")?.textContent === label
+  );
+  assert.ok(row, `no menu row "${label}"`);
+  click(row);
+}
+
 function editorIn(host, tabId) {
   return tabEl(host, tabId)?.querySelector(".session-tab-title-input") || null;
 }
@@ -815,15 +841,11 @@ function type(input, value) {
   });
 }
 
-test("right-click opens the editor on that tab, seeded with its current title", () => {
+test("double-clicking a kept tab opens the editor on it, seeded with its current title", () => {
   const view = mount({ items: ITEMS, focusedTabId: "tab-a", onRename: () => {} });
   try {
-    const event = contextMenu(tabEl(view.host, "tab-b"));
-    // The browser's own menu must not also open over the editor.
-    assert.equal(event.defaultPrevented, true);
-
-    const input = editorIn(view.host, "tab-b");
-    assert.ok(input, "the right-clicked tab must enter edit mode");
+    const input = openEditor(view.host, "tab-b");
+    assert.ok(input, "the double-clicked tab must enter edit mode");
     assert.equal(input.value, "Beta", "the box starts from what the tab shows");
     assert.equal(editorIn(view.host, "tab-a"), null, "only one tab edits at a time");
     // The static label is replaced, not duplicated — two titles would double-render.
@@ -839,8 +861,7 @@ test("right-click opens the editor on that tab, seeded with its current title", 
 test("the editor is never rendered inside the tab's button", () => {
   const view = mount({ items: ITEMS, onRename: () => {} });
   try {
-    contextMenu(tabEl(view.host, "tab-a"));
-    const input = editorIn(view.host, "tab-a");
+    const input = openEditor(view.host, "tab-a");
     assert.ok(input);
     assert.equal(input.closest("button"), null);
   } finally {
@@ -852,8 +873,7 @@ test("Enter commits the typed name against the tab's THREAD id", () => {
   const renames = [];
   const view = mount({ items: ITEMS, onRename: (threadId, name) => renames.push([threadId, name]) });
   try {
-    contextMenu(tabEl(view.host, "tab-c"));
-    const input = editorIn(view.host, "tab-c");
+    const input = openEditor(view.host, "tab-c");
     type(input, "  Auth work  ");
     keyDown(input, "Enter");
 
@@ -872,8 +892,7 @@ test("an emptied box still commits, so a reset can be expressed", () => {
   const renames = [];
   const view = mount({ items: ITEMS, onRename: (threadId, name) => renames.push([threadId, name]) });
   try {
-    contextMenu(tabEl(view.host, "tab-a"));
-    const input = editorIn(view.host, "tab-a");
+    const input = openEditor(view.host, "tab-a");
     type(input, "");
     keyDown(input, "Enter");
     assert.deepEqual(renames, [["t1", ""]]);
@@ -886,8 +905,7 @@ test("Escape abandons the edit without reporting anything", () => {
   const renames = [];
   const view = mount({ items: ITEMS, onRename: (threadId, name) => renames.push([threadId, name]) });
   try {
-    contextMenu(tabEl(view.host, "tab-a"));
-    const input = editorIn(view.host, "tab-a");
+    const input = openEditor(view.host, "tab-a");
     type(input, "Discarded");
     keyDown(input, "Escape");
 
@@ -908,8 +926,7 @@ test("clicking away commits rather than discarding, and commits only once", () =
   const renames = [];
   const view = mount({ items: ITEMS, onRename: (threadId, name) => renames.push([threadId, name]) });
   try {
-    contextMenu(tabEl(view.host, "tab-a"));
-    const input = editorIn(view.host, "tab-a");
+    const input = openEditor(view.host, "tab-a");
     type(input, "Blurred");
     blur(input);
     assert.deepEqual(renames, [["t1", "Blurred"]]);
@@ -924,8 +941,7 @@ test("Enter then blur reports exactly one rename", () => {
   const renames = [];
   const view = mount({ items: ITEMS, onRename: (threadId, name) => renames.push([threadId, name]) });
   try {
-    contextMenu(tabEl(view.host, "tab-a"));
-    const input = editorIn(view.host, "tab-a");
+    const input = openEditor(view.host, "tab-a");
     type(input, "Once");
     keyDown(input, "Enter");
     blur(input);
@@ -948,7 +964,7 @@ test("opening the editor neither focuses nor promotes the tab", () => {
     onRename: () => {},
   });
   try {
-    contextMenu(tabEl(view.host, "tab-c"));
+    openEditor(view.host, "tab-c");
     assert.deepEqual(focused, []);
     assert.deepEqual(promoted, []);
   } finally {
@@ -956,14 +972,19 @@ test("opening the editor neither focuses nor promotes the tab", () => {
   }
 });
 
-// Without a handler there is no transport, so advertising the gesture would be a lie —
-// and swallowing `contextmenu` would suppress the browser's own menu for nothing.
-test("with no onRename, right-click is left entirely alone", () => {
-  const view = mount({ items: ITEMS });
+// Without a handler there is no transport, so offering the action would be a lie.
+test("with no onRename, neither the menu nor a double click offers a rename", () => {
+  const promoted = [];
+  const view = mount({ items: ITEMS, onClose() {}, onPromote: (tabId) => promoted.push(tabId) });
   try {
-    const event = contextMenu(tabEl(view.host, "tab-a"));
-    assert.equal(event.defaultPrevented, false);
+    contextMenu(tabEl(view.host, "tab-a"));
+    assert.equal(menuRows().some((row) => row.label === "Rename…"), false);
+    dom.window.document.dispatchEvent(
+      new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })
+    );
+    doubleClick(tabEl(view.host, "tab-a").querySelector(".session-tab-main"));
     assert.equal(editorIn(view.host, "tab-a"), null);
+    assert.deepEqual(promoted, ["tab-a"], "a double click still keeps the tab");
   } finally {
     view.cleanup();
   }
@@ -995,8 +1016,7 @@ test("keystrokes inside the editor do not escape to document-level shortcuts", (
   const spy = (event) => seen.push(event.key);
   dom.window.document.addEventListener("keydown", spy);
   try {
-    contextMenu(tabEl(view.host, "tab-a"));
-    const input = editorIn(view.host, "tab-a");
+    const input = openEditor(view.host, "tab-a");
     keyDown(input, "ArrowLeft");
     keyDown(input, "Home");
     assert.deepEqual(seen, [], "a rename in progress must own its keyboard");
@@ -1012,8 +1032,7 @@ test("a press inside the editor arms no strip gesture", async () => {
   const before = windowListenerCount();
   const view = mount({ items: ITEMS, onRename: () => {} });
   try {
-    contextMenu(tabEl(view.host, "tab-a"));
-    const input = editorIn(view.host, "tab-a");
+    const input = openEditor(view.host, "tab-a");
     pointer(input, "pointerdown", centreOf("tab-a"));
     await waitForHold();
     assert.equal(
@@ -1022,6 +1041,166 @@ test("a press inside the editor arms no strip gesture", async () => {
       "the editor must not install the strip's drag listeners"
     );
     assert.ok(!tabEl(view.host, "tab-a").className.includes("is-dragging"));
+  } finally {
+    view.cleanup();
+  }
+});
+
+// --- the right-click menu ---------------------------------------------------------
+
+test("right-click opens the tab's menu: its own actions, then the closing ones", () => {
+  const view = mount({
+    items: ITEMS,
+    focusedTabId: "tab-a",
+    onClose() {},
+    onCloseTabs() {},
+    onRename() {},
+    onTogglePin() {},
+  });
+  try {
+    const event = contextMenu(tabEl(view.host, "tab-b"));
+    assert.equal(event.defaultPrevented, true, "the browser's own menu must not open too");
+    assert.deepEqual(
+      menuRows().map((row) => row.label),
+      ["Rename…", "Pin tab", "Close", "Close other tabs", "Close tabs to the right"]
+    );
+    assert.equal(document.querySelectorAll(".context-menu .context-menu-separator").length, 1);
+    assert.equal(editorIn(view.host, "tab-b"), null, "right-click no longer edits by itself");
+  } finally {
+    view.cleanup();
+  }
+});
+
+test("Close tabs to the right is unavailable on the last tab, and Close other tabs on a lone one", () => {
+  const view = mount({ items: ITEMS, onClose() {}, onCloseTabs() {} });
+  try {
+    contextMenu(tabEl(view.host, "tab-c"));
+    const last = Object.fromEntries(menuRows().map((row) => [row.label, row.disabled]));
+    assert.equal(last["Close tabs to the right"], true);
+    assert.equal(last["Close other tabs"], false);
+  } finally {
+    view.cleanup();
+  }
+
+  const lone = mount({ items: ITEMS.slice(0, 1), onClose() {}, onCloseTabs() {} });
+  try {
+    contextMenu(tabEl(lone.host, "tab-a"));
+    const rows = Object.fromEntries(menuRows().map((row) => [row.label, row.disabled]));
+    assert.equal(rows["Close other tabs"], true);
+    assert.equal(rows["Close tabs to the right"], true);
+  } finally {
+    lone.cleanup();
+  }
+});
+
+test("the bulk closes leave pinned tabs alone and keep the tab the menu was opened on", () => {
+  const calls = [];
+  const items = [
+    { tabId: "tab-p", threadId: "tp", title: "Pinned", pinned: true },
+    ...ITEMS,
+  ];
+  const view = mount({
+    items,
+    onClose() {},
+    onCloseTabs: (tabIds, options) => calls.push([tabIds, options]),
+  });
+  try {
+    contextMenu(tabEl(view.host, "tab-b"));
+    chooseMenuRow("Close other tabs");
+    contextMenu(tabEl(view.host, "tab-a"));
+    chooseMenuRow("Close tabs to the right");
+    assert.deepEqual(calls, [
+      [["tab-a", "tab-c"], { keepTabId: "tab-b" }],
+      [["tab-b", "tab-c"], { keepTabId: "tab-a" }],
+    ]);
+    assert.equal(document.querySelector(".context-menu"), null, "choosing closes the menu");
+  } finally {
+    view.cleanup();
+  }
+});
+
+test("the menu's Rename… opens the same editor, and Pin tab follows the tab's state", () => {
+  const pins = [];
+  const items = [ITEMS[0], { ...ITEMS[1], pinned: true }];
+  const view = mount({ items, onRename() {}, onTogglePin: (tabId, pinned) => pins.push([tabId, pinned]) });
+  try {
+    contextMenu(tabEl(view.host, "tab-b"));
+    chooseMenuRow("Unpin tab");
+    assert.deepEqual(pins, [["tab-b", false]]);
+
+    contextMenu(tabEl(view.host, "tab-a"));
+    chooseMenuRow("Rename…");
+    assert.ok(editorIn(view.host, "tab-a"));
+  } finally {
+    view.cleanup();
+  }
+});
+
+test("a preview tab keeps on double click rather than renaming", () => {
+  const promoted = [];
+  const view = mount({
+    items: PREVIEW_ITEMS,
+    onPromote: (tabId) => promoted.push(tabId),
+    onRename() {},
+  });
+  try {
+    doubleClick(tabEl(view.host, "tab-b").querySelector(".session-tab-main"));
+    assert.deepEqual(promoted, ["tab-b"]);
+    assert.equal(editorIn(view.host, "tab-b"), null);
+  } finally {
+    view.cleanup();
+  }
+});
+
+test("F2 anywhere renames the tab on screen, but not while typing elsewhere", () => {
+  const field = document.createElement("textarea");
+  document.body.append(field);
+  const view = mount({ items: ITEMS, focusedTabId: "tab-b", onRename() {} });
+  try {
+    keyDown(field, "F2");
+    assert.equal(editorIn(view.host, "tab-b"), null, "F2 in a text field is that field's");
+
+    keyDown(document.body, "F2");
+    assert.ok(editorIn(view.host, "tab-b"));
+  } finally {
+    view.cleanup();
+    field.remove();
+  }
+});
+
+test("while renaming, the tab hides its pin and close controls", () => {
+  const view = mount({ items: ITEMS, onClose() {}, onRename() {}, onTogglePin() {} });
+  try {
+    openEditor(view.host, "tab-a");
+    const tab = tabEl(view.host, "tab-a");
+    assert.equal(tab.querySelector(".session-tab-pin"), null);
+    assert.equal(tab.querySelector(".session-tab-close"), null);
+    assert.ok(tabEl(view.host, "tab-b").querySelector(".session-tab-close"), "other tabs keep theirs");
+  } finally {
+    view.cleanup();
+  }
+});
+
+// Choosing a candidate in a Chinese/Japanese input method is an Enter; committing on
+// it would save half a name.
+test("Enter while an input method is composing does not commit the rename", () => {
+  const renames = [];
+  const view = mount({ items: ITEMS, onRename: (threadId, name) => renames.push([threadId, name]) });
+  try {
+    const input = openEditor(view.host, "tab-a");
+    type(input, "左侧");
+    act(() => {
+      input.dispatchEvent(
+        new dom.window.KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true, cancelable: true })
+      );
+    });
+    act(() => {
+      input.dispatchEvent(
+        new dom.window.KeyboardEvent("keydown", { key: "Enter", keyCode: 229, bubbles: true, cancelable: true })
+      );
+    });
+    assert.deepEqual(renames, []);
+    assert.ok(editorIn(view.host, "tab-a"), "the box stays open for the rest of the name");
   } finally {
     view.cleanup();
   }

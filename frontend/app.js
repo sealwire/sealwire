@@ -22,9 +22,6 @@ import {
   controlBanner,
   cwdInput,
   deleteThreadButton,
-  projectContextMenu,
-  renameProjectMenuButton,
-  deleteProjectMenuButton,
   directoryForm,
   forkSessionDialogRoot,
   forkThreadButton,
@@ -59,7 +56,15 @@ import {
   agentWorkingIndicatorLabel,
   stopButton,
   threadContextMenu,
+  threadContextMenuItems,
+  threadMenuConfirm,
+  threadMenuConfirmBody,
+  threadMenuConfirmCancel,
+  threadMenuConfirmOk,
+  threadMenuConfirmTitle,
   threadProjectActions,
+  threadProjectFilter,
+  threadProjectFilterInput,
   threadProjectSubmenu,
   threadProjectSubmenuTrigger,
   threadProjectCurrentLabel,
@@ -173,12 +178,11 @@ import {
 } from "./shared/thread-list-store.js";
 import {
   applyThreadSelectionClick,
-  describeBulkDelete,
   pruneThreadSelection,
   resolveContextMenuTargets,
   threadSelectionIntent,
 } from "./shared/thread-multi-select.js";
-import { matchesApplePlatform } from "./shared/composer-keys.js";
+import { isImeComposing, matchesApplePlatform } from "./shared/composer-keys.js";
 import { createComposerCommandController } from "./local/composer-commands.js";
 import {
   createThreadSkillsStore,
@@ -250,6 +254,10 @@ import {
 } from "./shared/context-menu-position.js";
 import { fetchBuildInfo } from "./shared/build-badge.js";
 import { providerLabel } from "./shared/provider-labels.js";
+import { describeThreadRemoval } from "./shared/destructive-confirm-copy.js";
+import { CHECK_SVG, PLUS_SVG } from "./svg.js";
+import { UndoToast } from "./shared/undo-toast.js";
+import { offerProjectUndo } from "./shared/project-undo.js";
 import { applyProviderMark } from "./shared/provider-mark.js";
 import { ForkSessionDialog } from "./shared/fork-session-dialog.js";
 import { forkCompletionEffect } from "./local/fork-submit-ownership.js";
@@ -786,10 +794,6 @@ projectsStore.subscribe((projectsState) => {
   if (openContext.threadId && threadContextMenu && !threadContextMenu.hidden) {
     refreshThreadContextMenuContent(openContext, openContext.threadId);
   }
-  // Fail closed: a projects transition (remote rename/delete, add, or a refresh/error)
-  // can invalidate the right-clicked project, so drop any open project menu rather than
-  // let Rename/Delete act on a now-stale target and clobber a concurrent change.
-  closeProjectContextMenu();
 });
 let forkSessionRoot = null;
 
@@ -1128,18 +1132,17 @@ const renderer = createSessionRenderer({
   renderSettings: () => settings.render(),
   renderPairingApprovalModal,
   resolveActiveThread,
-  setSelectedCwd,
   resumeSession(...args) {
     return controller.resumeSession(...args);
   },
   openThreadContextMenu,
   closeThreadContextMenu,
   onSelectThread: selectThreadFromClick,
+  onBeginThreadRename: beginThreadRename,
   onCommitThreadRename: commitThreadRename,
   onCancelThreadRename: cancelThreadRename,
   onRenameProject: renameProjectFromHeader,
   onDeleteProject: deleteProjectFromHeader,
-  openProjectContextMenu,
   scheduleControllerHeartbeat(...args) {
     return controller.scheduleControllerHeartbeat(...args);
   },
@@ -1800,11 +1803,12 @@ function promptProjectName(current = "") {
   return normalizeProjectName(window.prompt("Project name", current));
 }
 
-// Create a Project from the Projects toolbar. Membership/list refresh rides the
-// snapshot's projects_revision bump (project_action calls notify()), same as an
-// API-driven mutation — no manual store.refresh() needed.
-async function createProjectFromToolbar() {
-  const name = promptProjectName();
+// Create a Project from the switcher. Membership/list refresh rides the snapshot's
+// projects_revision bump (project_action calls notify()), same as an API-driven
+// mutation — no manual store.refresh() needed. `presetName` is what was typed into the
+// switcher's filter; without one, ask.
+async function createProjectFromToolbar(presetName = null) {
+  const name = presetName != null ? normalizeProjectName(presetName) : promptProjectName();
   if (!name) {
     return;
   }
@@ -1825,8 +1829,8 @@ async function createProjectFromToolbar() {
 }
 
 // Selects the new project instead of navigating to it, unlike the toolbar version.
-async function createProjectForLaunchDraft(apply, isCurrent) {
-  const name = promptProjectName();
+async function createProjectForLaunchDraft(apply, isCurrent, presetName = null) {
+  const name = presetName != null ? normalizeProjectName(presetName) : promptProjectName();
   if (!name) {
     return;
   }
@@ -1874,14 +1878,11 @@ async function trustWorkspace(cwd) {
   logLine(`Trusted workspace ${cwd}.`);
 }
 
-// Rename a Project from its group header (Projects view). Prompt pre-filled with the
-// current name; refresh rides the projects_revision snapshot bump like every mutation.
-async function renameProjectFromHeader(projectId, currentName) {
-  if (!projectId) {
-    return;
-  }
-  const name = promptProjectName(currentName || "");
-  if (!name || name === currentName) {
+// The group header edits the name in place and hands over the result; the refresh
+// rides the projects_revision snapshot bump like every mutation.
+async function renameProjectFromHeader(projectId, nextName) {
+  const name = normalizeProjectName(nextName);
+  if (!projectId || !name) {
     return;
   }
   try {
@@ -1892,18 +1893,15 @@ async function renameProjectFromHeader(projectId, currentName) {
   }
 }
 
-// Delete a Project from its group header. Its sessions become Unassigned (the sessions
-// themselves are not deleted). Confirm first, mirroring the archive/delete flows.
-async function deleteProjectFromHeader(projectId, name) {
+// Delete a Project from its group header, which has already confirmed — or, for an
+// empty project, skipped the confirm, so this offers an Undo instead. Its sessions only
+// leave the project; none are deleted.
+async function deleteProjectFromHeader(projectId, name, { sessionCount = 0 } = {}) {
   if (!projectId) {
     return;
   }
-  const confirmed = window.confirm(
-    `Delete project "${name}"?\n\nIts sessions become Unassigned — the sessions themselves are not deleted.`
-  );
-  if (!confirmed) {
-    return;
-  }
+  const wasViewing =
+    sessionViewStore.getState().location.context?.projectId === projectId;
   try {
     await deleteProject(apiFetch, projectId);
     // Decided AFTER the await AND after the controller settles — not from a snapshot
@@ -1934,50 +1932,51 @@ async function deleteProjectFromHeader(projectId, name) {
       await sessionViewController.showOverview(nextContext, { replace: true });
     }
     logLine(`Deleted project "${name}".`);
+    offerProjectUndo({
+      name,
+      sessionCount,
+      recreate: (projectName) => restoreEmptyProject(projectName, { reopen: wasViewing }),
+      showUndo: showUndoToast,
+    });
   } catch (error) {
     logLine(`Failed to delete project: ${error.message}`);
   }
 }
 
-// Right-click menu for a project row in the sidebar (Projects mode). Positioned +
-// toggled imperatively like #thread-context-menu; the target project is held here so
-// the Rename/Delete buttons act on whatever row was right-clicked.
-let projectContextTarget = null;
-function openProjectContextMenu(projectId, name, clientX, clientY) {
-  if (!projectContextMenu || !projectId) {
+let undoToastRoot = null;
+let undoToastSeq = 0;
+function showUndoToast({ message, onUndo }) {
+  const mount = document.getElementById("undo-toast-root");
+  if (!mount) {
     return;
   }
-  // Don't stack the two menus.
-  closeThreadContextMenu({ rerender: false });
-  projectContextTarget = { id: projectId, name: name || projectId };
-  // Unhide first so the menu can be measured, then place it: near the bottom of
-  // the sidebar it flips up instead of running off the viewport.
-  projectContextMenu.hidden = false;
-  positionContextMenuElement(projectContextMenu, clientX, clientY);
+  undoToastRoot ??= createRoot(mount);
+  // A newer toast replaces an older one; the older one's timer must not clear it.
+  const id = ++undoToastSeq;
+  const dismiss = () => {
+    if (id === undoToastSeq) {
+      undoToastRoot.render(null);
+    }
+  };
+  undoToastRoot.render(
+    React.createElement(UndoToast, { key: id, message, onDismiss: dismiss, onUndo })
+  );
 }
 
-function closeProjectContextMenu() {
-  if (projectContextMenu) {
-    projectContextMenu.hidden = true;
+// An empty project is only a name, so bringing it back is creating it again.
+async function restoreEmptyProject(name, { reopen = false } = {}) {
+  try {
+    const before = state.projects || [];
+    const receipt = await createProject(apiFetch, name);
+    const projectId = pickNewProjectId(before, receipt?.projects);
+    logLine(`Restored project "${name}".`);
+    if (reopen && projectId) {
+      await sessionViewController.switchContext({ kind: "project", projectId });
+    }
+  } catch (error) {
+    logLine(`Failed to restore project: ${error.message}`);
   }
-  projectContextTarget = null;
 }
-
-renameProjectMenuButton?.addEventListener("click", () => {
-  const target = projectContextTarget;
-  closeProjectContextMenu();
-  if (target) {
-    void renameProjectFromHeader(target.id, target.name);
-  }
-});
-
-deleteProjectMenuButton?.addEventListener("click", () => {
-  const target = projectContextTarget;
-  closeProjectContextMenu();
-  if (target) {
-    void deleteProjectFromHeader(target.id, target.name);
-  }
-});
 
 // Run one context-menu Project action for a thread (assign / unassign / new+assign).
 // `builtSeq` is the projectsStateSeq captured when the clicked button was built.
@@ -2038,6 +2037,14 @@ async function runThreadProjectAction(threadId, item, builtSeq) {
   }
 }
 
+// The flyout grows a filter once the list is long enough that scanning it is slower
+// than typing.
+const PROJECT_FILTER_MIN = 8;
+
+// What the open flyout was last built from, so typing in its filter can re-list the
+// rows without rebuilding (and re-guarding) everything else.
+let threadProjectRows = null;
+
 // Rebuild the context menu's per-session Project controls for `threadId` from the
 // current Projects payload: the trigger row's "current project" value plus the
 // submenu's buttons. Called each time the menu opens (openThreadContextMenu) and
@@ -2047,6 +2054,7 @@ function populateThreadProjectActions(threadId) {
     return;
   }
   threadProjectActions.textContent = ""; // drop prior buttons (and their listeners)
+  threadProjectRows = null;
   // Fail closed: mirror the sidebar renderer — never present Project membership or
   // mutation controls as authoritative unless we hold a current payload. During a
   // pending/failed/first-load fetch, show a non-interactive note instead of buttons
@@ -2069,46 +2077,113 @@ function populateThreadProjectActions(threadId) {
       : state.projectsError
         ? "Unavailable"
         : "Loading…";
-    threadProjectCurrentLabel.classList.toggle("is-assigned", Boolean(assignedLabel));
   }
   if (!ready) {
+    if (threadProjectFilter) {
+      threadProjectFilter.hidden = true;
+    }
     const note = document.createElement("p");
     note.className = "context-menu-note";
     note.textContent = state.projectsError ? "Projects unavailable" : "Loading projects…";
     threadProjectActions.appendChild(note);
     return;
   }
-  const builtSeq = projectsStateSeq; // freshness token for this build
   const items = buildProjectMenuItems({ projects: state.projects || [], currentProjectId });
-  for (const item of items) {
-    // "Remove from project" trails the Project list and reads as a different class of
-    // action than picking one — rule it off so it isn't mistaken for another Project.
-    if (item.kind === "unassign") {
-      const separator = document.createElement("div");
-      separator.className = "context-menu-separator";
-      separator.setAttribute("role", "separator");
-      threadProjectActions.appendChild(separator);
+  if (threadProjectFilter) {
+    const filtering = items.filter((item) => item.kind === "assign").length >= PROJECT_FILTER_MIN;
+    threadProjectFilter.hidden = !filtering;
+    if (!filtering && threadProjectFilterInput) {
+      threadProjectFilterInput.value = "";
     }
+  }
+  // `builtSeq` is the freshness token for this build; see runThreadProjectAction.
+  threadProjectRows = { builtSeq: projectsStateSeq, items, threadId };
+  renderThreadProjectRows();
+}
+
+function renderThreadProjectRows() {
+  if (!threadProjectActions || !threadProjectRows) {
+    return;
+  }
+  const { builtSeq, items, threadId } = threadProjectRows;
+  threadProjectActions.textContent = "";
+  const query =
+    threadProjectFilter && !threadProjectFilter.hidden
+      ? (threadProjectFilterInput?.value || "").trim().toLowerCase()
+      : "";
+  const projects = items.filter(
+    (item) => item.kind === "assign" && (!query || item.label.toLowerCase().includes(query))
+  );
+  const actions = items.filter((item) => item.kind !== "assign");
+
+  const row = (item) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "context-menu-button context-menu-project-button";
-    // The flyout is role="menu", so its rows have to be menuitems or the container's role
-    // is a lie to assistive tech.
-    button.setAttribute("role", "menuitem");
-    if (item.isCurrent) {
-      button.classList.add("is-current");
-      button.setAttribute("aria-current", "true");
+    const lead = document.createElement("span");
+    lead.className = "context-menu-lead";
+    lead.setAttribute("aria-hidden", "true");
+    if (item.kind === "assign") {
+      // The flyout is role="menu"; a project row is one choice among many, and the
+      // check is the only thing that says which — so the state is spoken, not drawn.
+      button.setAttribute("role", "menuitemradio");
+      button.setAttribute("aria-checked", item.isCurrent ? "true" : "false");
+      if (item.isCurrent) {
+        button.classList.add("is-current");
+        lead.innerHTML = CHECK_SVG;
+      }
+    } else {
+      button.setAttribute("role", "menuitem");
+      if (item.kind === "create") {
+        lead.innerHTML = PLUS_SVG;
+      } else {
+        button.classList.add("is-muted");
+      }
     }
-    if (item.kind === "create") {
-      button.classList.add("context-menu-project-create");
-    }
-    button.textContent = item.isCurrent ? `✓ ${item.label}` : item.label;
+    const label = document.createElement("span");
+    label.className = "context-menu-label";
+    label.textContent = item.label;
+    button.append(lead, label);
     button.addEventListener("click", () => {
       void runThreadProjectAction(threadId, item, builtSeq);
     });
-    threadProjectActions.appendChild(button);
+    return button;
+  };
+
+  for (const item of projects) {
+    threadProjectActions.appendChild(row(item));
+  }
+  if (query && !projects.length) {
+    const note = document.createElement("p");
+    note.className = "context-menu-note";
+    note.textContent = "No matching projects";
+    threadProjectActions.appendChild(note);
+  }
+  const separator = document.createElement("div");
+  separator.className = "context-menu-separator";
+  separator.setAttribute("role", "separator");
+  threadProjectActions.appendChild(separator);
+  for (const item of actions) {
+    threadProjectActions.appendChild(row(item));
   }
 }
+
+threadProjectFilterInput?.addEventListener("input", () => {
+  renderThreadProjectRows();
+});
+
+threadProjectFilterInput?.addEventListener("keydown", (event) => {
+  if (isImeComposing(event)) {
+    return;
+  }
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    threadProjectActions?.querySelector("button:not(:disabled)")?.focus();
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    threadProjectActions?.querySelector('[role="menuitemradio"]')?.click();
+  }
+});
 
 // Populate + place the thread menu, then re-place an open Projects flyout. The flyout is
 // anchored to the MENU's box, and the menu's own placement depends on the height of the
@@ -2135,10 +2210,18 @@ function openThreadProjectSubmenu({ focusFirst = false } = {}) {
   ) {
     return;
   }
+  const wasOpen = !threadProjectSubmenu.hidden;
   threadProjectSubmenu.hidden = false;
   threadProjectSubmenuTrigger.setAttribute("aria-expanded", "true");
   placeThreadProjectSubmenu();
-  if (focusFirst) {
+  // With a filter, opening means "type to find": the box takes focus however the
+  // flyout was reached. Only on the opening, so hovering the trigger again does not
+  // pull focus back out of a row the keyboard had moved to.
+  if (threadProjectFilter && !threadProjectFilter.hidden) {
+    if (!wasOpen || focusFirst) {
+      threadProjectFilterInput?.focus({ preventScroll: true });
+    }
+  } else if (focusFirst) {
     threadProjectSubmenu.querySelector("button:not(:disabled)")?.focus();
   }
 }
@@ -2215,7 +2298,8 @@ threadProjectSubmenuTrigger?.addEventListener("keydown", (event) => {
 // ArrowLeft walks back out to the trigger — the mirror of ArrowRight, so a keyboard user
 // can leave the flyout without dismissing the whole menu (which is what Escape does).
 threadProjectSubmenu?.addEventListener("keydown", (event) => {
-  if (event.key !== "ArrowLeft") {
+  // In the filter, ArrowLeft moves the caret.
+  if (event.key !== "ArrowLeft" || event.target === threadProjectFilterInput) {
     return;
   }
   event.preventDefault();
@@ -2493,7 +2577,7 @@ threadsRefreshButton.addEventListener("click", () => {
 });
 
 archiveThreadButton?.addEventListener("click", () => {
-  void archiveThreadFromContextMenu();
+  void askThreadRemoval("archive");
 });
 
 renameThreadButton?.addEventListener("click", () => {
@@ -2512,14 +2596,18 @@ forkThreadButton?.addEventListener("click", () => {
 });
 
 deleteThreadButton?.addEventListener("click", () => {
-  void deleteThreadFromContextMenu();
+  void askThreadRemoval("delete");
+});
+
+threadMenuConfirmCancel?.addEventListener("click", () => {
+  closeThreadContextMenu();
+});
+
+threadMenuConfirmOk?.addEventListener("click", () => {
+  void runPendingThreadRemoval();
 });
 
 document.addEventListener("click", (event) => {
-  if (projectContextMenu && !projectContextMenu.hidden && !event.target.closest("#project-context-menu")) {
-    closeProjectContextMenu();
-  }
-
   if (!threadContextMenu || threadContextMenu.hidden) {
     return;
   }
@@ -2546,7 +2634,6 @@ window.addEventListener("keydown", (event) => {
     // would also discard the batch the user built to feed it.
     const menuWasOpen = readThreadListContextMenu(state.threadListStore).threadId != null;
     closeThreadContextMenu();
-    closeProjectContextMenu();
     if (!menuWasOpen && readThreadSelection(state.threadListStore).ids.size) {
       state.threadListStore.getState().clearThreadSelection();
       renderThreads();
@@ -2556,12 +2643,10 @@ window.addEventListener("keydown", (event) => {
 
 window.addEventListener("blur", () => {
   closeThreadContextMenu();
-  closeProjectContextMenu();
 });
 
 window.addEventListener("resize", () => {
   closeThreadContextMenu();
-  closeProjectContextMenu();
   syncThreadHistoryScroll();
 });
 
@@ -4022,13 +4107,14 @@ function renderForkSessionDialog() {
     forkCapabilities: state.session?.provider_fork_capabilities || [],
     sourceSettings: dialogState.sourceSettings || null,
     sourceProjectId: state.threadProjectId?.[dialogState.sourceThread?.id] || null,
-    onCreateProject() {
+    onCreateProject(name = null) {
       // The generation, not the source id: reopening on the SAME thread is still a
       // different opening, and the earlier answer does not belong to it.
       const opening = state.forkDialogGeneration;
       void createProjectForLaunchDraft(
         (projectId) => handleForkDialogFieldChange("projectId", projectId),
-        () => state.forkDialog?.open && state.forkDialogGeneration === opening
+        () => state.forkDialog?.open && state.forkDialogGeneration === opening,
+        name
       );
     },
     projects: state.projects || [],
@@ -4304,6 +4390,92 @@ function selectThreadFromClick(threadId, event, orderedThreadIds = []) {
   return true;
 }
 
+// The words sit in a span beside the hint (F2, the project name), so swapping them must
+// not touch the rest of the row.
+function setMenuRowLabel(button, text) {
+  const label = button?.querySelector(".context-menu-label");
+  if (label) {
+    label.textContent = text;
+  }
+}
+
+// What the menu's in-place confirm will run. Set when Delete… or Archive asks, and
+// dropped with the menu so a later confirm can never act on an earlier question.
+let pendingThreadRemoval = null;
+
+function resetThreadMenuConfirm() {
+  pendingThreadRemoval = null;
+  threadContextMenu?.classList.remove("is-confirming");
+  if (threadContextMenuItems) {
+    threadContextMenuItems.hidden = false;
+  }
+  if (threadMenuConfirm) {
+    threadMenuConfirm.hidden = true;
+  }
+}
+
+async function askThreadRemoval(action) {
+  const anchor = readThreadListContextMenu(state.threadListStore);
+  const threadId = anchor.threadId;
+  if (!threadId || !threadContextMenu || !threadMenuConfirm || !threadContextMenuItems) {
+    return;
+  }
+  // Resolved when the menu OPENED; the batch only applies to delete, and only while it
+  // still holds the row the menu was opened on.
+  const batch = state.contextMenuThreadIds || [];
+  const targets =
+    action === "delete" && batch.length > 1 && batch.includes(threadId) ? [...batch] : [threadId];
+  const reviewerThreads = await reviewerThreadsForDestructiveAction();
+  if (
+    threadContextMenu.hidden
+    || readThreadListContextMenu(state.threadListStore).threadId !== threadId
+  ) {
+    return;
+  }
+  const reviewerCount = targets.reduce(
+    (total, id) => total + countReviewerThreadsForParent(reviewerThreads, id),
+    0
+  );
+  const copy = describeThreadRemoval({
+    action,
+    titles: targets.map(threadTitle),
+    providerName: providerLabel(resolveActiveThread(threadId)?.provider) || "",
+    reviewerCount,
+  });
+  // The confirm says reviewer sessions go too, so the request must ask for exactly that
+  // rather than lean on each endpoint's own default (archive's keeps them).
+  pendingThreadRemoval = {
+    action,
+    deleteReviewers: reviewerCount > 0 ? true : undefined,
+    targets,
+    threadId,
+  };
+  closeThreadProjectSubmenu();
+  threadMenuConfirmTitle.textContent = copy.title;
+  threadMenuConfirmBody.textContent = copy.body;
+  threadMenuConfirmOk.textContent = copy.confirmLabel;
+  threadContextMenuItems.hidden = true;
+  threadMenuConfirm.hidden = false;
+  threadContextMenu.classList.add("is-confirming");
+  positionContextMenuElement(threadContextMenu, anchor.clientX, anchor.clientY);
+  threadMenuConfirmCancel?.focus({ preventScroll: true });
+}
+
+async function runPendingThreadRemoval() {
+  const pending = pendingThreadRemoval;
+  closeThreadContextMenu();
+  if (!pending) {
+    return;
+  }
+  if (pending.action === "archive") {
+    await archiveThread(pending.threadId, pending.deleteReviewers);
+  } else if (pending.targets.length > 1) {
+    await deleteThreadBatch(pending.targets, pending.deleteReviewers);
+  } else {
+    await deleteThread(pending.threadId, pending.deleteReviewers);
+  }
+}
+
 function openThreadContextMenu(threadId, clientX, clientY, orderedThreadIds = []) {
   if (!threadContextMenu || !archiveThreadButton || !deleteThreadButton || !threadId) {
     return;
@@ -4331,9 +4503,10 @@ function openThreadContextMenu(threadId, clientX, clientY, orderedThreadIds = []
     // well — gate on the same rule the server uses, not just "is active".
     const forkBlocked = threadIsBusy(contextThread);
     forkThreadButton.disabled = forkBlocked;
-    forkThreadButton.textContent = forkBlocked
-      ? "Running session cannot be forked"
-      : "Fork session";
+    setMenuRowLabel(
+      forkThreadButton,
+      forkBlocked ? "Running session cannot be forked" : "Fork session"
+    );
   }
   // Hidden, not disabled: a provider without an archive will never grow one at
   // runtime, so there is nothing for the user to wait for. (Disabled is for
@@ -4355,14 +4528,15 @@ function openThreadContextMenu(threadId, clientX, clientY, orderedThreadIds = []
       capabilities: state.session?.provider_archive_capabilities || [],
     });
   archiveThreadButton.disabled = isRunningActiveSession;
-  archiveThreadButton.textContent = isRunningActiveSession
-    ? "Running session cannot be archived"
-    : "Archive session";
+  setMenuRowLabel(
+    archiveThreadButton,
+    isRunningActiveSession ? "Running session cannot be archived" : "Archive session"
+  );
   // Relay-owned metadata, like rename — works mid-turn, so no busy gate. A batch
   // still disables it below (like rename/fork/archive): it needs one session to
   // aim at, not whichever row happened to be right-clicked.
   if (flagThreadButton) {
-    flagThreadButton.textContent = contextThread?.flagged ? "Unflag" : "Flag for follow-up";
+    setMenuRowLabel(flagThreadButton, contextThread?.flagged ? "Unflag" : "Flag for follow-up");
   }
   // Delete is the ONLY action that takes a batch. Archive, fork, rename, and flag
   // each need one session to aim at, so a batch disables them rather than silently
@@ -4371,12 +4545,12 @@ function openThreadContextMenu(threadId, clientX, clientY, orderedThreadIds = []
   if (isBatch) {
     if (forkThreadButton) {
       forkThreadButton.disabled = true;
-      forkThreadButton.textContent = "Fork session";
+      setMenuRowLabel(forkThreadButton, "Fork session");
     }
     archiveThreadButton.disabled = true;
-    archiveThreadButton.textContent = "Archive session";
+    setMenuRowLabel(archiveThreadButton, "Archive session");
     if (flagThreadButton) {
-      flagThreadButton.textContent = "Flag for follow-up";
+      setMenuRowLabel(flagThreadButton, "Flag for follow-up");
     }
   }
   // Assigned on EVERY open, not just batch ones: a right-click straight onto another
@@ -4401,13 +4575,16 @@ function openThreadContextMenu(threadId, clientX, clientY, orderedThreadIds = []
     : 0;
   const deleteBlocked = isBatch ? busyTargets > 0 : isRunningActiveSession;
   deleteThreadButton.disabled = deleteBlocked;
-  deleteThreadButton.textContent = !deleteBlocked
-    ? isBatch
-      ? `Delete ${batchSize} sessions permanently`
-      : "Delete permanently"
-    : isBatch
-      ? `${busyTargets} of ${batchSize} are running and cannot be deleted`
-      : "Running session cannot be deleted";
+  setMenuRowLabel(
+    deleteThreadButton,
+    !deleteBlocked
+      ? isBatch
+        ? `Delete ${batchSize} sessions…`
+        : "Delete…"
+      : isBatch
+        ? `${busyTargets} of ${batchSize} are running and cannot be deleted`
+        : "Running session cannot be deleted"
+  );
   // Per-session Project assignment — rebuilt from the current Projects payload each
   // open so the marked "current" project and the list stay fresh. Populate and place
   // go through the same entry point the projects-store subscriber uses, so an open
@@ -4418,6 +4595,10 @@ function openThreadContextMenu(threadId, clientX, clientY, orderedThreadIds = []
   // previous right-click (and closing it first keeps it from being placed against the
   // menu's pre-move box).
   closeThreadProjectSubmenu();
+  resetThreadMenuConfirm();
+  if (threadProjectFilterInput) {
+    threadProjectFilterInput.value = "";
+  }
   refreshThreadContextMenuContent({ clientX, clientY }, threadId);
 
   // Re-render the thread list so the `is-context-target` highlight lands via
@@ -4447,20 +4628,21 @@ function closeThreadContextMenu({ rerender = true } = {}) {
     threadContextMenu.hidden = true;
   }
   closeThreadProjectSubmenu(); // the flyout lives outside the menu element — hide it too
+  resetThreadMenuConfirm();
   if (forkThreadButton) {
     forkThreadButton.disabled = false;
-    forkThreadButton.textContent = "Fork session";
+    setMenuRowLabel(forkThreadButton, "Fork session");
   }
   if (archiveThreadButton) {
     archiveThreadButton.disabled = false;
-    archiveThreadButton.textContent = "Archive session";
+    setMenuRowLabel(archiveThreadButton, "Archive session");
   }
   if (flagThreadButton) {
-    flagThreadButton.textContent = "Flag for follow-up";
+    setMenuRowLabel(flagThreadButton, "Flag for follow-up");
   }
   if (deleteThreadButton) {
     deleteThreadButton.disabled = false;
-    deleteThreadButton.textContent = "Delete permanently";
+    setMenuRowLabel(deleteThreadButton, "Delete…");
   }
   // All three are only ever disabled for a batch (see openThreadContextMenu), and a
   // menu that closed while disabled would reopen on a single row still greyed out.
@@ -4550,6 +4732,16 @@ async function renameThreadById(threadId, rawName) {
   }
 }
 
+// F2 on a focused row: the row's own title turns into the edit box.
+function beginThreadRename(threadId) {
+  if (!threadId) {
+    return;
+  }
+  closeThreadContextMenu({ rerender: false });
+  state.threadListStore.getState().beginThreadRename(threadId);
+  renderThreads();
+}
+
 // From the sidebar's right-click menu: the row's own title turns into the edit box.
 function renameThreadFromContextMenu() {
   const threadId = readThreadListContextMenu(state.threadListStore).threadId;
@@ -4615,10 +4807,8 @@ async function toggleThreadFlagFromContextMenu() {
   await setThreadFlagById(threadId, !thread?.flagged);
 }
 
-async function archiveThreadFromContextMenu() {
-  const threadId = readThreadListContextMenu(state.threadListStore).threadId;
-  closeThreadContextMenu();
-
+// Confirmed already, in the menu (askThreadRemoval), which also decided the reviewers.
+async function archiveThread(threadId, deleteReviewers) {
   if (!threadId) {
     return;
   }
@@ -4627,26 +4817,6 @@ async function archiveThreadFromContextMenu() {
   const wasViewed = state.viewThreadId === threadId;
   const fallbackThreadId = wasViewed ? findAdjacentThreadId(threadId) : null;
   const title = thread?.name || thread?.preview || shortId(threadId);
-  if (!window.confirm(`Archive "${title}" from local history?`)) {
-    return;
-  }
-
-  // If this thread is the parent of hidden reviewer thread(s), ask what to do with
-  // them. Reviewer threads have no archived state of their own, so the choice is
-  // delete vs keep-as-normal — same prompt as permanent delete. Default (OK) deletes
-  // them; Cancel keeps them as normal threads.
-  const reviewerCount = countReviewerThreadsForParent(
-    await reviewerThreadsForDestructiveAction(),
-    threadId
-  );
-  let deleteReviewers;
-  if (reviewerCount > 0) {
-    deleteReviewers = window.confirm(
-      `This conversation has ${reviewerCount} reviewer session${reviewerCount === 1 ? "" : "s"}.\n\n` +
-        "OK: delete the reviewer session(s) too.\n" +
-        "Cancel: keep them as normal sessions (they'll appear in your session list)."
-    );
-  }
 
   try {
     const response = await apiFetch(`/api/threads/${encodeURIComponent(threadId)}/archive`, {
@@ -4705,29 +4875,7 @@ function threadTitle(threadId) {
 // request, so this is a loop — run SEQUENTIALLY because each delete mutates the same
 // session state on the far side, and because a failure halfway has to name which
 // sessions actually went.
-async function deleteThreadBatch(threadIds) {
-  const confirmed = window.confirm(describeBulkDelete({ titles: threadIds.map(threadTitle) }));
-  if (!confirmed) {
-    return;
-  }
-
-  // Asked ONCE for the whole batch rather than once per session: a per-session prompt
-  // would be a dialog storm, and the answer is a policy ("keep my reviewer sessions"),
-  // not a per-row judgement.
-  const reviewerThreads = await reviewerThreadsForDestructiveAction();
-  const reviewerCount = threadIds.reduce(
-    (total, id) => total + countReviewerThreadsForParent(reviewerThreads, id),
-    0
-  );
-  let deleteReviewers;
-  if (reviewerCount > 0) {
-    deleteReviewers = window.confirm(
-      `These sessions have ${reviewerCount} reviewer session${reviewerCount === 1 ? "" : "s"} between them.\n\n` +
-        "OK: delete the reviewer session(s) too.\n" +
-        "Cancel: keep them as normal sessions (they'll appear in your session list)."
-    );
-  }
-
+async function deleteThreadBatch(threadIds, deleteReviewers) {
   const viewedThreadId = state.viewThreadId;
   const fallbackThreadId = threadIds.includes(viewedThreadId)
     ? state.threads.find((entry) => !threadIds.includes(entry.id))?.id || null
@@ -4811,20 +4959,8 @@ async function deleteThreadBatch(threadIds) {
   }
 }
 
-async function deleteThreadFromContextMenu() {
-  const threadId = readThreadListContextMenu(state.threadListStore).threadId;
-  // Resolved when the menu OPENED, over the selection as it stood then. Re-deriving
-  // it here would read a selection the close below has already torn down.
-  const batch = state.contextMenuThreadIds || [];
-  closeThreadContextMenu();
-
+async function deleteThread(threadId, deleteReviewers) {
   if (!threadId) {
-    return;
-  }
-  // The batch must still contain the row the menu was opened on, or it belongs to an
-  // earlier menu and this is a plain single delete.
-  if (batch.length > 1 && batch.includes(threadId)) {
-    await deleteThreadBatch(batch);
     return;
   }
 
@@ -4832,30 +4968,6 @@ async function deleteThreadFromContextMenu() {
   const wasViewed = state.viewThreadId === threadId;
   const fallbackThreadId = wasViewed ? findAdjacentThreadId(threadId) : null;
   const title = thread?.name || thread?.preview || shortId(threadId);
-  // Name the thread's own provider — the old ternary mislabeled every
-  // non-Claude provider (incl. future ones) as "Codex".
-  const providerName = providerLabel(thread?.provider) || "agent";
-  const confirmed = window.confirm(
-    `Permanently delete "${title}" from local ${providerName} storage?\n\nThis removes the local session file and related local index/state entries. This cannot be undone.`
-  );
-  if (!confirmed) {
-    return;
-  }
-
-  // If this thread is the parent of hidden reviewer thread(s), ask what to do with
-  // them. Default (OK) deletes them too; Cancel keeps them as normal threads.
-  const reviewerCount = countReviewerThreadsForParent(
-    await reviewerThreadsForDestructiveAction(),
-    threadId
-  );
-  let deleteReviewers;
-  if (reviewerCount > 0) {
-    deleteReviewers = window.confirm(
-      `This conversation has ${reviewerCount} reviewer session${reviewerCount === 1 ? "" : "s"}.\n\n` +
-        "OK: delete the reviewer session(s) too.\n" +
-        "Cancel: keep them as normal sessions (they'll appear in your session list)."
-    );
-  }
 
   try {
     const response = await apiFetch(`/api/threads/${encodeURIComponent(threadId)}/delete`, {
@@ -5235,13 +5347,14 @@ function renderLaunchSessionDialog() {
       gitContext: state.launchGitContext,
       id: "launch-start-session-dialog",
       initialPromptAttachmentsId: "start-prompt-attachments",
-      onCreateProject() {
+      onCreateProject(name = null) {
         const opening = state.launchDialogGeneration;
         void createProjectForLaunchDraft(
           (projectId) => handleLaunchFieldInput("projectId", projectId),
           () =>
             state.launchDialogGeneration === opening
-            && document.getElementById("launch-start-session-dialog")?.open === true
+            && document.getElementById("launch-start-session-dialog")?.open === true,
+          name
         );
       },
       onFieldChange: handleLaunchFieldInput,
@@ -5298,9 +5411,16 @@ function renderProjectSwitcher(labels = null) {
       label: lastSwitcherLabels.label,
       labelTooltip: lastSwitcherLabels.labelTooltip,
       projects: state.projects || [],
+      // Printing a session page is not something anyone does here; switching is.
+      shortcut: {
+        key: "p",
+        hint: matchesApplePlatform(navigator.platform, navigator.userAgent) ? "⌘P" : "Ctrl+P",
+      },
+      threadProjectId: state.threadProjectId || {},
+      threads: state.threads || [],
       titleId: "workspace-title",
-      onCreateProject() {
-        void createProjectFromToolbar();
+      onCreateProject(name) {
+        void createProjectFromToolbar(name);
       },
       onSelectProject(projectId) {
         // Straight through the session-view controller, which is what makes the
@@ -5472,6 +5592,9 @@ function renderSessionTabs() {
       },
       onClose(tabId) {
         void sessionViewController.closeTab(tabId, { context });
+      },
+      onCloseTabs(tabIds, { keepTabId = null } = {}) {
+        void sessionViewController.closeTabs(tabIds, { context, keepTabId });
       },
       onPromote(tabId) {
         void sessionViewController.promoteTab(tabId, { context });

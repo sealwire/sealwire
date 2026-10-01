@@ -227,6 +227,21 @@
      surface — unmodified it lands at 2.78:1, under the 3:1 WCAG AA floor for
      non-text UI. */
   --provider-claude-mark: #D97757;
+
+  /* Every right-click and dropdown menu. Light uses a white panel on the grey
+     chrome; dark keeps the raised surface, since white would glare there. */
+  --menu-bg: var(--surface-2);
+  --menu-border: var(--border-soft);
+  --menu-hover: var(--surface-3);
+  --menu-separator: var(--border-faint);
+  --menu-hint: var(--text-3);
+  --menu-input-bg: var(--surface-1);
+  --menu-shadow: var(--shadow-2);
+  /* Solid fill for the one button that confirms a destructive act. */
+  --menu-danger-bg: #c2453f;
+  --menu-danger-fg: #ffffff;
+  /* An idle tab's title: quieter than the focused one, louder than a hint. */
+  --tab-fg: var(--text-2);
 }
 
 :root[data-theme="light"] {
@@ -314,6 +329,16 @@
     --provider-claude-series: #c2410c;
     --provider-codex-series: #376daf;
     --provider-cursor-series: #6d28d9;
+
+    --menu-bg: #ffffff;
+    --menu-border: #dde4e8;
+    --menu-hover: #eef2f4;
+    --menu-separator: #eef1f3;
+    --menu-hint: #738a94;
+    --menu-input-bg: #f3f6f8;
+    --menu-shadow: 0 10px 28px rgba(10, 29, 38, 0.14), 0 2px 6px rgba(10, 29, 38, 0.06);
+    --menu-danger-bg: #b42d24;
+    --tab-fg: #5c6b73;
 }
 
 * {
@@ -1239,77 +1264,105 @@ input:focus, textarea:focus, select:focus {
   padding-left: 0;
 }
 
+/* A group header: the whole row folds the group (Notion / Linear / VS Code), and a
+   project's actions hide behind "⋯" until the row is hovered. */
 .thread-group-header {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
   width: 100%;
-  padding: 4px 0;
-  /* A project header is a <div>, so without this it inherits the body's 1.5 and
-     its 21px line box makes a one-word LABEL as tall as a session ROW. */
+  min-height: 30px;
+  padding: 0 4px 0 0;
+  border-radius: var(--r-sm);
+  color: var(--text-primary);
   line-height: var(--leading-tight);
-  border: 0;
-  background: transparent;
+}
+
+.thread-group-header.is-foldable:hover,
+.thread-group-header.is-menu-open,
+.thread-group-header:focus-within:has(.thread-group-toggle:focus-visible) {
+  background: var(--surface-2);
+}
+
+.thread-group-toggle {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 10px;
-  color: var(--text-primary);
-  /* A cwd header IS a <button>, so it inherits the UA's text-align: center and
-     centred its label — while a project header (a <div>) sat left. Now that both
-     kinds carry a collapse chevron they read as siblings, so the mismatch shows. */
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  /* Same left inset as a session row, so the kind mark sits in the column of the
+     rows' agent marks and the name lines up with their titles. */
+  padding: 0 4px 0 12px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
   text-align: left;
 }
 
-.thread-group-header:hover,
-.thread-group-header:focus-visible {
+.thread-group-toggle:hover {
   background: transparent;
-  border-color: transparent;
 }
 
-.thread-group-header-static {
+.thread-group-toggle.is-static {
   cursor: default;
 }
 
-/* Rename/delete affordances on a Project group header — revealed on hover/focus. */
-.thread-group-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  margin-left: auto;
-  opacity: 0;
-  transition: opacity 120ms ease;
+.thread-group-toggle:focus-visible {
+  box-shadow: none;
 }
 
-/* :focus-within is scoped to the actions themselves, NOT the whole header. The
-   header also hosts the label and the +/- disclosure; scoping it to the header
-   meant clicking "fold" latched the pencil and trash on until focus moved away —
-   folding a group should not arm its destructive actions. The actions stay
-   focusable at opacity: 0, so tabbing into them still lights them up. */
-.thread-group-header-project:hover .thread-group-actions,
-.thread-group-actions:focus-within {
-  opacity: 1;
+.thread-group-name-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  margin-left: -6px;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm);
+  outline: none;
+  background: var(--menu-bg);
+  color: var(--text-1);
+  font-size: var(--text-ui);
+  font-weight: var(--weight-strong);
 }
 
-.thread-group-action {
+.thread-group-more {
+  flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   padding: 0;
   border: 0;
   border-radius: var(--r-sm);
   background: transparent;
-  color: var(--text-tertiary);
-  cursor: pointer;
+  color: var(--text-2);
+  opacity: 0;
 }
 
-.thread-group-action:hover:not(:disabled) {
+.thread-group-header:hover .thread-group-more,
+.thread-group-header.is-menu-open .thread-group-more,
+.thread-group-more:focus-visible {
+  opacity: 1;
+}
+
+.thread-group-more:hover,
+.thread-group-header.is-menu-open .thread-group-more {
   background: var(--surface-3);
-  color: var(--text-primary);
+  color: var(--text-1);
 }
 
-.thread-group-action-danger:hover:not(:disabled) {
-  background: var(--err-bg);
-  color: var(--err-fg);
+/* No hover on a touch screen, so the way into the actions stays on screen. */
+@media (hover: none) {
+  .thread-group-more {
+    opacity: 1;
+  }
 }
 
 /* The slot for the group's kind mark — a folder or a tag, drawn in
@@ -1341,6 +1394,34 @@ input:focus, textarea:focus, select:focus {
   display: block;
 }
 
+.thread-group-kind,
+.thread-group-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.thread-group-chevron {
+  display: none;
+  pointer-events: none;
+}
+
+.thread-group-chevron svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* On hover the kind mark becomes the fold state: ⌄ open, › folded. */
+.thread-group-header.is-foldable:hover .thread-group-kind,
+.thread-group-toggle:focus-visible .thread-group-kind {
+  display: none;
+}
+
+.thread-group-header.is-foldable:hover .thread-group-chevron,
+.thread-group-toggle:focus-visible .thread-group-chevron {
+  display: inline-flex;
+}
+
 /* A section header, not content. It used to sit at body size and 600 — bigger
    AND bolder than the session titles nested under it, which inverts the
    hierarchy and is most of why the column read heavy. Demoted a step and pushed
@@ -1357,49 +1438,12 @@ input:focus, textarea:focus, select:focus {
 .pinned-project-chip-name {
   min-width: 0;
   flex: 1 1 auto;
-  font-size: var(--text-sm);
+  font-size: var(--text-ui);
   font-weight: var(--weight-strong);
   color: var(--text-tertiary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-/* Both header kinds are <div>s that select on click, so the cursor has to be set
-   explicitly — and only where a selection handler actually exists. */
-.thread-group-header.is-clickable,
-.thread-group-header-project.is-clickable {
-  cursor: pointer;
-}
-
-/* The +/− fold control. `margin-left: auto` pins it to the row's right edge (on a
-   project header the badges/actions already sit right, so it lands after them).
-   Sized as a real tap target rather than a bare glyph — it is the ONLY way to
-   fold a group now that clicking the row means "select". */
-.thread-group-disclosure {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  margin-left: auto;
-  padding: 0;
-  border: 0;
-  border-radius: var(--r-sm);
-  background: transparent;
-  color: var(--text-tertiary);
-}
-
-.thread-group-disclosure:hover {
-  background: var(--surface-2);
-  color: var(--text-primary);
-}
-
-/* On a project header the badges/actions consume the auto margin first, so keep
-   the disclosure hard against the right edge behind them. */
-.thread-group-header-project .thread-group-disclosure {
-  margin-left: 2px;
 }
 
 .thread-group-show-more {
@@ -1741,112 +1785,337 @@ input:focus, textarea:focus, select:focus {
   justify-self: end;
 }
 
+/* ===== Menus — one spec for every right-click and dropdown menu =====
+   13px items on a 28px row, right-hand hints at 12px, the check in a fixed slot on
+   the LEFT, and the destructive item last. The session menu (imperative), the tab
+   and project-header menus (React) and the project switcher all draw from here. */
 .context-menu {
   position: fixed;
   z-index: 60;
-  min-width: 180px;
-  max-width: 260px;
-  max-height: min(70vh, 420px);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 216px;
+  max-width: 300px;
+  max-height: min(70vh, 480px);
   overflow-y: auto;
   padding: 4px;
   border-radius: var(--r-md);
-  border: 1px solid var(--border-faint);
-  background: var(--surface-2);
-  box-shadow: var(--shadow-2);
+  border: 1px solid var(--menu-border);
+  background: var(--menu-bg);
+  box-shadow: var(--menu-shadow);
+  font-family: var(--font-sans);
+}
+
+/* The panel takes focus only so arrow keys work at once; the rows show where it is. */
+.context-menu:focus {
+  outline: none;
+}
+
+.context-menu-items {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 
 .context-menu-button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  flex: none;
   width: 100%;
+  height: 28px;
+  padding: 0 10px;
   border: 0;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--text-1);
-  text-align: left;
-  justify-content: flex-start;
   font-family: var(--font-sans);
-  font-size: var(--text-body);
-  font-weight: var(--weight-medium);
-  padding: 8px 10px;
-  border-radius: var(--r-sm);
+  font-size: var(--text-ui);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-tight);
+  text-align: left;
+  white-space: nowrap;
 }
 
-.context-menu-button:hover:not(:disabled) {
-  background: var(--surface-3);
+.context-menu-button:hover:not(:disabled),
+.context-menu-button:focus-visible,
+.context-menu-button.is-highlighted {
+  background: var(--menu-hover);
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .context-menu-button:disabled {
   opacity: 0.45;
-  cursor: not-allowed;
 }
 
 .context-menu-button-danger {
   color: var(--err-fg);
 }
 
-.context-menu-button-danger:hover:not(:disabled) {
-  background: var(--err-bg);
+.context-menu-button-danger:hover:not(:disabled),
+.context-menu-button-danger:focus-visible {
   color: var(--err-fg);
 }
 
-.context-menu-separator {
-  height: 1px;
-  margin: 4px 6px;
-  background: var(--border-faint);
+.context-menu-button.is-muted {
+  color: var(--text-2);
 }
 
-/* "Projects  <current> ›" — the row that opens the second-level Project flyout. */
-.context-menu-submenu-trigger {
+.context-menu-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A shortcut or the current value: never competes with the label. */
+.context-menu-hint {
+  flex: none;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: var(--text-sm);
+  color: var(--menu-hint);
+}
+
+/* The check / plus slot. Always laid out on rows that have one, so a row does not
+   change width when it becomes the current one. */
+.context-menu-lead {
+  flex: none;
+  pointer-events: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  margin-left: -2px;
+  color: var(--text-2);
+}
+
+.context-menu-lead svg {
+  width: 12px;
+  height: 12px;
+}
+
+.context-menu-button[aria-checked="true"] .context-menu-lead {
+  color: var(--text-1);
+}
+
+.context-menu-chevron {
+  flex: none;
+  pointer-events: none;
+  display: inline-flex;
+  color: var(--menu-hint);
+}
+
+.context-menu-chevron svg {
+  width: 12px;
+  height: 12px;
+}
+
+.context-menu-separator {
+  flex: none;
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--menu-separator);
+}
+
+.context-menu-heading {
+  flex: none;
+  padding: 6px 10px 4px;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-strong);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--menu-hint);
+}
+
+/* "Project  <current> ›" — opens the second-level flyout. */
+.context-menu-submenu-trigger[aria-expanded="true"] {
+  background: var(--menu-hover);
+}
+
+/* Second level: same panel, stacked above the menu it flies out of. */
+.context-menu-submenu {
+  z-index: 61;
+  min-width: 232px;
+}
+
+.context-menu-projects {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* The filter at the top of a long list: type straight away, no click first. */
+.context-menu-filter {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
+  height: 28px;
+  margin-bottom: 3px;
+  padding: 0 8px;
+  border-radius: var(--r-sm);
+  background: var(--menu-input-bg);
+  color: var(--menu-hint);
 }
 
-.context-menu-submenu-trigger[aria-expanded="true"] {
-  background: var(--surface-3);
+.context-menu-filter svg {
+  flex: none;
+  width: 12px;
+  height: 12px;
 }
 
-.context-menu-submenu-value {
-  margin-left: auto;
+.context-menu-filter input {
+  flex: 1 1 auto;
   min-width: 0;
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
-  color: var(--text-tertiary);
+  height: 100%;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-1);
+  font-size: var(--text-ui);
 }
 
-/* The session IS in a project — read it as a value, not as placeholder text. */
-.context-menu-submenu-value.is-assigned {
-  color: var(--accent);
+.context-menu-filter input::placeholder {
+  color: var(--menu-hint);
 }
 
-.context-menu-submenu-chevron {
-  flex: 0 0 auto;
-  color: var(--text-tertiary);
+.context-menu-filter input:focus-visible {
+  box-shadow: none;
 }
 
-/* Second level: same panel chrome, stacked above the menu it flies out of. */
-.context-menu-submenu {
-  z-index: 61;
+.context-menu-match {
+  background: transparent;
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
-.context-menu-project-button.is-current {
-  color: var(--accent);
-}
-
-.context-menu-project-create {
-  color: var(--text-secondary);
-  font-style: italic;
-}
-
-/* Fail-closed note shown in place of Project buttons while the payload is
-   pending/failed/not-yet-loaded — non-interactive, muted. */
+/* Shown in place of Project rows while that payload is pending or failed. */
 .context-menu-note {
   margin: 2px 0;
   padding: 6px 10px;
   font-size: var(--text-sm);
-  color: var(--text-tertiary);
+  color: var(--menu-hint);
+}
+
+/* The in-place confirm a destructive item turns the menu into: no browser dialog,
+   Escape or a click outside cancels. */
+.context-menu.is-confirming {
+  width: 264px;
+  min-width: 0;
+  max-width: calc(100vw - 24px);
+  padding: 12px;
+  gap: 10px;
+}
+
+.context-menu-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.context-menu-confirm-title {
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-size: var(--text-ui);
+  font-weight: var(--weight-strong);
+  line-height: var(--leading-normal);
+  color: var(--text-1);
+}
+
+.context-menu-confirm-body {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+  color: var(--text-2);
+}
+
+.context-menu-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.context-menu-confirm-actions button {
+  height: 28px;
+  padding: 0 12px;
+  font-size: var(--text-ui);
+  font-weight: var(--weight-regular);
+}
+
+.context-menu-confirm-cancel {
+  border: 1px solid var(--menu-border);
+  background: transparent;
+  color: var(--text-1);
+}
+
+.context-menu-confirm-cancel:hover {
+  border-color: var(--menu-border);
+  background: var(--menu-hover);
+}
+
+.context-menu-confirm-danger {
+  background: var(--menu-danger-bg);
+  color: var(--menu-danger-fg);
+  font-weight: var(--weight-medium);
+}
+
+.context-menu-confirm-danger:hover {
+  background: var(--menu-danger-bg);
+  filter: brightness(0.92);
+}
+
+.undo-toast {
+  position: fixed;
+  z-index: 70;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: calc(100vw - 32px);
+  padding: 8px 8px 8px 14px;
+  border: 1px solid var(--menu-border);
+  border-radius: var(--r-md);
+  background: var(--menu-bg);
+  box-shadow: var(--menu-shadow);
+  color: var(--text-1);
+  font-size: var(--text-ui);
+  animation: surface-enter 120ms ease;
+}
+
+.undo-toast-message {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.undo-toast-action {
+  flex: none;
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: var(--text-ui);
+  font-weight: var(--weight-medium);
+}
+
+.undo-toast-action:hover {
+  background: var(--menu-hover);
 }
 
 /* ===== Projects-mode sidebar: a list of project rows (no sessions inline) ===== */
@@ -5352,7 +5621,7 @@ body.sidebar-collapsed .app-shell[data-view="tasks"] #tasks-sidebar-toggle {
   .conversation-title { font-size: var(--text-body); }
   .conversation-meta { font-size: var(--text-sm); }
   .thread-group-name,
-  .pinned-project-chip-name { font-size: var(--text-ui); }
+  .pinned-project-chip-name { font-size: var(--text-body); }
   .sidebar-host-status { font-size: var(--text-sm); }
 
   .chat-shell { height: auto; overflow: visible; }
@@ -8407,7 +8676,7 @@ body.is-resizing-panel {
   padding-left: 8px;
   padding-right: 4px;
   border-radius: var(--r-sm) var(--r-sm) 0 0;
-  color: var(--text-secondary);
+  color: var(--tab-fg);
 }
 .session-tab:hover {
   background: var(--bg-hover);
@@ -8451,8 +8720,9 @@ body.is-resizing-panel {
   background: transparent;
   border: none;
   color: inherit;
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
+  font-family: var(--font-sans);
+  font-size: var(--text-ui);
+  font-weight: var(--weight-regular);
   line-height: var(--leading-none);
 }
 .session-tab-title {
@@ -8468,15 +8738,16 @@ body.is-resizing-panel {
 .session-tab-title-input {
   flex: 1;
   min-width: 0;
-  padding: 1px 4px;
-  margin: -1px 0;
-  background: var(--bg-input, var(--bg-elevated));
+  height: 24px;
+  padding: 0 6px;
+  margin: 0 4px 0 0;
+  background: var(--menu-bg);
   border: 1px solid var(--accent);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   color: var(--text-primary);
-  font-family: inherit;
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
+  font-family: var(--font-sans);
+  font-size: var(--text-ui);
+  font-weight: var(--weight-regular);
   line-height: var(--leading-none);
   /* The accent border already carries the focus signal; the UA ring on top of it
    * only thickens the tab. */
@@ -8484,8 +8755,18 @@ body.is-resizing-panel {
 }
 /* An editing tab keeps the pane-continuous treatment even when it is not the focused
  * one — you are working on it, so it should not look dormant while you type. */
+/* The accent border is the focus signal; the global ring on top only thickens it. */
+.session-tab-title-input:focus-visible,
+.thread-group-name-input:focus-visible {
+  box-shadow: none;
+}
+
 .session-tab[data-editing="true"] {
-  background: var(--bg-elevated);
+  /* Wide enough for the whole name while it is being edited; it returns to the
+     fixed width on Enter or Escape. Pinned tabs widen too — the name is what matters. */
+  flex-basis: 280px;
+  width: 280px;
+  background: var(--surface-1);
   border-color: var(--border-subtle);
   color: var(--text-primary);
 }
@@ -8655,21 +8936,6 @@ body.is-resizing-panel {
   }
 }
 
-/* The project group name is a <button> so selecting a project is keyboard- and
- * tap-reachable (the header also hosts action buttons, so it can't be one itself).
- * Strip the global button chrome — it must read as the heading it replaced, not as a
- * control. Typography/colour still come from `.thread-group-name`. */
-.thread-group-name-button {
-  background: transparent;
-  border: none;
-  padding: 0;
-  justify-content: flex-start;
-  text-align: left;
-}
-.thread-group-name-button:hover {
-  background: transparent;
-  color: var(--accent-primary);
-}
 /* The selected project decides which tab set a new session joins, so it needs to be
  * visible at a glance — and for a long time it wasn't. This named
  * `.thread-group-icon::before`, the tab of the CSS-drawn folder, and set `color` on
@@ -8681,14 +8947,34 @@ body.is-resizing-panel {
   color: var(--accent-primary);
 }
 
-/* Activity roll-up on a project group header. Reuses the badge pills the project rows
- * used, so the counts read the same after sessions moved into the tree. */
+/* Activity roll-up on a group header: a dot and a number per state worth acting on. */
 .thread-group-badges {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   flex: none;
   margin-left: auto;
+}
+
+.thread-group-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-regular);
+  font-variant-numeric: tabular-nums;
+  color: var(--tab-fg);
+}
+
+.thread-group-count-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+}
+
+.thread-group-count.is-attention .thread-group-count-dot {
+  background: var(--warn-fg);
 }
 
 /* ===== Project switcher — the header title, and how you change containers ===== */
@@ -8851,117 +9137,35 @@ body.is-resizing-panel {
   white-space: nowrap;
 }
 
-/* Drawn in CSS rather than imported: one glyph, and it has to flip. */
 .project-switcher-caret {
   flex: 0 0 auto;
-  width: 0;
-  height: 0;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
-  border-top: 5px solid var(--text-2);
+  display: inline-flex;
+  color: var(--text-3);
+  pointer-events: none;
   transition: transform 120ms ease;
+}
+
+.project-switcher-caret svg {
+  width: 14px;
+  height: 14px;
 }
 
 .project-switcher-trigger[aria-expanded="true"] .project-switcher-caret {
   transform: rotate(180deg);
 }
 
-/* Absolute, not fixed: anchored to the trigger and scrolls with it. (The sidebar's
- * .context-menu is fixed and needs bounding-box measurement; this does not — worth
- * remembering when testing them.) Left edge flush with the title. */
+/* Chrome and rows come from the shared menu spec (`.context-menu*`); this only sizes
+ * the panel for a list of names. Placed by use-anchored-menu.js. */
 .project-switcher-menu {
-  position: absolute;
-  z-index: 40;
-  top: calc(100% + 4px);
-  left: -6px;
-  min-width: 220px;
+  z-index: 60;
+  min-width: 260px;
   max-width: 340px;
   max-height: 60vh;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  padding: 4px;
-  /* Same tokens as .context-menu — this is a menu, and the two should not be
-   * distinguishable by chrome just because one is React and one is imperative. */
-  border: 1px solid var(--border-faint);
-  border-radius: var(--r-md);
-  background: var(--surface-2);
-  box-shadow: var(--shadow-popover);
-  animation: surface-enter 120ms ease;
 }
 
-/* Keep each two-line project row at its natural height. Otherwise flexbox
- * shrinks the rows to fit the capped menu and their labels overlap. */
+/* A capped menu must scroll, not squeeze its rows into each other. */
 .project-switcher-menu > * {
   flex-shrink: 0;
-}
-
-.project-switcher-option {
-  width: 100%;
-  border: 0;
-  padding: 8px 10px;
-  border-radius: var(--r-sm);
-  font-family: var(--font-sans);
-  font-size: var(--text-body);
-  font-weight: var(--weight-medium);
-  /* See the trigger: justify-content is the one that actually left-aligns. */
-  justify-content: flex-start;
-  text-align: left;
-  color: var(--text-1);
-  background: transparent;
-  cursor: pointer;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  transition: background 90ms ease, color 90ms ease;
-}
-
-/* --surface-3, not --surface-2: the MENU is surface-2, so hovering to the same
- * token painted an invisible highlight. */
-.project-switcher-option:hover,
-.project-switcher-option:focus-visible {
-  background: var(--surface-3);
-}
-
-.project-switcher-option.is-active {
-  font-weight: var(--weight-strong);
-  background: var(--surface-3);
-}
-
-/* A fallback here would defeat the point: `var(--surface-4, var(--surface-3))`
- * silently resolved to the selected row's OWN background when --surface-4 did not
- * exist, so the row stopped reacting and the source still read as two different
- * values. Referenced bare, so an undefined token breaks loudly. */
-.project-switcher-option.is-active:hover {
-  background: var(--surface-4);
-}
-
-/* New / rename / delete are acts, not places, so they share one group under one divider.
- * The divider goes on the group's first member only; a border on each would split them.
- * Scoped to the menu so the generic `.project-switcher-option` rule further down cannot
- * reset these, which it silently did. */
-.project-switcher-menu .project-switcher-manage {
-  color: var(--text-2);
-}
-
-.project-switcher-option:not(.project-switcher-manage) + .project-switcher-manage {
-  margin-top: 4px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border-faint);
-  border-radius: 0 0 var(--r-sm) var(--r-sm);
-}
-
-/* Same tokens the project header's delete button uses, so "destructive" looks the same
- * wherever it is offered. Referenced bare: an undefined token must break loudly rather
- * than fall back to something that merely looks deliberate. */
-.project-switcher-menu .project-switcher-danger {
-  color: var(--err-fg);
-}
-
-.project-switcher-danger:hover,
-.project-switcher-danger:focus-visible {
-  color: var(--err-fg);
-  background: var(--err-bg);
 }
 
 /* ===== New task dialog ===== */
@@ -10249,8 +10453,7 @@ button.team-role-name.is-link {
 
 .setting-pill-section + .setting-pill-section { margin-top: 4px; }
 
-.setting-pill-section-heading,
-.project-switcher-menu-heading {
+.setting-pill-section-heading {
   padding: 6px 8px 4px;
   color: var(--text-faint);
   font-size: var(--text-xs);
@@ -10265,8 +10468,7 @@ button.team-role-name.is-link {
   font-size: var(--text-sm);
 }
 
-.setting-pill-option,
-.project-switcher-option {
+.setting-pill-option {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -10289,8 +10491,7 @@ button.team-role-name.is-link {
   border: 0;
 }
 
-.setting-pill-option-text,
-.project-switcher-option-text {
+.setting-pill-option-text {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
@@ -10298,15 +10499,13 @@ button.team-role-name.is-link {
   gap: 1px;
 }
 
-.setting-pill-option-label,
-.project-switcher-option-label {
+.setting-pill-option-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.setting-pill-option-subtitle,
-.project-switcher-option-subtitle {
+.setting-pill-option-subtitle {
   color: var(--text-faint);
   font-size: var(--text-xs);
   overflow: hidden;
@@ -10322,16 +10521,14 @@ button.team-role-name.is-link {
 
 /* Always laid out, revealed with opacity: a row must not change width when it
    becomes the current one. */
-.setting-pill-option-check,
-.project-switcher-option-check {
+.setting-pill-option-check {
   flex: 0 0 auto;
   width: 14px;
   opacity: 0;
   color: var(--accent);
 }
 
-.setting-pill-option.is-active .setting-pill-option-check,
-.project-switcher-option.is-active .project-switcher-option-check {
+.setting-pill-option.is-active .setting-pill-option-check {
   opacity: 1;
 }
 

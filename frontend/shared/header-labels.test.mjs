@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { readdir, readFile } from "node:fs/promises";
 
-import { DEFAULT_WORKSPACE_LABEL, selectHeaderLabels } from "./header-labels.js";
+import { ALL_SESSIONS_LABEL, selectHeaderLabels } from "./header-labels.js";
 
 // THE RULE THIS FILE ENCODES
 //
@@ -18,7 +18,7 @@ import { DEFAULT_WORKSPACE_LABEL, selectHeaderLabels } from "./header-labels.js"
 // It has to name something the switcher can switch to:
 //   a project is selected -> that project, plus a New agent button, since that
 //                            is the action belonging to a project
-//   otherwise             -> "Default Workspace", where project-less sessions live
+//   otherwise             -> "All sessions", no project pinned
 //
 // The working directory lost the title and kept the tooltip. It used to be the
 // title in Sessions mode, but the switcher cannot select a directory, so a folder
@@ -54,7 +54,7 @@ test("no project selected is the default workspace", () => {
     projectId: null,
     projectName: "",
   });
-  assert.equal(title, DEFAULT_WORKSPACE_LABEL);
+  assert.equal(title, ALL_SESSIONS_LABEL);
 });
 
 // --- with none selected -----------------------------------------------------
@@ -63,7 +63,7 @@ test("the default workspace keeps the folder as the tooltip", () => {
   const { title, titleTooltip } = selectHeaderLabels({
     ...CONVERSATION,
   });
-  assert.equal(title, DEFAULT_WORKSPACE_LABEL);
+  assert.equal(title, ALL_SESSIONS_LABEL);
   // The folder is not lost, it is demoted: the title has to name what the
   // switcher selects, and the full path was never readable at title size anyway.
   assert.equal(titleTooltip, "/Users/luchi/git/agent-relay");
@@ -99,7 +99,7 @@ test("with nothing selected the title is the default workspace, never a product 
     { ...CONVERSATION, viewingConversation: false, workspaceName: "" },
     {},
   ]) {
-    assert.equal(selectHeaderLabels(args).title, DEFAULT_WORKSPACE_LABEL);
+    assert.equal(selectHeaderLabels(args).title, ALL_SESSIONS_LABEL);
   }
 });
 
@@ -115,7 +115,7 @@ test("every project-less state produces the SAME title", () => {
       { ...CONVERSATION, projectId: "p", projectName: "" },
     ].map((args) => selectHeaderLabels(args).title)
   );
-  assert.deepEqual([...titles], [DEFAULT_WORKSPACE_LABEL]);
+  assert.deepEqual([...titles], [ALL_SESSIONS_LABEL]);
 });
 
 // --- subtitle rules (unchanged) ---------------------------------------------
@@ -125,7 +125,7 @@ test("read-only stays a warning, and does not repeat the title", () => {
     ...CONVERSATION,
     viewOnly: true,
   });
-  assert.equal(title, DEFAULT_WORKSPACE_LABEL);
+  assert.equal(title, ALL_SESSIONS_LABEL);
   assert.equal(subtitle, "", "a plain read-only session needs no header subtitle");
 });
 
@@ -149,7 +149,7 @@ test("console home names the running session in the subtitle, without 'live'", (
     viewingConversation: false,
     threadLabel: "background job",
   });
-  assert.equal(title, DEFAULT_WORKSPACE_LABEL);
+  assert.equal(title, ALL_SESSIONS_LABEL);
   assert.equal(subtitle, "session · background job");
   assert.ok(!subtitle.includes("live"));
 });
@@ -163,9 +163,9 @@ test("standby / no-workspace subtitles are unchanged", () => {
 // claim rendered twice. They were briefly two constants holding equal strings
 // under a comment asserting they could not drift — nothing compared them, so they
 // could. This pins the single definition instead of re-checking equality.
-test("the default workspace label has exactly one definition in the tree", async () => {
-  const { DEFAULT_WORKSPACE_LABEL: fromLabels } = await import("../shared/project-labels.js");
-  assert.equal(DEFAULT_WORKSPACE_LABEL, fromLabels);
+test("the all-sessions label has exactly one definition in the tree", async () => {
+  const { ALL_SESSIONS_LABEL: fromLabels } = await import("../shared/project-labels.js");
+  assert.equal(ALL_SESSIONS_LABEL, fromLabels);
 
   // Walk the whole tree, not a hand-listed set of directories. The first version
   // listed frontend/shared, frontend/local and frontend — and NOT frontend/remote,
@@ -191,7 +191,7 @@ test("the default workspace label has exactly one definition in the tree", async
     const source = await readFile(file, "utf8");
     // An ASSIGNMENT of the string is a copy, whatever it is called and whichever
     // quote style it uses. Comparisons against it (tests, assertions) are fine.
-    if (/=\s*(["'`])Default Workspace\1/.test(source)) {
+    if (/=\s*(["'`])All sessions\1/.test(source)) {
       seen.push(file);
     }
   }

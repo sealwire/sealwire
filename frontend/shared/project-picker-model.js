@@ -1,106 +1,77 @@
-// Pure row model for the project picker, shared by the top-bar switcher and both
-// launch dialogs. Everything is derived client-side; no server field is needed.
+// Pure row model for the project menu shared by the top-bar switcher and both launch
+// dialogs. Counts and order come from the loaded session list; no server field needed.
 
-import { DEFAULT_WORKSPACE_LABEL } from "./project-labels.js";
-import { selectProjectAgents, summarizeProjectActivity } from "./project-overview-model.js";
-import { formatRelativeTime } from "../remote/utils.js";
+import { ALL_SESSIONS_LABEL } from "./project-labels.js";
+import { countMembers } from "./thread-groups.js";
 
-// Not a count: unassigned sessions would make this look like the biggest project
-// in the list when it is really the absence of one.
-export const DEFAULT_WORKSPACE_SUBTITLE = "unfiled sessions";
-
-function pluralizeSessions(count) {
-  return count === 1 ? "1 session" : `${count} sessions`;
-}
-
-// Liveness outranks size: a count alone cannot separate a project worth opening
-// now from one last touched in March. Falls back to age only when nothing is live.
-export function projectSubtitle({
-  agents = [],
-  threadActivity = null,
-  threadAttention = null,
-  threadReviewing = null,
-  lastActiveAt = null,
-  now = null,
-} = {}) {
-  const summary = summarizeProjectActivity({
-    agents,
-    threadActivity,
-    threadAttention,
-    threadReviewing,
-  });
-
-  if (summary.total > 0) {
-    // needs-input folds into "running": splitting it makes the line long enough to
-    // truncate on a phone, and the session list's dot already tells them apart.
-    const live = summary.working + summary.needsInput + summary.reviewing;
-    return live > 0
-      ? `${pluralizeSessions(summary.total)} · ${live} running`
-      : pluralizeSessions(summary.total);
-  }
-
-  if (!lastActiveAt) {
-    return null;
-  }
-  return `idle · ${formatRelativeTime(lastActiveAt, now)}`;
-}
-
-// `activeProjectId` is resolved against the list, not trusted: an id deleted on
-// another device marks the DEFAULT row instead of leaving nothing ticked.
+/**
+ * `activeProjectId` is resolved against the list, not trusted: an id deleted on
+ * another device marks the default row instead of leaving nothing ticked.
+ *
+ * Projects are ordered by their most recent session, newest first, so the place you
+ * were just working is near the top; projects with no sessions follow by name.
+ *
+ * @returns {{ defaultRow: {id: null, label: string, count: number|null, active: boolean},
+ *             projectRows: Array<{id: string, label: string, count: number, members: number,
+ *                                 active: boolean}> }}
+ */
 export function buildProjectPickerRows({
   projects = [],
   threads = [],
   threadProjectId = {},
-  threadActivity = null,
-  threadAttention = null,
-  threadReviewing = null,
   activeProjectId = null,
-  now = null,
+  defaultLabel = ALL_SESSIONS_LABEL,
+  // The switcher counts every session on its default row; the pickers leave it bare.
+  defaultCount = null,
 } = {}) {
+  const list = (projects || []).filter((project) => project?.id);
   const resolvedId =
-    (activeProjectId && (projects || []).some((project) => project?.id === activeProjectId))
+    activeProjectId && list.some((project) => project.id === activeProjectId)
       ? activeProjectId
       : null;
 
-  const rows = [
-    {
-      id: null,
-      label: DEFAULT_WORKSPACE_LABEL,
-      subtitle: DEFAULT_WORKSPACE_SUBTITLE,
-      active: resolvedId === null,
-    },
-  ];
-
-  for (const project of projects || []) {
-    if (!project?.id) {
+  const counts = new Map();
+  const latest = new Map();
+  for (const thread of threads || []) {
+    const projectId = threadProjectId?.[thread?.id];
+    if (!projectId) {
       continue;
     }
-    const agents = selectProjectAgents({
-      projectId: project.id,
-      threads,
-      threadProjectId,
-    });
-    rows.push({
-      id: project.id,
-      // A project can legitimately hold an empty name (renamed to blank on
-      // another client); showing its id beats showing nothing at all.
-      label: project.name || project.id,
-      subtitle: projectSubtitle({
-        agents,
-        threadActivity,
-        threadAttention,
-        threadReviewing,
-        // selectProjectAgents sorts by recency, so the head is the newest — but
-        // do not depend on that here; take the max explicitly.
-        lastActiveAt: agents.reduce(
-          (newest, agent) => Math.max(newest, Number(agent?.updated_at) || 0),
-          0
-        ) || null,
-        now,
-      }),
-      active: project.id === resolvedId,
-    });
+    counts.set(projectId, (counts.get(projectId) || 0) + 1);
+    latest.set(projectId, Math.max(latest.get(projectId) || 0, Number(thread.updated_at) || 0));
   }
 
-  return rows;
+  const projectRows = list
+    .map((project) => ({
+      id: project.id,
+      // A project can legitimately hold an empty name (renamed to blank on another
+      // client); showing its id beats showing nothing at all.
+      label: project.name || project.id,
+      count: counts.get(project.id) || 0,
+      // Every member, loaded or not — what deleting the project would actually touch.
+      members: countMembers(threadProjectId, project.id),
+      active: project.id === resolvedId,
+      latest: latest.get(project.id) || 0,
+    }))
+    .sort((a, b) => b.latest - a.latest || a.label.localeCompare(b.label))
+    .map(({ latest: _latest, ...row }) => row);
+
+  return {
+    defaultRow: {
+      id: null,
+      label: defaultLabel,
+      count: defaultCount,
+      active: resolvedId === null,
+    },
+    projectRows,
+  };
+}
+
+/** Case-insensitive substring match on the label. */
+export function filterProjectRows(rows, query) {
+  const needle = String(query || "").trim().toLowerCase();
+  if (!needle) {
+    return rows;
+  }
+  return rows.filter((row) => String(row.label).toLowerCase().includes(needle));
 }

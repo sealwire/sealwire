@@ -1,5 +1,7 @@
 import React, { useEffect, useRef } from "react";
 
+import { isImeComposing } from "./composer-keys.js";
+
 const h = React.createElement;
 
 // In-place title editor shared by the session tab strip and the sidebar rows.
@@ -62,6 +64,11 @@ export function InlineTitleEditor({ defaultValue, onCommit, onCancel, className,
     onContextMenu: (event) => event.stopPropagation(),
     onBlur: () => settle(true),
     onKeyDown: (event) => {
+      if (isImeComposing(event)) {
+        // The input method's own keys; global shortcuts must still not see them.
+        event.stopPropagation();
+        return;
+      }
       if (event.key === "Enter") {
         event.preventDefault();
         settle(true, { explicit: true });

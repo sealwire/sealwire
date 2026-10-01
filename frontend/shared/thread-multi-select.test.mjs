@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import {
   applyThreadSelectionClick,
   createThreadSelection,
-  describeBulkDelete,
   pruneThreadSelection,
   resolveContextMenuTargets,
   threadSelectionIntent,
@@ -142,24 +141,4 @@ test("a single selected row is not a batch", () => {
     orderedThreadIds: ORDER,
   });
   assert.deepEqual(result.threadIds, ["c"]);
-});
-
-test("the confirm names every session when the batch is small", () => {
-  const message = describeBulkDelete({ titles: ["First", "Second", "Third"] });
-  assert.match(message, /3 sessions/);
-  for (const title of ["First", "Second", "Third"]) {
-    assert.ok(message.includes(title), `expected ${title} in:\n${message}`);
-  }
-  assert.match(message, /cannot be undone/i);
-});
-
-// A 40-session batch would overflow the confirm dialog and push the "cannot be
-// undone" warning off screen, which is the one line that has to be read.
-test("the confirm truncates a long batch and says how many it hid", () => {
-  const titles = Array.from({ length: 14 }, (_, index) => `Session ${index + 1}`);
-  const message = describeBulkDelete({ titles });
-  assert.match(message, /14 sessions/);
-  assert.ok(!message.includes("Session 14"), "expected the tail to be hidden");
-  assert.match(message, /4 more/);
-  assert.match(message, /cannot be undone/i);
 });

@@ -164,14 +164,13 @@ function paintedBackground(selector, theme) {
 
 // `button { display: inline-flex; justify-content: center }` is global in this
 // stylesheet, so `text-align: left` on a button is a no-op on its own — the flex
-// container keeps centring the content. Every other left-aligned button here sets
-// both (.context-menu-button, .thread-group-name-button); the switcher shipped
-// with only text-align and rendered a centred menu.
+// container keeps centring the content. The switcher once shipped with only
+// text-align and rendered a centred menu; its rows are menu rows now.
 //
 // Both are asserted unconditionally. An earlier version skipped the check when
 // text-align was absent, which would have passed a rule that simply deleted it.
 test("left-aligned switcher controls set BOTH text-align and justify-content", () => {
-  for (const selector of [".project-switcher-trigger", ".project-switcher-option"]) {
+  for (const selector of [".project-switcher-trigger", ".context-menu-button"]) {
     const body = ruleBody(selector);
     assert.equal(declaration(body, "text-align"), "left", `${selector} sets text-align: left`);
     assert.equal(
@@ -183,29 +182,32 @@ test("left-aligned switcher controls set BOTH text-align and justify-content", (
   }
 });
 
-// The menu paints on --surface-2. Hover was ALSO --surface-2, so the highlight was
-// the same colour as what it highlighted: the menu looked inert under the cursor.
+// Hover once painted the same token as the menu itself, so the highlight was the colour
+// of what it highlighted and the menu looked inert under the cursor.
 test("the menu's hover background differs from the menu's own background, in both themes", () => {
   for (const theme of THEMES) {
     assert.notEqual(
-      paintedBackground(".project-switcher-option:hover", theme),
-      paintedBackground(".project-switcher-menu", theme),
+      paintedBackground(".context-menu-button.is-highlighted", theme),
+      paintedBackground(".context-menu", theme),
       `${theme.name}: hover paints the same colour as the surface beneath it, so it is invisible`
     );
   }
 });
 
-// Same trap one level down, and the one the first version of this file missed:
-// the selected row is already tinted, so its hover has to move AGAIN or the
-// current selection becomes the one row in the menu that stops responding.
-test("the active option still changes colour under the cursor, in both themes", () => {
-  for (const theme of THEMES) {
-    assert.notEqual(
-      paintedBackground(".project-switcher-option.is-active:hover", theme),
-      paintedBackground(".project-switcher-option.is-active", theme),
-      `${theme.name}: the active row would not react to the cursor`
-    );
+// The current row is said by its check alone. A tint on it was a second, louder signal
+// that also had to be out-hovered — and the row that stopped responding was always it.
+test("the current row carries no fill of its own", () => {
+  const filled = [];
+  for (const match of CSS.matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
+    const selectors = match[1].split(",").map((one) => one.trim());
+    if (
+      selectors.some((one) => /\.project-switcher-option\.is-active(?!:)/.test(one))
+      && /(^|;|\n)\s*background\s*:/.test(match[2])
+    ) {
+      filled.push(match[1].trim());
+    }
   }
+  assert.deepEqual(filled, []);
 });
 
 // Every rule that sizes or colours a group name, paired with whether it also names the
@@ -263,16 +265,12 @@ test("the tokens those shared rules name are defined in both themes", () => {
   }
 });
 
-// The recap promised "at the bottom, behind a divider, with the destructive one marked".
-// None of that existed: the classes were emitted but no rule matched them, so rename and
-// delete rendered as ordinary navigation entries — and above "New project" at that.
-test("the management group is separated by a divider and the destructive one is marked", () => {
-  const divider = ruleBody(".project-switcher-option:not(.project-switcher-manage) + .project-switcher-manage");
-  assert.match(declaration(divider, "border-top") || "", /1px solid/, "a real divider rule exists");
-
+// The destructive item once rendered as an ordinary navigation entry: its class was
+// emitted and no rule matched it. The divider is an element now (see the layout test).
+test("the destructive item is marked", () => {
   for (const theme of THEMES) {
-    const danger = declaration(ruleBody(".project-switcher-menu .project-switcher-danger"), "color");
-    const ordinary = declaration(ruleBody(".project-switcher-option"), "color");
+    const danger = declaration(ruleBody(".context-menu-button-danger"), "color");
+    const ordinary = declaration(ruleBody(".context-menu-button"), "color");
     assert.ok(danger && ordinary, "both declare a colour");
     const missing = new Set();
     const dangerValue = resolve(danger, theme.tokens, missing);
@@ -291,15 +289,14 @@ test("the management group is separated by a divider and the destructive one is 
 // but a source check cannot prove the box actually lands inside the drawer.
 test("the top-bar menu spans the bar rather than hanging off its trigger", () => {
   const shared = ruleBody(".project-switcher-menu");
-  assert.equal(declaration(shared, "left"), "-6px", "the shared anchor is still the trigger");
-  assert.equal(declaration(shared, "min-width"), "220px", "and still carries a minimum width");
+  assert.equal(declaration(shared, "min-width"), "260px", "the shared menu carries a minimum width");
 
   // Both edges pinned, and the trigger-sized minimum released. Pinning one edge only
   // moves the overflow to the other side — that is precisely what the first fix did.
   const top = ruleBody(".project-switcher-top .project-switcher-menu");
   assert.ok(declaration(top, "left"), "the top-bar variant pins its left edge");
   assert.ok(declaration(top, "right"), "and its right edge");
-  assert.equal(declaration(top, "min-width"), "0", "and releases the 220px minimum");
+  assert.equal(declaration(top, "min-width"), "0", "and releases the shared minimum");
 
   // The anchor only reaches the bar because the switcher itself stops being the
   // containing block. Without this pair the rule above silently re-anchors to the 32px

@@ -13,7 +13,7 @@ import path from "node:path";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { DEFAULT_WORKSPACE_LABEL } from "../frontend/shared/header-labels.js";
+import { ALL_SESSIONS_LABEL } from "../frontend/shared/header-labels.js";
 import { prepareSeededCodexHome } from "./e2e-codex-home.mjs";
 import { launchBrowser } from "./e2e/harness/browser.mjs";
 import { openSessionsDrawer } from "./e2e/harness/drawer.mjs";
@@ -64,8 +64,8 @@ const projectNames = (page) =>
     [...document.querySelectorAll("#threads-list .thread-group-name")].map((n) => n.textContent.trim())
   );
 
-// Right-click a thread row (Sessions mode), open its second-level "Projects ›" flyout,
-// and read that flyout's buttons. Projects live one level down now: the menu itself only
+// Right-click a thread row (Sessions mode), open its second-level "Project ›" flyout,
+// and read that flyout's buttons — the current one prefixed "✓ ", as its aria-checked says. Projects live one level down now: the menu itself only
 // carries the trigger row.
 async function openThreadMenu(page, tid) {
   // Dismiss whatever a previous step left open first: the menu paints AT the cursor, so
@@ -89,7 +89,7 @@ async function openThreadMenu(page, tid) {
     const submenu = document.querySelector("#thread-project-submenu");
     return submenu && !submenu.hidden && document.querySelectorAll("#thread-project-actions button").length > 0;
   }, null, { timeout: TIMEOUT_MS });
-  return page.evaluate(() => [...document.querySelectorAll("#thread-project-actions button")].map((b) => b.textContent.trim()));
+  return page.evaluate(() => [...document.querySelectorAll("#thread-project-actions button")].map((b) => (b.getAttribute("aria-checked") === "true" ? "✓ " : "") + b.textContent.trim()));
 }
 
 // Reveal the second level with a REAL pointer hover, which is how a mouse user gets
@@ -164,7 +164,7 @@ async function clickThreadProjectButton(page, predicate) {
   assert.ok(
     index >= 0,
     `flyout row ${JSON.stringify(predicate)} not found: ${JSON.stringify(
-      await page.evaluate(() => [...document.querySelectorAll("#thread-project-actions button")].map((b) => b.textContent.trim()))
+      await page.evaluate(() => [...document.querySelectorAll("#thread-project-actions button")].map((b) => (b.getAttribute("aria-checked") === "true" ? "✓ " : "") + b.textContent.trim()))
     )}`
   );
   await page.locator("#thread-project-actions button").nth(index).click({ timeout: TIMEOUT_MS });
@@ -218,7 +218,7 @@ async function selectDefaultWorkspaceInSwitcher(page) {
     await page.click(".project-switcher-trigger", { timeout: TIMEOUT_MS });
   }
   await page.waitForSelector(".project-switcher-menu", { timeout: TIMEOUT_MS });
-  await projectSwitcherOption(page, "Default Workspace").click({ timeout: TIMEOUT_MS });
+  await projectSwitcherOption(page, "All sessions").click({ timeout: TIMEOUT_MS });
   await page.waitForFunction(
     () => !document.querySelector("#threads-list .thread-group-header-project"),
     undefined,
@@ -226,15 +226,19 @@ async function selectDefaultWorkspaceInSwitcher(page) {
   );
 }
 
-// Right-click the pinned project's header to open the project context menu.
+// Right-click the pinned project's header to open its menu.
 async function openProjectMenu(page, name) {
   await selectProjectInSwitcher(page, name);
   const row = page
     .locator("#threads-list .thread-group-header-project", { hasText: name })
     .first();
   await row.click({ button: "right", timeout: TIMEOUT_MS });
-  await page.waitForSelector("#project-context-menu:not([hidden])", { timeout: TIMEOUT_MS });
+  await page.waitForSelector(".context-menu[aria-label^=\"Project \"]", { timeout: TIMEOUT_MS });
 }
+
+// Scoped to the header's own menu: the session menu also has a (hidden) "Rename…".
+const projectMenuRow = (page, label) =>
+  page.locator('.context-menu[aria-label^="Project "] .context-menu-button', { hasText: label }).first();
 
 async function main() {
   const relayPort = await getFreePort();
@@ -373,7 +377,7 @@ async function main() {
           document.querySelector(`#threads-list [data-thread-id="${threadId}"]`)
         ),
         verifyBadge: row?.querySelector(".thread-group-badges")?.textContent?.trim() || "",
-        hasActionsButton: !!row?.closest(".thread-group-header-project")?.querySelector(".thread-group-action"),
+        hasActionsButton: !!row?.closest(".thread-group-header-project")?.querySelector(".thread-group-more"),
         pinnedFirst:
           [...document.querySelectorAll("#threads-list .thread-group-header")][0]
             ?.classList.contains("thread-group-header-project") || false,
@@ -460,7 +464,7 @@ async function main() {
       try {
         await page.waitForFunction(
           (expected) => document.querySelector(".project-switcher-trigger")?.textContent?.trim() === expected,
-          DEFAULT_WORKSPACE_LABEL,
+          ALL_SESSIONS_LABEL,
           { timeout: 8000 }
         );
       } catch {}
@@ -572,7 +576,6 @@ async function main() {
     let menuCreateAssign = null;
     let renameConfirmed = false;
     let deleteConfirmed = false;
-    let projectMenuClosedOnBump = false;
     let firstLevel = null;
     let geometry = null;
     let keyboardNav = null;
@@ -585,10 +588,7 @@ async function main() {
       nextPrompt = "UiCrudProj";
       await crudPage.click(".project-switcher-trigger", { timeout: TIMEOUT_MS });
       await crudPage.waitForSelector(".project-switcher-menu", { timeout: TIMEOUT_MS });
-      await crudPage
-        .locator(".project-switcher-option", { hasText: /^New project$/ })
-        .first()
-        .click({ timeout: TIMEOUT_MS });
+      await crudPage.locator(".project-switcher-create").first().click({ timeout: TIMEOUT_MS });
       await crudPage.waitForFunction(
         async (name) => {
           const response = await fetch("/api/projects");
@@ -637,7 +637,7 @@ async function main() {
         focusInsideSubmenu: !!document.activeElement?.closest("#thread-project-submenu"),
         // role="menu" on the panel obliges its rows to be menuitems.
         rowsAreMenuItems: [...document.querySelectorAll("#thread-project-actions button")].every(
-          (b) => b.getAttribute("role") === "menuitem"
+          (b) => ["menuitem", "menuitemradio"].includes(b.getAttribute("role"))
         ),
       }));
       // ArrowLeft walks back out to the trigger without dismissing the whole menu.
@@ -675,13 +675,14 @@ async function main() {
         await delay(150);
       }
 
-      // Rename + delete "UiCrudProj" via the PROJECT context menu. Its header exists
-      // only while that project is pinned, which `openProjectMenu` handles by selecting
-      // it first.
+      // Rename + delete "UiCrudProj" via its header's menu. Its header exists only while
+      // that project is pinned, which `openProjectMenu` handles by selecting it first.
+      // Rename edits the name in place; no prompt.
       const renameTargetId = uiProjId;
-      nextPrompt = "UiRenamedProj";
       await openProjectMenu(crudPage, "UiCrudProj");
-      await crudPage.click("#rename-project-button");
+      await projectMenuRow(crudPage, "Rename…").click({ timeout: TIMEOUT_MS });
+      await crudPage.fill("#threads-list .thread-group-name-input", "UiRenamedProj", { timeout: TIMEOUT_MS });
+      await crudPage.press("#threads-list .thread-group-name-input", "Enter");
       for (let i = 0; i < 100; i += 1) {
         const data = await api(relayPort, "GET", "/api/projects");
         const renamed = data.projects.find((p) => p.id === renameTargetId);
@@ -694,25 +695,15 @@ async function main() {
         { timeout: TIMEOUT_MS }
       );
       await openProjectMenu(crudPage, "UiRenamedProj");
-      await crudPage.click("#delete-project-button");
+      await projectMenuRow(crudPage, "Delete project…").click({ timeout: TIMEOUT_MS });
+      // Its only session moved to UiMenuProj above, so there is nothing to confirm: it goes
+      // at once and an Undo is offered instead.
+      await crudPage.waitForSelector(".undo-toast", { timeout: TIMEOUT_MS });
       for (let i = 0; i < 100; i += 1) {
         const data = await api(relayPort, "GET", "/api/projects");
         if (!data.projects.some((p) => p.id === renameTargetId)) { deleteConfirmed = true; break; }
         await delay(150);
       }
-
-      // Project-menu fail-closed: with the menu OPEN, a projects-revision bump (remote
-      // create) must drop the menu rather than let Rename/Delete act on a stale target.
-      await openProjectMenu(crudPage, "UiMenuProj");
-      await api(relayPort, "POST", "/api/projects", { action: "create", name: "MenuBump" });
-      try {
-        await crudPage.waitForFunction(
-          () => Boolean(document.querySelector("#project-context-menu")?.hidden),
-          null,
-          { timeout: TIMEOUT_MS }
-        );
-        projectMenuClosedOnBump = true;
-      } catch {}
     } finally {
       await crudPage.close();
     }
@@ -790,7 +781,7 @@ async function main() {
     console.log(JSON.stringify({
       sessionsView, projectsView, backToSessions,
       unassignPropagated, unassignedOpenedInSessions, afterUnassignBadge, failedFetch, gatePending,
-      crud: { menuItems, assignedMenuItems, triggerValueBeforeAssign, triggerValueAssigned, triggerValueUnassigned, assignConfirmed, currentMarked, unassignConfirmed, menuCreateAssign, renameConfirmed, deleteConfirmed, projectMenuClosedOnBump },
+      crud: { menuItems, assignedMenuItems, triggerValueBeforeAssign, triggerValueAssigned, triggerValueUnassigned, assignConfirmed, currentMarked, unassignConfirmed, menuCreateAssign, renameConfirmed, deleteConfirmed },
       submenu: { firstLevel, geometry, keyboardNav },
       menuFailClosed, staleMenu,
     }, null, 2));
@@ -837,7 +828,7 @@ async function main() {
     );
     assert.equal(
       unassignedOpenedInSessions,
-      DEFAULT_WORKSPACE_LABEL,
+      ALL_SESSIONS_LABEL,
       `opening an unassigned row must leave the selected project, not adopt it into P's tab set: ${unassignedOpenedInSessions}`
     );
 
@@ -900,15 +891,15 @@ async function main() {
       `no Project rows are on screen at the first level: ${firstLevel.visibleProjectButtons}`
     );
     assert.equal(
-      firstLevel.menuButtonLabels.filter((label) => label.startsWith("Projects")).length,
+      firstLevel.menuButtonLabels.filter((label) => label.startsWith("Project")).length,
       1,
-      `exactly one Projects row at the first level: ${JSON.stringify(firstLevel.menuButtonLabels)}`
+      `exactly one Project row at the first level: ${JSON.stringify(firstLevel.menuButtonLabels)}`
     );
     // That single row carries the session's project name (label + value concatenated).
     assert.match(
-      firstLevel.menuButtonLabels.find((label) => label.startsWith("Projects")) || "",
-      new RegExp(`^Projects${firstLevel.triggerValue}$`),
-      `the Projects row names the current project: ${JSON.stringify(firstLevel)}`
+      firstLevel.menuButtonLabels.find((label) => label.startsWith("Project")) || "",
+      new RegExp(`^Project${firstLevel.triggerValue}$`),
+      `the Project row names the current project: ${JSON.stringify(firstLevel)}`
     );
     assert.ok(
       firstLevel.triggerValue && firstLevel.triggerValue !== "None",
@@ -942,7 +933,6 @@ async function main() {
     assert.ok(menuCreateAssign, "'New project…' both creates the project and assigns the session");
     assert.ok(renameConfirmed, "renaming via the project context menu updates the name server-side");
     assert.ok(deleteConfirmed, "deleting via the project context menu removes the project server-side");
-    assert.ok(projectMenuClosedOnBump, "an open project menu closes fail-closed when the projects revision changes");
 
     assert.equal(menuFailClosed.buttonCount, 0, `no Project mutation buttons while the fetch is failing: ${menuFailClosed.buttonCount}`);
     assert.match(menuFailClosed.note || "", /Projects unavailable|Loading projects/, `a fail-closed note replaces the controls: ${menuFailClosed.note}`);

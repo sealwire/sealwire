@@ -23,7 +23,7 @@ export function createDefaultSessionDraft(provider = "codex") {
     provider,
     model: defaultModelForProvider(provider),
     // Which project the new session is filed under. Seeded from the project the
-    // UI is currently in when the dialog opens; null is the Default Workspace.
+    // UI is currently in when the dialog opens; null is no project.
     projectId: null,
     sandbox: "workspace-write",
   };

@@ -6,8 +6,6 @@
 // other shared empty constants: a stable identity, never written through.
 export const EMPTY_THREAD_SELECTION = Object.freeze({ ids: new Set(), anchorId: null });
 
-const MAX_CONFIRM_TITLES = 10;
-
 export function createThreadSelection() {
   return { ids: new Set(), anchorId: null };
 }
@@ -106,28 +104,11 @@ export function resolveContextMenuTargets({
   }
   if (selection.ids.size > 1 && selection.ids.has(threadId)) {
     return {
-      // List order, not click order: the confirm reads top-to-bottom the way the
-      // sidebar does.
+      // List order, not click order: the batch is deleted top to bottom, the way the
+      // sidebar reads.
       threadIds: orderedThreadIds.filter((id) => selection.ids.has(id)),
       selection,
     };
   }
   return { threadIds: [threadId], selection: { ids: new Set(), anchorId: threadId } };
-}
-
-/** The confirm text for a batch delete. */
-export function describeBulkDelete({ titles = [] } = {}) {
-  const shown = titles.slice(0, MAX_CONFIRM_TITLES);
-  const hidden = titles.length - shown.length;
-  const lines = shown.map((title) => `• ${title}`);
-  // Truncated so the batch cannot push the warning below off the bottom of the
-  // dialog, which is the one line that has to be read.
-  if (hidden > 0) {
-    lines.push(`…and ${hidden} more`);
-  }
-  return (
-    `Permanently delete ${titles.length} sessions?\n\n${lines.join("\n")}\n\n` +
-    "This removes each local session file and related local index/state entries. " +
-    "This cannot be undone."
-  );
 }

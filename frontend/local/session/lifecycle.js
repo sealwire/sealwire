@@ -360,7 +360,7 @@ export function createLifecycleController(ctx) {
             device_id: state.deviceId,
             provider: draft.provider || null,
             // Filed server-side as part of the start, so local and remote reach the
-            // same place. Explicit null means the Default Workspace.
+            // same place. Explicit null means no project.
             project_id: draft.projectId || null,
             images,
           }),
