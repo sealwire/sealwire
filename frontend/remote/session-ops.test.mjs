@@ -3120,6 +3120,85 @@ test("a refused Stop from the goal card lands on the card, not behind the modal"
   );
 });
 
+// A transcript goal card is judged by the relay, not by this device's copy of the goal,
+// which can be stale: the request names the card and carries no objective. Its refusal
+// lands on the goal line beside the panel's own buttons, not behind the modal.
+test("a goal card's button goes out as the claimed goal_card action, and its refusal lands on the card", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { actOnRemoteGoalCard, beginGoalActionOn, setGoalError, setRemoteGoal, stopRemoteGoal } =
+    await import("./session-ops.js");
+  const { createGoalActions } = await import("../shared/goal-actions.js");
+  const { goalErrorFrom } = await import("../shared/goal-errors.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  state.composerErrors = {};
+  state.goalErrors = {};
+  state.session = { active_thread_id: "thread-1", available_models: [] };
+  const refusal =
+    "this card is out of date — the goal has moved on since; act on it from the Agents panel";
+  const sent = [];
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      sent.push(frame.payload);
+      setImmediate(() => {
+        void handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: frame.payload.request?.type,
+          ok: false,
+          error: refusal,
+        });
+      });
+    },
+  };
+
+  const actions = createGoalActions({
+    getThreadId: () => "thread-1",
+    setGoal: setRemoteGoal,
+    stopGoal: stopRemoteGoal,
+    goalCard: actOnRemoteGoalCard,
+    setGoalError,
+    beginGoalAction: beginGoalActionOn,
+  });
+
+  actions.onGoalCard("thread-1", 7, "keep_going");
+  for (let i = 0; i < 50 && !state.goalErrors?.["thread-1"]?.message; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  const request = sent.find((payload) => payload.request?.type === "goal_card");
+  assert.ok(request, "the card's button is the goal_card action");
+  assert.equal(request.request.thread_id, "thread-1");
+  assert.equal(request.request.seq, 7);
+  assert.equal(request.request.action, "keep_going");
+  assert.equal(request.request.objective, undefined, "no words travel from this device's copy");
+  assert.equal(request.session_claim, "claim-token-1", "it is claim-gated like set_goal");
+  assert.match(goalErrorFrom(state.goalErrors, "thread-1"), /out of date/);
+  assert.equal(state.composerErrors?.["thread-1"], undefined);
+});
+
 // Reported from the phone: a "/delegate" with a real message just sat there. The relay
 // had refused it — the caller's thread was mid-turn — and the reason went only to a log
 // drawer that is `display: none` on this surface with nothing anywhere to open it.

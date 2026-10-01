@@ -27,8 +27,8 @@ pub(crate) use self::relay::IdSpace;
 #[cfg(test)]
 use self::relay::TranscriptRecord;
 pub(crate) use self::relay::{
-    clip_chars, injection_kind_from_name, injection_kind_name, DelegateMark, HandoverMark,
-    InjectedMessage, InjectionTag, MessageAnchor, ReviewMark,
+    clip_chars, injection_kind_from_name, injection_kind_name, DelegateMark, GoalMark,
+    HandoverMark, InjectedMessage, InjectionTag, MessageAnchor, ReviewMark,
 };
 pub(crate) use self::relay::{
     load_or_generate_vapid, next_relay_ingress, parse_ask_user_questions, thread_status_is_working,
@@ -43,7 +43,9 @@ pub(crate) use self::relay::{
 // `PushKind` is referenced only by cross-module tests (codex/claude handler tests
 // assert an Error push); gate the re-export so non-test builds don't warn.
 pub(crate) use self::delegation::{session_is_unrestricted, Ask};
-pub(crate) use self::goal::{Goal, GoalStatus, MAX_GOAL_OBJECTIVE_CHARS};
+pub(crate) use self::goal::{
+    Goal, GoalSettlement, GoalStatus, GoalStepStatus, MAX_GOAL_OBJECTIVE_CHARS,
+};
 pub(crate) use self::handover::{Handover, HandoverActor};
 // Only the tests name the status directly; production code asks `is_terminal()`.
 #[cfg(test)]

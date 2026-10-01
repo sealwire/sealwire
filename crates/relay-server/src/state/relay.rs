@@ -3,6 +3,7 @@ mod ask_user_question;
 mod background;
 mod delegate_marks;
 mod device;
+mod goal_marks;
 mod injections;
 mod push;
 mod review_marks;
@@ -43,8 +44,9 @@ pub(crate) use self::device::{
     PendingPairingResult, PendingTranscriptDelta, TranscriptDeltaKind,
 };
 pub(crate) use self::injections::{
-    clip_chars, injection_kind_from_name, injection_kind_name, DelegateMark, HandoverMark,
-    InjectedMessage, InjectionTag, Injections, MessageAnchor, ReviewMark, ThreadInjections,
+    clip_chars, injection_kind_from_name, injection_kind_name, DelegateMark, GoalMark,
+    HandoverMark, InjectedMessage, InjectionTag, Injections, MessageAnchor, ReviewMark,
+    ThreadInjections,
 };
 pub(crate) use self::push::{
     is_acceptable_push_endpoint, load_or_generate_vapid, vapid_key_path, PushAttentionTracker,
@@ -1037,6 +1039,7 @@ impl RelayState {
             loaded.handovers,
             loaded.reviews,
             loaded.delegates,
+            loaded.goals,
             loaded.messages,
         );
         self.usage_store = store;
@@ -3147,7 +3150,13 @@ happened, then hand over again."
                 .cmp(&a.updated_at)
                 .then_with(|| b.id.cmp(&a.id))
         });
-        goals.into_iter().map(|goal| goal.view()).collect()
+        goals
+            .into_iter()
+            .map(|goal| crate::protocol::GoalView {
+                provider: self.provider_of_thread(&goal.thread_id),
+                ..goal.view()
+            })
+            .collect()
     }
 
     pub(crate) fn asks_of_asker(&self, asker_thread_id: &str) -> Vec<&Ask> {
@@ -3815,6 +3824,10 @@ so {} never got it — hand over again when you are ready.",
             // the one being driven.
             goal.objective.hash(&mut h);
             goal.outcome.hash(&mut h);
+            // An agent moves several steps inside one second.
+            goal.steps.hash(&mut h);
+            goal.left_for_you.hash(&mut h);
+            goal.options.hash(&mut h);
             acc ^= h.finish().rotate_left(3);
         }
         // The session names the panel is sent: a session is often named after it starts.
@@ -8222,6 +8235,29 @@ mod tests {
             relay.reviews_revision(),
             "the panel lists what the round found, so it has to refetch"
         );
+    }
+
+    #[test]
+    fn a_goals_plan_moves_the_reviews_revision_within_the_same_second() {
+        let mut relay = test_relay();
+        let mut goal = crate::state::Goal::new("g".into(), "t".into(), "ship it".into());
+        goal.plan(&["Design".into(), "Build".into()]).unwrap();
+        relay.set_goal(goal);
+        let pinned = |relay: &mut RelayState| {
+            relay.update_goal("t", |goal| goal.updated_at = 7);
+            relay.reviews_revision()
+        };
+        let before = pinned(&mut relay);
+
+        relay.update_goal("t", |goal| {
+            goal.move_step(1, crate::state::GoalStepStatus::Done, Some("ok"))
+                .unwrap()
+        });
+        let moved = pinned(&mut relay);
+        assert_ne!(before, moved, "the panel draws each step's state");
+
+        relay.update_goal("t", |goal| goal.options = vec!["Use high".into()]);
+        assert_ne!(moved, pinned(&mut relay), "and the answers it offers");
     }
 
     #[test]

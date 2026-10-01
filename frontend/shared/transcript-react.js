@@ -37,6 +37,7 @@ import {
   opensAnsweredTurn,
 } from "./delegate-card.js";
 import { foldHandoverTurns, HandoverSourceEntry, HandoverTargetEntry } from "./handover-card.js";
+import { drawsGoalSettledCard, GoalSettledEntry, GoalTurnLine, goalToolLabel } from "./goal-card.js";
 import {
   foldReviewInjections,
   opensReviewedTurn,
@@ -2036,6 +2037,8 @@ function GenericToolEntry({ entry, isJustPrepended = false, options = null, inGr
   const description = tool.detail && tool.detail !== primary && tool.detail !== nameLabel
     ? tool.detail
     : "";
+  // Named from the call's own arguments; its result is prose written for the agent.
+  const goalLabel = goalToolLabel(tool);
   const inputPreviewText = String(tool.input_preview || "").trim();
   const showInputPreview = Boolean(
     inputPreviewText
@@ -2088,11 +2091,13 @@ function GenericToolEntry({ entry, isJustPrepended = false, options = null, inGr
               itemId,
               expanded,
               status,
-              title: description || nameLabel,
+              title: goalLabel?.title || description || nameLabel,
               // Design 20c-3: on its own the row says what it does; the command waits for the open row.
-              secondary: (primary || (title !== description ? title : "")) && (inGroup || !(tool.command && description))
-                ? renderToolPreviewText(primary || title)
-                : "",
+              secondary: goalLabel
+                ? goalLabel.detail
+                : (primary || (title !== description ? title : "")) && (inGroup || !(tool.command && description))
+                  ? renderToolPreviewText(primary || title)
+                  : "",
               output: tool.result_preview,
               exitLine: tool.name === "Bash",
             }),
@@ -2104,7 +2109,7 @@ function GenericToolEntry({ entry, isJustPrepended = false, options = null, inGr
                   h(
                     "div",
                     { className: "tool-run-detail" },
-                    description ? h("span", { className: "tool-run-name" }, nameLabel) : null,
+                    description || goalLabel ? h("span", { className: "tool-run-name" }, nameLabel) : null,
                     title && title !== description
                       ? h("div", { className: "tool-run-subtitle" }, title)
                       : null,
@@ -2316,6 +2321,10 @@ function kindPhrase(table, kind, count) {
 
 export function workGroupSummary(group) {
   const entries = group?.entries || [];
+  const goal = entries.length === 1 ? goalToolLabel(entries[0]?.tool) : null;
+  if (goal) {
+    return { lead: goal.title, rest: goal.detail ? [goal.detail] : [] };
+  }
   const counts = new Map();
   const bump = (kind) => counts.set(kind, (counts.get(kind) || 0) + 1);
 
@@ -2359,6 +2368,9 @@ function isGroupableFinishedTool(entry) {
     return false;
   }
   if (["delegate_call", "review_call"].includes(entry.injection?.kind) && entry.status === "completed") {
+    return false;
+  }
+  if (drawsGoalSettledCard(entry)) {
     return false;
   }
   // A failure folds too: mid-run it is mostly the agent trying something, and the
@@ -2786,6 +2798,19 @@ export function TranscriptEntry({
   const rowKey = transcriptRowKey(entry) || "";
   const showAvatar = !options?.turnOpenerItemIds || !rowKey || options.turnOpenerItemIds.has(rowKey);
 
+  // Drawn from its card alone, so a shell whose prompt text was dropped is already whole.
+  if (entry?.kind === "user_text" && entry.injection?.kind === "goal_turn" && entry.injection.goal_turn) {
+    return h(GoalTurnLine, {
+      attrs: transcriptEntryDomAttrs(
+        entry,
+        "chat-message",
+        isLatestUser ? { "data-latest-user-message": "true" } : null,
+        { justPrepended: isJustPrepended }
+      ),
+      entry,
+    });
+  }
+
   if (entry?.content_state === "omitted") {
     return h(OmittedEntry, { entry, isJustPrepended, provider, showAvatar });
   }
@@ -2834,6 +2859,21 @@ export function TranscriptEntry({
     return h(ReviewCallEntry, {
       attrs: transcriptEntryDomAttrs(entry, "chat-message chat-message-assistant"),
       entry, provider, providerIcon: providerIconSvg(provider) || SPARKLES_SVG,
+    });
+  }
+
+  if (drawsGoalSettledCard(entry)) {
+    return h(GoalSettledEntry, {
+      attrs: transcriptEntryDomAttrs(
+        entry,
+        `chat-message chat-message-assistant${showAvatar ? "" : " is-turn-continued"}`,
+        null,
+        { justPrepended: isJustPrepended }
+      ),
+      entry,
+      showAvatar,
+      provider,
+      providerIcon: providerIconSvg(provider) || SPARKLES_SVG,
     });
   }
 
@@ -3347,7 +3387,7 @@ function computeTurnOpenerIds(entries) {
   for (const entry of entries) {
     if (entry?.kind === "user_text") {
       opened = opensReviewedTurn(entry) || opensAnsweredTurn(entry);
-    } else if (entry?.kind === "agent_text" && !opened) {
+    } else if ((entry?.kind === "agent_text" || drawsGoalSettledCard(entry)) && !opened) {
       opened = true;
       const id = transcriptRowKey(entry);
       if (id) openers.add(id);

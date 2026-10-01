@@ -21,6 +21,9 @@ import { useDismissableMenu } from "./use-dismissable-menu.js";
 import { isTerminalReviewStatus } from "./review-state.js";
 import { CODE_FLOW_ENABLED } from "./workflow-state.js";
 import { goalObjectiveLengthNotice } from "./goal-objective.js";
+import { GoalLeftForYou, goalListOf, GoalSteps, goalStepsDone, goalStepsOf } from "./goal-card.js";
+import { Spinner } from "./card-parts.js";
+import { providerLabel } from "./provider-labels.js";
 import { ModelRequestBlock } from "./model-request-card.js";
 
 const h = React.createElement;
@@ -193,9 +196,9 @@ function LedgerMenu({ items, label = "More actions" }) {
 
 // What this session is working toward.
 //
-// The wording is load-bearing: "reports complete", never "complete". The relay
-// carries the work without reading it, so it cannot tell you the goal is met —
-// only that the agent says so.
+// The wording is load-bearing: "<agent> says done", never "done". The relay carries the
+// work without reading it, so it cannot tell you the goal is met — only that the agent
+// says so.
 // Shared with the tab marker in right-panel-tabs.js: the states the relay cannot
 // move past on its own are exactly the ones whose text has to be readable.
 export const GOAL_STATES_NEEDING_USER = new Set([
@@ -207,12 +210,20 @@ export const GOAL_STATES_NEEDING_USER = new Set([
 
 const GOAL_STATUS_LABEL = {
   active: "Working",
-  awaiting_user: "Waiting on you",
-  complete_claimed: "Agent reports complete",
+  awaiting_user: "Needs you",
   blocked: "Stuck",
   out_of_turns: "Out of turns",
-  interrupted: "Stopped — pick it back up",
+  interrupted: "Stopped",
 };
+
+const GOAL_FLAG_TONE = { awaiting_user: "needs-you", blocked: "blocker" };
+
+function goalStatusLabel(goal) {
+  if (goal.status === "complete_claimed") {
+    return `${providerLabel(goal.provider) || "The agent"} says done`;
+  }
+  return GOAL_STATUS_LABEL[goal.status] || goal.status;
+}
 
 // The warning and its way out. A refusal is superseded by the next goal action, but the
 // one that CANCELS the goal takes its own buttons away — so without this the last word
@@ -254,31 +265,135 @@ function expandToggleProps(expanded, setExpanded, showMoreTitle) {
   };
 }
 
+// On a phone this panel is a modal <dialog>, and the composer behind it is inert until
+// the dialog closes — so a button that sends the person to the composer leaves it first.
+function leavingPanel(callback) {
+  return (event) => {
+    event?.currentTarget?.closest?.("dialog[open]")?.close?.();
+    callback();
+  };
+}
+
+function GoalButton({ primary = false, onClick, children }) {
+  return h(
+    "button",
+    {
+      className: `reviewer-card-button${primary ? " is-primary" : ""}`,
+      onClick,
+      type: "button",
+    },
+    children
+  );
+}
+
+function GoalLink({ quiet = false, onClick, children }) {
+  return h(
+    "button",
+    { className: `reviewer-goal-link${quiet ? " is-quiet" : ""}`, onClick, type: "button" },
+    children
+  );
+}
+
+function GoalActions({ goal, steps, onStop, onResume, onEdit, onReply, onSendOption }) {
+  const stop = onStop ? () => onStop() : null;
+  const resume = onResume ? () => onResume(goal.objective) : null;
+  const reply = onReply ? leavingPanel(() => onReply()) : null;
+  const spacer = h("span", { className: "reviewer-goal-spacer", key: "spacer" });
+  if (goal.status === "active") {
+    if (!steps.length && !onEdit && !stop) {
+      return null;
+    }
+    const done = goalStepsDone(steps);
+    return h(
+      "div",
+      { className: "reviewer-goal-foot" },
+      steps.length
+        ? h("span", { className: "reviewer-goal-progress" }, `${done} of ${steps.length} done`)
+        : null,
+      spacer,
+      onEdit ? h(GoalLink, { onClick: leavingPanel(() => onEdit(goal.objective)) }, "Edit") : null,
+      stop ? h(GoalLink, { quiet: true, onClick: stop }, "Cancel") : null
+    );
+  }
+  if (goal.status === "complete_claimed") {
+    return h(
+      "div",
+      { className: "reviewer-card-actions" },
+      resume ? h(GoalButton, { onClick: resume }, "Not done — keep going") : null,
+      spacer,
+      stop ? h(GoalLink, { onClick: stop }, "Mark done") : null
+    );
+  }
+  if (goal.status === "awaiting_user") {
+    return h(
+      "div",
+      { className: "reviewer-card-actions is-wrapping" },
+      ...(onSendOption ? goalListOf(goal.options) : []).map((option, index) =>
+        h(GoalButton, { key: `${index}:${option}`, primary: true, onClick: () => onSendOption(option) }, option)
+      ),
+      reply ? h(GoalButton, { key: "reply", onClick: reply }, "Reply…") : null
+    );
+  }
+  if (goal.status === "blocked") {
+    return h(
+      "div",
+      { className: "reviewer-card-actions" },
+      reply ? h(GoalButton, { onClick: reply }, "Reply…") : null,
+      spacer,
+      stop ? h(GoalLink, { quiet: true, onClick: stop }, "Cancel goal") : null
+    );
+  }
+  // Out of turns or interrupted: the same objective can be picked back up.
+  return h(
+    "div",
+    { className: "reviewer-card-actions" },
+    resume ? h(GoalButton, { onClick: resume }, "Keep going") : null,
+    spacer,
+    stop ? h(GoalLink, { quiet: true, onClick: stop }, "Cancel goal") : null
+  );
+}
+
 // Above the review slot, because it outranks it: a review judges one commit, the goal is
 // the standing objective every commit — and every review — is in service of.
-function GoalSlot({ goal, error = "", onDismissError = null, onStop = null, onResume = null }) {
+function GoalSlot({
+  goal,
+  error = "",
+  onDismissError = null,
+  onStop = null,
+  onResume = null,
+  onEdit = null,
+  onReply = null,
+  onSendOption = null,
+}) {
   const working = goal.status === "active";
-  const status = GOAL_STATUS_LABEL[goal.status] || goal.status;
+  const steps = goalStepsOf(goal);
   const [expanded, setExpanded] = React.useState(false);
   // Keyed to the text, so a later report starts clamped instead of inheriting "open".
   const [expandedReport, setExpandedReport] = React.useState(null);
   const reportExpanded = expandedReport !== null && expandedReport === goal.outcome;
   const setReportExpanded = (next) =>
     setExpandedReport(next(reportExpanded) ? goal.outcome : null);
-  // "complete_claimed" still needs the user, but its outcome is a report, not a question.
-  const outcomeIsQuestion =
-    GOAL_STATES_NEEDING_USER.has(goal.status) && goal.status !== "complete_claimed";
+  // A QUESTION the run is stopped on is shown whole: two clamped lines of it is a decision
+  // nobody can make. A completion's report stays in the transcript's card.
+  const outcomeIsQuestion = Boolean(GOAL_FLAG_TONE[goal.status]);
+  const showOutcome = Boolean(goal.outcome) && !working && goal.status !== "complete_claimed";
+  const statusTone = {
+    active: "is-live",
+    complete_claimed: "is-pass",
+    awaiting_user: "is-needs-you",
+    blocked: "is-blocker",
+  }[goal.status] || "";
   return h(
     React.Fragment,
     null,
     h(LedgerHeading, {
       label: "Goal",
-      meta: working ? `Turn ${goal.turns} of ${goal.max_turns}` : `${goal.turns} turns used`,
+      meta: working ? `turn ${goal.turns} of ${goal.max_turns}` : `${goal.turns} turns used`,
       trailing: h(
         "span",
-        { className: `reviewer-goal-status${working ? " is-live" : ""}` },
-        working ? h(LiveDot) : null,
-        status
+        { className: `reviewer-goal-status ${statusTone}` },
+        working ? h(Spinner) : null,
+        goalStatusLabel(goal)
       ),
     }),
     h(
@@ -305,11 +420,13 @@ function GoalSlot({ goal, error = "", onDismissError = null, onStop = null, onRe
       // Beside the button that was refused. On a phone this card is inside a native
       // <dialog>, so anything reported to the composer is behind an inert layer.
       error ? h(GoalErrorLine, { error, onDismiss: onDismissError }) : null,
-      goal.outcome
+      h(GoalSteps, { steps, live: working, flagTone: GOAL_FLAG_TONE[goal.status] || "" }),
+      goal.status === "complete_claimed"
+        ? h(GoalLeftForYou, { items: goalListOf(goal.left_for_you) })
+        : null,
+      showOutcome
         ? h(
             "p",
-            // A QUESTION the run is stopped on is shown whole: two clamped lines of it is
-            // a decision nobody can make. A report is a preview, like the title.
             outcomeIsQuestion
               ? { className: "reviewer-card-result is-question" }
               : {
@@ -321,32 +438,15 @@ function GoalSlot({ goal, error = "", onDismissError = null, onStop = null, onRe
             goal.outcome
           )
         : null,
-      working || onResume
-        ? h(
-            "div",
-            { className: "reviewer-card-actions" },
-            working && onStop
-              ? h(
-                  "button",
-                  { className: "reviewer-card-button", onClick: () => onStop(), type: "button" },
-                  "Stop"
-                )
-              : null,
-            // Everything that is not active can be picked back up — including a
-            // completion claim you do not accept.
-            !working && onResume
-              ? h(
-                  "button",
-                  {
-                    className: "reviewer-card-button",
-                    onClick: () => onResume(goal.objective),
-                    type: "button",
-                  },
-                  goal.status === "complete_claimed" ? "Not done — keep going" : "Keep going"
-                )
-              : null
-          )
-        : null
+      h(GoalActions, {
+        goal,
+        steps,
+        onStop,
+        onResume,
+        onEdit,
+        onReply,
+        onSendOption,
+      })
     )
   );
 }
@@ -857,6 +957,12 @@ export function ReviewerPanel({
   onDismissGoalError = null,
   onStopGoal = null,
   onResumeGoal = null,
+  // Put `/goal <objective>` in this thread's composer, to be edited and sent again.
+  onEditGoal = null,
+  // Send the person to this thread's composer; any reply resumes a waiting goal.
+  onReplyGoal = null,
+  // One of the answers the agent offered, sent as the person's own message.
+  onSendGoalOption = null,
   onOpenThread = null,
   workflowRuns = [],
   reviewModel = {},
@@ -937,6 +1043,9 @@ export function ReviewerPanel({
             onDismissError: onDismissGoalError,
             onResume: onResumeGoal,
             onStop: onStopGoal,
+            onEdit: onEditGoal,
+            onReply: onReplyGoal,
+            onSendOption: onSendGoalOption,
           })
         : // A Stop that partly succeeded takes the card away and still has something the
           // user must read — "stopped, but the turn it started is still running". Without

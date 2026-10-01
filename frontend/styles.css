@@ -1,6 +1,7 @@
 @import "./conversation.css";
 @import "./review-cards.css";
 @import "./delegate-cards.css";
+@import "./goal-cards.css";
 
 :root {
   color-scheme: dark;
@@ -7550,18 +7551,97 @@ body.is-resizing-panel {
   white-space: nowrap;
 }
 .reviewer-goal-status.is-live {
-  color: var(--accent);
+  color: var(--text-secondary);
+}
+.reviewer-goal-status.is-pass {
+  color: var(--ok-fg);
+}
+.reviewer-goal-status.is-needs-you {
+  color: var(--warn-fg);
+}
+.reviewer-goal-status.is-blocker {
+  color: var(--err-fg);
 }
 .reviewer-goal {
+  gap: 12px;
+  padding: 14px 14px 12px;
   border-color: var(--border-subtle);
   background: var(--surface-1);
 }
 /* Standing aim and finished report — clamped by default; click to expand in place. */
 .reviewer-goal-title {
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  font-size: var(--text-body);
+  line-height: var(--leading-normal);
+}
+.reviewer-goal .reviewer-card-actions {
+  gap: 10px;
+  margin-top: 0;
+}
+.reviewer-goal .reviewer-card-actions.is-wrapping {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* An offered answer can be a sentence; it wraps rather than running off the card. */
+.reviewer-goal .reviewer-card-button {
+  height: auto;
+  min-height: 30px;
+  max-width: 100%;
+  padding-top: 5px;
+  padding-bottom: 5px;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.reviewer-card-button.is-primary {
+  background: var(--text-primary);
+  color: var(--bg-surface);
+}
+.reviewer-card-button.is-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text-primary) 86%, var(--bg-surface));
+}
+.reviewer-goal-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-faint);
+}
+.reviewer-goal-progress {
+  flex: none;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+.reviewer-goal-spacer {
+  flex: 1;
+}
+.reviewer-goal-link {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--accent);
+  cursor: pointer;
+}
+.reviewer-goal-link:hover {
+  background: none;
+  text-decoration: underline;
+}
+.reviewer-goal-link.is-quiet {
+  color: var(--text-secondary);
+}
+.reviewer-goal-link.is-quiet:hover {
+  color: var(--err-fg);
+  text-decoration: none;
+}
+.reviewer-goal-link:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
 }
 .reviewer-goal-title,
 .reviewer-goal-report {

@@ -5,7 +5,9 @@
 //! accept — see `crates/relay-server/src/state/goal.rs` for why the objective
 //! is not something an agent can write.
 
-use crate::state::{relay::RelayState, unix_now, AppState, Goal, GoalStatus};
+use crate::state::{
+    relay::RelayState, unix_now, AppState, Goal, GoalSettlement, GoalStatus, GoalStepStatus,
+};
 
 /// Scope a goal write exactly as the panel scopes its READ, so a device can only point a
 /// goal at — or erase one from — a session it can see. "No such session" rather than a
@@ -31,18 +33,54 @@ pub(crate) fn ensure_thread_in_device_scope(
 /// The objective goes in whole, every time. A summary would be the very drift
 /// this exists to prevent, and after a compaction the summary is all that is
 /// left of the original.
-fn continuation(objective: &str, turns: u32, max_turns: u32) -> String {
+fn continuation(goal: &Goal, max_turns: u32) -> String {
     format!(
         "This session is working toward a goal the user set. It is theirs, not \
 yours to change or narrow:\n\n{objective}\n\nThat is still the whole of it. \
 Look at where things actually stand against every part of it, and carry on — \
-bring in another agent if that helps.\n\nThe user set this goal in Sealwire and wants \
-it run through Sealwire's tools, not a goal tool of your own such as `create_goal`. \
+bring in another agent if that helps.\n\n{plan}\n\nThe user set this goal in Sealwire and \
+wants it run through Sealwire's tools, not a goal tool of your own such as `create_goal`. \
 Stop only by calling one of \
-`goal_complete` (with what you did and how you know), `goal_blocked` (with what \
-stopped you), or `goal_needs_you` (with the decision you need). Saying you are \
-done in prose does not end it. Turn {next} of {max_turns}.",
-        next = turns + 1,
+`goal_complete` (with what you did and how you know, and anything left for the user), \
+`goal_blocked` (with what stopped you), or `goal_needs_you` (with the decision you need). \
+Saying you are done in prose does not end it. Turn {next} of {max_turns}.",
+        objective = goal.objective,
+        plan = plan_text(goal),
+        next = goal.turns + 1,
+    )
+}
+
+/// The plan as the agent reads it back: the user sees these lines, so they are the
+/// agent's own words, numbered as `goal_step` takes them.
+fn plan_text(goal: &Goal) -> String {
+    if goal.steps.is_empty() {
+        return "Before you start, write your plan with `goal_plan`: 3–7 milestone steps the \
+user can follow at a glance. Then mark each with `goal_step` — active when you start it, done \
+with a one-line note when it is."
+            .to_string();
+    }
+    let lines: Vec<String> = goal
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            let note = step
+                .note
+                .as_deref()
+                .map(|note| format!(" — {note}"))
+                .unwrap_or_default();
+            format!(
+                "{}. [{}] {}{note}",
+                index + 1,
+                step.status.as_str(),
+                step.title
+            )
+        })
+        .collect();
+    format!(
+        "Your plan so far (yours to change with `goal_plan`):\n{}\nKeep it current with \
+`goal_step`: active when you start a step, done with a one-line note when it is.",
+        lines.join("\n")
     )
 }
 
@@ -85,6 +123,36 @@ fn thread_is_lent_to_a_review(relay: &crate::state::RelayState, thread_id: &str)
     relay.is_thread_review_locked(thread_id)
 }
 
+/// What a goal card's buttons do. Answering a question is not here: that is a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GoalCardAction {
+    KeepGoing,
+    Stop,
+}
+
+impl GoalCardAction {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "keep_going" => Some(Self::KeepGoing),
+            "stop" => Some(Self::Stop),
+            _ => None,
+        }
+    }
+}
+
+fn ensure_goal_on_card(relay: &RelayState, thread_id: &str, seq: u32) -> Result<(), String> {
+    let on_it = relay
+        .goal_for_thread(thread_id)
+        .is_some_and(|goal| goal.settlement_seq == Some(seq));
+    if on_it {
+        return Ok(());
+    }
+    Err(
+        "this card is out of date — the goal has moved on since; act on it from the Agents panel"
+            .to_string(),
+    )
+}
+
 impl AppState {
     /// Set or replace the goal for a thread. A person's action, always.
     /// `device_id` is `None` for the local operator, which is scoped by relay roots alone.
@@ -98,12 +166,56 @@ impl AppState {
         reset_turns: bool,
         ingress: Option<u64>,
     ) -> Result<(), String> {
-        let thread_id = self.canonical_session_id(thread_id).await?;
-        let thread_id = thread_id.as_str();
-        let objective = objective.trim().to_string();
+        let objective = objective.trim();
         if objective.is_empty() {
             return Err("say what you want done".to_string());
         }
+        self.write_goal(
+            thread_id,
+            Some(objective),
+            device_id,
+            reset_turns,
+            ingress,
+            None,
+        )
+        .await
+    }
+
+    /// A card's button, checked against the card the goal is on NOW, under the same lock
+    /// that acts: a client's copy of the goal can be stale, and a stale "keep going" would
+    /// write back words someone has since replaced.
+    pub(crate) async fn act_on_goal_card(
+        &self,
+        thread_id: &str,
+        seq: u32,
+        action: GoalCardAction,
+        device_id: Option<&str>,
+        ingress: Option<u64>,
+    ) -> Result<(), String> {
+        match action {
+            GoalCardAction::KeepGoing => {
+                self.write_goal(thread_id, None, device_id, false, ingress, Some(seq))
+                    .await
+            }
+            GoalCardAction::Stop => {
+                self.stop_goal(thread_id, device_id, ingress, Some(seq))
+                    .await
+            }
+        }
+    }
+
+    /// `objective: None` keeps the words the relay already holds.
+    async fn write_goal(
+        &self,
+        thread_id: &str,
+        objective: Option<&str>,
+        device_id: Option<&str>,
+        reset_turns: bool,
+        ingress: Option<u64>,
+        card: Option<u32>,
+    ) -> Result<(), String> {
+        let thread_id = self.canonical_session_id(thread_id).await?;
+        let thread_id = thread_id.as_str();
         // The same slot every other session-changing operation takes. Without it this
         // raced them all: the driver charges a turn and sends inside this slot, so a
         // revision could land in the window where a turn is owed and has no id yet, and a
@@ -147,6 +259,16 @@ to one of your own sessions"
                     .to_string(),
             );
         }
+        if let Some(seq) = card {
+            ensure_goal_on_card(&relay, thread_id, seq)?;
+        }
+        let objective = match objective {
+            Some(objective) => objective.to_string(),
+            None => relay
+                .goal_for_thread(thread_id)
+                .map(|goal| goal.objective.clone())
+                .ok_or_else(|| "this session has no goal".to_string())?,
+        };
         // "Keep going" resubmits the stored objective. Cap new/changed aims only —
         // otherwise a pre-cap status dump can never be resumed.
         let resuming_same = relay
@@ -181,6 +303,8 @@ to one of your own sessions"
             // hand-over stays open when its turn ends without reporting, and the person
             // may well have typed one of their own in that window.
             let running = goal.dispatch_turn_id.clone();
+            let left = goal.clone();
+            relay.resolve_goal_settlement(&left, "reopened");
             relay.update_goal(thread_id, |goal| {
                 goal.revise(objective.clone(), reset_turns)
             });
@@ -247,6 +371,16 @@ still running — the agent may still be working to it. Stop the session itself 
         device_id: Option<&str>,
         ingress: Option<u64>,
     ) -> Result<(), String> {
+        self.stop_goal(thread_id, device_id, ingress, None).await
+    }
+
+    async fn stop_goal(
+        &self,
+        thread_id: &str,
+        device_id: Option<&str>,
+        ingress: Option<u64>,
+        card: Option<u32>,
+    ) -> Result<(), String> {
         let thread_id = self.canonical_session_id(thread_id).await?;
         let thread_id = thread_id.as_str();
         // As above. A stop landing while the driver was between charging a turn and
@@ -257,6 +391,10 @@ still running — the agent may still be working to it. Stop the session itself 
         let (handed_over, goal_turn) = {
             let mut relay = self.relay.write().await;
             ensure_thread_in_device_scope(&relay, thread_id, device_id)?;
+            // Before the claim: a stale card changed nothing, so it holds no position.
+            if let Some(seq) = card {
+                ensure_goal_on_card(&relay, thread_id, seq)?;
+            }
             // Claimed before the existence check on purpose: a Stop that finds no goal
             // still has to hold the position, or a Set that arrived BEFORE it lands
             // afterwards and starts one the user has already stopped.
@@ -273,6 +411,8 @@ still running — the agent may still be working to it. Stop the session itself 
             // And WHICH turn, for the same reason a revision needs it: "stop this
             // session's turn" stops whatever the person happens to be doing.
             let goal_turn = goal.dispatch_turn_id.clone();
+            let left = goal.clone();
+            relay.resolve_goal_settlement(&left, RelayState::stop_resolution(left.status));
             relay.update_goal(thread_id, |goal| {
                 goal.settle(GoalStatus::Cancelled, "stopped by the user")
             });
@@ -327,8 +467,9 @@ still be working. Stop the session itself to be sure."
         let relay = self.relay.read().await;
         match relay.goal_for_thread(thread_id) {
             Some(goal) => format!(
-                "Goal (set by the user, not yours to change):\n\n{}\n\nStatus: {}. Turn {} of {}.",
+                "Goal (set by the user, not yours to change):\n\n{}\n\n{}\n\nStatus: {}. Turn {} of {}.",
                 goal.objective,
+                plan_text(goal),
                 goal.status.as_str(),
                 goal.turns,
                 crate::state::goal_max_turns(),
@@ -337,14 +478,69 @@ still be working. Stop the session itself to be sure."
         }
     }
 
+    /// The agent's plan. Returns how many steps it has.
+    pub(crate) async fn plan_goal(
+        &self,
+        thread_id: &str,
+        steps: &[String],
+    ) -> Result<usize, String> {
+        let mut relay = self.relay.write().await;
+        let Some(goal) = relay.goal_for_thread(thread_id) else {
+            return Err("this session has no goal".to_string());
+        };
+        // The plan is part of what a turn reports, so the same turn rule as settling:
+        // not a turn from before a revision, and nothing after the claim it was part of.
+        if !goal.dispatch_open {
+            return Err(
+                "you have not been given this goal to work on — wait until it is handed to you"
+                    .to_string(),
+            );
+        }
+        let mut planned = goal.clone();
+        planned.plan(steps)?;
+        let total = planned.steps.len();
+        relay.update_goal(thread_id, |goal| *goal = planned);
+        relay.sync_goal_turn_line(thread_id);
+        relay.notify();
+        Ok(total)
+    }
+
+    pub(crate) async fn move_goal_step(
+        &self,
+        thread_id: &str,
+        step: i64,
+        status: &str,
+        note: Option<&str>,
+    ) -> Result<(), String> {
+        let status = GoalStepStatus::parse(status)
+            .ok_or_else(|| "status must be active, done or pending".to_string())?;
+        let mut relay = self.relay.write().await;
+        let Some(goal) = relay.goal_for_thread(thread_id) else {
+            return Err("this session has no goal".to_string());
+        };
+        if !goal.dispatch_open {
+            return Err(
+                "you have not been given this goal to work on — wait until it is handed to you"
+                    .to_string(),
+            );
+        }
+        let mut moved = goal.clone();
+        moved.move_step(step, status, note)?;
+        relay.update_goal(thread_id, |goal| *goal = moved);
+        relay.sync_goal_turn_line(thread_id);
+        relay.notify();
+        Ok(())
+    }
+
     /// How the agent says it has stopped. It may say how, never what the goal is.
+    /// Returns the goal and settlement its call's row is drawn as.
     pub(crate) async fn settle_goal(
         &self,
         thread_id: &str,
         status: GoalStatus,
-        outcome: String,
-    ) -> Result<(), String> {
-        let outcome = outcome.trim().to_string();
+        settlement: GoalSettlement,
+    ) -> Result<Option<(String, u32)>, String> {
+        let outcome = settlement.outcome.trim().to_string();
         if outcome.is_empty() {
             return Err("say why — a bare status tells the user nothing".to_string());
         }
@@ -362,9 +558,38 @@ still be working. Stop the session itself to be sure."
                     .to_string(),
             );
         }
-        relay.update_goal(thread_id, |goal| goal.settle(status, outcome.clone()));
+        let left_for_you = crate::state::goal::clean_list(
+            &settlement.left_for_you,
+            crate::state::goal::MAX_GOAL_LEFT_FOR_YOU,
+        );
+        let options = crate::state::goal::clean_list(
+            &settlement.options,
+            crate::state::goal::MAX_GOAL_OPTIONS,
+        );
+        relay.update_goal(thread_id, |goal| {
+            goal.settle(status, outcome.clone());
+            goal.left_for_you = left_for_you;
+            goal.options = options;
+        });
+        let drawn = relay.record_goal_settlement(thread_id);
         relay.notify();
-        Ok(())
+        Ok(drawn)
+    }
+
+    /// The person wrote to a session whose goal is waiting on them: that is the answer.
+    pub(crate) async fn resume_goal_on_reply(&self, thread_id: &str) {
+        let mut relay = self.relay.write().await;
+        let Some(goal) = relay.goal_for_thread(thread_id).cloned() else {
+            return;
+        };
+        if !matches!(goal.status, GoalStatus::AwaitingUser | GoalStatus::Blocked) {
+            return;
+        }
+        relay.resolve_goal_settlement(&goal, "answered");
+        relay.update_goal(thread_id, |goal| {
+            goal.resume_on_reply();
+        });
+        relay.notify();
     }
 
     /// A stop the user pressed ends the RUN, not just the turn in flight.
@@ -499,7 +724,7 @@ still be working. Stop the session itself to be sure."
             // Everything the decision rests on is re-read under this one write
             // lock, because each was checked against a snapshot that has since
             // been dropped.
-            let (prompt, generation) = {
+            let (prompt, generation, line) = {
                 let mut relay = self.relay.write().await;
                 let Some(goal) = relay.goal_for_thread(&thread_id) else {
                     continue;
@@ -559,21 +784,28 @@ running — set the goal again once it is free",
                     relay.notify();
                     continue;
                 }
-                let text =
-                    continuation(&goal.objective, goal.turns, crate::state::goal_max_turns());
+                let text = continuation(goal, crate::state::goal_max_turns());
                 relay.update_goal(&thread_id, |goal| goal.hand_over());
                 let generation = relay
                     .goal_for_thread(&thread_id)
                     .map(|goal| goal.dispatch_generation)
                     .unwrap_or_default();
+                let line = relay.open_goal_turn_line(&thread_id);
                 relay.notify();
-                (text, generation)
+                (text, generation, line)
             };
 
-            match self
-                .send_message_to_thread(&thread_id, &prompt, None, None)
-                .await
-            {
+            let sent = match line {
+                Some(tag) => {
+                    self.send_injected(tag, &thread_id, &prompt, None, None)
+                        .await
+                }
+                None => {
+                    self.send_message_to_thread(&thread_id, &prompt, None, None)
+                        .await
+                }
+            };
+            match sent {
                 // Charged anyway. A failed start does not prove the provider
                 // never began, and an uncounted turn that actually ran is how the
                 // cap gets beaten.

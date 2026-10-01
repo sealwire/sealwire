@@ -2509,6 +2509,12 @@ export function stopRemoteGoal(threadId) {
   return dispatchGoal(threadId, "stop_goal", {}, "Stopping the goal…");
 }
 
+// A transcript card's button. The relay refuses unless the goal still sits on card `seq`,
+// and keeps going on the objective it holds, so no words travel from this device's copy.
+export function actOnRemoteGoalCard(threadId, seq, action) {
+  return dispatchGoal(threadId, "goal_card", { seq, action }, "Updating the goal…");
+}
+
 // A person's `/delegate`, which is not the peer tool an agent calls: the words are
 // expanded into a brief first, because the agent starting from nothing cannot see
 // this conversation.

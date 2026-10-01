@@ -15,7 +15,7 @@ use super::{pricing, TokenUsage};
 
 /// Bumped only by adding a numbered migration below. `user_version` is a plain
 /// integer SQLite keeps in the file header, so this needs no table of its own.
-const LEDGER_SCHEMA_VERSION: i64 = 14;
+const LEDGER_SCHEMA_VERSION: i64 = 15;
 
 /// The relay's one database, beside `session.json`.
 pub(crate) fn database_path(state_path: &Path) -> PathBuf {
@@ -2013,6 +2013,20 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         batch.push_str("PRAGMA user_version = 14;\nCOMMIT;");
         conn.execute_batch(&batch)
             .map_err(|error| format!("migrate to 14: {error}"))?;
+    }
+
+    if version < 15 {
+        conn.execute_batch(
+            "BEGIN;
+             CREATE TABLE IF NOT EXISTS goal_mark (
+                 id         TEXT PRIMARY KEY,
+                 body       TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL
+             );
+             PRAGMA user_version = 15;
+             COMMIT;",
+        )
+        .map_err(|error| format!("migrate to 15: {error}"))?;
     }
 
     Ok(())

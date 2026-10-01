@@ -125,6 +125,19 @@ export function resolveTranscriptAction(target) {
     };
   }
 
+  const goalButton = closest("[data-goal-action]");
+  if (goalButton) {
+    return {
+      kind: "goalAction",
+      element: goalButton,
+      action: goalButton.dataset.goalAction || "",
+      threadId: goalButton.dataset.threadId || "",
+      goalId: goalButton.dataset.goalId || "",
+      seq: goalButton.dataset.goalSeq || "",
+      option: goalButton.dataset.goalOption || "",
+    };
+  }
+
   const openThreadButton = closest("[data-open-thread-id]");
   if (openThreadButton) {
     return {

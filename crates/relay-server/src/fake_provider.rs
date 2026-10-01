@@ -115,6 +115,14 @@ struct FakeReportBack {
     cited: Vec<String>,
 }
 
+/// Any Sealwire tool, called the way a real provider's MCP bridge calls it.
+#[derive(Clone, Debug, Deserialize)]
+struct FakePeerCall {
+    name: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 struct FakeTurnScenario {
     reply: Option<String>,
@@ -147,6 +155,9 @@ struct FakeTurnScenario {
     /// provider's MCP bridge would: a tool row, then a call to the relay's own route.
     #[serde(default)]
     report_back: Option<FakeReportBack>,
+    /// Sealwire tools to call, in order, after `report_back`.
+    #[serde(default)]
+    peer_calls: Vec<FakePeerCall>,
     #[serde(default)]
     duplicate_chunk_indices: Vec<usize>,
     #[serde(default)]
@@ -1310,6 +1321,10 @@ impl ProviderBridge for FakeProviderBridge {
         let report_back = scenario
             .as_ref()
             .and_then(|scenario| scenario.report_back.clone());
+        let peer_calls = scenario
+            .as_ref()
+            .map(|scenario| scenario.peer_calls.clone())
+            .unwrap_or_default();
         let write_files = scenario
             .as_ref()
             .map(|scenario| scenario.write_files.clone())
@@ -2027,6 +2042,10 @@ impl ProviderBridge for FakeProviderBridge {
             if let Some(report) = &report_back {
                 tool_entries
                     .push(fake_report_back(&state, &thread_id, &turn_id_for_task, report).await);
+            }
+            for (index, call) in peer_calls.iter().enumerate() {
+                tool_entries
+                    .push(fake_peer_call(&state, &thread_id, &turn_id_for_task, index, call).await);
             }
 
             // 4. Begin the agent reply.
@@ -2804,6 +2823,84 @@ async fn fake_report_back(
         kind: TranscriptEntryKind::ToolCall,
         text: None,
         status: "completed".to_string(),
+        turn_id: Some(turn_id.to_string()),
+        tool: Some(tool),
+        content_state: crate::protocol::TranscriptContentState::Full,
+        injection: None,
+    }
+}
+
+/// The row lands running, the call is made, and the result is read back onto the row
+/// as a bridge does — including the relay's `_meta` that ties the row to a card.
+async fn fake_peer_call(
+    state: &Arc<RwLock<RelayState>>,
+    thread_id: &str,
+    turn_id: &str,
+    index: usize,
+    call: &FakePeerCall,
+) -> TranscriptEntryView {
+    let item_id = format!("{turn_id}-peer-{index}");
+    let mut tool = ToolCallView {
+        item_type: "mcpToolCall".to_string(),
+        name: format!("mcp__sealwire__{}", call.name),
+        title: call.name.clone(),
+        input_preview: Some(call.arguments.to_string()),
+        ..ToolCallView::command_execution(None)
+    };
+    let upsert = |relay: &mut RelayState, tool: &ToolCallView, status: &str| {
+        relay.upsert_transcript_item_for_thread(
+            thread_id,
+            item_id.clone(),
+            TranscriptEntryKind::ToolCall,
+            None,
+            status.to_string(),
+            Some(turn_id.to_string()),
+            Some(tool.clone()),
+        );
+        relay.notify();
+    };
+    let token = {
+        let mut relay = state.write().await;
+        upsert(&mut relay, &tool, "running");
+        relay.ask_token_for_thread(thread_id)
+    };
+    let url = format!(
+        "{}/api/orchestrator/tools/{}/call",
+        crate::provider::sealwire_relay_url(),
+        call.name
+    );
+    let mut request = reqwest::Client::new()
+        .post(url)
+        .json(&serde_json::json!({ "arguments": call.arguments, "ask_token": token }));
+    if let Some(api_token) = crate::provider::sealwire_relay_api_token() {
+        request = request.bearer_auth(api_token);
+    }
+    let envelope = match request.send().await {
+        Ok(response) => response
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or_default(),
+        Err(error) => {
+            tracing::warn!("fake {} could not reach the relay: {error}", call.name);
+            serde_json::Value::Null
+        }
+    };
+    tool.result_preview = envelope["content"][0]["text"].as_str().map(str::to_string);
+    let failed = envelope["isError"].as_bool().unwrap_or(true);
+    let status = if failed { "failed" } else { "completed" };
+    {
+        let mut relay = state.write().await;
+        upsert(&mut relay, &tool, status);
+        relay.mark_peer_tool_result(thread_id, &item_id, &tool.name, &envelope);
+    }
+    TranscriptEntryView {
+        row_id: None,
+        order_seq: None,
+        withdrawn: false,
+        item_id: Some(item_id),
+        kind: TranscriptEntryKind::ToolCall,
+        text: None,
+        status: status.to_string(),
         turn_id: Some(turn_id.to_string()),
         tool: Some(tool),
         content_state: crate::protocol::TranscriptContentState::Full,

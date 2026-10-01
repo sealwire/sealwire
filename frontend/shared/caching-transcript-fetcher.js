@@ -105,6 +105,10 @@ export function isVolatileEntry(entry) {
   ) {
     return true;
   }
+  // A settled goal's card keeps its buttons until the person answers it.
+  if (entry?.injection?.goal_settled && !entry.injection.goal_settled.resolution) {
+    return true;
+  }
   const status = typeof entry?.status === "string" ? entry.status.trim().toLowerCase() : "";
   return VOLATILE_ENTRY_STATUSES.has(status);
 }

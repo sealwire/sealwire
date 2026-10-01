@@ -314,6 +314,8 @@ mod delegation;
 mod fork;
 mod git_context;
 mod goal;
+#[cfg(test)]
+mod goal_card_tests;
 mod handover;
 mod handover_marks;
 mod injection_marks;
@@ -345,6 +347,7 @@ mod threads;
 mod transcript;
 #[cfg(test)]
 mod usage_report_tests;
+pub(crate) use goal::GoalCardAction;
 pub(crate) use thread_workspace::ThreadWorkspaceError;
 pub(crate) use transcript::TranscriptReadError;
 mod workflow;

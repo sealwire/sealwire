@@ -42,6 +42,12 @@ impl RelayState {
                     self.mark_review_call(id, thread_id, item_id);
                 }
             }
+            "goal_complete" | "goal_blocked" | "goal_needs_you" => {
+                let seq = result_id(result, "goal_seq").and_then(|seq| seq.parse().ok());
+                if let (Some(id), Some(seq)) = (result_id(result, "goal_id"), seq) {
+                    self.mark_goal_settlement_row(id, seq, thread_id, item_id);
+                }
+            }
             _ => {}
         }
     }
