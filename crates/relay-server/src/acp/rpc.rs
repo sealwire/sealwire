@@ -33,6 +33,8 @@ pub(crate) struct ReaderContext {
     pub(crate) state: Arc<RwLock<RelayState>>,
     pub(crate) sessions: Sessions,
     pub(crate) captures: Captures,
+    pub(crate) models: Arc<tokio::sync::Mutex<Vec<crate::protocol::ModelOptionView>>>,
+    pub(crate) models_cache: Option<std::path::PathBuf>,
     pub(crate) provider_key: &'static str,
 }
 
@@ -65,6 +67,8 @@ pub(crate) fn spawn_stdout_reader(context: ReaderContext) {
         state,
         sessions,
         captures,
+        models,
+        models_cache,
         provider_key,
     } = context;
 
@@ -80,6 +84,8 @@ pub(crate) fn spawn_stdout_reader(context: ReaderContext) {
                         &state,
                         &sessions,
                         &captures,
+                        &models,
+                        models_cache.as_deref(),
                         provider_key,
                     )
                     .await;
@@ -167,6 +173,8 @@ async fn handle_line(
     state: &Arc<RwLock<RelayState>>,
     sessions: &Sessions,
     captures: &Captures,
+    models: &Arc<tokio::sync::Mutex<Vec<crate::protocol::ModelOptionView>>>,
+    models_cache: Option<&std::path::Path>,
     provider_key: &'static str,
 ) {
     let payload: Value = match serde_json::from_str(line) {
@@ -203,7 +211,17 @@ async fn handle_line(
     }
 
     if has_method {
-        handle_notification(payload, stdin, state, sessions, captures, provider_key).await;
+        handle_notification(
+            payload,
+            stdin,
+            state,
+            sessions,
+            captures,
+            models,
+            models_cache,
+            provider_key,
+        )
+        .await;
         return;
     }
 
@@ -274,6 +292,8 @@ async fn handle_notification(
     state: &Arc<RwLock<RelayState>>,
     sessions: &Sessions,
     captures: &Captures,
+    models: &Arc<tokio::sync::Mutex<Vec<crate::protocol::ModelOptionView>>>,
+    models_cache: Option<&std::path::Path>,
     provider_key: &'static str,
 ) {
     let method = payload.get("method").and_then(Value::as_str).unwrap_or("");
@@ -290,6 +310,10 @@ async fn handle_notification(
     let Some(update) = params.get("update") else {
         return;
     };
+
+    if update.get("sessionUpdate").and_then(Value::as_str) == Some("config_option_update") {
+        super::absorb_catalog_into(models, update, false, provider_key, models_cache).await;
+    }
 
     let op = {
         let mut sessions = sessions.lock().await;
@@ -550,12 +574,16 @@ pub(crate) fn plan_update(update: &Value, session: &mut SessionRuntime) -> Trans
                 status: meta.status.clone(),
             }
         }
-        // ACP lets the agent change mode itself and announce it here. Ignoring
-        // it would leave the relay believing a thread is still read-only after
-        // the agent moved it back to full `agent` mode.
-        // The spec names this `modeId`; Cursor sends `currentModeId`. A bridge
-        // that only understands the measured spelling would miss a
-        // spec-compliant agent's mode change entirely.
+        "config_option_update" => {
+            let previous_mode = session.mode.clone();
+            super::absorb_session_settings(session, update);
+            if session.mode != previous_mode {
+                TranscriptOp::ModeChanged(session.mode.clone())
+            } else {
+                TranscriptOp::Ignore
+            }
+        }
+        // Track provider-initiated mode changes so read-only drift is detected.
         "current_mode_update" => update
             .get("modeId")
             .or_else(|| update.get("currentModeId"))

@@ -1523,7 +1523,7 @@ mod tests {
         // is prompt/tool-level, not OS isolation, so it belongs on the reject
         // side alongside Claude — and a provider added later is rejected by
         // default rather than silently admitted.
-        for reviewer in ["claude", "claude_code", "cursor"] {
+        for reviewer in ["claude", "claude_code", "cursor", "opencode"] {
             let mut wf = code_flow("codex");
             wf.steps[1] = step("rv", reviewer, StepRole::Review);
             let err = validate_workflow_shape(&wf, "codex")

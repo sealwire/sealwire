@@ -33405,6 +33405,30 @@ watchdog settle this Blocked",
     }
 
     #[tokio::test]
+    async fn an_unrestricted_opencode_session_cannot_start_a_goal_without_goal_tools() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = goal_session(&app, &cwd).await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.bind_session_to_foreign_handle(&thread, "opencode", "ses_native_goal");
+            relay.threads.retain(|row| row.id != thread);
+            assert!(relay.provider_hint_for_thread(&thread).is_none());
+        }
+        let error = app
+            .set_goal(&thread, "finish the work", None, false, None)
+            .await
+            .expect_err("a goal needs its settlement tools");
+        assert!(
+            error.contains("OpenCode") && error.contains("MCP"),
+            "{error}"
+        );
+        assert!(app.relay.read().await.goal_for_thread(&thread).is_none());
+    }
+
+    #[tokio::test]
     async fn a_session_that_cannot_end_a_goal_is_not_given_one() {
         // The three stopping tools are, like `delegate`, only offered to an
         // unrestricted session. Driving a restricted one would hand

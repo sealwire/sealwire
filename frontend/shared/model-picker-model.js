@@ -3,6 +3,7 @@
 
 import { buildModelSelectOptions } from "./composer.js";
 import { providerLabel } from "./provider-labels.js";
+import { providerPicksFolderDefaultModel } from "./provider-settings.js";
 
 // Naming a concrete model here would claim a choice the request does not carry.
 const DEFAULT_MODEL_LABEL = "default";
@@ -16,6 +17,8 @@ function modelEntry(models, model) {
 }
 
 export function buildModelPickerGroups({
+  // A launch's empty model means "the provider decides"; a fork's means "inherit".
+  offerProviderDefault = false,
   providerModels = {},
   providers = [],
   selectedModel = "",
@@ -39,13 +42,25 @@ export function buildModelPickerGroups({
       { allowForeign: true }
     );
 
+    // The catalog's default is only the default of the folder it was read in.
+    const folderDefault = providerPicksFolderDefaultModel(provider);
     const rendered = options.map((option) => ({
       label: option.display_name || option.model,
       provider,
       selected: isSelectedProvider && option.model === selectedModel,
-      tag: option.is_default ? "default" : null,
+      tag: option.is_default && !folderDefault ? "default" : null,
       value: option.model,
     }));
+    const providerDefault = {
+      label: "Use provider default",
+      provider,
+      selected: isSelectedProvider && !selectedModel,
+      tag: null,
+      value: "",
+    };
+    if (folderDefault && offerProviderDefault && rendered.length) {
+      rendered.unshift({ ...providerDefault, label: "Default for this folder" });
+    }
 
     return {
       // A cold catalogue still gets a CHOOSABLE row carrying an empty model id:
@@ -56,17 +71,7 @@ export function buildModelPickerGroups({
       // masquerades as the complete model list.
       empty: models.length === 0,
       label: providerLabel(provider),
-      options: rendered.length
-        ? rendered
-        : [
-            {
-              label: "Use provider default",
-              provider,
-              selected: isSelectedProvider && !selectedModel,
-              tag: null,
-              value: "",
-            },
-          ],
+      options: rendered.length ? rendered : [providerDefault],
       provider,
     };
   });
@@ -85,7 +90,7 @@ export function selectedModelChip({
     : DEFAULT_MODEL_LABEL;
 
   return {
-    tag: entry?.is_default ? "default" : null,
+    tag: entry?.is_default && !providerPicksFolderDefaultModel(selectedProvider) ? "default" : null,
     value: name ? `${name} · ${modelText}` : modelText,
   };
 }

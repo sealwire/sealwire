@@ -6,6 +6,7 @@ import { providerLabel, selectModelBadge } from "./provider-labels.js";
 test("providerLabel maps known providers and humanizes unknown ones", () => {
   assert.equal(providerLabel("claude_code"), "Claude");
   assert.equal(providerLabel("codex"), "Codex");
+  assert.equal(providerLabel("opencode"), "OpenCode");
   assert.equal(providerLabel("some_new_thing"), "Some New Thing");
   assert.equal(providerLabel(""), "");
 });

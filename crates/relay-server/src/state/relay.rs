@@ -1363,7 +1363,7 @@ impl RelayState {
             })
     }
 
-    fn thread_history_cwd(&self, thread_id: &str) -> Option<String> {
+    pub(crate) fn thread_history_cwd(&self, thread_id: &str) -> Option<String> {
         self.thread_cwd(thread_id).or_else(|| {
             self.thread_workspace
                 .get(thread_id)?
@@ -1371,6 +1371,19 @@ impl RelayState {
                 .as_ref()
                 .map(|history| history.cwd().to_string())
         })
+    }
+
+    pub(crate) fn history_working_directories(&self, provider: &str) -> Vec<String> {
+        self.thread_workspace
+            .keys()
+            .chain(self.threads.iter().map(|thread| &thread.id))
+            .filter(|id| {
+                self.session_bindings
+                    .binding(id)
+                    .is_some_and(|binding| binding.provider == provider)
+            })
+            .filter_map(|id| self.thread_history_cwd(id))
+            .collect()
     }
 
     fn thread_history_in_scope(&self, thread_id: &str, device_id: Option<&str>) -> bool {

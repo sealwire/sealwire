@@ -334,11 +334,14 @@ import {
 } from "./shared/select-options.js";
 import {
   buildReasoningEffortOptions,
+  buildReasoningEffortOptionsWithSelection,
   resolveReasoningEffortValue,
 } from "./shared/reasoning-efforts.js";
+import { settleLaunchDraft } from "./local/launch-draft.js";
 import {
   defaultModelForProvider,
   defaultProvider,
+  launchSeedModel,
   normalizeProviderList,
   providerOptions,
   providerSettings,
@@ -3714,6 +3717,10 @@ async function refreshProviderCatalogs(session) {
         catalogsChanged ||= models.length > 0;
       }
     }));
+    if (catalogsChanged) {
+      const draftProvider = readLocalUiState(state.localUiStore).sessionDraft?.provider;
+      if (draftProvider) settleLaunchDraftFromCatalog(draftProvider);
+    }
     // The merged Model pill is built from these catalogues. Opening the dialog
     // before they land left an empty menu that never refilled.
     renderLaunchSessionDialogIfOpen();
@@ -3899,14 +3906,18 @@ async function refreshForkGitContext(cwd) {
   }, 250);
 }
 
+// Not saved as last-used: a clamp against a partial catalogue is not the user's choice.
+function settleLaunchDraftFromCatalog(provider) {
+  const ui = state.localUiStore.getState();
+  const draft = readLocalUiState(state.localUiStore).sessionDraft || {};
+  const settled = settleLaunchDraft(draft, state.providerModels[provider] || [], provider);
+  if (settled.model !== (draft.model || "")) ui.setSessionDraftField("model", settled.model);
+  if (settled.effort !== draft.effort) ui.setSessionDraftField("effort", settled.effort);
+}
+
 // The static per-provider constant is a seed, not an answer: prefer the catalogue.
 function defaultModelForProviderCatalog(provider) {
-  const models = state.providerModels[provider] || [];
-  return (
-    models.find((option) => option.is_default)?.model
-    || models[0]?.model
-    || defaultModelForProvider(provider)
-  );
+  return launchSeedModel(provider, state.providerModels[provider] || []);
 }
 
 // One step, because effort is per MODEL: a Codex `xhigh` carried onto a Claude
@@ -3918,6 +3929,8 @@ function handleLaunchModelSelection({ provider, model }) {
     ui.setSessionDraftField("provider", provider);
     const storedApproval = loadLastApprovalPolicy(provider);
     if (storedApproval) ui.setSessionDraftField("approvalPolicy", storedApproval);
+    const storedEffort = loadLastEffort(provider);
+    if (storedEffort) ui.setSessionDraftField("effort", storedEffort);
     void refreshProviderCatalogs(state.session || {});
   }
   ui.setSessionDraftField("model", model);
@@ -3926,7 +3939,7 @@ function handleLaunchModelSelection({ provider, model }) {
   const models = state.providerModels[provider] || [];
   // Clamp against the NEW model's catalogue. Falls back to the model's own
   // default when the current level is not offered.
-  const effort = resolveReasoningEffortValue(models, model, draft.effort);
+  const effort = resolveReasoningEffortValue(models, model, draft.effort, provider);
   if (effort !== draft.effort) {
     ui.setSessionDraftField("effort", effort);
     saveLastEffort(provider, effort);
@@ -4030,9 +4043,7 @@ async function selectLaunchProvider(provider) {
     await refreshProviderCatalogs(state.session || { provider: selected, available_models: [] });
   }
   const models = modelsForProvider(selected, state.session?.available_models || []);
-  const model = models.find((option) => option.is_default)?.model
-    || models[0]?.model
-    || defaultModelForProvider(selected);
+  const model = launchSeedModel(selected, models);
   syncModelSuggestions(modelInput, models, model);
   syncEffortSuggestions(startEffortInput, models, model, startEffortInput?.value || "", selected);
 }
@@ -4042,7 +4053,7 @@ function syncEffortSuggestions(select, models, selectedModel, selectedEffort, pr
     return;
   }
 
-  const resolvedEffort = resolveReasoningEffortValue(models, selectedModel, selectedEffort);
+  const resolvedEffort = resolveReasoningEffortValue(models, selectedModel, selectedEffort, provider);
   renderSelectOptions(
     select,
     buildReasoningEffortOptions(models, selectedModel, provider),
@@ -4262,7 +4273,8 @@ function handleForkModelSelection({ provider, model }) {
     next.effort = resolveReasoningEffortValue(
       state.providerModels[provider] || [],
       model,
-      next.effort
+      next.effort,
+      provider
     );
   }
   state.forkDialog = { ...state.forkDialog, fields: next, error: "" };
@@ -5337,7 +5349,7 @@ function renderLaunchSessionDialog() {
   launchDialogRootHandle.render(
     React.createElement(StartSessionDialog, {
       approvalOptions: providerSettings(provider).approvalOptions,
-      effortOptions: buildReasoningEffortOptions(models, model, provider),
+      effortOptions: buildReasoningEffortOptionsWithSelection(models, model, provider, draft.effort),
       fields: {
         ...draft,
         cwd: draft.cwd || state.selectedCwd || state.session?.current_cwd || "",
@@ -5482,11 +5494,16 @@ function openStartSessionDialog({ projectId = undefined } = {}) {
       : defaultProvider(available);
   if (provider !== draft.provider) {
     ui.setSessionDraftField("provider", provider);
-    // The model belonged to the provider just replaced.
-    ui.setSessionDraftField("model", defaultModelForProvider(provider));
+    // The model, effort and approval belonged to the provider just replaced.
+    ui.setSessionDraftField("model", defaultModelForProviderCatalog(provider));
+    const storedEffort = loadLastEffort(provider);
+    const storedApproval = loadLastApprovalPolicy(provider);
+    if (storedEffort) ui.setSessionDraftField("effort", storedEffort);
+    if (storedApproval) ui.setSessionDraftField("approvalPolicy", storedApproval);
   } else if (!draft.model) {
-    ui.setSessionDraftField("model", defaultModelForProvider(provider));
+    ui.setSessionDraftField("model", defaultModelForProviderCatalog(provider));
   }
+  settleLaunchDraftFromCatalog(provider);
   void refreshLaunchGitContext(
     readLocalUiState(state.localUiStore).sessionDraft?.cwd || ""
   );

@@ -58,6 +58,8 @@ You need at least one of these installed and logged in:
   login or an `ANTHROPIC_API_KEY`. Everything else it needs comes bundled.
 - **[Codex](https://github.com/openai/codex)** — the `codex` command-line tool.
 - **[Cursor](https://cursor.com/cli)** — the `cursor-agent` command-line tool.
+- **[OpenCode](https://opencode.ai/docs/acp/)** — the `opencode` command-line tool
+  with a model configured. Use `opencode auth login` if your model needs a login.
 
 Then, in the folder you want to work on:
 
@@ -70,6 +72,34 @@ your own machine until you decide otherwise.
 
 **Tip:** run it on a computer that's always on — a desktop, a home server — and
 long jobs keep going even with your laptop closed.
+
+### OpenCode
+
+Sealwire launches `opencode acp` and uses your OpenCode configuration, models,
+permissions, commands, and MCP servers. The integration is verified with
+OpenCode 1.18.34. To run only this provider, use `AGENT_PROVIDERS=opencode npx sealwire`.
+
+OpenCode decides which tools require approval. **Review requests** and
+**Use OpenCode rules** show those requests in Sealwire; both auto-approve options
+answer them automatically, without overriding OpenCode's configured denials.
+OpenCode's default configuration allows most tools without asking; these settings
+do not make every tool ask. Read-only sessions and OpenCode
+reviewers are refused because ACP cannot guarantee read-only execution. You can
+use another provider to review an OpenCode session.
+
+Model discovery opens a temporary session without sending a prompt, then closes
+and deletes it. Session deletion uses OpenCode's own `session delete` command.
+History is discovered only in directories already used by OpenCode through
+Sealwire. OpenCode's ACP history listing matches exact directories and loads
+their plugins. Background model discovery uses a separate relay-owned directory;
+starting a session reads the chosen workspace's OpenCode configuration.
+Sealwire's per-session MCP tools (including delegation and goal tools) are not
+injected: OpenCode shares injected MCP servers across sessions in the same
+directory, which would mix their identities. Your own OpenCode MCP configuration
+still applies. Goal mode and Task seats are currently unavailable with OpenCode.
+You can delegate work to OpenCode; Sealwire forwards its final answer.
+Forks use Sealwire's transcript replay; native OpenCode forks and archiving are
+not exposed.
 
 ### Connect your phone
 

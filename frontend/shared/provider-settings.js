@@ -1,6 +1,6 @@
 import { providerLabel } from "./provider-labels.js";
 
-const DEFAULT_PROVIDERS = ["codex", "claude_code", "cursor"];
+const DEFAULT_PROVIDERS = ["codex", "claude_code", "cursor", "opencode"];
 const DEFAULT_MODELS = {
   claude_code: "claude-sonnet-4-6",
   codex: "gpt-5.5",
@@ -18,6 +18,10 @@ const DEFAULT_MODELS = {
 // `bypass` is the unified YOLO knob: the rust shim translates it to
 // `permissionMode=bypassPermissions` for Claude and to
 // `approvalPolicy=never` + `sandbox=danger-full-access` for Codex.
+const OPENCODE_ASKS =
+  "OpenCode's config decides which tools ask. By default it runs most tools without asking; the ones that ask wait for you here.";
+const OPENCODE_DENIES = "Tools OpenCode's config denies stay denied.";
+
 const PROVIDER_SETTINGS = {
   claude_code: {
     approvalLabel: "Permission mode",
@@ -78,6 +82,30 @@ const PROVIDER_SETTINGS = {
       xhigh: "Extra high",
     },
     modelLabel: "Cursor model",
+    sandboxLabel: "File access",
+  },
+  opencode: {
+    approvalLabel: "Permission requests",
+    // Sealwire only answers the requests OpenCode sends, so the two asking modes
+    // behave the same and neither auto-approve mode can lift an OpenCode deny.
+    approvalOptions: [
+      { label: "Review requests", value: "untrusted", description: `Same as Use OpenCode rules. ${OPENCODE_ASKS}`, tone: "neutral" },
+      { label: "Use OpenCode rules", value: "on-request", description: `Same as Review requests. ${OPENCODE_ASKS}`, tone: "neutral" },
+      { label: "Auto-approve requests", value: "never", description: `Sealwire allows each request OpenCode sends, once. ${OPENCODE_DENIES}`, tone: "elevated" },
+      { label: "Auto-approve, unrestricted", value: "bypass", description: `Same answers as Auto-approve requests. Sealwire also counts this session as unrestricted, so only agents with the same or wider permissions can hand it work. ${OPENCODE_DENIES}`, tone: "danger" },
+    ],
+    effortLabel: "Reasoning effort",
+    effortLabels: {
+      default: "Model default",
+      none: "None",
+      minimal: "Minimal",
+      low: "Low",
+      medium: "Medium",
+      high: "High",
+      xhigh: "Extra high",
+      max: "Max",
+    },
+    modelLabel: "OpenCode model",
     sandboxLabel: "File access",
   },
 };
@@ -164,6 +192,20 @@ export function defaultModelForProvider(provider) {
   return DEFAULT_MODELS[normalizeProvider(provider)] || "";
 }
 
+// OpenCode reads its default model from the new session's own folder config. The
+// shared catalog was discovered in another folder, so its default would override that.
+const FOLDER_DEFAULT_MODEL_PROVIDERS = new Set(["opencode"]);
+
+export function providerPicksFolderDefaultModel(provider) {
+  return FOLDER_DEFAULT_MODEL_PROVIDERS.has(normalizeProvider(provider));
+}
+
+// The model a launch holds before the user picks one. Empty lets the relay decide.
+export function launchSeedModel(provider, models = [], fallback = defaultModelForProvider(provider)) {
+  if (providerPicksFolderDefaultModel(provider)) return "";
+  return models?.find((option) => option?.is_default)?.model || models?.[0]?.model || fallback;
+}
+
 // Only Codex enforces a filesystem boundary at the OS level. Claude has no
 // sandbox at all, and Cursor runs over ACP, which has session *modes*
 // (agent/plan/ask) rather than isolation — the bridge maps every non-read-only
@@ -176,6 +218,14 @@ const FILESYSTEM_SANDBOX_PROVIDERS = new Set(["codex", "fake"]);
 
 export function providerHasFilesystemSandbox(provider) {
   return FILESYSTEM_SANDBOX_PROVIDERS.has(normalizeProvider(provider));
+}
+
+// The relay refuses these as reviewers: OpenCode's ACP sessions have no read-only
+// mode. A denylist, so a provider added later is still offered.
+const PROVIDERS_WITHOUT_READ_ONLY_REVIEW = new Set(["opencode"]);
+
+export function providerCanReview(provider) {
+  return !PROVIDERS_WITHOUT_READ_ONLY_REVIEW.has(normalizeProvider(provider));
 }
 
 export function providerSettings(provider) {

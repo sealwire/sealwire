@@ -38,6 +38,7 @@ import {
 import {
   defaultModelForProvider,
   defaultProvider,
+  launchSeedModel,
   providerOptions,
   providerSettings,
 } from "../shared/provider-settings.js";
@@ -63,6 +64,7 @@ import {
 } from "./chrome-view-model.js";
 import { selectRemoteHeaderProjectSwitcherModel } from "./header-project-switcher-model.js";
 import { deriveSessionRuntime } from "./session-runtime.js";
+import { remoteLaunchFields } from "./launch-fields.js";
 import {
   closeRemoteNavigation,
   toggleRemoteNavigation,
@@ -603,13 +605,11 @@ function RemoteApp() {
         // to draft.effort, which may be carried over from a different provider.
         const effortSeed = storedEffort || draft.effort;
         if (draft.provider === selectedProvider && (!draft.model || draft.model === defaultModelForProvider(selectedProvider))) {
-          const nextModel = models?.find((model) => model.is_default)?.model
-            || models?.[0]?.model
-            || defaultModelForProvider(selectedProvider);
+          const nextModel = launchSeedModel(selectedProvider, models || []);
           remoteUiStore.getState().setSessionDraftField("model", nextModel);
           remoteUiStore.getState().setSessionDraftField(
             "effort",
-            resolveReasoningEffortValue(models || [], nextModel, effortSeed)
+            resolveReasoningEffortValue(models || [], nextModel, effortSeed, selectedProvider)
           );
           return;
         }
@@ -618,7 +618,8 @@ function RemoteApp() {
           resolveReasoningEffortValue(
             models || [],
             draft.model || defaultModelForProvider(selectedProvider),
-            effortSeed
+            effortSeed,
+            selectedProvider
           )
         );
       })
@@ -648,9 +649,7 @@ function RemoteApp() {
     remoteUiStore.getState().setProviderModels(provider, models);
     const draft = remoteUiStore.getState().sessionDraft;
     if (draft.provider === provider && (!draft.model || draft.model === defaultModelForProvider(provider))) {
-      const nextModel = models.find((m) => m.is_default)?.model
-        || models[0]?.model
-        || defaultModelForProvider(provider);
+      const nextModel = launchSeedModel(provider, models);
       remoteUiStore.getState().setSessionDraftField("model", nextModel);
     }
   }, [currentState.session?.available_models, currentState.session?.provider]);
@@ -969,22 +968,14 @@ function RemoteApp() {
     : remoteUi.sessionPanelOpen
       ? "Close"
       : "New session";
+  const remoteLaunch = remoteLaunchFields({
+    sessionDraft: remoteUi.sessionDraft,
+    provider: selectedProvider,
+    providerModels: remoteUi.providerModels,
+  });
   const sessionPanelModel = {
-    fields: {
-      ...remoteUi.sessionDraft,
-      provider: selectedProvider,
-      model: remoteUi.sessionDraft.model || defaultModelForProvider(selectedProvider),
-      effort: resolveReasoningEffortValue(
-        selectedProviderModels,
-        remoteUi.sessionDraft.model || defaultModelForProvider(selectedProvider),
-        remoteUi.sessionDraft.effort
-      ),
-    },
-    effortOptions: buildReasoningEffortOptions(
-      selectedProviderModels,
-      remoteUi.sessionDraft.model || defaultModelForProvider(selectedProvider),
-      selectedProvider
-    ),
+    fields: remoteLaunch.fields,
+    effortOptions: remoteLaunch.effortOptions,
     labels: {
       approval: selectedProviderSettings.approvalLabel,
       effort: selectedProviderSettings.effortLabel,
@@ -1211,28 +1202,19 @@ function RemoteApp() {
       const nextComposerEffort = resolveReasoningEffortValue(
         availableModels,
         remoteUi.composerModel || session?.model || "",
-        remoteUi.composerEffort
+        remoteUi.composerEffort,
+        session?.provider || ""
       );
       if (nextComposerEffort !== remoteUi.composerEffort) {
         remoteUiStore.getState().setComposerEffort(nextComposerEffort);
       }
     }
-
-    const nextSessionEffort = resolveReasoningEffortValue(
-      availableModels,
-      remoteUi.sessionDraft.model,
-      remoteUi.sessionDraft.effort
-    );
-    if (nextSessionEffort !== remoteUi.sessionDraft.effort) {
-      remoteUiStore.getState().setSessionDraftField("effort", nextSessionEffort);
-    }
   }, [
     remoteUi.composerEffort,
     remoteUi.composerModel,
-    remoteUi.sessionDraft.effort,
-    remoteUi.sessionDraft.model,
     session?.available_models,
     session?.model,
+    session?.provider,
   ]);
 
   // Switching to a different session drops any per-surface effort/model override
@@ -1827,7 +1809,7 @@ function RemoteApp() {
     remoteUiStore.getState().setSessionStartPending(true);
     let result;
     try {
-      result = await handlers.onStartSession(remoteUi.sessionDraft);
+      result = await handlers.onStartSession(remoteLaunch.fields);
     } finally {
       remoteUiStore.getState().setSessionStartPending(false);
     }
@@ -2888,13 +2870,11 @@ function openRemoteStartSessionDialog(store, activeProjectId = null) {
 
 function providerDraftPatch(uiState, value) {
   const models = uiState.providerModels[value] || [];
-  const model = models.find((option) => option.is_default)?.model
-    || models[0]?.model
-    || defaultModelForProvider(value);
+  const model = launchSeedModel(value, models);
   const storedEffort = loadLastEffort(value);
   const storedApproval = loadLastApprovalPolicy(value);
   const patch = {
-    effort: resolveReasoningEffortValue(models, model, storedEffort || uiState.sessionDraft.effort),
+    effort: resolveReasoningEffortValue(models, model, storedEffort || uiState.sessionDraft.effort, value),
     model,
     provider: value,
   };
@@ -3160,7 +3140,7 @@ function RemoteSidebar({
               : {};
           updateSessionDraft({
             ...patch,
-            effort: resolveReasoningEffortValue(catalog, model, uiState.sessionDraft.effort),
+            effort: resolveReasoningEffortValue(catalog, model, patch.effort ?? uiState.sessionDraft.effort, provider),
             model,
             provider,
           });
@@ -3177,7 +3157,8 @@ function RemoteSidebar({
               effort: resolveReasoningEffortValue(
                 selectedModels,
                 value,
-                uiState.sessionDraft.effort
+                uiState.sessionDraft.effort,
+                uiState.sessionDraft.provider
               ),
               model: value,
             });

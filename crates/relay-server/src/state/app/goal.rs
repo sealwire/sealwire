@@ -90,10 +90,22 @@ with a one-line note when it is."
 /// checked again before every driven turn, not just when the goal is set. Settings can be changed on any idle thread, and a goal between
 /// turns is idle.
 fn thread_can_end_a_goal(relay: &crate::state::RelayState, thread_id: &str) -> bool {
+    if !thread_has_goal_tools(relay, thread_id) {
+        return false;
+    }
     relay
         .thread_settings(thread_id)
         .map(|s| crate::state::session_is_unrestricted(&s.approval_policy, &s.sandbox))
         .unwrap_or(false)
+}
+
+fn thread_has_goal_tools(relay: &RelayState, thread_id: &str) -> bool {
+    relay
+        .session_bindings
+        .binding(thread_id)
+        .map(|binding| binding.provider.clone())
+        .or_else(|| relay.provider_hint_for_thread(thread_id))
+        .is_none_or(|provider| crate::provider::supports_session_mcp(&provider))
 }
 
 /// Whether this thread belongs to a non-ordinary agent role that cannot host a goal.
@@ -231,6 +243,9 @@ impl AppState {
         // one the session cannot end.
         let mut relay = self.relay.write().await;
         ensure_thread_in_device_scope(&relay, thread_id, device_id)?;
+        if !thread_has_goal_tools(&relay, thread_id) {
+            return Err("OpenCode cannot run Sealwire goals because its ACP sessions cannot isolate the required per-session MCP tools; use another provider for goal mode".into());
+        }
         if !thread_can_end_a_goal(&relay, thread_id) {
             return Err(
                 "a goal runs this session on its own, so it needs a session that can \

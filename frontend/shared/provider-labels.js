@@ -1,6 +1,7 @@
 const PROVIDER_LABELS = {
   claude_code: "Claude",
   codex: "Codex",
+  opencode: "OpenCode",
 };
 
 export function providerLabel(provider) {

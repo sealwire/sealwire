@@ -14,15 +14,22 @@ export function findModelOption(models = [], modelName = "") {
 
 export function buildReasoningEffortOptions(models = [], modelName = "", provider = "") {
   const model = findModelOption(models, modelName);
-  const supportedEfforts = model?.supported_reasoning_efforts?.length
-    ? [...model.supported_reasoning_efforts]
-    : [...DEFAULT_REASONING_EFFORTS];
+  const supportedEfforts = [...(knownEfforts(models, model, provider) || DEFAULT_REASONING_EFFORTS)];
   const labelProvider = provider || modelProvider(models, modelName);
 
   return supportedEfforts.map((effort) => ({
     label: formatEffortLabel(effort, labelProvider),
     value: effort,
   }));
+}
+
+// What this model is known to accept, or null when the catalog cannot say.
+function knownEfforts(models, model, provider = "") {
+  if (model?.supported_reasoning_efforts?.length) return model.supported_reasoning_efforts;
+  // OpenCode announces variants only for a session's selected model.
+  const isOpenCode = provider === "opencode" || model?.provider === "opencode"
+    || (models.length > 0 && models.every((row) => row.provider === "opencode"));
+  return isOpenCode ? ["default"] : null;
 }
 
 // Like buildReasoningEffortOptions, but guarantees the currently-selected
@@ -77,15 +84,14 @@ export function resolveOutgoingEffort({
   return pick;
 }
 
-export function resolveReasoningEffortValue(models = [], modelName = "", selectedEffort = "") {
+// Clamps only against efforts the catalog knows. A cold or partial catalog keeps
+// the pick, so Claude's `max` or Codex's `minimal` is not rewritten to `low`.
+export function resolveReasoningEffortValue(models = [], modelName = "", selectedEffort = "", provider = "") {
   const model = findModelOption(models, modelName);
-  const supportedEfforts = model?.supported_reasoning_efforts?.length
-    ? model.supported_reasoning_efforts
-    : DEFAULT_REASONING_EFFORTS;
-
-  if (selectedEffort && supportedEfforts.includes(selectedEffort)) {
+  const known = knownEfforts(models, model, provider);
+  if (selectedEffort && (!known || known.includes(selectedEffort))) {
     return selectedEffort;
   }
 
-  return model?.default_reasoning_effort || supportedEfforts[0] || "medium";
+  return model?.default_reasoning_effort || (known || DEFAULT_REASONING_EFFORTS)[0] || "medium";
 }

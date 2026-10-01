@@ -718,6 +718,7 @@ mod tests {
 pub(crate) struct AgentCapabilities {
     pub(crate) load_session: bool,
     pub(crate) list_sessions: bool,
+    pub(crate) close_session: bool,
     pub(crate) prompt_images: bool,
 }
 
@@ -737,6 +738,10 @@ impl AgentCapabilities {
                 .and_then(|caps| caps.get("sessionCapabilities"))
                 .and_then(|session| session.get("list"))
                 .is_some_and(|list| list.as_bool() != Some(false)),
+            close_session: caps
+                .and_then(|caps| caps.get("sessionCapabilities"))
+                .and_then(|session| session.get("close"))
+                .is_some_and(Value::is_object),
             prompt_images: caps
                 .and_then(|caps| caps.get("promptCapabilities"))
                 .and_then(|prompt| prompt.get("image"))

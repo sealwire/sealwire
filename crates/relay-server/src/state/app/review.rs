@@ -338,7 +338,10 @@ impl AppState {
             let reviewer_provider = requested_provider
                 .clone()
                 .ok_or_else(|| "reviewer_provider is required".to_string())?;
-            self.resolve_provider(Some(&reviewer_provider))?;
+            let (_, bridge) = self.resolve_provider(Some(&reviewer_provider))?;
+            if !bridge.supports_read_only_reviews() {
+                return Err(format!("{reviewer_provider} cannot enforce read-only reviews; choose another reviewer provider"));
+            }
         }
 
         // Briefly take the shared session slot ONLY to atomically validate and
@@ -547,6 +550,10 @@ reviewer thread"
             }
         };
 
+        let (_, reviewer_bridge) = self.resolve_provider(Some(&reviewer_provider))?;
+        if !reviewer_bridge.supports_read_only_reviews() {
+            return Err(format!("{reviewer_provider} cannot enforce read-only reviews; choose another reviewer provider"));
+        }
         let job_id = format!("review-{}-{}", unix_now(), random_suffix());
         let reviewer_mode = match &reuse_thread_id {
             Some(thread_id) => ReviewMode::ExistingThread {

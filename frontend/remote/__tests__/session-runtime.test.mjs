@@ -6,6 +6,26 @@ import {
   selectRemoteControlSession,
 } from "../session-runtime.js";
 
+test("OpenCode remote effort uses its own labels and no invented variants", () => {
+  const runtime = deriveSessionRuntime({
+    composerEffort: "",
+    session: { provider: "opencode", active_thread_id: "ses_test", model: "test/echo", reasoning_effort: "default", available_models: [] },
+    sessionView: { composerDisabled: false, currentApprovalId: null, messagePlaceholder: "Message" },
+  });
+  assert.equal(runtime.currentEffortValue, "default");
+  assert.deepEqual(runtime.effortOptions, [{ label: "Model default", value: "default" }]);
+});
+
+test("a cold catalog keeps the session's effort and still offers it", () => {
+  const runtime = deriveSessionRuntime({
+    composerEffort: "",
+    session: { provider: "claude_code", active_thread_id: "t", model: "claude-sonnet-4-6", reasoning_effort: "max", available_models: [] },
+    sessionView: { composerDisabled: false, currentApprovalId: null, messagePlaceholder: "Message" },
+  });
+  assert.equal(runtime.currentEffortValue, "max");
+  assert.ok(runtime.effortOptions.some((option) => option.value === "max"));
+});
+
 test("selectRemoteControlSession uses the rendered session outside view-only mode", () => {
   const session = { active_thread_id: "thread-live" };
   const realSession = { active_thread_id: "thread-stale" };

@@ -1,4 +1,5 @@
-import { providerOptions } from "./provider-settings.js";
+import { providerLabel } from "./provider-labels.js";
+import { normalizeProviderList, providerCanReview } from "./provider-settings.js";
 import { isWorkingThreadStatus } from "./thread-status.js";
 import { pendingApprovalForThread } from "./session-view-model.js";
 
@@ -199,13 +200,19 @@ export function selectReviewLaunchModel({ providers = [], providerModels = {}, s
   for (const model of session?.available_models || []) {
     push(model, session?.provider || model.provider || "");
   }
+  // `models` keeps every provider: the composer's slash commands read it too.
+  const reviewers = providers.filter(providerCanReview);
+  const sessionReviewer =
+    session?.provider && providerCanReview(session.provider) ? session.provider : "";
   const defaultProvider =
-    providers.find((provider) => provider !== session?.provider) ||
-    providers[0] ||
-    session?.provider ||
-    "";
+    reviewers.find((provider) => provider !== session?.provider) ||
+    reviewers[0] ||
+    sessionReviewer;
   return {
-    providerOptions: providerOptions(providers),
+    // Not `providerOptions()`: it refills an empty list with every default provider.
+    providerOptions: normalizeProviderList(providers)
+      .filter(providerCanReview)
+      .map((value) => ({ label: providerLabel(value), value })),
     models,
     defaultProvider,
   };

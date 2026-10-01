@@ -4010,3 +4010,470 @@ async fn announced_commands_become_the_sessions_skills_and_nothing_is_guessed_be
     let other = crate::provider::ProviderBridge::list_skills(&bridge, "t2", "/tmp/project").await;
     assert!(other.is_err(), "one session's commands are not another's");
 }
+
+fn opencode_config(model: &str, effort: &str, mode: &str) -> serde_json::Value {
+    json!({"configOptions": [
+        {"id":"model","category":"model","type":"select","currentValue":model,
+         "options":[{"value":"test/echo","name":"Test/Echo"},{"value":"test/second","name":"Test/Second"}]},
+        {"id":"effort","category":"thought_level","type":"select","currentValue":effort,
+         "options":[{"value":"low","name":"Low"},{"value":"high","name":"High"},{"value":"default","name":"Default"}]},
+        {"id":"mode","category":"mode","type":"select","currentValue":mode,
+         "options":[{"value":"build","name":"Build"},{"value":"plan","name":"Plan"}]}
+    ]})
+}
+
+#[test]
+fn opencode_catalog_keeps_full_ids_and_limits_effort_to_the_selected_model() {
+    let first = opencode_config("test/echo", "low", "build");
+    let catalog = super::config::models(
+        first["configOptions"].as_array().unwrap(),
+        "opencode",
+        Some("test/echo"),
+        &[],
+        true,
+    );
+    assert_eq!(catalog[0].model, "test/echo");
+    assert!(catalog[0].is_default);
+    assert_eq!(
+        catalog[0].supported_reasoning_efforts,
+        ["low", "high", "default"]
+    );
+    assert!(catalog[1].supported_reasoning_efforts.is_empty());
+    let changed = opencode_config("test/second", "high", "build");
+    let catalog = super::config::models(
+        changed["configOptions"].as_array().unwrap(),
+        "opencode",
+        Some("test/echo"),
+        &catalog,
+        false,
+    );
+    assert!(
+        catalog[0].is_default,
+        "switching a session model must not change the provider default"
+    );
+    assert_eq!(catalog[0].default_reasoning_effort, "low");
+    assert_eq!(catalog[1].default_reasoning_effort, "default");
+}
+
+#[test]
+fn grouped_acp_model_options_are_not_lost() {
+    let value = json!({"configOptions":[{"id":"models","category":"model","type":"select","currentValue":"test/echo",
+        "options":[{"group":"Test","options":[{"value":"test/echo","name":"Echo"}]}]}]});
+    let models = super::config::models(
+        value["configOptions"].as_array().unwrap(),
+        "opencode",
+        Some("test/echo"),
+        &[],
+        true,
+    );
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].model, "test/echo");
+}
+
+#[test]
+fn config_mode_updates_still_trigger_read_only_drift_detection() {
+    let mut session = session();
+    session.mode = "plan".into();
+    session.required_mode = Some("plan");
+    let mut update = opencode_config("test/second", "high", "build");
+    update["sessionUpdate"] = json!("config_option_update");
+    assert!(
+        matches!(plan_update(&update, &mut session), TranscriptOp::ModeChanged(mode) if mode == "build")
+    );
+    assert_eq!(session.model, "test/second");
+    assert_eq!(session.required_mode, Some("plan"));
+}
+
+#[tokio::test]
+async fn opencode_config_is_applied_before_prompt_and_early_commands_survive() {
+    use crate::provider::{ProviderBridge, StartThreadRequest};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (outbound, peer) = tokio::io::duplex(16384);
+    let (mut writer, inbound) = tokio::io::duplex(16384);
+    let bridge = AcpBridge::for_test(relay_state(), outbound, inbound, "opencode");
+    let answerer = tokio::spawn(async move {
+        let mut lines = BufReader::new(peer).lines();
+        let mut methods = Vec::new();
+        let mut model = "test/echo".to_string();
+        let mut effort = "low".to_string();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let sent: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let method = sent["method"].as_str().unwrap();
+            methods.push(method.to_string());
+            let result = match method {
+                "session/new" => {
+                    assert_eq!(
+                        sent["params"]["mcpServers"],
+                        json!([]),
+                        "OpenCode cannot isolate per-session MCP identities"
+                    );
+                    let commands = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_test","update":{
+                        "sessionUpdate":"available_commands_update","availableCommands":[{"name":"compact","description":"Compact session"}]
+                    }}});
+                    writer
+                        .write_all(format!("{commands}\n").as_bytes())
+                        .await
+                        .unwrap();
+                    let mut result = opencode_config(&model, &effort, "build");
+                    result["sessionId"] = json!("ses_test");
+                    result
+                }
+                "session/set_config_option" => {
+                    match sent["params"]["configId"].as_str().unwrap() {
+                        "model" => model = sent["params"]["value"].as_str().unwrap().into(),
+                        "effort" => effort = sent["params"]["value"].as_str().unwrap().into(),
+                        other => panic!("unexpected config option {other}"),
+                    }
+                    opencode_config(&model, &effort, "build")
+                }
+                "session/prompt" => {
+                    assert_eq!(model, "test/second");
+                    assert_eq!(effort, "low");
+                    json!({"stopReason":"end_turn"})
+                }
+                other => panic!("OpenCode must not receive a Cursor mode request: {other}"),
+            };
+            let reply = json!({"jsonrpc":"2.0","id":sent["id"],"result":result});
+            writer
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .unwrap();
+            writer.flush().await.unwrap();
+            if method == "session/prompt" {
+                break;
+            }
+        }
+        methods
+    });
+    let result = bridge
+        .start_thread(
+            StartThreadRequest::new(
+                "/tmp/project",
+                "test/second",
+                "untrusted",
+                "workspace-write",
+            )
+            .with_effort("high"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.thread.provider, "opencode");
+    let commands = bridge
+        .sessions
+        .lock()
+        .await
+        .get("ses_test")
+        .unwrap()
+        .available_commands
+        .clone()
+        .unwrap();
+    assert_eq!(commands[0].name, "compact");
+    assert_eq!(bridge.list_models().await.unwrap().len(), 2);
+    bridge
+        .start_turn("ses_test", "hello", "test/second", "low", &[])
+        .await
+        .unwrap();
+    let methods = tokio::time::timeout(std::time::Duration::from_secs(3), answerer)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        methods,
+        [
+            "session/new",
+            "session/set_config_option",
+            "session/set_config_option",
+            "session/set_config_option",
+            "session/prompt"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn opencode_read_only_requests_fail_before_creating_a_session() {
+    use crate::provider::{ProviderBridge, StartThreadRequest};
+    let (outbound, mut peer) = tokio::io::duplex(8192);
+    let (_writer, inbound) = tokio::io::duplex(8192);
+    let bridge = AcpBridge::for_test(relay_state(), outbound, inbound, "opencode");
+    for (approval, sandbox) in [
+        ("untrusted", "read-only"),
+        ("review_read_only", "workspace-write"),
+    ] {
+        let result = bridge
+            .start_thread(StartThreadRequest::new(
+                "/tmp/project",
+                "",
+                approval,
+                sandbox,
+            ))
+            .await;
+        assert!(result.err().unwrap().contains("does not enforce read-only"));
+    }
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(30),
+        tokio::io::AsyncReadExt::read(&mut peer, &mut [0; 1])
+    )
+    .await
+    .is_err());
+}
+
+#[tokio::test]
+async fn opencode_lists_each_remembered_project_and_caches_cold_session_cwds() {
+    use crate::provider::ProviderBridge;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let root = tempfile::tempdir().unwrap();
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    std::fs::create_dir(&first).unwrap();
+    std::fs::create_dir(&second).unwrap();
+    let first = first.to_string_lossy().into_owned();
+    let second = second.to_string_lossy().into_owned();
+    let state = relay_state();
+    {
+        let mut relay = state.write().await;
+        relay.current_cwd = first.clone();
+        relay.allowed_roots = vec![first.clone()];
+        relay
+            .register_identity_session_binding("opencode", "first")
+            .unwrap();
+        relay
+            .register_identity_session_binding("opencode", "remembered")
+            .unwrap();
+        relay.restore_thread_workspace_from_json(
+            "first",
+            &json!({
+                "history": {"cwd": first, "repositories": []}
+            })
+            .to_string(),
+        );
+        relay.restore_thread_workspace_from_json(
+            "remembered",
+            &json!({
+                "history": {"cwd": second, "repositories": []}
+            })
+            .to_string(),
+        );
+    }
+    let (outbound, peer) = tokio::io::duplex(16384);
+    let (mut writer, inbound) = tokio::io::duplex(16384);
+    let bridge = AcpBridge::for_test(state, outbound, inbound, "opencode");
+    bridge.capabilities.lock().await.list_sessions = true;
+    let expected = vec![first.clone(), first, second.clone()];
+    let answerer = tokio::spawn(async move {
+        let mut lines = BufReader::new(peer).lines();
+        for (index, cwd) in expected.iter().enumerate() {
+            let sent: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(sent["method"], "session/list");
+            assert_eq!(sent["params"]["cwd"], *cwd);
+            assert_eq!(
+                sent["params"]["cursor"],
+                if index == 1 {
+                    json!("next")
+                } else {
+                    serde_json::Value::Null
+                }
+            );
+            let mut result = json!({"sessions":[{"sessionId": if index < 2 { "ses_first" } else { "ses_second" }, "cwd": cwd}]});
+            if index == 0 {
+                result["nextCursor"] = json!("next");
+            }
+            let reply = json!({"jsonrpc":"2.0", "id":sent["id"], "result":result});
+            writer
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    let threads = bridge.list_threads(1).await.unwrap();
+    assert_eq!(threads.len(), 1);
+    assert_eq!(
+        bridge.sessions.lock().await.len(),
+        2,
+        "deduplicate overlapping project pages"
+    );
+    assert_eq!(
+        bridge.resolve_cwd("ses_second").await.unwrap(),
+        second,
+        "cache all workspaces before truncating the visible list"
+    );
+    answerer.await.unwrap();
+}
+
+#[tokio::test]
+async fn opencode_history_skips_other_providers_and_continues_after_a_broken_directory() {
+    use crate::provider::ProviderBridge;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let root = tempfile::tempdir().unwrap();
+    let state = relay_state();
+    for (name, provider) in [
+        ("a-broken", "opencode"),
+        ("b-good", "opencode"),
+        ("c-untrusted", "codex"),
+    ] {
+        let cwd = root.path().join(name);
+        std::fs::create_dir(&cwd).unwrap();
+        let mut relay = state.write().await;
+        relay
+            .register_identity_session_binding(provider, name)
+            .unwrap();
+        relay.restore_thread_workspace_from_json(
+            name,
+            &json!({"history":{"cwd":cwd,"repositories":[]}}).to_string(),
+        );
+    }
+    {
+        let mut relay = state.write().await;
+        relay.current_cwd = root.path().join("c-untrusted").to_string_lossy().into();
+        relay.allowed_roots = vec![relay.current_cwd.clone()];
+    }
+    let (outbound, peer) = tokio::io::duplex(16384);
+    let (mut writer, inbound) = tokio::io::duplex(16384);
+    let bridge = AcpBridge::for_test(state, outbound, inbound, "opencode");
+    bridge.capabilities.lock().await.list_sessions = true;
+    let answerer = tokio::spawn(async move {
+        let mut lines = BufReader::new(peer).lines();
+        for name in ["a-broken", "b-good"] {
+            let sent: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            let cwd = sent["params"]["cwd"].as_str().unwrap();
+            assert!(cwd.ends_with(name));
+            let reply = if name == "a-broken" {
+                json!({"jsonrpc":"2.0","id":sent["id"],"error":{"code":-32603,"message":"bad config"}})
+            } else {
+                json!({"jsonrpc":"2.0","id":sent["id"],"result":{"sessions":[{"sessionId":"ses_good","cwd":cwd}]}})
+            };
+            writer
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    let threads = bridge.list_threads(10).await.unwrap();
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0].id, "ses_good");
+    answerer.await.unwrap();
+}
+
+#[tokio::test]
+async fn opencode_never_loads_or_remembers_a_foreign_directory_hint() {
+    use crate::provider::ProviderBridge;
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().to_string_lossy().into_owned();
+    let state = relay_state();
+    {
+        let mut relay = state.write().await;
+        relay
+            .register_identity_session_binding("codex", "foreign")
+            .unwrap();
+        relay.restore_thread_workspace_from_json(
+            "foreign",
+            &json!({"history":{"cwd":cwd,"repositories":[]}}).to_string(),
+        );
+    }
+    let (outbound, _peer) = tokio::io::duplex(16384);
+    let (_writer, inbound) = tokio::io::duplex(16384);
+    let bridge = AcpBridge::for_test(state, outbound, inbound, "opencode");
+    bridge.capabilities.lock().await.list_sessions = true;
+    bridge.capabilities.lock().await.load_session = true;
+    assert!(bridge.resolve_cwd("foreign").await.is_err());
+    let read = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        bridge.read_thread_in_cwd("foreign", &cwd),
+    )
+    .await;
+    assert!(matches!(read, Ok(Err(_))), "refuse before any ACP request");
+    assert!(!bridge.sessions.lock().await.contains_key("foreign"));
+    bridge.sessions.lock().await.insert(
+        "unattached".into(),
+        SessionRuntime {
+            cwd,
+            ..Default::default()
+        },
+    );
+    assert!(bridge.opencode_history_directories().await.is_empty());
+}
+
+#[tokio::test]
+async fn opencode_release_refuses_live_turns_and_reload_precedes_the_next_prompt() {
+    use crate::provider::ProviderBridge;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (outbound, peer) = tokio::io::duplex(16384);
+    let (mut writer, inbound) = tokio::io::duplex(16384);
+    let bridge = AcpBridge::for_test(relay_state(), outbound, inbound, "opencode");
+    bridge.capabilities.lock().await.close_session = true;
+    bridge.capabilities.lock().await.load_session = true;
+    bridge
+        .seed_session_for_test("ses_released", "/tmp/project")
+        .await;
+    bridge
+        .sessions
+        .lock()
+        .await
+        .get_mut("ses_released")
+        .unwrap()
+        .turn_id = Some("live-turn".into());
+    assert!(bridge
+        .release_thread("ses_released")
+        .await
+        .unwrap_err()
+        .contains("running"));
+    bridge
+        .sessions
+        .lock()
+        .await
+        .get_mut("ses_released")
+        .unwrap()
+        .turn_id = None;
+    let answerer = tokio::spawn(async move {
+        let mut lines = BufReader::new(peer).lines();
+        for method in [
+            "session/close",
+            "session/load",
+            "session/set_config_option",
+            "session/prompt",
+        ] {
+            let sent: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(sent["method"], method);
+            let result = match method {
+                "session/load" => {
+                    assert_eq!(sent["params"]["cwd"], "/tmp/project");
+                    assert_eq!(sent["params"]["mcpServers"], json!([]));
+                    opencode_config("test/echo", "high", "build")
+                }
+                "session/set_config_option" => {
+                    assert_eq!(sent["params"]["configId"], "effort");
+                    assert_eq!(sent["params"]["value"], "default");
+                    opencode_config("test/echo", "default", "build")
+                }
+                "session/prompt" => json!({"stopReason":"end_turn"}),
+                _ => json!({}),
+            };
+            let reply = json!({"jsonrpc":"2.0","id":sent["id"],"result":result});
+            writer
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    bridge.release_thread("ses_released").await.unwrap();
+    assert!(
+        !bridge
+            .sessions
+            .lock()
+            .await
+            .get("ses_released")
+            .unwrap()
+            .attached
+    );
+    bridge
+        .start_turn("ses_released", "hello", "test/echo", "unsupported", &[])
+        .await
+        .unwrap();
+    answerer.await.unwrap();
+    assert!(
+        bridge.models_cache.is_none(),
+        "in-memory test bridges must never persist the catalog"
+    );
+}

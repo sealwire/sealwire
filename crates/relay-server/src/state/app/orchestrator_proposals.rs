@@ -71,6 +71,19 @@ fn merge_task_seat_agents(input: &TaskSeatAgentsView) -> TaskSeatAgentsView {
     merged
 }
 
+fn refuse_seats_without_seat_tools(agents: &TaskSeatAgentsView) -> Result<(), String> {
+    for (seat, agent) in [
+        ("Planner seat", &agents.tl),
+        ("Implementer seat", &agents.dev),
+        ("Reviewer seat", &agents.reviewer),
+    ] {
+        if let Some(provider) = agent.provider.as_deref() {
+            super::team::refuse_seat_without_seat_tools(provider, seat)?;
+        }
+    }
+    Ok(())
+}
+
 fn agent_for_runtime_role(agents: &TaskSeatAgentsView, role: TeamRole) -> SeatAgentView {
     match role {
         TeamRole::Tl => agents.tl.clone(),
@@ -196,6 +209,7 @@ impl AppState {
         let (team_id, team_version_id, team_name, team_structure) =
             self.resolve_proposal_team(input.team_id.as_deref()).await;
         let agents = merge_task_seat_agents(&input.agents);
+        refuse_seats_without_seat_tools(&agents)?;
         let agent_rows = proposal_agent_rows(&agents, &team_structure);
 
         let proposal = OrchestratorProposalView {
@@ -274,6 +288,10 @@ impl AppState {
             .iter_mut()
             .find(|entry| entry.id == proposal_id)
             .ok_or_else(|| format!("no pending proposal '{proposal_id}'"))?;
+        // Before any field changes, so a refused revision leaves the card whole.
+        let mut agents = proposal.agents.clone();
+        agents.merge(&input.agents);
+        refuse_seats_without_seat_tools(&agents)?;
 
         if let Some(title) = input.title.and_then(|value| non_empty(Some(value))) {
             proposal.title = truncate_chars(title, MAX_PROPOSAL_TITLE_CHARS);
@@ -296,7 +314,7 @@ impl AppState {
         }
         // Field-by-field: revising one seat's effort must leave the model that
         // seat was already staged with alone.
-        proposal.agents.merge(&input.agents);
+        proposal.agents = agents;
         if let Some((team_id, team_version_id, team_name, _)) = team {
             proposal.team_id = team_id;
             proposal.team_version_id = team_version_id;
@@ -764,6 +782,64 @@ mod tests {
         assert!(
             !wire.contains("Context only the proposals channel carries."),
             "the snapshot carries the revision, never the card"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_card_cannot_put_a_seat_on_a_provider_without_seat_tools() {
+        let project = TempDir::new().expect("project");
+        let cwd = project.path().to_string_lossy().to_string();
+        let app = beta_app(&cwd).await;
+        let on_opencode = SeatAgentView {
+            provider: Some("opencode".to_string()),
+            model: None,
+            effort: None,
+        };
+
+        let refused = app
+            .propose_orchestrator_task(ProposeOrchestratorTaskInput {
+                title: "Add a parser".to_string(),
+                device_id: Some("device-1".to_string()),
+                agents: TaskSeatAgentsView {
+                    dev: on_opencode.clone(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await
+            .expect_err("a card that can only fail after the run starts must not be offered");
+        assert!(refused.contains("OpenCode"), "{refused}");
+        assert!(app.orchestrator_proposals().await.proposals.is_empty());
+
+        let staged = app
+            .propose_orchestrator_task(ProposeOrchestratorTaskInput {
+                title: "Add a parser".to_string(),
+                device_id: Some("device-1".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("propose")
+            .proposal;
+        let refused = app
+            .revise_orchestrator_proposal(
+                &staged.id,
+                ReviseOrchestratorProposalInput {
+                    title: Some("Renamed".to_string()),
+                    agents: TaskSeatAgentsView {
+                        reviewer: on_opencode,
+                        ..Default::default()
+                    },
+                    device_id: Some("device-1".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("a revision cannot move a seat onto OpenCode either");
+        assert!(refused.contains("OpenCode"), "{refused}");
+        assert_eq!(
+            app.orchestrator_proposals().await.proposals,
+            vec![staged],
+            "a refused revision leaves the card exactly as it was"
         );
     }
 

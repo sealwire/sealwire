@@ -280,6 +280,11 @@ pub fn session_gets_peer_tools(purpose: &SessionPurpose) -> bool {
     !purpose.is_driven_by_the_relay()
 }
 
+pub fn supports_session_mcp(provider: &str) -> bool {
+    // OpenCode registers ACP MCP servers per directory, mixing session identities.
+    provider != "opencode"
+}
+
 /// Which sealwire MCP identity a provider session should carry.
 ///
 /// One precedence rule for every bridge: a retained Task seat gets the
@@ -478,6 +483,9 @@ pub trait ProviderBridge: Send + Sync {
     /// success and changes nothing.
     fn supports_archive(&self) -> bool {
         false
+    }
+    fn supports_read_only_reviews(&self) -> bool {
+        true
     }
     async fn resume_thread(
         &self,
@@ -723,8 +731,11 @@ pub fn classify_spawn_error(reason: &str) -> crate::protocol::ProviderStatusKind
 /// This covers the relay's own exec only. A child that itself shells out by
 /// bare name (the Claude worker spawning the `claude` CLI) still uses the
 /// inherited `$PATH` and would need that `$PATH` augmented instead.
-fn fallback_bin_dirs(home: &Path) -> [PathBuf; 1] {
-    [home.join(".local").join("bin")]
+fn fallback_bin_dirs(home: &Path) -> [PathBuf; 2] {
+    [
+        home.join(".local").join("bin"),
+        home.join(".opencode").join("bin"),
+    ]
 }
 
 /// The program to hand `Command::new` for `binary_name`.
@@ -827,6 +838,14 @@ const DEFAULT_PROVIDERS: &[ProviderEntry] = &[
         kind: ProviderKind::Acp,
         launch_args: &["acp"],
         aliases: &["cursor-agent", "cursor_agent"],
+    },
+    ProviderEntry {
+        binary_name: "opencode",
+        display_name: "OpenCode",
+        provider_key: "opencode",
+        kind: ProviderKind::Acp,
+        launch_args: &["acp"],
+        aliases: &[],
     },
 ];
 
@@ -1115,6 +1134,7 @@ mod registry_tests {
         assert_eq!(entry("codex").kind, ProviderKind::Codex);
         assert_eq!(entry("claude_code").kind, ProviderKind::ClaudeCode);
         assert_eq!(entry("cursor").kind, ProviderKind::Acp);
+        assert_eq!(entry("opencode").kind, ProviderKind::Acp);
         assert_eq!(entry("fake").kind, ProviderKind::Fake);
     }
 
@@ -1133,6 +1153,7 @@ mod registry_tests {
             }
         }
         assert_eq!(entry("cursor").launch_args, &["acp"]);
+        assert_eq!(entry("opencode").launch_args, &["acp"]);
     }
 
     #[test]
@@ -1159,7 +1180,7 @@ mod registry_tests {
             .iter()
             .map(|e| e.provider_key)
             .collect();
-        assert_eq!(keys, vec!["codex", "claude_code", "cursor"]);
+        assert_eq!(keys, vec!["codex", "claude_code", "cursor", "opencode"]);
         assert!(select_providers("   ")
             .iter()
             .all(|e| e.provider_key != "fake"));

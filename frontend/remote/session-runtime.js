@@ -1,6 +1,6 @@
 import { threadError } from "../shared/composer-errors.js";
 import {
-  buildReasoningEffortOptions,
+  buildReasoningEffortOptionsWithSelection,
   resolveReasoningEffortValue,
 } from "../shared/reasoning-efforts.js";
 import { sessionIsWorking } from "../shared/thread-attention.js";
@@ -34,6 +34,7 @@ export function deriveSessionRuntime({
   session,
   sessionView,
 }) {
+  const provider = session?.provider || "unknown";
   const currentModelValue = composerModel || session?.model || "";
   const sessionModels = session?.available_models || [];
   // Keep the fetched same-provider catalogue on screen through a transiently
@@ -48,7 +49,8 @@ export function deriveSessionRuntime({
   const currentEffortValue = resolveReasoningEffortValue(
     models,
     currentModelValue,
-    composerEffort || session?.reasoning_effort || ""
+    composerEffort || session?.reasoning_effort || "",
+    provider
   );
   const working = sessionIsWorking(session);
   const threadId = session?.active_thread_id || null;
@@ -63,9 +65,10 @@ export function deriveSessionRuntime({
     currentModelValue,
     errorMessage: threadError(composerErrors, session?.active_thread_id),
     heldMessage: threadError(composerHeld, session?.active_thread_id),
-    effortOptions: buildReasoningEffortOptions(
+    effortOptions: buildReasoningEffortOptionsWithSelection(
       models,
       currentModelValue,
+      provider,
       currentEffortValue
     ),
     messagePlaceholder: sessionView.messagePlaceholder,

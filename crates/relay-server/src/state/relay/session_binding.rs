@@ -399,7 +399,7 @@ impl SessionBindingRegistry {
 
     /// The subset worth writing to `session.json`.
     ///
-    /// An identity binding re-derives itself from the provider's own thread list on
+    /// Most identity bindings re-derive from the provider's own thread list on
     /// the next refresh, so persisting one per historical row would grow the state
     /// file by every session a search ever scanned and change no decision. An
     /// unmaterialized session is dropped for the reason its metadata already is:
@@ -408,7 +408,9 @@ impl SessionBindingRegistry {
         self.bindings
             .iter()
             .filter(|(session_id, binding)| {
-                binding.is_materialized() && !binding.is_identity_for(session_id)
+                // OpenCode needs a known provider and cwd to rediscover its directory-scoped history.
+                binding.is_materialized()
+                    && (binding.provider == "opencode" || !binding.is_identity_for(session_id))
             })
             .map(|(session_id, binding)| (session_id.clone(), binding.clone()))
             .collect()
@@ -688,6 +690,18 @@ mod tests {
             vec!["session-real"],
             "identity rows re-derive from the provider list; an unsent deferred session \
 has no provider history to come back to",
+        );
+    }
+
+    #[test]
+    fn opencode_identity_survives_restart_for_directory_scoped_discovery() {
+        let mut registry = SessionBindingRegistry::default();
+        registry.bind_identity("opencode", "ses_saved").unwrap();
+        let (restored, dropped) = SessionBindingRegistry::restore(&registry.persistable());
+        assert!(dropped.is_empty());
+        assert_eq!(
+            restored.session_for_provider_handle("opencode", "ses_saved"),
+            Some("ses_saved")
         );
     }
 

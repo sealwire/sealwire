@@ -37,6 +37,8 @@ use crate::{
     state::{PendingApproval, RelayState},
 };
 
+mod config;
+mod opencode;
 mod protocol;
 mod rpc;
 
@@ -148,11 +150,12 @@ pub(crate) struct SessionRuntime {
     pub(crate) approval_policy: String,
     /// The ACP model id this session is currently configured with.
     ///
-    /// ACP models are *session* config (`session/set_model`), not a per-turn
+    /// ACP models are session config, not a per-turn
     /// argument the way `ProviderBridge::start_turn` passes them — so the bridge
     /// tracks the session's model and pushes a change only when the relay's
     /// selection actually differs.
     pub(crate) model: String,
+    pub(crate) config_options: Vec<Value>,
     /// The mode the session is actually in, per the agent's own reporting.
     pub(crate) mode: String,
     /// Whether THIS connection has the session open.
@@ -395,6 +398,7 @@ pub struct AcpBridge {
     /// Catalog captured from the first `session/new`, which returns the full
     /// model list — ACP has no standalone catalog method.
     models: Arc<Mutex<Vec<ModelOptionView>>>,
+    models_cache: Option<std::path::PathBuf>,
     /// One lock per session, held across a `session/load`.
     ///
     /// A replay is a session-wide side effect on a shared notification channel,
@@ -405,6 +409,7 @@ pub struct AcpBridge {
     /// and image prompts optional and requires clients to check first.
     capabilities: Arc<Mutex<protocol::AgentCapabilities>>,
     authenticated: AtomicBool,
+    discovery_lock: Mutex<()>,
 }
 
 use crate::provider::relay_mcp_server_name;
@@ -500,6 +505,9 @@ impl AcpBridge {
     /// Reattach MCP: retained Task seat wins, then ordinary standalone peer,
     /// else empty — same precedence Codex uses on `thread/resume`.
     async fn mcp_servers_for_reattach(&self, acp_session_id: &str) -> Value {
+        if !crate::provider::supports_session_mcp(self.provider_name) {
+            return json!([]);
+        }
         // Keep the peer decision and token mint under the same lock, as the old
         // `ask_token_if_allowed` path did. A team must not be able to adopt the
         // thread between those two operations and leave it holding peer identity.
@@ -546,6 +554,9 @@ impl AcpBridge {
         // is where cursor's installer puts it and is often not on `$PATH`. The
         // error text below stays bare — it names a command for a human to run.
         let mut command = Command::new(crate::provider::resolve_binary(binary_name));
+        if provider_key == "opencode" {
+            command.current_dir(opencode::discovery_directory().await?);
+        }
         command
             .args(launch_args)
             .stdin(Stdio::piped())
@@ -578,6 +589,10 @@ impl AcpBridge {
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
         let captures: Captures = Arc::new(Mutex::new(HashMap::new()));
         let stdin: Outbound = Arc::new(Mutex::new(Box::new(stdin)));
+        let models_cache = Some(models_cache_path(provider_key));
+        let models = Arc::new(Mutex::new(read_cached_models(
+            models_cache.as_ref().unwrap(),
+        )));
 
         rpc::spawn_stdout_reader(rpc::ReaderContext {
             stdout: Box::new(stdout),
@@ -586,6 +601,8 @@ impl AcpBridge {
             state: state.clone(),
             sessions: sessions.clone(),
             captures: captures.clone(),
+            models: models.clone(),
+            models_cache: models_cache.clone(),
             provider_key,
         });
         rpc::spawn_stderr_reader(stderr, state.clone(), provider_key);
@@ -602,12 +619,12 @@ impl AcpBridge {
             binary_name,
             sessions,
             captures,
-            models: Arc::new(Mutex::new(read_cached_models(&models_cache_path(
-                provider_key,
-            )))),
+            models,
+            models_cache,
             load_locks: Arc::new(Mutex::new(HashMap::new())),
             capabilities: Arc::new(Mutex::new(protocol::AgentCapabilities::default())),
             authenticated: AtomicBool::new(false),
+            discovery_lock: Mutex::new(()),
         };
 
         bridge.initialize().await?;
@@ -621,11 +638,13 @@ impl AcpBridge {
 
         // Off the startup critical path, like codex's: a hung `mcp list` must
         // not delay bridge creation or the providers queued behind it.
-        tokio::spawn(report_mcp_config(
-            binary_name,
-            provider_key,
-            bridge.state.clone(),
-        ));
+        if provider_key == "cursor" {
+            tokio::spawn(report_mcp_config(
+                binary_name,
+                provider_key,
+                bridge.state.clone(),
+            ));
+        }
 
         Ok(bridge)
     }
@@ -698,8 +717,13 @@ impl AcpBridge {
                 relay.push_log(
                     "warn",
                     format!(
-                        "{} is not authenticated ({error}). Run `{} login`, then reconnect.",
-                        self.display_name, self.binary_name
+                        "{} is not authenticated ({error}). Run `{}`, then reconnect.",
+                        self.display_name,
+                        if self.provider_name == "opencode" {
+                            "opencode auth login".to_string()
+                        } else {
+                            format!("{} login", self.binary_name)
+                        }
                     ),
                 );
                 relay.notify();
@@ -791,32 +815,14 @@ impl AcpBridge {
     /// the default would make opening one old thread change what every later new
     /// session starts on.
     async fn absorb_catalog(&self, result: &Value, from_new_session: bool) {
-        let Some(models) = result.get("models") else {
-            return;
-        };
-        let available = models
-            .get("availableModels")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        if available.is_empty() {
-            return;
-        }
-        let known_default = self
-            .models
-            .lock()
-            .await
-            .iter()
-            .find(|model| model.is_default)
-            .map(|model| model.model.clone());
-        let current = default_after(
+        absorb_catalog_into(
+            &self.models,
+            result,
             from_new_session,
-            models.get("currentModelId").and_then(Value::as_str),
-            known_default,
-        );
-        let options = protocol::model_options(&available, current.as_deref(), self.provider_name);
-        write_cached_models(&models_cache_path(self.provider_name), &options);
-        *self.models.lock().await = options;
+            self.provider_name,
+            self.models_cache.as_deref(),
+        )
+        .await;
     }
 
     /// The absolute cwd for a session, hydrating from `session/list` if the
@@ -835,6 +841,23 @@ impl AcpBridge {
             .map(|session| session.cwd.clone())
             .filter(|cwd| !cwd.is_empty())
         {
+            return Ok(cwd);
+        }
+
+        let recorded = {
+            let relay = self.state.read().await;
+            let session_id = relay
+                .session_for_provider_handle(self.provider_name, thread_id)
+                .or_else(|| (self.provider_name != "opencode").then(|| thread_id.to_string()));
+            session_id.and_then(|id| relay.thread_history_cwd(&id))
+        };
+        if let Some(cwd) = recorded {
+            self.sessions
+                .lock()
+                .await
+                .entry(thread_id.to_string())
+                .or_default()
+                .cwd = cwd.clone();
             return Ok(cwd);
         }
 
@@ -874,6 +897,7 @@ impl AcpBridge {
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
         let captures: Captures = Arc::new(Mutex::new(HashMap::new()));
         let stdin: Outbound = Arc::new(Mutex::new(Box::new(outbound)));
+        let models = Arc::new(Mutex::new(Vec::new()));
 
         rpc::spawn_stdout_reader(rpc::ReaderContext {
             stdout: Box::new(inbound),
@@ -882,6 +906,8 @@ impl AcpBridge {
             state: state.clone(),
             sessions: sessions.clone(),
             captures: captures.clone(),
+            models: models.clone(),
+            models_cache: None,
             provider_key,
         });
 
@@ -899,10 +925,12 @@ impl AcpBridge {
             binary_name: "cursor-agent",
             sessions,
             captures,
-            models: Arc::new(Mutex::new(Vec::new())),
+            models,
+            models_cache: None,
             load_locks: Arc::new(Mutex::new(HashMap::new())),
             capabilities: Arc::new(Mutex::new(protocol::AgentCapabilities::default())),
             authenticated: AtomicBool::new(true),
+            discovery_lock: Mutex::new(()),
         }
     }
 
@@ -1054,6 +1082,9 @@ impl AcpBridge {
         // never answered. Logged on a relay-owned channel so the audit view
         // shows it rather than filtering it as provider chatter.
         if !protocol::model_is_known(&self.models.lock().await, &target) {
+            if self.provider_name == "opencode" {
+                return Err(format!("OpenCode does not offer model `{target}`"));
+            }
             let effective = self
                 .sessions
                 .lock()
@@ -1074,11 +1105,29 @@ impl AcpBridge {
             return Ok(());
         }
 
-        self.send_request(
-            "session/set_model",
-            json!({ "sessionId": thread_id, "modelId": target }),
-        )
-        .await
+        let config_id = self
+            .sessions
+            .lock()
+            .await
+            .get(thread_id)
+            .and_then(|session| config::option(&session.config_options, "model"))
+            .and_then(|option| option.get("id").and_then(Value::as_str))
+            .map(str::to_string);
+        let result = if let Some(config_id) = config_id {
+            self.send_request(
+                "session/set_config_option",
+                json!({
+                    "sessionId": thread_id, "configId": config_id, "value": target,
+                }),
+            )
+            .await
+        } else {
+            self.send_request(
+                "session/set_model",
+                json!({ "sessionId": thread_id, "modelId": target }),
+            )
+            .await
+        }
         .map_err(|error| {
             format!(
                 "{} could not switch `{thread_id}` to model `{target}`: {error}",
@@ -1086,12 +1135,69 @@ impl AcpBridge {
             )
         })?;
 
-        self.sessions
+        self.absorb_catalog(&result, false).await;
+        let mut sessions = self.sessions.lock().await;
+        let session = sessions.entry(thread_id.to_string()).or_default();
+        absorb_session_settings(session, &result);
+        session.model = target;
+        Ok(())
+    }
+
+    async fn apply_effort(&self, thread_id: &str, effort: &str) -> Result<(), String> {
+        if effort.is_empty() {
+            return Ok(());
+        }
+        let option = self
+            .sessions
             .lock()
             .await
-            .entry(thread_id.to_string())
-            .or_default()
-            .model = target;
+            .get(thread_id)
+            .and_then(|session| config::option(&session.config_options, "thought_level"))
+            .cloned();
+        let Some(option) = option else {
+            return Ok(());
+        };
+        if config::current(&option) == Some(effort) {
+            return Ok(());
+        }
+        let offered = config::choices(&option);
+        let effort = if !offered
+            .iter()
+            .any(|choice| choice.get("value").and_then(Value::as_str) == Some(effort))
+        {
+            if self.provider_name == "opencode"
+                && offered
+                    .iter()
+                    .any(|choice| choice.get("value").and_then(Value::as_str) == Some("default"))
+            {
+                let mut relay = self.state.write().await;
+                relay.push_log("warn", format!("OpenCode does not offer effort `{effort}` for this model; using its model default"));
+                relay.notify();
+                "default"
+            } else {
+                return Err(format!(
+                    "{} does not offer effort `{effort}` for this model",
+                    self.display_name
+                ));
+            }
+        } else {
+            effort
+        };
+        let id = option
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("ACP effort option has no id")?;
+        let result = self
+            .send_request(
+                "session/set_config_option",
+                json!({
+                    "sessionId": thread_id, "configId": id, "value": effort,
+                }),
+            )
+            .await?;
+        self.absorb_catalog(&result, false).await;
+        let mut sessions = self.sessions.lock().await;
+        absorb_session_settings(sessions.entry(thread_id.to_string()).or_default(), &result);
         Ok(())
     }
 
@@ -1115,6 +1221,11 @@ impl AcpBridge {
             return Ok(());
         };
 
+        config::validate_policy(
+            self.provider_name,
+            &settings.approval_policy,
+            &settings.sandbox,
+        )?;
         let mode = protocol::acp_mode_for_policy(&settings.approval_policy, &settings.sandbox);
         let needs_mode_push = {
             let mut sessions = self.sessions.lock().await;
@@ -1148,6 +1259,10 @@ impl AcpBridge {
         approval_policy: &str,
         sandbox: &str,
     ) -> Result<(), String> {
+        config::validate_policy(self.provider_name, approval_policy, sandbox)?;
+        if self.provider_name == "opencode" {
+            return Ok(());
+        }
         let mode = protocol::acp_mode_for_policy(approval_policy, sandbox);
         let outcome = self
             .send_request(
@@ -1224,6 +1339,15 @@ fn empty_thread_sync(thread_id: &str, cwd: &str, provider_key: &'static str) -> 
 /// already in place, and gives drift detection a baseline before the first
 /// `current_mode_update`. A response that carries neither leaves what we knew.
 pub(crate) fn absorb_session_settings(session: &mut SessionRuntime, result: &Value) {
+    if let Some(options) = result.get("configOptions").and_then(Value::as_array) {
+        session.config_options = options.clone();
+        if let Some(model) = config::option(options, "model").and_then(config::current) {
+            session.model = model.to_string();
+        }
+        if let Some(mode) = config::option(options, "mode").and_then(config::current) {
+            session.mode = mode.to_string();
+        }
+    }
     if let Some(mode) = result
         .get("modes")
         .and_then(|modes| modes.get("currentModeId"))
@@ -1239,6 +1363,53 @@ pub(crate) fn absorb_session_settings(session: &mut SessionRuntime, result: &Val
         .filter(|model| !model.is_empty())
     {
         session.model = model.to_string();
+    }
+}
+
+async fn absorb_catalog_into(
+    models: &Arc<Mutex<Vec<ModelOptionView>>>,
+    result: &Value,
+    from_new_session: bool,
+    provider: &'static str,
+    cache_path: Option<&std::path::Path>,
+) {
+    let mut catalog = models.lock().await;
+    let known_default = catalog
+        .iter()
+        .find(|model| model.is_default)
+        .map(|model| model.model.clone());
+    let options =
+        if let Some(config_options) = result.get("configOptions").and_then(Value::as_array) {
+            let current = default_after(
+                from_new_session,
+                config::option(config_options, "model").and_then(config::current),
+                known_default,
+            );
+            config::models(
+                config_options,
+                provider,
+                current.as_deref(),
+                &catalog,
+                from_new_session,
+            )
+        } else if let Some(models) = result.get("models") {
+            let Some(available) = models.get("availableModels").and_then(Value::as_array) else {
+                return;
+            };
+            let current = default_after(
+                from_new_session,
+                models.get("currentModelId").and_then(Value::as_str),
+                known_default,
+            );
+            protocol::model_options(available, current.as_deref(), provider)
+        } else {
+            return;
+        };
+    if !options.is_empty() {
+        if let Some(path) = cache_path {
+            write_cached_models(path, &options);
+        }
+        *catalog = options;
     }
 }
 
@@ -1319,7 +1490,11 @@ pub(crate) fn absorb_thread_cwds(
 
 #[async_trait]
 impl ProviderBridge for AcpBridge {
+    fn supports_read_only_reviews(&self) -> bool {
+        self.provider_name != "opencode"
+    }
     async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String> {
+        let _discovery = self.discovery_lock.lock().await;
         // Optional in ACP. An agent without it simply has no history to offer;
         // the relay still drives sessions it starts itself, so this is an empty
         // list rather than an error.
@@ -1335,38 +1510,79 @@ impl ProviderBridge for AcpBridge {
         }
         let now = crate::state::unix_now();
         let mut threads: Vec<ThreadSummaryView> = Vec::new();
-        let mut cursor: Option<String> = None;
-
-        // `session/list` is cursor-paginated. Stopping at the first page hides
-        // later threads AND leaves their cwd uncached, so `resolve_cwd` cannot
-        // reload them after a restart. Bounded so an agent that always hands
-        // back a cursor cannot spin the bridge forever.
-        for _ in 0..MAX_LIST_PAGES {
-            let params = match &cursor {
-                Some(cursor) => json!({ "cursor": cursor }),
-                None => json!({}),
-            };
-            let result = self.send_request("session/list", params).await?;
-            threads.extend(
-                result
-                    .get("sessions")
-                    .and_then(Value::as_array)
-                    .map(|sessions| {
-                        sessions
-                            .iter()
-                            .filter_map(|session| {
-                                protocol::thread_summary(session, self.provider_name, now)
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default(),
-            );
-            match protocol::next_list_cursor(&result) {
-                Some(next) => cursor = Some(next),
-                None => break,
+        // OpenCode lists exact directories and loads their plugins as a side effect.
+        let directories = if self.provider_name == "opencode" {
+            self.opencode_history_directories()
+                .await
+                .into_iter()
+                .map(Some)
+                .collect()
+        } else {
+            vec![None]
+        };
+        let mut last_error = None;
+        let mut successful_directories = 0;
+        for cwd in directories {
+            let mut cursor: Option<String> = None;
+            for _ in 0..MAX_LIST_PAGES {
+                let mut params = json!({});
+                if let Some(cwd) = &cwd {
+                    params["cwd"] = json!(cwd);
+                }
+                if let Some(cursor) = &cursor {
+                    params["cursor"] = json!(cursor);
+                }
+                let result = match self
+                    .send_request_with_timeout("session/list", params, 15)
+                    .await
+                {
+                    Ok(result) => {
+                        successful_directories += 1;
+                        result
+                    }
+                    Err(error) if self.provider_name == "opencode" => {
+                        let mut relay = self.state.write().await;
+                        relay.push_log(
+                            "warn",
+                            format!(
+                                "Could not list OpenCode history in {}: {error}",
+                                cwd.as_deref().unwrap_or_default()
+                            ),
+                        );
+                        relay.notify();
+                        last_error = Some(error);
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                };
+                threads.extend(
+                    result
+                        .get("sessions")
+                        .and_then(Value::as_array)
+                        .map(|sessions| {
+                            sessions
+                                .iter()
+                                .filter_map(|session| {
+                                    protocol::thread_summary(session, self.provider_name, now)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                );
+                match protocol::next_list_cursor(&result) {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+            }
+        }
+        if successful_directories == 0 {
+            if let Some(error) = last_error {
+                return Err(error);
             }
         }
         threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        let mut seen = std::collections::HashSet::new();
+        threads.retain(|thread| seen.insert(thread.id.clone()));
 
         // Cache before truncating: a session outside the requested window still
         // needs its cwd on hand for a later `session/load`.
@@ -1416,11 +1632,19 @@ impl ProviderBridge for AcpBridge {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelOptionView>, String> {
+        if self.provider_name == "opencode" && self.models.lock().await.is_empty() {
+            let cwd = opencode::discovery_directory().await?;
+            self.discover_opencode_models(&cwd.to_string_lossy())
+                .await?;
+        }
         Ok(self.models.lock().await.clone())
     }
 
     /// Only `session/new` reports it, so a cold bridge with no cached catalog has none.
-    async fn default_model(&self, _cwd: &str) -> Result<String, String> {
+    async fn default_model(&self, cwd: &str) -> Result<String, String> {
+        if self.provider_name == "opencode" {
+            return self.discover_opencode_models(cwd).await;
+        }
         self.models
             .lock()
             .await
@@ -1439,12 +1663,21 @@ impl ProviderBridge for AcpBridge {
     /// `mcpServers` and nothing resembling an instruction field. Not smuggled in
     /// as a user turn: see `StartThreadRequest::system_prompt`.
     async fn start_thread(&self, request: StartThreadRequest) -> Result<StartThreadResult, String> {
+        config::validate_policy(
+            self.provider_name,
+            &request.approval_policy,
+            &request.sandbox,
+        )?;
         let cwd = request.cwd.as_str();
         // Minted before the session exists, bound to it below. What it is for decides
         // whether it gets one at all — permissions alone handed a task seat the tools of
         // a session that drives itself. Seat purpose attaches the run-scoped bridge
         // instead and never mints an ask token.
-        let identity = crate::provider::sealwire_mcp_for_new_session(&request.purpose);
+        let identity = if !crate::provider::supports_session_mcp(self.provider_name) {
+            crate::provider::SealwireMcpIdentity::None
+        } else {
+            crate::provider::sealwire_mcp_for_new_session(&request.purpose)
+        };
         let unrestricted =
             crate::state::session_is_unrestricted(&request.approval_policy, &request.sandbox);
         let new_token = match &identity {
@@ -1487,25 +1720,29 @@ impl ProviderBridge for AcpBridge {
         self.absorb_catalog(&result, true).await;
 
         {
-            let mut runtime = SessionRuntime {
-                cwd: cwd.to_string(),
-                approval_policy: approval_policy.to_string(),
-                // `session/new` just opened it on this connection.
-                attached: true,
-                relay_mcp_server: new_token.as_deref().map(relay_mcp_server_name),
-                ..Default::default()
-            };
-            // Whatever `session/new` chose, until the relay says otherwise.
-            absorb_session_settings(&mut runtime, &result);
-            self.sessions
-                .lock()
-                .await
-                .insert(session_id.clone(), runtime);
+            // A command announcement can arrive before the session/new response.
+            let mut sessions = self.sessions.lock().await;
+            let runtime = sessions.entry(session_id.clone()).or_default();
+            runtime.cwd = cwd.to_string();
+            runtime.approval_policy = approval_policy.to_string();
+            runtime.attached = true;
+            runtime.relay_mcp_server = new_token.as_deref().map(relay_mcp_server_name);
+            absorb_session_settings(runtime, &result);
         }
 
-        self.apply_mode(&session_id, approval_policy, sandbox)
-            .await?;
-        self.apply_model(&session_id, model).await?;
+        let configured = async {
+            self.apply_mode(&session_id, approval_policy, sandbox)
+                .await?;
+            self.apply_model(&session_id, model).await?;
+            self.apply_effort(&session_id, &request.effort).await
+        }
+        .await;
+        if let Err(error) = configured {
+            if self.provider_name == "opencode" {
+                self.cleanup_opencode_session(&session_id).await;
+            }
+            return Err(error);
+        }
 
         Ok(StartThreadResult {
             provider_thread_id: Some(session_id.clone()),
@@ -1536,6 +1773,7 @@ impl ProviderBridge for AcpBridge {
         approval_policy: &str,
         sandbox: &str,
     ) -> Result<(), String> {
+        config::validate_policy(self.provider_name, approval_policy, sandbox)?;
         // Same lock as `read_thread`: two replays into one session would
         // overwrite each other's capture and leak replay events into live state.
         let lock = self.load_lock(thread_id).await;
@@ -1553,7 +1791,10 @@ impl ProviderBridge for AcpBridge {
                 .get(thread_id)
                 // An un-prompted session has nothing to replay and cannot be
                 // loaded at all; a streaming one must not be replayed over.
-                .map(|session| session.has_content && session.can_replay_into())
+                .map(|session| {
+                    (session.has_content || self.provider_name == "opencode")
+                        && session.can_replay_into()
+                })
                 .unwrap_or(true)
         };
 
@@ -1620,6 +1861,42 @@ impl ProviderBridge for AcpBridge {
             }
         }
         self.read_thread(thread_id).await.is_ok()
+    }
+
+    async fn read_thread_in_cwd(
+        &self,
+        thread_id: &str,
+        cwd: &str,
+    ) -> Result<ThreadSyncData, String> {
+        if self.provider_name == "opencode" && !cwd.is_empty() {
+            let bound = self
+                .state
+                .read()
+                .await
+                .session_for_provider_handle(self.provider_name, thread_id)
+                .is_some();
+            let mut sessions = self.sessions.lock().await;
+            if !bound
+                && !sessions
+                    .get(thread_id)
+                    .is_some_and(|session| !session.cwd.is_empty())
+            {
+                // OpenCode loads cwd plugins before checking that a session exists.
+                return Err(
+                    "Cannot load a directory hint for a session not known to OpenCode".into(),
+                );
+            }
+            let session = sessions
+                .entry(thread_id.to_string())
+                .or_insert_with(|| SessionRuntime {
+                    has_content: true,
+                    ..Default::default()
+                });
+            if session.cwd.is_empty() {
+                session.cwd = cwd.to_string();
+            }
+        }
+        self.read_thread(thread_id).await
     }
 
     async fn read_thread(&self, thread_id: &str) -> Result<ThreadSyncData, String> {
@@ -1767,13 +2044,45 @@ impl ProviderBridge for AcpBridge {
         ))
     }
 
-    /// ACP itself has no delete, so this goes to the vendor's local store —
-    /// see [`crate::acp_local`]. Blocking file I/O, so it is handed to the
-    /// blocking pool the same way Codex's local delete is.
+    async fn release_thread(&self, thread_id: &str) -> Result<(), String> {
+        if self.capabilities.lock().await.close_session {
+            let lock = self.load_lock(thread_id).await;
+            let _guard = lock.lock().await;
+            if self
+                .sessions
+                .lock()
+                .await
+                .get(thread_id)
+                .is_some_and(|session| session.turn_id.is_some())
+            {
+                return Err(format!(
+                    "{} cannot release a session while its turn is running",
+                    self.display_name
+                ));
+            }
+            self.send_request("session/close", json!({ "sessionId": thread_id }))
+                .await?;
+            if let Some(session) = self.sessions.lock().await.get_mut(thread_id) {
+                session.attached = false;
+            }
+        }
+        Ok(())
+    }
+
     async fn delete_thread_permanently(
         &self,
         thread_id: &str,
     ) -> Result<LocalThreadDeleteSummary, String> {
+        if self.provider_name == "opencode" {
+            self.release_thread(thread_id).await?;
+            let result = self.delete_opencode_session(thread_id).await;
+            settle_delete(&self.sessions, thread_id, &result).await;
+            result?;
+            return Ok(LocalThreadDeleteSummary {
+                deleted_paths: Vec::new(),
+                deleted_thread_row: true,
+            });
+        }
         let provider_name = self.provider_name;
         let display_name = self.display_name;
         let thread_id = thread_id.to_string();
@@ -1791,6 +2100,17 @@ impl ProviderBridge for AcpBridge {
         &self,
         thread_id: &str,
     ) -> Result<Option<LocalThreadDeleteSummary>, String> {
+        if self.provider_name == "opencode" {
+            self.release_thread(thread_id).await?;
+            let result = self.delete_opencode_session(thread_id).await;
+            settle_delete(&self.sessions, thread_id, &result).await;
+            return result.map(|deleted| {
+                deleted.then(|| LocalThreadDeleteSummary {
+                    deleted_paths: Vec::new(),
+                    deleted_thread_row: true,
+                })
+            });
+        }
         let provider_name = self.provider_name;
         let display_name = self.display_name;
         let thread_id = thread_id.to_string();
@@ -1813,7 +2133,7 @@ impl ProviderBridge for AcpBridge {
         thread_id: &str,
         text: &str,
         model: &str,
-        _effort: &str,
+        effort: &str,
         images: &[ProviderImage],
     ) -> Result<Option<String>, String> {
         // `promptCapabilities.image` is optional. Dropping the blocks silently
@@ -1828,14 +2148,14 @@ impl ProviderBridge for AcpBridge {
             ));
         }
 
-        // Before the prompt, not after: the model is session config, so it has
-        // to be in place for this turn rather than the next one. Reasoning
-        // effort has no separate axis here — ACP model ids encode it (see
-        // `protocol::model_effort`), so it rides along inside `model`.
-        self.apply_model(thread_id, model).await?;
         // Same reason: this turn's permissions must be decided against the
         // policy the relay holds now.
         self.sync_thread_policy(thread_id).await?;
+        if self.provider_name == "opencode" {
+            self.ensure_opencode_attached(thread_id).await?;
+        }
+        self.apply_model(thread_id, model).await?;
+        self.apply_effort(thread_id, effort).await?;
 
         let turn_id = self.mint_turn_id();
 
@@ -1944,6 +2264,18 @@ impl ProviderBridge for AcpBridge {
     /// Only cursor-agent is known to answer `about` / `status`; other ACP agents stay unknown.
     async fn account(&self) -> Result<crate::provider::account::ProviderAccount, String> {
         use crate::provider::account;
+        if self.provider_name == "opencode" {
+            let version = account::run_cli(
+                crate::provider::resolve_binary(self.binary_name),
+                &["--version"],
+            )
+            .await?;
+            return Ok(account::ProviderAccount {
+                version: account::version_from_banner(&version),
+                login_command: Some("opencode auth login"),
+                ..Default::default()
+            });
+        }
         if self.binary_name != "cursor-agent" {
             return Ok(account::ProviderAccount::default());
         }
