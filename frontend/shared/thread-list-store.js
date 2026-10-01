@@ -189,6 +189,16 @@ export function createThreadListStore(initialThreadList = {}) {
         return { threadSelection: createThreadSelection() };
       });
     },
+    // Which sidebar row is showing the rename box. Held here, not in the row, because
+    // the right-click menu that starts a rename lives outside React.
+    renamingThreadId: null,
+    beginThreadRename(threadId) {
+      set({ renamingThreadId: threadId || null });
+    },
+    // Guarded by id so a late settle from an old editor cannot close a newer one.
+    endThreadRename(threadId) {
+      set((state) => (state.renamingThreadId === threadId ? { renamingThreadId: null } : state));
+    },
     closeContextMenu() {
       set({
         contextMenu: {
@@ -250,6 +260,10 @@ export function readSearchUi(store) {
  */
 export function readThreadSelection(store) {
   return store?.getState?.().threadSelection || EMPTY_THREAD_SELECTION;
+}
+
+export function readRenamingThreadId(store) {
+  return store?.getState?.().renamingThreadId || null;
 }
 
 export function readActiveProjectId(store) {

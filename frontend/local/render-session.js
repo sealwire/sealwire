@@ -78,6 +78,7 @@ import { selectThreadState } from "../shared/thread-dot.js";
 import { canForkInSession } from "../shared/fork-fields.js";
 import {
   readActiveProjectId,
+  readRenamingThreadId,
   readSearchUi,
   readThreadFilter,
   readThreadListContextMenu,
@@ -273,6 +274,8 @@ export function createSessionRenderer({
   openThreadContextMenu,
   closeThreadContextMenu,
   onSelectThread,
+  onCommitThreadRename,
+  onCancelThreadRename,
   onRenameProject,
   onDeleteProject,
   scheduleControllerHeartbeat,
@@ -1704,6 +1707,9 @@ export function createSessionRenderer({
         // menu a batch, and remote has no right-click to feed.
         onSelectThread,
         selectedThreadIds: readThreadSelection(state.threadListStore).ids,
+        renamingThreadId: readRenamingThreadId(state.threadListStore),
+        onCommitRename: onCommitThreadRename,
+        onCancelRename: onCancelThreadRename,
         // Rename/delete render only for a group carrying a projectId, which since the
         // switcher means exactly one group: the pinned one. That is now the surviving
         // home for both actions — they used to be reachable only inside the retired

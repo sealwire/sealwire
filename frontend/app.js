@@ -233,7 +233,6 @@ import {
   normalizeThreadName,
   threadCustomName,
   threadNameChanged,
-  threadNameDraft,
 } from "./shared/thread-rename.js";
 import {
   buildProjectMenuItems,
@@ -1136,6 +1135,8 @@ const renderer = createSessionRenderer({
   openThreadContextMenu,
   closeThreadContextMenu,
   onSelectThread: selectThreadFromClick,
+  onCommitThreadRename: commitThreadRename,
+  onCancelThreadRename: cancelThreadRename,
   onRenameProject: renameProjectFromHeader,
   onDeleteProject: deleteProjectFromHeader,
   openProjectContextMenu,
@@ -2496,7 +2497,7 @@ archiveThreadButton?.addEventListener("click", () => {
 });
 
 renameThreadButton?.addEventListener("click", () => {
-  void renameThreadFromContextMenu();
+  renameThreadFromContextMenu();
 });
 
 flagThreadButton?.addEventListener("click", () => {
@@ -4549,28 +4550,26 @@ async function renameThreadById(threadId, rawName) {
   }
 }
 
-/**
- * Rename from the sidebar's right-click menu. A prompt rather than an inline editor:
- * the menu has already taken over the pointer, and this mirrors how renaming a Project
- * works from its own menu.
- */
-async function renameThreadFromContextMenu() {
+// From the sidebar's right-click menu: the row's own title turns into the edit box.
+function renameThreadFromContextMenu() {
   const threadId = readThreadListContextMenu(state.threadListStore).threadId;
   closeThreadContextMenu();
   if (!threadId) {
     return;
   }
-  const thread = resolveActiveThread(threadId);
-  const current = threadNameDraft(thread, shortId(threadId));
-  const answer = window.prompt(
-    "Rename this session.\n\nLeave it blank to go back to the name the agent picked.",
-    current
-  );
-  // Cancel (null) is not the same as an emptied box (""): only the latter is a reset.
-  if (answer === null) {
-    return;
-  }
-  await renameThreadById(threadId, answer);
+  state.threadListStore.getState().beginThreadRename(threadId);
+  renderThreads();
+}
+
+function commitThreadRename(threadId, value) {
+  state.threadListStore.getState().endThreadRename(threadId);
+  renderThreads();
+  void renameThreadById(threadId, value);
+}
+
+function cancelThreadRename(threadId) {
+  state.threadListStore.getState().endThreadRename(threadId);
+  renderThreads();
 }
 
 /**

@@ -123,6 +123,8 @@ export function createThreadListRows({
   // row it emits, so a `display: none` header still reserves its height and leaves a
   // gap that looks like a rendering fault.
   hidePinnedGroupHeader = false,
+  // Listed even past the limit: the rename box holds its draft only while mounted.
+  keepThreadId = null,
   visibleThreadLimit = 10,
 } = {}) {
   const rows = [];
@@ -141,7 +143,13 @@ export function createThreadListRows({
       !headerless && collapsible && collapsedGroupCwds.has(normalizedCwd);
     const allThreads = group.threads || [];
     const showAll = expandedGroupCwds.has(normalizedCwd);
-    const visibleThreads = showAll ? allThreads : allThreads.slice(0, visibleThreadLimit);
+    let visibleThreads = showAll ? allThreads : allThreads.slice(0, visibleThreadLimit);
+    const kept = !showAll && keepThreadId
+      ? allThreads.slice(visibleThreadLimit).find((thread) => thread.id === keepThreadId)
+      : null;
+    if (kept) {
+      visibleThreads = [...visibleThreads, kept];
+    }
     const hiddenCount = allThreads.length - visibleThreads.length;
 
     if (!headerless) {

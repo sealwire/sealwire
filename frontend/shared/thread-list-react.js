@@ -7,6 +7,7 @@ import React, {
 } from "react";
 import {
   Virtualizer,
+  defaultRangeExtractor,
   elementScroll,
   measureElement,
   observeElementOffset,
@@ -21,6 +22,8 @@ import { providerLabel } from "./provider-labels.js";
 import { providerMark } from "./provider-mark.js";
 import { ProjectTagIcon, WorkspaceFolderIcon } from "./panel-icons.js";
 import { selectThreadDot } from "./thread-dot.js";
+import { InlineTitleEditor } from "./inline-title-editor.js";
+import { threadNameDraft } from "./thread-rename.js";
 
 const h = React.createElement;
 
@@ -140,6 +143,8 @@ export function ThreadGroupList({
   formatThreadMeta = (thread) => thread.updated_at || "",
   groups = [],
   includePreview = false,
+  onCancelRename = null,
+  onCommitRename = null,
   onContextThread = null,
   onDeleteProject = null,
   activeProjectId = null,
@@ -154,6 +159,7 @@ export function ThreadGroupList({
   onToggleExpandedGroup = null,
   onToggleGroup = null,
   previewFallback = "No preview yet.",
+  renamingThreadId = null,
   selectedCwd = "",
   selectedThreadIds = null,
   threadActivity = null,
@@ -175,11 +181,24 @@ export function ThreadGroupList({
         expandedGroupCwds,
         groups,
         hidePinnedGroupHeader,
+        keepThreadId: renamingThreadId,
         visibleThreadLimit: VISIBLE_THREAD_LIMIT,
       }),
-    [collapsedGroupCwds, collapsible, expandedGroupCwds, groups, hidePinnedGroupHeader]
+    [
+      collapsedGroupCwds,
+      collapsible,
+      expandedGroupCwds,
+      groups,
+      hidePinnedGroupHeader,
+      renamingThreadId,
+    ]
   );
-  const virtualizer = useThreadListVirtualizer(rows);
+  // The wheel scrolls without blurring, so an editor dropped by the virtualizer would
+  // lose the draft with nothing saved; the row being renamed is always rendered.
+  const keepIndex = renamingThreadId
+    ? rows.findIndex((row) => row.type === "thread" && row.thread.id === renamingThreadId)
+    : -1;
+  const virtualizer = useThreadListVirtualizer(rows, keepIndex);
   const virtualRows = virtualizer.getVirtualItems();
   // The row hands up `(threadId, event)`; the ORDER a shift+click ranges over is
   // knowable only here, where the rows are built — the list is virtualized, so the
@@ -236,6 +255,8 @@ export function ThreadGroupList({
             formatThreadMeta,
             includePreview,
             normalizedSelectedCwd,
+            onCancelRename,
+            onCommitRename,
             onContextThread: onContextThread ? handleContextThread : null,
             onDeleteProject,
             activeProjectId,
@@ -249,6 +270,7 @@ export function ThreadGroupList({
             onToggleExpandedGroup,
             onToggleGroup,
             previewFallback,
+            renamingThreadId,
             row,
             selectedThreadIds,
             threadActivity,
@@ -267,6 +289,8 @@ function ThreadListRow({
   formatThreadMeta,
   includePreview,
   normalizedSelectedCwd,
+  onCancelRename,
+  onCommitRename,
   onContextThread,
   onDeleteProject,
   activeProjectId,
@@ -280,6 +304,7 @@ function ThreadListRow({
   onToggleExpandedGroup,
   onToggleGroup,
   previewFallback,
+  renamingThreadId,
   row,
   selectedThreadIds,
   threadActivity,
@@ -320,11 +345,14 @@ function ThreadListRow({
       formatThreadMeta,
       group: row.group,
       includePreview,
+      onCancelRename,
+      onCommitRename,
       onContextThread,
       onResumeThread,
       onSelectThread,
       onThreadActions,
       previewFallback,
+      renaming: renamingThreadId != null && renamingThreadId === row.thread.id,
       selected: selectedThreadIds?.has?.(row.thread.id) || false,
       thread: row.thread,
     });
@@ -341,7 +369,7 @@ function ThreadListRow({
   );
 }
 
-function useThreadListVirtualizer(rows) {
+function useThreadListVirtualizer(rows, keepIndex = -1) {
   const scrollTargetRef = useRef(null);
   const [, forceUpdate] = useReducer((value) => value + 1, 0);
   const virtualizerRef = useRef(null);
@@ -373,6 +401,16 @@ function useThreadListVirtualizer(rows) {
     }
     return row?.group?.threads?.length && row.group.threads.length > 0 ? 38 : 36;
   }, [rows]);
+  const rangeExtractor = useCallback(
+    (range) => {
+      const indexes = defaultRangeExtractor(range);
+      if (keepIndex < 0 || indexes.includes(keepIndex)) {
+        return indexes;
+      }
+      return [...indexes, keepIndex].sort((a, b) => a - b);
+    },
+    [keepIndex]
+  );
 
   virtualizerRef.current.setOptions({
     count: rows.length,
@@ -383,6 +421,7 @@ function useThreadListVirtualizer(rows) {
     observeElementOffset,
     observeElementRect,
     overscan: VIRTUAL_OVERSCAN,
+    rangeExtractor,
     scrollMargin,
     scrollToFn: elementScroll,
     onChange: () => forceUpdate(),
@@ -703,15 +742,19 @@ export function ThreadGroupItem({
   formatThreadMeta,
   group,
   includePreview,
+  onCancelRename = null,
+  onCommitRename = null,
   onContextThread,
   onResumeThread,
   onSelectThread = null,
   onThreadActions = null,
   previewFallback,
+  renaming = false,
   selected = false,
   thread,
 }) {
   const title = thread.name || thread.preview || shortId(thread.id);
+  const isRenaming = renaming && Boolean(onCommitRename);
   const provider = providerLabel(thread.provider);
   // Four-state dot: needs_input (amber) > working (pulse) > reviewing (blue pulse)
   // > completed (steady blue). See selectThreadDot for the full ordering rationale.
@@ -725,54 +768,7 @@ export function ThreadGroupItem({
   // it stable across renders.
   const isContextTarget = contextMenuThreadId === thread.id;
 
-  const rowButton = h(
-    "button",
-    {
-      className: `conversation-item${active ? " is-active" : ""}${isContextTarget ? " is-context-target" : ""}${selected ? " is-multi-selected" : ""}`,
-      // Only meaningful where rows are selectable; a surface without the handler
-      // would otherwise announce every row as "not selected" for no reason.
-      "aria-selected": onSelectThread ? String(Boolean(selected)) : undefined,
-      "data-thread-cwd": group.cwd,
-      "data-thread-id": thread.id,
-      "data-thread-provider": thread.provider || "",
-      "data-thread-title": title,
-      // One row, two intents. A single click PEEKS: the session opens instantly,
-      // as before, but into the reusable preview tab — so scrolling the sidebar
-      // hunting for a session no longer leaves a tab behind for every row touched
-      // on the way. A double click KEEPS it, the way an editor pins the tab you
-      // actually start working in.
-      //
-      // The two clicks of a double click fire first and peek; the dblclick then
-      // upgrades that same tab. Nothing is opened twice — `preview` only ever
-      // decides how a NEW tab is flagged, and the surface with no tab strip
-      // (remote) simply ignores the option.
-      //
-      // EVERY click first goes to the selection layer, which returns true when it has
-      // claimed the gesture (cmd/shift, or a Mac ctrl+click that is really a
-      // right-click) and false for a plain one. A plain click is not a no-op there —
-      // it is what sets the ANCHOR a later shift+click ranges from — so it cannot be
-      // filtered out here, only by the caller, which is the side that knows the
-      // platform. See threadSelectionIntent.
-      //
-      // The text-selection half of shift+click is suppressed in CSS (user-select on
-      // .conversation-item): it begins on mousedown, too early for this to stop.
-      onClick: (event) => {
-        if (onSelectThread?.(thread.id, event)) {
-          event.preventDefault();
-          return;
-        }
-        onResumeThread?.(thread.id, { preview: true });
-      },
-      onDoubleClick: () => onResumeThread?.(thread.id, { preview: false }),
-      onContextMenu: onContextThread
-        ? (event) => {
-            event.preventDefault();
-            onContextThread(thread.id, event.clientX, event.clientY);
-          }
-        : undefined,
-      title: provider ? `${provider} · ${title}` : title,
-      type: "button",
-    },
+  const rowChildren = [
     // One fixed-width leading slot. The mark says WHICH agent owns the row, and
     // the FIXED width is what puts every title on the same left edge — the text
     // pill it replaces was a different width per provider ("Claude" vs "Codex"),
@@ -820,13 +816,84 @@ export function ThreadGroupItem({
             title: dot.label,
           })
         : null,
-      h("span", { className: "conversation-title" }, title)
+      isRenaming
+        ? h(InlineTitleEditor, {
+            className: "conversation-title-input",
+            ariaLabel: "Session name",
+            defaultValue: threadNameDraft(thread, shortId(thread.id)),
+            onCommit: (value) => onCommitRename(thread.id, value),
+            onCancel: () => onCancelRename?.(thread.id),
+          })
+        : h("span", { className: "conversation-title" }, title)
     ),
     includePreview
       ? h("span", { className: "conversation-preview" }, thread.preview || previewFallback)
       : null,
-    h("span", { className: "conversation-meta" }, formatThreadMeta(thread))
-  );
+    h("span", { className: "conversation-meta" }, formatThreadMeta(thread)),
+  ];
+
+  // While renaming, the row stops being a <button>: an <input> inside one is invalid
+  // HTML, and the button would eat the clicks that place a caret.
+  const rowButton = isRenaming
+    ? h(
+        "div",
+        {
+          className: `conversation-item is-renaming${active ? " is-active" : ""}`,
+          "data-thread-cwd": group.cwd,
+          "data-thread-id": thread.id,
+        },
+        ...rowChildren
+      )
+    : h(
+        "button",
+        {
+          className: `conversation-item${active ? " is-active" : ""}${isContextTarget ? " is-context-target" : ""}${selected ? " is-multi-selected" : ""}`,
+          // Only meaningful where rows are selectable; a surface without the handler
+          // would otherwise announce every row as "not selected" for no reason.
+          "aria-selected": onSelectThread ? String(Boolean(selected)) : undefined,
+          "data-thread-cwd": group.cwd,
+          "data-thread-id": thread.id,
+          "data-thread-provider": thread.provider || "",
+          "data-thread-title": title,
+          // One row, two intents. A single click PEEKS: the session opens instantly,
+          // as before, but into the reusable preview tab — so scrolling the sidebar
+          // hunting for a session no longer leaves a tab behind for every row touched
+          // on the way. A double click KEEPS it, the way an editor pins the tab you
+          // actually start working in.
+          //
+          // The two clicks of a double click fire first and peek; the dblclick then
+          // upgrades that same tab. Nothing is opened twice — `preview` only ever
+          // decides how a NEW tab is flagged, and the surface with no tab strip
+          // (remote) simply ignores the option.
+          //
+          // EVERY click first goes to the selection layer, which returns true when it has
+          // claimed the gesture (cmd/shift, or a Mac ctrl+click that is really a
+          // right-click) and false for a plain one. A plain click is not a no-op there —
+          // it is what sets the ANCHOR a later shift+click ranges from — so it cannot be
+          // filtered out here, only by the caller, which is the side that knows the
+          // platform. See threadSelectionIntent.
+          //
+          // The text-selection half of shift+click is suppressed in CSS (user-select on
+          // .conversation-item): it begins on mousedown, too early for this to stop.
+          onClick: (event) => {
+            if (onSelectThread?.(thread.id, event)) {
+              event.preventDefault();
+              return;
+            }
+            onResumeThread?.(thread.id, { preview: true });
+          },
+          onDoubleClick: () => onResumeThread?.(thread.id, { preview: false }),
+          onContextMenu: onContextThread
+            ? (event) => {
+                event.preventDefault();
+                onContextThread(thread.id, event.clientX, event.clientY);
+              }
+            : undefined,
+          title: provider ? `${provider} · ${title}` : title,
+          type: "button",
+        },
+        ...rowChildren
+      );
 
   // Without an actions handler there is nothing to reveal — keep the bare row, so the
   // surfaces that don't pass one (local, which has its own right-click menu) render
