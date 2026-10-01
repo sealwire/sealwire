@@ -707,6 +707,17 @@ impl FakeProviderBridge {
             .collect()
     }
 
+    #[cfg(test)]
+    pub(crate) async fn seed_history_entry(&self, thread_id: &str, entry: TranscriptEntryView) {
+        self.threads
+            .lock()
+            .await
+            .get_mut(thread_id)
+            .expect("fake thread")
+            .transcript
+            .push(entry);
+    }
+
     /// Answer `read_thread_transcript_page` like a provider that pages its own
     /// history, so the relay's paging branch is reachable against the double.
     pub(crate) fn enable_transcript_paging(&self) {

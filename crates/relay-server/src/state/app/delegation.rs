@@ -13,13 +13,14 @@ use super::super::delegation::{
     peer_is_wider_than_asker, peer_thread_settings, Ask, ModelDecision, ModelRequest, MAX_CITED,
     MAX_CITED_CHARS,
 };
-use super::review::DeviceFence;
+use super::review::{agent_entry_for_turn, DeviceFence};
 use super::{ModelChooser, ModelRefusal, ModelSelection, ModelTarget};
 use crate::protocol::{
     AskView, InjectionKind, ModelChoiceView, ModelOptionView, ModelRequestDecisionInput,
+    TranscriptEntryKind, TranscriptEntryView,
 };
 use crate::provider::{ProviderBridge, StartThreadRequest};
-use crate::state::{clip_chars, unix_now, AppState, InjectionTag};
+use crate::state::{clip_chars, unix_now, AppState, InjectionTag, TurnOutcome};
 
 /// How many peers one session may have brought in. A runaway asker is a runaway
 /// bill, and a sidebar nobody can read. Ask *rounds* to those peers are not
@@ -38,6 +39,38 @@ what it will be shown."
 fn answer_nudge() -> &'static str {
     "You finished without calling `report_back`. Call it now with what the agent \
 that asked you needs to know — it is still waiting."
+}
+
+fn failed_peer_turn_reason<'a>(
+    entries: impl IntoIterator<Item = &'a TranscriptEntryView>,
+    turn_id: &str,
+) -> Option<String> {
+    entries
+        .into_iter()
+        .find(|entry| {
+            entry.kind == TranscriptEntryKind::Error && entry.turn_id.as_deref() == Some(turn_id)
+        })
+        .map(|entry| {
+            entry
+                .text
+                .clone()
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| "the agent's turn failed".to_string())
+        })
+}
+
+fn nudged_baseline_answer(ask: &Ask, entries: &[TranscriptEntryView]) -> Option<(String, String)> {
+    let baseline = ask.nudged.then_some(ask.baseline_item_id.as_deref()?)?;
+    entries.iter().rev().find_map(|entry| {
+        if entry.kind != TranscriptEntryKind::AgentText
+            || (entry.row_id.as_deref() != Some(baseline)
+                && entry.item_id.as_deref() != Some(baseline))
+        {
+            return None;
+        }
+        let text = entry.text.as_deref()?.trim();
+        (!text.is_empty()).then(|| (baseline.to_string(), text.to_string()))
+    })
 }
 
 /// How long to wait for a brief before giving up. Generous: writing a brief is a
@@ -1411,6 +1444,10 @@ impl AppState {
                 })
                 .collect()
         };
+        self.cold_ask_history_checked
+            .lock()
+            .expect("cold ask history lock")
+            .retain(|id, _| live.iter().any(|(ask_id, _, _)| ask_id == id));
 
         for (ask_id, peer_thread_id, sent_at) in live {
             let busy = {
@@ -1428,15 +1465,130 @@ impl AppState {
                         .into_iter()
                         .any(|ask| !ask.status.is_terminal())
             };
+            if busy {
+                continue;
+            }
+            let (turn_id, peer_provider, terminal, mut reply) = {
+                let relay = self.relay.read().await;
+                let Some(ask) = relay.ask(&ask_id) else {
+                    continue;
+                };
+                let turn_id = ask.turn_id.clone();
+                let terminal = turn_id
+                    .as_deref()
+                    .and_then(|turn_id| relay.turn_terminal(&peer_thread_id, turn_id));
+                let reply = turn_id.as_deref().and_then(|turn_id| {
+                    relay
+                        .runtime_for_thread(&peer_thread_id)
+                        .and_then(|runtime| {
+                            agent_entry_for_turn(&runtime.transcript_views(), turn_id)
+                        })
+                });
+                (turn_id, ask.peer_provider.clone(), terminal, reply)
+            };
+            if terminal == Some(TurnOutcome::Failed) && reply.is_none() {
+                let (reason, salvaged) = {
+                    let relay = self.relay.read().await;
+                    let reason = relay
+                        .last_turn_failure(&peer_thread_id)
+                        .filter(|failure| Some(failure.turn_id.as_str()) == turn_id.as_deref())
+                        .map(|failure| failure.reason.clone())
+                        .unwrap_or_else(|| "the agent's turn failed".to_string());
+                    let salvaged = relay.ask(&ask_id).and_then(|ask| {
+                        relay
+                            .runtime_for_thread(&peer_thread_id)
+                            .and_then(|runtime| {
+                                nudged_baseline_answer(ask, &runtime.transcript_views())
+                            })
+                    });
+                    (reason, salvaged)
+                };
+                let mut relay = self.relay.write().await;
+                match salvaged {
+                    Some((item_id, text)) => {
+                        relay.update_ask(&ask_id, |ask| ask.finish(text));
+                        relay.mark_delegate_reply(&ask_id, &peer_thread_id, &item_id);
+                    }
+                    None => {
+                        relay.update_ask(&ask_id, |ask| ask.fail(reason));
+                    }
+                }
+                relay.notify();
+                continue;
+            }
+            let mut cold_quiet = false;
+            if terminal.is_none() && reply.is_none() {
+                if let Some(turn_id) = turn_id.as_deref() {
+                    if peer_provider == "claude_code" {
+                        cold_quiet = true;
+                    } else if peer_provider != "cursor" {
+                        let checked = self
+                            .cold_ask_history_checked
+                            .lock()
+                            .expect("cold ask history lock")
+                            .get(&ask_id)
+                            .is_some_and(|checked| checked == turn_id);
+                        if checked {
+                            cold_quiet = true;
+                        } else if let Ok(target) =
+                            self.resolve_session_target(&peer_thread_id).await
+                        {
+                            if let Ok(history) = target.read_thread().await {
+                                let status = history.status.to_ascii_lowercase();
+                                let views = history.to_views();
+                                reply = agent_entry_for_turn(&views, turn_id);
+                                if let Some(reason) = failed_peer_turn_reason(&views, turn_id) {
+                                    if reply.is_none() {
+                                        let mut relay = self.relay.write().await;
+                                        let salvaged = relay
+                                            .ask(&ask_id)
+                                            .and_then(|ask| nudged_baseline_answer(ask, &views));
+                                        match salvaged {
+                                            Some((item_id, text)) => {
+                                                relay.update_ask(&ask_id, |ask| ask.finish(text));
+                                                relay.mark_delegate_reply(
+                                                    &ask_id,
+                                                    &peer_thread_id,
+                                                    &item_id,
+                                                );
+                                            }
+                                            None => {
+                                                relay.update_ask(&ask_id, |ask| ask.fail(reason));
+                                            }
+                                        }
+                                        relay.notify();
+                                        continue;
+                                    }
+                                }
+                                cold_quiet = reply.is_none();
+                                if cold_quiet
+                                    && !matches!(
+                                        status.as_str(),
+                                        "active" | "running" | "streaming" | "unknown"
+                                    )
+                                {
+                                    self.cold_ask_history_checked
+                                        .lock()
+                                        .expect("cold ask history lock")
+                                        .insert(ask_id.clone(), turn_id.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             // Still working is not stuck. Timing out a peer mid-thought throws
             // away the work AND does not stop it, so the run continues with
             // nobody listening.
-            if !busy && now.saturating_sub(sent_at) >= ASK_TIMEOUT_SECS {
+            if now.saturating_sub(sent_at) >= ASK_TIMEOUT_SECS {
                 // Take whatever it did say before giving up. A finished answer
                 // sitting in its transcript, discarded because a clock fired, is
                 // the one outcome nobody wants — and it is what happened.
                 // Only from its own turn: a reply the person prompted meanwhile is theirs.
-                let latest = self.latest_assistant_entry_with_turn(&peer_thread_id).await;
+                let latest = match reply.clone() {
+                    Some(reply) => Some(reply),
+                    None => self.latest_assistant_entry_with_turn(&peer_thread_id).await,
+                };
                 let mut relay = self.relay.write().await;
                 let salvaged = latest.filter(|(item_id, _, reply_turn, _)| {
                     relay
@@ -1456,15 +1608,16 @@ impl AppState {
                 relay.notify();
                 continue;
             }
-            if busy {
+            if cold_quiet {
                 continue;
             }
             // Idle, said something new, AND said it in the turn this ask
             // dispatched. The last part is what stops a reply the user prompted
             // in the meantime from being handed back as the answer.
-            let Some((item_id, text, reply_turn, _)) =
-                self.latest_assistant_entry_with_turn(&peer_thread_id).await
-            else {
+            let Some((item_id, text, reply_turn, _)) = (match reply {
+                Some(reply) => Some(reply),
+                None => self.latest_assistant_entry_with_turn(&peer_thread_id).await,
+            }) else {
                 continue;
             };
             let (matches, nudged) = {
@@ -1491,17 +1644,23 @@ impl AppState {
                     .send_injected(tag, &peer_thread_id, answer_nudge(), None, None)
                     .await;
                 let mut relay = self.relay.write().await;
-                relay.update_ask(&ask_id, |ask| {
-                    ask.nudged = true;
-                    // The nudge is a NEW turn, and the reply we are waiting for
-                    // now belongs to it. Leaving the old turn id here would make
-                    // every later reply look like somebody else's and the ask
-                    // would never settle.
-                    if let Ok(dispatched) = &dispatched {
-                        ask.turn_id = dispatched.turn_id.clone();
-                        ask.baseline_item_id = Some(item_id.clone());
+                match dispatched {
+                    Ok(dispatched) => {
+                        relay.update_ask(&ask_id, |ask| {
+                            ask.nudged = true;
+                            // The nudge is a NEW turn, and the reply we are waiting for
+                            // now belongs to it. Leaving the old turn id here would make
+                            // every later reply look like somebody else's and the ask
+                            // would never settle.
+                            ask.turn_id = dispatched.turn_id.clone();
+                            ask.baseline_item_id = Some(item_id.clone());
+                        });
                     }
-                });
+                    Err(_) => {
+                        relay.update_ask(&ask_id, |ask| ask.finish(text));
+                        relay.mark_delegate_reply(&ask_id, &peer_thread_id, &item_id);
+                    }
+                }
                 relay.notify();
                 continue;
             }
@@ -1659,6 +1818,22 @@ impl AppState {
 mod wake_tests {
     use super::*;
     use relay_api::delegation::AskStatus;
+
+    #[test]
+    fn a_rehydrated_error_matches_only_its_own_turn() {
+        let entry: TranscriptEntryView = serde_json::from_value(serde_json::json!({
+            "kind": "error",
+            "text": "The turn ended with an error.",
+            "status": "failed",
+            "turn_id": "failed-turn"
+        }))
+        .expect("error row");
+        assert_eq!(
+            failed_peer_turn_reason([&entry], "failed-turn").as_deref(),
+            Some("The turn ended with an error.")
+        );
+        assert_eq!(failed_peer_turn_reason([&entry], "another-turn"), None);
+    }
 
     fn ask(id: &str, asker: &str, status: AskStatus, delivered: bool) -> Ask {
         let mut ask = Ask::new(

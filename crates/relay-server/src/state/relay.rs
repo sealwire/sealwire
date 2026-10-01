@@ -160,7 +160,7 @@ pub const MAX_REVIEW_JOBS_PUB: usize = MAX_REVIEW_JOBS;
 pub(crate) fn thread_status_is_working(status: &str) -> bool {
     !matches!(
         status.trim().to_ascii_lowercase().as_str(),
-        "" | "idle" | "viewing" | "completed" | "unknown" | "notloaded"
+        "" | "idle" | "viewing" | "completed" | "unknown" | "notloaded" | "systemerror"
     )
 }
 

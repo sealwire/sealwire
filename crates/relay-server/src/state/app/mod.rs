@@ -117,6 +117,7 @@ pub struct AppState {
     providers: HashMap<String, Arc<dyn ProviderBridge>>,
     provider_model_catalogs: Arc<RwLock<HashMap<String, Vec<ModelOptionView>>>>,
     provider_default_models: model_selection::ProviderDefaultCache,
+    cold_ask_history_checked: Arc<std::sync::Mutex<HashMap<String, String>>>,
     provider_skill_catalogs: skills::SkillCatalogs,
     change_tx: watch::Sender<u64>,
     /// Serializes individual session-mutating ops against each other (op-vs-op
@@ -446,6 +447,7 @@ impl AppState {
             providers,
             provider_model_catalogs: Arc::new(RwLock::new(HashMap::new())),
             provider_default_models: Arc::new(RwLock::new(HashMap::new())),
+            cold_ask_history_checked: Arc::new(std::sync::Mutex::new(HashMap::new())),
             provider_skill_catalogs: Arc::new(RwLock::new(HashMap::new())),
             change_tx,
             session_guard: Arc::new(tokio::sync::Mutex::new(())),
@@ -642,6 +644,7 @@ impl AppState {
             providers,
             provider_model_catalogs: Arc::new(RwLock::new(HashMap::new())),
             provider_default_models: Arc::new(RwLock::new(HashMap::new())),
+            cold_ask_history_checked: Arc::new(std::sync::Mutex::new(HashMap::new())),
             provider_skill_catalogs: Arc::new(RwLock::new(HashMap::new())),
             change_tx,
             session_guard: Arc::new(tokio::sync::Mutex::new(())),

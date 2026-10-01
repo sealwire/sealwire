@@ -44,6 +44,22 @@ export async function findLocalSessionFile({
   return null;
 }
 
+export async function readSessionErrors({ filePath }) {
+  const errors = new Map();
+  const handle = await open(filePath, "r");
+  try {
+    for await (const line of linesForward(handle, 0, (await handle.stat()).size)) {
+      const record = parseRecord(line.bytes);
+      if (record?.type === "assistant" && record.error && typeof record.uuid === "string") {
+        errors.set(record.uuid, record.error);
+      }
+    }
+    return errors;
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function readSessionMessagePage({
   beforeByte = null,
   filePath,
@@ -314,8 +330,12 @@ async function* linesForward(
     const data = Buffer.concat([prefix, chunk.subarray(0, bytesRead)]);
     const dataStart = lineStart;
     let segmentStart = 0;
-    for (let index = 0; index < data.length; index += 1) {
-      if (data[index] !== 0x0a) continue;
+    // The carried prefix has already been searched for newlines.
+    for (
+      let index = data.indexOf(0x0a, prefix.length);
+      index !== -1;
+      index = data.indexOf(0x0a, segmentStart)
+    ) {
       yield {
         start: dataStart + segmentStart,
         end: dataStart + index,
@@ -376,6 +396,7 @@ function toSessionMessage(record) {
     uuid: record.uuid,
     session_id: record.sessionId || "",
     message: record.message,
+    ...(record.error ? { error: record.error } : {}),
     parent_tool_use_id: record.parent_tool_use_id ?? null,
     timestamp: record.timestamp,
   };
