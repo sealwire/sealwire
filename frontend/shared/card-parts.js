@@ -130,6 +130,10 @@ export function useFold(content, enabled = true) {
           role: "button",
           "aria-expanded": open ? "true" : "false",
           onKeyDown: (event) => {
+            // A focused link inside sends its keys up through here; they stay the link's.
+            if (event.target !== event.currentTarget) {
+              return;
+            }
             if (event.key === "Enter" || event.key === " ") {
               event.preventDefault();
               toggle();

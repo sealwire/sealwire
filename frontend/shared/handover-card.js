@@ -96,8 +96,8 @@ const HANDED_OVER_ICON = ["M2 8h9M8 4.5 11.5 8 8 11.5", "M14 3v10"];
 const PICKED_UP_ICON = ["M2 3v10", "M5 8h9M8.5 4.5 5 8l3.5 3.5"];
 
 // Folded to a couple of lines; its heading or its text opens it.
-function SummarySection({ section, body, anchorId }) {
-  const fold = useFold(body, Boolean(section.title));
+function SummarySection({ section, body, anchorId, folds }) {
+  const fold = useFold(body, folds);
   const label = !section.title
     ? null
     : fold.togglable
@@ -122,6 +122,8 @@ function SummarySection({ section, body, anchorId }) {
         ref: fold.ref,
         className: `handover-section-value message-body ${fold.className}`,
         onClick: fold.onClick,
+        // With no heading to press, the text takes the keyboard too.
+        ...(section.title ? null : fold.keyboard),
       },
       renderMarkdown(body || "—")
     )
@@ -156,6 +158,8 @@ export function SummarySections({ text, moreLabel = "Show full summary", footer 
         anchorId: `section:${key}`,
         section,
         body: (!expanded && preview) || section.body,
+        // A delegate brief puts its whole to-do list before its one heading, so that part folds too.
+        folds: titled > 0,
       });
     }),
     more

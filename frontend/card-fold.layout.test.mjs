@@ -23,8 +23,14 @@ const LONG = "这句话写得很长，长到在卡片里一定会换行，折叠
 const list = (tag) => Array.from({ length: 5 }, (_, i) => `- ${tag} ${i + 1}：${i % 2 ? LONG : "短的一条。"}`).join("\n");
 const paragraphs = (tag) => Array.from({ length: 3 }, (_, i) => `${tag} ${i + 1}。${LONG}`).join("\n\n");
 // Headings long enough to wrap in the label column, as agents write them.
+// It opens the way a delegate brief does: a long to-do list before the first heading.
 const SUMMARY = [
-  "结论：没有 blocker。",
+  `结论：没有 blocker。${LONG}`,
+  "",
+  "要做的：",
+  list("开头"),
+  "  - 嵌套的一条。",
+  "  - 嵌套的另一条。",
   "## 1. joined 其他情况（已逐一验证，行为正确或和旧版一致）",
   list("列表"),
   "## Where the remote ask handler reads its text from, and why it matters here",
