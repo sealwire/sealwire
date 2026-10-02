@@ -353,9 +353,10 @@ export function createLifecycleController(ctx) {
             initial_prompt: String(draft.initialPrompt || "").trim() || null,
             model: String(draft.model || "").trim() || null,
             approval_policy: draft.approvalPolicy,
-            // The file-access dropdown was collapsed into the permission level; the
-            // draft still carries the value so the start protocol is unchanged.
-            sandbox: draft.sandbox || "workspace-write",
+            // Pi validates both fields; the hidden sandbox must match the visible Full access choice.
+            sandbox: draft.provider === "pi" && draft.approvalPolicy === "bypass"
+              ? "danger-full-access"
+              : draft.sandbox || "workspace-write",
             effort: draft.effort,
             device_id: state.deviceId,
             provider: draft.provider || null,

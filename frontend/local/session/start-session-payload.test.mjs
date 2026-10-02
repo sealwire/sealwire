@@ -190,6 +190,18 @@ test("the start request carries exactly the fields the dialog collects", async (
   });
 });
 
+test("Pi Full access does not submit the hidden sandbox inherited from another provider", async () => {
+  for (const sandbox of ["workspace-write", "read-only", "", "danger-full-access"]) {
+    const { controller, startRequests } = buildController({
+      draft: { ...defaultDraft(), provider: "pi", model: "openai/gpt-6-luna", approvalPolicy: "bypass", sandbox },
+      respond: () => acceptance(),
+    });
+    await controller.startSession();
+    assert.equal(startRequests()[0].body.approval_policy, "bypass");
+    assert.equal(startRequests()[0].body.sandbox, "danger-full-access");
+  }
+});
+
 test("an accepted fork stays successful when opening the new session fails", async () => {
   const { controller, requests, logged } = buildController({
     respond: () => acceptance({ active_thread_id: "thread-fork" }),

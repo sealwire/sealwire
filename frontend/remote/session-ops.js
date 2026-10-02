@@ -1452,7 +1452,9 @@ export async function startRemoteSession(sessionDraftOverride = null) {
         initial_prompt: sessionDraft.initialPrompt.trim() || null,
         model: sessionDraft.model.trim() || null,
         approval_policy: sessionDraft.approvalPolicy,
-        sandbox: sessionDraft.sandbox,
+        sandbox: sessionDraft.provider === "pi" && sessionDraft.approvalPolicy === "bypass"
+          ? "danger-full-access"
+          : sessionDraft.sandbox,
         effort: sessionDraft.effort,
         provider: sessionDraft.provider,
         // Explicit null when unfiled: remote has no second step, its start_session
