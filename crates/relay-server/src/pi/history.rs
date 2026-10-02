@@ -1,7 +1,6 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
-    path::Path,
 };
 
 use serde_json::Value;
@@ -55,7 +54,7 @@ impl MessageIds {
     }
 }
 
-fn entry_message(entry: &Value) -> Option<Cow<'_, Value>> {
+pub(super) fn entry_message(entry: &Value) -> Option<Cow<'_, Value>> {
     match entry["type"].as_str()? {
         "message" => Some(Cow::Borrowed(&entry["message"])),
         "custom_message" => Some(Cow::Owned(
@@ -262,13 +261,6 @@ pub(super) struct Document {
 }
 
 impl Document {
-    pub async fn read(path: &Path) -> Result<Self, String> {
-        let contents = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| format!("Read Pi session {}: {e}", path.display()))?;
-        Self::parse(&contents)
-    }
-
     pub fn parse(contents: &str) -> Result<Self, String> {
         let mut lines = contents.lines().filter(|line| !line.is_empty());
         let header: Value = serde_json::from_str(lines.next().ok_or("Empty Pi session file")?)
@@ -374,6 +366,7 @@ impl Document {
         })
     }
 
+    #[cfg(test)]
     pub fn leaf(&self) -> Option<&str> {
         self.entries.last().and_then(|e| e["id"].as_str())
     }

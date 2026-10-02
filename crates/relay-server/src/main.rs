@@ -350,6 +350,7 @@ async fn main() {
 
     let web_assets = default_web_assets();
     log_web_assets(&web_assets);
+    let shutdown_state = state.clone();
     let context = AppContext {
         app: state,
         auth,
@@ -376,12 +377,33 @@ async fn main() {
         }
     }
 
-    axum::serve(listener, app)
-        .await
-        .expect("server exited unexpectedly");
+    tokio::select! {
+        result = async { axum::serve(listener, app).await } => {
+            result.expect("server exited unexpectedly");
+        }
+        _ = shutdown_signal() => {}
+    }
+    shutdown_state.shutdown_providers().await;
     // `lock_guard` (if any) is dropped here, releasing the OS lock as the
     // process exits — kept alive up to this point on purpose (see
     // InstanceLockGuard's doc comment).
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler");
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result.expect("failed to listen for Ctrl-C"),
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to listen for Ctrl-C");
 }
 
 fn build_router(context: AppContext, web_assets: WebAssets) -> Router {

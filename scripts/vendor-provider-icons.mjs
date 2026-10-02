@@ -25,6 +25,7 @@ const SOURCES = [
   { provider: "codex", file: "openai.svg", note: "OpenAI knot" },
   { provider: "cursor", file: "cursor.svg", note: "Cursor cube" },
   { provider: "opencode", file: "opencode.svg", note: "OpenCode" },
+  { provider: "pi", file: "pi.svg", note: "Pi, https://pi.dev/logo-auto.svg", local: true },
 ];
 
 function packageDir() {
@@ -34,7 +35,7 @@ function packageDir() {
 }
 
 function tidy(svg, file) {
-  const trimmed = svg.trim();
+  const trimmed = svg.replace(/<\?xml[^>]*>/, "").trim();
   if (!trimmed.startsWith("<svg")) {
     throw new Error(`${file}: expected an <svg> root`);
   }
@@ -70,15 +71,18 @@ function assertInheritsColour(svg, file) {
 const dir = packageDir();
 const version = require("@lobehub/icons-static-svg/package.json").version;
 const entries = [];
-for (const { provider, file, note } of SOURCES) {
-  const svg = await fs.readFile(path.join(dir, "icons", file), "utf8");
+for (const { provider, file, note, local } of SOURCES) {
+  const source = local ? path.join(ROOT, "scripts", "assets", file) : path.join(dir, "icons", file);
+  let svg = await fs.readFile(source, "utf8");
+  if (provider === "pi") svg = svg.replace('viewBox="0 0 800 800"', 'viewBox="165.29 165.29 469.43 469.43"');
   entries.push({ provider, file, note, svg: assertInheritsColour(tidy(svg, file), file) });
 }
 
 const body = `// GENERATED FILE — do not edit by hand.
 // Run \`node scripts/vendor-provider-icons.mjs\` to regenerate.
 //
-// Source: @lobehub/icons-static-svg@${version} (MIT). The marks themselves remain
+// Sources: @lobehub/icons-static-svg@${version} (MIT), Pi from https://pi.dev/logo-auto.svg.
+// The marks themselves remain
 // the trademarks of their respective owners; they are used here only to identify
 // which agent produced a message.
 //

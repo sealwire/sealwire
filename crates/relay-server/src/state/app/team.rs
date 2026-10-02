@@ -34,7 +34,7 @@ pub(crate) const TASKS_LOCKED_MESSAGE: &str =
 
 /// Ordinary session tools do not imply support for unattended Task seats.
 pub(crate) fn refuse_seat_without_seat_tools(provider: &str, seat: &str) -> Result<(), String> {
-    if provider != "opencode" && crate::provider::supports_session_mcp(provider) {
+    if !matches!(provider, "opencode" | "pi") && crate::provider::supports_session_mcp(provider) {
         return Ok(());
     }
     Err(format!(

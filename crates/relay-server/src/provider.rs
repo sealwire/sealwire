@@ -283,7 +283,7 @@ pub fn session_gets_peer_tools(purpose: &SessionPurpose) -> bool {
 pub fn supports_session_mcp(provider: &str) -> bool {
     matches!(
         provider,
-        "codex" | "claude" | "claude_code" | "cursor" | "opencode" | "fake"
+        "codex" | "claude" | "claude_code" | "cursor" | "opencode" | "pi" | "fake"
     )
 }
 
@@ -452,6 +452,8 @@ pub struct SkillInputRef {
 
 #[async_trait]
 pub trait ProviderBridge: Send + Sync {
+    async fn shutdown(&self) {}
+
     async fn refresh_workspace_trust(&self) -> Result<(), String> {
         Ok(())
     }

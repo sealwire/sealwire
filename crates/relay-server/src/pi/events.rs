@@ -1,6 +1,9 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use tokio::sync::{mpsc, Mutex, RwLock};
 
 use crate::{
@@ -16,18 +19,23 @@ use super::{
 #[derive(Default)]
 pub(super) struct Runtime {
     pub turn: Option<String>,
+    pub bridge_ready: bool,
+    pub last_used: Option<tokio::time::Instant>,
     pub ids: MessageIds,
     pub tools: HashMap<String, Value>,
     pub failure: Option<String>,
     pub message_error: Option<String>,
     pub stopped: bool,
     pub prompt_pending: bool,
+    pub extension_pending: bool,
     pub unsent_text: Option<String>,
+    pub dialogs: HashMap<String, super::ui::Dialog>,
+    pub usage_seen: HashSet<String>,
     message: Option<String>,
     blocks: HashMap<usize, String>,
 }
 
-fn session(relay: &mut RelayState, handle: &str) -> Option<String> {
+pub(super) fn session(relay: &mut RelayState, handle: &str) -> Option<String> {
     match relay.session_for_provider_event("pi", Some(handle)) {
         ProviderEventSession::Session(id) if !relay.thread_is_locally_deleted(&id) => Some(id),
         _ => None,
@@ -61,6 +69,9 @@ fn apply_row(relay: &mut RelayState, id: &str, turn: &str, mut row: TranscriptEn
 }
 
 pub(super) fn finish(relay: &mut RelayState, handle: &str, runtime: &mut Runtime) {
+    runtime.last_used = Some(tokio::time::Instant::now());
+    runtime.extension_pending = false;
+    super::ui::clear(relay, &mut runtime.dialogs);
     let Some(turn) = runtime.turn.take() else {
         return;
     };
@@ -128,6 +139,10 @@ pub(super) fn finish(relay: &mut RelayState, handle: &str, runtime: &mut Runtime
         history::settle_tool(&mut row);
         apply_row(relay, &id, &turn, row);
     }
+    if outcome == TurnOutcome::Failed {
+        relay.usage_store.mark_turn_failed(&turn);
+        relay.mark_turn_spend_failed(&id, &turn);
+    }
     let now = crate::state::unix_now();
     relay.bg_set_active_turn(&id, None, now);
     relay.bg_set_thread_status(&id, "idle".into(), vec![], now);
@@ -135,8 +150,58 @@ pub(super) fn finish(relay: &mut RelayState, handle: &str, runtime: &mut Runtime
     relay.notify();
 }
 
+pub(super) fn handled_command(
+    relay: &mut RelayState,
+    handle: &str,
+    runtime: &mut Runtime,
+    text: &str,
+) {
+    let Some(turn) = runtime.turn.as_deref() else {
+        return;
+    };
+    let Some(id) = session(relay, handle) else {
+        return;
+    };
+    if text.starts_with('/') {
+        apply_row(
+            relay,
+            &id,
+            turn,
+            history::row(
+                format!("pi:command:{turn}"),
+                TranscriptEntryKind::UserText,
+                text.into(),
+                "completed",
+            ),
+        );
+        if runtime.unsent_text.as_deref() == Some(text) {
+            runtime.unsent_text = None;
+        }
+    }
+}
+
 pub(super) fn apply(relay: &mut RelayState, handle: &str, runtime: &mut Runtime, event: &Value) {
     let kind = event["type"].as_str().unwrap_or_default();
+    if kind == "agent_start" {
+        ensure_turn(relay, handle, runtime);
+        runtime.extension_pending = false;
+    }
+    if kind == "extension_error"
+        && matches!(
+            event["event"].as_str(),
+            Some("command" | "send_user_message")
+        )
+    {
+        ensure_turn(relay, handle, runtime);
+        runtime.failure = Some(
+            event["error"]
+                .as_str()
+                .unwrap_or("Pi extension command failed")
+                .into(),
+        );
+        finish(relay, handle, runtime);
+        return;
+    }
     if kind == "agent_settled" {
         finish(relay, handle, runtime);
         return;
@@ -216,6 +281,7 @@ pub(super) fn apply(relay: &mut RelayState, handle: &str, runtime: &mut Runtime,
                 runtime.unsent_text = None;
             }
             if message["role"] == "assistant" {
+                record_usage(relay, &id, &turn, runtime, message);
                 runtime.failure = (message["stopReason"] == "error").then(|| {
                     message["errorMessage"]
                         .as_str()
@@ -249,6 +315,19 @@ pub(super) fn apply(relay: &mut RelayState, handle: &str, runtime: &mut Runtime,
                 &turn,
                 history::tool_row(tool_id, name, args, result, status),
             );
+            if kind == "tool_execution_end" {
+                let row_id = relay
+                    .runtime_for_thread(&id)
+                    .and_then(|r| r.transcript.resolve_relay(&format!("pi:tool:{tool_id}")))
+                    .map(str::to_string);
+                if let Some(row_id) = row_id {
+                    let marks = event["result"]["structuredContent"]["structuredContent"]
+                        ["sealwire"]
+                        .clone();
+                    let result = serde_json::json!({"_meta":marks,"isError":event["isError"]});
+                    relay.mark_peer_tool_result(&id, &row_id, name, &result);
+                }
+            }
             relay.touch_thread_progress(&id, Some("working"), Some(name));
         }
         "auto_retry_end" if event["success"] == false => {
@@ -260,6 +339,10 @@ pub(super) fn apply(relay: &mut RelayState, handle: &str, runtime: &mut Runtime,
             )
         }
         "auto_retry_start" => relay.touch_thread_progress(&id, Some("retrying"), None),
+        "compaction_end" => {
+            let result = &event["result"];
+            record_usage(relay, &id, &turn, runtime, result);
+        }
         "compaction_start" => relay.touch_thread_progress(&id, Some("compacting"), None),
         "session_info_changed" => {
             if let Some(mut thread) = relay
@@ -278,6 +361,19 @@ pub(super) fn apply(relay: &mut RelayState, handle: &str, runtime: &mut Runtime,
     relay.notify();
 }
 
+pub(super) fn ensure_turn(relay: &mut RelayState, handle: &str, runtime: &mut Runtime) {
+    if runtime.turn.is_some() || runtime.stopped {
+        return;
+    }
+    let turn = crate::state::new_uuid_v4();
+    runtime.turn = Some(turn.clone());
+    runtime.usage_seen.clear();
+    runtime.failure = None;
+    runtime.message_error = None;
+    runtime.unsent_text = None;
+    start(relay, handle, &turn);
+}
+
 pub(super) fn spawn(
     mut receiver: mpsc::UnboundedReceiver<Event>,
     connection: Arc<Connection>,
@@ -293,29 +389,10 @@ pub(super) fn spawn(
                     let _ = sender.send(());
                 }
                 Event::Record(record) if record["type"] == "extension_ui_request" => {
-                    let method = record["method"].as_str().unwrap_or_default();
-                    if matches!(method, "select" | "confirm" | "input" | "editor") {
-                        let Some(connection) = connection.upgrade() else {
-                            break;
-                        };
-                        let response = connection.write(json!({"type":"extension_ui_response","id":record["id"],"cancelled":true})).await;
-                        let mut relay = state.write().await;
-                        relay.push_log(
-                            "warn",
-                            format!(
-                                "Pi extension dialog {method} is unsupported and was cancelled: {}",
-                                record["title"]
-                            ),
-                        );
-                        if let Err(error) = response {
-                            relay.push_log("error", error);
-                        }
-                        relay.notify();
-                    } else if method == "notify" {
-                        let mut relay = state.write().await;
-                        relay.push_log("pi", record["message"].as_str().unwrap_or_default());
-                        relay.notify();
-                    }
+                    let Some(connection) = connection.upgrade() else {
+                        break;
+                    };
+                    super::ui::request(record, &connection, &state, &handle, &runtime).await;
                 }
                 Event::Record(record) => {
                     let mut runtime = runtime.lock().await;
@@ -343,4 +420,49 @@ pub(super) fn spawn(
             }
         }
     });
+}
+
+fn record_usage(
+    relay: &mut RelayState,
+    id: &str,
+    turn: &str,
+    runtime: &mut Runtime,
+    message: &Value,
+) {
+    use sha2::{Digest, Sha256};
+    let Some(usage) = message.get("usage").filter(|v| v.is_object()) else {
+        return;
+    };
+    let key = format!("{:x}", Sha256::digest(message.to_string().as_bytes()));
+    if !runtime.usage_seen.insert(key) {
+        return;
+    }
+    let mut tokens = crate::usage::TokenUsage {
+        input: usage["input"].as_u64().unwrap_or_default(),
+        cached_input: usage["cacheRead"].as_u64().unwrap_or_default(),
+        cache_write: usage["cacheWrite"].as_u64().unwrap_or_default(),
+        output: usage["output"].as_u64().unwrap_or_default(),
+        total: usage["totalTokens"].as_u64().unwrap_or_default(),
+        ..Default::default()
+    };
+    if tokens.total == 0 {
+        tokens.total = tokens.sum_of_parts();
+    }
+    let model = message["model"].as_str().map(|m| {
+        message["provider"]
+            .as_str()
+            .map_or_else(|| m.into(), |p| format!("{p}/{m}"))
+    });
+    relay.record_token_usage(
+        id,
+        Some(turn.into()),
+        "pi",
+        tokens,
+        usage["cost"]["total"]
+            .as_f64()
+            .filter(|v| v.is_finite() && *v >= 0.0),
+        None,
+        model,
+        message["stopReason"] == "error",
+    );
 }

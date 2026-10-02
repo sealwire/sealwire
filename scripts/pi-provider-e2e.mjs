@@ -14,6 +14,7 @@ const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "sealwire
 const cwd = path.join(root, "project");
 const agent = path.join(root, "agent");
 const bashPidFile = path.join(root, "bash.pid");
+const apiToken = "!literal-$SEALWIRE_PI_TEST_TOKEN";
 await fs.mkdir(cwd);
 await fs.mkdir(agent);
 await fs.writeFile(path.join(cwd, "fixture.txt"), "PI_TOOL_RESULT");
@@ -42,8 +43,14 @@ const modelServer = http.createServer(async (request, response) => {
   response.writeHead(200, { "content-type": "text/event-stream" });
   const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: `pi-${requests}`, object: "chat.completion.chunk", created: 1, model: body.model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
   const finish = () => { chunk({}, "stop"); response.end("data: [DONE]\n\n"); };
-  if (text.includes("PI_BASH") && !usedTool) {
-    chunk({ role: "assistant", tool_calls: [{ index: 0, id: `pi-bash-${requests}`, type: "function", function: { name: "bash", arguments: JSON.stringify({ command: `echo $$ > "${bashPidFile}"; sleep 120` }) } }] });
+  if (text.includes("PI_MCP") && !usedTool) {
+    const tool = body.tools.find((tool) => tool.function.name.endsWith("__goal_status"));
+    assert.ok(tool, "Sealwire MCP tools reach the model");
+    chunk({ role: "assistant", tool_calls: [{ index: 0, id: `pi-mcp-${requests}`, type: "function", function: { name: tool.function.name, arguments: "{}" } }] });
+    chunk({}, "tool_calls");
+    response.end("data: [DONE]\n\n");
+  } else if (text.includes("PI_BASH") && !usedTool) {
+    chunk({ role: "assistant", tool_calls: [{ index: 0, id: `pi-bash-${requests}`, type: "function", function: { name: "bash", arguments: JSON.stringify({ command: `test -z "$SEALWIRE_PI_MCP" && test -z "$RELAY_API_TOKEN" || exit 66; echo $$ > "${bashPidFile}"; sleep 120` }) } }] });
     chunk({}, "tool_calls");
     response.end("data: [DONE]\n\n");
   } else if (text.includes("PI_USE_TOOL") && !usedTool) {
@@ -69,7 +76,7 @@ await fs.writeFile(path.join(agent, "models.json"), JSON.stringify({ providers: 
   sealwire_test: { baseUrl: `http://127.0.0.1:${modelPort}/v1`, api: "openai-completions", apiKey: "local-test",
     models: [{ id: "echo", name: "Echo", reasoning: false, input: ["text"], contextWindow: 32768, maxTokens: 1024 }, { id: "second", name: "Second", reasoning: true, input: ["text", "image"], contextWindow: 32768, maxTokens: 1024 }] },
 } }));
-await fs.writeFile(path.join(agent, "settings.json"), JSON.stringify({ defaultProvider: "sealwire_test", defaultModel: "echo", defaultTools: ["read", "bash", "edit", "write"], packages: [], autoUpdate: false }));
+await fs.writeFile(path.join(agent, "settings.json"), JSON.stringify({ defaultProvider: "sealwire_test", defaultModel: "echo", defaultTools: ["read", "bash", "edit", "write"], packages: [], autoUpdate: false, compaction: { keepRecentTokens: 100 } }));
 await fs.mkdir(path.join(cwd, ".pi"));
 await fs.writeFile(path.join(cwd, ".pi", "settings.json"), JSON.stringify({ defaultProvider: "sealwire_test", defaultModel: "second" }));
 const extensionMarker = path.join(root, "extension-dialog-cancelled");
@@ -77,12 +84,31 @@ const extensionLoaded = path.join(root, "extension-loaded");
 const preflightReady = path.join(root, "preflight-ready");
 const preflightRelease = path.join(root, "preflight-release");
 await fs.mkdir(path.join(cwd, ".pi", "extensions"));
+await fs.mkdir(path.join(cwd, ".pi", "prompts"));
+await fs.writeFile(path.join(cwd, ".pi", "prompts", "sealwire-template.md"), "PI_TEMPLATE $ARGUMENTS");
+await fs.mkdir(path.join(cwd, ".pi", "skills", "sealwire-check"), { recursive: true });
+await fs.writeFile(path.join(cwd, ".pi", "skills", "sealwire-check", "SKILL.md"), "---\nname: sealwire-check\ndescription: Isolated Pi skill smoke test\n---\nPI_SKILL_TEST\n");
 await fs.writeFile(path.join(cwd, ".pi", "extensions", "startup.ts"), `
 import { writeFileSync, existsSync } from "node:fs";
 writeFileSync(${JSON.stringify(extensionLoaded)}, "loaded");
 export default function (pi) {
+  pi.registerCommand("sealwire-async", { handler: async (args) => {
+    pi.sendUserMessage(args);
+  }});
+  pi.registerCommand("sealwire-switch", { handler: async (_args, ctx) => {
+    const result = await ctx.newSession();
+    ctx.ui.notify(result.cancelled ? "PI_SWITCH_BLOCKED" : "PI_SWITCH_UNSAFE", "info");
+  }});
+  pi.registerCommand("sealwire-dialog", { handler: async (args, ctx) => {
+    const value = args === "select" ? await ctx.ui.select("Pick", ["One", "Two"])
+      : args === "editor" ? await ctx.ui.editor("Edit", "Prefill")
+      : args === "timeout" ? await ctx.ui.input("Timeout", "", { timeout: 100 })
+      : await ctx.ui.input("Input", "Enter text");
+    ctx.ui.notify("PI_DIALOG:" + String(value), "info");
+  }});
   pi.on("input", async (event) => {
     // Simulate a broken extension transformation that Pi rejects before saving the message.
+    if (event.text.includes("PI_REJECT_ASYNC")) return { action: "transform", text: event.text, images: [null] };
     if (event.text.includes("PI_REJECT")) return { action: "transform", text: null };
   });
   pi.on("before_agent_start", async (event) => {
@@ -92,8 +118,13 @@ export default function (pi) {
     }
     if (event.prompt.includes("PI_PREFLIGHT")) await new Promise((resolve) => setTimeout(resolve, 31000));
   });
-  pi.on("tool_call", async (_event, ctx) => {
-    const confirmed = await ctx.ui.confirm("Test tool dialog", "Cancel this unsupported dialog");
+  pi.on("session_before_compact", event => ({ compaction: {
+    summary: "PI_COMPACT_SUMMARY", firstKeptEntryId: event.preparation.firstKeptEntryId,
+    tokensBefore: event.preparation.tokensBefore,
+  }}));
+  pi.on("tool_call", async (event, ctx) => {
+    if (event.toolName !== "read") return;
+    const confirmed = await ctx.ui.confirm("Test tool dialog", "Answer this Pi extension dialog");
     if (!confirmed) writeFileSync(${JSON.stringify(extensionMarker)}, "cancelled");
   });
   pi.on("session_shutdown", async () => { await new Promise((resolve) => setTimeout(resolve, 3000)); });
@@ -109,7 +140,7 @@ async function boot() {
   const port = await getFreePort();
   const { command, args } = resolveRelayServerCommand();
   relay = spawnManagedProcess("pi-relay", command, args, {
-    AGENT_PROVIDERS: "pi", BIND_HOST: "127.0.0.1", PORT: String(port), RELAY_API_TOKEN: "",
+    AGENT_PROVIDERS: "pi", BIND_HOST: "127.0.0.1", PORT: String(port), RELAY_API_TOKEN: apiToken,
     RELAY_STATE_PATH: path.join(root, "relay", "session.json"), PI_CODING_AGENT_DIR: agent,
     PI_CODING_AGENT_SESSION_DIR: path.join(root, "sessions"),
     PI_OFFLINE: "1", PI_TELEMETRY: "0",
@@ -121,7 +152,7 @@ async function boot() {
 async function api(route, data) {
   const response = await fetch(`${base}${route}`, {
     method: data === undefined ? "GET" : "POST",
-    headers: { "content-type": "application/json", "X-Agent-Relay-CSRF": "1" },
+    headers: { "content-type": "application/json", Authorization: `Bearer ${apiToken}` },
     body: data === undefined ? undefined : JSON.stringify({ device_id: "pi-e2e", ...data }),
     signal: AbortSignal.timeout(45000),
   });
@@ -189,9 +220,50 @@ try {
   await send(firstId, "PI_PREFLIGHT");
   await until(() => transcript(firstId), (page) => contains(page, "PI_PREFLIGHT") && !page.thread_state?.active_turn_id, "slow preflight completes", 45000);
   assert.ok(Date.now() - preflightStarted >= 31000, "real extension preflight exceeds the former RPC deadline");
+  await send(firstId, "/sealwire-switch");
+  const switched = await until(() => transcript(firstId), (p) => contains(p, "PI_SWITCH_BLOCKED") && !p.thread_state?.active_turn_id, "native switch is blocked");
+  assert.ok(!contains(switched, "PI_SWITCH_UNSAFE"));
+  for (const [method, answer] of [["select", "Two"], ["input", "Hello"], ["editor", "Edited\ntext"]]) {
+    await send(firstId, `/sealwire-dialog ${method}`);
+    const snap = await until(() => api("/api/session"), (s) => s.pending_ask_user_questions?.length > 0, `extension ${method}`);
+    const q = snap.pending_ask_user_questions[0];
+    await api(`/api/ask-user-questions/${encodeURIComponent(q.request_id)}/answer`, { answers: { [q.questions[0].question]: answer } });
+    await until(() => transcript(firstId), (p) => contains(p, `PI_DIALOG:${answer}`) && !p.thread_state?.active_turn_id, `${method} answered`);
+  }
+  await send(firstId, "/sealwire-dialog timeout");
+  await until(() => transcript(firstId), (p) => contains(p, "PI_DIALOG:undefined") && !p.thread_state?.active_turn_id, "dialog timeout settles");
+  assert.equal((await api("/api/session")).pending_ask_user_questions.length, 0);
+  await send(firstId, "/sealwire-async PI_ASYNC_COMMAND");
+  await until(() => transcript(firstId), p => contains(p, "PI_ASYNC_COMMAND") && !p.thread_state?.active_turn_id, "fire-and-forget slash output is routed");
+  await fs.rm(preflightReady, { force: true });
+  await fs.rm(preflightRelease, { force: true });
+  await send(firstId, "/sealwire-async PI_CANCEL_PREFLIGHT_ASYNC");
+  await until(async () => fs.stat(preflightReady).then(() => true, () => false), Boolean, "slash preflight is pending");
+  assert.ok((await transcript(firstId)).thread_state?.active_turn_id, "slash preflight remains stoppable");
+  await api("/api/session/stop", { thread_id: firstId });
+  await fs.writeFile(preflightRelease, "released");
+  await send(firstId, "PI_AFTER_ASYNC_STOP");
+  await until(() => transcript(firstId), p => contains(p, "PI_AFTER_ASYNC_STOP") && !p.thread_state?.active_turn_id, "resume after slash Stop");
+  assert.ok(!modelPrompts.some(p => p.includes("PI_CANCEL_PREFLIGHT_ASYNC")));
+  await send(firstId, "/sealwire-async PI_REJECT_ASYNC");
+  await until(() => transcript(firstId), p => !p.thread_state?.active_turn_id && rows(p).some(r => r.kind === "user_text" && r.text?.includes("PI_REJECT_ASYNC")), "async slash rejection is visible");
+  await send(firstId, "/sealwire-template argument");
+  await until(() => transcript(firstId), p => contains(p, "PI_TEMPLATE argument") && !p.thread_state?.active_turn_id, "prompt template expands");
+  await send(firstId, "/skill:sealwire-check");
+  await until(() => transcript(firstId), p => contains(p, "PI_SKILL_TEST") && !p.thread_state?.active_turn_id, "skill command expands");
+  await send(firstId, "/compact");
+  await until(() => transcript(firstId), p => contains(p, "Pi context compacted.") && !p.thread_state?.active_turn_id, "manual compaction finishes");
+  await send(firstId, "/reload");
+  await until(() => transcript(firstId), p => !p.thread_state?.active_turn_id, "reload finishes");
+  await send(firstId, "PI_MCP");
+  const mcpPage = await until(() => transcript(firstId), (p) => rows(p).some((r) => r.tool?.name?.endsWith("__goal_status")) && !p.thread_state?.active_turn_id, "real MCP call settles");
+  assert.ok(rows(mcpPage).some(r => r.tool?.name?.endsWith("__goal_status") && r.status === "completed" && r.tool.result_preview?.includes("no goal")), "MCP returns the relay result");
   await send(firstId, "PI_USE_TOOL");
+  const dialog = await until(() => api("/api/session"), (s) => s.pending_ask_user_questions?.length > 0, "extension confirmation appears");
+  const pending = dialog.pending_ask_user_questions[0];
+  await api(`/api/ask-user-questions/${encodeURIComponent(pending.request_id)}/answer`, { answers: { [pending.questions[0].question]: "No" } });
   const toolPage = await until(() => transcript(firstId), (page) => contains(page, "PI_TOOL_DONE") && !page.thread_state?.active_turn_id, "tool turn settles");
-  assert.equal(await fs.readFile(extensionMarker, "utf8"), "cancelled", "unsupported tool dialogs must not hang the turn");
+  assert.equal(await fs.readFile(extensionMarker, "utf8"), "cancelled", "extension confirmation answer reaches Pi");
   assert.ok(rows(toolPage).some((entry) => entry.tool?.result_preview?.includes("PI_TOOL_RESULT")));
   const keys = rows(toolPage).map((entry) => entry.row_id);
   assert.equal(new Set(keys).size, keys.length, "streaming and history must share row identities");
@@ -214,8 +286,8 @@ try {
   const history = await transcript(secondId);
   assert.ok(contains(history, "PI_SECOND"), "cold history survives relay restart");
   assert.ok(rows(history).some((entry) => entry.kind === "reasoning" && entry.text === "PI_THINKING"), "thinking survives cold history reload");
-  await send(secondId, "PI_RESUMED");
-  const resumed = await until(() => transcript(secondId), (page) => contains(page, "PI_RESUMED") && !page.thread_state?.active_turn_id, "resumed turn settles");
+  await send(secondId, "PI_RESUMED PI_MCP");
+  const resumed = await until(() => transcript(secondId), (page) => contains(page, "PI_TOOL_DONE") && !page.thread_state?.active_turn_id, "resumed turn settles");
   assert.ok(contains(resumed, "PI_SECOND"), "resume retains prior messages");
   await send(emptyId, "PI_EMPTY_RESUMED");
   await until(() => transcript(emptyId), (page) => contains(page, "PI_EMPTY_RESUMED") && !page.thread_state?.active_turn_id, "empty session resumes after restart");

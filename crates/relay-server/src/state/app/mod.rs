@@ -988,6 +988,12 @@ in thread {thread_id}: {error}"
         Ok(())
     }
 
+    pub async fn shutdown_providers(&self) {
+        for provider in self.providers.values() {
+            provider.shutdown().await;
+        }
+    }
+
     pub fn available_providers(&self) -> Vec<String> {
         let mut providers: Vec<String> = self.providers.keys().cloned().collect();
         providers.sort_by(|left, right| match (left.as_str(), right.as_str()) {

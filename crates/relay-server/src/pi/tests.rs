@@ -22,9 +22,11 @@ fn bridge(root: &Path, state: Arc<RwLock<RelayState>>) -> PiBridge {
             .into_os_string(),
         root: root.join("sessions"),
         metadata: root.join("metadata"),
-        sessions: Mutex::new(HashMap::new()),
+        sessions: Arc::new(Mutex::new(HashMap::new())),
         records: Mutex::new(HashMap::new()),
-        attach: Mutex::new(()),
+        indexes: Mutex::new(HashMap::new()),
+        discovered: Mutex::new(None),
+        attach: Arc::new(Mutex::new(())),
     }
 }
 
@@ -326,18 +328,13 @@ async fn retry_ends_only_on_settled_and_rejections_and_exits_release_the_turn() 
     let root = tempfile::tempdir().unwrap();
     let bridge = bridge(root.path(), state(root.path()));
     let id = create(&bridge, root.path()).await;
-    assert!(bridge
-        .start_turn(&id, "/switch", "test/echo", "", &[])
-        .await
-        .unwrap_err()
-        .contains("extension commands"));
     let skills = bridge.list_skills(&id, "").await.unwrap().unwrap();
     assert_eq!(
         skills
             .iter()
             .map(|skill| skill.name.as_str())
             .collect::<Vec<_>>(),
-        ["skill:review"]
+        ["skill:review", "switch"]
     );
     let turn = bridge
         .start_turn(&id, "retry", "test/echo", "", &[])
@@ -508,4 +505,275 @@ async fn events_resolve_provider_handles_before_touching_relay_state() {
         .unwrap();
     events::start(&mut relay, "foreign", "wrong");
     assert!(relay.runtime_for_thread("foreign").is_none());
+}
+
+#[tokio::test]
+async fn dialogs_route_to_their_own_sessions_and_stop_cancels_them() {
+    let root = tempfile::tempdir().unwrap();
+    let bridge = bridge(root.path(), state(root.path()));
+    let first = create(&bridge, root.path()).await;
+    let second = create(&bridge, root.path()).await;
+    let turn_a = bridge
+        .start_turn(&first, "dialog:select", "", "", &[])
+        .await
+        .unwrap()
+        .unwrap();
+    let turn_b = bridge
+        .start_turn(&second, "dialog:input", "", "", &[])
+        .await
+        .unwrap()
+        .unwrap();
+    timeout(Duration::from_secs(3), async {
+        while bridge.state.read().await.pending_ask_user_questions.len() != 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let id = format!("pi:{first}:same-native-id");
+    let answers = json!({"Fixture question":"Two"})
+        .as_object()
+        .unwrap()
+        .clone();
+    assert!(bridge
+        .respond_to_ask_user_question(
+            &id,
+            json!({"Fixture question":"Other"}).as_object().unwrap()
+        )
+        .await
+        .is_err());
+    assert!(bridge
+        .state
+        .read()
+        .await
+        .ask_user_transcript_row_id(&first, &id)
+        .is_some());
+    bridge
+        .respond_to_ask_user_question(&id, &answers)
+        .await
+        .unwrap();
+    assert_eq!(
+        settled(&bridge, &first, &turn_a).await,
+        TurnOutcome::Completed
+    );
+    assert_eq!(
+        bridge.state.read().await.pending_ask_user_questions.len(),
+        1
+    );
+    bridge
+        .request_turn_stop(&second, Some(&turn_b))
+        .await
+        .unwrap();
+    assert_eq!(
+        settled(&bridge, &second, &turn_b).await,
+        TurnOutcome::Stopped
+    );
+    assert!(bridge
+        .state
+        .read()
+        .await
+        .pending_ask_user_questions
+        .is_empty());
+}
+
+#[tokio::test]
+async fn pi_usage_counts_assistant_retry_and_compaction_once_in_the_bound_session() {
+    let root = tempfile::tempdir().unwrap();
+    let relay = state(root.path());
+    let mut relay = relay.write().await;
+    relay.bind_session_to_foreign_handle("stable", "pi", "native");
+    let mut runtime = events::Runtime::default();
+    runtime.turn = Some("usage-turn".into());
+    events::start(&mut relay, "native", "usage-turn");
+    let message = json!({"role":"assistant","timestamp":100,"provider":"openai","model":"gpt-6-luna","stopReason":"error","errorMessage":"retry","content":[],"usage":{"input":10,"output":5,"cacheRead":20,"cacheWrite":3,"totalTokens":38,"cost":{"total":0.01}}});
+    for _ in 0..2 {
+        events::apply(
+            &mut relay,
+            "native",
+            &mut runtime,
+            &json!({"type":"message_end","message":message}),
+        );
+    }
+    assert_eq!(relay.last_turn_spend("stable").unwrap().billed, 38);
+    let compact = json!({"type":"compaction_end","result":{"summary":"compressed","usage":{"input":4,"output":2,"totalTokens":6}}});
+    events::apply(&mut relay, "native", &mut runtime, &compact);
+    events::apply(&mut relay, "native", &mut runtime, &compact);
+    let success = json!({"role":"assistant","timestamp":101,"provider":"openai","model":"gpt-6-luna","stopReason":"stop","content":[],"usage":{"input":7,"output":1,"totalTokens":8}});
+    events::apply(
+        &mut relay,
+        "native",
+        &mut runtime,
+        &json!({"type":"message_end","message":success}),
+    );
+    events::apply(
+        &mut relay,
+        "native",
+        &mut runtime,
+        &json!({"type":"agent_settled"}),
+    );
+    assert_eq!(relay.last_turn_spend("stable").unwrap().billed, 52);
+    assert!(relay.last_turn_spend("native").is_none());
+    assert_eq!(
+        relay.turn_terminal("stable", "usage-turn"),
+        Some(TurnOutcome::Completed)
+    );
+}
+
+#[tokio::test]
+async fn history_pages_match_the_full_branch_and_hydrate_tool_arguments_on_demand() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("large.jsonl");
+    let header = json!({"type":"session","version":3,"id":"large","cwd":root.path()});
+    let mut entries = Vec::new();
+    for i in 0..250 {
+        entries.push(json!({"type":"message","id":format!("e{i}"),"parentId":if i == 0 { Value::Null } else { json!(format!("e{}", i-1)) },"message":{"role":"user","timestamp":i+1000,"content":format!("{i}:{}", "x".repeat(1000))}}));
+    }
+    entries.push(json!({"type":"message","id":"call","parentId":"e249","message":{"role":"assistant","timestamp":2000,"content":[{"type":"toolCall","id":"read-1","name":"read","arguments":{"path":"huge.txt"}}]}}));
+    entries.push(json!({"type":"message","id":"result","parentId":"call","message":{"role":"toolResult","toolCallId":"read-1","toolName":"read","content":[{"type":"text","text":"z".repeat(100_000)}],"timestamp":2001}}));
+    entries.push(json!({"type":"message","id":"abandoned","parentId":"e0","message":{"role":"user","timestamp":2002,"content":"not on this branch"}}));
+    entries.push(json!({"type":"custom_message","id":"last","parentId":"result","customType":"note","content":"visible","display":true}));
+    let text = std::iter::once(&header)
+        .chain(entries.iter())
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    tokio::fs::write(&path, &text).await.unwrap();
+    let expected = Document { header, entries }
+        .sync(Some("last"))
+        .unwrap()
+        .into_views();
+    let index = index::Index::read(&path).await.unwrap();
+    let mut before = None;
+    let mut actual = Vec::new();
+    loop {
+        let page = index.page(&path, before, 100).await.unwrap();
+        assert!(!page.sync.transcript_complete);
+        let mut rows = page.sync.into_views();
+        rows.append(&mut actual);
+        actual = rows;
+        before = page.prev_cursor;
+        if before.is_none() {
+            break;
+        }
+    }
+    assert_eq!(
+        serde_json::to_value(&actual).unwrap(),
+        serde_json::to_value(&expected).unwrap()
+    );
+    let position = index.row_position("pi:tool:read-1").unwrap();
+    let detail = index
+        .page(&path, Some(position + 1), 1)
+        .await
+        .unwrap()
+        .sync
+        .into_views();
+    assert_eq!(
+        serde_json::to_value(&detail[0]).unwrap(),
+        serde_json::to_value(&expected[position]).unwrap()
+    );
+    assert!(
+        index
+            .page(&path, None, usize::MAX)
+            .await
+            .unwrap()
+            .sync
+            .transcript_complete
+    );
+    tokio::fs::write(&path, format!("{text}\nmalformed\n"))
+        .await
+        .unwrap();
+    let broken = index::Index::read(&path).await.unwrap();
+    assert!(
+        !broken
+            .page(&path, None, usize::MAX)
+            .await
+            .unwrap()
+            .sync
+            .transcript_complete
+    );
+}
+
+#[tokio::test]
+async fn reaper_expires_idle_processes_but_keeps_callers_and_active_turns() {
+    let root = tempfile::tempdir().unwrap();
+    let bridge = bridge(root.path(), state(root.path()));
+    let held = create(&bridge, root.path()).await;
+    let caller = bridge.session(&held).await.unwrap();
+    let idle = create(&bridge, root.path()).await;
+    let active = create(&bridge, root.path()).await;
+    let turn = bridge
+        .start_turn(&active, "slow", "", "", &[])
+        .await
+        .unwrap()
+        .unwrap();
+    reaper::reap(&bridge.sessions, 8, Duration::ZERO).await;
+    assert!(!bridge.sessions.lock().await.contains_key(&idle));
+    assert!(bridge.sessions.lock().await.contains_key(&held));
+    assert!(bridge.sessions.lock().await.contains_key(&active));
+    drop(caller);
+    bridge
+        .request_turn_stop(&active, Some(&turn))
+        .await
+        .unwrap();
+    settled(&bridge, &active, &turn).await;
+    reaper::reap(&bridge.sessions, 8, Duration::ZERO).await;
+    assert!(bridge.sessions.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn pi_mcp_reuses_the_bound_sessions_token_without_creating_a_native_binding() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state
+        .write()
+        .await
+        .bind_session_to_foreign_handle("stable", "pi", "native");
+    let bridge = bridge(root.path(), state.clone());
+    let (first, token) = bridge.mcp_config("native", None).await;
+    assert!(first.is_some());
+    let token = token.unwrap();
+    assert_eq!(
+        state.read().await.thread_for_ask_token(&token).as_deref(),
+        Some("stable")
+    );
+    assert_eq!(bridge.mcp_config("native", None).await.0, first);
+    assert!(state.read().await.runtime_for_thread("native").is_none());
+    assert_eq!(mcp::literal("!literal-${TOKEN}"), "$!literal-$${TOKEN}");
+    assert_eq!(
+        mcp::literal("/tmp/$project/bridge.mjs"),
+        "/tmp/$$project/bridge.mjs"
+    );
+}
+
+#[tokio::test]
+async fn pi_peer_tool_marks_follow_the_bound_session_and_rendered_row() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let mut relay = state.write().await;
+    relay.bind_session_to_foreign_handle("stable", "pi", "native");
+    let mut ask = crate::state::Ask::new(
+        "ask-pi".into(),
+        "stable".into(),
+        "peer".into(),
+        "codex".into(),
+        None,
+        None,
+        "Inspect changes".into(),
+        root.path().display().to_string(),
+        None,
+        relay_api::delegation::StartedBy::Agent,
+    );
+    ask.sent_at = Some(crate::state::unix_now());
+    relay.insert_ask(ask);
+    let mut runtime = events::Runtime::default();
+    runtime.turn = Some("turn".into());
+    events::start(&mut relay, "native", "turn");
+    events::apply(
+        &mut relay,
+        "native",
+        &mut runtime,
+        &json!({"type":"tool_execution_end","toolCallId":"delegate", "toolName":"mcp__sealwire_test__delegate", "isError":false,"result":{"content":[],"structuredContent":{"structuredContent":{"sealwire":{"delegate_ask_id":"ask-pi"}}}}}),
+    );
+    assert_eq!(relay.injections.anchored_rows("stable"), 1);
+    assert_eq!(relay.injections.anchored_rows("native"), 0);
 }

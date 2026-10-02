@@ -64,7 +64,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const args = request.params.arguments ?? {};
   try {
     // Refused calls are 200 + isError (model can correct); don't throw those.
-    return await relayJson(`/api/orchestrator/tools/${encodeURIComponent(name)}/call`, {
+    const result = await relayJson(`/api/orchestrator/tools/${encodeURIComponent(name)}/call`, {
       method: "POST",
       body: JSON.stringify({
         arguments: args,
@@ -73,6 +73,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ask_token: ASK_TOKEN,
       }),
     });
+    if (process.env.SEALWIRE_PI_MARKS === "1" && result._meta) {
+      result.structuredContent = { ...result.structuredContent, sealwire: result._meta };
+    }
+    return result;
   } catch (error) {
     // Transport failure → tool result, not a session fault.
     return {

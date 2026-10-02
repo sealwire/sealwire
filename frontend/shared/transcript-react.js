@@ -25,6 +25,7 @@ import {
   writeAskUserDraft,
 } from "./ask-user-draft-store.js";
 import { providerIconSvg } from "./provider-icons.js";
+import { providerLabel } from "./provider-labels.js";
 import {
   DELEGATE_REPORTED_KIND,
   DelegateAnswerEntry,
@@ -1341,6 +1342,7 @@ function findPinnedAskUserItemIds(entries, pendingList) {
 // has no entry to say which conversation it belongs to.
 function AskUserPendingCard({ request, entry = null, isJustPrepended = false, options }) {
   const requestId = request.request_id;
+  const provider = options?.provider || (requestId.startsWith("pi:") ? "pi" : "claude_code");
   const itemId = `ask:${requestId}`;
   const detailEntry = entry ? resolveTranscriptDetailEntry(entry, options) : null;
   const tool = (detailEntry || entry)?.tool || {};
@@ -1350,6 +1352,7 @@ function AskUserPendingCard({ request, entry = null, isJustPrepended = false, op
     normalizeAskUserQuestions(request.questions) || parseAskUserQuestions(tool.input_preview);
   if (!questions) {
     return h(AskUserDetailPendingCard, {
+      provider,
       entry,
       isJustPrepended,
       itemId,
@@ -1362,6 +1365,7 @@ function AskUserPendingCard({ request, entry = null, isJustPrepended = false, op
     });
   }
   return h(AskUserWizard, {
+    provider,
     entry,
     isJustPrepended,
     itemId,
@@ -1454,6 +1458,7 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
 }
 
 export function AskUserDetailPendingCard({
+  provider = "claude_code",
   entry,
   isJustPrepended,
   itemId,
@@ -1484,7 +1489,7 @@ export function AskUserDetailPendingCard({
         h(
           "div",
           { className: "ask-user-meta" },
-          h("span", { className: "ask-user-tag" }, "Claude asks"),
+          h("span", { className: "ask-user-tag" }, `${providerLabel(provider)} asks`),
           h("span", { className: "ask-user-topic" }),
           h("span", { className: "ask-user-status" }, status)
         ),
@@ -1672,6 +1677,7 @@ function getQuestionState(stateMap, questionText) {
 }
 
 export function AskUserWizard({
+  provider = "claude_code",
   entry,
   isJustPrepended,
   itemId,
@@ -1682,6 +1688,7 @@ export function AskUserWizard({
   submitAnswers,
   askUserError,
 }) {
+  const isPiDialog = requestId?.startsWith("pi:");
   // Seeded from the draft store rather than from nothing: this component is
   // rebuilt on every blink of the pending list, and a fresh start there is the
   // reader's answer being forgotten mid-sentence.
@@ -1784,8 +1791,12 @@ export function AskUserWizard({
   }
 
   // Unanswered questions go back as a hand-off rather than blocking the turn.
-  function letClaudeDecide() {
+  function skipQuestion() {
     if (!submitAnswers || isSubmitting) return;
+    if (isPiDialog) {
+      submitAnswers(requestId, Object.fromEntries(questions.map(q => [q.question, null])));
+      return;
+    }
     const payload = {};
     for (const q of questions) {
       const state = getQuestionState(perQuestion, q.question);
@@ -1840,7 +1851,7 @@ export function AskUserWizard({
         h(
           "div",
           { className: "ask-user-meta" },
-          h("span", { className: "ask-user-tag" }, "Claude asks"),
+          h("span", { className: "ask-user-tag" }, `${providerLabel(provider)} asks`),
           h("span", { className: "ask-user-topic" }, currentQuestion.header || ""),
           h(
             "span",
@@ -1854,6 +1865,7 @@ export function AskUserWizard({
           // identically, so the notes control is identified by the card it is in.
           notesId: `ask-user-notes-${draftKey || itemId || "card"}-${safeIndex}`,
           question: currentQuestion,
+          allowOther: !isPiDialog || currentQuestion.options.length === 0,
           currentState,
           isSubmitting,
           onToggleOption: (label) => clickOption(currentQuestion, label),
@@ -1903,9 +1915,9 @@ export function AskUserWizard({
             type: "button",
             className: "ask-user-decide",
             disabled: isSubmitting || !submitAnswers,
-            onClick: letClaudeDecide,
+            onClick: skipQuestion,
           },
-          "Let Claude decide"
+          isPiDialog ? "Cancel" : `Let ${providerLabel(provider)} decide`
         )
       ),
       askUserError
@@ -1919,6 +1931,7 @@ const LET_CLAUDE_DECIDE_ANSWER = "No preference — use your best judgment.";
 
 function AskUserQuestionStep({
   question,
+  allowOther = true,
   currentState,
   isSubmitting,
   notesId,
@@ -1967,7 +1980,7 @@ function AskUserQuestionStep({
           ),
         );
       }),
-      h(
+      allowOther ? h(
         "label",
         {
           className: [
@@ -1996,7 +2009,7 @@ function AskUserQuestionStep({
             }
           },
         })
-      )
+      ) : null
     )
   );
 }

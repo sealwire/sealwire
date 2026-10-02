@@ -17,6 +17,7 @@ if (file && existsSync(file)) {
 let model = { id: "echo", provider: "test", name: "Echo", reasoning: true };
 let streaming = false;
 let timer;
+let pendingDialog;
 const emit = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 const response = (command, data = null) => emit({ id: command.id, type: "response", command: command.type, success: true, data });
 function message(message) {
@@ -41,6 +42,13 @@ function finish(text, stopReason = "stop") {
 }
 async function command(command) {
   switch (command.type) {
+    case "extension_ui_response": {
+      if (pendingDialog && streaming) {
+        pendingDialog = null;
+        finish(command.cancelled ? "dialog cancelled" : `dialog answer: ${command.value ?? command.confirmed}`);
+      }
+      return;
+    }
     case "get_state": return response(command, { sessionId: header.id, sessionFile: file || undefined, model, thinkingLevel: "medium", isStreaming: streaming, isCompacting: false });
     case "get_entries": return response(command, { entries, leafId: entries.at(-1)?.id ?? null });
     case "get_available_models": return response(command, { models: [model] });
@@ -62,6 +70,12 @@ async function command(command) {
       streaming = true;
       emit({ type: "agent_start" });
       message({ role: "user", content: command.message, timestamp: Date.now() });
+      if (command.message.startsWith("dialog:")) {
+        const method = command.message.slice(7);
+        pendingDialog = { type: "extension_ui_request", id: "same-native-id", method, title: "Fixture question", ...(method === "select" ? { options: ["One", "Two"] } : {}) };
+        emit(pendingDialog);
+        return;
+      }
       if (command.message === "crash") return process.exit(1);
       if (command.message === "retry") {
         message({ role: "assistant", content: [], timestamp: Date.now(), stopReason: "error", errorMessage: "retry me" });
@@ -83,6 +97,7 @@ async function command(command) {
     default: return emit({ id: command.id, type: "response", success: false, error: `Unknown command ${command.type}` });
   }
 }
+emit({ type: "extension_ui_request", id: "bridge-ready", method: "setStatus", statusKey: "sealwire:bridge", statusText: "ready" });
 let buffer = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {

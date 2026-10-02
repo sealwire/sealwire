@@ -5,8 +5,7 @@
 // remote Providers panel.
 //
 // A provider we ship no icon for returns null rather than borrowing another vendor's
-// logo, which would mislabel the session. `provider-icons.js` covers exactly claude_code
-// and codex, so every caller MUST handle null — either leaving the slot empty (a fixed
+// logo, which would mislabel the session. every caller must handle null — either leaving the slot empty (a fixed
 // slot keeps alignment) or falling back to the provider's name in text.
 
 import React from "react";

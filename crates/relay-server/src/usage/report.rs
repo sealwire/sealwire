@@ -276,6 +276,7 @@ pub(crate) fn provider_label(key: &str) -> String {
     match key {
         "claude_code" | "claude" => "Claude".to_string(),
         "codex" => "Codex".to_string(),
+        "pi" => "Pi".to_string(),
         "cursor" | "cursor_agent" | "cursor-agent" => "Cursor".to_string(),
         "fake" => "Fake".to_string(),
         other => other.to_string(),

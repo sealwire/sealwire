@@ -82,31 +82,44 @@ model in Pi, then select **Pi** in Sealwire. To run only Pi, use
 `AGENT_PROVIDERS=pi npx sealwire`. This integration targets Pi 1.0.0's RPC protocol.
 
 Pi supports streamed text, thinking, tool results, images, model selection,
-cancellation, prompt template/skill discovery, and resuming its version 3 session files.
+cancellation, extension slash commands, prompt templates, skills, and resuming its
+version 3 session files. Sealwire injects its MCP tools into ordinary sessions.
+Extension select/confirm/input/editor dialogs appear as questions in the transcript.
+`/compact` and `/reload` are also available; other Pi terminal-only commands are
+not RPC commands. Commands cannot switch, fork, or navigate the native session
+behind the relay thread. Use Sealwire for those operations.
 History follows the active branch and includes messages before compaction.
 New sessions use Pi's native storage settings, including `sessionDir` and
 `PI_CODING_AGENT_SESSION_DIR`. History discovery scans the environment's session
 directory or the default `~/.pi/agent/sessions`, plus sessions Sealwire created.
 Empty session metadata lives beside Sealwire's state file.
-Idle processes are evicted as more sessions open; active turns are retained.
+History listing reads bounded summaries; transcript pages contain up to 100 rows,
+with tool details loaded on demand. Malformed history is marked incomplete.
+Idle processes are reclaimed after ten minutes, with a target cache of eight;
+active turns and in-use sessions are retained.
 Withdrawing workspace trust closes that workspace's Pi processes and stops active
 turns. Granting trust preserves running turns; the next idle resume loads the new configuration.
 Stopping during prompt preflight terminates that Pi process because its extension
 hooks cannot be cancelled through RPC; the next turn resumes the saved session.
 
 **Full access (YOLO)** is the only supported permission mode: Pi's RPC interface
-provides no tool approval or OS filesystem sandbox. Read-only reviews and Task
-seats are unavailable. Sealwire MCP injection and extension dialogs are not yet
-supported; dialogs are cancelled with a log entry. Extension commands are refused
-because they can switch the session outside Sealwire. Forking uses Sealwire's
+provides no tool approval or OS filesystem sandbox. Read-only reviews, Task
+seats, and Orchestrator sessions are unavailable. Forking uses Sealwire's
 transcript replay, and archiving is unavailable. Permanent deletion removes the
 native session file.
 
-Extensions that await a dialog during `session_start` may fail to initialize
+Token usage and provider-reported cost are recorded for turns run through
+Sealwire, including retries and compaction. Reading old history does not add
+usage. Background cache warming is disabled for managed Pi sessions.
+
+Extensions that await a dialog during initial `session_start` may fail to initialize
 in Pi 1.0.0's RPC mode; disable those startup prompts for this integration.
 
 Run `node scripts/pi-provider-e2e.mjs` with Pi on `PATH` to verify the integration
 against a local test model and a separate relay; no model subscription is used.
+For an opt-in real-model check, set `PI_LIVE_MODEL=provider/model` and run
+`node scripts/pi-provider-live-smoke.mjs`. It uses your Pi login for one short
+turn with one read-only MCP call in an isolated workspace.
 
 ### OpenCode
 

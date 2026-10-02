@@ -41,10 +41,25 @@ impl Connection {
         cwd: &Path,
         args: &[String],
     ) -> Result<(Arc<Self>, mpsc::UnboundedReceiver<Event>), String> {
+        Self::spawn_with_env(binary, cwd, args, &[]).await
+    }
+
+    pub async fn spawn_with_env(
+        binary: &OsStr,
+        cwd: &Path,
+        args: &[String],
+        env: &[(String, String)],
+    ) -> Result<(Arc<Self>, mpsc::UnboundedReceiver<Event>), String> {
         let mut command = Command::new(binary);
         command
             .args(["--mode", "rpc"])
             .args(args)
+            .env_remove("SEALWIRE_PI_MCP")
+            .env_remove("RELAY_API_TOKEN")
+            .env_remove("SEALWIRE_ASK_TOKEN")
+            .env_remove("SEALWIRE_SEAT_RUN_ID")
+            .env_remove("SEALWIRE_DEVICE_ID")
+            .envs(env.iter().cloned())
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

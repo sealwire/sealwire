@@ -154,6 +154,22 @@ for (const [name, field, id] of [["delegate", "delegate_ask_id", "ask-one"], ["r
   });
 }
 
+test("Pi retains card identifiers even when its MCP adapter removes _meta", async () => {
+  const marks = { delegate_ask_id: "ask-pi", review_id: "review-pi", goal_id: "goal-pi", goal_seq: "2" };
+  const { server, port } = await startStubRelay(() => ({ body: {
+    content: [{ type: "text", text: "Done" }], _meta: marks, structuredContent: { existing: true },
+  } }));
+  const { client, transport } = await connect(port, { SEALWIRE_PI_MARKS: "1" });
+  try {
+    const result = await client.callTool({ name: "goal_complete", arguments: {} });
+    const { _meta, ...piResult } = result;
+    assert.deepEqual(piResult.structuredContent, { existing: true, sealwire: marks });
+  } finally {
+    await transport.close();
+    server.close();
+  }
+});
+
 test("a refused call reaches the model as a readable result, not a thrown error", async () => {
   // The distinction that matters: a model shown a REASON corrects itself; a model
   // shown a transport failure retries the identical call.
