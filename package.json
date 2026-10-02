@@ -151,6 +151,7 @@
     "test:browser:public-remote-follow": "npm run build && node scripts/browser-public-remote-follow-e2e.mjs",
     "test:browser:public-multi-remote-follow": "npm run build && node scripts/browser-public-multi-remote-follow-e2e.mjs",
     "test:browser:remote-mobile-session-actions": "npm run build && node scripts/browser-remote-mobile-session-actions-e2e.mjs",
+    "test:browser:remote-mobile-stream-switch": "npm run build && node scripts/browser-remote-mobile-stream-switch-e2e.mjs",
     "test:browser:remote-desktop-tabs": "npm run build && node scripts/browser-remote-desktop-tabs-e2e.mjs",
     "test:browser:public-core": "node scripts/e2e/run-browser-suite.mjs --suite public-core",
     "test:browser:public-core:fake": "node scripts/e2e/run-browser-suite.mjs --suite public-core --fake",

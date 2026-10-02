@@ -68,6 +68,7 @@
       "public-thread-interleaving",
       "remote-mobile-header",
       "remote-mobile-session-actions",
+      "remote-mobile-stream-switch",
       "remote-new-session-menus",
       "remote-relay-name-truncation",
       "remote-mobile-bell",
@@ -89,6 +90,7 @@
       "public-thread-interleaving",
       "remote-mobile-header",
       "remote-mobile-session-actions",
+      "remote-mobile-stream-switch",
       "remote-new-session-menus",
       "remote-relay-name-truncation",
       "remote-mobile-bell",
@@ -256,6 +258,16 @@
         "mobile-layout",
         "provider-mark",
         "projects"
+      ]
+    },
+    "remote-mobile-stream-switch": {
+      "script": "browser-remote-mobile-stream-switch-e2e.mjs",
+      "tier": "core",
+      "provider": "stub",
+      "transport": "static-remote",
+      "coverage": [
+        "mobile-session-switch",
+        "mobile-layout"
       ]
     },
     "local-auth": {

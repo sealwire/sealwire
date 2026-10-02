@@ -2072,11 +2072,20 @@ function RemoteApp() {
     // Navigation goes through the controller so the tab set and what is on screen can
     // never disagree; the subscriber below performs the actual view change. The host
     // files it under the thread's OWNING project, not the pinned one.
-    await sessionTabsHost.openThread({
+    const change = await sessionTabsHost.openThread({
       threadId,
       threadProjectId: threadProjectIdRef.current,
       preview,
     });
+    if (
+      sessionTabsHost.shouldRetryView({
+        change,
+        threadId,
+        viewedThreadId: viewedThreadIdRef.current,
+      })
+    ) {
+      void handlersRef.current.onViewThread?.(threadId);
+    }
   }
 
   // VAPID public key arrives on the session snapshot (null until the server

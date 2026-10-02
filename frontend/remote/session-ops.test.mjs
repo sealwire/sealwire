@@ -6912,7 +6912,17 @@ function createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload) {
         }
         fetchCount += 1;
         const threadId = frame.payload.request.input.thread_id;
-        pending.push(() => {
+        pending.push((fail = false) => {
+          if (fail) {
+            void handleRemoteBrokerPayload({
+              kind: "remote_action_result",
+              action_id: frame.payload.action_id,
+              action: "fetch_thread_transcript",
+              ok: false,
+              error: "transient broker hiccup",
+            });
+            return;
+          }
           void handleRemoteBrokerPayload({
             kind: "remote_action_result",
             action_id: frame.payload.action_id,
@@ -6942,6 +6952,11 @@ function createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload) {
       const resolve = pending.shift();
       assert.ok(resolve, "expected a pending viewed-thread transcript fetch");
       resolve();
+    },
+    failNext() {
+      const resolve = pending.shift();
+      assert.ok(resolve, "expected a pending viewed-thread transcript fetch");
+      resolve(true);
     },
   };
 }
@@ -7023,6 +7038,137 @@ test("maybeRefreshRemoteViewedThread triggers viewRemoteThread when background t
 
   clearSessionRuntime();
   state.socket = null;
+});
+
+// thread-b is pinned while it and thread-c stream; the live thread is thread-a.
+async function viewStreamingThreadB() {
+  activeBrowser = installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { applySessionSnapshot, clearSessionRuntime, viewRemoteThread } = await import("./session-ops.js");
+  const { remoteQueryClient } = await import("./query-client.js");
+
+  clearSessionRuntime();
+  seedRemoteViewedTerminalRefreshFixture(state, saveRemoteAuth);
+  const transcriptFetch = createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload);
+  state.socket = transcriptFetch.socket;
+  remoteQueryClient.clear();
+
+  let revision = 0;
+  const applyActivity = (activity) =>
+    applySessionSnapshot({
+      active_thread_id: "thread-a",
+      active_turn_id: "turn-a",
+      current_cwd: "/tmp/a",
+      current_status: "active",
+      pending_approvals: [],
+      pending_ask_user_questions: [],
+      thread_activity: activity.map((thread_id) => ({ thread_id, phase: "streaming" })),
+      transcript: [{ item_id: "a-1", kind: "agent_text", text: "live A", turn_id: "turn-a" }],
+      transcript_revision: ++revision,
+      transcript_truncated: false,
+    });
+  applyActivity(["thread-b", "thread-c"]);
+
+  const initialView = viewRemoteThread("thread-b");
+  await nextTick();
+  transcriptFetch.completeNext();
+  assert.equal(await initialView, true);
+
+  return {
+    state,
+    transcriptFetch,
+    applyActivity,
+    viewRemoteThread,
+    cleanup() {
+      clearSessionRuntime();
+      state.socket = null;
+    },
+  };
+}
+
+test("an apparent terminal refresh of the old view cannot cancel a switch to another streaming session", async () => {
+  const { state, transcriptFetch, applyActivity, viewRemoteThread, cleanup } = await viewStreamingThreadB();
+
+  const targetView = viewRemoteThread("thread-c");
+  await waitFor(() => transcriptFetch.fetchCount >= 2);
+  // The old thread drops out of activity while the target transcript is still
+  // in flight. This can happen even while the old thread still emits deltas.
+  applyActivity(["thread-c"]);
+  assert.equal(transcriptFetch.fetchCount, 2, "the old view must not start a competing refresh");
+
+  transcriptFetch.completeNext();
+  assert.equal(await targetView, true, "the user's newer navigation must win");
+  assert.equal(state.session.active_thread_id, "thread-c");
+
+  cleanup();
+});
+
+test("a terminal refresh held back by a switch still runs if that switch fails", async () => {
+  const { state, transcriptFetch, applyActivity, viewRemoteThread, cleanup } = await viewStreamingThreadB();
+
+  const targetView = viewRemoteThread("thread-c");
+  await waitFor(() => transcriptFetch.fetchCount >= 2);
+  applyActivity(["thread-c"]);
+  assert.equal(transcriptFetch.fetchCount, 2);
+
+  transcriptFetch.failNext();
+  assert.equal(await targetView, false);
+  await waitFor(() => transcriptFetch.fetchCount >= 3);
+  assert.equal(transcriptFetch.fetchCount, 3, "thread-b is still pinned and owes its terminal refresh");
+  transcriptFetch.completeNext();
+  await nextTick();
+  assert.equal(state.session.active_thread_id, "thread-b");
+
+  cleanup();
+});
+
+test("the refresh owed after a failed switch cannot override a newer tap", async () => {
+  const { state, transcriptFetch, applyActivity, viewRemoteThread, cleanup } = await viewStreamingThreadB();
+
+  const failedView = viewRemoteThread("thread-c");
+  await waitFor(() => transcriptFetch.fetchCount >= 2);
+  applyActivity(["thread-d"]);
+  transcriptFetch.failNext();
+  assert.equal(await failedView, false);
+  await waitFor(() => transcriptFetch.fetchCount >= 3);
+
+  const newerView = viewRemoteThread("thread-d");
+  await waitFor(() => transcriptFetch.fetchCount >= 4);
+  // The owed thread-b refresh answers while thread-d is still in flight.
+  transcriptFetch.completeNext();
+  await nextTick();
+  await nextTick();
+  assert.equal(transcriptFetch.fetchCount, 4, "the stale refresh must not start another one");
+
+  transcriptFetch.completeNext();
+  assert.equal(await newerView, true, "the newer tap must win");
+  assert.equal(state.session.active_thread_id, "thread-d");
+
+  cleanup();
+});
+
+test("a superseded switch does not release the held-back refresh over the newer tap", async () => {
+  const { state, transcriptFetch, applyActivity, viewRemoteThread, cleanup } = await viewStreamingThreadB();
+
+  const supersededView = viewRemoteThread("thread-c");
+  await waitFor(() => transcriptFetch.fetchCount >= 2);
+  applyActivity(["thread-c", "thread-d"]);
+  const newerView = viewRemoteThread("thread-d");
+  await waitFor(() => transcriptFetch.fetchCount >= 3);
+
+  transcriptFetch.completeNext();
+  assert.equal(await supersededView, false);
+  await nextTick();
+  await nextTick();
+  assert.equal(transcriptFetch.fetchCount, 3, "thread-b's refresh is still owed, but not while thread-d loads");
+
+  transcriptFetch.completeNext();
+  assert.equal(await newerView, true, "the newer tap must win");
+  assert.equal(state.session.active_thread_id, "thread-d");
+
+  cleanup();
 });
 
 test("viewOnlyWasWorking seeds from the viewed thread thread_activity, not the live active_turn_id", async () => {

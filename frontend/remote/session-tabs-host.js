@@ -380,6 +380,22 @@ export function createRemoteSessionTabsHost({
     },
 
     /**
+     * Should a tap perform the view itself, because its commit will not?
+     *
+     * A failed view leaves the location on the tapped session, so re-tapping it commits nothing.
+     * Checked against the CURRENT location so a late retry cannot undo a newer tap.
+     */
+    shouldRetryView({ change, threadId, viewedThreadId } = {}) {
+      return (
+        Boolean(threadId)
+        && change?.locationChanged === false
+        && change.next?.location?.threadId === threadId
+        && controller.getState().location.threadId === threadId
+        && viewedThreadId !== threadId
+      );
+    },
+
+    /**
      * Mirror the thread the surface is actually showing into the tab set.
      *
      * Remote's viewed thread moves for reasons the controller does not cause — boot,

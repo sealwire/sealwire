@@ -149,6 +149,9 @@ let viewOnlyThreadId = null;
 // Which run of the relay minted the ids in the currently pinned view-only transcript.
 let viewOnlyRelayGeneration = "";
 let viewOnlyNavigationGeneration = 0;
+// Thread the newest view is still fetching. A refresh of the old pin bumps the generation,
+// so starting one now would cancel the user's switch and leave them on the old thread.
+let viewOnlyNavigationTarget = null;
 let viewOnlyRefreshInFlight = false;
 let viewOnlyLastRefreshAt = 0;
 let viewOnlyWasWorking = false;
@@ -254,6 +257,7 @@ function settleTranscriptProjection() {
 function invalidateViewOnlyNavigation() {
   viewOnlyNavigationGeneration += 1;
   viewOnlyThreadId = null;
+  viewOnlyNavigationTarget = null;
   viewOnlyRefreshInFlight = false;
   viewOnlyLastRefreshAt = 0;
   viewOnlyWasWorking = false;
@@ -1881,6 +1885,7 @@ export async function viewRemoteThread(threadId) {
   const navigationGeneration = ++viewOnlyNavigationGeneration;
   renderLog(`Viewing remote session ${threadId}.`);
   if (state.realSession?.active_thread_id === threadId) {
+    viewOnlyNavigationTarget = null;
     viewOnlyThreadId = threadId;
     viewOnlyRelayGeneration = state.realSession?.transcript_generation || "";
     viewOnlyLastRefreshAt = Date.now();
@@ -1890,6 +1895,7 @@ export async function viewRemoteThread(threadId) {
     return true;
   }
 
+  viewOnlyNavigationTarget = threadId;
   try {
     const viewOnlyGeneration = (state.realSession || state.session)?.transcript_generation || "";
     const readSentAt = noteSettingsReadSent();
@@ -1975,11 +1981,21 @@ export async function viewRemoteThread(threadId) {
   } catch (error) {
     renderLog(`Remote session view failed: ${error.message}`);
     return false;
+  } finally {
+    if (navigationGeneration === viewOnlyNavigationGeneration) {
+      viewOnlyNavigationTarget = null;
+      // A refresh skipped while this was in flight is owed to whichever pin survived it.
+      maybeRefreshRemoteViewedThread(state.realSession);
+    }
   }
 }
 
 function maybeRefreshRemoteViewedThread(realSession) {
-  if (!viewOnlyThreadId || viewOnlyRefreshInFlight) {
+  if (
+    !viewOnlyThreadId
+    || viewOnlyRefreshInFlight
+    || (viewOnlyNavigationTarget && viewOnlyNavigationTarget !== viewOnlyThreadId)
+  ) {
     return;
   }
   const working = remoteViewedThreadIsWorking(viewOnlyThreadId, realSession);

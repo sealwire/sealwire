@@ -833,6 +833,40 @@ test("the repair fires only for a failed view that is still on screen", async ()
   );
 });
 
+// A view that failed or was superseded leaves the location on the tapped session while the
+// screen stays elsewhere, and re-tapping it commits nothing the subscriber would act on.
+test("re-tapping a selected session that is not on screen asks for the view again", async () => {
+  const host = hostWith();
+  await host.adoptViewedThread({ threadId: "B", threadProjectId: {} });
+  const firstTap = await host.openThread({ threadId: "C", threadProjectId: {} });
+  assert.equal(firstTap.locationChanged, true);
+
+  const retap = await host.openThread({ threadId: "C", threadProjectId: {} });
+  assert.equal(retap.locationChanged, false, "the controller already names C");
+  assert.equal(
+    host.shouldRetryView({ change: retap, threadId: "C", viewedThreadId: "B" }),
+    true,
+    "the screen still shows B, so the tap must perform the view itself"
+  );
+  assert.equal(
+    host.shouldRetryView({ change: retap, threadId: "C", viewedThreadId: "C" }),
+    false,
+    "a session already on screen needs no second fetch"
+  );
+  assert.equal(
+    host.shouldRetryView({ change: firstTap, threadId: "C", viewedThreadId: "B" }),
+    false,
+    "a tap that moved the location is already viewed by the subscriber"
+  );
+
+  await host.openThread({ threadId: "D", threadProjectId: {} });
+  assert.equal(
+    host.shouldRetryView({ change: retap, threadId: "C", viewedThreadId: "B" }),
+    false,
+    "a late retry for C must not override a newer tap on D"
+  );
+});
+
 // The sweep must keep collecting the projects you are NOT in while it dissolves the one
 // you are. Those are different outcomes for the same event, and an implementation that
 // short-circuited on an unresolvable current context would stop collecting entirely — on
