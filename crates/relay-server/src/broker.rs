@@ -13,7 +13,6 @@ pub use access_release::run_cloud_access_release;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -76,18 +75,7 @@ const BROKER_PONG_TIMEOUT_SECS: u64 = 10;
 const PUBLIC_RELAY_AUTH_REQUEST_RETRY_SECS: u64 = 5;
 
 fn product_version() -> &'static str {
-    static VERSION: OnceLock<String> = OnceLock::new();
-    VERSION.get_or_init(|| {
-        serde_json::from_str::<serde_json::Value>(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../package.json"
-        )))
-        .expect("package.json must be valid")
-        .get("version")
-        .and_then(serde_json::Value::as_str)
-        .expect("package.json must include version")
-        .to_string()
-    })
+    env!("SEALWIRE_PRODUCT_VERSION")
 }
 
 pub(crate) async fn check_broker_client_version() -> Result<(), String> {

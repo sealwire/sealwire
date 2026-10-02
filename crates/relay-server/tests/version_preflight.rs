@@ -4,6 +4,26 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 #[test]
+fn relay_binary_does_not_embed_private_npm_script() {
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../package.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(manifest_path).expect("read npm manifest"))
+            .expect("parse npm manifest");
+    let private_script = manifest["scripts"]["test:private-frontend"]
+        .as_str()
+        .expect("private npm script regression fixture");
+    assert!(private_script.contains("sealwire-private"));
+
+    let binary = std::fs::read(env!("CARGO_BIN_EXE_relay-server")).expect("read relay executable");
+    assert!(
+        !binary
+            .windows(private_script.len())
+            .any(|window| window == private_script.as_bytes()),
+        "relay executable embeds the private npm script from package.json; compile only the product version"
+    );
+}
+
+#[test]
 fn outdated_relay_exits_before_opening_local_server() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock broker");
     let address = listener.local_addr().expect("mock broker address");

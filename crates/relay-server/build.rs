@@ -19,6 +19,19 @@ fn main() {
     }
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
+    let package_json_path = manifest_dir.join("../../package.json");
+    println!("cargo:rerun-if-changed={}", package_json_path.display());
+    let package_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(package_json_path).expect("failed to read package.json"))
+            .expect("package.json must be valid");
+    let version = package_json
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .expect("package.json must include version");
+    // The npm version is canonical; embedding its whole manifest also ships
+    // script paths that the release binary scanner forbids.
+    println!("cargo:rustc-env=SEALWIRE_PRODUCT_VERSION={version}");
+
     let web_root = manifest_dir.join("..").join("..").join("web");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("out dir"));
     let generated_path = out_dir.join("embedded_web_assets.rs");

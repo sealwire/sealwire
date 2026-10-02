@@ -366,6 +366,18 @@ async fn broker_config_builds_websocket_url() {
 }
 
 #[test]
+fn product_version_matches_npm_release_version() {
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../package.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(manifest_path).expect("read npm manifest"))
+            .expect("parse npm manifest");
+    assert_eq!(
+        product_version(),
+        manifest["version"].as_str().expect("npm product version")
+    );
+}
+
+#[test]
 fn broker_health_requires_current_relay_version_before_start() {
     let health = relay_broker::protocol::HealthResponse {
         status: "ok".to_string(),
