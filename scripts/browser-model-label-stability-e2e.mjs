@@ -137,7 +137,8 @@ async function installModelObserver(page) {
 
     window.__recordModelLabel = (source = "manual") => {
       const select = document.querySelector("#message-model");
-      const label = select?.selectedOptions?.[0]?.textContent?.trim() || "";
+      const label =
+        document.querySelector("#message-model-picker .setting-pill-value")?.textContent?.trim() || "";
       const value = select?.value || "";
       if (!label) return;
       const key = `${value}\n${label}`;
@@ -284,13 +285,14 @@ async function runCase(context, baseUrl, testCase) {
         ({ model, threadId }) => {
           const form = document.querySelector("#message-form");
           const select = document.querySelector("#message-model");
-          const rect = select?.getBoundingClientRect();
+          const picker = document.querySelector("#message-model-picker");
+          const rect = picker?.getBoundingClientRect();
           return new URL(window.location.href).searchParams.get("thread") === threadId
             && form?.hidden === false
             && rect?.width > 0
             && rect?.height > 0
             && select?.value === model
-            && select.selectedOptions?.[0]?.textContent?.trim() === model;
+            && picker.querySelector(".setting-pill-value")?.textContent?.trim() === model;
         },
         { ...testCase, threadId: full.active_thread_id },
         { timeout: TIMEOUT_MS }
@@ -302,7 +304,7 @@ async function runCase(context, baseUrl, testCase) {
       ({ displayName, model }) => {
         const select = document.querySelector("#message-model");
         return select?.value === model
-          && select.selectedOptions?.[0]?.textContent?.trim() === displayName;
+          && document.querySelector("#message-model-picker .setting-pill-value")?.textContent?.trim() === displayName;
       },
       testCase,
       { timeout: TIMEOUT_MS }
@@ -319,12 +321,12 @@ async function runCase(context, baseUrl, testCase) {
     await page.evaluate(() => window.__resetModelLabelSamples());
     await pushSnapshot(page, full);
     const firstFullLabel = await page.evaluate(
-      () => document.querySelector("#message-model")?.selectedOptions?.[0]?.textContent?.trim() || ""
+      () => document.querySelector("#message-model-picker .setting-pill-value")?.textContent?.trim() || ""
     );
     await pushSnapshot(page, empty);
 
     const emptyLabel = await page.evaluate(
-      () => document.querySelector("#message-model")?.selectedOptions?.[0]?.textContent?.trim() || ""
+      () => document.querySelector("#message-model-picker .setting-pill-value")?.textContent?.trim() || ""
     );
     if (SCREENSHOT_DIR) {
       await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
@@ -341,7 +343,7 @@ async function runCase(context, baseUrl, testCase) {
     const samples = await page.evaluate(() => window.__modelLabelSamples);
     const labels = samples.map((sample) => sample.label);
     const finalLabel = await page.evaluate(
-      () => document.querySelector("#message-model")?.selectedOptions?.[0]?.textContent?.trim() || ""
+      () => document.querySelector("#message-model-picker .setting-pill-value")?.textContent?.trim() || ""
     );
 
     assert.equal(unexpectedNativeStreamRequests, 0, "the controlled stream shim must be active");
@@ -440,7 +442,7 @@ async function runCrossProviderCase(context, baseUrl) {
         const select = document.querySelector("#message-model");
         return new URL(window.location.href).searchParams.get("thread") === threadId
           && select?.value === model
-          && select.selectedOptions?.[0]?.textContent?.trim() === displayName;
+          && document.querySelector("#message-model-picker .setting-pill-value")?.textContent?.trim() === displayName;
       },
       { ...viewedCase, threadId: viewedThreadId },
       { timeout: TIMEOUT_MS }
@@ -449,7 +451,7 @@ async function runCrossProviderCase(context, baseUrl) {
     await page.evaluate(() => window.__resetModelLabelSamples());
     await pushSnapshot(page, live);
     const labelAfterPaint = await page.evaluate(
-      () => document.querySelector("#message-model")?.selectedOptions?.[0]?.textContent?.trim() || ""
+      () => document.querySelector("#message-model-picker .setting-pill-value")?.textContent?.trim() || ""
     );
     await page.waitForTimeout(400);
     await page.evaluate(() => window.__recordModelLabel("after-deferred-render"));

@@ -699,7 +699,7 @@ test("the Orchestrator composer offers no model picker and no settings", () => {
   );
   assert.match(html, /task-orch-form/);
   assert.doesNotMatch(html, /composer-model-picker/);
-  assert.doesNotMatch(html, /composer-model-chip/);
+  assert.doesNotMatch(html, /model-picker-trigger/);
   assert.doesNotMatch(html, /composer-settings-mount/);
 });
 

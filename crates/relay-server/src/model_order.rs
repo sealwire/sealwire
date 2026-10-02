@@ -4,47 +4,75 @@ use std::collections::HashMap;
 
 use crate::protocol::ModelOptionView;
 
-/// Reorders `models` in place. Only the version moves a model: ties keep the
-/// provider's order, and a line keeps the slot where it first appeared.
+/// Reorders `models` in place. Only the version moves a model within its line; ties
+/// keep the provider's order. Lines sharing a first word (`claude-opus`,
+/// `claude-sonnet`) are gathered where the first of them appeared.
 pub(crate) fn newest_first(models: &mut Vec<ModelOptionView>) {
     let mut keyed: Vec<_> = std::mem::take(models)
         .into_iter()
         .map(|model| {
             let (line, version) = line_and_version(&model.model);
-            (line, version, model)
+            (family_of(&line), line, version, model)
         })
         .collect();
-    let mut rank = HashMap::new();
-    for (line, _, _) in &keyed {
-        let next = rank.len();
-        rank.entry(line.clone()).or_insert(next);
+    let mut families = HashMap::new();
+    let mut lines = HashMap::new();
+    for (family, line, _, _) in &keyed {
+        let next = families.len();
+        families.entry(family.clone()).or_insert(next);
+        let next = lines.len();
+        lines.entry(line.clone()).or_insert(next);
     }
     // `sort_by` is stable, which is what keeps equal versions in the provider's order.
-    keyed.sort_by(|a, b| rank[&a.0].cmp(&rank[&b.0]).then_with(|| b.1.cmp(&a.1)));
-    *models = keyed.into_iter().map(|(_, _, model)| model).collect();
+    keyed.sort_by(|a, b| {
+        families[&a.0]
+            .cmp(&families[&b.0])
+            .then_with(|| lines[&a.1].cmp(&lines[&b.1]))
+            .then_with(|| b.2.cmp(&a.2))
+    });
+    *models = keyed.into_iter().map(|(_, _, _, model)| model).collect();
 }
 
-/// `openai/gpt-6.1-sol` is line `openai/gpt` at version [6, 1]. An id with no
-/// version is a line of its own.
+/// The vendor and the first word of the name: `claude-opus` and `claude-sonnet` are
+/// both `claude`, which is how Cursor's unprefixed ids still say who made them.
+fn family_of(line: &str) -> String {
+    let (vendor, name) = line.rsplit_once('/').unwrap_or(("", line));
+    let word = name.split(['-', ':']).next().unwrap_or(name);
+    format!("{vendor}/{word}")
+}
+
+/// `openai/gpt-6.1-sol` is line `openai/gpt` at version [6, 1], and `qwen3.8-max` is
+/// line `qwen` at [3, 8]. An id with no version is a line of its own.
 fn line_and_version(model: &str) -> (String, Vec<u32>) {
     let base = model.split('[').next().unwrap_or(model);
     let (vendor, name) = match base.rsplit_once('/') {
         Some((vendor, name)) => (Some(vendor), name),
         None => (None, base),
     };
+    // OpenRouter and Bedrock tag a variant after a colon: `:free`, `:batch`, `v1:0`.
+    let name = name.split(':').next().unwrap_or(name);
     let words: Vec<&str> = name.split('-').collect();
-    let Some(at) = words.iter().position(|word| version_of(word).is_some()) else {
+    // A date beside a real version cannot be compared with it, and what follows it is date too.
+    let found = words
+        .iter()
+        .enumerate()
+        .take_while(|(_, word)| !is_date(word))
+        .find_map(|(at, word)| version_of(word, at).map(|found| (at, found)));
+    let Some((at, (glued, mut version))) = found else {
         return (base.to_string(), Vec::new());
     };
-    let mut version = version_of(words[at]).unwrap_or_default();
-    // Claude spells 4.6 as `4-6`. Longer numbers are dates, which say nothing newer.
+    // Claude spells 4.6 as `4-6`.
     version.extend(
         words[at + 1..]
             .iter()
             .take_while(|word| word.len() <= 2)
             .map_while(|word| word.parse::<u32>().ok()),
     );
-    let family = words[..at].join("-");
+    let mut family = words[..at].to_vec();
+    if !glued.is_empty() {
+        family.push(glued);
+    }
+    let family = family.join("-");
     let line = match vendor {
         Some(vendor) => format!("{vendor}/{family}"),
         None => family,
@@ -52,12 +80,22 @@ fn line_and_version(model: &str) -> (String, Vec<u32>) {
     (line, version)
 }
 
-fn version_of(word: &str) -> Option<Vec<u32>> {
-    let digits = word.strip_prefix('v').unwrap_or(word);
-    if digits.is_empty() {
+fn is_date(word: &str) -> bool {
+    word.len() >= 4 && word.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// `5.6` is version [5, 6]; `k2.6` is too, glued to the family letter `k`.
+fn version_of(word: &str, at: usize) -> Option<(&str, Vec<u32>)> {
+    let (letters, digits) = word.split_at(word.find(|c: char| c.is_ascii_digit())?);
+    // A bare `o3` or `k3` has no family name to rank it within.
+    if !letters.bytes().all(|byte| byte.is_ascii_alphabetic()) || (at == 0 && letters.len() == 1) {
         return None;
     }
-    digits.split('.').map(|part| part.parse().ok()).collect()
+    let version = digits
+        .split('.')
+        .map(|part| part.parse().ok())
+        .collect::<Option<Vec<u32>>>()?;
+    Some((letters, version))
 }
 
 #[cfg(test)]
@@ -180,6 +218,81 @@ mod tests {
                 "claude-opus-4-6[thinking=true]",
                 "mimo-v2.6",
                 "mimo-v2.5",
+            ]
+        );
+    }
+
+    #[test]
+    fn glued_versions_and_colon_tags_rank_but_dates_do_not() {
+        // A date beside a real version cannot be compared with it, so it ranks nothing.
+        assert_eq!(
+            sorted(&[
+                "moonshotai/kimi-k2.6",
+                "moonshotai/kimi-k3",
+                "minimax/MiniMax-M2.7",
+                "minimax/MiniMax-M3",
+                "anthropic/claude-opus-4.8:batch",
+                "anthropic/claude-opus-5:batch",
+                "qwen/qwen-2.5-72b",
+                "qwen/qwen3.5-plus-02-15",
+                "qwen/qwen3.8-flash",
+                "mistral/mistral-medium-2604",
+                "mistral/mistral-medium-3.5",
+                "mistral/mistral-medium-2505",
+                "openai/o1",
+                "openai/o3",
+            ]),
+            [
+                "moonshotai/kimi-k3",
+                "moonshotai/kimi-k2.6",
+                "minimax/MiniMax-M3",
+                "minimax/MiniMax-M2.7",
+                "anthropic/claude-opus-5:batch",
+                "anthropic/claude-opus-4.8:batch",
+                "qwen/qwen3.8-flash",
+                "qwen/qwen3.5-plus-02-15",
+                "qwen/qwen-2.5-72b",
+                "mistral/mistral-medium-2604",
+                "mistral/mistral-medium-3.5",
+                "mistral/mistral-medium-2505",
+                "openai/o1",
+                "openai/o3",
+            ]
+        );
+    }
+
+    #[test]
+    fn cursor_catalog_gathers_each_family_and_keeps_its_first_place() {
+        // Cursor's own order interleaves Opus, GPT and Fable; the family it lists first
+        // still comes first.
+        assert_eq!(
+            sorted(&[
+                "default[]",
+                "grok-4.6[effort=high]",
+                "grok-4.7[effort=high]",
+                "composer-2.5[fast=true]",
+                "claude-opus-5[thinking=true]",
+                "gpt-5.5[reasoning=medium]",
+                "claude-fable-5-1[thinking=true]",
+                "claude-opus-5-5[effort=medium]",
+                "gpt-5.6-sol[reasoning=medium]",
+                "claude-sonnet-5-5[effort=high]",
+                "glm-5.2[reasoning=high]",
+                "glm-5p3[reasoning=high]",
+            ]),
+            [
+                "default[]",
+                "grok-4.7[effort=high]",
+                "grok-4.6[effort=high]",
+                "composer-2.5[fast=true]",
+                "claude-opus-5-5[effort=medium]",
+                "claude-opus-5[thinking=true]",
+                "claude-fable-5-1[thinking=true]",
+                "claude-sonnet-5-5[effort=high]",
+                "gpt-5.6-sol[reasoning=medium]",
+                "gpt-5.5[reasoning=medium]",
+                "glm-5.2[reasoning=high]",
+                "glm-5p3[reasoning=high]",
             ]
         );
     }

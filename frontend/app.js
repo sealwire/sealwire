@@ -258,7 +258,7 @@ import { describeThreadRemoval } from "./shared/destructive-confirm-copy.js";
 import { CHECK_SVG, PLUS_SVG } from "./svg.js";
 import { UndoToast } from "./shared/undo-toast.js";
 import { offerProjectUndo } from "./shared/project-undo.js";
-import { applyProviderMark } from "./shared/provider-mark.js";
+import { ComposerModelPicker } from "./shared/composer.js";
 import { ForkSessionDialog } from "./shared/fork-session-dialog.js";
 import { forkCompletionEffect } from "./local/fork-submit-ownership.js";
 import {
@@ -3290,7 +3290,7 @@ messageModel?.addEventListener("change", () => {
   // Keep the chip's logo on the model the user just picked. Unconditional and
   // first, because the effort bookkeeping below bails out when there's no
   // session provider — the mark must not be left showing the previous vendor.
-  syncComposerModelMark();
+  syncComposerModelPicker();
   // Effort is no longer in the composer; the popover owns it. Just react
   // to model changes so an effort default can still be persisted for this
   // provider+model pair.
@@ -3762,19 +3762,29 @@ async function refreshProviderCatalogs(session) {
   }
 }
 
-// The composer chip's logo, for the surface that renders its options outside
-// React. Reads the vendor off the selected <option> rather than re-deriving it
-// from state, so it stays correct whether the change came from the user or from
-// a snapshot reasserting the session's model.
-function syncComposerModelMark() {
-  if (!messageModel) {
+let composerModelRoot = null;
+let composerModelCatalog = { models: [], provider: "" };
+
+// The hidden select stays the composer's model of record (the send path reads it);
+// the picker is drawn from it and writes a choice back through its change event.
+function syncComposerModelPicker() {
+  const mount = document.getElementById("composer-model-mount");
+  if (!mount || !messageModel) {
     return;
   }
-  const selected = messageModel.selectedOptions?.[0];
-  applyProviderMark(
-    document.getElementById("message-model-mark"),
-    selected?.dataset?.provider || ""
-  );
+  composerModelRoot ??= createRoot(mount);
+  const picker = messageModel.options.length
+    ? React.createElement(ComposerModelPicker, {
+        ...composerModelCatalog,
+        id: "message-model-picker",
+        onSelect: (next) => {
+          messageModel.value = next;
+          messageModel.dispatchEvent(new Event("change", { bubbles: true }));
+        },
+        value: messageModel.value,
+      })
+    : null;
+  flushSync(() => composerModelRoot.render(picker));
 }
 
 function syncComposerModelForRenderedSession(session, selectedModel = "") {
@@ -3789,6 +3799,7 @@ function syncComposerModelForRenderedSession(session, selectedModel = "") {
   const currentModel = displayModels.some((model) => model.model === requestedModel)
     ? requestedModel
     : session.model || requestedModel;
+  composerModelCatalog = { models: displayModels, provider: session.provider || "" };
 
   // The rendered session may be a client-local view-only projection for a
   // provider different from the relay's live session. Use that projection's
@@ -3803,7 +3814,7 @@ function syncComposerModelForRenderedSession(session, selectedModel = "") {
     true,
     fallbackModels
   );
-  syncComposerModelMark();
+  syncComposerModelPicker();
 }
 
 function syncProviderSuggestions(select, providers, selectedProvider) {

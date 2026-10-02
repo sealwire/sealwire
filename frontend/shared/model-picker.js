@@ -6,7 +6,6 @@ import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState
 import { MenuGlyph, highlightMatch, moveMenuFocus } from "./context-menu-react.js";
 import { placeFlyout } from "./context-menu-position.js";
 import { modelSections, searchModelOptions } from "./model-picker-model.js";
-import { hasFinePrimaryPointer } from "./pointer-class.js";
 import { providerMarkSlot } from "./provider-mark.js";
 import { MenuPortal, placementBounds, useAnchoredMenu } from "./use-anchored-menu.js";
 import { useDismissableMenu } from "./use-dismissable-menu.js";
@@ -77,9 +76,9 @@ function ModelRow({ onChoose, option, query = "", lead = null }) {
   );
 }
 
-function ModelList({ group, olderOpen, onChoose, onToggleOlder }) {
-  const { older, sections } = modelSections(group.options);
-  const showOlder = olderOpen || older.some((option) => option.selected);
+function ModelList({ group, otherOpen, onChoose, onToggleOther }) {
+  const { other, sections } = modelSections(group.options);
+  const showOther = otherOpen || other.some((option) => option.selected);
   const rows = [];
   if (group.empty) {
     // A note beside the choosable row, not a replacement for it.
@@ -98,27 +97,27 @@ function ModelList({ group, olderOpen, onChoose, onToggleOlder }) {
       rows.push(h(ModelRow, { key: `option:${option.value}`, onChoose, option }));
     }
   });
-  if (older.length) {
-    rows.push(h("div", { className: "context-menu-separator", key: "sep-older", role: "separator" }));
+  if (other.length) {
+    rows.push(h("div", { className: "context-menu-separator", key: "sep-other", role: "separator" }));
     rows.push(
       h(
         "button",
         {
-          "aria-expanded": showOlder ? "true" : "false",
-          className: "context-menu-button is-muted model-picker-older",
-          key: "older",
-          onClick: onToggleOlder,
+          "aria-expanded": showOther ? "true" : "false",
+          className: "context-menu-button is-muted model-picker-other",
+          key: "other",
+          onClick: onToggleOther,
           role: "menuitem",
           type: "button",
         },
         h(MenuGlyph, { className: "context-menu-lead", svg: "" }),
-        h("span", { className: "context-menu-label" }, "Older models"),
-        h("span", { className: "context-menu-hint" }, String(older.length)),
-        h(MenuGlyph, { className: "context-menu-chevron model-picker-older-caret", svg: CHEVRON_DOWN_SVG })
+        h("span", { className: "context-menu-label" }, "Other models"),
+        h("span", { className: "context-menu-hint" }, String(other.length)),
+        h(MenuGlyph, { className: "context-menu-chevron model-picker-other-caret", svg: CHEVRON_DOWN_SVG })
       )
     );
-    if (showOlder) {
-      for (const option of older) {
+    if (showOther) {
+      for (const option of other) {
         rows.push(h(ModelRow, { key: `option:${option.value}`, onChoose, option }));
       }
     }
@@ -145,12 +144,10 @@ export function ModelPicker({
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState("");
   const [query, setQuery] = useState("");
-  const [olderOpen, setOlderOpen] = useState(() => new Set());
+  const [otherOpen, setOtherOpen] = useState(() => new Set());
   // No room beside the menu (a phone): the models replace the provider list.
   const [drill, setDrill] = useState(false);
   const [drilled, setDrilled] = useState(false);
-  // Typing opens search, and a finger types nothing until a field is tapped.
-  const [touch, setTouch] = useState(false);
   const rootRef = useRef(null);
   const triggerRef = useRef(null);
   const layerRef = useRef(null);
@@ -196,10 +193,9 @@ export function ModelPicker({
     onOpen?.();
     setActive(initialProvider(groups, provider));
     setQuery("");
-    setOlderOpen(new Set());
+    setOtherOpen(new Set());
     setDrill(false);
     setDrilled(false);
-    setTouch(!hasFinePrimaryPointer(rootRef.current?.ownerDocument?.defaultView));
     requestFocus("provider");
     setOpen(true);
   };
@@ -218,8 +214,10 @@ export function ModelPicker({
   };
 
   const activeGroup = groups.find((group) => group.provider === active && !group.direct) || null;
+  // A thread's composer can only move within its own provider: no provider level.
+  const single = groups.length === 1 && !groups[0].direct;
   const results = query ? searchModelOptions(groups, query) : [];
-  const showFlyout = open && !query && !drill && Boolean(activeGroup);
+  const showFlyout = open && !query && !drill && !single && Boolean(activeGroup);
 
   // Panel 1 is placed by useAnchoredMenu in an earlier layout effect, so its rect
   // is final by the time this runs.
@@ -313,13 +311,13 @@ export function ModelPicker({
       focus(searchRef.current);
       return;
     }
-    if (intent === "provider" && !(drill && drilled)) {
+    if (intent === "provider" && !(drill && drilled) && !single) {
       focus(providerRowNode(menu, active) || menu.querySelector(ITEM_SELECTOR));
       return;
     }
-    const panel = drill ? menu : flyoutRef.current;
+    const panel = drill || single ? menu : flyoutRef.current;
     // An unplaced panel is either not committed yet or about to give way to the drill-in.
-    if (!drill && panel?.dataset.placed !== "true") {
+    if (!drill && !single && panel?.dataset.placed !== "true") {
       focusIntent.current = intent;
       return;
     }
@@ -494,14 +492,13 @@ export function ModelPicker({
       { className: "context-menu-filter", key: "filter" },
       h(MenuGlyph, { svg: SEARCH_SVG }),
       h("input", {
-        "aria-label": "Search models",
+        "aria-label": "Search models or providers",
         autoComplete: "off",
         onChange: (event) => {
           setQuery(event.target.value);
-          // On touch the box stays put when emptied, and so does the keyboard.
-          requestFocus(event.target.value || touch ? "search" : "provider");
+          requestFocus("search");
         },
-        placeholder: "Search models",
+        placeholder: "Search models or providers",
         ref: searchRef,
         spellCheck: false,
         type: "text",
@@ -517,7 +514,7 @@ export function ModelPicker({
         ? results.map((option) =>
             h(ModelRow, {
               key: `${option.provider}:${option.value}`,
-              lead: providerMarkSlot(option.provider, { className: "model-picker-mark" }),
+              lead: single ? null : providerMarkSlot(option.provider, { className: "model-picker-mark" }),
               onChoose: choose,
               option,
               query,
@@ -525,9 +522,19 @@ export function ModelPicker({
           )
         : h("p", { className: "context-menu-note", key: "none" }, "No models match"),
     ];
+  } else if (single && activeGroup) {
+    firstLevel = [
+      searchBox(),
+      ...ModelList({
+        group: activeGroup,
+        onChoose: (option) => choose(option, activeGroup),
+        onToggleOther: () => toggleOther(activeGroup.provider),
+        otherOpen: otherOpen.has(activeGroup.provider),
+      }),
+    ];
   } else if (drill && drilled && activeGroup) {
     firstLevel = [
-      touch ? searchBox() : null,
+      searchBox(),
       h(
         "button",
         {
@@ -547,23 +554,23 @@ export function ModelPicker({
       h("div", { className: "context-menu-separator", key: "back-sep", role: "separator" }),
       ...ModelList({
         group: activeGroup,
-        olderOpen: olderOpen.has(activeGroup.provider),
         onChoose: (option) => choose(option, activeGroup),
-        onToggleOlder: () => toggleOlder(activeGroup.provider),
+        onToggleOther: () => toggleOther(activeGroup.provider),
+        otherOpen: otherOpen.has(activeGroup.provider),
       }),
     ];
   } else {
     const direct = groups.filter((group) => group.direct);
     firstLevel = [
-      touch ? searchBox() : null,
+      searchBox(),
       ...direct.map(directRow),
       direct.length ? h("div", { className: "context-menu-separator", key: "direct-sep", role: "separator" }) : null,
       ...groups.filter((group) => !group.direct).map(providerRow),
     ];
   }
 
-  function toggleOlder(key) {
-    setOlderOpen((current) => {
+  function toggleOther(key) {
+    setOtherOpen((current) => {
       const next = new Set(current);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -627,7 +634,7 @@ export function ModelPicker({
           "div",
           {
             "aria-label": ariaLabel,
-            className: "context-menu model-picker-menu" + (query ? " is-searching" : ""),
+            className: "context-menu model-picker-menu" + (query ? " is-searching" : "") + (single ? " is-single" : ""),
             id: menuId,
             ref: assignMenuRef,
             role: "menu",
@@ -647,9 +654,9 @@ export function ModelPicker({
               },
               ModelList({
                 group: activeGroup,
-                olderOpen: olderOpen.has(activeGroup.provider),
                 onChoose: (option) => choose(option, activeGroup),
-                onToggleOlder: () => toggleOlder(activeGroup.provider),
+                onToggleOther: () => toggleOther(activeGroup.provider),
+                otherOpen: otherOpen.has(activeGroup.provider),
               })
             )
           : null

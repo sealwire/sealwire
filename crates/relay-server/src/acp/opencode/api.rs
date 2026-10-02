@@ -89,7 +89,7 @@ impl AcpBridge {
             .as_array()
             .ok_or("OpenCode returned an invalid provider catalog")?;
         let mut models = self.models.lock().await;
-        populate_model_efforts(&mut models, providers);
+        populate_native_details(&mut models, providers);
         if let Some(path) = self.models_cache.as_deref() {
             write_cached_models(path, &models);
         }
@@ -250,7 +250,7 @@ fn unsafe_command_expansion(template: &Value, arguments: &str) -> bool {
             && [template, arguments].iter().any(|text| text.contains('`')))
 }
 
-fn populate_model_efforts(models: &mut [ModelOptionView], providers: &[Value]) {
+fn populate_native_details(models: &mut [ModelOptionView], providers: &[Value]) {
     for model in models {
         let Some((provider, id)) = model.model.split_once('/') else {
             continue;
@@ -262,6 +262,9 @@ fn populate_model_efforts(models: &mut [ModelOptionView], providers: &[Value]) {
         else {
             continue;
         };
+        // Image, video, speech and embedding models cannot call tools, so a session
+        // started on one can do no work. OpenCode lists them all the same.
+        model.hidden = native["capabilities"]["toolcall"] == false;
         let mut efforts: Vec<_> = native["variants"]
             .as_object()
             .into_iter()
@@ -370,6 +373,44 @@ mod tests {
     }
 
     #[test]
+    fn models_that_cannot_call_tools_are_hidden() {
+        let options = json!([
+            {"category": "model", "type": "select", "currentValue": "google/gemini-3.8-flash", "options": [
+                {"value": "google/gemini-3.8-flash"}, {"value": "google/veo-3.1-generate-preview"},
+                {"value": "google/gemini-embedding-2"}, {"value": "custom/unknown"}
+            ]}
+        ]);
+        let mut models = crate::acp::config::models(
+            options.as_array().unwrap(),
+            "opencode",
+            Some("google/gemini-3.8-flash"),
+            &[],
+            true,
+        );
+        populate_native_details(
+            &mut models,
+            &[json!({"id": "google", "models": {
+                "gemini-3.8-flash": {"capabilities": {"toolcall": true}},
+                "veo-3.1-generate-preview": {"capabilities": {"toolcall": false}},
+                "gemini-embedding-2": {"capabilities": {"toolcall": false}}
+            }})],
+        );
+        let hidden: Vec<_> = models
+            .iter()
+            .map(|m| (m.model.as_str(), m.hidden))
+            .collect();
+        assert_eq!(
+            hidden,
+            [
+                ("google/gemini-3.8-flash", false),
+                ("google/veo-3.1-generate-preview", true),
+                ("google/gemini-embedding-2", true),
+                ("custom/unknown", false),
+            ]
+        );
+    }
+
+    #[test]
     fn provider_catalog_populates_unselected_models_without_borrowing_efforts() {
         let options = json!([
             {"category": "model", "type": "select", "currentValue": "test/echo", "options": [
@@ -388,7 +429,7 @@ mod tests {
         );
         models[2].supported_reasoning_efforts = vec!["high".into()];
         models[2].default_reasoning_effort = "high".into();
-        populate_model_efforts(
+        populate_native_details(
             &mut models,
             &[json!({"id": "test", "models": {
                 "echo": {"variants": {"high": {}, "low": {}}},

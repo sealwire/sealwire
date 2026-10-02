@@ -1,9 +1,5 @@
-// The provider/model pickers show a vendor logo. Both are native <select>s, so
-// the logo cannot live in an <option>; it rides in a slot beside the control and
-// must track the current selection. These tests pin the two things that make
-// that work: the vendor->agent-id mapping (model catalogs say "anthropic", our
-// icons are keyed "claude_code"), and the always-present slot the local surface
-// fills imperatively.
+// Pickers show a vendor logo. These tests pin the vendor->agent-id mapping (model
+// catalogs say "anthropic", our icons are keyed "claude_code") and where it shows.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -14,7 +10,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 import React from "react";
 
 import {
-  applyProviderMark,
   providerIconKey,
   providerMark,
   providerMarkSlot,
@@ -65,53 +60,27 @@ test("the slot stays in the DOM when no icon ships, but claims no vendor", () =>
   assert.match(filled.props.dangerouslySetInnerHTML.__html, /<svg/);
 });
 
-test("the composer chip shows the selected model's vendor, not the catalog's first", () => {
+test("the composer's picker shows the selected model's vendor, not the catalog's first", () => {
   const markup = renderToStaticMarkup(
     h(ConversationComposer, { models: MODELS, currentModelValue: "gpt-5.5" })
   );
-  assert.match(markup, /class="composer-model-mark"[^>]*data-provider="codex"/);
+  assert.match(markup, /class="model-picker-trigger-mark"[^>]*data-provider="codex"/);
   assert.doesNotMatch(markup, /data-provider="claude_code"/);
-});
 
-test("switching the selected model switches the chip's logo", () => {
-  const markup = renderToStaticMarkup(
+  const switched = renderToStaticMarkup(
     h(ConversationComposer, { models: MODELS, currentModelValue: "claude-sonnet-4-6" })
   );
-  assert.match(markup, /class="composer-model-mark"[^>]*data-provider="claude_code"/);
-});
-
-test("each model option carries its vendor for the DOM-driven surface to read", () => {
-  const markup = renderToStaticMarkup(
-    h(ConversationComposer, { models: MODELS, currentModelValue: "gpt-5.5" })
-  );
-  assert.match(markup, /<option[^>]*value="claude-sonnet-4-6"[^>]*data-provider="anthropic"/);
-  assert.match(markup, /<option[^>]*value="gpt-5.5"[^>]*data-provider="openai"/);
+  assert.match(switched, /class="model-picker-trigger-mark"[^>]*data-provider="claude_code"/);
 });
 
 // The logo replaced this prefix; keeping both left the chip reading
-// "anthropic · Sonnet 4.6" next to an Anthropic logo, and the 18ch cap ellipsed
-// the model name — the one part the user actually needs — away first.
-test("the option label no longer repeats the vendor the logo already shows", () => {
+// "anthropic · Sonnet 4.6" next to an Anthropic logo.
+test("the picker's label does not repeat the vendor the logo already shows", () => {
   const markup = renderToStaticMarkup(
     h(ConversationComposer, { models: MODELS, currentModelValue: "gpt-5.5" })
   );
-  assert.doesNotMatch(markup, /anthropic ·/);
   assert.doesNotMatch(markup, /openai ·/);
-  assert.match(markup, />Sonnet 4\.6</);
-  assert.match(markup, />GPT-5\.5</);
-});
-
-test("the chip's slot is addressable by id so a non-React surface can fill it", () => {
-  const markup = renderToStaticMarkup(
-    h(ConversationComposer, { modelId: "message-model", models: MODELS })
-  );
-  assert.match(markup, /id="message-model-mark"/);
-});
-
-test("applyProviderMark tolerates a missing slot", () => {
-  // The behavioural coverage lives in picker-provider-mark.dom.test.mjs against a
-  // real element; this only pins the null-node guard, which needs no DOM.
-  assert.equal(applyProviderMark(null, "openai"), false);
+  assert.match(markup, /setting-pill-value">GPT-5\.5</);
 });
 
 // --- the indent that keeps the logo off the label ---------------------------
@@ -127,13 +96,12 @@ const CSS = fs
   .replace(/\/\*[\s\S]*?\*\//g, "");
 
 test("the leading indent is applied only when a logo actually rendered", () => {
-  assert.match(CSS, /\.composer-model-mark\[data-provider\]\s*\+\s*\.composer-model-chip\s*\{[^}]*padding-left/);
   assert.match(CSS, /\.select-mark\[data-provider\]\s*\+\s*select\s*\{[^}]*padding-left/);
 });
 
 test("neither indent rule leans on :has()", () => {
   for (const rule of CSS.split("}")) {
-    if (!/composer-model-chip|select-with-mark|select-mark/.test(rule)) continue;
+    if (!/select-with-mark|select-mark/.test(rule)) continue;
     assert.doesNotMatch(rule, /:has\(/, `an indent rule must not require :has(): ${rule.trim()}`);
   }
 });

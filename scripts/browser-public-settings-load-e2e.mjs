@@ -98,13 +98,18 @@ async function clickRemoteThread(page, threadId) {
 }
 
 async function readRemoteLoadedSettings(page) {
-  // Model lives in the composer chip; permission + effort live in the popover.
+  // Model lives in the composer's picker (the ticked row); permission + effort live
+  // in the popover.
   await page.waitForSelector("#remote-message-model", { timeout: TIMEOUT_MS });
+  await page.click("#remote-message-model");
+  const ticked = '.model-picker-menu [aria-checked="true"]';
+  await page.waitForSelector(ticked, { timeout: TIMEOUT_MS });
+  const model = await page.$eval(ticked, (row) => row.dataset.value ?? null);
+  await page.keyboard.press("Escape");
   await page.waitForSelector("#remote-session-settings-button", { timeout: TIMEOUT_MS });
   await page.click("#remote-session-settings-button");
   await page.waitForSelector(".session-settings-popover", { timeout: TIMEOUT_MS });
-  return page.evaluate(() => ({
-    model: document.querySelector("#remote-message-model")?.value ?? null,
+  const rest = await page.evaluate(() => ({
     effort:
       document
         .querySelector("#session-settings-effort .settings-segmented-option.is-selected")
@@ -114,6 +119,7 @@ async function readRemoteLoadedSettings(page) {
         .querySelector(".approval-card.is-selected .approval-card-label")
         ?.textContent?.trim() ?? null,
   }));
+  return { model, ...rest };
 }
 
 async function main() {

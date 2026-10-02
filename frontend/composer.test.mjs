@@ -24,20 +24,35 @@ test("ConversationComposer renders no effort select (effort lives in the setting
   assert.doesNotMatch(markup, /id="remote-message-effort"/);
 });
 
-test("ConversationComposer renders the model select without a visible label", () => {
+test("ConversationComposer's model control is the model picker, named for the selected model", () => {
   const markup = renderToStaticMarkup(
     h(ConversationComposer, {
       currentModelValue: "claude-opus-4-7",
       messageId: "remote-message-input",
       modelId: "remote-message-model",
-      models: [{ display_name: "Opus", model: "claude-opus-4-7" }],
+      models: [{ display_name: "Opus", model: "claude-opus-4-7", provider: "claude_code" }],
       onModelChange() {},
       sendButtonId: "remote-send-button",
     })
   );
 
-  assert.match(markup, /<select[^>]*id="remote-message-model"[^>]*class="composer-model-chip"/);
-  assert.doesNotMatch(markup, /<span[^>]*>Model<\/span>/);
+  assert.match(markup, /<button[^>]*id="remote-message-model"/);
+  assert.match(markup, /model-picker-trigger-mark[^>]*data-provider="claude_code"/);
+  assert.match(markup, /setting-pill-value">Opus</);
+  assert.doesNotMatch(markup, /<select/);
+});
+
+test("a surface that drives the model itself puts its own control in the slot", () => {
+  const markup = renderToStaticMarkup(
+    h(ConversationComposer, {
+      messageId: "message-input",
+      modelPicker: h("span", { id: "composer-model-mount" }),
+      sendButtonId: "send-button",
+    })
+  );
+
+  assert.match(markup, /id="composer-model-mount"/);
+  assert.doesNotMatch(markup, /model-picker-trigger/);
 });
 
 test("ConversationComposer can render a local-only attachment area above the input", () => {

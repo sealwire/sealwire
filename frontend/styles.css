@@ -5165,73 +5165,26 @@ body.sidebar-collapsed .app-shell[data-view="tasks"] #tasks-sidebar-toggle {
   gap: 6px;
   min-width: 0;
 }
-/* The vendor's logo rides inside the chip's own pill rather than beside it, so
-   the control still reads as one object. The slot is always in the DOM (empty
-   for a vendor we ship no mark for) and the leading padding is keyed off
-   [data-provider], which only appears when a logo actually rendered — an empty
-   slot therefore costs no indent. */
-.composer-model-picker {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  min-width: 0;
-}
-.composer-model-mark {
-  position: absolute;
-  left: 10px;
-  top: 50%;
-  transform: translateY(-50%);
-  display: inline-flex;
-  width: 14px;
-  height: 14px;
-  color: var(--text-tertiary);
-  /* Clicks belong to the select underneath, whose hit area the mark overlaps. */
-  pointer-events: none;
-}
-.composer-model-mark svg {
-  width: 14px;
-  height: 14px;
-}
-.composer-model-mark[data-provider="claude_code"] {
-  color: var(--provider-claude-mark);
-}
-/* Adjacent-sibling, not :has() — the slot is always the element right before the
-   select, so the cheap combinator does the job and works everywhere. This is
-   load-bearing rather than cosmetic: the mark is absolutely positioned, so a
-   browser that failed to apply the indent would paint the logo ON TOP of the
-   model name, not merely un-indented. */
-.composer-model-mark[data-provider] + .composer-model-chip {
-  padding-left: 30px;
-}
-.composer-model-chip {
-  appearance: none;
-  -webkit-appearance: none;
-  display: inline-flex;
-  align-items: center;
-  padding: 4px 22px 4px 12px;
-  font: inherit;
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
-  color: var(--text-primary);
-  background: var(--surface-2, var(--bg-surface));
+/* The composer's model control keeps the round pill it had as a <select>. */
+.model-picker.composer-model-picker .setting-pill-trigger {
+  height: 28px;
+  gap: 6px;
+  max-width: 22ch;
+  padding: 0 10px;
   border: 1px solid var(--border-faint);
   border-radius: 999px;
-  cursor: pointer;
-  max-width: 18ch;
-  text-overflow: ellipsis;
-  overflow: hidden;
-  white-space: nowrap;
-  background-image: linear-gradient(45deg, transparent 50%, var(--text-secondary) 50%),
-    linear-gradient(135deg, var(--text-secondary) 50%, transparent 50%);
-  background-position: calc(100% - 11px) center, calc(100% - 7px) center;
-  background-size: 4px 4px, 4px 4px;
-  background-repeat: no-repeat;
-  transition: border-color 120ms ease, background-color 120ms ease;
+  background: var(--surface-2, var(--bg-surface));
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
 }
-.composer-model-chip:hover,
-.composer-model-chip:focus {
+.model-picker.composer-model-picker .setting-pill-trigger:hover,
+.model-picker.composer-model-picker .setting-pill-trigger[aria-expanded="true"] {
   border-color: var(--border-prominent);
-  outline: none;
+  background: var(--surface-2, var(--bg-surface));
+}
+.composer-model-mount {
+  display: contents;
 }
 .composer-actions .send-button,
 .composer-actions .stop-button { margin-left: auto; }
@@ -10595,6 +10548,12 @@ button.team-role-name.is-link {
   width: 300px;
 }
 
+.model-picker-menu.is-single {
+  width: max-content;
+  min-width: 232px;
+  max-width: 300px;
+}
+
 .model-picker-flyout {
   min-width: 232px;
   max-width: 300px;
@@ -10617,11 +10576,11 @@ button.team-role-name.is-link {
   padding: 6px 10px 4px 30px;
 }
 
-.model-picker-older .context-menu-hint {
+.model-picker-other .context-menu-hint {
   margin-left: auto;
 }
 
-.model-picker-older[aria-expanded="true"] .model-picker-older-caret {
+.model-picker-other[aria-expanded="true"] .model-picker-other-caret {
   transform: rotate(180deg);
 }
 

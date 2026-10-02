@@ -102,7 +102,7 @@ export function clickMenuRowInPage(wanted) {
 }
 
 // The picker shows one provider's models at a time, so visit each provider in turn
-// (older generations unfolded) and read what it offers. In-page, like the one above;
+// (Other models unfolded) and read what it offers. In-page, like the one above;
 // React commits a click after it returns, so every click waits before the next read.
 export async function readModelPickerOptionsInPage() {
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -112,15 +112,24 @@ export async function readModelPickerOptionsInPage() {
     await settle();
   };
   const seen = [];
-  // A phone opens already inside the current provider.
-  await clickThenSettle(document.querySelector(".model-picker-back"));
-  const count = document.querySelectorAll(".model-picker-provider").length;
-  for (let index = 0; index < count; index += 1) {
-    await clickThenSettle(document.querySelectorAll(".model-picker-provider")[index]);
-    await clickThenSettle(document.querySelector('.model-picker-older[aria-expanded="false"]'));
+  const readRows = () => {
     for (const option of document.querySelectorAll(".model-picker-layer .model-picker-option")) {
       seen.push({ provider: option.dataset.provider || "", value: option.dataset.value || "" });
     }
+  };
+  // A phone opens already inside the current provider.
+  await clickThenSettle(document.querySelector(".model-picker-back"));
+  const count = document.querySelectorAll(".model-picker-provider").length;
+  // One provider has no provider level: its models are the menu.
+  if (!count) {
+    await clickThenSettle(document.querySelector('.model-picker-other[aria-expanded="false"]'));
+    readRows();
+    return seen;
+  }
+  for (let index = 0; index < count; index += 1) {
+    await clickThenSettle(document.querySelectorAll(".model-picker-provider")[index]);
+    await clickThenSettle(document.querySelector('.model-picker-other[aria-expanded="false"]'));
+    readRows();
     await clickThenSettle(document.querySelector(".model-picker-back"));
   }
   return seen;
@@ -139,7 +148,7 @@ export async function showProviderModelsInPage(provider) {
       (row) => row.dataset.providerRow === provider
     )
   );
-  await clickThenSettle(document.querySelector('.model-picker-older[aria-expanded="false"]'));
+  await clickThenSettle(document.querySelector('.model-picker-other[aria-expanded="false"]'));
 }
 
 function readMenuOptions(page) {

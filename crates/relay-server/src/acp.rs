@@ -1522,8 +1522,9 @@ async fn absorb_catalog_into(
         } else {
             return;
         };
-    // OpenCode lists by id, alphabetically; Cursor's order is its own recommendation.
-    if provider == "opencode" {
+    // OpenCode lists by id, alphabetically, and Cursor interleaves its families; each
+    // family still keeps the place it first appears in.
+    if provider == "opencode" || provider == "cursor" {
         crate::model_order::newest_first(&mut options);
     }
     if !options.is_empty() {

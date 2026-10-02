@@ -5,7 +5,7 @@ import { ProjectPicker } from "./project-picker.js";
 import { SettingPill } from "./setting-pill.js";
 import { WorkspacePicker } from "./workspace-picker.js";
 import { abbreviateHomePath } from "./workspace-chip-model.js";
-import { buildModelPickerGroups, selectedModelChip } from "./model-picker-model.js";
+import { modelPickerProps } from "./model-picker-model.js";
 import {
   PromptCard,
   SessionContextBar,
@@ -54,12 +54,6 @@ export function StartSessionDialog({
   const hasInitialPrompt = Boolean(fields.initialPrompt?.trim());
   const startDisabled =
     startPending || !cwd.trim() || (requiresInitialPrompt && !hasInitialPrompt);
-
-  const modelChip = selectedModelChip({
-    providerModels,
-    selectedModel: fields.model || "",
-    selectedProvider: provider,
-  });
 
   const [startError, setStartError] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
@@ -200,7 +194,7 @@ export function StartSessionDialog({
       SettingPillRow,
       { key: "pills" },
       h(ModelPicker, {
-        groups: buildModelPickerGroups({
+        ...modelPickerProps({
           offerProviderDefault: true,
           providerModels,
           providers,
@@ -218,8 +212,6 @@ export function StartSessionDialog({
           setStartError("");
           onSelectModel?.({ model: value, provider: option.provider || provider });
         },
-        provider,
-        value: modelChip.value,
       }),
       h(SettingPill, {
         disabled: locked,

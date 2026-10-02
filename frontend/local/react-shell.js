@@ -526,8 +526,14 @@ function ComposerShell() {
         heldId: "composer-held",
         messageId: "message-input",
         messagePlaceholder: "Start or open a session first.",
-        modelId: "message-model",
-        models: [{ display_name: "gpt-5.4", model: "gpt-5.4" }],
+        // app.js fills and reads the hidden select, and draws the visible picker into
+        // the mount from it; the send path and its tests read #message-model's value.
+        modelPicker: h(
+          React.Fragment,
+          null,
+          h("select", { "aria-hidden": "true", hidden: true, id: "message-model", tabIndex: -1 }),
+          h("span", { className: "composer-model-mount", id: "composer-model-mount" })
+        ),
         sendButtonId: "send-button",
         stopButtonId: "stop-button",
       })

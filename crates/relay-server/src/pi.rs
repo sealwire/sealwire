@@ -614,6 +614,37 @@ fn thinking_levels(model: &Value) -> Vec<String> {
         .collect()
 }
 
+// Pi lists by id, alphabetically, which puts GPT-4 above GPT-6.
+fn catalog(models: &[Value]) -> Vec<ModelOptionView> {
+    let mut options: Vec<_> = models
+        .iter()
+        .filter_map(|model| {
+            let levels = thinking_levels(model);
+            let default_effort = if levels.iter().any(|level| level == "medium") {
+                "medium".into()
+            } else {
+                levels.first().cloned().unwrap_or_default()
+            };
+            Some(ModelOptionView {
+                model: model_id(model)?,
+                display_name: format!(
+                    "{} · {}",
+                    model["name"].as_str().unwrap_or(model["id"].as_str()?),
+                    model["provider"].as_str()?
+                ),
+                provider: "pi".into(),
+                supported_reasoning_efforts: levels,
+                default_reasoning_effort: default_effort,
+                hidden: false,
+                is_default: false,
+                resolved_model: None,
+            })
+        })
+        .collect();
+    crate::model_order::newest_first(&mut options);
+    options
+}
+
 #[async_trait]
 impl ProviderBridge for PiBridge {
     async fn shutdown(&self) {
@@ -726,31 +757,7 @@ impl ProviderBridge for PiBridge {
         let models = result["models"]
             .as_array()
             .ok_or("Pi returned an invalid model catalog")?;
-        Ok(models
-            .iter()
-            .filter_map(|model| {
-                let levels = thinking_levels(model);
-                let default_effort = if levels.iter().any(|level| level == "medium") {
-                    "medium".into()
-                } else {
-                    levels.first().cloned().unwrap_or_default()
-                };
-                Some(ModelOptionView {
-                    model: model_id(model)?,
-                    display_name: format!(
-                        "{} · {}",
-                        model["name"].as_str().unwrap_or(model["id"].as_str()?),
-                        model["provider"].as_str()?
-                    ),
-                    provider: "pi".into(),
-                    supported_reasoning_efforts: levels,
-                    default_reasoning_effort: default_effort,
-                    hidden: false,
-                    is_default: false,
-                    resolved_model: None,
-                })
-            })
-            .collect())
+        Ok(catalog(models))
     }
 
     async fn default_model(&self, cwd: &str) -> Result<String, String> {

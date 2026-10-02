@@ -58,8 +58,7 @@ export function providerMark(provider, className = "provider-mark") {
  *
  * Prefer this over providerMark where the element must survive a selection
  * change: a picker whose mark appears and disappears would shift its own label
- * sideways, and a non-React surface (the local composer fills #message-model
- * imperatively) needs a stable node to write into by id.
+ * sideways.
  *
  * @param {string} provider
  * @param {{className?: string, id?: string|null}} [options]
@@ -79,27 +78,3 @@ export function providerMarkSlot(provider, { className = "provider-mark", id = n
   });
 }
 
-/**
- * DOM-side twin of providerMarkSlot, for surfaces that own their picker
- * imperatively. Clears the slot when no icon ships, mirroring the null contract
- * so a stale logo can never outlive the selection that produced it.
- *
- * @param {Element|null} element the slot node
- * @param {string} provider
- * @returns {boolean} whether a mark is now showing
- */
-export function applyProviderMark(element, provider) {
-  if (!element) return false;
-  const key = providerIconKey(provider);
-  const icon = providerIconSvg(key);
-  if (!icon) {
-    element.innerHTML = "";
-    element.removeAttribute("data-provider");
-    return false;
-  }
-  if (element.getAttribute("data-provider") !== key) {
-    element.innerHTML = icon;
-    element.setAttribute("data-provider", key);
-  }
-  return true;
-}

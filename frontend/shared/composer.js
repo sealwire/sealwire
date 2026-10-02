@@ -6,7 +6,8 @@ import {
   defaultEnterSubmits,
   defaultRemapHomeEnd,
 } from "./composer-keys.js";
-import { providerMarkSlot } from "./provider-mark.js";
+import { ModelPicker } from "./model-picker.js";
+import { modelPickerProps } from "./model-picker-model.js";
 
 const h = React.createElement;
 
@@ -59,6 +60,21 @@ export function buildModelOptions(models = [], currentModelValue = "") {
   return buildModelSelectOptions(models, currentModelValue, { allowForeign: true }).options;
 }
 
+/** A thread's model control: its provider's catalogue, chosen in place. */
+export function ComposerModelPicker({ id, models = [], onSelect = null, provider = "", value = "" }) {
+  return h(ModelPicker, {
+    ...modelPickerProps({
+      providerModels: { [provider]: models },
+      providers: [provider],
+      selectedModel: value,
+      selectedProvider: provider,
+    }),
+    className: "composer-model-picker",
+    id,
+    onSelect,
+  });
+}
+
 export function ConversationComposer({
   actionsBeforeSend = null,
   attachmentArea = null,
@@ -73,6 +89,8 @@ export function ConversationComposer({
   messageId = "remote-message-input",
   messagePlaceholder = "",
   modelId = "remote-message-model",
+  // A surface that keeps the model outside React (local) mounts its own control here.
+  modelPicker = null,
   models = [],
   onDraftChange = null,
   onModelChange = null,
@@ -123,29 +141,18 @@ export function ConversationComposer({
     enterSubmits: submitOnEnter,
     remapHomeEnd: remapCaretKeys,
   });
-  const modelSelectProps = {
-    id: modelId,
-    className: "composer-model-chip",
-    "aria-label": "Model",
-  };
   const modelOptions = buildModelOptions(models, currentModelValue);
-  // The vendor behind the *selected* model, which is what the chip's mark shows.
-  // Undefined on the local surface, whose catalog arrives after render — it
-  // fills the slot by id instead (see syncComposerModelMark in app.js).
-  const selectedModelVendor =
-    modelOptions.find((model) => model.model === currentModelValue)?.provider || "";
+  // A thread's catalogue is one provider's; each row names it.
+  const modelProvider =
+    modelOptions.find((model) => model.model === currentModelValue)?.provider
+    || modelOptions.find((model) => model.provider)?.provider
+    || "";
 
   if (currentDraft !== undefined) {
     textareaProps.value = currentDraft;
   }
   if (onDraftChange) {
     textareaProps.onChange = (event) => onDraftChange(event.target.value);
-  }
-  if (currentModelValue !== undefined) {
-    modelSelectProps.value = currentModelValue;
-  }
-  if (onModelChange) {
-    modelSelectProps.onChange = (event) => onModelChange(event.target.value);
   }
 
   // Why a send failed belongs HERE, not only in the client log: the log is a
@@ -202,38 +209,16 @@ export function ConversationComposer({
       "div",
       { className: "composer-actions" },
       actionsBeforeSend,
-      // The chip's leading slot carries the vendor's logo, so the option text
-      // no longer prefixes it ("anthropic · Sonnet 4.6" beside an Anthropic
-      // mark was both redundant and, under the chip's 18ch cap, the first thing
-      // to be ellipsed away). The local surface never showed the prefix, so
-      // dropping it also settles a long-standing local/remote disagreement.
-      modelOptions.length
-        ? h(
-            "span",
-            { className: "composer-model-picker" },
-            providerMarkSlot(selectedModelVendor, {
-              className: "composer-model-mark",
-              id: `${modelId}-mark`,
-            }),
-            h(
-              "select",
-              modelSelectProps,
-              ...modelOptions.map((model) =>
-                h(
-                  "option",
-                  {
-                    key: model.model,
-                    value: model.model,
-                    // Read back by the local surface's change handler, which has
-                    // no React state to consult when refreshing the mark.
-                    "data-provider": model.provider || undefined,
-                  },
-                  model.display_name || model.model
-                )
-              )
-            )
-          )
-        : null,
+      modelPicker
+        ?? (modelOptions.length
+          ? h(ComposerModelPicker, {
+              id: modelId,
+              models,
+              onSelect: onModelChange ? (value) => onModelChange(value) : null,
+              provider: modelProvider,
+              value: currentModelValue || "",
+            })
+          : null),
       h(
         "button",
         {

@@ -166,35 +166,110 @@ test("a touch screen gets a search box it can tap, without the keyboard popping 
   }
 });
 
-test("with a mouse there is no search box until something is typed", () => {
+test("the search box sits at the top with a mouse too, while focus stays on the providers", () => {
   const view = mount();
-  click(trigger(view.host));
-  assert.equal(view.host.querySelector(".model-picker-menu input"), null);
+  key(trigger(view.host), "ArrowDown");
+  const menu = view.host.querySelector(".model-picker-menu");
+  const search = menu.querySelector("input");
+  assert.ok(search, "visible before anything is typed");
+  assert.equal(menu.firstElementChild, search.closest("label"));
+  assert.equal(label(focused()), "Claude", "arrow keys still walk the providers");
 });
 
-test("older generations fold under Older models, and open on their own when one is chosen", () => {
+test("what is not shown folds under one Other models, which opens on its own when one is chosen", () => {
   const view = mount({ model: "gpt-6-sol", provider: "codex" });
   click(trigger(view.host));
   assert.deepEqual(
     [...flyout(view.host).querySelectorAll(".model-picker-heading")].map((node) => node.textContent),
-    ["gpt-6", "gpt-5.6"]
+    ["gpt-6.1", "gpt-6", "gpt-5.6"]
   );
   assert.equal(flyoutLabels(view.host).includes("GPT-5.5"), false);
-  const older = flyout(view.host).querySelector(".model-picker-older");
-  assert.equal(older.querySelector(".context-menu-hint").textContent, "1");
+  const other = flyout(view.host).querySelectorAll(".model-picker-other");
+  assert.equal(other.length, 1);
+  assert.equal(label(other[0]), "Other models");
+  assert.equal(other[0].querySelector(".context-menu-hint").textContent, "1");
 
-  click(older);
+  click(other[0]);
   assert.equal(flyoutLabels(view.host).at(-1), "GPT-5.5");
   view.cleanup();
 
-  const onOlder = mount({ model: "gpt-5.5", provider: "codex" });
-  click(trigger(onOlder.host));
+  const onOther = mount({ model: "gpt-5.5", provider: "codex" });
+  click(trigger(onOther.host));
   assert.equal(
-    flyout(onOlder.host).querySelector('[aria-checked="true"]') && label(flyout(onOlder.host).querySelector('[aria-checked="true"]')),
+    flyout(onOther.host).querySelector('[aria-checked="true"]') && label(flyout(onOther.host).querySelector('[aria-checked="true"]')),
     "GPT-5.5",
-    "a chosen older model is never hidden"
+    "a chosen model is never hidden"
   );
-  onOlder.cleanup();
+  onOther.cleanup();
+});
+
+test("an older release and a model with no version to rank share the one Other fold", () => {
+  const catalogue = ["openai/gpt-6.1-sol", "openai/gpt-6-sol", "openai/gpt-5.6-sol", "openai/gpt-5.5", "openai/o3"].map(
+    (model) => ({ display_name: model, model })
+  );
+  const view = mountWithCatalogue(catalogue, "openai/gpt-6-sol");
+  click(trigger(view.host));
+  const other = flyout(view.host).querySelectorAll(".model-picker-other");
+  assert.equal(other.length, 1);
+  assert.equal(other[0].querySelector(".context-menu-hint").textContent, "2");
+  click(other[0]);
+  assert.deepEqual(flyoutLabels(view.host).slice(-2), ["openai/gpt-5.5", "openai/o3"]);
+});
+
+// A thread's composer can only change model within its own provider.
+function mountSingle({ model = "gpt-6-sol" } = {}) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const selections = [];
+  act(() => {
+    root.render(
+      React.createElement(ModelPicker, {
+        groups: buildModelPickerGroups({
+          providerModels: { codex: CODEX },
+          providers: ["codex"],
+          selectedModel: model,
+          selectedProvider: "codex",
+        }),
+        id: "picker",
+        onSelect: (value, option) => selections.push([option.provider, value]),
+        provider: "codex",
+        value: model,
+      })
+    );
+  });
+  const view = {
+    host,
+    selections,
+    cleanup() {
+      if (!mounted.delete(view)) return;
+      act(() => root.unmount());
+      host.remove();
+    },
+  };
+  mounted.add(view);
+  return view;
+}
+
+test("one provider's picker lists its models straight away, under a search box", () => {
+  const view = mountSingle();
+  key(trigger(view.host), "ArrowDown");
+  const menu = view.host.querySelector(".model-picker-menu");
+  assert.equal(view.host.querySelectorAll(".model-picker-provider").length, 0, "no provider level");
+  assert.equal(flyout(view.host), null, "no second panel");
+  assert.equal(menu.firstElementChild, menu.querySelector("input").closest("label"));
+  assert.deepEqual(
+    [...menu.querySelectorAll(".model-picker-heading")].map((node) => node.textContent),
+    ["gpt-6.1", "gpt-6", "gpt-5.6"]
+  );
+  assert.equal(focused().dataset.value, "gpt-6-sol", "the keyboard starts on the current model");
+
+  key(focused(), "u");
+  const rows = [...menu.querySelectorAll(".model-picker-option")];
+  assert.deepEqual(rows.map(label), ["GPT-6-LUNA", "GPT-5.6-LUNA"]);
+  assert.equal(rows[0].querySelector(".model-picker-mark"), null, "one provider needs no logo per row");
+  key(focused(), "Enter");
+  assert.deepEqual(view.selections, [["codex", "gpt-6-luna"]]);
 });
 
 test("hovering a provider switches the models only after a short rest", (t) => {
@@ -299,7 +374,7 @@ function mountWithCatalogue(codex, selected) {
 }
 
 test("a catalogue arriving under the keyboard keeps focus on the same model", () => {
-  // gpt-5.4 is first a stand-in row, then lands under Older once the real list arrives.
+  // gpt-5.4 is first a stand-in row, then lands under Other once the real list arrives.
   const view = mountWithCatalogue([], "gpt-5.4");
   key(trigger(view.host), "ArrowDown");
   key(focused(), "ArrowRight");

@@ -4108,7 +4108,7 @@ fn opencode_catalog_keeps_full_ids_and_limits_effort_to_the_selected_model() {
 }
 
 #[tokio::test]
-async fn opencode_catalog_is_kept_newest_first_and_cursor_keeps_its_own_order() {
+async fn opencode_and_cursor_catalogs_are_kept_newest_first() {
     // OpenCode lists models alphabetically, which put gpt-5.5 above gpt-6.1.
     let result = json!({"configOptions":[{"id":"model","category":"model","type":"select",
         "currentValue":"opencode/big-pickle","options":[
@@ -4139,15 +4139,7 @@ async fn opencode_catalog_is_kept_newest_first_and_cursor_keeps_its_own_order() 
 
     let cursor = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
     super::absorb_catalog_into(&cursor, &result, true, "cursor", None).await;
-    assert_eq!(
-        ids(&cursor.lock().await),
-        [
-            "openai/gpt-5.5",
-            "openai/gpt-6-sol",
-            "openai/gpt-6.1-sol",
-            "opencode/big-pickle"
-        ]
-    );
+    assert_eq!(ids(&cursor.lock().await), newest_first);
 }
 
 #[test]

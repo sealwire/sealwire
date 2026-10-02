@@ -218,6 +218,40 @@ fn thinking_catalog_obeys_pi_model_capabilities() {
     );
 }
 
+#[test]
+fn catalog_lists_the_newest_gpt_first() {
+    // Pi's own order, which is alphabetical by id.
+    let models: Vec<Value> = [
+        "gpt-4",
+        "gpt-4.1",
+        "gpt-4o",
+        "gpt-5",
+        "gpt-5.5",
+        "gpt-5.6-sol",
+        "gpt-6-sol",
+        "gpt-6.1-sol",
+        "o3",
+    ]
+    .iter()
+    .map(|id| json!({"id": id, "name": id, "provider": "openai"}))
+    .collect();
+    let order: Vec<String> = catalog(&models).into_iter().map(|m| m.model).collect();
+    assert_eq!(
+        order,
+        [
+            "openai/gpt-6.1-sol",
+            "openai/gpt-6-sol",
+            "openai/gpt-5.6-sol",
+            "openai/gpt-5.5",
+            "openai/gpt-5",
+            "openai/gpt-4.1",
+            "openai/gpt-4",
+            "openai/gpt-4o",
+            "openai/o3",
+        ]
+    );
+}
+
 #[tokio::test]
 async fn sessions_stream_independently_resume_and_keep_live_history_ids() {
     let root = tempfile::tempdir().unwrap();
