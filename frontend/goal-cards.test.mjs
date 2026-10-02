@@ -75,6 +75,19 @@ test("a goal turn starts with a line, not a bubble of the relay's prompt", () =>
   assert.equal(count(markup, 'class="message-avatar"'), 1, "the reply under it still opens the turn");
 });
 
+test("a settled card still loading is a placeholder, so the reply after it keeps the turn's mark", () => {
+  for (const status of ["complete_claimed", "blocked", "awaiting_user"]) {
+    const markup = render([
+      user("u1", "go"),
+      { ...settleRow("settle", { status }), content_state: "omitted" },
+      agent("reply", "Done."),
+    ]);
+    const reply = markup.slice(markup.indexOf('data-transcript-entry-id="reply"'));
+    assert.equal(count(markup, 'class="message-avatar"'), 1, `${status}: the turn still has its mark`);
+    assert.ok(reply.includes('class="message-avatar"'), `${status}: on the reply, since the placeholder draws none`);
+  }
+});
+
 test("a turn line with no step says only the turn", () => {
   const markup = render([turnLine("u1", { goal_id: "goal-1", turn: 1, max_turns: 20 })]);
   assert.ok(markup.includes("turn 1 of 20"));

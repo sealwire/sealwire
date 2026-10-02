@@ -3381,6 +3381,12 @@ function drawsOwnToolCard(entry) {
     : injection?.kind === "review_call" && Boolean(injection.review);
 }
 
+// A card still loading is a placeholder that draws a logo only for text, so it cannot hold the turn's.
+function opensTurnWithLogo(entry) {
+  if (entry?.kind === "agent_text") return true;
+  return entry?.content_state !== "omitted" && (drawsGoalSettledCard(entry) || drawsOwnToolCard(entry));
+}
+
 // Design 20c-3: the logo marks where a turn's replies start; your message ends a turn.
 // Another agent's result drawn in the column is not this agent's, so it opens nothing.
 function computeTurnOpenerIds(entries) {
@@ -3389,7 +3395,7 @@ function computeTurnOpenerIds(entries) {
   for (const entry of entries) {
     if (entry?.kind === "user_text") {
       opened = false;
-    } else if ((entry?.kind === "agent_text" || drawsGoalSettledCard(entry) || drawsOwnToolCard(entry)) && !opened) {
+    } else if (!opened && opensTurnWithLogo(entry)) {
       opened = true;
       const id = transcriptRowKey(entry);
       if (id) openers.add(id);

@@ -185,6 +185,15 @@ test("an own review or delegate card later in a turn takes no second mark", () =
   }
 });
 
+test("an own card still loading is a placeholder, so the reply after it keeps the turn's mark", () => {
+  for (const [card, call] of Object.entries(OWN_CARDS)) {
+    const markup = render([user("u1", "go"), { ...call(), content_state: "omitted" }, agent("reply", "Waiting on it.")]);
+    const reply = markup.slice(markup.indexOf('data-transcript-entry-id="reply"'));
+    assert.equal(marks(markup), 1, `${card}: the turn still has its mark`);
+    assert.match(reply, /class="message-avatar"/, `${card}: on the reply, since the placeholder draws none`);
+  }
+});
+
 test("an approval with nothing found is green and says so", () => {
   const markup = render([
     marked("result", "review_result", {
