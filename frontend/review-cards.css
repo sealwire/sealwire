@@ -81,10 +81,14 @@
     white-space: normal;
   }
 }
+/* One width for HIGH / MED / LOW: each row sizes its own tag column, so a narrower
+   tag would start that row's text further left than the row above. */
 .review-finding-tag {
   flex: none;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  min-width: 4.2em;
   height: 16px;
   padding: 0 5px;
   border-radius: 4px;

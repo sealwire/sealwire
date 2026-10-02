@@ -847,7 +847,8 @@ function agentMark(provider, name) {
   );
 }
 
-// Same row as an agent group; the direction word and the summary lines are what differ.
+// Same row and card as an agent group, so its text starts where theirs does; the
+// direction word and the summary lines are what differ.
 function HandoverItem({ item, onOpen = null }) {
   return h(
     "section",
@@ -864,7 +865,7 @@ function HandoverItem({ item, onOpen = null }) {
     ),
     h(
       "div",
-      { className: "reviewer-handover-body" },
+      { className: "reviewer-card reviewer-handover-body" },
       item.title ? h("h3", { className: "reviewer-card-title" }, item.title) : null,
       item.rows.length
         ? h(
