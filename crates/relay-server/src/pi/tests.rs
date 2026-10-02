@@ -27,6 +27,7 @@ fn bridge(root: &Path, state: Arc<RwLock<RelayState>>) -> PiBridge {
         indexes: Mutex::new(HashMap::new()),
         discovered: Mutex::new(None),
         attach: Arc::new(Mutex::new(())),
+        shutting_down: AtomicBool::new(false),
     }
 }
 
@@ -776,4 +777,191 @@ async fn pi_peer_tool_marks_follow_the_bound_session_and_rendered_row() {
     );
     assert_eq!(relay.injections.anchored_rows("stable"), 1);
     assert_eq!(relay.injections.anchored_rows("native"), 0);
+}
+
+#[tokio::test]
+async fn pi_review_rejected_extension_send_preserves_the_running_turn() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let mut relay = state.write().await;
+    relay.bind_session_to_foreign_handle("stable", "pi", "native");
+    let mut runtime = events::Runtime::default();
+    events::apply(
+        &mut relay,
+        "native",
+        &mut runtime,
+        &json!({"type":"agent_start"}),
+    );
+    let turn = runtime.turn.clone().unwrap();
+    for event in ["send_user_message", "command"] {
+        events::apply(
+            &mut relay,
+            "native",
+            &mut runtime,
+            &json!({"type":"extension_error","event":event,"error":"Agent is already processing"}),
+        );
+        assert_eq!(runtime.turn.as_deref(), Some(turn.as_str()));
+        assert_eq!(relay.turn_terminal("stable", &turn), None);
+    }
+    events::apply(
+        &mut relay,
+        "native",
+        &mut runtime,
+        &json!({"type":"message_end","message":{"role":"assistant","timestamp":100,"content":[{"type":"text","text":"still running"}],"stopReason":"stop","usage":{"input":3,"output":2,"totalTokens":5}}}),
+    );
+    events::apply(
+        &mut relay,
+        "native",
+        &mut runtime,
+        &json!({"type":"agent_settled"}),
+    );
+    assert_eq!(
+        relay.turn_terminal("stable", &turn),
+        Some(TurnOutcome::Completed)
+    );
+    assert_eq!(relay.last_turn_spend("stable").unwrap().billed, 5);
+    assert!(relay
+        .runtime_for_thread("stable")
+        .unwrap()
+        .transcript
+        .iter()
+        .any(|row| row.text.as_deref() == Some("still running")));
+}
+
+#[tokio::test]
+async fn pi_review_spontaneous_run_after_abort_is_owned_and_stoppable() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let mut relay = state.write().await;
+    relay.bind_session_to_foreign_handle("stable", "pi", "native");
+    let mut runtime = events::Runtime::default();
+    events::apply(
+        &mut relay,
+        "native",
+        &mut runtime,
+        &json!({"type":"agent_start"}),
+    );
+    let stopped = runtime.turn.clone().unwrap();
+    events::apply(
+        &mut relay,
+        "native",
+        &mut runtime,
+        &json!({"type":"message_end","message":{"role":"assistant","timestamp":100,"content":[],"stopReason":"aborted"}}),
+    );
+    events::apply(
+        &mut relay,
+        "native",
+        &mut runtime,
+        &json!({"type":"agent_settled"}),
+    );
+    assert_eq!(
+        relay.turn_terminal("stable", &stopped),
+        Some(TurnOutcome::Stopped)
+    );
+    events::apply(
+        &mut relay,
+        "native",
+        &mut runtime,
+        &json!({"type":"agent_start"}),
+    );
+    let spontaneous = runtime.turn.clone().expect("spontaneous run must be owned");
+    assert_ne!(spontaneous, stopped);
+    assert_eq!(
+        relay
+            .runtime_for_thread("stable")
+            .unwrap()
+            .active_turn_id
+            .as_deref(),
+        Some(spontaneous.as_str())
+    );
+    runtime.stopped = true;
+    events::apply(
+        &mut relay,
+        "native",
+        &mut runtime,
+        &json!({"type":"agent_settled"}),
+    );
+    assert_eq!(
+        relay.turn_terminal("stable", &spontaneous),
+        Some(TurnOutcome::Stopped)
+    );
+}
+
+#[tokio::test]
+async fn pi_review_settled_cancels_a_native_dialog_without_an_abort_signal() {
+    let root = tempfile::tempdir().unwrap();
+    let bridge = bridge(root.path(), state(root.path()));
+    let id = create(&bridge, root.path()).await;
+    let turn = bridge
+        .start_turn(&id, "orphan-dialog", "", "", &[])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(settled(&bridge, &id, &turn).await, TurnOutcome::Completed);
+    timeout(Duration::from_secs(2), async {
+        while !root.path().join("dialog-cancelled").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("Pi must receive cancellation when the turn settles");
+    assert!(bridge
+        .state
+        .read()
+        .await
+        .pending_ask_user_questions
+        .is_empty());
+}
+
+#[tokio::test]
+async fn pi_review_bad_history_does_not_hide_other_threads() {
+    let root = tempfile::tempdir().unwrap();
+    let bridge = bridge(root.path(), state(root.path()));
+    tokio::fs::create_dir_all(&bridge.root).await.unwrap();
+    for id in ["good", "bad"] {
+        tokio::fs::write(
+            bridge.root.join(format!("{id}.jsonl")),
+            format!(
+                "{}\n",
+                json!({"type":"session","version":3,"id":id,"cwd":root.path()})
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    bridge.discover(true).await.unwrap();
+    tokio::fs::write(bridge.root.join("bad.jsonl"), "broken header\n")
+        .await
+        .unwrap();
+    let threads = bridge
+        .list_threads(10)
+        .await
+        .expect("one corrupt file must not fail the whole list");
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0].id, "good");
+}
+
+#[tokio::test]
+async fn pi_shutdown_stops_the_turn_and_refuses_new_processes() {
+    let root = tempfile::tempdir().unwrap();
+    let bridge = bridge(root.path(), state(root.path()));
+    let id = create(&bridge, root.path()).await;
+    let turn = bridge
+        .start_turn(&id, "slow", "", "", &[])
+        .await
+        .unwrap()
+        .unwrap();
+    bridge.shutdown().await;
+    assert_eq!(settled(&bridge, &id, &turn).await, TurnOutcome::Stopped);
+    assert!(bridge.sessions.lock().await.is_empty());
+    assert!(bridge.session(&id).await.is_err());
+    assert!(bridge
+        .start_thread(StartThreadRequest::new(
+            &root.path().to_string_lossy(),
+            "test/echo",
+            "bypass",
+            "danger-full-access"
+        ))
+        .await
+        .is_err());
 }

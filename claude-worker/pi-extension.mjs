@@ -6,7 +6,10 @@ delete process.env.SEALWIRE_PI_MCP;
 export default function sealwire(pi) {
   if (config) pi.registerMcpServer(config.name, config.server);
   pi.on("session_start", (_event, ctx) => ctx.ui.setStatus("sealwire:bridge", "ready"));
-  pi.on("session_shutdown", (_event, ctx) => ctx.ui.setStatus("sealwire:bridge", "closed"));
+  pi.on("session_shutdown", (event, ctx) => {
+    // EOF may already have closed stdout. Only reload needs to invalidate the handshake.
+    if (event.reason === "reload") ctx.ui.setStatus("sealwire:bridge", "closed");
+  });
 
   pi.on("cache_warming_decision", () => ({ action: "stop" }));
   pi.on("before_agent_start", (event, ctx) => {

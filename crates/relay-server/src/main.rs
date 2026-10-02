@@ -383,7 +383,11 @@ async fn main() {
         }
         _ = shutdown_signal() => {}
     }
-    shutdown_state.shutdown_providers().await;
+    tokio::select! {
+        _ = shutdown_state.shutdown_providers() => {}
+        _ = shutdown_signal() => warn!("second signal interrupted provider shutdown"),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => warn!("provider shutdown timed out"),
+    }
     // `lock_guard` (if any) is dropped here, releasing the OS lock as the
     // process exits — kept alive up to this point on purpose (see
     // InstanceLockGuard's doc comment).
@@ -395,9 +399,12 @@ async fn shutdown_signal() {
         let mut terminate =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                 .expect("failed to install SIGTERM handler");
+        let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            .expect("failed to install SIGHUP handler");
         tokio::select! {
             result = tokio::signal::ctrl_c() => result.expect("failed to listen for Ctrl-C"),
             _ = terminate.recv() => {}
+            _ = hangup.recv() => {}
         }
     }
     #[cfg(not(unix))]

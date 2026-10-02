@@ -23,6 +23,12 @@ test("Pi bridge survives extension reload without leaving its credentials in she
     }
     assert.deepEqual(handlers.get("cache_warming_decision")(), { action: "stop" });
     assert.deepEqual([...commands.keys()], ["compact", "reload"]);
+    const status = [];
+    const ctx = { ui: { setStatus: (...args) => status.push(args) } };
+    handlers.get("session_shutdown")({ reason: "quit" }, ctx);
+    assert.deepEqual(status, [], "shutdown must not write to a closed RPC pipe");
+    handlers.get("session_shutdown")({ reason: "reload" }, ctx);
+    assert.deepEqual(status, [["sealwire:bridge", "closed"]]);
   } finally {
     delete globalThis[key];
     delete process.env.SEALWIRE_PI_MCP;

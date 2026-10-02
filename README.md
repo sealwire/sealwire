@@ -110,7 +110,8 @@ native session file.
 
 Token usage and provider-reported cost are recorded for turns run through
 Sealwire, including retries and compaction. Reading old history does not add
-usage. Background cache warming is disabled for managed Pi sessions.
+usage. Cache warming is disabled for managed Pi sessions so it cannot spend
+unreported tokens between assistant messages.
 
 Extensions that await a dialog during initial `session_start` may fail to initialize
 in Pi 1.0.0's RPC mode; disable those startup prompts for this integration.

@@ -2,7 +2,10 @@ use std::{
     collections::HashMap,
     ffi::OsString,
     path::{Path, PathBuf},
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use async_trait::async_trait;
@@ -107,22 +110,14 @@ impl Session {
             let mut runtime = self.runtime.lock().await;
             events::finish(&mut *state.write().await, &self.record.id, &mut runtime);
         }
+        ui::flush_cancellations(&self.connection, &mut *self.runtime.lock().await).await;
     }
 
     async fn cancel_dialogs(&self, state: &Arc<RwLock<RelayState>>) {
         let mut runtime = self.runtime.lock().await;
-        for dialog in runtime.dialogs.values() {
-            if let Err(error) = self
-                .connection
-                .write(
-                    json!({"type":"extension_ui_response","id":dialog.native_id,"cancelled":true}),
-                )
-                .await
-            {
-                tracing::warn!("Cancel Pi dialog: {error}");
-            }
-        }
-        ui::clear(&mut *state.write().await, &mut runtime.dialogs);
+        let cancelled = ui::clear(&mut *state.write().await, &mut runtime.dialogs);
+        runtime.cancelled_dialogs.extend(cancelled);
+        ui::flush_cancellations(&self.connection, &mut runtime).await;
     }
 
     async fn close(&self) {
@@ -162,6 +157,7 @@ pub(crate) struct PiBridge {
     indexes: Mutex<HashMap<String, Arc<index::Index>>>,
     discovered: Mutex<Option<tokio::time::Instant>>,
     attach: Arc<Mutex<()>>,
+    shutting_down: AtomicBool,
 }
 
 impl PiBridge {
@@ -190,6 +186,7 @@ impl PiBridge {
             indexes: Mutex::new(HashMap::new()),
             discovered: Mutex::new(None),
             attach: Arc::new(Mutex::new(())),
+            shutting_down: AtomicBool::new(false),
         };
         let discovery = bridge.metadata.join("discovery");
         tokio::fs::create_dir_all(&discovery)
@@ -333,6 +330,7 @@ impl PiBridge {
         effort: &str,
         request: Option<&StartThreadRequest>,
     ) -> Result<Arc<Session>, String> {
+        self.check_running()?;
         let mut args = if record.path.is_file() {
             vec![
                 "--session".into(),
@@ -437,11 +435,26 @@ impl PiBridge {
             trusted,
             mcp,
         });
+        if self.shutting_down.load(Ordering::Acquire) {
+            session.runtime.lock().await.stopped = true;
+            session.close().await;
+            return Err("Pi provider is shutting down".into());
+        }
         Ok(session)
     }
 
+    fn check_running(&self) -> Result<(), String> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            Err("Pi provider is shutting down".into())
+        } else {
+            Ok(())
+        }
+    }
+
     async fn session(&self, id: &str) -> Result<Arc<Session>, String> {
+        self.check_running()?;
         let _attach = self.attach.lock().await;
+        self.check_running()?;
         let existing = self.sessions.lock().await.get(id).cloned();
         if let Some(session) = existing {
             if !session.connection.closed.load(Ordering::Acquire) {
@@ -604,10 +617,15 @@ fn thinking_levels(model: &Value) -> Vec<String> {
 #[async_trait]
 impl ProviderBridge for PiBridge {
     async fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+        let _attach = self.attach.lock().await;
         let sessions = std::mem::take(&mut *self.sessions.lock().await);
         let mut closing = tokio::task::JoinSet::new();
         for session in sessions.into_values() {
-            closing.spawn(async move { session.close().await });
+            closing.spawn(async move {
+                session.runtime.lock().await.stopped = true;
+                session.close().await;
+            });
         }
         while let Some(result) = closing.join_next().await {
             if let Err(error) = result {
@@ -670,7 +688,13 @@ impl ProviderBridge for PiBridge {
                 .get(&record.id)
                 .map(|i| i.summary.clone());
             let mut thread = if record.path.is_file() {
-                index::summary(&record.path).await?
+                match index::summary(&record.path).await {
+                    Ok(thread) => thread,
+                    Err(error) => {
+                        tracing::warn!(path = %record.path.display(), "Read Pi session summary: {error}");
+                        continue;
+                    }
+                }
             } else {
                 Document {
                     header: json!({"id":record.id,"cwd":record.cwd}),
@@ -736,6 +760,7 @@ impl ProviderBridge for PiBridge {
     }
 
     async fn start_thread(&self, request: StartThreadRequest) -> Result<StartThreadResult, String> {
+        self.check_running()?;
         permissions(&request.approval_policy, &request.sandbox)?;
         if request.orchestrator_tools.is_some()
             || matches!(request.purpose, crate::provider::SessionPurpose::Seat(_))
@@ -743,6 +768,7 @@ impl ProviderBridge for PiBridge {
             return Err("Pi Task seats and Orchestrator sessions are not supported".into());
         }
         let _attach = self.attach.lock().await;
+        self.check_running()?;
         self.evict_idle().await;
         let cwd = Path::new(&request.cwd)
             .canonicalize()
@@ -904,6 +930,7 @@ impl ProviderBridge for PiBridge {
     ) -> Result<Option<String>, String> {
         let session = self.session(id).await?;
         let operation = session.operation.clone().lock_owned().await;
+        self.check_running()?;
         if session.runtime.lock().await.turn.is_some() {
             return Err("Pi session is already working".into());
         }
@@ -958,7 +985,9 @@ impl ProviderBridge for PiBridge {
         let turn = crate::state::new_uuid_v4();
         {
             let mut runtime = session.runtime.lock().await;
+            self.check_running()?;
             runtime.turn = Some(turn.clone());
+            runtime.run_active = false;
             runtime.usage_seen.clear();
             runtime.failure = None;
             runtime.message_error = None;

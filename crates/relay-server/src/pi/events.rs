@@ -19,6 +19,7 @@ use super::{
 #[derive(Default)]
 pub(super) struct Runtime {
     pub turn: Option<String>,
+    pub run_active: bool,
     pub bridge_ready: bool,
     pub last_used: Option<tokio::time::Instant>,
     pub ids: MessageIds,
@@ -30,6 +31,7 @@ pub(super) struct Runtime {
     pub extension_pending: bool,
     pub unsent_text: Option<String>,
     pub dialogs: HashMap<String, super::ui::Dialog>,
+    pub cancelled_dialogs: Vec<Value>,
     pub usage_seen: HashSet<String>,
     message: Option<String>,
     blocks: HashMap<usize, String>,
@@ -70,8 +72,15 @@ fn apply_row(relay: &mut RelayState, id: &str, turn: &str, mut row: TranscriptEn
 
 pub(super) fn finish(relay: &mut RelayState, handle: &str, runtime: &mut Runtime) {
     runtime.last_used = Some(tokio::time::Instant::now());
+    runtime.run_active = false;
     runtime.extension_pending = false;
-    super::ui::clear(relay, &mut runtime.dialogs);
+    runtime
+        .cancelled_dialogs
+        .extend(super::ui::clear(relay, &mut runtime.dialogs));
+    let stopped = runtime.stopped;
+    if !runtime.prompt_pending {
+        runtime.stopped = false;
+    }
     let Some(turn) = runtime.turn.take() else {
         return;
     };
@@ -86,7 +95,7 @@ pub(super) fn finish(relay: &mut RelayState, handle: &str, runtime: &mut Runtime
         return;
     }
     if let Some(text) = runtime.unsent_text.take() {
-        if runtime.failure.is_some() || runtime.stopped {
+        if runtime.failure.is_some() || stopped {
             // The API already accepted this send, but Pi never recorded the user's message.
             apply_row(
                 relay,
@@ -118,7 +127,7 @@ pub(super) fn finish(relay: &mut RelayState, handle: &str, runtime: &mut Runtime
             );
         }
         TurnOutcome::Failed
-    } else if runtime.stopped {
+    } else if stopped {
         TurnOutcome::Stopped
     } else {
         TurnOutcome::Completed
@@ -184,6 +193,7 @@ pub(super) fn apply(relay: &mut RelayState, handle: &str, runtime: &mut Runtime,
     let kind = event["type"].as_str().unwrap_or_default();
     if kind == "agent_start" {
         ensure_turn(relay, handle, runtime);
+        runtime.run_active = true;
         runtime.extension_pending = false;
     }
     if kind == "extension_error"
@@ -192,6 +202,11 @@ pub(super) fn apply(relay: &mut RelayState, handle: &str, runtime: &mut Runtime,
             Some("command" | "send_user_message")
         )
     {
+        if runtime.run_active {
+            relay.push_log("error", format!("Pi extension: {}", event["error"]));
+            relay.notify();
+            return;
+        }
         ensure_turn(relay, handle, runtime);
         runtime.failure = Some(
             event["error"]
@@ -397,6 +412,9 @@ pub(super) fn spawn(
                 Event::Record(record) => {
                     let mut runtime = runtime.lock().await;
                     apply(&mut *state.write().await, &handle, &mut runtime, &record);
+                    if let Some(connection) = connection.upgrade() {
+                        super::ui::flush_cancellations(&connection, &mut runtime).await;
+                    }
                 }
                 Event::Diagnostic(line) => {
                     let mut relay = state.write().await;
@@ -407,7 +425,9 @@ pub(super) fn spawn(
                     let mut runtime = runtime.lock().await;
                     let mut relay = state.write().await;
                     if runtime.turn.is_some() {
-                        runtime.failure.get_or_insert(error);
+                        if !runtime.stopped {
+                            runtime.failure.get_or_insert(error);
+                        }
                         finish(&mut relay, &handle, &mut runtime);
                     }
                     drop(relay);

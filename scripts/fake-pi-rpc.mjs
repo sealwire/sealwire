@@ -43,6 +43,7 @@ function finish(text, stopReason = "stop") {
 async function command(command) {
   switch (command.type) {
     case "extension_ui_response": {
+      if (pendingDialog?.id === "orphan" && command.cancelled) { writeFileSync("dialog-cancelled", "yes"); pendingDialog = null; return; }
       if (pendingDialog && streaming) {
         pendingDialog = null;
         finish(command.cancelled ? "dialog cancelled" : `dialog answer: ${command.value ?? command.confirmed}`);
@@ -70,6 +71,12 @@ async function command(command) {
       streaming = true;
       emit({ type: "agent_start" });
       message({ role: "user", content: command.message, timestamp: Date.now() });
+      if (command.message === "orphan-dialog") {
+        pendingDialog = { type: "extension_ui_request", id: "orphan", method: "confirm", title: "Unsignalled dialog" };
+        emit(pendingDialog);
+        finish("finished while the dialog is open");
+        return;
+      }
       if (command.message.startsWith("dialog:")) {
         const method = command.message.slice(7);
         pendingDialog = { type: "extension_ui_request", id: "same-native-id", method, title: "Fixture question", ...(method === "select" ? { options: ["One", "Two"] } : {}) };

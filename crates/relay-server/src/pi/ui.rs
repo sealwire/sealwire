@@ -46,9 +46,25 @@ fn tool(question: &str, options: &[String], answer: Option<&str>) -> ToolCallVie
     tool
 }
 
-pub(super) fn clear(relay: &mut RelayState, dialogs: &mut HashMap<String, Dialog>) {
+pub(super) fn clear(relay: &mut RelayState, dialogs: &mut HashMap<String, Dialog>) -> Vec<Value> {
+    let mut cancelled = Vec::new();
     for (id, dialog) in dialogs.drain() {
         resolved(relay, &id, &dialog, "Pi dialog closed");
+        cancelled.push(dialog.native_id);
+    }
+    cancelled
+}
+
+pub(super) async fn flush_cancellations(connection: &Connection, runtime: &mut events::Runtime) {
+    for id in std::mem::take(&mut runtime.cancelled_dialogs) {
+        if !connection.closed.load(std::sync::atomic::Ordering::Acquire) {
+            if let Err(error) = connection
+                .write(json!({"type":"extension_ui_response","id":id,"cancelled":true}))
+                .await
+            {
+                tracing::warn!("Cancel Pi dialog: {error}");
+            }
+        }
     }
 }
 
@@ -72,10 +88,12 @@ pub(super) async fn request(
             if let Ok(value) =
                 serde_json::from_str::<Value>(record["statusText"].as_str().unwrap_or_default())
             {
-                runtime.unsent_text = crate::provider::user_message_transcript_text(
-                    value["text"].as_str().unwrap_or_default(),
-                    value["images"].as_u64().unwrap_or_default() as usize,
-                );
+                if !runtime.prompt_pending {
+                    runtime.unsent_text = crate::provider::user_message_transcript_text(
+                        value["text"].as_str().unwrap_or_default(),
+                        value["images"].as_u64().unwrap_or_default() as usize,
+                    );
+                }
             }
         }
         return;

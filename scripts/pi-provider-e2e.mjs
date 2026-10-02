@@ -83,6 +83,7 @@ const extensionMarker = path.join(root, "extension-dialog-cancelled");
 const extensionLoaded = path.join(root, "extension-loaded");
 const preflightReady = path.join(root, "preflight-ready");
 const preflightRelease = path.join(root, "preflight-release");
+const orphanDialogCancelled = path.join(root, "orphan-dialog-cancelled");
 await fs.mkdir(path.join(cwd, ".pi", "extensions"));
 await fs.mkdir(path.join(cwd, ".pi", "prompts"));
 await fs.writeFile(path.join(cwd, ".pi", "prompts", "sealwire-template.md"), "PI_TEMPLATE $ARGUMENTS");
@@ -92,6 +93,20 @@ await fs.writeFile(path.join(cwd, ".pi", "extensions", "startup.ts"), `
 import { writeFileSync, existsSync } from "node:fs";
 writeFileSync(${JSON.stringify(extensionLoaded)}, "loaded");
 export default function (pi) {
+  let prompt = "";
+  pi.on("agent_start", (_event, ctx) => {
+    if (prompt.includes("PI_SLOW_CONCURRENT_SEND")) pi.sendUserMessage("PI_INVALID_CONCURRENT");
+    if (prompt.includes("PI_ORPHAN_DIALOG")) {
+      void ctx.ui.confirm("Background dialog", "This dialog has no abort signal")
+        .then(value => writeFileSync(${JSON.stringify(orphanDialogCancelled)}, String(value)));
+    }
+  });
+  pi.on("agent_settled", () => {
+    if (prompt.includes("PI_SLOW_SPONTANEOUS_STOP")) {
+      prompt = "";
+      setTimeout(() => pi.sendUserMessage("PI_SPONTANEOUS_AFTER_STOP"), 50);
+    }
+  });
   pi.registerCommand("sealwire-async", { handler: async (args) => {
     pi.sendUserMessage(args);
   }});
@@ -112,6 +127,7 @@ export default function (pi) {
     if (event.text.includes("PI_REJECT")) return { action: "transform", text: null };
   });
   pi.on("before_agent_start", async (event) => {
+    prompt = event.prompt;
     if (event.prompt.includes("PI_CANCEL_PREFLIGHT")) {
       writeFileSync(${JSON.stringify(preflightReady)}, "ready");
       while (!existsSync(${JSON.stringify(preflightRelease)})) await new Promise((resolve) => setTimeout(resolve, 10));
@@ -223,6 +239,19 @@ try {
   await send(firstId, "/sealwire-switch");
   const switched = await until(() => transcript(firstId), (p) => contains(p, "PI_SWITCH_BLOCKED") && !p.thread_state?.active_turn_id, "native switch is blocked");
   assert.ok(!contains(switched, "PI_SWITCH_UNSAFE"));
+  await send(firstId, "PI_SLOW_CONCURRENT_SEND");
+  await until(async () => modelPrompts, prompts => prompts.includes("PI_SLOW_CONCURRENT_SEND"), "original run reaches the model");
+  await delay(200);
+  assert.ok((await transcript(firstId)).thread_state?.active_turn_id, "rejected extension send must not finish the running turn");
+  await api("/api/session/stop", { thread_id: firstId });
+  await until(() => transcript(firstId), p => !p.thread_state?.active_turn_id, "original run is still stoppable");
+  await send(firstId, "PI_SLOW_SPONTANEOUS_STOP");
+  await until(async () => modelPrompts, prompts => prompts.includes("PI_SLOW_SPONTANEOUS_STOP"), "run awaiting Stop starts");
+  await api("/api/session/stop", { thread_id: firstId });
+  await until(() => transcript(firstId), p => contains(p, "PI_SPONTANEOUS_AFTER_STOP") && !p.thread_state?.active_turn_id, "spontaneous run after Stop is routed");
+  await send(firstId, "PI_ORPHAN_DIALOG");
+  await until(async () => fs.readFile(orphanDialogCancelled, "utf8").catch(() => ""), value => value === "false", "settled cancels Pi's outstanding dialog");
+  assert.equal((await api("/api/session")).pending_ask_user_questions.length, 0);
   for (const [method, answer] of [["select", "Two"], ["input", "Hello"], ["editor", "Edited\ntext"]]) {
     await send(firstId, `/sealwire-dialog ${method}`);
     const snap = await until(() => api("/api/session"), (s) => s.pending_ask_user_questions?.length > 0, `extension ${method}`);
@@ -311,7 +340,8 @@ try {
   await fs.unlink(bashPidFile);
   await send(secondId, "PI_BASH_SHUTDOWN");
   const shutdownPid = await until(async () => Number(await fs.readFile(bashPidFile, "utf8").catch(() => 0)), (pid) => pid > 0, "shutdown bash tool starts");
-  await stopManagedProcess(relay);
+  relay.kill("SIGHUP");
+  await until(async () => relay.exitCode !== null || relay.signalCode !== null, Boolean, "SIGHUP shuts the relay down");
   await until(async () => { try { process.kill(shutdownPid, 0); return false; } catch (error) { if (error.code === "ESRCH") return true; throw error; } }, Boolean, "relay shutdown terminates detached bash tool");
   console.log(`Pi provider E2E passed: ${requests} local model requests; tools, images, thinking, streams, parallel sessions, stop, restart and resume.`);
 } catch (error) {
