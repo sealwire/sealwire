@@ -1495,7 +1495,7 @@ async fn absorb_catalog_into(
         .iter()
         .find(|model| model.is_default)
         .map(|model| model.model.clone());
-    let options =
+    let mut options =
         if let Some(config_options) = result.get("configOptions").and_then(Value::as_array) {
             let current = default_after(
                 from_new_session,
@@ -1522,6 +1522,10 @@ async fn absorb_catalog_into(
         } else {
             return;
         };
+    // OpenCode lists by id, alphabetically; Cursor's order is its own recommendation.
+    if provider == "opencode" {
+        crate::model_order::newest_first(&mut options);
+    }
     if !options.is_empty() {
         if let Some(path) = cache_path {
             write_cached_models(path, &options);

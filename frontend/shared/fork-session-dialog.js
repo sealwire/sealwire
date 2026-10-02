@@ -10,6 +10,7 @@ import {
   forkIsLossy,
   normalizeForkFields,
 } from "./fork-fields.js";
+import { ModelPicker } from "./model-picker.js";
 import { INHERIT_ROW_ID, ProjectPicker } from "./project-picker.js";
 import { SettingPill } from "./setting-pill.js";
 import { WorkspacePicker } from "./workspace-picker.js";
@@ -317,12 +318,20 @@ export function ForkSessionDialog({
     h(
       SettingPillRow,
       { key: "pills" },
-      h(SettingPill, {
+      h(ModelPicker, {
         groups: (inheritable.has("model")
           ? [
               {
+                direct: true,
                 empty: false,
-                label: null,
+                hint: inheritedModel
+                  ? selectedModelChip({
+                      providerModels,
+                      selectedModel: inheritedModel,
+                      selectedProvider: sourceProvider,
+                    }).value
+                  : null,
+                label: INHERIT_LABEL,
                 options: [
                   {
                     label: INHERIT_LABEL,
@@ -347,9 +356,9 @@ export function ForkSessionDialog({
         id: `${id}-model`,
         inherited: modelInherits,
         key: "model",
-        label: "Model",
         onSelect: (value, option) =>
           onSelectModel?.({ model: value, provider: option.provider || targetProvider }),
+        provider: modelInherits ? sourceProvider : targetProvider,
         tag: modelChip.tag,
         value: modelChip.value,
       }),

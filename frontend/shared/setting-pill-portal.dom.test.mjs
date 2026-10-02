@@ -82,7 +82,8 @@ test("the grouped model menu escapes the pill wrapper and is placed by JS", () =
 
   click(view.host.querySelector("#grouped-model-dialog-model"));
 
-  const menu = view.host.querySelector(".setting-pill-menu");
+  const menu = view.host.querySelector(".model-picker-menu");
+  const flyout = view.host.querySelector(".model-picker-flyout");
   const pill = view.host.querySelector("#grouped-model-dialog-model").closest(".setting-pill");
 
   assert.ok(menu, "model menu did not open");
@@ -94,6 +95,8 @@ test("the grouped model menu escapes the pill wrapper and is placed by JS", () =
     menu.dataset.placement === "above" || menu.dataset.placement === "below",
     "grouped menus must run through shared placement"
   );
+  assert.equal(dialog.contains(flyout), true, "the models beside it portal with it");
+  assert.equal(flyout.dataset.placed, "true", "and are placed against it");
 
   view.cleanup();
 });

@@ -11,6 +11,7 @@ mod host_guard;
 mod instance_lock;
 #[cfg(test)]
 mod legacy_promotion_audit;
+mod model_order;
 mod model_policy;
 mod orchestrator_tools;
 mod protocol;

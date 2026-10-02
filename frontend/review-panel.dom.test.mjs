@@ -85,6 +85,21 @@ const choose = (host, name, label) => {
   assert.ok(node, `expected a "${label}" option in the ${name} menu, got ${optionLabels(host)}`);
   click(node);
 };
+const menuRow = (host, selector, label) =>
+  [...host.querySelectorAll(selector)].find(
+    (n) => n.querySelector(".context-menu-label").textContent === label
+  );
+const flyoutLabels = (host) =>
+  [...host.querySelectorAll(".model-picker-flyout .model-picker-option .context-menu-label")].map(
+    (n) => n.textContent
+  );
+const chooseModel = (host, provider, label) => {
+  if (pill(host, "model").getAttribute("aria-expanded") !== "true") openPill(host, "model");
+  click(menuRow(host, ".model-picker-provider", provider));
+  const node = menuRow(host, ".model-picker-flyout .model-picker-option", label);
+  assert.ok(node, `expected "${label}" under ${provider}, got ${flyoutLabels(host)}`);
+  click(node);
+};
 const submit = async (host) => {
   await act(async () => {
     host
@@ -165,33 +180,42 @@ test("instructions are the prompt card, and Cmd+Enter there starts the review", 
   view.cleanup();
 });
 
-test("the reviewer pill names provider and model together", () => {
+test("the reviewer chip is the provider's logo and the model", () => {
   const view = mount();
-  assert.match(pill(view.host, "model").textContent, /Reviewer.*Codex · default/);
+  const chip = pill(view.host, "model");
+  assert.equal(chip.querySelector(".setting-pill-value").textContent, "Default");
+  assert.equal(chip.querySelector(".model-picker-trigger-mark").dataset.provider, "codex");
   view.cleanup();
 });
 
-test("the reviewer menu groups each provider's models, and never offers a hidden one", () => {
+test("the reviewer menu lists providers, each leading with its default, and never a hidden model", () => {
   const view = mount();
   openPill(view.host, "model");
   assert.deepEqual(
-    [...view.host.querySelectorAll(".setting-pill-section-heading")].map((node) => node.textContent),
-    ["Codex", "Claude"]
+    [...view.host.querySelectorAll(".model-picker-provider")].map((node) => [
+      node.querySelector(".context-menu-label").textContent,
+      node.querySelector(".context-menu-hint").textContent,
+    ]),
+    [
+      ["Codex", "Default"],
+      ["Claude", "Default"],
+    ]
   );
-  assert.deepEqual(optionLabels(view.host), [
-    "Provider default",
-    "GPT-5.5",
-    "Provider default",
-    "Opus",
-  ]);
+  assert.deepEqual(flyoutLabels(view.host), ["Provider default", "GPT-5.5"]);
+  click(menuRow(view.host, ".model-picker-provider", "Claude"));
+  assert.deepEqual(flyoutLabels(view.host), ["Provider default", "Opus"]);
   assert.doesNotMatch(view.host.innerHTML, /codex-auto-review|Codex Auto Review/);
   view.cleanup();
 });
 
 test("choosing another provider's model switches the reviewer provider with it", async () => {
   const view = mount();
-  choose(view.host, "model", "Opus");
-  assert.match(pill(view.host, "model").textContent, /Claude · Opus/);
+  chooseModel(view.host, "Claude", "Opus");
+  assert.equal(pill(view.host, "model").querySelector(".setting-pill-value").textContent, "Opus");
+  assert.equal(
+    pill(view.host, "model").querySelector(".model-picker-trigger-mark").dataset.provider,
+    "claude_code"
+  );
 
   await submit(view.host);
   assert.equal(view.submitted[0].reviewerProvider, "claude_code");
@@ -228,7 +252,7 @@ test("a missing reviewer catalogue explains itself, but only when something can 
 
 test("the effort pill offers the chosen model's efforts after a default", () => {
   const view = mount();
-  choose(view.host, "model", "GPT-5.5");
+  chooseModel(view.host, "Codex", "GPT-5.5");
   openPill(view.host, "effort");
   assert.deepEqual(optionLabels(view.host), ["Model default", "low", "high"]);
   view.cleanup();
@@ -268,7 +292,7 @@ test("switching provider off a reused reviewer falls back to a clean one and fla
     initialReviewerThreadId: "rev-1",
     reusableReviewers: [{ reviewerThreadId: "rev-1", provider: "codex", label: "Codex reviewer" }],
   });
-  choose(view.host, "model", "Opus");
+  chooseModel(view.host, "Claude", "Opus");
   const session = view.host.querySelector(".setting-pill.reviewer-session-autoswitched");
   assert.ok(session?.contains(pill(view.host, "reviewer-session")));
   assert.match(pill(view.host, "reviewer-session").textContent, /New reviewer/);

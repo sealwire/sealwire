@@ -46,10 +46,20 @@ const PROJECT_NAMES = [
   "Design system", "Infrastructure", "Customer support",
 ];
 
+// Newest first, as Codex lists it. The session's gpt-5.5 is two generations old, so it
+// folds under Older at the bottom: a phone has to scroll the menu to show it.
 const CODEX_MODELS = [
+  { model: "gpt-6.1-sol", display_name: "GPT-6.1-Sol" },
+  { model: "gpt-6-astra", display_name: "GPT-6-Astra" },
+  { model: "gpt-6-sol", display_name: "GPT-6-Sol" },
+  { model: "gpt-6-luna", display_name: "GPT-6-Luna" },
+  { model: "gpt-5.6-sol", display_name: "GPT-5.6-Sol" },
+  { model: "gpt-5.6-terra", display_name: "GPT-5.6-Terra" },
+  { model: "gpt-5.6-luna", display_name: "GPT-5.6-Luna" },
   { model: "gpt-5.5", display_name: "GPT-5.5", is_default: true },
-  { model: "gpt-5.5-codex", display_name: "GPT-5.5 Codex" },
   { model: "gpt-5.4", display_name: "GPT-5.4" },
+  { model: "gpt-5.3-codex", display_name: "GPT-5.3-Codex" },
+  { model: "gpt-5.2", display_name: "GPT-5.2" },
 ];
 const CLAUDE_MODELS = [
   { model: "claude-opus-4-6", display_name: "Opus 4.6", is_default: true },
@@ -73,36 +83,54 @@ function logStep(message, details) {
   console.log(`[remote-new-session-menus-e2e] ${message}${suffix}`);
 }
 
-// A row that exists in the DOM is not a row you can tap: read the menu's box and
-// hit-test its first row, so a menu painted as a clipped strip fails here.
+// The current provider's models open beside the menu, or in place of it on a phone.
+// The CHECKED row is the one that must be reachable: it is what the user came to see.
 function readModelMenu() {
-  const menu = document.querySelector("#remote-start-session-dialog .setting-pill-menu")
-    || document.querySelector(".setting-pill-menu");
+  // On screen and on top: a row in the DOM, or scrolled out of its menu, is not tappable.
+  const hitTestable = (node) => {
+    const box = node?.getBoundingClientRect();
+    if (!box) return false;
+    const hit = document.elementFromPoint(
+      Math.round(box.left + box.width / 2),
+      Math.round(box.top + box.height / 2)
+    );
+    return Boolean(hit && (node === hit || node.contains(hit)));
+  };
+  const menu = document.querySelector(".model-picker-menu");
   if (!menu) {
     return { present: false };
   }
-  const rows = [...menu.querySelectorAll(".setting-pill-option")].map((option) => ({
+  const models = document.querySelector(".model-picker-flyout") || menu;
+  const rows = [...models.querySelectorAll(".model-picker-option")].map((option) => ({
     label: option.textContent?.trim() || "",
     provider: option.dataset.provider || "",
     value: option.dataset.value || "",
   }));
-  const box = menu.getBoundingClientRect();
-  const first = menu.querySelector(".setting-pill-option");
-  const firstBox = first?.getBoundingClientRect();
-  const hit = firstBox
-    ? document.elementFromPoint(
-        Math.round(firstBox.left + firstBox.width / 2),
-        Math.round(firstBox.top + firstBox.height / 2)
-      )
-    : null;
+  const box = models.getBoundingClientRect();
+  const checked = models.querySelector('.model-picker-option[aria-checked="true"]');
   return {
     present: true,
-    emptyNote: menu.querySelector(".setting-pill-section-empty")?.textContent?.trim() || null,
+    checked: checked?.dataset.value || null,
+    checkedRowReachable: hitTestable(checked),
+    drilledIn: models === menu,
+    emptyNote: models.querySelector(".context-menu-note")?.textContent?.trim() || null,
     height: Math.round(box.height),
-    firstRowReachable: Boolean(first && hit && (first === hit || first.contains(hit))),
     rows,
-    sections: menu.querySelectorAll(".setting-pill-section").length,
+    scrollTop: models.scrollTop,
     width: Math.round(box.width),
+  };
+}
+
+// Whatever holds focus in the picker must be on screen: the user is about to act on it.
+function readFocusedRow() {
+  const node = document.activeElement;
+  const box = node?.getBoundingClientRect();
+  const hit = box
+    && document.elementFromPoint(Math.round(box.left + Math.min(20, box.width / 2)), Math.round(box.top + box.height / 2));
+  return {
+    inPicker: Boolean(node?.closest(".model-picker-layer")),
+    reachable: Boolean(hit && (hit === node || node.contains(hit))),
+    value: node?.dataset?.value ?? node?.tagName ?? null,
   };
 }
 
@@ -501,12 +529,96 @@ async function main() {
         menu.rows.some((row) => row.value === "gpt-5.5" && row.provider === "codex"),
         `[${name}] the selected model must be listed under its provider, got ${JSON.stringify(menu.rows)}`
       );
+      assert.equal(menu.checked, "gpt-5.5", `[${name}] the session's model is the ticked one`);
       assert.ok(
-        menu.firstRowReachable,
-        `[${name}] the first model row must be hit-testable, got ${JSON.stringify(menu)}`
+        menu.checkedRowReachable,
+        `[${name}] the ticked model must be on screen and tappable, got ${JSON.stringify(menu)}`
+      );
+
+      // Typing starts a search; the box it types into must not sit scrolled out of view.
+      await page.keyboard.press("g");
+      const search = await page.evaluate(() => {
+        const input = document.querySelector(".model-picker-menu input");
+        const box = input?.getBoundingClientRect();
+        const hit = box
+          && document.elementFromPoint(Math.round(box.left + 20), Math.round(box.top + box.height / 2));
+        return { focused: document.activeElement === input, reachable: hit === input };
+      });
+      assert.deepEqual(search, { focused: true, reachable: true }, `[${name}] the search box`);
+
+      // Scroll the results away from the box, then step into them from it.
+      const results = await page.$eval(".model-picker-menu", (node) => {
+        const box = node.getBoundingClientRect();
+        return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+      });
+      await page.mouse.move(results.x, results.y);
+      await page.mouse.wheel(0, 600);
+      await page.waitForTimeout(200);
+      const scrolled = await page.$eval(".model-picker-menu", (node) => node.scrollTop);
+      if (profile.isMobile) {
+        assert.ok(scrolled > 60, `[${name}] the results must scroll for this check to mean anything`);
+      }
+      await page.keyboard.press("ArrowDown");
+      await page.waitForTimeout(100);
+      const stepped = await page.evaluate(readFocusedRow);
+      assert.ok(
+        stepped.inPicker && stepped.reachable,
+        `[${name}] ArrowDown out of the search box lands on a row you can see, got ${JSON.stringify(stepped)}`
       );
 
       await page.keyboard.press("Escape");
+      if (!profile.isMobile) {
+        // A shorter window shrinks the models panel; the row the keyboard is on stays in it.
+        await page.click("#remote-start-session-dialog-model");
+        await page.waitForSelector(".model-picker-flyout[data-placed='true']", { timeout: TIMEOUT_MS });
+        await page.keyboard.press("ArrowRight");
+        await page.waitForTimeout(100);
+        assert.equal((await page.evaluate(readFocusedRow)).value, "gpt-5.5");
+        await page.setViewportSize({ width: profile.viewport.width, height: 400 });
+        await page.waitForTimeout(400);
+        const shrunk = await page.evaluate(readFocusedRow);
+        await page.setViewportSize(profile.viewport);
+        await page.waitForTimeout(200);
+        assert.ok(
+          shrunk.inPicker && shrunk.reachable,
+          `[${name}] the focused model stays visible when the window shrinks, got ${JSON.stringify(shrunk)}`
+        );
+        await page.keyboard.press("Escape");
+      }
+
+      if (profile.isMobile) {
+        // A row half under the panel's edge is still a row you can tap: focusing it must
+        // not scroll a different row under the finger before the tap completes.
+        await page.tap("#remote-start-session-dialog-model");
+        await page.waitForSelector(".model-picker-menu input", { timeout: TIMEOUT_MS });
+        await page.tap(".model-picker-menu input");
+        await page.keyboard.type("g");
+        await page.waitForTimeout(200);
+        const edge = await page.evaluate(() => {
+          const panel = document.querySelector(".model-picker-menu");
+          const room = panel.getBoundingClientRect();
+          const rows = [...panel.querySelectorAll(".model-picker-option")];
+          const row = rows.find((node) => node.getBoundingClientRect().bottom > room.bottom);
+          panel.scrollTop += row.getBoundingClientRect().top - (room.bottom - 10);
+          const box = row.getBoundingClientRect();
+          return {
+            label: row.querySelector(".context-menu-label").textContent,
+            x: Math.round(box.left + box.width / 2),
+            y: Math.round(room.bottom - 4),
+          };
+        });
+        await page.touchscreen.tap(edge.x, edge.y);
+        await page.waitForTimeout(300);
+        const after = await page.evaluate(() => ({
+          chip: document.querySelector("#remote-start-session-dialog-model .setting-pill-value")?.textContent,
+          open: Boolean(document.querySelector(".model-picker-menu")),
+        }));
+        assert.deepEqual(
+          after,
+          { chip: edge.label, open: false },
+          `[${name}] tapping the visible edge of ${edge.label} chooses it`
+        );
+      }
       const workspace = await openWorkspacePanel(page, { touch: profile.hasTouch });
       logStep(`${name} workspace panel`, workspace);
 

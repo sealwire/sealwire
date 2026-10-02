@@ -10387,25 +10387,33 @@ button.team-role-name.is-link {
 
 .setting-pill { position: relative; }
 
+/* Square-cornered chips of one height: a pill read as a tag, not a control. */
 .setting-pill-trigger {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 7px 11px;
-  border: 1px solid var(--border-firm);
-  border-radius: var(--r-pill);
-  background: var(--surface-1);
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--menu-border);
+  border-radius: var(--r-sm);
+  background: transparent;
   box-shadow: none;
   color: var(--text-1);
   font: inherit;
-  font-size: var(--text-sm);
+  font-size: var(--text-ui);
+  line-height: var(--leading-tight);
+  white-space: nowrap;
   cursor: pointer;
 }
 
-.setting-pill-trigger:hover,
+.setting-pill-trigger:hover {
+  background: var(--menu-hover);
+  border-color: var(--menu-border);
+}
+
 .setting-pill-trigger[aria-expanded="true"] {
   background: var(--surface-2);
-  border-color: var(--border-prominent);
+  border-color: transparent;
 }
 
 .setting-pill-trigger:disabled { opacity: 0.6; cursor: default; }
@@ -10418,8 +10426,12 @@ button.team-role-name.is-link {
   background: transparent;
 }
 
-.setting-pill-label { color: var(--text-3); }
-.setting-pill-value { font-weight: var(--weight-medium); }
+.setting-pill-label { color: var(--menu-hint); }
+.setting-pill-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .setting-pill-tag {
   padding: 1px 6px;
@@ -10454,23 +10466,6 @@ button.team-role-name.is-link {
 
 .setting-pill-menu[data-placed="true"] {
   visibility: visible;
-}
-
-.setting-pill-section + .setting-pill-section { margin-top: 4px; }
-
-.setting-pill-section-heading {
-  padding: 6px 8px 4px;
-  color: var(--text-faint);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-strong);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.setting-pill-section-empty {
-  padding: 6px 8px;
-  color: var(--text-faint);
-  font-size: var(--text-sm);
 }
 
 .setting-pill-option {
@@ -10535,6 +10530,108 @@ button.team-role-name.is-link {
 
 .setting-pill-option.is-active .setting-pill-option-check {
   opacity: 1;
+}
+
+/* --- model picker: providers, then the active provider's models beside them --- */
+
+.model-picker .setting-pill-trigger {
+  max-width: 260px;
+}
+
+.model-picker-trigger-mark,
+.model-picker-mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-1);
+}
+
+.model-picker-trigger-mark:empty {
+  display: none;
+}
+
+.model-picker-trigger-mark svg {
+  width: 14px;
+  height: 14px;
+}
+
+.model-picker-mark {
+  width: 16px;
+}
+
+.model-picker-mark svg {
+  width: 16px;
+  height: 16px;
+}
+
+.model-picker-trigger-mark[data-provider="claude_code"],
+.model-picker-mark[data-provider="claude_code"] {
+  color: var(--provider-claude-mark);
+}
+
+.model-picker-caret {
+  flex: none;
+  display: inline-flex;
+  color: var(--text-3);
+  transition: transform 120ms ease;
+}
+
+.model-picker-caret svg {
+  width: 10px;
+  height: 10px;
+}
+
+.model-picker-trigger[aria-expanded="true"] .model-picker-caret {
+  transform: rotate(180deg);
+}
+
+/* The layer only groups both panels for "inside the menu"; each places itself. */
+.model-picker-layer {
+  display: contents;
+}
+
+.model-picker-menu {
+  width: 248px;
+  min-width: 0;
+}
+
+.model-picker-menu.is-searching {
+  width: 300px;
+}
+
+.model-picker-flyout {
+  min-width: 232px;
+  max-width: 300px;
+}
+
+.model-picker-flyout:not([data-placed="true"]) {
+  visibility: hidden;
+}
+
+.model-picker-provider.is-current .context-menu-label {
+  font-weight: var(--weight-strong);
+}
+
+.model-picker-option.is-selected .context-menu-label {
+  font-weight: var(--weight-strong);
+}
+
+/* Lines up with the row labels, past the check column. */
+.model-picker-heading {
+  padding: 6px 10px 4px 30px;
+}
+
+.model-picker-older .context-menu-hint {
+  margin-left: auto;
+}
+
+.model-picker-older[aria-expanded="true"] .model-picker-older-caret {
+  transform: rotate(180deg);
+}
+
+.model-picker-back-caret {
+  transform: scaleX(-1);
 }
 
 /* --- footer --------------------------------------------------------------- */

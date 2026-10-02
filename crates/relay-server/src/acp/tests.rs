@@ -4107,6 +4107,49 @@ fn opencode_catalog_keeps_full_ids_and_limits_effort_to_the_selected_model() {
     assert_eq!(catalog[1].default_reasoning_effort, "default");
 }
 
+#[tokio::test]
+async fn opencode_catalog_is_kept_newest_first_and_cursor_keeps_its_own_order() {
+    // OpenCode lists models alphabetically, which put gpt-5.5 above gpt-6.1.
+    let result = json!({"configOptions":[{"id":"model","category":"model","type":"select",
+        "currentValue":"opencode/big-pickle","options":[
+            {"value":"openai/gpt-5.5","name":"OpenAI/GPT-5.5"},
+            {"value":"openai/gpt-6-sol","name":"OpenAI/GPT-6 Sol"},
+            {"value":"openai/gpt-6.1-sol","name":"OpenAI/GPT-6.1 Sol"},
+            {"value":"opencode/big-pickle","name":"OpenCode Zen/Big Pickle"}]}]});
+    let ids = |models: &[crate::protocol::ModelOptionView]| {
+        models.iter().map(|m| m.model.clone()).collect::<Vec<_>>()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("acp-models-opencode.json");
+
+    let opencode = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    super::absorb_catalog_into(&opencode, &result, true, "opencode", Some(&path)).await;
+    let newest_first = [
+        "openai/gpt-6.1-sol",
+        "openai/gpt-6-sol",
+        "openai/gpt-5.5",
+        "opencode/big-pickle",
+    ];
+    assert_eq!(ids(&opencode.lock().await), newest_first);
+    assert_eq!(
+        ids(&super::read_cached_models(&path)),
+        newest_first,
+        "a restart reads the same order back"
+    );
+
+    let cursor = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    super::absorb_catalog_into(&cursor, &result, true, "cursor", None).await;
+    assert_eq!(
+        ids(&cursor.lock().await),
+        [
+            "openai/gpt-5.5",
+            "openai/gpt-6-sol",
+            "openai/gpt-6.1-sol",
+            "opencode/big-pickle"
+        ]
+    );
+}
+
 #[test]
 fn grouped_acp_model_options_are_not_lost() {
     let value = json!({"configOptions":[{"id":"models","category":"model","type":"select","currentValue":"test/echo",

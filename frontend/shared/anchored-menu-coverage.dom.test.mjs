@@ -32,6 +32,7 @@ const React = (await import("react")).default;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 
+const { ModelPicker } = await import("./model-picker.js");
 const { ProjectPicker } = await import("./project-picker.js");
 const { ReviewerPanel } = await import("./reviewer-panel.js");
 const { ProjectSwitcher } = await import("./project-switcher.js");
@@ -48,14 +49,33 @@ const MENUS = [
   {
     element: () =>
       h(SettingPill, {
-        label: "Model",
-        options: [{ label: "GPT-5.6-Sol", value: "sol" }],
-        value: "GPT-5.6-Sol",
+        label: "Effort",
+        options: [{ label: "High", value: "high" }],
+        value: "High",
       }),
     menu: ".setting-pill-menu",
     file: "setting-pill.js",
-    name: "SettingPill (Model / Effort / Permissions)",
+    name: "SettingPill (Effort / Permissions)",
     trigger: ".setting-pill-trigger",
+  },
+  {
+    element: () =>
+      h(ModelPicker, {
+        groups: [
+          {
+            hint: "GPT-5.6-Sol",
+            label: "Codex",
+            options: [{ label: "GPT-5.6-Sol", provider: "codex", selected: true, value: "sol" }],
+            provider: "codex",
+          },
+        ],
+        provider: "codex",
+        value: "GPT-5.6-Sol",
+      }),
+    menu: ".model-picker-menu",
+    file: "model-picker.js",
+    name: "ModelPicker (provider, then model)",
+    trigger: ".model-picker-trigger",
   },
   {
     element: () => h(WorkspacePicker, { suggestions: [{ path: "/tmp/a" }], value: "/tmp/a" }),

@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildModelPickerGroups, selectedModelChip } from "./model-picker-model.js";
+import {
+  buildModelPickerGroups,
+  modelSections,
+  searchModelOptions,
+  selectedModelChip,
+} from "./model-picker-model.js";
 
 // Merging the two dropdowns moves a real invariant here: the submitted pair must
 // stay consistent, and the current model must stay visible in a stale catalogue.
@@ -181,28 +186,6 @@ test("the provider-default row is what is ticked when no model is held", () => {
   assert.equal(groups[0].options[0].selected, true);
 });
 
-test("the chip names provider and model together", () => {
-  const chip = selectedModelChip({
-    providerModels: CATALOGS,
-    selectedModel: "claude-opus-4-6",
-    selectedProvider: "claude_code",
-  });
-
-  assert.equal(chip.value, "Claude · Opus 4.6");
-  assert.equal(chip.tag, "default");
-});
-
-test("a non-default model carries no tag", () => {
-  const chip = selectedModelChip({
-    providerModels: CATALOGS,
-    selectedModel: "claude-sonnet-4-5",
-    selectedProvider: "claude_code",
-  });
-
-  assert.equal(chip.value, "Claude · Sonnet 4.5");
-  assert.equal(chip.tag, null);
-});
-
 test("an unknown model still shows its id rather than going blank", () => {
   const chip = selectedModelChip({
     providerModels: CATALOGS,
@@ -210,17 +193,7 @@ test("an unknown model still shows its id rather than going blank", () => {
     selectedProvider: "claude_code",
   });
 
-  assert.equal(chip.value, "Claude · some-unfetched-id");
-});
-
-test("with no model chosen the chip says so instead of naming a provider alone", () => {
-  const chip = selectedModelChip({
-    providerModels: CATALOGS,
-    selectedModel: "",
-    selectedProvider: "claude_code",
-  });
-
-  assert.equal(chip.value, "Claude · default");
+  assert.equal(chip.value, "some-unfetched-id");
 });
 
 test("a provider the relay does not offer produces no group to pick from", () => {
@@ -270,5 +243,136 @@ test("OpenCode's menu offers its folder default and tags no catalog model as def
       selectedProvider: "opencode",
     }).tag,
     null
+  );
+});
+
+// --- two-level picker: sections inside one provider ---------------------------------
+
+const option = (value, label = value) => ({ label, provider: "x", selected: false, tag: null, value });
+const shape = ({ sections, older }) => ({
+  sections: sections.map((section) => [section.heading, section.options.map((o) => o.value)]),
+  older: older.map((o) => o.value),
+});
+
+test("Codex splits into the current generation, the last point release, and Older", () => {
+  // The design's own example: GPT-6.1 sits with GPT-6, GPT-5.6 is its own group.
+  assert.deepEqual(
+    shape(
+      modelSections(
+        ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"].map(
+          (id) => option(id)
+        )
+      )
+    ),
+    {
+      sections: [
+        ["gpt-6", ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]],
+        ["gpt-5.6", ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]],
+      ],
+      older: ["gpt-5.5"],
+    }
+  );
+});
+
+test("OpenCode keeps a vendor's one-off models under the vendor's name, not in Older", () => {
+  // Older is per line: Zen's single models are not "older GPT", and big-pickle is
+  // OpenCode's own default, so folding it away would hide the usual pick.
+  const result = modelSections([
+    option("", "Default for this folder"),
+    option("openai/gpt-6.1-sol", "OpenAI/GPT-6.1 Sol"),
+    option("openai/gpt-6-luna", "OpenAI/GPT-6 Luna"),
+    option("openai/gpt-5.6-sol", "OpenAI/GPT-5.6 Sol"),
+    option("openai/gpt-5.5", "OpenAI/GPT-5.5"),
+    option("openai/gpt-5.4-mini", "OpenAI/GPT-5.4 mini"),
+    option("opencode/big-pickle", "OpenCode Zen/Big Pickle"),
+    option("opencode/nemotron-3.5-lightning-free", "OpenCode Zen/Nemotron 3.5 Lightning Free"),
+    option("opencode/nemotron-3-ultra-free", "OpenCode Zen/Nemotron 3 Ultra Free"),
+  ]);
+  assert.deepEqual(shape(result), {
+    sections: [
+      [null, [""]],
+      ["gpt-6", ["openai/gpt-6.1-sol", "openai/gpt-6-luna"]],
+      ["gpt-5.6", ["openai/gpt-5.6-sol"]],
+      [
+        "OpenCode Zen",
+        ["opencode/big-pickle", "opencode/nemotron-3.5-lightning-free", "opencode/nemotron-3-ultra-free"],
+      ],
+    ],
+    older: ["openai/gpt-5.5", "openai/gpt-5.4-mini"],
+  });
+});
+
+test("a short list with no line spanning generations stays flat (Claude)", () => {
+  assert.deepEqual(
+    shape(modelSections(["default", "opus[1m]", "claude-fable-5-1[1m]", "sonnet", "haiku"].map((id) => option(id)))),
+    { sections: [[null, ["default", "opus[1m]", "claude-fable-5-1[1m]", "sonnet", "haiku"]]], older: [] }
+  );
+});
+
+test("a list whose versions are not in order stays flat rather than half-grouped (Cursor)", () => {
+  // Cursor's order is its own recommendation; grouping it would scatter one heading
+  // across the menu and fold a model the provider put near the top.
+  assert.deepEqual(
+    shape(
+      modelSections(
+        ["default[]", "claude-opus-5[x=1]", "gpt-5.6-sol[r=1]", "claude-opus-4-6[x=1]", "claude-opus-4-8[x=1]"].map(
+          (id) => option(id)
+        )
+      )
+    ),
+    {
+      sections: [[null, ["default[]", "claude-opus-5[x=1]", "gpt-5.6-sol[r=1]", "claude-opus-4-6[x=1]", "claude-opus-4-8[x=1]"]]],
+      older: [],
+    }
+  );
+});
+
+test("each provider row says which model it would run", () => {
+  const groups = buildModelPickerGroups({
+    providerModels: { ...CATALOGS, opencode: [{ model: "opencode/big-pickle", display_name: "Big Pickle", is_default: true }] },
+    providers: [...PROVIDERS, "opencode", "cursor"],
+    selectedModel: "gpt-5-codex",
+    selectedProvider: "codex",
+  });
+  assert.deepEqual(
+    groups.map((group) => [group.provider, group.hint]),
+    [
+      ["claude_code", "Opus 4.6"],
+      ["codex", "GPT-5 Codex"],
+      // A catalogue default is only the default of the folder it was read in.
+      ["opencode", "Default"],
+      ["cursor", "Default"],
+    ]
+  );
+});
+
+test("the chip names the model alone; the provider is the logo beside it", () => {
+  assert.deepEqual(
+    selectedModelChip({ providerModels: CATALOGS, selectedModel: "claude-opus-4-6", selectedProvider: "claude_code" }),
+    { provider: "claude_code", tag: null, value: "Opus 4.6" }
+  );
+  assert.equal(
+    selectedModelChip({ providerModels: CATALOGS, selectedModel: "", selectedProvider: "codex" }).value,
+    "Default"
+  );
+});
+
+test("typing searches every provider's models, older ones included", () => {
+  const groups = buildModelPickerGroups({
+    providerModels: { ...CATALOGS, opencode: [{ model: "openai/gpt-5.5", display_name: "OpenAI/GPT-5.5" }] },
+    providers: [...PROVIDERS, "opencode"],
+    selectedModel: "",
+    selectedProvider: "codex",
+  });
+  assert.deepEqual(
+    searchModelOptions(groups, "5.5").map((option) => [option.provider, option.value]),
+    [
+      ["codex", "gpt-5.5"],
+      ["opencode", "openai/gpt-5.5"],
+    ]
+  );
+  assert.deepEqual(
+    searchModelOptions(groups, "SONNET").map((option) => option.value),
+    ["claude-sonnet-4-5"]
   );
 });

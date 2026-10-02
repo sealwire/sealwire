@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   placeContextMenu,
+  placeFlyout,
   positionContextMenuElement,
   updateContextMenuContent,
 } from "./context-menu-position.js";
@@ -227,4 +228,63 @@ test("updateContextMenuContent ignores a menu with no usable anchor", () => {
   assert.equal(placement, null);
   assert.equal(populated, false);
   assert.equal(menu.style.top, undefined);
+});
+
+// --- second-level panel beside a menu (the model picker's flyout) -------------------
+
+const PANEL = { left: 32, right: 280, top: 400, bottom: 560 };
+
+test("a flyout opens to the right, overlapping the menu edge, and bottom-aligned above its trigger", () => {
+  // The design draws the menu opened upward with both panels' bottoms on one line.
+  const placed = placeFlyout({ alignBottom: true, height: 300, menu: PANEL, width: 232, ...VIEWPORT });
+  assert.deepEqual(placed, { fits: true, left: 276, maxHeight: 776, side: "right", top: 260, width: 232 });
+});
+
+test("a flyout below its trigger lines up with the menu's top", () => {
+  const placed = placeFlyout({ alignBottom: false, height: 300, menu: PANEL, width: 232, ...VIEWPORT });
+  assert.equal(placed.top, 400);
+});
+
+test("a flyout with no room on the right opens to the left", () => {
+  const placed = placeFlyout({
+    alignBottom: false,
+    height: 100,
+    menu: { left: 900, right: 1148, top: 100, bottom: 300 },
+    width: 232,
+    ...VIEWPORT,
+  });
+  assert.deepEqual([placed.side, placed.left], ["left", 672]);
+});
+
+test("a flyout that fits on neither side says so, so the picker can drill in instead", () => {
+  // A phone: 248 + 232 does not fit in 390.
+  const placed = placeFlyout({
+    alignBottom: true,
+    height: 200,
+    menu: { left: 12, right: 260, top: 300, bottom: 600 },
+    width: 232,
+    viewportHeight: 800,
+    viewportWidth: 390,
+  });
+  assert.equal(placed.fits, false);
+});
+
+test("a flyout taller than the room is pinned inside the margins and capped", () => {
+  const placed = placeFlyout({ alignBottom: true, height: 2000, menu: PANEL, width: 232, ...VIEWPORT });
+  assert.deepEqual([placed.top, placed.maxHeight], [12, 776]);
+});
+
+test("a flyout too wide for the room beside the menu is narrowed, not moved out of reach", () => {
+  // OpenCode's names ("OpenAI/GPT-6 Astra Ultrafast") make the panel wider than the
+  // dialog leaves; a narrower panel with ellipsed names beats losing the second level.
+  const placed = placeFlyout({
+    alignBottom: false,
+    height: 100,
+    menu: { left: 20, right: 268, top: 100, bottom: 300 },
+    minWidth: 232,
+    viewportHeight: 600,
+    viewportWidth: 560,
+    width: 300,
+  });
+  assert.deepEqual([placed.fits, placed.side, placed.left, placed.width], [true, "right", 264, 284]);
 });

@@ -1,5 +1,5 @@
 // Replaces a labelled `<select>`: a native `<option>` renders one string, with
-// nowhere for a tag, a provider heading, or a per-row subtitle.
+// nowhere for a tag or a per-row subtitle. The model has its own two-level picker.
 
 import React, { useCallback, useId, useRef, useState } from "react";
 
@@ -10,10 +10,7 @@ const h = React.createElement;
 
 export function SettingPill({
   className = "",
-  // Either `options` (flat) or `groups` (sectioned, for the model picker).
-  // Groups win when both are supplied.
   disabled = false,
-  groups = null,
   id = null,
   inherited = false,
   label,
@@ -33,22 +30,19 @@ export function SettingPill({
   useDismissableMenu({ menuRef, onClose: close, open, rootRef });
   const assignMenuRef = useAnchoredMenu({ menuRef, open, triggerRef });
 
-  const sections = groups || [{ label: null, options: options || [], provider: null }];
-
   const choose = (option) => {
     close();
     onSelect?.(option.value, option);
   };
 
-  const renderOption = (option, section) =>
+  const renderOption = (option) =>
     h(
       "button",
       {
         "aria-checked": option.selected ? "true" : "false",
         className: "setting-pill-option" + (option.selected ? " is-active" : ""),
-        "data-provider": option.provider || section.provider || undefined,
         "data-value": option.value,
-        key: `${section.provider || ""}:${option.value}`,
+        key: option.value,
         onClick: () => choose(option),
         role: "menuitemradio",
         type: "button",
@@ -63,22 +57,6 @@ export function SettingPill({
       ),
       option.tag ? h("span", { className: "setting-pill-option-tag" }, option.tag) : null,
       h("span", { "aria-hidden": "true", className: "setting-pill-option-check" }, "✓")
-    );
-
-  const renderSection = (section, index) =>
-    h(
-      "div",
-      { className: "setting-pill-section", key: section.provider || section.label || index },
-      section.label ? h("div", { className: "setting-pill-section-heading" }, section.label) : null,
-      // A note beside the choosable row, not a replacement for it.
-      section.empty
-        ? h(
-            "div",
-            { className: "setting-pill-section-empty" },
-            "Catalogue unavailable — the relay will pick"
-          )
-        : null,
-      section.options.map((option) => renderOption(option, section))
     );
 
   return h(
@@ -118,7 +96,7 @@ export function SettingPill({
       h(
         "div",
         { className: "setting-pill-menu", id: menuId, ref: assignMenuRef, role: "menu" },
-        sections.map(renderSection)
+        (options || []).map(renderOption)
       )
     )
   );

@@ -103,30 +103,41 @@ function type(node, value) {
 
 const pill = (host, name) => host.querySelector(`#test-dialog-${name}`);
 const openPill = (host, name) => click(pill(host, name));
-const pillOptions = (host) =>
-  [...host.querySelectorAll(".setting-pill-option")].map(
-    (node) => node.querySelector(".setting-pill-option-label").textContent
+const providerRow = (host, label) =>
+  [...host.querySelectorAll(".model-picker-provider")].find(
+    (node) => node.querySelector(".context-menu-label").textContent === label
+  );
+const flyoutRow = (host, label) =>
+  [...host.querySelectorAll(".model-picker-flyout .model-picker-option")].find(
+    (node) => node.querySelector(".context-menu-label").textContent === label
   );
 
-test("the model pill names provider and model together", () => {
+test("the model chip is the provider's logo and the model's name, nothing else", () => {
   const view = mount();
-  assert.match(pill(view.host, "model").textContent, /Claude · Opus 4\.6/);
+  const chip = pill(view.host, "model");
+  assert.equal(chip.querySelector(".setting-pill-value").textContent, "Opus 4.6");
+  assert.equal(chip.querySelector(".model-picker-trigger-mark").dataset.provider, "claude_code");
+  assert.equal(chip.querySelector(".setting-pill-label"), null, "no visible 'Model' label");
   view.cleanup();
 });
 
-test("the model menu groups every provider's models under a heading", () => {
-  // The merged control's whole justification: one menu, two levels, so choosing
-  // a model is one act instead of two.
+test("the menu lists providers and opens on the current provider's models", () => {
+  // Changing model within the same provider stays one click.
   const view = mount();
   openPill(view.host, "model");
 
   assert.deepEqual(
-    [...view.host.querySelectorAll(".setting-pill-section-heading")].map(
-      (node) => node.textContent
-    ),
-    ["Claude", "Codex"]
+    [...view.host.querySelectorAll(".model-picker-provider")].map((node) => [
+      node.querySelector(".context-menu-label").textContent,
+      node.querySelector(".context-menu-hint").textContent,
+    ]),
+    [
+      ["Claude", "Opus 4.6"],
+      ["Codex", "GPT-5.5"],
+    ]
   );
-  assert.deepEqual(pillOptions(view.host), ["Opus 4.6", "Sonnet 4.5", "GPT-5.5"]);
+  assert.equal(view.host.querySelector(".model-picker-flyout").dataset.provider, "claude_code");
+  assert.equal(flyoutRow(view.host, "Opus 4.6").getAttribute("aria-checked"), "true");
   view.cleanup();
 });
 
@@ -135,25 +146,19 @@ test("choosing a model reports the provider WITH it, in one selection", () => {
   // cannot be resolved together, the second reads a stale render.
   const view = mount();
   openPill(view.host, "model");
-  click(
-    [...view.host.querySelectorAll(".setting-pill-option")].find(
-      (node) => node.querySelector(".setting-pill-option-label").textContent === "GPT-5.5"
-    )
-  );
+  click(providerRow(view.host, "Codex"));
+  click(flyoutRow(view.host, "GPT-5.5"));
 
   assert.deepEqual(view.modelSelections, [{ model: "gpt-5.5", provider: "codex" }]);
   assert.deepEqual(view.changes, [], "and NOT as loose field changes");
+  assert.equal(view.host.querySelector(".model-picker-menu"), null, "and the menu closes");
   view.cleanup();
 });
 
 test("a same-provider model still names its provider, so the pair is never partial", () => {
   const view = mount();
   openPill(view.host, "model");
-  click(
-    [...view.host.querySelectorAll(".setting-pill-option")].find(
-      (node) => node.querySelector(".setting-pill-option-label").textContent === "Sonnet 4.5"
-    )
-  );
+  click(flyoutRow(view.host, "Sonnet 4.5"));
 
   assert.deepEqual(view.modelSelections, [
     { model: "claude-sonnet-4-5", provider: "claude_code" },

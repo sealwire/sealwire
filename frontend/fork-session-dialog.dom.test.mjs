@@ -103,9 +103,14 @@ const click = (node) =>
   act(() => {
     node.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
   });
+// Effort and Permissions are plain pill menus; the model picker uses the shared menu rows.
 const pillLabels = (host) =>
-  [...host.querySelectorAll(".setting-pill-option")].map(
-    (n) => n.querySelector(".setting-pill-option-label").textContent
+  [
+    ...host.querySelectorAll(".setting-pill-option-label, .model-picker-layer .context-menu-label"),
+  ].map((n) => n.textContent);
+const menuRow = (host, selector, label) =>
+  [...host.querySelectorAll(selector)].find(
+    (n) => n.querySelector(".context-menu-label").textContent === label
   );
 
 test("the source card names the thread and when it was last active", () => {
@@ -166,10 +171,10 @@ test("untouched settings render as inherited, not as a concrete value", () => {
   // The visual distinction IS the contract: inherited is sent as null.
   const view = mount();
   const inherited = [...view.host.querySelectorAll(".setting-pill.is-inherited")].map(
-    (n) => n.querySelector(".setting-pill-label").textContent
+    (n) => n.querySelector(".setting-pill-trigger").id
   );
 
-  assert.deepEqual(inherited, ["Model", "Effort", "Permissions"]);
+  assert.deepEqual(inherited, ["test-fork-model", "test-fork-effort", "test-fork-approval"]);
   assert.equal(
     view.host.querySelectorAll(".setting-pill-tag").length,
     3,
@@ -214,13 +219,23 @@ test("permissions keeps inherit across a provider change, because it is provider
 test("choosing a model reports provider and model together", () => {
   const view = mount();
   click(view.host.querySelector("#test-fork-model"));
-  click(
-    [...view.host.querySelectorAll(".setting-pill-option")].find(
-      (n) => n.querySelector(".setting-pill-option-label").textContent === "GPT-5.5"
-    )
-  );
+  click(menuRow(view.host, ".model-picker-provider", "Codex"));
+  click(menuRow(view.host, ".model-picker-flyout .model-picker-option", "GPT-5.5"));
 
   assert.deepEqual(view.modelSelections, [{ model: "gpt-5.5", provider: "codex" }]);
+  view.cleanup();
+});
+
+test("inheriting is one row at the first level, naming what the source runs", () => {
+  const view = mount({ sourceSettings: { model: "claude-opus-4-6", remembered: true } });
+  click(view.host.querySelector("#test-fork-model"));
+  const inherit = view.host.querySelector(".model-picker-direct");
+
+  assert.equal(inherit.querySelector(".context-menu-label").textContent, "Inherit from source");
+  assert.equal(inherit.querySelector(".context-menu-hint").textContent, "Opus 4.6");
+  assert.equal(inherit.getAttribute("aria-checked"), "true");
+  click(inherit);
+  assert.deepEqual(view.modelSelections, [{ model: INHERIT, provider: "claude_code" }]);
   view.cleanup();
 });
 

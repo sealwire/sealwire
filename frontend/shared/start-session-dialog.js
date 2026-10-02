@@ -1,5 +1,6 @@
 import React from "react";
 
+import { ModelPicker } from "./model-picker.js";
 import { ProjectPicker } from "./project-picker.js";
 import { SettingPill } from "./setting-pill.js";
 import { WorkspacePicker } from "./workspace-picker.js";
@@ -198,7 +199,7 @@ export function StartSessionDialog({
     h(
       SettingPillRow,
       { key: "pills" },
-      h(SettingPill, {
+      h(ModelPicker, {
         groups: buildModelPickerGroups({
           offerProviderDefault: true,
           providerModels,
@@ -208,7 +209,6 @@ export function StartSessionDialog({
         }),
         id: `${id}-model`,
         key: "model",
-        label: "Model",
         onOpen: onOpenModelPicker,
         disabled: locked,
         onSelect: (value, option) => {
@@ -218,7 +218,7 @@ export function StartSessionDialog({
           setStartError("");
           onSelectModel?.({ model: value, provider: option.provider || provider });
         },
-        tag: modelChip.tag,
+        provider,
         value: modelChip.value,
       }),
       h(SettingPill, {

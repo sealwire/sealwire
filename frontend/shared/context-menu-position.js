@@ -119,6 +119,45 @@ export function placeAnchoredMenu({
 }
 
 /**
+ * A second-level panel beside `menu` (both rects in viewport coordinates). It
+ * overlaps the menu's edge by `overlap`, as drawn, and narrows to the room on the
+ * roomier side down to `minWidth`. `fits: false` means neither side has even that,
+ * which on a phone is the usual answer.
+ */
+export function placeFlyout({
+  alignBottom = false,
+  height = 0,
+  margin = CONTEXT_MENU_MARGIN_PX,
+  menu,
+  minWidth = null,
+  overlap = 4,
+  viewportHeight = 0,
+  viewportWidth = 0,
+  width = 0,
+} = {}) {
+  const roomRight = viewportWidth - margin - (menu.right - overlap);
+  const roomLeft = menu.left + overlap - margin;
+  const floor = Math.min(minWidth ?? width, width);
+  const right = roomRight >= width || (roomRight >= floor && roomRight >= roomLeft);
+  const room = right ? roomRight : roomLeft;
+  if (room < floor) {
+    return { fits: false };
+  }
+  const shownWidth = Math.min(width, room);
+  const maxHeight = Math.max(0, viewportHeight - margin * 2);
+  const shown = Math.min(height, maxHeight);
+  const wanted = alignBottom ? menu.bottom - shown : menu.top;
+  return {
+    fits: true,
+    left: right ? menu.right - overlap : menu.left + overlap - shownWidth,
+    maxHeight,
+    side: right ? "right" : "left",
+    top: clamp(wanted, margin, Math.max(margin, viewportHeight - margin - shown)),
+    width: shownWidth,
+  };
+}
+
+/**
  * Measure an already-visible menu element and write its `position: fixed`
  * coordinates. Callers must unhide the menu (and finish populating it) first,
  * so the measured height reflects the real content — that measurement is the

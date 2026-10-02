@@ -1,7 +1,6 @@
 import React from "react";
 
 import { buildModelPickerGroups, selectedModelChip } from "./model-picker-model.js";
-import { providerLabel } from "./provider-labels.js";
 import { selectReviewerCatalogState } from "./review-state.js";
 import {
   PromptCard,
@@ -10,6 +9,7 @@ import {
   SettingPillRow,
   SubmitShortcutHint,
 } from "./session-dialog-chrome.js";
+import { ModelPicker } from "./model-picker.js";
 import { SettingPill } from "./setting-pill.js";
 import { ThreadWorkspaceField } from "./workspace-picker.js";
 
@@ -285,7 +285,7 @@ export function ReviewPanel({
   const reviewerChip = !reviewerProvider
     ? "Choose a provider"
     : isReuse && !reviewerModel
-      ? `${providerLabel(reviewerProvider)} · current`
+      ? "Current model"
       : modelChip.value;
 
   const sessionOptions = [
@@ -366,7 +366,8 @@ export function ReviewPanel({
     h(
       SettingPillRow,
       { key: "pills" },
-      h(SettingPill, {
+      h(ModelPicker, {
+        ariaLabel: "Reviewer model",
         groups: reviewerModelGroups({
           activeProvider,
           isReuse,
@@ -378,7 +379,6 @@ export function ReviewPanel({
         }),
         id: `${id}-model`,
         key: "model",
-        label: "Reviewer",
         // The menu lists every provider, so fetch the catalogues it is about to show.
         onOpen: () => {
           for (const provider of providerValues(providerOptions)) {
@@ -398,7 +398,7 @@ export function ReviewPanel({
           // A new model may not support the previously-picked effort.
           setReviewerEffort("");
         },
-        tag: isReuse && !reviewerModel ? null : modelChip.tag,
+        provider: reviewerProvider,
         value: reviewerChip,
       }),
       h(SettingPill, {
@@ -533,6 +533,7 @@ function reviewerModelGroups({
     const current = group.provider === reviewerProvider;
     return {
       ...group,
+      hint: current && !reviewerModel ? (isReuse ? "Current" : "Default") : group.hint,
       label: named?.label || group.label,
       options: [
         {

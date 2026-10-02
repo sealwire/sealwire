@@ -244,9 +244,9 @@ test("SessionPanel wires remote's per-provider catalogs into the merged model pi
   );
 
   assert.match(markup, /id="remote-start-session-dialog"/);
-  // The closed pill names provider and model together — after the merge it is
-  // the only thing naming the provider at all.
-  assert.match(markup, /Codex · GPT-5\.5/);
+  // The closed chip is the only thing naming the provider: its logo, then the model.
+  assert.match(markup, /model-picker-trigger-mark" aria-hidden="true" data-provider="codex"/);
+  assert.match(markup, /<span class="setting-pill-value">GPT-5\.5<\/span>/);
   assert.match(markup, /id="remote-start-session-dialog-model"/);
   // And the project chip is present, which is the whole point of the parity work:
   // a phone can file a session into a project at creation time.

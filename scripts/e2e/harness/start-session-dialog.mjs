@@ -89,7 +89,7 @@ export function pickModelOptionIndex(options, { model = null, provider = null } 
 // Runs inside the page (Playwright serializes it), so it may only touch its
 // argument and browser globals. Exported so the test drives the shipped code.
 export function clickMenuRowInPage(wanted) {
-  const row = [...document.querySelectorAll(".setting-pill-menu .setting-pill-option")].find(
+  const row = [...document.querySelectorAll(".model-picker-layer .model-picker-option")].find(
     (option) =>
       (option.dataset.value || "") === wanted.value
       && (option.dataset.provider || "") === wanted.provider
@@ -101,13 +101,49 @@ export function clickMenuRowInPage(wanted) {
   return { provider: row.dataset.provider || "", value: row.dataset.value || "" };
 }
 
-function readMenuOptions(page) {
-  return page.evaluate(() =>
-    [...document.querySelectorAll(".setting-pill-menu .setting-pill-option")].map((option) => ({
-      provider: option.dataset.provider || "",
-      value: option.dataset.value || "",
-    }))
+// The picker shows one provider's models at a time, so visit each provider in turn
+// (older generations unfolded) and read what it offers. In-page, like the one above;
+// React commits a click after it returns, so every click waits before the next read.
+export async function readModelPickerOptionsInPage() {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const clickThenSettle = async (node) => {
+    if (!node) return;
+    node.click();
+    await settle();
+  };
+  const seen = [];
+  // A phone opens already inside the current provider.
+  await clickThenSettle(document.querySelector(".model-picker-back"));
+  const count = document.querySelectorAll(".model-picker-provider").length;
+  for (let index = 0; index < count; index += 1) {
+    await clickThenSettle(document.querySelectorAll(".model-picker-provider")[index]);
+    await clickThenSettle(document.querySelector('.model-picker-older[aria-expanded="false"]'));
+    for (const option of document.querySelectorAll(".model-picker-layer .model-picker-option")) {
+      seen.push({ provider: option.dataset.provider || "", value: option.dataset.value || "" });
+    }
+    await clickThenSettle(document.querySelector(".model-picker-back"));
+  }
+  return seen;
+}
+
+export async function showProviderModelsInPage(provider) {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const clickThenSettle = async (node) => {
+    if (!node) return;
+    node.click();
+    await settle();
+  };
+  await clickThenSettle(document.querySelector(".model-picker-back"));
+  await clickThenSettle(
+    [...document.querySelectorAll(".model-picker-provider")].find(
+      (row) => row.dataset.providerRow === provider
+    )
   );
+  await clickThenSettle(document.querySelector('.model-picker-older[aria-expanded="false"]'));
+}
+
+function readMenuOptions(page) {
+  return page.evaluate(readModelPickerOptionsInPage);
 }
 
 async function selectModel(page, dialogId, { model, provider, optional }, timeout) {
@@ -133,6 +169,7 @@ async function selectModel(page, dialogId, { model, provider, optional }, timeou
 
     if (index >= 0) {
       const target = options[index];
+      await page.evaluate(showProviderModelsInPage, target.provider);
       const clicked = await page.evaluate(clickMenuRowInPage, target);
 
       if (clicked) {
@@ -142,7 +179,7 @@ async function selectModel(page, dialogId, { model, provider, optional }, timeou
           "the row that was clicked must be the row that matched"
         );
         await page
-          .waitForSelector(".setting-pill-menu", { state: "detached", timeout })
+          .waitForSelector(".model-picker-menu", { state: "detached", timeout })
           .catch(() => {});
         return;
       }
