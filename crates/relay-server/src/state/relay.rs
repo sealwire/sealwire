@@ -2177,6 +2177,8 @@ impl RelayState {
             .filter(|(_, record)| record.navigation_visible != Some(true))
             .map(|(reviewer, record)| {
                 let summary = self.reviewer_thread_summary(reviewer);
+                let settings = self.thread_settings(reviewer);
+                let known = |value: String| Some(value).filter(|value| !value.is_empty());
                 crate::protocol::ReviewerThreadView {
                     reviewer_thread_id: reviewer.clone(),
                     parent_thread_id: record.parent_thread_id.clone(),
@@ -2186,6 +2188,9 @@ impl RelayState {
                     // The reviewer's OWN tree, not its parent's: the parent may have
                     // moved since, and the reuse gate compares against the reviewer.
                     cwd: self.thread_cwd(reviewer),
+                    model: settings.clone().and_then(|settings| known(settings.model)),
+                    reasoning_effort: settings
+                        .and_then(|settings| known(settings.reasoning_effort)),
                 }
             })
             .collect();

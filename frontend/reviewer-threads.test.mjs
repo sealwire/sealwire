@@ -95,7 +95,27 @@ test("selectReusableReviewers filters to the parent and sorts newest-first", () 
     reviewerThreadId: "rev-codex-new",
     provider: "codex",
     label: "Codex reviewer 2",
+    model: null,
+    effort: null,
   });
+});
+
+test("a reusable reviewer carries the model and effort a re-review keeps", () => {
+  const [entry] = selectReusableReviewers(
+    [
+      {
+        reviewer_thread_id: "rev-1",
+        parent_thread_id: "parent-A",
+        reviewer_provider: "codex",
+        model: "gpt-6.1-sol",
+        reasoning_effort: "high",
+      },
+    ],
+    "parent-A",
+    null
+  );
+  assert.equal(entry.model, "gpt-6.1-sol");
+  assert.equal(entry.effort, "high");
 });
 
 test("selectReusableReviewers filters by provider but keeps unknown-provider entries", () => {

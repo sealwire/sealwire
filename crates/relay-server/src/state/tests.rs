@@ -2546,6 +2546,31 @@ fn reviewer_thread_views_enrich_provider_and_label_from_summary() {
 }
 
 #[test]
+fn reviewer_reuse_candidates_say_which_model_and_effort_they_run() {
+    // A re-review offers to keep the reviewer's settings; it can only show them if
+    // they cross the wire. Unknown after a restart, which the picker must tolerate.
+    let mut relay = test_state();
+    relay.upsert_thread(test_thread("reviewer-1", "/tmp/project"));
+    relay.register_reviewer_thread("reviewer-1".to_string(), "parent-1".to_string());
+    relay.remember_thread_settings("reviewer-1", "bypass", "read-only", "high", "gpt-6.1-sol");
+    relay.register_reviewer_thread("reviewer-ghost".to_string(), "parent-1".to_string());
+
+    let wire = serde_json::to_value(relay.reviewer_thread_views()).expect("views serialize");
+    let view = |id: &str| {
+        wire.as_array()
+            .unwrap()
+            .iter()
+            .find(|view| view["reviewer_thread_id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(view("reviewer-1")["model"], "gpt-6.1-sol");
+    assert_eq!(view("reviewer-1")["reasoning_effort"], "high");
+    assert!(view("reviewer-ghost")["model"].is_null());
+    assert!(view("reviewer-ghost")["reasoning_effort"].is_null());
+}
+
+#[test]
 fn visible_task_reviewers_have_an_independent_lifecycle_and_no_reuse_picker_entry() {
     let mut relay = test_state();
     let parent = "task-tl";

@@ -1,6 +1,7 @@
 import React from "react";
 
 import { buildModelPickerGroups, selectedModelChip } from "./model-picker-model.js";
+import { providerPicksFolderDefaultModel } from "./provider-settings.js";
 import { selectReviewerCatalogState } from "./review-state.js";
 import {
   PromptCard,
@@ -233,9 +234,20 @@ export function ReviewPanel({
     setReviewerEffort("");
   };
 
+  // Untouched, a new review asks for the default it names: sending none would let the
+  // reviewed folder's own config choose. A re-review keeps what the reviewer had.
+  const reuseEntry = isReuse
+    ? reusableForProvider.find((entry) => entry.reviewerThreadId === selectedReviewerThreadId)
+    : null;
+  const catalogDefault = providerPicksFolderDefaultModel(reviewerProvider)
+    ? ""
+    : providerModels.find((model) => model.is_default && !model.hidden)?.model || "";
+  const shownModel = reviewerModel || (isReuse ? reuseEntry?.model || "" : catalogDefault);
+  const shownEffort = reviewerEffort || (isReuse ? reuseEntry?.effort || "" : "");
+
   // Reasoning-effort options for the currently-selected model (fall back to the
   // common low/medium/high triple when the catalog doesn't enumerate them).
-  const selectedModel = providerModels.find((model) => model.model === reviewerModel);
+  const selectedModel = providerModels.find((model) => model.model === shownModel);
   const effortOptions =
     selectedModel?.supported_reasoning_efforts?.length
       ? selectedModel.supported_reasoning_efforts
@@ -255,7 +267,8 @@ export function ReviewPanel({
       const result = await onSubmit?.(
         reviewSubmitPayload({
           reviewerProvider,
-          reviewerModel,
+          // A re-review keeps the reviewer's model unless told otherwise.
+          reviewerModel: isReuse ? reviewerModel : shownModel,
           reviewerEffort,
           instructions,
           // Effective selection: a dropped prefill must not reach the relay.
@@ -279,12 +292,12 @@ export function ReviewPanel({
 
   const modelChip = selectedModelChip({
     providerModels: { [reviewerProvider]: providerModels },
-    selectedModel: reviewerModel,
+    selectedModel: shownModel,
     selectedProvider: reviewerProvider,
   });
   const reviewerChip = !reviewerProvider
     ? "Choose a provider"
-    : isReuse && !reviewerModel
+    : isReuse && !shownModel
       ? "Current model"
       : modelChip.value;
 
@@ -374,7 +387,7 @@ export function ReviewPanel({
           models,
           providerModelsStatus,
           providerOptions,
-          reviewerModel,
+          reviewerModel: shownModel,
           reviewerProvider,
         }),
         id: `${id}-model`,
@@ -408,12 +421,14 @@ export function ReviewPanel({
         onSelect: setReviewerEffort,
         options: markSelected(
           [
-            { value: "", label: isReuse ? "Keep current effort" : "Model default" },
+            ...(isReuse && reuseEntry?.effort
+              ? []
+              : [{ value: "", label: isReuse ? "Keep current effort" : "Model default" }]),
             ...effortOptions.map((effort) => ({ value: effort, label: effort })),
           ],
-          reviewerEffort
+          shownEffort
         ),
-        value: reviewerEffort || (isReuse ? "current" : "default"),
+        value: shownEffort || (isReuse ? "current" : "default"),
       }),
       h(SettingPill, {
         className: sessionAutoSwitched ? "reviewer-session-autoswitched" : "",
@@ -498,8 +513,8 @@ function providerValues(providerOptions) {
   );
 }
 
-// Unlike a session's, a reviewer's model is optional, so every group leads with the
-// "no override" row the old model select offered.
+// `reviewerModel` is the model shown as chosen: the pick, else what an untouched
+// request would run. A re-review whose model is unknown ticks nothing.
 function reviewerModelGroups({
   activeProvider,
   isReuse,
@@ -522,6 +537,7 @@ function reviewerModelGroups({
     ])
   );
   return buildModelPickerGroups({
+    offerProviderDefault: !isReuse,
     providerModels: catalogs,
     providers,
     selectedModel: reviewerModel,
@@ -533,18 +549,8 @@ function reviewerModelGroups({
     const current = group.provider === reviewerProvider;
     return {
       ...group,
-      hint: current && !reviewerModel ? (isReuse ? "Current" : "Default") : group.hint,
+      hint: current && isReuse && !reviewerModel ? "Current" : group.hint,
       label: named?.label || group.label,
-      options: [
-        {
-          label: isReuse && current ? "Keep current model" : "Provider default",
-          provider: group.provider,
-          selected: current && !reviewerModel,
-          tag: null,
-          value: "",
-        },
-        ...group.options.filter((option) => option.value !== ""),
-      ],
     };
   });
 }

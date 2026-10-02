@@ -1140,6 +1140,8 @@ fn plain_fetch_reviews_result_carries_the_reviews_payload_to_the_device() {
             name: Some("reviewer one".to_string()),
             updated_at: Some(5),
             cwd: None,
+            model: None,
+            reasoning_effort: None,
         }],
     };
     let result = RemoteActionResultPlaintext {

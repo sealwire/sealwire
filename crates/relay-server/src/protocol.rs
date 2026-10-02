@@ -445,6 +445,11 @@ pub struct ReviewerThreadView {
     /// Tree this reviewer is bound to; `None` after restart. Needed so reuse can drop cross-tree candidates `request_review` would refuse.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// What a re-review keeps unless told otherwise; `None` when not known.
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 /// One working thread, as surfaced to clients for per-thread activity badges.

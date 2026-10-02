@@ -84,6 +84,8 @@ export function selectReusableReviewers(
       reviewerThreadId: entry.reviewer_thread_id,
       provider: entry.reviewer_provider ?? null,
       label: entry.name || entry.reviewer_thread_id,
+      model: entry.model ?? null,
+      effort: entry.reasoning_effort ?? null,
     }));
 }
 
@@ -100,7 +102,7 @@ export function selectReusableReviewers(
  * @param {string|null|undefined} viewThreadId
  * @param {string|null|undefined} provider
  * @param {string|null|undefined} workspaceCwd the tree the review will target
- * @returns {Array<{reviewerThreadId: string, provider: string|null, label: string}>}
+ * @returns {Array<{reviewerThreadId: string, provider: string|null, label: string, model: string|null, effort: string|null}>}
  */
 export function selectReusableReviewersForView(
   session,

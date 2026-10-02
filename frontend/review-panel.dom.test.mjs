@@ -188,7 +188,7 @@ test("the reviewer chip is the provider's logo and the model", () => {
   view.cleanup();
 });
 
-test("the reviewer menu lists providers, each leading with its default, and never a hidden model", () => {
+test("the reviewer menu lists each provider's models, with no extra default row, and never a hidden model", () => {
   const view = mount();
   openPill(view.host, "model");
   assert.deepEqual(
@@ -201,10 +201,53 @@ test("the reviewer menu lists providers, each leading with its default, and neve
       ["Claude", "Default"],
     ]
   );
-  assert.deepEqual(flyoutLabels(view.host), ["Provider default", "GPT-5.5"]);
+  assert.deepEqual(flyoutLabels(view.host), ["GPT-5.5"]);
   click(menuRow(view.host, ".model-picker-provider", "Claude"));
-  assert.deepEqual(flyoutLabels(view.host), ["Provider default", "Opus"]);
+  assert.deepEqual(flyoutLabels(view.host), ["Opus"]);
   assert.doesNotMatch(view.host.innerHTML, /codex-auto-review|Codex Auto Review/);
+  view.cleanup();
+});
+
+// The provider's own default is named rather than offered as a row of its own.
+const WITH_DEFAULT = MODELS.map((model) => (model.model === "gpt-5.5" ? { ...model, is_default: true } : model));
+const ticked = (host) =>
+  host.querySelector('.model-picker-flyout [aria-checked="true"] .context-menu-label')?.textContent;
+
+test("a new review shows and ticks the provider's default model, and asks for exactly that one", async () => {
+  // Sending no model would let the reviewed folder's own config pick another one,
+  // and the label would no longer say what runs.
+  const view = mount({ models: WITH_DEFAULT });
+  assert.equal(pill(view.host, "model").querySelector(".setting-pill-value").textContent, "GPT-5.5");
+  openPill(view.host, "effort");
+  assert.deepEqual(optionLabels(view.host), ["Model default", "low", "high"]);
+  openPill(view.host, "model");
+  assert.equal(ticked(view.host), "GPT-5.5");
+
+  await submit(view.host);
+  assert.equal(view.submitted[0].reviewerModel, "gpt-5.5");
+  view.cleanup();
+});
+
+test("a re-review shows the reviewer's current model and effort, and keeps them unless changed", async () => {
+  const view = mount({
+    models: WITH_DEFAULT,
+    initialReviewerThreadId: "rev-1",
+    reusableReviewers: [
+      { reviewerThreadId: "rev-1", provider: "codex", label: "Codex reviewer", model: "gpt-5.5", effort: "high" },
+    ],
+  });
+  assert.equal(pill(view.host, "model").querySelector(".setting-pill-value").textContent, "GPT-5.5");
+  assert.equal(pill(view.host, "effort").querySelector(".setting-pill-value").textContent, "high");
+  openPill(view.host, "effort");
+  assert.deepEqual(optionLabels(view.host), ["low", "high"]);
+  assert.equal(optionNodes(view.host).find((node) => node.getAttribute("aria-checked") === "true")
+    ?.querySelector(".setting-pill-option-label").textContent, "high");
+  openPill(view.host, "model");
+  assert.equal(ticked(view.host), "GPT-5.5");
+
+  await submit(view.host);
+  assert.equal(view.submitted[0].reviewerModel, null);
+  assert.equal(view.submitted[0].reviewerEffort, null);
   view.cleanup();
 });
 
