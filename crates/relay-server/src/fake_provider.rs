@@ -791,6 +791,10 @@ impl FakeProviderBridge {
         let enforce_approvals = std::env::var("FAKE_PROVIDER_ENFORCE_APPROVALS")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        // So a browser run can reach the native fork, which only a unit test could switch on.
+        let native_fork = std::env::var("FAKE_PROVIDER_NATIVE_FORK")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         let scenario_harness = FakeScenarioHarness::from_env()?;
         let model_vendor =
             non_empty_env("FAKE_PROVIDER_VENDOR").unwrap_or_else(|| "fake".to_string());
@@ -829,7 +833,7 @@ impl FakeProviderBridge {
             system_prompts: Arc::new(Mutex::new(Vec::new())),
             thread_id_arguments: Arc::new(Mutex::new(Vec::new())),
             transcript_paging: Arc::new(AtomicBool::new(false)),
-            native_fork: Arc::new(AtomicBool::new(false)),
+            native_fork: Arc::new(AtomicBool::new(native_fork)),
             refuse_next_archive: Arc::new(AtomicBool::new(false)),
             fail_lists: Arc::new(AtomicBool::new(false)),
             extra_models: Arc::new(std::sync::Mutex::new(

@@ -201,3 +201,22 @@ test("the rows that need their whole body fetched, and a stable list when none w
   assert.equal(drawn[2].text, "a and b");
   assert.equal(overlayCardBodies(entries, details)[2], drawn[2], "the same pair draws the same object");
 });
+
+test("a fork card's long note is drawn whole once the row's detail has it", () => {
+  const forkRow = (note, extra) => ({
+    row_id: "brief",
+    kind: "user_text",
+    status: "completed",
+    text: "the replayed context",
+    injection: { kind: "fork_brief", fork: { id: "fork-1", note, ...extra } },
+  });
+  assert.equal(entryBodyClipped(forkRow("Short")), false);
+  const listed = forkRow("The start of a long no…", { note_clipped: true, source_thread_id: "src" });
+  assert.equal(entryBodyClipped(listed), true);
+
+  const drawn = overlayCardBody(listed, forkRow("The start of a long note, and the rest of it"));
+  assert.equal(drawn.injection.fork.note, "The start of a long note, and the rest of it");
+  assert.equal(drawn.injection.fork.note_clipped, false);
+  assert.equal(drawn.injection.fork.source_thread_id, "src", "the rest of the card is the list's");
+  assert.equal(entryBodyClipped(drawn), false);
+});

@@ -44,8 +44,8 @@ pub(crate) use self::device::{
     PendingPairingResult, PendingTranscriptDelta, TranscriptDeltaKind,
 };
 pub(crate) use self::injections::{
-    clip_chars, injection_kind_from_name, injection_kind_name, CardBodies, DelegateMark, GoalMark,
-    HandoverMark, InjectedMessage, InjectionTag, Injections, MessageAnchor, ReviewMark,
+    clip_chars, injection_kind_from_name, injection_kind_name, CardBodies, DelegateMark, ForkMark,
+    GoalMark, HandoverMark, InjectedMessage, InjectionTag, Injections, MessageAnchor, ReviewMark,
     ThreadInjections,
 };
 pub(crate) use self::push::{
@@ -1042,6 +1042,9 @@ impl RelayState {
             loaded.goals,
             loaded.messages,
         );
+        for fork in loaded.forks {
+            self.injections.put_fork(fork);
+        }
         self.usage_store = store;
     }
 
@@ -5740,6 +5743,9 @@ so {} never got it — hand over again when you are ready.",
         // link to it would open nothing. The other end's cards keep the mark.
         for mark in self.injections.detach_handover_end(thread_id) {
             self.usage_store.save_handover_mark(&mark);
+        }
+        for mark in self.injections.detach_fork_source(thread_id) {
+            self.usage_store.save_fork_mark(&mark);
         }
         self.threads.len() != before_len
     }

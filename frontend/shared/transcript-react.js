@@ -38,6 +38,7 @@ import {
   opensAnsweredTurn,
 } from "./delegate-card.js";
 import { foldHandoverTurns, HandoverSourceEntry, HandoverTargetEntry } from "./handover-card.js";
+import { FORK_DIVIDER_KIND, ForkBriefEntry, ForkDivider, foldForkStarts } from "./fork-card.js";
 import { CardBodyContext } from "./card-parts.js";
 import { overlayCardBodies } from "./card-body.js";
 import { drawsGoalSettledCard, GoalSettledEntry, GoalTurnLine, goalToolLabel } from "./goal-card.js";
@@ -2894,6 +2895,7 @@ export function TranscriptEntry({
   if (kind === "user_text") {
     const injection =
       entry.injection?.handover || entry.injection?.review || entry.injection?.delegate
+        || entry.injection?.fork
         ? entry.injection
         : null;
     if (injection) {
@@ -2928,6 +2930,9 @@ export function TranscriptEntry({
       if (injection.kind === "handover_brief") {
         return h(HandoverTargetEntry, { attrs, entry });
       }
+      if (injection.kind === "fork_brief") {
+        return h(ForkBriefEntry, { attrs, entry });
+      }
       if (injection.delegate) {
         const providerIcon = providerIconSvg(provider) || SPARKLES_SVG;
         switch (injection.kind) {
@@ -2956,6 +2961,9 @@ export function TranscriptEntry({
   }
   if (kind === REVIEW_RESULT_LINE_KIND) {
     return h(ReviewResultLine, { entry });
+  }
+  if (kind === FORK_DIVIDER_KIND) {
+    return h(ForkDivider, { entry });
   }
   if (kind === DELEGATE_REPORTED_KIND) {
     return h(DelegateReportedEntry, {
@@ -3453,7 +3461,7 @@ export function TranscriptContent({
     [reviewFold]
   );
   const groupedItems = React.useMemo(
-    () => groupToolEntries(delegateFold.entries),
+    () => groupToolEntries(foldForkStarts(delegateFold.entries)),
     [delegateFold]
   );
   const latestUserEntryId = React.useMemo(() => {

@@ -2,6 +2,7 @@
 @import "./review-cards.css";
 @import "./delegate-cards.css";
 @import "./goal-cards.css";
+@import "./fork-cards.css";
 
 :root {
   color-scheme: dark;

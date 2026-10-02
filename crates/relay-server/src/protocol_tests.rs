@@ -1273,6 +1273,52 @@ fn compact_emergency_shell_drops_a_delegate_brief_with_the_rest_of_the_card() {
     }
 }
 
+/// A client merging an omitted copy over the hydrated one restores only the long bodies
+/// a card flags; the quote is bounded where it is made, so it must ride along.
+#[test]
+fn compact_emergency_shell_keeps_a_fork_cards_quote() {
+    use crate::protocol::{
+        ForkBranchPointView, ForkCardView, InjectionCard, InjectionKind, InjectionView,
+    };
+    let mut snapshot = make_snapshot();
+    snapshot.current_cwd = "/tmp/".to_string() + &"超长路径".repeat(3_000);
+    snapshot.logs.clear();
+    snapshot.pending_approvals.clear();
+    let quote = format!("the race {}", "q".repeat(590));
+    snapshot.transcript = vec![snapshot_row(
+        "brief",
+        TranscriptEntryKind::UserText,
+        Some("You are starting from a forked agent session. ".repeat(400)),
+        Some(InjectionView {
+            kind: InjectionKind::ForkBrief,
+            card: InjectionCard::Fork(ForkCardView {
+                id: "fork-1".to_string(),
+                note: "note ".repeat(300),
+                branch_point: Some(ForkBranchPointView {
+                    speaker: "agent".to_string(),
+                    text: quote.clone(),
+                }),
+                ..ForkCardView::default()
+            }),
+            text_clipped: false,
+        }),
+    )];
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+
+    let entry = &compacted.transcript[0];
+    assert_eq!(entry.content_state, TranscriptContentState::Omitted);
+    let fork = entry.injection.as_ref().unwrap().fork().unwrap();
+    assert!(
+        fork.note.is_empty(),
+        "the long body is read from the hydrated copy"
+    );
+    assert_eq!(
+        fork.branch_point.as_ref().map(|point| point.text.as_str()),
+        Some(quote.as_str())
+    );
+}
+
 #[test]
 fn compact_emergency_shell_only_exempts_settled_empty_reasoning() {
     // `Full` is final on clients: even a short real body must remain hydration-

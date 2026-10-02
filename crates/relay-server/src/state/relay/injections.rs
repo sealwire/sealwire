@@ -8,10 +8,11 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
-    CardRow, DelegateCardView, GoalSettledCardView, GoalStepRefView, GoalStepView,
-    GoalTurnCardView, HandoverCardView, InjectionCard, InjectionKind, InjectionView,
-    ReviewCardView, ReviewFindingView, ReviewResultView, ReviewRoundView, TranscriptContentState,
-    TranscriptEntryKind, TranscriptEntryView,
+    CardRow, DelegateCardView, ForkBranchPointView, ForkCardView, ForkCarriedView,
+    GoalSettledCardView, GoalStepRefView, GoalStepView, GoalTurnCardView, HandoverCardView,
+    InjectionCard, InjectionKind, InjectionView, ReviewCardView, ReviewFindingView,
+    ReviewResultView, ReviewRoundView, TranscriptContentState, TranscriptEntryKind,
+    TranscriptEntryView,
 };
 
 use super::transcript::TranscriptRecord;
@@ -53,7 +54,7 @@ impl MessageAnchor {
     }
 }
 
-const KIND_NAMES: [(InjectionKind, &str); 20] = [
+const KIND_NAMES: [(InjectionKind, &str); 22] = [
     (InjectionKind::HandoverRequest, "handover_request"),
     (InjectionKind::HandoverSummary, "handover_summary"),
     (InjectionKind::HandoverBrief, "handover_brief"),
@@ -74,6 +75,8 @@ const KIND_NAMES: [(InjectionKind, &str); 20] = [
     (InjectionKind::DelegateReported, "delegate_reported"),
     (InjectionKind::GoalTurn, "goal_turn"),
     (InjectionKind::GoalSettled, "goal_settled"),
+    (InjectionKind::ForkBrief, "fork_brief"),
+    (InjectionKind::ForkStart, "fork_start"),
 ];
 
 pub(crate) fn injection_kind_name(kind: InjectionKind) -> &'static str {
@@ -123,6 +126,14 @@ impl InjectionTag {
             kind,
             ref_id: goal_id.to_string(),
             round: seq,
+        }
+    }
+
+    pub(crate) fn fork(kind: InjectionKind, fork_id: &str) -> Self {
+        Self {
+            kind,
+            ref_id: fork_id.to_string(),
+            round: 0,
         }
     }
 
@@ -339,6 +350,21 @@ impl GoalMark {
     }
 }
 
+/// What a fork's card is drawn from, written once as the fork is made.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct ForkMark {
+    pub(crate) id: String,
+    pub(crate) source_thread_id: String,
+    pub(crate) target_thread_id: String,
+    pub(crate) source_provider: String,
+    pub(crate) target_provider: String,
+    pub(crate) note: String,
+    pub(crate) branch_point: Option<ForkBranchPointView>,
+    pub(crate) carried: Option<ForkCarriedView>,
+    pub(crate) created_at: u64,
+}
+
 /// The card shows the objective on one line; the panel has the whole of it.
 const CARD_OBJECTIVE_CHARS: usize = 300;
 
@@ -395,6 +421,7 @@ pub(crate) struct Injections {
     reviews: HashMap<String, ReviewMark>,
     delegates: HashMap<String, DelegateMark>,
     goals: HashMap<String, GoalMark>,
+    forks: HashMap<String, ForkMark>,
     anchored: HashMap<String, Vec<InjectedMessage>>,
     pending: HashMap<String, Vec<(String, InjectionTag)>>,
 }
@@ -481,6 +508,27 @@ impl Injections {
         self.goals.insert(goal.id.clone(), goal);
     }
 
+    pub(crate) fn put_fork(&mut self, fork: ForkMark) {
+        self.forks.insert(fork.id.clone(), fork);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fork(&self, id: &str) -> Option<&ForkMark> {
+        self.forks.get(id)
+    }
+
+    /// Blanks a removed session out of the forks taken from it; the branches keep their cards.
+    pub(crate) fn detach_fork_source(&mut self, thread_id: &str) -> Vec<ForkMark> {
+        self.forks
+            .values_mut()
+            .filter(|mark| mark.source_thread_id == thread_id)
+            .map(|mark| {
+                mark.source_thread_id.clear();
+                mark.clone()
+            })
+            .collect()
+    }
+
     pub(crate) fn reviews_continued_by(&self, review_id: &str) -> Vec<String> {
         self.reviews
             .values()
@@ -562,6 +610,7 @@ impl Injections {
         self.reviews.remove(ref_id);
         self.delegates.remove(ref_id);
         self.goals.remove(ref_id);
+        self.forks.remove(ref_id);
     }
 
     /// Drops the thread's rows, and every mark only they carried. Returns those marks'
@@ -610,6 +659,13 @@ impl Injections {
                 goal_card(self.goals.get(&tag.ref_id)?, tag, bodies)?
             } else if tag.kind.is_delegate() {
                 InjectionCard::Delegate(self.delegate_cards(tag, &named, &title, bodies)?)
+            } else if tag.kind.is_fork() {
+                InjectionCard::Fork(fork_card(
+                    self.forks.get(&tag.ref_id)?,
+                    &named,
+                    &title,
+                    bodies,
+                ))
             } else {
                 InjectionCard::Handover(self.handover_card(&tag.ref_id, &named, &title)?)
             };
@@ -852,6 +908,34 @@ fn card_body(text: &str, limit: usize, bodies: CardBodies) -> (String, bool) {
     }
 }
 
+fn fork_card(
+    mark: &ForkMark,
+    named: &impl Fn(&str) -> bool,
+    title: &impl Fn(&str) -> Option<String>,
+    bodies: CardBodies,
+) -> ForkCardView {
+    let source = !mark.source_thread_id.is_empty() && named(&mark.source_thread_id);
+    // The note and the quoted message were both sent to the branch, so they stay
+    // wherever the source is hidden; only the way back to it goes.
+    let (note, note_clipped) = card_body(&mark.note, CARD_BODY_CHARS, bodies);
+    ForkCardView {
+        id: mark.id.clone(),
+        source_thread_id: if source {
+            mark.source_thread_id.clone()
+        } else {
+            String::new()
+        },
+        source_title: source.then(|| title(&mark.source_thread_id)).flatten(),
+        source_provider: mark.source_provider.clone(),
+        target_provider: mark.target_provider.clone(),
+        note,
+        note_clipped,
+        branch_point: mark.branch_point.clone(),
+        carried: mark.carried,
+        created_at: mark.created_at,
+    }
+}
+
 fn delegate_card(
     mark: &DelegateMark,
     kind: InjectionKind,
@@ -982,6 +1066,8 @@ impl ThreadInjections {
                         record.kind == TranscriptEntryKind::ToolCall && record.status == "completed"
                     }
                     InjectionKind::DelegateReported => record.kind != TranscriptEntryKind::UserText,
+                    // Whatever row the copy ended on.
+                    InjectionKind::ForkStart => true,
                     _ => record.kind == TranscriptEntryKind::UserText,
                 };
                 right_kind && matches(matcher, transcript, record)
@@ -1219,6 +1305,48 @@ mod tests {
         assert_eq!(hidden.reviewer_thread_id, "");
         assert_eq!(hidden.rounds[0].reviewer_thread_id, "");
         assert_eq!(hidden.error, None);
+    }
+
+    #[test]
+    fn a_fork_card_names_no_source_its_reader_cannot_see() {
+        let mut injections = Injections::default();
+        injections.put_fork(ForkMark {
+            id: "f".to_string(),
+            source_thread_id: "source".to_string(),
+            target_thread_id: "branch".to_string(),
+            note: "try cookies".to_string(),
+            ..ForkMark::default()
+        });
+        injections.anchor(InjectedMessage {
+            thread_id: "branch".to_string(),
+            anchor: MessageAnchor::Item("user:branch".to_string()),
+            tag: InjectionTag::fork(InjectionKind::ForkBrief, "f"),
+            created_at: 1,
+        });
+        let card = |may_see: bool| {
+            injections
+                .for_thread(
+                    "branch",
+                    |_| Some("title".to_string()),
+                    |_| may_see,
+                    CardBodies::Preview,
+                )
+                .marks
+                .pop()
+                .and_then(|(_, view)| view.fork().cloned())
+                .expect("the row is marked")
+        };
+
+        let open = card(true);
+        assert_eq!(open.source_thread_id, "source");
+        assert_eq!(open.source_title.as_deref(), Some("title"));
+        let hidden = card(false);
+        assert_eq!(hidden.source_thread_id, "");
+        assert_eq!(hidden.source_title, None);
+        assert_eq!(
+            hidden.note, "try cookies",
+            "the branch was sent the note itself"
+        );
     }
 
     #[test]

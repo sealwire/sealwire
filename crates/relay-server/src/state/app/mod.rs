@@ -312,6 +312,8 @@ mod broker;
 mod checkpoint;
 mod delegation;
 mod fork;
+#[cfg(test)]
+mod fork_card_tests;
 mod git_context;
 mod goal;
 #[cfg(test)]

@@ -1,0 +1,69 @@
+/* A forked thread's start: the handover card's skeleton, and a line for a native fork. */
+.fork-card-icon svg {
+  width: 15px;
+  height: 15px;
+}
+.fork-card-speaker {
+  font-weight: var(--weight-strong);
+  color: var(--text-secondary);
+}
+.fork-card-carried {
+  color: var(--text-secondary);
+}
+@container handover-card (max-width: 420px) {
+  .fork-card .handover-card-title {
+    white-space: normal;
+  }
+}
+
+.fork-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+}
+.fork-divider-line {
+  flex: 1;
+  min-width: 16px;
+  height: 1px;
+  background: var(--border-soft);
+}
+.fork-divider-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.fork-divider-icon {
+  flex: none;
+  display: inline-flex;
+  color: var(--accent);
+}
+.fork-divider-icon svg {
+  width: 13px;
+  height: 13px;
+}
+.fork-divider-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+}
+/* A phone has no room for the rules either side; the text centres on its own lines. */
+@media (max-width: 600px) {
+  .fork-divider {
+    flex-wrap: wrap;
+    justify-content: center;
+    row-gap: 2px;
+  }
+  .fork-divider-line {
+    display: none;
+  }
+  .fork-divider-title {
+    max-width: 200px;
+  }
+}

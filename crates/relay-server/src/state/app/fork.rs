@@ -1,7 +1,10 @@
 use super::*;
 
-use crate::protocol::{TranscriptEntryKind, TranscriptEntryView};
+use crate::protocol::{
+    ForkBranchPointView, ForkCarriedView, InjectionKind, TranscriptEntryKind, TranscriptEntryView,
+};
 use crate::state::relay::relay_thread_is_busy;
+use crate::state::{ForkMark, InjectedMessage, InjectionTag, MessageAnchor};
 
 const FORK_BUSY_SOURCE_MSG: &str = "cannot fork a thread while a turn is in progress";
 /// Nothing can locate the requested row AND it is not the thread tip, so widening to
@@ -20,6 +23,8 @@ const RECENT_RAW_ENTRY_COUNT: usize = 16;
 const MAX_SUMMARY_ENTRY_CHARS: usize = 360;
 const MAX_RAW_ENTRY_CHARS: usize = 2_000;
 const MAX_TOOL_FIELD_CHARS: usize = 700;
+/// The card folds its quote to two lines; this is what opening it shows.
+const BRANCH_POINT_CHARS: usize = 600;
 
 impl AppState {
     pub async fn fork_session(&self, input: ForkSessionInput) -> Result<SessionSnapshot, String> {
@@ -224,6 +229,16 @@ impl AppState {
             })
             .unwrap_or_else(|| defaults.sandbox.clone());
         let user_prompt = non_empty(input.initial_prompt);
+        let fork_mark = ForkMark {
+            id: new_fork_id(),
+            source_thread_id: source_thread_id.clone(),
+            source_provider: source_provider_name.clone(),
+            target_provider: target_provider_name.clone(),
+            note: user_prompt.clone().unwrap_or_default(),
+            branch_point: branch_point(&forked_transcript),
+            created_at: unix_now(),
+            ..ForkMark::default()
+        };
 
         if source_provider_name == target_provider_name && native_fork_possible {
             // Through the SOURCE target: a native fork is described to the provider
@@ -255,6 +270,7 @@ impl AppState {
                         target_project_id.as_deref(),
                         user_prompt,
                         images,
+                        fork_mark,
                     )
                     .await;
             }
@@ -270,7 +286,7 @@ impl AppState {
             ),
             ..source_data
         };
-        let replay_prompt = build_fork_replay_prompt(
+        let (replay_prompt, carried) = build_fork_replay_prompt(
             &source_provider_name,
             &target_provider_name,
             &replay_source,
@@ -290,6 +306,10 @@ impl AppState {
             target_project_id.as_deref(),
             replay_prompt,
             images,
+            ForkMark {
+                carried: Some(carried),
+                ..fork_mark
+            },
         )
         .await
     }
@@ -309,6 +329,7 @@ impl AppState {
         project_id: Option<&str>,
         user_prompt: Option<String>,
         images: Vec<ProviderImage>,
+        fork_mark: ForkMark,
     ) -> Result<SessionSnapshot, String> {
         let forked_thread_id = start.identity.session_id.clone();
         let read_started_at_revision = {
@@ -318,6 +339,13 @@ impl AppState {
         let thread_data = self
             .read_adopted_provider_thread(&start.identity, &target_bridge, &start.result.thread.cwd)
             .await?;
+        // Named by the provider, so a re-read after a restart still finds it.
+        let last_copied = thread_data.transcript.last().and_then(|entry| {
+            entry
+                .provider_item_id
+                .clone()
+                .or_else(|| entry.view.item_id.clone())
+        });
         {
             let mut relay = self.relay.write().await;
             relay.set_provider_name(target_provider_name.to_string());
@@ -334,6 +362,24 @@ impl AppState {
                 read_started_at_revision,
             );
             relay.set_thread_forked_from(&forked_thread_id, source_thread_id);
+            // A branch with nothing copied has no history to mark the end of.
+            if let Some(item_id) = last_copied {
+                let mark = ForkMark {
+                    target_thread_id: forked_thread_id.clone(),
+                    ..fork_mark
+                };
+                relay.usage_store.save_fork_mark(&mark);
+                let message = InjectedMessage {
+                    thread_id: forked_thread_id.clone(),
+                    anchor: MessageAnchor::Item(item_id),
+                    tag: InjectionTag::fork(InjectionKind::ForkStart, &mark.id),
+                    created_at: mark.created_at,
+                };
+                relay.injections.put_fork(mark);
+                relay.usage_store.record_injected_message(&message);
+                relay.injections.anchor(message);
+                relay.republish_thread_rows(&forked_thread_id);
+            }
             if let Some(project_id) = project_id {
                 if super::projects::attach_new_thread_to_project(
                     &mut relay,
@@ -391,6 +437,7 @@ impl AppState {
         project_id: Option<&str>,
         replay_prompt: String,
         images: Vec<ProviderImage>,
+        fork_mark: ForkMark,
     ) -> Result<SessionSnapshot, String> {
         // Thread creation cannot carry images — `start_thread` only takes text.
         // So when the fork has attachments, withhold the prompt here and send
@@ -411,9 +458,20 @@ impl AppState {
         let started_thread_id = start.identity.session_id;
         let initial_user_message = start_result.initial_user_message.clone();
         let started_turn_id = start_result.started_turn_id.clone();
+        let fork_mark = ForkMark {
+            target_thread_id: started_thread_id.clone(),
+            ..fork_mark
+        };
+        let brief_tag = InjectionTag::fork(InjectionKind::ForkBrief, &fork_mark.id);
 
         {
             let mut relay = self.relay.write().await;
+            relay.usage_store.save_fork_mark(&fork_mark);
+            relay.injections.put_fork(fork_mark.clone());
+            // Drawn as the card from the first snapshot, before its row can be named.
+            relay
+                .injections
+                .expect(&started_thread_id, replay_prompt.trim(), brief_tag.clone());
             relay.set_provider_name(target_provider_name.to_string());
             if let Some(models) = provider_models {
                 relay.set_available_models(models);
@@ -440,7 +498,7 @@ impl AppState {
                 }
             }
             if turn_revision == 0 {
-                if let Some(turn_id) = started_turn_id {
+                if let Some(turn_id) = started_turn_id.clone() {
                     relay.set_active_turn(Some(turn_id));
                     if let Some(active_thread_id) = relay.active_thread_id.clone() {
                         relay.set_thread_status(
@@ -474,7 +532,7 @@ impl AppState {
 
         if !consumed_initial_prompt {
             let sent = self
-                .send_message_inner_with_images(
+                .send_message_dispatched(
                     SendMessageInput {
                         text: replay_prompt,
                         model: Some(model.to_string()),
@@ -485,20 +543,41 @@ impl AppState {
                     &images,
                 )
                 .await;
-            if sent.is_err() {
-                // Lineage was recorded above so the branch is linked the moment
-                // it appears, but the fork never actually started. Keeping the
-                // row would persist a link to a thread that carries none of the
-                // source's context — and for a deferred Claude session no provider
-                // thread was ever created, so nothing later would clean it up.
-                let mut relay = self.relay.write().await;
-                relay.clear_thread_forked_from(&started_thread_id);
-            }
-            return sent;
+            return match sent {
+                Ok((snapshot, turn_id)) => {
+                    self.anchor_fork_brief(brief_tag, started_thread_id, turn_id);
+                    Ok(snapshot)
+                }
+                Err(error) => {
+                    // Lineage was recorded above so the branch is linked the moment
+                    // it appears, but the fork never actually started. Keeping the
+                    // row would persist a link to a thread that carries none of the
+                    // source's context — and for a deferred Claude session no provider
+                    // thread was ever created, so nothing later would clean it up.
+                    let mut relay = self.relay.write().await;
+                    relay.clear_thread_forked_from(&started_thread_id);
+                    relay
+                        .injections
+                        .forget_pending(&started_thread_id, &brief_tag);
+                    relay.injections.forget_mark(&fork_mark.id);
+                    relay.usage_store.forget_mark(&fork_mark.id);
+                    Err(error)
+                }
+            };
         }
 
+        self.anchor_fork_brief(brief_tag, started_thread_id, started_turn_id);
         let _ = self.list_threads(20, Some(device_id.to_string())).await;
         Ok(self.snapshot().await)
+    }
+
+    /// In the background: a provider may write the row only after its turn starts.
+    fn anchor_fork_brief(&self, tag: InjectionTag, thread_id: String, turn_id: Option<String>) {
+        let app = self.clone();
+        tokio::spawn(async move {
+            app.anchor_injection(&tag, &thread_id, turn_id.as_deref())
+                .await;
+        });
     }
 }
 
@@ -507,7 +586,7 @@ fn build_fork_replay_prompt(
     target_provider: &str,
     source: &ThreadSyncData,
     user_prompt: &str,
-) -> String {
+) -> (String, ForkCarriedView) {
     let transcript = source.to_views();
     let tail_start = transcript.len().saturating_sub(RECENT_RAW_ENTRY_COUNT);
     let summary_lines = transcript[..tail_start]
@@ -538,8 +617,14 @@ fn build_fork_replay_prompt(
             tail_drop,
             &tail_blocks[tail_drop..],
         );
+        let carried = ForkCarriedView {
+            total: transcript.len() as u32,
+            full: (tail_blocks.len() - tail_drop) as u32,
+            condensed: (summary_lines.len() - summary_start) as u32,
+            dropped: (summary_start + tail_drop) as u32,
+        };
         if context.len() + task_section.len() <= MAX_FORK_REPLAY_PROMPT_CHARS {
-            return format!("{context}{task_section}");
+            return (format!("{context}{task_section}"), carried);
         }
         if summary_start < summary_lines.len() {
             let remaining = summary_lines.len() - summary_start;
@@ -552,8 +637,28 @@ fn build_fork_replay_prompt(
         }
         // Only the newest block is left and it still overflows: trim inside it
         // rather than dropping the one entry the fork branches from.
-        return fit_context_with_task(context, task_section);
+        return (fit_context_with_task(context, task_section), carried);
     }
+}
+
+fn new_fork_id() -> String {
+    format!("fork-{}-{}", unix_now(), super::review::random_suffix())
+}
+
+/// The last thing said before the branch; tool rows are skipped as unreadable in a quote.
+fn branch_point(carried: &[TranscriptEntryView]) -> Option<ForkBranchPointView> {
+    carried.iter().rev().find_map(|entry| {
+        let speaker = match entry.kind {
+            TranscriptEntryKind::UserText => "user",
+            TranscriptEntryKind::AgentText => "agent",
+            _ => return None,
+        };
+        let text = entry.text.as_deref()?.trim();
+        (!text.is_empty()).then(|| ForkBranchPointView {
+            speaker: speaker.to_string(),
+            text: crate::state::clip_chars(text, BRANCH_POINT_CHARS),
+        })
+    })
 }
 
 /// A fork point resolved to the EXACT entry of the materialized read.
@@ -1095,7 +1200,7 @@ mod tests {
             })
             .collect();
         let source = source_with_transcript(transcript);
-        let prompt = build_fork_replay_prompt(
+        let (prompt, _) = build_fork_replay_prompt(
             "codex",
             "claude_code",
             &source,
@@ -1195,6 +1300,78 @@ mod tests {
         assert_eq!(kept.len(), 2);
     }
 
+    /// The card states how much of the source the branch got, so the counts must
+    /// describe the message that was actually built.
+    #[test]
+    fn the_replay_counts_what_it_sent_whole_cut_short_and_left_out() {
+        let entries = |count: usize, chars: usize| {
+            (0..count)
+                .map(|index| agent_entry(&format!("item-{index}"), &"y".repeat(chars)))
+                .collect::<Vec<_>>()
+        };
+
+        let (_, fits) = build_fork_replay_prompt(
+            "codex",
+            "codex",
+            &source_with_transcript(entries(40, 50)),
+            "go",
+        );
+        assert_eq!(
+            fits,
+            ForkCarriedView {
+                total: 40,
+                full: RECENT_RAW_ENTRY_COUNT as u32,
+                condensed: 40 - RECENT_RAW_ENTRY_COUNT as u32,
+                dropped: 0,
+            }
+        );
+
+        let (prompt, crowded) = build_fork_replay_prompt(
+            "codex",
+            "codex",
+            &source_with_transcript(entries(300, MAX_SUMMARY_ENTRY_CHARS)),
+            "go",
+        );
+        assert!(prompt.len() <= MAX_FORK_REPLAY_PROMPT_CHARS);
+        assert!(crowded.dropped > 0, "{crowded:?}");
+        assert_eq!(crowded.full, RECENT_RAW_ENTRY_COUNT as u32);
+        assert_eq!(
+            crowded.full + crowded.condensed + crowded.dropped,
+            crowded.total
+        );
+        assert_eq!(
+            prompt.matches("\n- assistant: ").count() as u32,
+            crowded.condensed,
+            "the condensed count is the lines in the message"
+        );
+    }
+
+    #[test]
+    fn the_branch_point_is_the_last_thing_said_not_a_tool_row() {
+        let mut tool = agent_entry("tool-1", "Read src/auth.ts");
+        tool.kind = TranscriptEntryKind::ToolCall;
+        let mut asked = agent_entry("user-1", "why the logout?");
+        asked.kind = TranscriptEntryKind::UserText;
+        let long = format!("the race {}", "z".repeat(BRANCH_POINT_CHARS));
+
+        let point = branch_point(&[asked.clone(), agent_entry("a-1", &long), tool.clone()])
+            .expect("a message to quote");
+        assert_eq!(point.speaker, "agent");
+        assert!(point.text.starts_with("the race"));
+        assert_eq!(
+            point.text.chars().count(),
+            BRANCH_POINT_CHARS + 1,
+            "clipped with an ellipsis"
+        );
+
+        let point = branch_point(&[asked, tool.clone()]).expect("the question");
+        assert_eq!(
+            (point.speaker.as_str(), point.text.as_str()),
+            ("user", "why the logout?")
+        );
+        assert_eq!(branch_point(&[tool]), None);
+    }
+
     // The budget loop can only shrink the summarized head. When the raw tail
     // alone blows the budget the old code trimmed the END of the render, which
     // dropped the newest exchanges — exactly the context a fork needs most.
@@ -1210,7 +1387,8 @@ mod tests {
             .collect::<Vec<_>>();
         let source = source_with_transcript(transcript);
 
-        let prompt = build_fork_replay_prompt("codex", "codex", &source, "the fork task");
+        let (prompt, carried) =
+            build_fork_replay_prompt("codex", "codex", &source, "the fork task");
 
         assert!(prompt.len() <= MAX_FORK_REPLAY_PROMPT_CHARS);
         assert!(
@@ -1223,6 +1401,9 @@ mod tests {
             "newest entry {newest} must survive truncation: {}",
             &prompt[prompt.len().saturating_sub(400)..]
         );
+        assert_eq!(carried.total, RECENT_RAW_ENTRY_COUNT as u32);
+        assert_eq!(carried.condensed, 0);
+        assert_eq!(carried.full + carried.dropped, carried.total);
     }
 }
 

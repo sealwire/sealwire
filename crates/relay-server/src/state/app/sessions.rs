@@ -605,6 +605,7 @@ impl AppState {
         let _slot = self.acquire_session_slot()?;
         self.send_message_inner_with_turn(input, &images, skill.as_ref())
             .await
+            .map(|(snapshot, _)| snapshot)
     }
 
     pub(super) async fn send_message_inner_with_images(
@@ -612,6 +613,17 @@ impl AppState {
         input: SendMessageInput,
         images: &[ProviderImage],
     ) -> Result<SessionSnapshot, String> {
+        self.send_message_dispatched(input, images)
+            .await
+            .map(|(snapshot, _)| snapshot)
+    }
+
+    /// The same send, with the turn the provider started for it.
+    pub(super) async fn send_message_dispatched(
+        &self,
+        input: SendMessageInput,
+        images: &[ProviderImage],
+    ) -> Result<(SessionSnapshot, Option<String>), String> {
         self.send_message_inner_with_turn(input, images, None).await
     }
 
@@ -620,7 +632,7 @@ impl AppState {
         input: SendMessageInput,
         images: &[ProviderImage],
         skill: Option<&crate::protocol::SkillInvocationInput>,
-    ) -> Result<SessionSnapshot, String> {
+    ) -> Result<(SessionSnapshot, Option<String>), String> {
         let device_id = require_device_id(input.device_id)?;
         self.expire_stale_controller_if_needed().await;
         let defaults = self.defaults().await;
@@ -926,7 +938,7 @@ impl AppState {
             // returns. Preserve those turn events instead of resurrecting the
             // completed turn; seed active state only when no turn event landed.
             if relay.thread_turn_revision(&effective_thread_id) == turn_revision {
-                relay.set_active_turn(turn_id);
+                relay.set_active_turn(turn_id.clone());
                 relay.set_thread_status(&effective_thread_id, "active".to_string(), Vec::new());
             }
             relay.model = model.clone();
@@ -947,7 +959,7 @@ impl AppState {
         // Only once the turn is really underway: a refused send answered nothing.
         self.resume_goal_on_reply(&effective_thread_id).await;
 
-        Ok(self.snapshot().await)
+        Ok((self.snapshot().await, turn_id))
     }
 
     async fn session_turn_base_sha(&self, cwd: &str) -> Option<(String, String)> {

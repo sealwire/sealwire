@@ -27,7 +27,7 @@ pub(crate) use self::relay::IdSpace;
 #[cfg(test)]
 use self::relay::TranscriptRecord;
 pub(crate) use self::relay::{
-    clip_chars, injection_kind_from_name, injection_kind_name, DelegateMark, GoalMark,
+    clip_chars, injection_kind_from_name, injection_kind_name, DelegateMark, ForkMark, GoalMark,
     HandoverMark, InjectedMessage, InjectionTag, MessageAnchor, ReviewMark,
 };
 pub(crate) use self::relay::{

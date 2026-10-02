@@ -1061,6 +1061,16 @@ impl SessionSnapshot {
                 settled.report_clipped |=
                     truncate_with_ellipsis(&mut settled.report, budget.max_transcript_chars);
             }
+            if let Some(InjectionView {
+                card: InjectionCard::Fork(fork),
+                ..
+            }) = &mut entry.injection
+            {
+                // The quote is left alone: it is capped where it is made, and no client
+                // copy could restore it once cut.
+                fork.note_clipped |=
+                    truncate_with_ellipsis(&mut fork.note, budget.max_transcript_chars);
+            }
             if entry_previewed {
                 transcript_truncated = true;
                 // The entry's content was ellipsis-truncated but is still
@@ -1307,6 +1317,12 @@ impl SessionSnapshot {
                             for step in &mut settled.steps {
                                 step.note = None;
                             }
+                        }
+                        Some(InjectionView {
+                            card: InjectionCard::Fork(fork),
+                            ..
+                        }) => {
+                            fork.note.clear();
                         }
                         _ => {}
                     }
@@ -2304,6 +2320,10 @@ pub enum InjectionKind {
     GoalTurn,
     /// Not a user row: the `goal_complete` / `goal_blocked` / `goal_needs_you` call.
     GoalSettled,
+    /// A replayed fork's first message: the source's context the relay wrote for it.
+    ForkBrief,
+    /// Not a user row: the last row a native fork copied from its source.
+    ForkStart,
 }
 
 impl InjectionKind {
@@ -2336,6 +2356,10 @@ impl InjectionKind {
 
     pub fn is_goal(self) -> bool {
         matches!(self, Self::GoalTurn | Self::GoalSettled)
+    }
+
+    pub fn is_fork(self) -> bool {
+        matches!(self, Self::ForkBrief | Self::ForkStart)
     }
 }
 
@@ -2393,7 +2417,8 @@ impl InjectionView {
             }
             (DelegateCall | ReviewCall | GoalSettled | DelegateReported, ToolCall)
             | (
-                HandoverRequest | DelegateRequest | DelegateAnswer | DelegateNudge | GoalTurn,
+                HandoverRequest | DelegateRequest | DelegateAnswer | DelegateNudge | GoalTurn
+                | ForkBrief,
                 UserText,
             ) => Some(CardRow::Replaced),
             (review, UserText) if review.is_review() => Some(CardRow::Replaced),
@@ -2435,6 +2460,13 @@ impl InjectionView {
             _ => None,
         }
     }
+
+    pub fn fork(&self) -> Option<&ForkCardView> {
+        match &self.card {
+            InjectionCard::Fork(fork) => Some(fork),
+            _ => None,
+        }
+    }
 }
 
 /// How a client draws a row that carries a card.
@@ -2456,6 +2488,7 @@ pub enum InjectionCard {
     Delegate(Vec<DelegateCardView>),
     GoalTurn(GoalTurnCardView),
     GoalSettled(GoalSettledCardView),
+    Fork(ForkCardView),
 }
 
 /// One `/delegate` or peer ask, as the cards at both ends draw it.
@@ -3907,6 +3940,49 @@ pub struct GoalStepRefView {
     pub index: u32,
     pub total: u32,
     pub title: String,
+}
+
+/// Where a forked thread came from, drawn in place of a replayed fork's first message
+/// or under the last row a native fork copied.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkCardView {
+    pub id: String,
+    /// Empty wherever the source is gone or hidden from the reader.
+    pub source_thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_title: Option<String>,
+    pub source_provider: String,
+    pub target_provider: String,
+    /// What the person typed in the fork dialog; empty when nothing.
+    pub note: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub note_clipped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_point: Option<ForkBranchPointView>,
+    /// Only on a replay: a native fork carries the source's rows as they were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried: Option<ForkCarriedView>,
+    pub created_at: u64,
+}
+
+/// The last message the branch carries, as the card quotes it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkBranchPointView {
+    /// `user` or `agent`.
+    pub speaker: String,
+    pub text: String,
+}
+
+/// How much of the source a replay got into its one message, counted in transcript rows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkCarriedView {
+    pub total: u32,
+    /// The newest rows, sent as written (each still capped in length).
+    pub full: u32,
+    /// The rows before those, cut to one line each.
+    pub condensed: u32,
+    /// The oldest rows, left out to fit the target's context.
+    pub dropped: u32,
 }
 
 /// Drawn in place of the prompt the relay sends to start a goal turn.

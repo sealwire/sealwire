@@ -15,6 +15,7 @@ export function entryBodyClipped(entry) {
   return Boolean(
     injection.text_clipped
       || injection.goal_settled?.report_clipped
+      || injection.fork?.note_clipped
       || injection.review?.findings_clipped
       || asksOf(injection).some((ask) => ask?.task_clipped || ask?.answer_clipped)
   );
@@ -128,6 +129,15 @@ function combineReport(newer, older) {
     : null;
 }
 
+function combineNote(newer, older) {
+  if (!newer || !older || newer.id !== older.id) {
+    return null;
+  }
+  return takesOlder(newer.note, newer.note_clipped, older.note, older.note_clipped)
+    ? { ...newer, note: older.note, note_clipped: Boolean(older.note_clipped) }
+    : null;
+}
+
 /**
  * One card from two copies of it: each body from the copy holding more of it, the rest
  * from `newer`, the latest word on how things went. `newer` itself when nothing is taken.
@@ -148,6 +158,10 @@ export function combineCardBodies(newer, older) {
   const settled = combineReport(newer.goal_settled, older.goal_settled);
   if (settled) {
     card = { ...card, goal_settled: settled };
+  }
+  const fork = combineNote(newer.fork, older.fork);
+  if (fork) {
+    card = { ...card, fork };
   }
   return card;
 }
