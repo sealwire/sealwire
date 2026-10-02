@@ -319,6 +319,9 @@ export function createRemoteSessionTabsHost({
      */
     openThread({ threadId, threadProjectId = null, preview = undefined } = {}) {
       if (!threadId) return Promise.resolve(null);
+      // A tap is the user's own navigation, even onto the restored session: its retry
+      // supersedes the restore's view, and that `false` must not fall back to the live one.
+      bootRestoredThreadId = null;
       return controller.openThread(threadId, {
         context: selectOwningContext({ threadId, threadProjectId }),
         preview,

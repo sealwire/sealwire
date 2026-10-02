@@ -124,8 +124,10 @@ function installFakeRelay({ relayId, threads }) {
     };
   };
 
-  // Per-thread transcript fetch mode: "hold" parks the reply, "fail" refuses it.
-  window.__transcriptMode = {};
+  // Per-thread transcript fetch mode: "hold" parks the reply, "fail" refuses it. Seeded
+  // from storage so a reload can hold the fetch the page makes on its way up.
+  window.__transcriptMode = JSON.parse(window.localStorage.getItem("e2e-transcript-mode") || "{}");
+  window.localStorage.removeItem("e2e-transcript-mode");
   window.__heldTranscripts = [];
   window.__transcriptFetches = [];
 
@@ -238,6 +240,7 @@ function installFakeRelay({ relayId, threads }) {
 async function openPage(context, origin) {
   const page = await context.newPage();
   page.on("pageerror", (error) => console.error(`[stream-switch-e2e:pageerror] ${error.stack || error.message}`));
+  if (process.env.E2E_DEBUG) page.on("console", (message) => console.log(`[page] ${message.text()}`));
   await page.addInitScript(installFakeRelay, { relayId: RELAY_ID, threads: THREADS });
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__agentRelaySecretReady === true, null, { timeout: TIMEOUT_MS });
@@ -259,6 +262,29 @@ async function expectOnScreen(page, threadId, message = `${THREADS[threadId]} sh
     .catch(() => {
       throw new assert.AssertionError({ message });
     });
+}
+
+// Sampled rather than checked once: a surface flipping between sessions passes a single look.
+async function expectStaysOnScreen(page, threadId, message, durationMs = 1000) {
+  const samples = await page.evaluate(
+    async ({ expected, others, durationMs }) => {
+      const seen = [];
+      const deadline = performance.now() + durationMs;
+      while (performance.now() < deadline) {
+        const text = document.body.innerText;
+        seen.push(text.includes(expected) && !others.some((body) => text.includes(body)));
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      return seen;
+    },
+    {
+      expected: bodyOf(threadId),
+      others: Object.keys(THREADS).filter((id) => id !== threadId).map(bodyOf),
+      durationMs,
+    }
+  );
+  const off = samples.filter((onScreen) => !onScreen).length;
+  assert.equal(off, 0, `${message} (${off} of ${samples.length} samples showed something else)`);
 }
 
 const fetchesOf = (page, threadId) =>
@@ -301,6 +327,29 @@ const SCENARIOS = {
     await tapSession(page, "thread-b");
     await expectOnScreen(page, "thread-b", "the second tap on Beta must open it");
     assert.equal(await fetchesOf(page, "thread-b"), before + 1);
+  },
+
+  // A reload brings back the last session; tapping it again while that is still loading
+  // must not let the reload's fallback drop the user on the relay's live session.
+  async "re-tapping the restored session while it loads keeps it"(page) {
+    await tapSession(page, "thread-b");
+    await expectOnScreen(page, "thread-b");
+
+    await page.evaluate(() => {
+      window.localStorage.setItem("e2e-transcript-mode", JSON.stringify({ "thread-b": "hold" }));
+    });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => window.__heldTranscripts.length >= 1, null, { timeout: TIMEOUT_MS });
+    await expectOnScreen(page, "thread-a", "the live session shows while the restored one loads");
+
+    await tapSession(page, "thread-b");
+    await page.waitForTimeout(300);
+    await page.evaluate(() => {
+      delete window.__transcriptMode["thread-b"];
+      window.__releaseHeldTranscripts();
+    });
+    await expectOnScreen(page, "thread-b");
+    await expectStaysOnScreen(page, "thread-b", "the tapped session must stay on screen");
   },
 };
 

@@ -867,6 +867,22 @@ test("re-tapping a selected session that is not on screen asks for the view agai
   );
 });
 
+// Re-tapping the restored session while it loads retries the view, which supersedes the
+// restore's own; that `false` must not then send the user to the live session.
+test("re-tapping the restored session takes it out of the restore's fallback", async () => {
+  const host = await restoredSurface();
+  await host.adoptViewedThread({ threadId: "LIVE", threadProjectId: {} });
+  assert.equal(host.controller.getState().location.threadId, "A");
+
+  const retap = await host.openThread({ threadId: "A", threadProjectId: { A: "P" } });
+  assert.equal(host.shouldRetryView({ change: retap, threadId: "A", viewedThreadId: "LIVE" }), true);
+  assert.equal(
+    host.shouldRepairBootRestore({ shown: false, liveThreadId: "LIVE" }),
+    false,
+    "the user asked for A, so the restore's superseded view must not fall back"
+  );
+});
+
 // The sweep must keep collecting the projects you are NOT in while it dissolves the one
 // you are. Those are different outcomes for the same event, and an implementation that
 // short-circuited on an unresolvable current context would stop collecting entirely — on
