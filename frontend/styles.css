@@ -896,7 +896,10 @@ button:disabled {
   box-shadow: var(--shadow-2);
 }
 .start-session-split-option {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
   width: 100%;
   padding: 6px 10px;
   border: 0;
@@ -909,6 +912,20 @@ button:disabled {
 }
 .start-session-split-option:hover { background: var(--surface-3); }
 .start-session-split-option.is-active { color: var(--accent); }
+.start-session-split-mark {
+  flex: none;
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  color: var(--text-tertiary);
+}
+.start-session-split-mark svg {
+  width: 16px;
+  height: 16px;
+}
+.start-session-split-mark[data-provider="claude_code"] {
+  color: var(--provider-claude-mark);
+}
 
 /* In the sidebar this is a full-width accent slab sitting directly above the
    list, so it sets the column's weight before a single session has been read.

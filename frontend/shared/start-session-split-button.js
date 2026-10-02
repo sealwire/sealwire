@@ -16,6 +16,7 @@
 
 import React from "react";
 
+import { providerMarkSlot } from "./provider-mark.js";
 import { MenuPortal, useAnchoredMenu } from "./use-anchored-menu.js";
 import { useDismissableMenu } from "./use-dismissable-menu.js";
 
@@ -131,7 +132,8 @@ export function StartSessionSplitButton({
                 role: "menuitem",
                 type: "button",
               },
-              option.label || option.value
+              providerMarkSlot(option.value, { className: "start-session-split-mark" }),
+              h("span", null, option.label || option.value)
             )
           )
         )
