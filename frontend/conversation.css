@@ -2735,6 +2735,15 @@ button.handover-section-label {
   align-self: flex-start;
   padding-top: 2px;
 }
+/* Under a card body the relay sent short, while the rest loads or after it failed. */
+.card-body-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+}
 .handover-card-more:hover,
 button.handover-section-label:hover {
   color: var(--text-primary);

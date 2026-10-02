@@ -113,6 +113,7 @@ import {
   buildExpandedTranscriptDetailEntries,
   collectFileChangeDetailItemIds,
 } from "./transcript/details.js";
+import { collectClippedBodyItemIds } from "../shared/card-body.js";
 import { shouldShowTranscriptLoading } from "./transcript-loading.js";
 import { adoptSettledTranscript } from "./transcript/store.js";
 import {
@@ -1380,6 +1381,9 @@ export function createSessionRenderer({
   function handleEnsureFileChangeDetail(itemId) {
     void state.controller?.ensureFileChangeDetail?.(itemId);
   }
+  function handleLoadEntryDetail(itemId) {
+    void state.controller?.loadEntryDetail?.(itemId);
+  }
   function handleSubmitAskUserAnswers(requestId, answers) {
     void state.controller?.submitAskUserQuestionAnswer?.(requestId, answers);
   }
@@ -1395,8 +1399,13 @@ export function createSessionRenderer({
       detailEntries: buildExpandedTranscriptDetailEntries(state, {
         expandedItemIds: localUi.transcriptExpandedItemIds,
         threadId: activeThreadId,
-        autoDetailItemIds: collectFileChangeDetailItemIds(entries),
+        autoDetailItemIds: [
+          ...collectFileChangeDetailItemIds(entries),
+          ...collectClippedBodyItemIds(entries),
+        ],
       }),
+      onLoadEntryDetail: handleLoadEntryDetail,
+      detailFailedItemIds: state.controller?.detailFailedItemIds?.() || null,
       // Hide rollback/reapply on a read-only view-only thread (the apply
       // endpoint resolves the item against the relay's REAL active thread, so
       // acting from a saved-thread view would mutate the wrong/live thread),

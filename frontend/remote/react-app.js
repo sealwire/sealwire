@@ -113,6 +113,8 @@ import {
   searchRemoteThreads,
   configureRemoteStopPending,
 } from "./session-ops.js";
+import { createTranscriptDetailLoader } from "../shared/transcript-detail-loader.js";
+import { collectClippedBodyItemIds } from "../shared/card-body.js";
 import {
   buildExpandedTranscriptDetailEntries,
   cacheTranscriptEntryDetail,
@@ -120,7 +122,7 @@ import {
   getCachedTranscriptEntryDetail,
   getFullTranscriptEntryDetail,
   getLiveTranscriptEntryDetail,
-  isOmittedFileChangeDetail,
+  hasFullFileChangeDetail,
   setLiveTranscriptEntryDetail,
 } from "./transcript/details.js";
 import {
@@ -491,6 +493,35 @@ function RemoteApp() {
       },
     });
   }
+
+  // Reads the live store at call time: a load outlives the render that started it.
+  const [detailFailedItemIds, setDetailFailedItemIds] = useState(() => new Set());
+  const transcriptDetailLoaderRef = useRef(null);
+  if (!transcriptDetailLoaderRef.current) {
+    const live = () => readRemoteStateSnapshot().state;
+    transcriptDetailLoaderRef.current = createTranscriptDetailLoader({
+      currentThreadId: () => live().session?.active_thread_id || null,
+      // A failed run's snapshot copy is parked live but cut; opening it must fetch.
+      hasFull: (threadId, itemId) => Boolean(getFullTranscriptEntryDetail(live(), threadId, itemId)),
+      hasFullDiff: (threadId, itemId) => hasFullFileChangeDetail(live(), threadId, itemId),
+      fetchDetail: (threadId, itemId) => fetchRemoteTranscriptEntryDetail(threadId, itemId),
+      store: (threadId, detail) => {
+        const { cached } = cacheTranscriptEntryDetail(live(), threadId, detail);
+        if (!cached) {
+          setLiveTranscriptEntryDetail(live(), threadId, detail);
+        }
+      },
+      setLoading: (itemId, loading) =>
+        dispatchTranscriptUi({
+          type: loading ? "transcript/startLoadingDetail" : "transcript/finishLoadingDetail",
+          itemId,
+        }),
+      onChange: () => setDetailFailedItemIds(transcriptDetailLoaderRef.current.failedItemIds()),
+      // Called from click handlers that do not await it.
+      onError: (itemId, error) => console.warn(`[transcript] detail load failed for ${itemId}:`, error),
+    });
+  }
+  const transcriptDetailLoader = transcriptDetailLoaderRef.current;
 
   const selectedProvider = remoteUi.sessionDraft.provider || defaultProvider(remoteUi.providers);
   const selectedProviderModels = remoteUi.providerModels[selectedProvider] || [];
@@ -1046,7 +1077,10 @@ function RemoteApp() {
     expandedItemIds: transcriptUiState.transcriptExpandedItemIds,
     threadId: session?.active_thread_id || null,
     transientDetails: transcriptUiState.transcriptExpandedDetails,
-    autoDetailItemIds: collectFileChangeDetailItemIds(session?.transcript),
+    autoDetailItemIds: [
+      ...collectFileChangeDetailItemIds(session?.transcript),
+      ...collectClippedBodyItemIds(session?.transcript),
+    ],
   });
   const pendingAskUserQuestions = session?.pending_ask_user_questions || [];
   const pendingAskUserSignature = askUserDetailSignature(pendingAskUserQuestions);
@@ -1095,6 +1129,7 @@ function RemoteApp() {
       type: "transcript/reset",
     });
     askUserDetailLoaderRef.current?.reset();
+    transcriptDetailLoader.reset();
   }, [session?.active_thread_id]);
 
   // Drive detail loading from the pending set. Re-sync only when the pending
@@ -2187,98 +2222,30 @@ function RemoteApp() {
       type: "transcript/expand",
       itemId: expandKey,
     });
-    // A failed run's snapshot copy is parked live but cut; opening it must fetch.
-    if (
-      getFullTranscriptEntryDetail(currentState, session.active_thread_id, itemId)
-      || transcriptUiState.transcriptExpandedDetails.has(itemId)
-    ) {
+    if (transcriptUiState.transcriptExpandedDetails.has(itemId)) {
       return;
     }
-
-    dispatchTranscriptUi({
-      type: "transcript/startLoadingDetail",
-      itemId,
-    });
-
-    const threadId = session.active_thread_id;
-    try {
-      const detail = await fetchRemoteTranscriptEntryDetail(threadId, itemId);
-      // `currentState` is the live store; the closed-over `session` is not.
-      if (!detail || currentState.session?.active_thread_id !== threadId) {
-        return;
-      }
-
-      const { cached } = cacheTranscriptEntryDetail(currentState, threadId, detail);
-      if (!cached) {
-        setLiveTranscriptEntryDetail(currentState, threadId, detail);
-      }
+    if (await transcriptDetailLoader.load(itemId)) {
       dispatchTranscriptUi({
         type: "transcript/setExpandedDetail",
         detail: null,
-        itemId,
-      });
-    } catch (error) {
-      // Called from a click handler that does not await it.
-      console.warn(`[transcript] detail load failed for ${itemId}:`, error);
-    } finally {
-      dispatchTranscriptUi({
-        type: "transcript/finishLoadingDetail",
         itemId,
       });
     }
   }
 
   // Opening an individual file section calls this to pull omitted diff bodies.
-  // Idempotent: skips when full detail is cached/live or a fetch is in flight.
-  //
-  // Hoisted via useCallback rather than a fresh function every render: this
-  // flows into transcriptOptions (RemoteTranscriptPanel), where a fresh
-  // reference every render defeated stableTranscriptOptions no matter how
-  // stable every other field was. Depends on session?.active_thread_id, not
-  // `session` itself, so a routine transcript delta (which replaces `session`
-  // but not its active_thread_id) does not recreate this — the async
-  // continuation's `session?.active_thread_id !== threadId` re-check below
-  // still reads the CURRENT value correctly, because a real thread switch is
-  // exactly the case that invalidates this dependency and recreates the
-  // callback.
+  // Stable for the panel's lifetime, so it never defeats stableTranscriptOptions.
   const ensureFileChangeDetail = useCallback(
-    async (itemId) => {
-      if (!itemId || !session?.active_thread_id) {
-        return;
-      }
-      const threadId = session.active_thread_id;
-      // Skip only when we already hold the FULL detail — a stripped summary parked
-      // in the live store (running turnDiff) must not block the fetch.
-      const cached = getCachedTranscriptEntryDetail(currentState, threadId, itemId);
-      const live = getLiveTranscriptEntryDetail(currentState, threadId, itemId);
-      const hasFullDetail =
-        (cached && !isOmittedFileChangeDetail(cached))
-        || (live && !isOmittedFileChangeDetail(live));
-      if (hasFullDetail || transcriptUiState.transcriptLoadingItemIds.has(itemId)) {
-        return;
-      }
+    (itemId) => transcriptDetailLoader.loadDiff(itemId),
+    [transcriptDetailLoader]
+  );
 
-      dispatchTranscriptUi({ type: "transcript/startLoadingDetail", itemId });
-      try {
-        const detail = await fetchRemoteTranscriptEntryDetail(threadId, itemId);
-        if (!detail || session?.active_thread_id !== threadId) {
-          return;
-        }
-        const { cached } = cacheTranscriptEntryDetail(currentState, threadId, detail);
-        if (!cached) {
-          setLiveTranscriptEntryDetail(currentState, threadId, detail);
-        }
-      } catch (error) {
-        // The shared renderer fires this without awaiting, so swallow the
-        // rejection here to avoid an unhandled promise rejection; the entry stays
-        // on its "Loading diff…" summary until a new load edge (such as remounting
-        // the entry) tries again.
-        console.warn(`[file-change] diff load failed for ${itemId}:`, error);
-      } finally {
-        dispatchTranscriptUi({ type: "transcript/finishLoadingDetail", itemId });
-      }
+  const handleLoadEntryDetail = useCallback(
+    (itemId) => {
+      void transcriptDetailLoader.loadBody(itemId);
     },
-    [session?.active_thread_id, currentState, transcriptUiState.transcriptLoadingItemIds, dispatchTranscriptUi]
+    [transcriptDetailLoader]
   );
 
   // Same identity-stability reason as ensureFileChangeDetail above, and the
@@ -2594,6 +2561,8 @@ function RemoteApp() {
           onToggleExpandableBlock: handleExpandableBlockToggle,
           onToggleTranscriptItem: handleTranscriptToggle,
           onEnsureFileChangeDetail: ensureFileChangeDetail,
+          onLoadEntryDetail: handleLoadEntryDetail,
+          detailFailedItemIds,
           onSubmitDecision(decision, scope) {
             void handlers.onSubmitDecision(decision, scope);
           },
@@ -3434,6 +3403,8 @@ function RemoteThreadPanel({
   onToggleExpandableBlock,
   onToggleTranscriptItem,
   onEnsureFileChangeDetail,
+  onLoadEntryDetail,
+  detailFailedItemIds,
   onSubmitDecision,
   onSubmitAskUserAnswers,
   onRetryAskUserDetail,
@@ -3534,6 +3505,8 @@ function RemoteThreadPanel({
         onToggleExpandableBlock,
         onToggleTranscriptItem,
         onEnsureFileChangeDetail,
+        onLoadEntryDetail,
+        detailFailedItemIds,
         onSubmitDecision,
         onSubmitAskUserAnswers,
         onRetryAskUserDetail,

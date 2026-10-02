@@ -34827,6 +34827,430 @@ mod delegate_card_tests {
         assert_eq!(mark.delegates()[0].id, ask_id);
     }
 
+    async fn entry_detail(
+        app: &crate::state::AppState,
+        thread_id: &str,
+        row_id: &str,
+    ) -> serde_json::Value {
+        let detail = app
+            .read_thread_entry_detail(crate::protocol::ReadThreadEntryDetailInput {
+                thread_id: thread_id.to_string(),
+                item_id: row_id.to_string(),
+                field: None,
+                cursor: None,
+                device_id: None,
+            })
+            .await
+            .expect("detail read");
+        assert!(
+            detail.pending_fields.is_empty(),
+            "{:?}",
+            detail.pending_fields
+        );
+        serde_json::to_value(detail.entry.expect("an entry")).unwrap()
+    }
+
+    fn chars(value: &serde_json::Value) -> usize {
+        value.as_str().expect("a string").chars().count()
+    }
+
+    #[tokio::test]
+    async fn a_long_mcp_brief_reads_whole_from_its_cards_detail_even_after_a_reload() {
+        use crate::protocol::{ToolCallView, TranscriptEntryKind};
+        use crate::state::IdSpace;
+        use crate::usage::store::UsageStore;
+
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let database = project.path().join("sealwire.db");
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let caller = session(&app, &cwd).await;
+        app.relay
+            .write()
+            .await
+            .install_database(UsageStore::open(&database));
+        let brief = format!(
+            "Review the retry loop.\n\n{}",
+            "Check every branch that can retry and say which one loops. ".repeat(50)
+        );
+        let DelegateOutcome::Sent { ask_id, .. } = app
+            .delegate_request(&caller, request(StartedBy::Agent, &brief))
+            .await
+            .expect("delegate succeeds")
+        else {
+            panic!("delegate started without a model approval hold");
+        };
+        {
+            let mut relay = app.relay.write().await;
+            let mut tool = ToolCallView::command_execution(None);
+            tool.item_type = "mcpToolCall".into();
+            tool.name = "delegate".into();
+            relay.upsert_item_for_thread(
+                &caller,
+                "tool:delegate".into(),
+                IdSpace::Provider,
+                TranscriptEntryKind::ToolCall,
+                None,
+                "completed".into(),
+                None,
+                Some(tool),
+            );
+            relay.mark_delegate_call(&ask_id, &caller, "tool:delegate");
+            relay.install_database(UsageStore::open(&database));
+        }
+
+        let (row, _) = row_marked(&app, &caller, InjectionKind::DelegateCall).await;
+        let detail = entry_detail(&app, &caller, row.row_id.as_deref().unwrap()).await;
+        let whole = &detail["injection"]["delegate"][0];
+        assert_eq!(whole["task"], brief.trim(), "expanding reads all of it");
+        assert!(whole.get("task_clipped").is_none());
+
+        let page = serde_json::to_value(&row).unwrap();
+        let listed = &page["injection"]["delegate"][0];
+        assert!(chars(&listed["task"]) < brief.chars().count());
+        assert_eq!(listed["task_clipped"], true, "the list says it is short");
+    }
+
+    /// Lists keep each long card body short and say so; the row's detail has it whole.
+    #[tokio::test]
+    async fn every_long_card_body_is_a_marked_preview_on_a_page_and_whole_in_its_detail() {
+        use crate::protocol::{
+            ReviewFindingView, ReviewRoundView, ToolCallView, TranscriptEntryKind,
+        };
+        use crate::state::relay::{
+            DelegateMark, GoalMark, HandoverMark, InjectedMessage, InjectionTag, MessageAnchor,
+            ReviewMark,
+        };
+        use crate::state::IdSpace;
+
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = session(&app, &cwd).await;
+        let long = |line: &str| format!("{line}\n\n{}", "A sentence that goes on. ".repeat(360));
+        let (task, answer, report, summary) = (
+            long("The brief"),
+            long("The answer"),
+            long("The report"),
+            long("## Goal\nThe summary"),
+        );
+        let finding_text = "x".repeat(600);
+        {
+            let mut relay = app.relay.write().await;
+            let rows = [
+                ("tool:call", TranscriptEntryKind::ToolCall, None),
+                ("user:answer", TranscriptEntryKind::UserText, Some("wake")),
+                (
+                    "user:review",
+                    TranscriptEntryKind::UserText,
+                    Some("findings"),
+                ),
+                ("tool:goal", TranscriptEntryKind::ToolCall, None),
+                (
+                    "agent:summary",
+                    TranscriptEntryKind::AgentText,
+                    Some(summary.as_str()),
+                ),
+            ];
+            for (id, kind, text) in rows {
+                relay.upsert_item_for_thread(
+                    &thread,
+                    id.into(),
+                    IdSpace::Provider,
+                    kind,
+                    text.map(str::to_string),
+                    "completed".into(),
+                    None,
+                    (kind == TranscriptEntryKind::ToolCall).then(|| {
+                        let mut tool = ToolCallView::command_execution(None);
+                        tool.item_type = "mcpToolCall".into();
+                        tool
+                    }),
+                );
+            }
+            relay.injections.put_delegate(DelegateMark {
+                id: "ask".into(),
+                asker_thread_id: thread.clone(),
+                task: task.clone(),
+                status: "done".into(),
+                answer: Some(answer.clone()),
+                sent_at: Some(1),
+                ..DelegateMark::default()
+            });
+            relay.injections.put_review(ReviewMark {
+                id: "review".into(),
+                parent_thread_id: thread.clone(),
+                status: "addressing_findings".into(),
+                max_rounds: 2,
+                rounds: vec![ReviewRoundView {
+                    round: 1,
+                    verdict: Some("needs_changes".into()),
+                    findings: (0..20)
+                        .map(|_| ReviewFindingView {
+                            severity: "high".into(),
+                            location: None,
+                            text: finding_text.clone(),
+                            clipped: false,
+                        })
+                        .collect(),
+                    findings_total: 20,
+                    finished_at: Some(2),
+                    ..ReviewRoundView::default()
+                }],
+                ..ReviewMark::default()
+            });
+            relay.injections.put_goal(
+                serde_json::from_value::<GoalMark>(serde_json::json!({
+                    "id": "goal",
+                    "thread_id": thread,
+                    "settlements": [{
+                        "seq": 1,
+                        "status": "complete_claimed",
+                        "objective": "Ship it",
+                        "report": report,
+                    }],
+                }))
+                .unwrap(),
+            );
+            relay.injections.put_handover(HandoverMark {
+                id: "handover".into(),
+                source_thread_id: thread.clone(),
+                status: "done".into(),
+                ..HandoverMark::default()
+            });
+            let ask = ["ask".to_string()];
+            for (id, tag) in [
+                (
+                    "tool:call",
+                    InjectionTag::delegate(InjectionKind::DelegateCall, &ask),
+                ),
+                (
+                    "user:answer",
+                    InjectionTag::delegate(InjectionKind::DelegateAnswer, &ask),
+                ),
+                (
+                    "user:review",
+                    InjectionTag::review(InjectionKind::ReviewResult, "review", 1),
+                ),
+                (
+                    "tool:goal",
+                    InjectionTag::goal(InjectionKind::GoalSettled, "goal", 1),
+                ),
+                (
+                    "agent:summary",
+                    InjectionTag::handover(InjectionKind::HandoverSummary, "handover"),
+                ),
+            ] {
+                relay.injections.anchor(InjectedMessage {
+                    thread_id: thread.clone(),
+                    anchor: MessageAnchor::Item(id.into()),
+                    tag,
+                    created_at: 1,
+                });
+            }
+        }
+
+        let row = |id: &'static str| {
+            let app = &app;
+            let thread = &thread;
+            async move {
+                let page = app
+                    .read_thread_transcript_rows(crate::protocol::ReadThreadTranscriptRowsInput {
+                        thread_id: thread.clone(),
+                        row_ids: vec![id.to_string()],
+                        device_id: None,
+                    })
+                    .await
+                    .expect("rows read");
+                assert_eq!(page.entries.len(), 1, "{id} is held");
+                (serde_json::to_value(&page.entries[0]).unwrap(), id)
+            }
+        };
+
+        let (listed, id) = row("tool:call").await;
+        let ask = &listed["injection"]["delegate"][0];
+        assert!(chars(&ask["task"]) < task.chars().count());
+        assert_eq!(ask["task_clipped"], true);
+        let whole = entry_detail(&app, &thread, id).await;
+        assert_eq!(whole["injection"]["delegate"][0]["task"], task);
+        assert!(whole["injection"]["delegate"][0]
+            .get("task_clipped")
+            .is_none());
+
+        let (listed, id) = row("user:answer").await;
+        let ask = &listed["injection"]["delegate"][0];
+        assert!(chars(&ask["answer"]) < answer.chars().count());
+        assert_eq!(ask["answer_clipped"], true);
+        let whole = entry_detail(&app, &thread, id).await;
+        assert_eq!(whole["injection"]["delegate"][0]["answer"], answer);
+        assert!(whole["injection"]["delegate"][0]
+            .get("answer_clipped")
+            .is_none());
+
+        let (listed, id) = row("user:review").await;
+        let review = &listed["injection"]["review"];
+        let findings = review["rounds"][0]["findings"].as_array().unwrap();
+        assert!(findings.len() < 20);
+        assert!(findings.iter().all(|finding| finding["clipped"] == true
+            && chars(&finding["text"]) < finding_text.chars().count()));
+        assert_eq!(review["findings_clipped"], true);
+        let whole = entry_detail(&app, &thread, id).await;
+        let review = &whole["injection"]["review"];
+        let findings = review["rounds"][0]["findings"].as_array().unwrap();
+        assert_eq!(findings.len(), 20);
+        assert!(findings
+            .iter()
+            .all(|finding| finding["text"] == finding_text.as_str()
+                && finding.get("clipped").is_none()));
+        assert!(review.get("findings_clipped").is_none());
+
+        let (listed, id) = row("tool:goal").await;
+        let settled = &listed["injection"]["goal_settled"];
+        assert!(chars(&settled["report"]) < report.chars().count());
+        assert_eq!(settled["report_clipped"], true);
+        let whole = entry_detail(&app, &thread, id).await;
+        assert_eq!(whole["injection"]["goal_settled"]["report"], report);
+        assert!(whole["injection"]["goal_settled"]
+            .get("report_clipped")
+            .is_none());
+
+        let (listed, id) = row("agent:summary").await;
+        assert!(chars(&listed["text"]) < summary.chars().count());
+        assert_eq!(listed["injection"]["text_clipped"], true);
+        assert_eq!(
+            listed["content_state"], "full",
+            "a preview on purpose is not a row to repair"
+        );
+        let whole = entry_detail(&app, &thread, id).await;
+        assert_eq!(whole["text"], summary);
+        assert!(whole["injection"].get("text_clipped").is_none());
+    }
+
+    /// Codex history keeps long tool fields and texts short and the relay stores those
+    /// rows cut. Drawn as a card, the row is not left a preview the client would repair.
+    #[tokio::test]
+    async fn a_card_row_codex_kept_short_is_not_left_for_the_client_to_repair() {
+        use crate::protocol::{ToolCallView, TranscriptContentState, TranscriptEntryKind};
+        use crate::state::relay::{
+            DelegateMark, HandoverMark, InjectedMessage, InjectionTag, MessageAnchor,
+        };
+        use crate::state::IdSpace;
+
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = session(&app, &cwd).await;
+        {
+            let mut relay = app.relay.write().await;
+            let rows = [
+                ("tool:call", TranscriptEntryKind::ToolCall, None),
+                (
+                    "agent:summary",
+                    TranscriptEntryKind::AgentText,
+                    Some("## Goal\nShip"),
+                ),
+                ("tool:plain", TranscriptEntryKind::ToolCall, None),
+                (
+                    "user:answer",
+                    TranscriptEntryKind::UserText,
+                    Some("The agents you asked have finished."),
+                ),
+            ];
+            for (id, kind, text) in rows {
+                relay.upsert_item_for_thread(
+                    &thread,
+                    id.into(),
+                    IdSpace::Provider,
+                    kind,
+                    text.map(str::to_string),
+                    "completed".into(),
+                    None,
+                    (kind == TranscriptEntryKind::ToolCall).then(|| {
+                        let mut tool = ToolCallView::command_execution(None);
+                        tool.item_type = "mcpToolCall".into();
+                        tool
+                    }),
+                );
+                relay.mark_transcript_row_cut_for_thread(&thread, id, true);
+            }
+            relay.injections.put_delegate(DelegateMark {
+                id: "ask".into(),
+                asker_thread_id: thread.clone(),
+                task: "The brief".into(),
+                status: "working".into(),
+                sent_at: Some(1),
+                ..DelegateMark::default()
+            });
+            relay.injections.put_handover(HandoverMark {
+                id: "handover".into(),
+                source_thread_id: thread.clone(),
+                status: "done".into(),
+                ..HandoverMark::default()
+            });
+            for (id, tag) in [
+                (
+                    "tool:call",
+                    InjectionTag::delegate(InjectionKind::DelegateCall, &["ask".to_string()]),
+                ),
+                (
+                    "agent:summary",
+                    InjectionTag::handover(InjectionKind::HandoverSummary, "handover"),
+                ),
+                (
+                    "user:answer",
+                    InjectionTag::delegate(InjectionKind::DelegateAnswer, &["ask".to_string()]),
+                ),
+            ] {
+                relay.injections.anchor(InjectedMessage {
+                    thread_id: thread.clone(),
+                    anchor: MessageAnchor::Item(id.into()),
+                    tag,
+                    created_at: 1,
+                });
+            }
+        }
+
+        let page = app
+            .read_thread_transcript_rows(crate::protocol::ReadThreadTranscriptRowsInput {
+                thread_id: thread.clone(),
+                row_ids: vec![
+                    "tool:call".into(),
+                    "agent:summary".into(),
+                    "tool:plain".into(),
+                    "user:answer".into(),
+                ],
+                device_id: None,
+            })
+            .await
+            .expect("rows read");
+        let [call, summary, plain, answer] = &page.entries[..] else {
+            panic!("four rows: {}", page.entries.len());
+        };
+        assert_eq!(
+            answer.content_state,
+            TranscriptContentState::Full,
+            "the answer card never shows the wake prompt Codex cut"
+        );
+        assert_eq!(
+            call.content_state,
+            TranscriptContentState::Full,
+            "the card never shows the tool fields Codex cut"
+        );
+        assert_eq!(summary.content_state, TranscriptContentState::Full);
+        assert!(
+            summary.injection.as_ref().unwrap().text_clipped,
+            "the card offers the rest, read from Codex when opened"
+        );
+        assert_eq!(
+            plain.content_state,
+            TranscriptContentState::Preview,
+            "a tool row drawn as itself still shows it was cut"
+        );
+    }
+
     async fn marked_rows(
         app: &crate::state::AppState,
         thread_id: &str,
@@ -35003,24 +35427,18 @@ mod delegate_card_tests {
         });
         let reply = runtime.transcript.get_row(&reply_id).unwrap().clone();
         let marks = relay.thread_injections(&asker, InjectionReader::Operator);
-        let page = relay
-            .runtime_for_thread(&asker)
-            .unwrap()
-            .transcript_page(&asker, None, &marks);
-        assert_eq!(
-            page.entries.len(),
-            1,
-            "the long brief occupies the latest page"
+        // Read alone, as a page that left the request on an older one serves it.
+        let alone = relay.runtime_for_thread(&asker).unwrap().transcript_rows(
+            &asker,
+            std::slice::from_ref(&reply_id),
+            &marks,
         );
-        assert!(
-            page.prev_cursor.is_some(),
-            "the request is on an older page"
-        );
-        let mark = serde_json::to_value(&page.entries[0].injection).unwrap();
+        let mark = serde_json::to_value(&alone.entries[0].injection).unwrap();
         assert_eq!(
             mark["kind"], "delegate_brief",
             "the brief must identify its own card"
         );
+        assert_eq!(mark["text_clipped"], true, "a list carries its opening");
 
         relay.install_database(UsageStore::open(&database));
         let mut rebuilt = reply;
@@ -37995,24 +38413,18 @@ mod handover_tests {
         });
         let reply = runtime.transcript.get_row(&reply_id).unwrap().clone();
         let marks = relay.thread_injections(&source, InjectionReader::Operator);
-        let page = relay
-            .runtime_for_thread(&source)
-            .unwrap()
-            .transcript_page(&source, None, &marks);
-        assert_eq!(
-            page.entries.len(),
-            1,
-            "the long reply occupies the latest page"
+        // Read alone, as a page that left the request on an older one serves it.
+        let alone = relay.runtime_for_thread(&source).unwrap().transcript_rows(
+            &source,
+            std::slice::from_ref(&reply_id),
+            &marks,
         );
-        assert!(
-            page.prev_cursor.is_some(),
-            "the request is on an older page"
-        );
-        let mark = serde_json::to_value(&page.entries[0].injection).unwrap();
+        let mark = serde_json::to_value(&alone.entries[0].injection).unwrap();
         assert_eq!(
             mark["kind"], "handover_summary",
             "the reply must identify its own card"
         );
+        assert_eq!(mark["text_clipped"], true, "a list carries its opening");
         assert_eq!(mark["handover"]["target_thread_id"], target);
         assert_eq!(mark["handover"]["status"], "done");
 

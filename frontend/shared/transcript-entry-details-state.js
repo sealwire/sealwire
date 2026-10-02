@@ -1,5 +1,6 @@
 import { transcriptRowKey } from "./transcript-row-key.js";
 import { transcriptPageMatchesGeneration } from "./transcript-generation.js";
+import { entryBodyClipped } from "./card-body.js";
 
 const TRANSCRIPT_ENTRY_DETAIL_INLINE_CACHE_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_ENTRY_DETAIL_CACHE_MAX_BYTES = 256 * 1024;
@@ -57,19 +58,25 @@ function estimateTranscriptEntryDetailBytes(entry) {
   }
 }
 
-function supportsTranscriptEntryDetail(entry) {
+function isToolRow(entry) {
   return Boolean(
     transcriptRowKey(entry)
       && (entry.kind === "command" || entry.kind === "tool_call")
   );
 }
 
+// A card row is fetched for its body the way a tool row is for its output.
+function supportsTranscriptEntryDetail(entry) {
+  return isToolRow(entry) || Boolean(transcriptRowKey(entry) && entry.injection);
+}
+
 function shouldInlineCacheTranscriptEntry(entry) {
   return supportsTranscriptEntryDetail(entry) && entry.status === "completed";
 }
 
+// Only a tool row's snapshot copy is worth parking: it grows while it runs.
 function shouldRetainLiveTranscriptEntry(entry) {
-  return supportsTranscriptEntryDetail(entry) && entry.status !== "completed";
+  return isToolRow(entry) && entry.status !== "completed";
 }
 
 function buildPreviewEntry(entry) {
@@ -228,6 +235,11 @@ export function cacheTranscriptEntryDetail(state, threadId, entry) {
   const generation = sessionGeneration(state);
   const base = rebasedDetailStores(state, generation);
   const key = transcriptEntryCacheKey(threadId, itemId);
+  // The phone caches each page row as it lands; a short copy must not replace a whole body.
+  const held = base.cache.get(key)?.entry;
+  if (held && isPartialTranscriptEntry(entry) && !isPartialTranscriptEntry(held)) {
+    return { cached: true, patch: null };
+  }
   const nextCache = new Map(base.cache);
   const nextOrder = base.order.filter((value) => value !== key);
   nextCache.set(key, {
@@ -363,12 +375,21 @@ export function isOmittedFileChangeDetail(entry) {
   return Boolean(entry?.tool?.file_changes_omitted);
 }
 
+/** Whether the full diff of a file-change row is held, not just its summary. */
+export function hasFullFileChangeDetail(state, threadId, itemId) {
+  return [
+    getCachedTranscriptEntryDetail(state, threadId, itemId),
+    getLiveTranscriptEntryDetail(state, threadId, itemId),
+  ].some((candidate) => candidate && !isOmittedFileChangeDetail(candidate));
+}
+
 /** Whether this copy of a row is missing part of its body. */
 export function isPartialTranscriptEntry(entry) {
   return (
     isOmittedFileChangeDetail(entry)
     || entry?.content_state === "preview"
     || entry?.content_state === "omitted"
+    || entryBodyClipped(entry)
   );
 }
 

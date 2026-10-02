@@ -994,14 +994,14 @@ impl SessionSnapshot {
             // bounds a pathologically large snapshot, clipping even user text
             // only as a last resort, so the honesty invariant holds.
             let mut entry_previewed = false;
-            if entry.kind != TranscriptEntryKind::UserText {
-                if let Some(text) = &mut entry.text {
-                    entry_previewed |= truncate_with_ellipsis(text, budget.max_transcript_chars);
-                }
-            }
+            let text_cut = entry.kind != TranscriptEntryKind::UserText
+                && entry
+                    .text
+                    .as_mut()
+                    .is_some_and(|text| truncate_with_ellipsis(text, budget.max_transcript_chars));
+            let mut tool_cut = false;
             if let Some(tool) = &mut entry.tool {
-                entry_previewed |=
-                    truncate_with_ellipsis(&mut tool.title, budget.max_transcript_chars);
+                tool_cut |= truncate_with_ellipsis(&mut tool.title, budget.max_transcript_chars);
                 for field in [
                     &mut tool.detail,
                     &mut tool.command,
@@ -1009,37 +1009,43 @@ impl SessionSnapshot {
                     &mut tool.url,
                 ] {
                     if let Some(value) = field {
-                        entry_previewed |=
-                            truncate_with_ellipsis(value, budget.max_transcript_chars);
+                        tool_cut |= truncate_with_ellipsis(value, budget.max_transcript_chars);
                     }
                 }
                 if let Some(input_preview) = &mut tool.input_preview {
-                    entry_previewed |=
-                        truncate_with_ellipsis(input_preview, budget.max_transcript_chars);
+                    tool_cut |= truncate_with_ellipsis(input_preview, budget.max_transcript_chars);
                 }
                 if let Some(result_preview) = &mut tool.result_preview {
-                    entry_previewed |=
-                        truncate_with_ellipsis(result_preview, budget.max_transcript_chars);
+                    tool_cut |= truncate_with_ellipsis(result_preview, budget.max_transcript_chars);
                 }
                 if let Some(diff) = &mut tool.diff {
-                    entry_previewed |= truncate_with_ellipsis(diff, budget.max_transcript_chars);
+                    tool_cut |= truncate_with_ellipsis(diff, budget.max_transcript_chars);
                 }
                 if tool.file_changes.len() > budget.max_file_changes {
                     tool.file_changes.truncate(budget.max_file_changes);
-                    entry_previewed = true;
+                    tool_cut = true;
                 }
                 for change in &mut tool.file_changes {
-                    entry_previewed |=
+                    tool_cut |=
                         truncate_with_ellipsis(&mut change.diff, budget.max_transcript_chars);
                 }
+            }
+            if text_cut || tool_cut {
+                entry_previewed |= entry.needs_repair_after_cut(text_cut);
             }
             if let Some(InjectionView {
                 card: InjectionCard::Delegate(asks),
                 ..
             }) = &mut entry.injection
             {
-                for answer in asks.iter_mut().filter_map(|ask| ask.answer.as_mut()) {
-                    entry_previewed |= truncate_with_ellipsis(answer, budget.max_transcript_chars);
+                // A card says it was cut on itself, so its row is not marked a preview.
+                for ask in asks.iter_mut() {
+                    ask.task_clipped |=
+                        truncate_with_ellipsis(&mut ask.task, budget.max_transcript_chars);
+                    if let Some(answer) = ask.answer.as_mut() {
+                        ask.answer_clipped |=
+                            truncate_with_ellipsis(answer, budget.max_transcript_chars);
+                    }
                 }
             }
             if let Some(InjectionView {
@@ -1047,7 +1053,7 @@ impl SessionSnapshot {
                 ..
             }) = &mut entry.injection
             {
-                entry_previewed |=
+                settled.report_clipped |=
                     truncate_with_ellipsis(&mut settled.report, budget.max_transcript_chars);
             }
             if entry_previewed {
@@ -1151,43 +1157,44 @@ impl SessionSnapshot {
                     })
             }) {
                 for entry in &mut self.transcript {
-                    let mut entry_previewed = false;
-                    if let Some(text) = &mut entry.text {
-                        entry_previewed |=
-                            truncate_with_ellipsis(text, budget.fallback_transcript_chars);
-                    }
+                    let text_cut = entry.text.as_mut().is_some_and(|text| {
+                        truncate_with_ellipsis(text, budget.fallback_transcript_chars)
+                    });
+                    let mut tool_cut = false;
                     if let Some(tool) = &mut entry.tool {
                         if let Some(detail) = &mut tool.detail {
-                            entry_previewed |=
+                            tool_cut |=
                                 truncate_with_ellipsis(detail, budget.fallback_transcript_chars);
                         }
                         if let Some(input_preview) = &mut tool.input_preview {
-                            entry_previewed |= truncate_with_ellipsis(
+                            tool_cut |= truncate_with_ellipsis(
                                 input_preview,
                                 budget.fallback_transcript_chars,
                             );
                         }
                         if let Some(result_preview) = &mut tool.result_preview {
-                            entry_previewed |= truncate_with_ellipsis(
+                            tool_cut |= truncate_with_ellipsis(
                                 result_preview,
                                 budget.fallback_transcript_chars,
                             );
                         }
                         if let Some(diff) = &mut tool.diff {
-                            entry_previewed |=
+                            tool_cut |=
                                 truncate_with_ellipsis(diff, budget.fallback_transcript_chars);
                         }
                         if tool.file_changes.len() > budget.fallback_file_changes {
                             tool.file_changes.truncate(budget.fallback_file_changes);
-                            entry_previewed = true;
+                            tool_cut = true;
                         }
                         for change in &mut tool.file_changes {
-                            entry_previewed |= truncate_with_ellipsis(
+                            tool_cut |= truncate_with_ellipsis(
                                 &mut change.diff,
                                 budget.fallback_transcript_chars,
                             );
                         }
                     }
+                    let entry_previewed =
+                        (text_cut || tool_cut) && entry.needs_repair_after_cut(text_cut);
                     if entry_previewed {
                         transcript_truncated = true;
                         entry
@@ -1281,6 +1288,7 @@ impl SessionSnapshot {
                             ..
                         }) => {
                             for ask in asks {
+                                ask.task.clear();
                                 ask.answer = None;
                                 ask.cited.clear();
                             }
@@ -2331,9 +2339,63 @@ pub struct InjectionView {
     pub kind: InjectionKind,
     #[serde(flatten)]
     pub card: InjectionCard,
+    /// The row's `text` is the card's body, cut short for a list; its detail has all of it.
+    /// Not `content_state`: that one asks the client to repair the row by itself.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub text_clipped: bool,
+}
+
+impl TranscriptEntryView {
+    /// Some of the row's own fields were cut short, its text among them if `text_cut`. True
+    /// when the row must be marked a preview for the client to repair; a card row needs no
+    /// repair, since the card says so on itself when the cut text is its body.
+    pub(crate) fn needs_repair_after_cut(&mut self, text_cut: bool) -> bool {
+        let kind = self.kind;
+        let Some(mark) = self.injection.as_mut() else {
+            return true;
+        };
+        match mark.draws_row(kind) {
+            Some(CardRow::TextBody) => {
+                mark.text_clipped |= text_cut;
+                false
+            }
+            Some(CardRow::Replaced) => false,
+            None => true,
+        }
+    }
 }
 
 impl InjectionView {
+    /// How a client draws `kind`'s row with this card, mirroring its `TranscriptEntry`;
+    /// `None` when it draws the row as a plain message or tool row.
+    pub fn draws_row(&self, kind: TranscriptEntryKind) -> Option<CardRow> {
+        use InjectionKind::*;
+        use TranscriptEntryKind::{AgentText, ToolCall, UserText};
+        let ask = self.delegates().first();
+        let drawn = |shown: bool, row: CardRow| shown.then_some(row);
+        match (self.kind, kind) {
+            (HandoverSummary, AgentText) => drawn(
+                self.handover()
+                    .is_some_and(|handover| handover.status != "failed"),
+                CardRow::TextBody,
+            ),
+            (DelegateBrief, AgentText) => drawn(
+                ask.is_some_and(|ask| ask.sent_at.is_some() || ask.status == "working"),
+                CardRow::TextBody,
+            ),
+            (HandoverBrief | DelegateTask, UserText) | (DelegateReported, AgentText) => {
+                Some(CardRow::TextBody)
+            }
+            (DelegateCall | ReviewCall | GoalSettled | DelegateReported, ToolCall)
+            | (
+                HandoverRequest | DelegateRequest | DelegateAnswer | DelegateNudge | GoalTurn,
+                UserText,
+            ) => Some(CardRow::Replaced),
+            (review, UserText) if review.is_review() => Some(CardRow::Replaced),
+            _ => None,
+        }
+    }
+
     pub fn handover(&self) -> Option<&HandoverCardView> {
         match &self.card {
             InjectionCard::Handover(handover) => Some(handover),
@@ -2370,6 +2432,15 @@ impl InjectionView {
     }
 }
 
+/// How a client draws a row that carries a card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardRow {
+    /// The row's text is the card's body.
+    TextBody,
+    /// The card stands in for the row; none of the row's own fields are shown.
+    Replaced,
+}
+
 /// Serialized as a field named after the variant, beside `kind`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2395,8 +2466,11 @@ pub struct DelegateCardView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_title: Option<String>,
     pub peer_provider: String,
-    /// What the person typed after `/delegate`; empty when an agent asked.
+    /// What the person typed after `/delegate`, or the brief an agent's delegate call sent.
     pub task: String,
+    /// `task` is the opening of a longer one; the row's detail has all of it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub task_clipped: bool,
     /// The opening line of what the peer was given.
     pub title: String,
     /// Appended to the brief on the peer's row; a client strips it to show the brief.
@@ -2409,6 +2483,8 @@ pub struct DelegateCardView {
     /// when the answer came through `report_back` rather than as a reply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub answer_clipped: bool,
     /// The `path:line` places the answer rests on; wherever `answer` is drawn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cited: Vec<String>,
@@ -2446,6 +2522,9 @@ pub struct ReviewCardView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<String>,
     pub rounds: Vec<ReviewRoundView>,
+    /// Some findings this card draws were left out or cut short; the row's detail has them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub findings_clipped: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2493,13 +2572,15 @@ pub struct ReviewRoundView {
 }
 
 /// One line of the reviewer's `## Findings`, in the form its prompt asks for.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewFindingView {
     /// `high`, `medium` or `low`.
     pub severity: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
     pub text: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clipped: bool,
 }
 
 /// Both ends of one handover, as its two cards show it.
@@ -3852,6 +3933,8 @@ pub struct GoalSettledCardView {
     pub left_for_you: Vec<String>,
     /// The completion summary, the reason it is stuck, or the question.
     pub report: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub report_clipped: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<String>,
     pub settled_at: u64,

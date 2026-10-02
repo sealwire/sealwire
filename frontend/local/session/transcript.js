@@ -2,6 +2,7 @@ import { transcriptRowKey } from "../../shared/transcript-row-key.js";
 import { transcript } from "../dom.js";
 import { displayedEntriesFrom, displayedThreadIdFrom } from "../displayed-thread.js";
 import { fetchTranscriptEntryDetailViaRequester } from "../../shared/transcript-entry-detail.js";
+import { createTranscriptDetailLoader } from "../../shared/transcript-detail-loader.js";
 import {
   normalizeThreadTranscriptPage,
   normalizeThreadTranscriptRows,
@@ -18,10 +19,8 @@ import { localTranscriptPageCache } from "../transcript/page-cache-instance.js";
 import { readLocalUiState } from "../ui-store.js";
 import {
   cacheTranscriptEntryDetail,
-  getCachedTranscriptEntryDetail,
   getFullTranscriptEntryDetail,
-  getLiveTranscriptEntryDetail,
-  isOmittedFileChangeDetail,
+  hasFullFileChangeDetail,
   setLiveTranscriptEntryDetail,
 } from "../transcript/details.js";
 import { hydrateLocalTranscript, loadOlderLocalTranscript } from "../transcript/hydration.js";
@@ -272,6 +271,37 @@ export function createTranscriptController(ctx) {
     );
   }
 
+  const detailLoader = createTranscriptDetailLoader({
+    currentThreadId: displayedThreadId,
+    // A failed run's snapshot copy is parked live but cut; opening it must fetch.
+    hasFull: (threadId, itemId) => Boolean(getFullTranscriptEntryDetail(state, threadId, itemId)),
+    hasFullDiff: (threadId, itemId) => hasFullFileChangeDetail(state, threadId, itemId),
+    fetchDetail: fetchTranscriptEntryDetail,
+    store: (threadId, detail) => {
+      const { cached } = cacheTranscriptEntryDetail(state, threadId, detail);
+      if (!cached) {
+        setLiveTranscriptEntryDetail(state, threadId, detail);
+      }
+    },
+    setLoading: (itemId, loading) => {
+      const ui = state.localUiStore.getState();
+      if (loading) {
+        ui.startTranscriptDetailLoading(itemId);
+      } else {
+        ui.finishTranscriptDetailLoading(itemId);
+      }
+      if (state.session) {
+        renderSession(state.session);
+      }
+    },
+    onChange: () => {
+      if (state.session) {
+        renderSession(state.session);
+      }
+    },
+    onError: (itemId, error) => logLine(`Transcript detail load failed: ${error.message}`),
+  });
+
   async function toggleTranscriptEntry(itemId) {
     if (!itemId) {
       return;
@@ -282,85 +312,24 @@ export function createTranscriptController(ctx) {
       renderSession(state.session);
     }
 
-    const localUi = readLocalUiState(state.localUiStore);
-    const threadId = displayedThreadId();
-    if (
-      !localUi.transcriptExpandedItemIds.has(expandKey)
-      || !threadId
-      // A failed run's snapshot copy is parked live but cut; opening it must fetch.
-      || getFullTranscriptEntryDetail(state, threadId, itemId)
-      || localUi.transcriptLoadingItemIds.has(itemId)
-    ) {
+    if (!readLocalUiState(state.localUiStore).transcriptExpandedItemIds.has(expandKey)) {
       return;
     }
-
     const entry = displayedEntries().find((candidate) => transcriptRowKey(candidate) === itemId);
     if (!entry || (entry.kind !== "tool_call" && entry.kind !== "command")) {
       return;
     }
-
-    state.localUiStore.getState().startTranscriptDetailLoading(itemId);
-    renderSession(state.session);
-
-    try {
-      const detail = await fetchTranscriptEntryDetail(threadId, itemId);
-      if (!detail || displayedThreadId() !== threadId) {
-        return;
-      }
-      const { cached } = cacheTranscriptEntryDetail(state, threadId, detail);
-      if (!cached) {
-        setLiveTranscriptEntryDetail(state, threadId, detail);
-      }
-    } catch (error) {
-      logLine(`Transcript detail load failed: ${error.message}`);
-    } finally {
-      state.localUiStore.getState().finishTranscriptDetailLoading(itemId);
-      if (state.session) {
-        renderSession(state.session);
-      }
-    }
+    await detailLoader.load(itemId);
   }
 
   // Opening an individual file section calls this to pull omitted diff bodies.
-  // The fetch remains idempotent across repeated open/close interactions.
   async function ensureFileChangeDetail(itemId) {
-    const threadId = displayedThreadId();
-    if (!itemId || !threadId) {
-      return;
-    }
-    const localUi = readLocalUiState(state.localUiStore);
-    // Skip only when we already hold the FULL detail — a stripped summary parked
-    // in the live store (running turnDiff) must not block the fetch.
-    const cached = getCachedTranscriptEntryDetail(state, threadId, itemId);
-    const live = getLiveTranscriptEntryDetail(state, threadId, itemId);
-    const hasFullDetail =
-      (cached && !isOmittedFileChangeDetail(cached))
-      || (live && !isOmittedFileChangeDetail(live));
-    if (hasFullDetail || localUi.transcriptLoadingItemIds.has(itemId)) {
-      return;
-    }
+    await detailLoader.loadDiff(itemId);
+  }
 
-    state.localUiStore.getState().startTranscriptDetailLoading(itemId);
-    if (state.session) {
-      renderSession(state.session);
-    }
-    try {
-      const detail = await fetchTranscriptEntryDetail(threadId, itemId);
-      if (!detail || displayedThreadId() !== threadId) {
-        return;
-      }
-      const { cached } = cacheTranscriptEntryDetail(state, threadId, detail);
-      if (!cached) {
-        setLiveTranscriptEntryDetail(state, threadId, detail);
-      }
-    } catch (error) {
-      logLine(`File change diff load failed: ${error.message}`);
-    } finally {
-      state.localUiStore.getState().finishTranscriptDetailLoading(itemId);
-      if (state.session) {
-        renderSession(state.session);
-      }
-    }
+  /** A card's body the relay sent short, loaded from its row when the card is opened. */
+  async function loadEntryDetail(itemId) {
+    await detailLoader.loadBody(itemId);
   }
 
   async function applyFileChange(itemId, direction) {
@@ -408,6 +377,8 @@ export function createTranscriptController(ctx) {
     toggleTranscriptExpandKey,
     toggleTranscriptEntry,
     ensureFileChangeDetail,
+    loadEntryDetail,
+    detailFailedItemIds: detailLoader.failedItemIds,
     applyFileChange,
   };
 }

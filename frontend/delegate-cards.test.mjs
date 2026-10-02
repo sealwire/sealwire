@@ -399,13 +399,14 @@ test("a snapshot's clipped answer never replaces the whole one already read, but
     active_thread_id: "asker",
     transcript_revision: 11,
     transcript_truncated: true,
-    transcript: [row({ status: "done", answer: `${"W".repeat(1599)}…`, delivered: true }, "preview")],
+    transcript: [row({ status: "done", answer: `${"W".repeat(1599)}…`, answer_clipped: true, delivered: true }, "preview")],
   };
 
   Object.assign(state, prepareTranscriptHydrationState(state, snapshot).patch);
 
   const card = state.transcriptHydrationEntries.get("wake").injection.delegate[0];
   assert.equal(card.answer, whole);
+  assert.equal(card.answer_clipped, false, "the whole answer kept is not called short");
   assert.equal(card.delivered, true, "what did change still lands");
 
   // An emptied shell drops the cited places with the answer; the ones read stay.

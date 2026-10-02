@@ -3,11 +3,13 @@ import React, { useState } from "react";
 
 import {
   avatar,
+  CardBodyStatus,
   CardIcon,
   clockTime,
   OpenThreadLink,
   ShowAllButton,
   Spinner,
+  useCardBody,
   useFold,
 } from "./card-parts.js";
 import { renderMarkdown } from "./markdown.js";
@@ -96,8 +98,8 @@ const HANDED_OVER_ICON = ["M2 8h9M8 4.5 11.5 8 8 11.5", "M14 3v10"];
 const PICKED_UP_ICON = ["M2 3v10", "M5 8h9M8.5 4.5 5 8l3.5 3.5"];
 
 // Folded to a couple of lines; its heading or its text opens it.
-function SummarySection({ section, body, anchorId, folds }) {
-  const fold = useFold(body, folds);
+function SummarySection({ section, body, anchorId, folds, detail = null }) {
+  const fold = useFold(body, folds, detail);
   const label = !section.title
     ? null
     : fold.togglable
@@ -130,8 +132,11 @@ function SummarySection({ section, body, anchorId, folds }) {
   );
 }
 
-/** Markdown split at its headings, three shown; a delegate card uses it for its text too. */
-export function SummarySections({ text, moreLabel = "Show full summary", footer = null }) {
+/**
+ * Markdown split at its headings, three shown; a delegate card uses it for its text too.
+ * A `body` the relay sent short always offers the rest, and loads it when opened.
+ */
+export function SummarySections({ text, moreLabel = "Show full summary", footer = null, body = null }) {
   const [expanded, setExpanded] = useState(false);
   const sections = parseHandoverSections(text);
   if (!sections.length) {
@@ -143,12 +148,18 @@ export function SummarySections({ text, moreLabel = "Show full summary", footer 
   const preview = titled ? null : summaryPreview(sections[0].body);
   const hidden = titled ? Math.max(0, titled - SECTIONS_SHOWN) : 0;
   const shown = expanded || !titled ? sections : sections.slice(0, lead + SECTIONS_SHOWN);
-  const more = hidden || preview ? moreLabel : null;
+  const more = hidden || preview || body?.load ? moreLabel : null;
+  const toggle = () => {
+    if (!expanded) {
+      body?.load?.();
+    }
+    setExpanded(!expanded);
+  };
   const occurrences = new Map();
   return h(
     "div",
     { className: "handover-card-body" },
-    ...shown.map(section => {
+    ...shown.map((section, index) => {
       // Inserting a lead paragraph must not rename every existing heading.
       const occurrence = occurrences.get(section.title) || 0;
       occurrences.set(section.title, occurrence + 1);
@@ -160,13 +171,16 @@ export function SummarySections({ text, moreLabel = "Show full summary", footer 
         body: (!expanded && preview) || section.body,
         // A delegate brief puts its whole to-do list before its one heading, so that part folds too.
         folds: titled > 0,
+        // A short copy is cut at its end, so only its last section is missing words.
+        detail: index === sections.length - 1 ? body : null,
       });
     }),
+    h(CardBodyStatus, { key: "status", body }),
     more
       ? h(ShowAllButton, {
           key: "show-all",
           open: expanded,
-          onToggle: () => setExpanded((value) => !value),
+          onToggle: toggle,
           label: more,
         })
       : null,
@@ -174,7 +188,7 @@ export function SummarySections({ text, moreLabel = "Show full summary", footer 
   );
 }
 
-function HandoverCard({ icon, kicker, title, time, summary, footerStart, link }) {
+function HandoverCard({ icon, kicker, title, time, summary, body = null, footerStart, link }) {
   return h(
     "div",
     { className: "handover-card" },
@@ -190,7 +204,7 @@ function HandoverCard({ icon, kicker, title, time, summary, footerStart, link })
       ),
       time ? h("span", { className: "handover-card-time" }, time) : null
     ),
-    summary ? h(SummarySections, { text: summary }) : null,
+    summary ? h(SummarySections, { text: summary, body }) : null,
     h(
       "div",
       { className: "handover-card-foot" },
@@ -205,24 +219,28 @@ function typedCommand(handover) {
   return handover?.note ? `/handover ${handover.note}` : "/handover";
 }
 
+/** The row the summary was written in; a request's card draws it from its turn. */
 function settledSummary(members) {
   for (let index = members.length - 1; index >= 0; index -= 1) {
     const member = members[index];
     if (member?.kind === "agent_text" && member.text) {
-      return member.text;
+      return member;
     }
   }
-  return "";
+  return null;
 }
 
 function SourceCard({ handover, members }) {
   const target = agentName(handover.target_provider);
+  const summary = settledSummary(members);
+  const body = useCardBody(transcriptRowKey(summary), summary?.injection?.text_clipped);
   return h(HandoverCard, {
     icon: HANDED_OVER_ICON,
     kicker: "Handed over",
     title: handover.target_title ? `to ${target} · ${handover.target_title}` : `to ${target}`,
     time: clockTime(handover.updated_at),
-    summary: settledSummary(members),
+    summary: summary?.text || "",
+    body,
     footerStart: h(
       "span",
       { className: "handover-card-status" },
@@ -289,6 +307,7 @@ export function HandoverSourceEntry({
 export function HandoverTargetEntry({ attrs, entry }) {
   const handover = entry.injection.handover;
   const sourceAgent = agentName(handover.source_provider);
+  const body = useCardBody(transcriptRowKey(entry), entry.injection.text_clipped);
   return h(
     "article",
     { ...attrs, className: `${attrs.className} handover-brief`, "data-handover-id": handover.id },
@@ -298,6 +317,7 @@ export function HandoverTargetEntry({ attrs, entry }) {
       title: handover.source_title || "Another session",
       time: clockTime(handover.created_at),
       summary: briefSummary(entry.text, handover.instruction),
+      body,
       footerStart: null,
       link: h(OpenThreadLink, { threadId: handover.source_thread_id, label: "Source thread" }),
     })

@@ -39,6 +39,8 @@ export function RemoteTranscriptPanel({
   onRetryAskUserDetail,
   onToggleTranscriptItem,
   onEnsureFileChangeDetail,
+  onLoadEntryDetail = null,
+  detailFailedItemIds = null,
   pendingAskUserQuestions,
   session,
   sessionView,
@@ -98,6 +100,8 @@ export function RemoteTranscriptPanel({
       session?.active_thread_id || null
     ),
     onEnsureFileChangeDetail,
+    onLoadEntryDetail,
+    detailFailedItemIds,
     pendingAskUserQuestions,
     onSubmitAskUserAnswers: handleSubmitAskUserAnswers,
     askUserSubmittingRequestIds:

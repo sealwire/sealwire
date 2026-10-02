@@ -10,6 +10,10 @@ use crate::protocol::{
     WorkflowRunView, WorkflowVerdictView, EMERGENCY_TRANSCRIPT_SHELL_CHARS,
     MAX_REVIEW_ACTIVITY_REMOTE_JOBS, MAX_WORKFLOW_ACTIVITY_REMOTE_LOCKED_THREAD_IDS,
 };
+use crate::protocol::{
+    DelegateCardView, GoalSettledCardView, HandoverCardView, InjectionCard, InjectionKind,
+    InjectionView,
+};
 
 const MAX_BROKER_LOGS: usize = 8;
 const MAX_BROKER_TRANSCRIPT_ENTRIES: usize = 6;
@@ -1216,6 +1220,48 @@ fn compact_shelled_entries_are_marked_omitted_not_inferred_from_ellipsis() {
 }
 
 #[test]
+fn compact_emergency_shell_drops_a_delegate_brief_with_the_rest_of_the_card() {
+    use crate::protocol::{DelegateCardView, InjectionCard, InjectionKind, InjectionView};
+    let mut snapshot = make_snapshot();
+    snapshot.current_cwd = "/tmp/".to_string() + &"超长路径".repeat(3_000);
+    snapshot.logs.clear();
+    snapshot.pending_approvals.clear();
+    let row = |id: &str| TranscriptEntryView {
+        row_id: None,
+        order_seq: None,
+        withdrawn: false,
+        item_id: Some(id.to_string()),
+        kind: TranscriptEntryKind::ToolCall,
+        text: None,
+        status: "completed".to_string(),
+        turn_id: Some("turn-1".to_string()),
+        tool: None,
+        content_state: TranscriptContentState::Full,
+        injection: Some(InjectionView {
+            kind: InjectionKind::DelegateCall,
+            card: InjectionCard::Delegate(vec![DelegateCardView {
+                id: id.to_string(),
+                task: "brief ".repeat(300),
+                ..DelegateCardView::default()
+            }]),
+            text_clipped: false,
+        }),
+    };
+    snapshot.transcript = vec![row("call-1"), row("call-2"), row("call-3")];
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+
+    for entry in &compacted.transcript {
+        assert_eq!(entry.content_state, TranscriptContentState::Omitted);
+        let ask = &entry.injection.as_ref().unwrap().delegates()[0];
+        assert!(
+            ask.task.is_empty(),
+            "an omitted row is drawn from its hydrated copy"
+        );
+    }
+}
+
+#[test]
 fn compact_emergency_shell_only_exempts_settled_empty_reasoning() {
     // `Full` is final on clients: even a short real body must remain hydration-
     // eligible because this snapshot can race with longer live deltas. A completed
@@ -1540,47 +1586,228 @@ fn compact_marks_ellipsis_truncated_entry_preview_and_leaves_short_full() {
 
 /// Every marked row carries its card, so a long answer is clipped like the text it
 /// repeats, and the row is re-read for the rest.
-#[test]
-fn compact_clips_a_delegate_answer_and_marks_its_row_preview() {
-    use crate::protocol::{DelegateCardView, InjectionCard, InjectionKind, InjectionView};
-    let mut snapshot = make_snapshot();
-    snapshot.logs.clear();
-    snapshot.pending_approvals.clear();
-    snapshot.transcript = vec![TranscriptEntryView {
+fn snapshot_row(
+    id: &str,
+    kind: TranscriptEntryKind,
+    text: Option<String>,
+    injection: Option<InjectionView>,
+) -> TranscriptEntryView {
+    TranscriptEntryView {
         row_id: None,
         order_seq: None,
         withdrawn: false,
-        item_id: Some("wake".to_string()),
-        kind: TranscriptEntryKind::UserText,
-        text: Some("short wake".to_string()),
+        item_id: Some(id.to_string()),
+        kind,
+        text,
         status: "completed".to_string(),
         turn_id: Some("turn-1".to_string()),
         tool: None,
         content_state: TranscriptContentState::Full,
-        injection: Some(InjectionView {
+        injection,
+    }
+}
+
+fn handover_mark(kind: InjectionKind) -> InjectionView {
+    InjectionView {
+        kind,
+        card: InjectionCard::Handover(HandoverCardView {
+            id: "h".to_string(),
+            source_thread_id: "s".to_string(),
+            source_title: None,
+            source_provider: "claude_code".to_string(),
+            target_thread_id: "t".to_string(),
+            target_title: None,
+            target_provider: "codex".to_string(),
+            note: String::new(),
+            instruction: String::new(),
+            status: "done".to_string(),
+            error: None,
+            created_at: 1,
+            updated_at: 1,
+        }),
+        text_clipped: false,
+    }
+}
+
+/// A card says on itself that its body was cut, and is read whole when opened; marking
+/// its row a preview as well would make the client fetch the row by itself.
+#[test]
+fn compact_cuts_a_cards_bodies_on_the_card_and_leaves_its_row_whole() {
+    // Two rows a push, so none is dropped to make room.
+    let compact = |rows: Vec<TranscriptEntryView>| {
+        let mut snapshot = make_snapshot();
+        snapshot.logs.clear();
+        snapshot.pending_approvals.clear();
+        snapshot.transcript = rows;
+        snapshot
+            .compact_for(SessionSnapshotCompactProfile::RemoteSurface)
+            .transcript
+    };
+    let long = |c: &str| c.repeat(MAX_BROKER_TRANSCRIPT_CHARS * 4);
+    let rows = vec![
+        snapshot_row(
+            "wake",
+            TranscriptEntryKind::UserText,
+            Some("short wake".to_string()),
+            Some(InjectionView {
+                kind: InjectionKind::DelegateAnswer,
+                card: InjectionCard::Delegate(vec![DelegateCardView {
+                    id: "ask-1".to_string(),
+                    task: long("T"),
+                    answer: Some(long("A")),
+                    ..DelegateCardView::default()
+                }]),
+                text_clipped: false,
+            }),
+        ),
+        TranscriptEntryView {
+            tool: Some(long_tool_input(long("I"))),
+            ..snapshot_row(
+                "goal",
+                TranscriptEntryKind::ToolCall,
+                None,
+                Some(InjectionView {
+                    kind: InjectionKind::GoalSettled,
+                    card: InjectionCard::GoalSettled(GoalSettledCardView {
+                        report: long("R"),
+                        ..GoalSettledCardView::default()
+                    }),
+                    text_clipped: false,
+                }),
+            )
+        },
+        snapshot_row(
+            "summary",
+            TranscriptEntryKind::AgentText,
+            Some(long("S")),
+            Some(handover_mark(InjectionKind::HandoverSummary)),
+        ),
+        snapshot_row(
+            "reply",
+            TranscriptEntryKind::AgentText,
+            Some(long("P")),
+            None,
+        ),
+    ];
+
+    let mut rows = rows.into_iter();
+    let first = compact(rows.by_ref().take(2).collect());
+    let second = compact(rows.collect());
+    let [wake, goal] = &first[..] else {
+        panic!("both rows kept: {}", first.len());
+    };
+    let [summary, reply] = &second[..] else {
+        panic!("both rows kept: {}", second.len());
+    };
+    let ask = &wake.injection.as_ref().unwrap().delegates()[0];
+    assert!(ask.answer.as_ref().unwrap().chars().count() <= MAX_BROKER_TRANSCRIPT_CHARS);
+    assert!(ask.answer_clipped && ask.task_clipped);
+    assert!(ask.task.chars().count() <= MAX_BROKER_TRANSCRIPT_CHARS);
+    assert_eq!(wake.text.as_deref(), Some("short wake"));
+    let settled = goal.injection.as_ref().unwrap().goal_settled().unwrap();
+    assert!(settled.report.chars().count() <= MAX_BROKER_TRANSCRIPT_CHARS);
+    assert!(settled.report_clipped);
+    assert!(summary.text.as_ref().unwrap().chars().count() <= MAX_BROKER_TRANSCRIPT_CHARS);
+    assert!(summary.injection.as_ref().unwrap().text_clipped);
+    for row in [wake, goal, summary] {
+        assert_eq!(
+            row.content_state,
+            TranscriptContentState::Full,
+            "{:?}",
+            row.item_id
+        );
+    }
+    assert_eq!(
+        reply.content_state,
+        TranscriptContentState::Preview,
+        "a plain reply has no card to say it, so its row is repaired"
+    );
+    let plain_tool = compact(vec![TranscriptEntryView {
+        tool: Some(long_tool_input(long("I"))),
+        ..snapshot_row("tool", TranscriptEntryKind::ToolCall, None, None)
+    }]);
+    assert_eq!(
+        plain_tool[0].content_state,
+        TranscriptContentState::Preview,
+        "a tool row drawn as itself shows what was cut"
+    );
+}
+
+fn long_tool_input(input: String) -> ToolCallView {
+    ToolCallView {
+        item_type: "mcpToolCall".to_string(),
+        input_preview: Some(input),
+        ..ToolCallView::command_execution(None)
+    }
+}
+
+/// A card that stands in for the person's row never shows its text (a delegate's answer
+/// row holds the whole wake prompt), so cutting it gives the client nothing to repair.
+#[test]
+fn compact_last_resort_leaves_a_row_its_card_hides_whole() {
+    let compact = |row: TranscriptEntryView| {
+        let mut snapshot = make_snapshot();
+        snapshot.logs.clear();
+        snapshot.pending_approvals.clear();
+        snapshot.transcript = vec![row];
+        snapshot
+            .compact_for(SessionSnapshotCompactProfile::RemoteSurface)
+            .transcript
+            .remove(0)
+    };
+    let wake = compact(snapshot_row(
+        "wake",
+        TranscriptEntryKind::UserText,
+        Some("W".repeat(600_000)),
+        Some(InjectionView {
             kind: InjectionKind::DelegateAnswer,
             card: InjectionCard::Delegate(vec![DelegateCardView {
                 id: "ask-1".to_string(),
-                answer: Some("A".repeat(MAX_BROKER_TRANSCRIPT_CHARS * 4)),
+                answer: Some("short".to_string()),
                 ..DelegateCardView::default()
             }]),
+            text_clipped: false,
         }),
-    }];
+    ));
+    assert!(wake.text.as_ref().unwrap().chars().count() < 600_000);
+    assert_eq!(wake.content_state, TranscriptContentState::Full);
+    assert!(
+        !wake.injection.as_ref().unwrap().text_clipped,
+        "its card has nothing more to show"
+    );
+
+    let typed = compact(snapshot_row(
+        "typed",
+        TranscriptEntryKind::UserText,
+        Some("P".repeat(600_000)),
+        None,
+    ));
+    assert_eq!(
+        typed.content_state,
+        TranscriptContentState::Preview,
+        "the person's own message is shown, so it is repaired"
+    );
+}
+
+/// The last-resort pass cuts the person's rows too; one drawn as a card still says so on it.
+#[test]
+fn compact_last_resort_cuts_a_handed_over_brief_on_its_card() {
+    let mut snapshot = make_snapshot();
+    snapshot.logs.clear();
+    snapshot.pending_approvals.clear();
+    snapshot.transcript = vec![snapshot_row(
+        "brief",
+        TranscriptEntryKind::UserText,
+        Some("B".repeat(600_000)),
+        Some(handover_mark(InjectionKind::HandoverBrief)),
+    )];
 
     let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
 
-    let row = &compacted.transcript[0];
-    assert_eq!(row.content_state, TranscriptContentState::Preview);
-    let answer = row.injection.as_ref().unwrap().delegates()[0]
-        .answer
-        .clone()
-        .unwrap();
-    assert!(answer.chars().count() <= MAX_BROKER_TRANSCRIPT_CHARS);
-    assert_eq!(
-        row.text.as_deref(),
-        Some("short wake"),
-        "the person's row is left whole"
-    );
+    let brief = &compacted.transcript[0];
+    assert!(brief.text.as_ref().unwrap().chars().count() < 600_000);
+    assert!(brief.injection.as_ref().unwrap().text_clipped);
+    assert_eq!(brief.content_state, TranscriptContentState::Full);
 }
 
 #[test]

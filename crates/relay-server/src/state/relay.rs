@@ -44,7 +44,7 @@ pub(crate) use self::device::{
     PendingPairingResult, PendingTranscriptDelta, TranscriptDeltaKind,
 };
 pub(crate) use self::injections::{
-    clip_chars, injection_kind_from_name, injection_kind_name, DelegateMark, GoalMark,
+    clip_chars, injection_kind_from_name, injection_kind_name, CardBodies, DelegateMark, GoalMark,
     HandoverMark, InjectedMessage, InjectionTag, Injections, MessageAnchor, ReviewMark,
     ThreadInjections,
 };
@@ -1051,6 +1051,24 @@ impl RelayState {
         thread_id: &str,
         reader: InjectionReader<'_>,
     ) -> ThreadInjections {
+        self.thread_marks(thread_id, reader, CardBodies::Preview)
+    }
+
+    /// The same marks with every card body whole, for a row's detail.
+    pub(crate) fn thread_card_details(
+        &self,
+        thread_id: &str,
+        reader: InjectionReader<'_>,
+    ) -> ThreadInjections {
+        self.thread_marks(thread_id, reader, CardBodies::Whole)
+    }
+
+    fn thread_marks(
+        &self,
+        thread_id: &str,
+        reader: InjectionReader<'_>,
+        bodies: CardBodies,
+    ) -> ThreadInjections {
         let may_see = |peer: &str| {
             if matches!(reader, InjectionReader::Operator) {
                 return true;
@@ -1068,8 +1086,12 @@ impl RelayState {
                 InjectionReader::Everyone => self.thread_history_cwd(thread_id) == Some(peer_cwd),
             }
         };
-        self.injections
-            .for_thread(thread_id, |id| self.thread_display_name(id), may_see)
+        self.injections.for_thread(
+            thread_id,
+            |id| self.thread_display_name(id),
+            may_see,
+            bodies,
+        )
     }
 
     /// Best-effort human label for a thread, for push notification copy.
@@ -4610,7 +4632,7 @@ so {} never got it — hand over again when you are ready.",
                     .map(|record| {
                         let mut view = record.to_view();
                         runtime::overlay_apply_state(record, &mut view, &self.apply_states);
-                        view.injection = marks.mark_for(&self.transcript, record);
+                        marks.apply(&self.transcript, record, &mut view);
                         view
                     })
                     .collect()

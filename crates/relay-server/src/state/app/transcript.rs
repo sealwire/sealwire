@@ -424,7 +424,7 @@ impl AppState {
                 )?;
                 // A whole copy is the detail (Claude cannot answer per row at all); a
                 // cut one (Codex history) is re-read from the provider below.
-                let marks = relay.thread_injections(
+                let marks = relay.thread_card_details(
                     &input.thread_id,
                     InjectionReader::for_device(input.device_id.as_deref()),
                 );
@@ -491,7 +491,7 @@ impl AppState {
             entry.item_id = Some(input.item_id.clone());
             let relay = self.relay.read().await;
             if let Some(runtime) = relay.runtime_for_thread(&input.thread_id) {
-                let marks = relay.thread_injections(
+                let marks = relay.thread_card_details(
                     &input.thread_id,
                     InjectionReader::for_device(input.device_id.as_deref()),
                 );

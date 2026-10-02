@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   buildExpandedTranscriptDetailEntries,
+  cacheTranscriptEntryDetail,
   getFullTranscriptEntryDetail,
   getLiveTranscriptEntryDetail,
   prepareTranscriptEntryForSurface,
@@ -110,3 +111,57 @@ test("a command squeezed for the surface says it is cut", () => {
   assert.equal(short.content_state, "full", "nothing was cut, so nothing is claimed");
 });
 
+
+const summary = (text, extra, clipped = false) => ({
+  row_id: "agent:summary",
+  item_id: "agent:summary",
+  kind: "agent_text",
+  status: "completed",
+  content_state: "full",
+  text,
+  injection: { kind: "handover_summary", handover: { id: "h", status: "done" }, ...(clipped ? { text_clipped: true } : {}) },
+  ...extra,
+});
+
+function cache(state, entry) {
+  const result = cacheTranscriptEntryDetail(state, "thread-1", entry);
+  if (result.patch) Object.assign(state, result.patch);
+  return result;
+}
+
+// A card row is fetched for its body like a tool call is for its output.
+test("a card's fetched body is held whole, and the list's short copy never passes for it", () => {
+  const state = createState();
+  assert.equal(cache(state, summary("## Goal\nPart", {}, true)).cached, true);
+  assert.equal(
+    getFullTranscriptEntryDetail(state, "thread-1", "agent:summary"),
+    null,
+    "a copy the relay says it shortened is not the body"
+  );
+
+  cache(state, summary("## Goal\nPart and the rest"));
+  assert.equal(getFullTranscriptEntryDetail(state, "thread-1", "agent:summary")?.text, "## Goal\nPart and the rest");
+  assert.equal(
+    buildExpandedTranscriptDetailEntries(state, {
+      autoDetailItemIds: ["agent:summary"],
+      threadId: "thread-1",
+    }).get("agent:summary")?.text,
+    "## Goal\nPart and the rest"
+  );
+});
+
+// Only tool rows grow while they run; a card's text row is not parked as its own detail.
+test("a snapshot does not park a running card row as if it were its detail", () => {
+  const state = createState();
+  sync(state, summary("## Goal\nStill wri", { status: "in_progress" }));
+  assert.equal(getLiveTranscriptEntryDetail(state, "thread-1", "agent:summary"), null);
+});
+
+// The phone caches each page row as it lands; a page's short copy must not replace the
+// body already fetched for that row.
+test("a page's short copy never replaces a body already held whole", () => {
+  const state = createState();
+  cache(state, summary("## Goal\nPart and the rest"));
+  cache(state, summary("## Goal\nPart", {}, true));
+  assert.equal(getFullTranscriptEntryDetail(state, "thread-1", "agent:summary")?.text, "## Goal\nPart and the rest");
+});

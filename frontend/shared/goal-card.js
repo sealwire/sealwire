@@ -2,9 +2,10 @@
 // it in carries a card. The Agents panel lists the same steps with the same rows.
 import React, { useState } from "react";
 
-import { avatar, CardIcon, Caret } from "./card-parts.js";
+import { avatar, CardBodyStatus, CardIcon, Caret, useCardBody } from "./card-parts.js";
 import { renderMarkdown } from "./markdown.js";
 import { providerLabel } from "./provider-labels.js";
+import { transcriptRowKey } from "./transcript-row-key.js";
 
 const h = React.createElement;
 
@@ -188,8 +189,33 @@ function GoalReport({ text }) {
   return h("div", { className: "message-body goal-card-report" }, renderMarkdown(text));
 }
 
-function FullReport({ text }) {
+// Shown as it stands, since it is what the person has to act on; the rest on request.
+function InlineReport({ text, body }) {
+  const offer = body.load && !body.loading && !body.failed;
+  return h(
+    React.Fragment,
+    null,
+    h(GoalReport, { text }),
+    offer
+      ? h(
+          "button",
+          { type: "button", className: "handover-card-more", onClick: body.load },
+          h(Caret, { open: false }),
+          "Show full report"
+        )
+      : null,
+    h(CardBodyStatus, { body })
+  );
+}
+
+function FullReport({ text, body }) {
   const [open, setOpen] = useState(false);
+  const toggle = () => {
+    if (!open) {
+      body.load?.();
+    }
+    setOpen(!open);
+  };
   return h(
     React.Fragment,
     null,
@@ -199,12 +225,13 @@ function FullReport({ text }) {
         type: "button",
         className: "handover-card-more",
         "aria-expanded": open ? "true" : "false",
-        onClick: () => setOpen((value) => !value),
+        onClick: toggle,
       },
       h(Caret, { open }),
       "Full report"
     ),
-    open ? h(GoalReport, { text }) : null
+    open ? h(GoalReport, { text }) : null,
+    open ? h(CardBodyStatus, { body }) : null
   );
 }
 
@@ -263,6 +290,7 @@ export function GoalSettledEntry({ attrs, entry, showAvatar = true, provider = "
   const underStep = report && flaggedStepIndex(steps, flagTone) >= 0;
   const leftForYou = complete ? goalListOf(card.left_for_you) : [];
   const trailing = complete ? plural(card.turns || 0, "turn") : resolution ? "" : "paused";
+  const body = useCardBody(transcriptRowKey(entry), card.report_clipped);
   return h(
     "article",
     { ...attrs, className: `${attrs.className} handover-message goal-message` },
@@ -288,11 +316,11 @@ export function GoalSettledEntry({ attrs, entry, showAvatar = true, provider = "
         h(GoalSteps, {
           steps,
           flagTone,
-          under: underStep ? h(GoalReport, { text: report }) : null,
+          under: underStep ? h(InlineReport, { text: report, body }) : null,
         }),
-        !complete && report && !underStep ? h(GoalReport, { text: report }) : null,
+        !complete && report && !underStep ? h(InlineReport, { text: report, body }) : null,
         h(GoalLeftForYou, { items: leftForYou }),
-        complete && report ? h(FullReport, { text: report }) : null,
+        complete && report ? h(FullReport, { text: report, body }) : null,
         complete
           ? null
           : resolution

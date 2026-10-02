@@ -38,6 +38,8 @@ import {
   opensAnsweredTurn,
 } from "./delegate-card.js";
 import { foldHandoverTurns, HandoverSourceEntry, HandoverTargetEntry } from "./handover-card.js";
+import { CardBodyContext } from "./card-parts.js";
+import { overlayCardBodies } from "./card-body.js";
 import { drawsGoalSettledCard, GoalSettledEntry, GoalTurnLine, goalToolLabel } from "./goal-card.js";
 import {
   foldReviewInjections,
@@ -3423,9 +3425,22 @@ export function TranscriptContent({
   hydrationLoading = false,
   options = null,
 }) {
-  const entries = React.useMemo(
+  const collapsed = React.useMemo(
     () => collapseDuplicateTranscriptRows(rawEntries),
     [rawEntries]
+  );
+  // Before any fold: a fold copies bodies into the cards it builds.
+  const entries = React.useMemo(
+    () => overlayCardBodies(collapsed, options?.detailEntries),
+    [collapsed, options?.detailEntries]
+  );
+  const cardBodies = React.useMemo(
+    () => ({
+      load: options?.onLoadEntryDetail || null,
+      loading: options?.loadingItemIds || null,
+      failed: options?.detailFailedItemIds || null,
+    }),
+    [options?.onLoadEntryDetail, options?.loadingItemIds, options?.detailFailedItemIds]
   );
   // A delivered handover's turn is drawn as its card, so its rows leave the list.
   const handoverFold = React.useMemo(() => foldHandoverTurns(entries), [entries]);
@@ -3703,7 +3718,11 @@ export function TranscriptContent({
     canAsk: Boolean(effectiveOptions?.canAsk),
   });
 
-  return h(TranscriptViewport, { nodes, sentinel, askUserFooter, selectionToolbar });
+  return h(
+    CardBodyContext.Provider,
+    { value: cardBodies },
+    h(TranscriptViewport, { nodes, sentinel, askUserFooter, selectionToolbar })
+  );
 }
 
 // Scrolling changes only the rendered range, not the full transcript projection.

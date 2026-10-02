@@ -6,6 +6,7 @@ import {
   getCachedTranscriptEntryDetail,
   getFullTranscriptEntryDetail,
   getLiveTranscriptEntryDetail,
+  hasFullFileChangeDetail,
   isOmittedFileChangeDetail,
   setLiveTranscriptEntryDetail as setLiveTranscriptEntryDetailPatch,
   syncLiveTranscriptEntryDetailsFromSnapshot as syncLiveTranscriptEntryDetailsFromSnapshotPatch,
@@ -25,6 +26,7 @@ export {
   getCachedTranscriptEntryDetail,
   getFullTranscriptEntryDetail,
   getLiveTranscriptEntryDetail,
+  hasFullFileChangeDetail,
   isOmittedFileChangeDetail,
 };
 

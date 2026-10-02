@@ -305,7 +305,7 @@ test("a snapshot's clipped report never replaces the whole one already read, but
     active_thread_id: "t1",
     transcript_revision: 11,
     transcript_truncated: true,
-    transcript: [row({ report: `${"R".repeat(1599)}…`, resolution: "reopened" }, "preview")],
+    transcript: [row({ report: `${"R".repeat(1599)}…`, report_clipped: true, resolution: "reopened" }, "preview")],
   };
 
   Object.assign(state, prepareTranscriptHydrationState(state, snapshot).patch);

@@ -1,6 +1,6 @@
 // What the handover, review and delegate cards share: the fold, and the small parts of
 // the skeleton.
-import React, { useEffect, useRef, useState } from "react";
+import React, { useContext, useEffect, useRef, useState } from "react";
 
 const h = React.createElement;
 
@@ -82,6 +82,51 @@ export function avatar(markup, provider) {
   });
 }
 
+/** How a transcript lets its cards load a row's whole body: `{ load, loading, failed }`. */
+export const CardBodyContext = React.createContext(null);
+
+/**
+ * A body the relay may have sent short. `load` is set only while it is short and the
+ * surface can fetch the rest, from row `rowId`.
+ */
+export function useCardBody(rowId, clipped) {
+  const detail = useContext(CardBodyContext);
+  const id = rowId || "";
+  const loadable = Boolean(clipped && id && typeof detail?.load === "function");
+  const loading = loadable && Boolean(detail.loading?.has?.(id));
+  return {
+    clipped: Boolean(clipped),
+    loading,
+    failed: loadable && !loading && Boolean(detail.failed?.has?.(id)),
+    load: loadable ? () => detail.load(id) : null,
+  };
+}
+
+/** Under a short body once asked for: that the rest is on its way, or a way to retry. */
+export function CardBodyStatus({ body }) {
+  if (body?.loading) {
+    return h(
+      "div",
+      { className: "card-body-status", role: "status", "data-card-body-loading": "true" },
+      h(Spinner),
+      "Loading the rest…"
+    );
+  }
+  if (body?.failed) {
+    return h(
+      "div",
+      { className: "card-body-status is-failed", role: "status" },
+      "Could not load the rest.",
+      h(
+        "button",
+        { type: "button", className: "handover-card-link", "data-card-body-retry": "true", onClick: body.load },
+        "Try again"
+      )
+    );
+  }
+  return null;
+}
+
 /** The card's own "show the rest" button, under what it holds back. */
 export function ShowAllButton({ open, onToggle, label }) {
   return h(
@@ -99,9 +144,9 @@ export function ShowAllButton({ open, onToggle, label }) {
 
 /**
  * Folds a value to two lines (`card-fold`). It opens on a press only once the browser
- * says it is cut off, since widths differ per screen.
+ * says it is cut off, since widths differ per screen, or `body` says there is more.
  */
-export function useFold(content, enabled = true) {
+export function useFold(content, enabled = true, body = null) {
   const [open, setOpen] = useState(false);
   const [cutOff, setCutOff] = useState(false);
   const ref = useRef(null);
@@ -116,8 +161,14 @@ export function useFold(content, enabled = true) {
     observer?.observe(node);
     return () => observer?.disconnect();
   }, [enabled, open, content]);
-  const togglable = enabled && (open || cutOff);
-  const toggle = () => setOpen((value) => !value);
+  const more = Boolean(enabled && body?.load);
+  const togglable = enabled && (open || cutOff || more);
+  const toggle = () => {
+    if (!open) {
+      body?.load?.();
+    }
+    setOpen(!open);
+  };
   return {
     ref,
     open,

@@ -939,6 +939,7 @@ fn review_marks_survive_a_reopen_and_an_unfinished_one_fails() {
                 severity: "high".to_string(),
                 location: Some("gate.rs:88".to_string()),
                 text: "The gate is not a lifetime invariant.".to_string(),
+                clipped: false,
             }],
             findings_total: 1,
             started_at: 5,

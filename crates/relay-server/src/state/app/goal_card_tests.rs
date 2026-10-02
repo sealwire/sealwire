@@ -544,7 +544,7 @@ async fn panel_settlement(app: &AppState, thread_id: &str) -> Option<u32> {
 }
 
 #[tokio::test]
-async fn the_full_report_is_drawn_whole_however_long() {
+async fn the_full_report_reads_whole_from_its_row_however_long() {
     let (app, thread, _project, _p, _o) = set_up("ship it").await;
     hand_over(&app, &thread).await;
     let summary = "evidence line\n".repeat(600);
@@ -556,11 +556,33 @@ async fn the_full_report_is_drawn_whole_however_long() {
     )
     .await;
     let card = settling_row(&app, &thread, "goal_complete", &envelope).await;
-    assert_eq!(
-        card.report.chars().count(),
-        summary.trim().chars().count(),
-        "a page is the whole row; nowhere else shows the report"
+    assert!(
+        card.report_clipped,
+        "a page carries the opening and says so"
     );
+    assert!(card.report.chars().count() < summary.trim().chars().count());
+
+    let detail = app
+        .read_thread_entry_detail(crate::protocol::ReadThreadEntryDetailInput {
+            thread_id: thread.clone(),
+            item_id: "tool:goal_complete".into(),
+            field: None,
+            cursor: None,
+            device_id: None,
+        })
+        .await
+        .expect("detail read");
+    let whole = detail
+        .entry
+        .and_then(|entry| entry.injection)
+        .and_then(|mark| mark.goal_settled().cloned())
+        .expect("the detail is drawn as the card");
+    assert_eq!(
+        whole.report.chars().count(),
+        summary.trim().chars().count(),
+        "nowhere else shows the report, so opening it reads all of it"
+    );
+    assert!(!whole.report_clipped);
 }
 
 #[tokio::test]

@@ -8,13 +8,23 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
-    DelegateCardView, GoalSettledCardView, GoalStepRefView, GoalStepView, GoalTurnCardView,
-    HandoverCardView, InjectionCard, InjectionKind, InjectionView, ReviewCardView,
-    ReviewFindingView, ReviewResultView, ReviewRoundView, TranscriptEntryKind,
+    CardRow, DelegateCardView, GoalSettledCardView, GoalStepRefView, GoalStepView,
+    GoalTurnCardView, HandoverCardView, InjectionCard, InjectionKind, InjectionView,
+    ReviewCardView, ReviewFindingView, ReviewResultView, ReviewRoundView, TranscriptContentState,
+    TranscriptEntryKind, TranscriptEntryView,
 };
 
 use super::transcript::TranscriptRecord;
 use super::transcript_store::ThreadTranscript;
+
+/// How much of a card's long body a read carries. Every list and snapshot row carries
+/// its own copy, so they get the opening; a row's detail, opened on demand, the whole.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CardBodies {
+    #[default]
+    Preview,
+    Whole,
+}
 
 /// A user row, named so a history re-read still finds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -225,7 +235,8 @@ impl ReviewMark {
             }
             _ => InjectionKind::ReviewResult,
         };
-        let rounds = card_rounds(kind, last.round, &self.rounds)
+        let (rounds, _) = card_rounds(kind, last.round, &self.rounds, CardBodies::Preview);
+        let rounds = rounds
             .into_iter()
             .map(|round| ReviewRoundView {
                 reviewer_thread_id: String::new(),
@@ -331,7 +342,7 @@ impl GoalMark {
 /// The card shows the objective on one line; the panel has the whole of it.
 const CARD_OBJECTIVE_CHARS: usize = 300;
 
-fn goal_card(mark: &GoalMark, tag: &InjectionTag) -> Option<InjectionCard> {
+fn goal_card(mark: &GoalMark, tag: &InjectionTag, bodies: CardBodies) -> Option<InjectionCard> {
     match tag.kind {
         InjectionKind::GoalTurn => {
             let turn = mark.turns.iter().find(|turn| turn.seq == tag.round)?;
@@ -347,6 +358,7 @@ fn goal_card(mark: &GoalMark, tag: &InjectionTag) -> Option<InjectionCard> {
                 .settlements
                 .iter()
                 .find(|settlement| settlement.seq == tag.round)?;
+            let (report, report_clipped) = card_body(&settled.report, CARD_BODY_CHARS, bodies);
             Some(InjectionCard::GoalSettled(GoalSettledCardView {
                 goal_id: mark.id.clone(),
                 thread_id: mark.thread_id.clone(),
@@ -358,9 +370,8 @@ fn goal_card(mark: &GoalMark, tag: &InjectionTag) -> Option<InjectionCard> {
                 provider: mark.provider.clone(),
                 steps: settled.steps.clone(),
                 left_for_you: settled.left_for_you.clone(),
-                // Whole: this card is the only place the report is shown. A snapshot
-                // still clips it, as a preview the client reads in full from the page.
-                report: settled.report.clone(),
+                report,
+                report_clipped,
                 options: settled.options.clone(),
                 settled_at: settled.settled_at,
                 resolution: settled.resolution.clone(),
@@ -589,21 +600,23 @@ impl Injections {
         thread_id: &str,
         title: impl Fn(&str) -> Option<String>,
         may_see: impl Fn(&str) -> bool,
+        bodies: CardBodies,
     ) -> ThreadInjections {
         let named = |id: &str| id == thread_id || may_see(id);
         let view = |tag: &InjectionTag| {
             let card = if tag.kind.is_review() {
-                InjectionCard::Review(self.review_card(tag, &named, &title)?)
+                InjectionCard::Review(self.review_card(tag, &named, &title, bodies)?)
             } else if tag.kind.is_goal() {
-                goal_card(self.goals.get(&tag.ref_id)?, tag)?
+                goal_card(self.goals.get(&tag.ref_id)?, tag, bodies)?
             } else if tag.kind.is_delegate() {
-                InjectionCard::Delegate(self.delegate_cards(tag, &named, &title)?)
+                InjectionCard::Delegate(self.delegate_cards(tag, &named, &title, bodies)?)
             } else {
                 InjectionCard::Handover(self.handover_card(&tag.ref_id, &named, &title)?)
             };
             Some(InjectionView {
                 kind: tag.kind,
                 card,
+                text_clipped: false,
             })
         };
         let anchored = self.anchored.get(thread_id).into_iter().flatten();
@@ -617,7 +630,7 @@ impl Injections {
                     view(tag).map(|view| (Match::Text(text.clone()), view))
                 }))
                 .collect();
-        ThreadInjections { marks }
+        ThreadInjections { marks, bodies }
     }
 
     fn handover_card(
@@ -665,11 +678,12 @@ impl Injections {
         tag: &InjectionTag,
         named: &impl Fn(&str) -> bool,
         title: &impl Fn(&str) -> Option<String>,
+        bodies: CardBodies,
     ) -> Option<Vec<DelegateCardView>> {
         let cards: Vec<DelegateCardView> = tag
             .ref_ids()
             .filter_map(|id| self.delegates.get(id))
-            .map(|mark| delegate_card(mark, tag.kind, named, title))
+            .map(|mark| delegate_card(mark, tag.kind, named, title, bodies))
             .collect();
         (!cards.is_empty()).then_some(cards)
     }
@@ -679,6 +693,7 @@ impl Injections {
         tag: &InjectionTag,
         named: &impl Fn(&str) -> bool,
         title: &impl Fn(&str) -> Option<String>,
+        bodies: CardBodies,
     ) -> Option<ReviewCardView> {
         let review = self.reviews.get(&tag.ref_id)?;
         let visible = |id: &str| !id.is_empty() && named(id);
@@ -694,7 +709,8 @@ impl Injections {
             .rounds
             .iter()
             .all(|round| visible(&round.reviewer_thread_id));
-        let rounds = card_rounds(tag.kind, tag.round, &review.rounds)
+        let (rounds, findings_clipped) = card_rounds(tag.kind, tag.round, &review.rounds, bodies);
+        let rounds = rounds
             .into_iter()
             .map(|mut round| {
                 if !visible(&round.reviewer_thread_id) {
@@ -724,12 +740,13 @@ impl Injections {
             error: review.error.clone().filter(|_| parent && reviewers_visible),
             decision: review.decision.clone(),
             rounds,
+            findings_clipped,
         })
     }
 }
 
-/// Every marked row carries its copy, snapshots included, so a card gets only what it
-/// draws: its own round's findings, and for the last card what each round fixed.
+/// A card gets only what it draws: its own round's findings, and for the last card what
+/// each round fixed. A preview also bounds how many and how long; true when it cut any.
 const CARD_FINDINGS: usize = 12;
 const CARD_FINDING_CHARS: usize = 200;
 
@@ -737,18 +754,28 @@ fn card_rounds(
     kind: InjectionKind,
     row_round: u32,
     rounds: &[ReviewRoundView],
-) -> Vec<ReviewRoundView> {
+    bodies: CardBodies,
+) -> (Vec<ReviewRoundView>, bool) {
     let last = rounds.last().map_or(0, |round| round.round);
-    let mut budget = CARD_FINDINGS;
+    let mut budget = match bodies {
+        CardBodies::Preview => CARD_FINDINGS,
+        CardBodies::Whole => usize::MAX,
+    };
+    let mut clipped = false;
     let mut take = |findings: &[ReviewFindingView]| -> Vec<ReviewFindingView> {
         let kept: Vec<_> = findings
             .iter()
             .take(budget)
-            .map(|finding| ReviewFindingView {
-                text: clip_chars(&finding.text, CARD_FINDING_CHARS),
-                ..finding.clone()
+            .map(|finding| {
+                let (text, cut) = card_body(&finding.text, CARD_FINDING_CHARS, bodies);
+                ReviewFindingView {
+                    text,
+                    clipped: cut,
+                    ..finding.clone()
+                }
             })
             .collect();
+        clipped |= kept.len() < findings.len() || kept.iter().any(|finding| finding.clipped);
         budget -= kept.len();
         kept
     };
@@ -759,7 +786,7 @@ fn card_rounds(
         verdict_note: None,
         ..round.clone()
     };
-    rounds
+    let kept = rounds
         .iter()
         .filter_map(|round| {
             let mut kept = bare(round);
@@ -793,7 +820,8 @@ fn card_rounds(
             }
             Some(kept)
         })
-        .collect()
+        .collect();
+    (kept, clipped)
 }
 
 pub(crate) fn clip_chars(text: &str, limit: usize) -> String {
@@ -811,14 +839,25 @@ fn card_note(note: &str) -> String {
     clip_chars(note, CARD_NOTE_CHARS)
 }
 
-/// Bounds a page; a snapshot clips it further (`compact_for_budget`).
+/// A preview of a brief, summary or report: about what a folded card shows. Answers keep
+/// more; a snapshot clips both further (`compact_for_budget`).
+const CARD_BODY_CHARS: usize = 2_000;
 const CARD_ANSWER_CHARS: usize = 4_000;
+
+/// The body as `bodies` asks for it, and whether it was cut.
+fn card_body(text: &str, limit: usize, bodies: CardBodies) -> (String, bool) {
+    match bodies {
+        CardBodies::Preview if text.chars().nth(limit).is_some() => (clip_chars(text, limit), true),
+        _ => (text.to_string(), false),
+    }
+}
 
 fn delegate_card(
     mark: &DelegateMark,
     kind: InjectionKind,
     named: &impl Fn(&str) -> bool,
     title: &impl Fn(&str) -> Option<String>,
+    bodies: CardBodies,
 ) -> DelegateCardView {
     let visible = |id: &str| !id.is_empty() && named(id);
     let (asker, peer) = (
@@ -837,6 +876,22 @@ fn delegate_card(
         InjectionKind::DelegateReported => mark.answered_with_tool,
         _ => false,
     };
+    // A delegate call's card draws the brief itself; elsewhere it is the typed command.
+    let task_chars = match kind {
+        InjectionKind::DelegateCall => CARD_BODY_CHARS,
+        _ => CARD_NOTE_CHARS,
+    };
+    let (task, task_clipped) = match asker {
+        true => card_body(&mark.task, task_chars, bodies),
+        false => (String::new(), false),
+    };
+    let (answer, answer_clipped) = match mark.answer.as_deref().filter(|_| draws_answer) {
+        Some(answer) => {
+            let (answer, cut) = card_body(answer, CARD_ANSWER_CHARS, bodies);
+            (Some(answer), cut)
+        }
+        None => (None, false),
+    };
     DelegateCardView {
         id: mark.id.clone(),
         asker_thread_id,
@@ -846,11 +901,8 @@ fn delegate_card(
         peer_title,
         peer_provider: mark.peer_provider.clone(),
         // Typed into the asker, so it stays wherever the asker is hidden.
-        task: if asker {
-            card_note(&mark.task)
-        } else {
-            String::new()
-        },
+        task,
+        task_clipped,
         title: mark.title.clone(),
         instruction: mark.instruction.clone(),
         status: mark.status.clone(),
@@ -859,11 +911,8 @@ fn delegate_card(
             .error
             .clone()
             .filter(|_| asker && (peer || mark.peer_thread_id.is_empty())),
-        answer: mark
-            .answer
-            .as_deref()
-            .filter(|_| draws_answer)
-            .map(|answer| clip_chars(answer, CARD_ANSWER_CHARS)),
+        answer,
+        answer_clipped,
         cited: if draws_answer {
             mark.cited.clone()
         } else {
@@ -881,9 +930,37 @@ fn delegate_card(
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ThreadInjections {
     marks: Vec<(Match, InjectionView)>,
+    bodies: CardBodies,
 }
 
 impl ThreadInjections {
+    /// Marks `view`, the row `record` serves, and for a list cuts a card body it carries
+    /// as its text. Only rows drawn as that card: anywhere else the text is the message.
+    pub(crate) fn apply(
+        &self,
+        transcript: &ThreadTranscript,
+        record: &TranscriptRecord,
+        view: &mut TranscriptEntryView,
+    ) {
+        view.injection = self.mark_for(transcript, record);
+        // A provider's short copy (Codex history) cuts a text row's text, a tool row's tool.
+        if record.cut && !view.needs_repair_after_cut(record.kind != TranscriptEntryKind::ToolCall)
+        {
+            view.content_state = TranscriptContentState::Full;
+        }
+        let (Some(mark), Some(text)) = (view.injection.as_mut(), view.text.as_mut()) else {
+            return;
+        };
+        let Some(limit) = text_body_chars(mark, record.kind) else {
+            return;
+        };
+        let (cut, clipped) = card_body(text, limit, self.bodies);
+        if clipped {
+            *text = cut;
+            mark.text_clipped = true;
+        }
+    }
+
     pub(crate) fn mark_for(
         &self,
         transcript: &ThreadTranscript,
@@ -910,6 +987,17 @@ impl ThreadInjections {
                 right_kind && matches(matcher, transcript, record)
             })
             .map(|(_, view)| view.clone())
+    }
+}
+
+/// How much of a row's text its card shows, when the card draws its body from it.
+fn text_body_chars(mark: &InjectionView, kind: TranscriptEntryKind) -> Option<usize> {
+    match mark.draws_row(kind)? {
+        CardRow::Replaced => None,
+        CardRow::TextBody if mark.kind == InjectionKind::DelegateReported => {
+            Some(CARD_ANSWER_CHARS)
+        }
+        CardRow::TextBody => Some(CARD_BODY_CHARS),
     }
 }
 
@@ -994,6 +1082,7 @@ mod tests {
             severity: "high".to_string(),
             location: None,
             text: text.to_string(),
+            clipped: false,
         }
     }
 
@@ -1028,7 +1117,8 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        let result = card_rounds(InjectionKind::ReviewResult, 1, &rounds);
+        let draw = |kind, round| card_rounds(kind, round, &rounds, CardBodies::Preview).0;
+        let result = draw(InjectionKind::ReviewResult, 1);
         assert_eq!(
             texts(&result),
             vec![
@@ -1042,7 +1132,7 @@ mod tests {
         );
         assert_eq!(result[0].change, None);
 
-        let approved = card_rounds(InjectionKind::ReviewApproved, 2, &rounds);
+        let approved = draw(InjectionKind::ReviewApproved, 2);
         assert_eq!(
             texts(&approved),
             vec![
@@ -1050,28 +1140,40 @@ mod tests {
                 (2, "still".into(), "first".into())
             ]
         );
-        let escalated = card_rounds(InjectionKind::ReviewEscalated, 2, &rounds);
+        let escalated = draw(InjectionKind::ReviewEscalated, 2);
         assert_eq!(
             texts(&escalated),
             vec![(1, "".into(), "".into()), (2, "still".into(), "".into())]
         );
-        let brief = card_rounds(InjectionKind::ReviewBrief, 1, &rounds);
+        let brief = draw(InjectionKind::ReviewBrief, 1);
         assert_eq!(brief.len(), 1);
         assert_eq!(brief[0].change.as_deref(), Some("the change"));
-        assert!(card_rounds(InjectionKind::ReviewRecap, 0, &rounds).is_empty());
+        assert!(draw(InjectionKind::ReviewRecap, 0).is_empty());
 
         let many: Vec<_> = (0..30).map(|i| found(&"x".repeat(i * 20))).collect();
-        let flood = card_rounds(
+        let flooded = [ReviewRoundView {
+            round: 1,
+            findings: many,
+            findings_total: 30,
+            ..ReviewRoundView::default()
+        }];
+        let (flood, clipped) = card_rounds(
             InjectionKind::ReviewResult,
             1,
-            &[ReviewRoundView {
-                round: 1,
-                findings: many,
-                findings_total: 30,
-                ..ReviewRoundView::default()
-            }],
+            &flooded,
+            CardBodies::Preview,
         );
+        assert!(clipped);
         assert_eq!(flood[0].findings.len(), CARD_FINDINGS);
+        let (whole, clipped) =
+            card_rounds(InjectionKind::ReviewResult, 1, &flooded, CardBodies::Whole);
+        assert!(!clipped);
+        assert_eq!(whole, flooded, "a detail carries every finding whole");
+        assert_eq!(
+            texts(&card_rounds(InjectionKind::ReviewResult, 1, &rounds, CardBodies::Whole).0),
+            texts(&result),
+            "and still only the ones its card draws"
+        );
         assert!(flood[0]
             .findings
             .iter()
@@ -1092,7 +1194,12 @@ mod tests {
         );
         let card = |may_see: bool| {
             injections
-                .for_thread("parent", |_| Some("title".to_string()), |_| may_see)
+                .for_thread(
+                    "parent",
+                    |_| Some("title".to_string()),
+                    |_| may_see,
+                    CardBodies::Preview,
+                )
                 .marks
                 .pop()
                 .and_then(|(_, view)| view.review().cloned())
@@ -1173,7 +1280,8 @@ mod tests {
         let result = approved.result_view("complete").expect("a result");
         assert_eq!(
             result.rounds,
-            card_rounds(ReviewApproved, 2, &approved.rounds)
+            card_rounds(ReviewApproved, 2, &approved.rounds, CardBodies::Preview)
+                .0
                 .into_iter()
                 .map(|round| ReviewRoundView {
                     reviewer_thread_id: String::new(),

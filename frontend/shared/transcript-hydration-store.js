@@ -1,4 +1,5 @@
 import { transcriptRowKey } from "./transcript-row-key.js";
+import { combineCardBodies } from "./card-body.js";
 import {
   normalizeTranscriptDeltaKind,
   resolveDeltaAppend,
@@ -1751,14 +1752,22 @@ function mergeTranscriptEntry(existing, incoming) {
     )
   );
 
+  const text = selectTranscriptText(existing.text, incoming.text, existingFull, incomingFull);
+  // A push cuts a card's bodies shorter than a page, or empties them with the row.
+  let injection = incoming.injection
+    ? combineCardBodies(incoming.injection, existing.injection)
+    : null;
+  // Whether the text is short belongs to the copy the text was kept from.
+  if (injection && text === existing.text && text !== incoming.text) {
+    injection = { ...injection, text_clipped: Boolean(existing.injection?.text_clipped) };
+  }
+
   return {
     ...existing,
     ...incoming,
-    text: selectTranscriptText(existing.text, incoming.text, existingFull, incomingFull),
+    text,
     tool: mergeToolView(existing.tool, incoming.tool, existingFull, incomingFull),
-    ...(incoming.injection
-      ? { injection: mergeInjection(existing.injection, incoming.injection, incomingFull) }
-      : {}),
+    ...(injection ? { injection } : {}),
     turn_id: incoming.turn_id || existing.turn_id || null,
     content_state: mergedContentState,
     // Absorbing: a copy serialized before the withdrawal must not resurrect the row.
@@ -1768,33 +1777,6 @@ function mergeTranscriptEntry(existing, incoming) {
     // keeps its position — leaving a window whose cached proof still says
     // "sorted" while the numbers no longer agree with the order.
     ...(Number.isSafeInteger(existing.order_seq) ? { order_seq: existing.order_seq } : {}),
-  };
-}
-
-// A snapshot clips a delegate card's answer and cited places with the row, and a goal
-// card's report; the copy read whole keeps its own.
-function mergeInjection(existing, incoming, incomingFull) {
-  if (incomingFull) {
-    return incoming;
-  }
-  if (existing?.goal_settled?.report && incoming.goal_settled
-      && existing.goal_settled.goal_id === incoming.goal_settled.goal_id) {
-    return { ...incoming, goal_settled: { ...incoming.goal_settled, report: existing.goal_settled.report } };
-  }
-  if (!existing?.delegate || !incoming.delegate) {
-    return incoming;
-  }
-  const held = new Map(existing.delegate.map((ask) => [ask.id, ask]));
-  return {
-    ...incoming,
-    delegate: incoming.delegate.map((ask) => {
-      const whole = held.get(ask.id);
-      return {
-        ...ask,
-        ...(whole?.answer ? { answer: whole.answer } : {}),
-        ...(whole?.cited?.length && !ask.cited?.length ? { cited: whole.cited } : {}),
-      };
-    }),
   };
 }
 

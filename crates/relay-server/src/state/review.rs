@@ -983,6 +983,7 @@ fn finding_line(line: &str) -> Option<ReviewFindingView> {
         severity,
         location,
         text: text.to_string(),
+        clipped: false,
     })
 }
 
@@ -1213,6 +1214,7 @@ mod tests {
             severity: severity.to_string(),
             location: location.map(str::to_string),
             text: text.to_string(),
+            clipped: false,
         }
     }
 

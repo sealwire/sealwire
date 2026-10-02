@@ -259,6 +259,8 @@ export function createSessionController({
     toggleTranscriptEntry: controller.toggleTranscriptEntry,
     toggleTranscriptExpandKey: controller.toggleTranscriptExpandKey,
     ensureFileChangeDetail: controller.ensureFileChangeDetail,
+    loadEntryDetail: controller.loadEntryDetail,
+    detailFailedItemIds: controller.detailFailedItemIds,
     applyFileChange: controller.applyFileChange,
     updateSessionSettings: controller.updateSessionSettings,
   };

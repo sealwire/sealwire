@@ -4,11 +4,13 @@ import React, { useState } from "react";
 
 import {
   avatar,
+  CardBodyStatus,
   CardIcon,
   Caret,
   clockTime,
   OpenThreadLink,
   Spinner,
+  useCardBody,
   useFold,
   useNow,
 } from "./card-parts.js";
@@ -112,15 +114,16 @@ function withoutTitle(text, title) {
 }
 
 // Headings split it like a handover summary; otherwise it is one value, two lines until pressed.
-function CardText({ text, title = "", moreLabel, footer = null }) {
+// `detail` (from `useCardBody`) loads the rest of a text the relay sent short.
+function CardText({ text, title = "", moreLabel, footer = null, detail = null }) {
   const body = withoutTitle(text, title);
   const plain = !parseHandoverSections(body).some((section) => section.title);
-  const fold = useFold(body, plain);
+  const fold = useFold(body, plain, detail);
   if (!body) {
     return null;
   }
   if (!plain) {
-    return h(SummarySections, { text: body, moreLabel, footer });
+    return h(SummarySections, { text: body, moreLabel, footer, body: detail });
   }
   return h(
     "div",
@@ -135,6 +138,7 @@ function CardText({ text, title = "", moreLabel, footer = null }) {
       },
       renderMarkdown(body)
     ),
+    h(CardBodyStatus, { body: detail }),
     footer
   );
 }
@@ -198,6 +202,7 @@ function PeerStatus({ ask }) {
 
 function AskedCard({ ask, brief, collapsed }) {
   const [open, setOpen] = useState(false);
+  const detail = useCardBody(brief.rowId, brief.clipped);
   const peer = peerName(ask);
   const title = ask.title || "A question for another agent";
   if (collapsed && !open) {
@@ -223,7 +228,7 @@ function AskedCard({ ask, brief, collapsed }) {
       footerStart: h(PeerStatus, { ask }),
       link: h(OpenThreadLink, { threadId: ask.peer_thread_id, label: `${peer} thread` }),
     },
-    h(CardText, { text: brief, title, moreLabel: "Show the whole question" })
+    h(CardText, { text: brief.text, title, moreLabel: "Show the whole question", detail })
   );
 }
 
@@ -249,8 +254,9 @@ function MissingCard({ ask }) {
   );
 }
 
-function AnsweredCard({ ask }) {
+function AnsweredCard({ ask, rowId }) {
   const peer = peerName(ask);
+  const detail = useCardBody(rowId, ask.answer_clipped);
   return h(
     DelegateCard,
     {
@@ -266,18 +272,27 @@ function AnsweredCard({ ask }) {
       text: ask.answer,
       moreLabel: "Show the whole answer",
       footer: h(Cited, { places: ask.cited }),
+      detail,
     })
   );
 }
 
-function settledBrief(members) {
+/** The brief and the row it is read from: a delegate call's own card, or the asker's reply. */
+function briefOf(entry, members, ask) {
+  if (entry.injection?.kind === "delegate_call") {
+    return { text: ask.task, rowId: transcriptRowKey(entry), clipped: Boolean(ask.task_clipped) };
+  }
   for (let index = members.length - 1; index >= 0; index -= 1) {
     const member = members[index];
     if (member?.kind === "agent_text" && member.text) {
-      return member.text;
+      return {
+        text: member.text,
+        rowId: transcriptRowKey(member),
+        clipped: Boolean(member.injection?.text_clipped),
+      };
     }
   }
-  return "";
+  return { text: "", rowId: null, clipped: false };
 }
 
 function PreparingLine({ ask, asker }) {
@@ -354,7 +369,7 @@ export function DelegateRequestEntry({
         "div",
         { className: "delegate-stack" },
         // Once the answer card below says how it went, this one is a line.
-        h(AskedCard, { ask: first, brief: entry.injection?.kind === "delegate_call" ? first.task : settledBrief(members), collapsed: answered.has(first.id) })
+        h(AskedCard, { ask: first, brief: briefOf(entry, members, first), collapsed: answered.has(first.id) })
       )
     );
   }
@@ -377,7 +392,7 @@ export function DelegateAnswerEntry({ attrs, entry }) {
       { className: "delegate-stack" },
       ...asks.map((ask) =>
         outcome(ask) === "done"
-          ? h(AnsweredCard, { key: ask.id, ask })
+          ? h(AnsweredCard, { key: ask.id, ask, rowId: transcriptRowKey(entry) })
           : h(MissingCard, { key: ask.id, ask })
       )
     )
@@ -387,6 +402,7 @@ export function DelegateAnswerEntry({ attrs, entry }) {
 /** The peer's first row (25b): the brief it was given, without the instruction after it. */
 export function DelegateTaskEntry({ attrs, entry }) {
   const ask = (entry.injection.delegate || [])[0];
+  const detail = useCardBody(transcriptRowKey(entry), entry.injection.text_clipped);
   if (!ask) {
     return null;
   }
@@ -409,6 +425,7 @@ export function DelegateTaskEntry({ attrs, entry }) {
         text: briefSummary(entry.text, ask.instruction),
         title: ask.title,
         moreLabel: "Show the whole task",
+        detail,
       })
     )
   );
@@ -429,6 +446,7 @@ export function DelegateNudgeEntry({ attrs, entry }) {
 export function DelegateReportedEntry({ entry, provider = "", providerIcon = "" }) {
   const ask = entry.delegate;
   const asker = askerName(ask);
+  const detail = useCardBody(transcriptRowKey(entry), entry.answer_clipped);
   const attrs = {
     className: `chat-message chat-message-assistant handover-message delegate-message${entry.opensTurn ? "" : " is-turn-continued"}`,
     "data-transcript-entry-id": transcriptRowKey(entry) || "",
@@ -459,6 +477,7 @@ export function DelegateReportedEntry({ entry, provider = "", providerIcon = "" 
         text: entry.answer,
         moreLabel: "Show the whole answer",
         footer: h(Cited, { places: entry.cited }),
+        detail,
       })
     )
   );
@@ -478,6 +497,7 @@ function reportedEntry(row, ask, opensTurn) {
     kind: DELEGATE_REPORTED_KIND,
     delegate: ask,
     answer: typeof answer === "string" ? answer : "",
+    answer_clipped: Boolean(ask.answered_with_tool ? ask.answer_clipped : row.injection?.text_clipped),
     cited: Array.isArray(cited) ? cited.filter((place) => typeof place === "string") : [],
     opensTurn,
   };

@@ -563,7 +563,7 @@ impl ThreadRuntime {
     ) -> TranscriptEntryView {
         let mut view = record.to_view();
         overlay_apply_state(record, &mut view, &self.apply_states);
-        view.injection = marks.mark_for(&self.transcript, record);
+        marks.apply(&self.transcript, record, &mut view);
         view
     }
 

@@ -4,12 +4,14 @@ import React, { useState } from "react";
 
 import {
   avatar,
+  CardBodyStatus,
   CardIcon,
   Caret,
   clockTime,
   OpenThreadLink,
   ShowAllButton,
   Spinner,
+  useCardBody,
   useFold,
   useNow,
 } from "./card-parts.js";
@@ -152,8 +154,8 @@ function FindingWhere({ location }) {
   );
 }
 
-function FindingRow({ finding, state }) {
-  const fold = useFold(finding.text);
+function FindingRow({ finding, state, body = null }) {
+  const fold = useFold(finding.text, true, finding.clipped ? body : null);
   return h(
     "div",
     { className: "review-finding" },
@@ -183,33 +185,49 @@ function FindingRow({ finding, state }) {
   );
 }
 
-/** The findings a card lists, three at first; the Agents panel lists them the same way. */
-export function FindingList({ rows, more }) {
+/**
+ * The findings a card lists, three at first; the Agents panel lists them the same way.
+ * Those the relay held back load from the card's row (`body`) when all are asked for.
+ */
+export function FindingList({ rows, more, body = null }) {
   const [expanded, setExpanded] = useState(false);
   if (!rows.length) {
     return null;
   }
-  const folds = rows.length > FINDINGS_SHOWN;
+  const loadable = Boolean(body?.load);
+  const folds = rows.length > FINDINGS_SHOWN || (more > 0 && loadable);
   const shown = folds && !expanded ? rows.slice(0, FINDINGS_SHOWN) : rows;
+  const toggle = () => {
+    if (!expanded && more > 0) {
+      body?.load?.();
+    }
+    setExpanded(!expanded);
+  };
+  const placed = new Map();
   return h(
     React.Fragment,
     null,
-    ...shown.map(({ finding, state }, index) =>
-      h(FindingRow, { key: `${index}:${finding.text}`, finding, state })
-    ),
+    ...shown.map(({ finding, state }) => {
+      // By place in its group, not by text: a short copy's text changes when the rest loads.
+      const group = state || "open";
+      const index = placed.get(group) || 0;
+      placed.set(group, index + 1);
+      return h(FindingRow, { key: `${group}:${index}`, finding, state, body });
+    }),
     // Keyed so the button stays the same node, focus included, as rows come and go.
-    more > 0 && (!folds || expanded)
+    more > 0 && !loadable && (!folds || expanded)
       ? h(
           "span",
           { key: "held-back", className: "review-finding-more" },
           `${more} more in the reviewer's thread`
         )
       : null,
+    h(CardBodyStatus, { key: "status", body }),
     folds
       ? h(ShowAllButton, {
           key: "show-all",
           open: expanded,
-          onToggle: () => setExpanded((value) => !value),
+          onToggle: toggle,
           label: "Show all findings",
         })
       : null
@@ -307,10 +325,11 @@ function EscalatedActions({ review, round }) {
   );
 }
 
-function ResultCard({ kind, review, parent, onFold = null }) {
+function ResultCard({ kind, review, parent, rowId, onFold = null }) {
   const round = roundOf(review, review.round) || lastRound(review);
   const tone = reviewTone(kind, round);
   const { rows, more } = cardFindings(kind, review, round);
+  const body = useCardBody(rowId, review.findings_clipped);
   const actions = kind === "review_escalated" ? h(EscalatedActions, { review, round }) : null;
   const head = h(
     "div",
@@ -336,7 +355,7 @@ function ResultCard({ kind, review, parent, onFold = null }) {
     { className: `handover-card review-card is-${tone}`, "data-review-id": review.id },
     head,
     rows.length || actions
-      ? h("div", { className: "handover-card-body review-card-body" }, h(FindingList, { rows, more }), actions)
+      ? h("div", { className: "handover-card-body review-card-body" }, h(FindingList, { rows, more, body }), actions)
       : null,
     h(
       "div",
@@ -518,6 +537,7 @@ export function ReviewEntry({ attrs, entry, folded = false, provider = "" }) {
           kind,
           review,
           parent: agentName(review.parent_provider || provider, "The agent"),
+          rowId: transcriptRowKey(entry),
           onFold,
         });
   if (kind === "review_brief") {
