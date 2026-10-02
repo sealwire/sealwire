@@ -1,4 +1,5 @@
 const PROVIDER_LABELS = {
+  pi: "Pi",
   claude_code: "Claude",
   codex: "Codex",
   opencode: "OpenCode",

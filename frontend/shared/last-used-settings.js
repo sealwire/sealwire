@@ -54,6 +54,8 @@ export function loadLastEffort(provider) {
 }
 
 export function loadLastApprovalPolicy(provider) {
+  // Pi exposes only unrestricted execution; a foreign provider's policy cannot carry over.
+  if (normalizeProvider(provider) === "pi") return "bypass";
   return readValue("approvalPolicy", provider);
 }
 

@@ -42,6 +42,14 @@ test("every known provider has effort labels rather than raw wire values", () =>
 test("cursor is offered when the relay reports no provider list", () => {
   assert.ok(normalizeProviderList([]).includes("cursor"));
   assert.ok(normalizeProviderList([]).includes("opencode"));
+  assert.ok(normalizeProviderList([]).includes("pi"));
+});
+
+test("Pi offers only its real permission mode and preserves the folder default model", () => {
+  assert.deepEqual(providerSettings("pi").approvalOptions.map((option) => option.value), ["bypass"]);
+  assert.equal(providerHasFilesystemSandbox("pi"), false);
+  assert.equal(launchSeedModel("pi", [{ model: "other/folder-model", is_default: true }]), "");
+  assert.equal(providerSettings("pi").effortLabels.off, "Off");
 });
 
 test("cursor's approval copy never promises a filesystem sandbox", () => {

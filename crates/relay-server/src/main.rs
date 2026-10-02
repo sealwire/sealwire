@@ -14,6 +14,7 @@ mod legacy_promotion_audit;
 mod model_order;
 mod model_policy;
 mod orchestrator_tools;
+mod pi;
 mod protocol;
 #[cfg(test)]
 mod protocol_tests;

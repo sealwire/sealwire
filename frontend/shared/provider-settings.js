@@ -1,6 +1,6 @@
 import { providerLabel } from "./provider-labels.js";
 
-const DEFAULT_PROVIDERS = ["codex", "claude_code", "cursor", "opencode"];
+const DEFAULT_PROVIDERS = ["codex", "claude_code", "cursor", "opencode", "pi"];
 const DEFAULT_MODELS = {
   claude_code: "claude-sonnet-4-6",
   codex: "gpt-5.5",
@@ -19,6 +19,16 @@ const DEFAULT_MODELS = {
 // `permissionMode=bypassPermissions` for Claude and to
 // `approvalPolicy=never` + `sandbox=danger-full-access` for Codex.
 const PROVIDER_SETTINGS = {
+  pi: {
+    approvalLabel: "Permission mode",
+    approvalOptions: [
+      { label: "Full access (YOLO)", value: "bypass", description: "Pi runs tools without built-in approval prompts or an OS sandbox. Use a trusted workspace.", tone: "danger" },
+    ],
+    effortLabel: "Thinking",
+    effortLabels: { off: "Off", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" },
+    modelLabel: "Pi model",
+    sandboxLabel: "File access",
+  },
   claude_code: {
     approvalLabel: "Permission mode",
     approvalOptions: [
@@ -188,7 +198,7 @@ export function defaultModelForProvider(provider) {
 
 // OpenCode reads its default model from the new session's own folder config. The
 // shared catalog was discovered in another folder, so its default would override that.
-const FOLDER_DEFAULT_MODEL_PROVIDERS = new Set(["opencode"]);
+const FOLDER_DEFAULT_MODEL_PROVIDERS = new Set(["opencode", "pi"]);
 
 export function providerPicksFolderDefaultModel(provider) {
   return FOLDER_DEFAULT_MODEL_PROVIDERS.has(normalizeProvider(provider));

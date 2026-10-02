@@ -73,6 +73,41 @@ your own machine until you decide otherwise.
 **Tip:** run it on a computer that's always on — a desktop, a home server — and
 long jobs keep going even with your laptop closed.
 
+### Pi
+
+Sealwire controls [Pi](https://github.com/earendil-works/pi) through its native
+`pi --mode rpc` interface, with one process per session. Install
+`npm install -g @earendil-works/pi-coding-agent` (Node.js 22.19+) and configure a
+model in Pi, then select **Pi** in Sealwire. To run only Pi, use
+`AGENT_PROVIDERS=pi npx sealwire`. This integration targets Pi 1.0.0's RPC protocol.
+
+Pi supports streamed text, thinking, tool results, images, model selection,
+cancellation, prompt template/skill discovery, and resuming its version 3 session files.
+History follows the active branch and includes messages before compaction.
+New sessions use Pi's native storage settings, including `sessionDir` and
+`PI_CODING_AGENT_SESSION_DIR`. History discovery scans the environment's session
+directory or the default `~/.pi/agent/sessions`, plus sessions Sealwire created.
+Empty session metadata lives beside Sealwire's state file.
+Idle processes are evicted as more sessions open; active turns are retained.
+Withdrawing workspace trust closes that workspace's Pi processes and stops active
+turns. Granting trust preserves running turns; the next idle resume loads the new configuration.
+Stopping during prompt preflight terminates that Pi process because its extension
+hooks cannot be cancelled through RPC; the next turn resumes the saved session.
+
+**Full access (YOLO)** is the only supported permission mode: Pi's RPC interface
+provides no tool approval or OS filesystem sandbox. Read-only reviews and Task
+seats are unavailable. Sealwire MCP injection and extension dialogs are not yet
+supported; dialogs are cancelled with a log entry. Extension commands are refused
+because they can switch the session outside Sealwire. Forking uses Sealwire's
+transcript replay, and archiving is unavailable. Permanent deletion removes the
+native session file.
+
+Extensions that await a dialog during `session_start` may fail to initialize
+in Pi 1.0.0's RPC mode; disable those startup prompts for this integration.
+
+Run `node scripts/pi-provider-e2e.mjs` with Pi on `PATH` to verify the integration
+against a local test model and a separate relay; no model subscription is used.
+
 ### OpenCode
 
 Sealwire launches one `opencode acp` process per session, using your OpenCode

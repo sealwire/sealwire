@@ -131,6 +131,7 @@ export function applyForkProviderChange(fields, provider, models) {
     provider,
     model: firstCatalogModel(models),
     effort: INHERIT,
+    ...(provider === "pi" ? { approvalPolicy: "bypass", sandbox: "danger-full-access" } : {}),
   };
 }
 

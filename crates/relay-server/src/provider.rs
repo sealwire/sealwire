@@ -452,6 +452,9 @@ pub struct SkillInputRef {
 
 #[async_trait]
 pub trait ProviderBridge: Send + Sync {
+    async fn refresh_workspace_trust(&self) -> Result<(), String> {
+        Ok(())
+    }
     async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String>;
     async fn list_models(&self) -> Result<Vec<ModelOptionView>, String>;
     /// The model a new session in `cwd` would run if the relay named none, as the
@@ -667,6 +670,7 @@ enum ProviderKind {
     Codex,
     /// The Node worker wrapping `@anthropic-ai/claude-agent-sdk`.
     ClaudeCode,
+    Pi,
     /// Agent Client Protocol over stdio (`cursor-agent acp`, and any other ACP
     /// agent — the bridge is parameterized, not vendor-specific).
     Acp,
@@ -849,6 +853,14 @@ const DEFAULT_PROVIDERS: &[ProviderEntry] = &[
         launch_args: &["acp"],
         aliases: &[],
     },
+    ProviderEntry {
+        binary_name: "pi",
+        display_name: "Pi",
+        provider_key: "pi",
+        kind: ProviderKind::Pi,
+        launch_args: &["--mode", "rpc"],
+        aliases: &[],
+    },
 ];
 
 const FAKE_PROVIDER: ProviderEntry = ProviderEntry {
@@ -1017,6 +1029,7 @@ async fn spawn_provider(
         ProviderKind::Fake => {
             bridge_arc(crate::fake_provider::FakeProviderBridge::spawn(state).await)
         }
+        ProviderKind::Pi => bridge_arc(crate::pi::PiBridge::spawn(state).await),
         ProviderKind::ClaudeCode => bridge_arc(crate::claude::ClaudeCodeBridge::spawn(state).await),
         ProviderKind::Acp if entry.provider_key == "opencode" => {
             bridge_arc(crate::acp::OpenCodeBridge::spawn(state).await)
@@ -1140,6 +1153,7 @@ mod registry_tests {
         assert_eq!(entry("claude_code").kind, ProviderKind::ClaudeCode);
         assert_eq!(entry("cursor").kind, ProviderKind::Acp);
         assert_eq!(entry("opencode").kind, ProviderKind::Acp);
+        assert_eq!(entry("pi").kind, ProviderKind::Pi);
         assert_eq!(entry("fake").kind, ProviderKind::Fake);
     }
 
@@ -1149,7 +1163,10 @@ mod registry_tests {
         // the subcommand the bridge would attach to a terminal UI and hang
         // rather than speak a protocol.
         for entry in DEFAULT_PROVIDERS {
-            if matches!(entry.kind, ProviderKind::Codex | ProviderKind::Acp) {
+            if matches!(
+                entry.kind,
+                ProviderKind::Codex | ProviderKind::Acp | ProviderKind::Pi
+            ) {
                 assert!(
                     !entry.launch_args.is_empty(),
                     "`{}` needs launch args to enter protocol mode",
@@ -1185,7 +1202,10 @@ mod registry_tests {
             .iter()
             .map(|e| e.provider_key)
             .collect();
-        assert_eq!(keys, vec!["codex", "claude_code", "cursor", "opencode"]);
+        assert_eq!(
+            keys,
+            vec!["codex", "claude_code", "cursor", "opencode", "pi"]
+        );
         assert!(select_providers("   ")
             .iter()
             .all(|e| e.provider_key != "fake"));

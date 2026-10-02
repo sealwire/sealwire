@@ -241,6 +241,9 @@ impl AppState {
             let relay = self.relay.read().await;
             relay.thread_settings(&input.thread_id)
         };
+        let target = self.resolve_session_target(&input.thread_id).await?;
+        let provider_name = target.provider.clone();
+        let defaults = defaults.for_provider(&provider_name);
         let approval_policy = non_empty(input.approval_policy)
             .or_else(|| {
                 remembered_settings
@@ -255,9 +258,6 @@ impl AppState {
                     .map(|settings| settings.sandbox.clone())
             })
             .unwrap_or(defaults.sandbox);
-
-        let target = self.resolve_session_target(&input.thread_id).await?;
-        let provider_name = target.provider.clone();
         let provider_models = self
             .load_provider_model_catalog(&provider_name, target.bridge())
             .await;
@@ -724,6 +724,7 @@ impl AppState {
 
         let target = self.resolve_session_target(&target_thread).await?;
         let provider_name = target.provider.clone();
+        let defaults = defaults.for_provider(&provider_name);
         let provider_models = self
             .load_provider_model_catalog(&provider_name, target.bridge())
             .await;

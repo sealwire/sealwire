@@ -483,6 +483,12 @@ impl AppState {
             relay.notify();
         }
 
+        drop(relay);
+        // Project configuration can change a provider's default as soon as trust changes.
+        self.provider_default_models.write().await.clear();
+        for bridge in self.providers.values() {
+            bridge.refresh_workspace_trust().await?;
+        }
         Ok(WorkspaceTrustReceipt {
             cwd,
             trusted: input.trusted,

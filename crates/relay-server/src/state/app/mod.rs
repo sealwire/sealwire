@@ -1269,6 +1269,9 @@ in thread {thread_id}: {error}"
             let relay = self.relay.read().await;
             relay.remembered_thread_settings(thread_id)
         };
+        let target = self.resolve_session_target(thread_id).await?;
+        let (provider_name, bridge) = (target.provider.clone(), target.bridge().clone());
+        let defaults = defaults.for_provider(&provider_name);
         let approval_policy = settings
             .as_ref()
             .map(|value| value.approval_policy.clone())
@@ -1285,8 +1288,6 @@ in thread {thread_id}: {error}"
             .as_ref()
             .map(|value| value.model.clone())
             .filter(|value| !value.is_empty());
-        let target = self.resolve_session_target(thread_id).await?;
-        let (provider_name, bridge) = (target.provider.clone(), target.bridge().clone());
         let data = match recorded_cwd.as_deref() {
             Some(cwd) => target.read_thread_in_cwd(cwd).await?,
             None => target.read_thread().await?,
@@ -2717,6 +2718,16 @@ struct SessionDefaults {
     approval_policy: String,
     sandbox: String,
     reasoning_effort: String,
+}
+
+impl SessionDefaults {
+    fn for_provider(mut self, provider: &str) -> Self {
+        if provider == "pi" {
+            self.approval_policy = "bypass".into();
+            self.sandbox = "danger-full-access".into();
+        }
+        self
+    }
 }
 
 fn default_effort_for_model(

@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+test("Pi's launch cannot inherit a permission policy it cannot enforce", async () => {
+  const { loadLastApprovalPolicy } = await import("./last-used-settings.js");
+  assert.equal(loadLastApprovalPolicy("pi"), "bypass");
+});
+
 // Map-backed localStorage shim. last-used-settings.js reads `window.localStorage`,
 // so the stub must hang off globalThis.window (not globalThis.localStorage).
 function installStorage() {
