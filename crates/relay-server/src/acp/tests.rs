@@ -422,6 +422,88 @@ fn standard_acp_tool_content_is_read_not_just_cursors_raw_output() {
 }
 
 #[test]
+fn cursor_read_and_search_results_survive_acp_replay() {
+    // Shapes captured from a Cursor session/load: no ACP `content` at all, the
+    // read body sits in `rawOutput.content` and a search reports only counts.
+    let entries = replay(&[
+        json!({"sessionUpdate":"tool_call","toolCallId":"read-1","title":"Read note.txt",
+            "kind":"read","status":"pending","rawInput":{"path":"/w/note.txt"},"locations":[]}),
+        json!({"sessionUpdate":"tool_call_update","toolCallId":"read-1",
+            "status":"completed","rawOutput":{"content":"one\ntwo\n"}}),
+        json!({"sessionUpdate":"tool_call","toolCallId":"search-1","title":"grep needle",
+            "kind":"search","status":"pending","rawInput":{"pattern":"needle","path":"src"}}),
+        json!({"sessionUpdate":"tool_call_update","toolCallId":"search-1",
+            "status":"completed","rawOutput":{"totalMatches":4,"truncated":false}}),
+        json!({"sessionUpdate":"tool_call","toolCallId":"sh-1","title":"touch x",
+            "kind":"execute","status":"pending","rawInput":{"command":"touch x"}}),
+        json!({"sessionUpdate":"tool_call_update","toolCallId":"sh-1",
+            "status":"completed","rawOutput":{"exitCode":0,"stdout":"","stderr":""}}),
+    ]);
+
+    let read = entries[0].tool.as_ref().expect("read view");
+    assert_eq!(read.result_preview.as_deref(), Some("one\ntwo\n"));
+    let input = read.input_preview.as_deref().unwrap_or_default();
+    assert!(input.contains("\"path\": \"/w/note.txt\""), "{input}");
+    let search = entries[1].tool.as_ref().expect("search view");
+    let input = search.input_preview.as_deref().unwrap_or_default();
+    assert!(input.contains("\"pattern\": \"needle\""), "{input}");
+    let result = search.result_preview.as_deref().unwrap_or_default();
+    assert!(result.contains("\"totalMatches\": 4"), "{result}");
+    let shell = entries[2].tool.as_ref().expect("shell view");
+    assert_eq!(shell.result_preview, None, "a silent command has no output");
+}
+
+#[test]
+fn opencode_tool_result_is_its_text_not_its_raw_output_json() {
+    // OpenCode sends both; its rawOutput.metadata can carry whole patches.
+    let entries = replay(&[
+        json!({"sessionUpdate":"tool_call","toolCallId":"t1","title":"git status --short",
+            "kind":"execute","status":"pending",
+            "rawInput":{"command":"git status --short","cwd":"/w"}}),
+        json!({"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed",
+            "content":[{"type":"content","content":{"type":"text","text":" M a.rs\n"}}],
+            "rawOutput":{"output":" M a.rs\n","metadata":{"exit":0,"truncated":false}}}),
+    ]);
+
+    let tool = entries[0].tool.as_ref().expect("tool view");
+    assert_eq!(tool.result_preview.as_deref(), Some(" M a.rs\n"));
+    assert_eq!(tool.input_preview.as_deref(), Some("git status --short"));
+}
+
+#[test]
+fn acp_edit_diff_becomes_a_file_change_with_a_compact_hunk() {
+    // Cursor's diff block carries the whole file before and after (242 KB for a
+    // package-lock.json bump), so only the changed span and its context is kept.
+    let entries = replay(&[
+        json!({"sessionUpdate":"tool_call","toolCallId":"edit-1","title":"Edit note.txt",
+            "kind":"edit","status":"pending","rawInput":{"path":"note.txt"},"locations":[]}),
+        json!({"sessionUpdate":"tool_call_update","toolCallId":"edit-1","status":"completed",
+            "content":[{"type":"diff","path":"note.txt",
+                "oldText":"a\nb\nc\nd\ne\nf\ng\nh\ni\n",
+                "newText":"a\nb\nc\nd\nchanged\nf\ng\nh\ni\n"}]}),
+        json!({"sessionUpdate":"tool_call","toolCallId":"new-1","title":"Write new.txt",
+            "kind":"edit","status":"pending","rawInput":{"path":"new.txt"}}),
+        json!({"sessionUpdate":"tool_call_update","toolCallId":"new-1","status":"completed",
+            "content":[{"type":"diff","path":"new.txt","oldText":null,"newText":"x\n"}]}),
+    ]);
+
+    let tool = entries[0].tool.as_ref().expect("edit view");
+    assert_eq!(tool.item_type, "fileChange");
+    assert_eq!(tool.file_changes.len(), 1);
+    assert_eq!(tool.file_changes[0].change_type, "update");
+    assert_eq!(
+        tool.file_changes[0].diff,
+        "--- a/note.txt\n+++ b/note.txt\n@@ -2,7 +2,7 @@\n b\n c\n d\n-e\n+changed\n f\n g\n h"
+    );
+    let created = entries[1].tool.as_ref().expect("write view");
+    assert_eq!(created.file_changes[0].change_type, "add");
+    assert_eq!(
+        created.file_changes[0].diff,
+        "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,1 @@\n+x"
+    );
+}
+
+#[test]
 fn listing_threads_caches_each_cwd_so_a_cold_session_can_be_loaded() {
     // `session/load` needs an absolute cwd. After a relay restart the session
     // map is empty, and the only place the cwd appears is the `session/list`

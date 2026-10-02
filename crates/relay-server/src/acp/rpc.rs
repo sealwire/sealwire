@@ -15,8 +15,8 @@ use tokio::{
 
 use crate::{
     protocol::{
-        ThreadSummaryView, ToolCallView, TranscriptContentState, TranscriptEntryKind,
-        TranscriptEntryView,
+        FileChangeDiffView, ThreadSummaryView, ToolCallView, TranscriptContentState,
+        TranscriptEntryKind, TranscriptEntryView,
     },
     state::{
         ApprovalKind, BrokerPendingMessage, PendingApproval, PendingTranscriptDelta,
@@ -418,7 +418,9 @@ pub(crate) enum TranscriptOp {
         path: Option<String>,
         title: String,
         command: Option<String>,
+        input: Option<String>,
         output: Option<String>,
+        file_changes: Vec<FileChangeDiffView>,
         status: String,
     },
     Title(String),
@@ -438,14 +440,20 @@ fn tool_status(raw: Option<&str>) -> String {
     .to_string()
 }
 
-/// Tool output, from either shape.
-///
-/// `content` is the portable ACP representation (an array of content blocks);
-/// `rawOutput` is Cursor's richer extension carrying `{exitCode, stdout, stderr}`.
-/// Preferring `rawOutput` keeps shell output faithful where it exists, while the
-/// `content` fallback is what makes this bridge work against a non-Cursor agent.
+fn raw_value_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(text) => (!text.is_empty()).then(|| text.clone()),
+        _ => Some(serde_json::to_string_pretty(value).expect("JSON value serializes")),
+    }
+}
+
+/// Tool output. Readable text wins over `rawOutput` JSON: OpenCode sends both, and
+/// its rawOutput metadata can carry whole patches. Cursor's searches only send JSON.
 fn tool_output(update: &Value) -> Option<String> {
-    if let Some(raw) = update.get("rawOutput") {
+    let raw = update.get("rawOutput").filter(|raw| !raw.is_null());
+    let shell = raw.filter(|raw| raw.get("stdout").is_some() || raw.get("stderr").is_some());
+    if let Some(raw) = shell {
         let stdout = raw.get("stdout").and_then(Value::as_str).unwrap_or("");
         let stderr = raw.get("stderr").and_then(Value::as_str).unwrap_or("");
         let joined = format!("{stdout}{stderr}");
@@ -453,8 +461,117 @@ fn tool_output(update: &Value) -> Option<String> {
             return Some(joined);
         }
     }
-    let text = protocol::content_text(update.get("content")?);
-    (!text.is_empty()).then_some(text)
+    [
+        raw.and_then(|raw| raw.get("content")),
+        update.get("content"),
+    ]
+    .into_iter()
+    .flatten()
+    .map(protocol::content_text)
+    .find(|text| !text.is_empty())
+    .or_else(|| raw.filter(|_| shell.is_none()).and_then(raw_value_text))
+}
+
+/// ACP diff blocks carry whole old/new files. Keep the changed span and a few
+/// context lines so a one-line edit to a large file does not create a huge card.
+fn file_diff(path: &str, old: Option<&str>, new: &str) -> String {
+    let before: Vec<&str> = old.unwrap_or_default().lines().collect();
+    let after: Vec<&str> = new.lines().collect();
+    let common_start = before
+        .iter()
+        .zip(&after)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let common_end = before[common_start..]
+        .iter()
+        .rev()
+        .zip(after[common_start..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let before_end = before.len() - common_end;
+    let after_end = after.len() - common_end;
+    let context_start = common_start.saturating_sub(3);
+    let before_context_end = (before_end + 3).min(before.len());
+    let after_context_end = (after_end + 3).min(after.len());
+    let old_label = if old.is_some() {
+        format!("a/{path}")
+    } else {
+        "/dev/null".to_string()
+    };
+    let new_label = if old.is_some() && new.is_empty() {
+        "/dev/null".to_string()
+    } else {
+        format!("b/{path}")
+    };
+    let mut lines = vec![
+        format!("--- {old_label}"),
+        format!("+++ {new_label}"),
+        format!(
+            "@@ -{},{} +{},{} @@",
+            if before.is_empty() {
+                0
+            } else {
+                context_start + 1
+            },
+            before_context_end - context_start,
+            if after.is_empty() {
+                0
+            } else {
+                context_start + 1
+            },
+            after_context_end - context_start,
+        ),
+    ];
+    lines.extend(
+        before[context_start..common_start]
+            .iter()
+            .map(|line| format!(" {line}")),
+    );
+    lines.extend(
+        before[common_start..before_end]
+            .iter()
+            .map(|line| format!("-{line}")),
+    );
+    lines.extend(
+        after[common_start..after_end]
+            .iter()
+            .map(|line| format!("+{line}")),
+    );
+    lines.extend(
+        before[before_end..before_context_end]
+            .iter()
+            .map(|line| format!(" {line}")),
+    );
+    lines.join("\n")
+}
+
+fn tool_file_changes(update: &Value) -> Vec<FileChangeDiffView> {
+    update
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|block| {
+            if block.get("type").and_then(Value::as_str) != Some("diff") {
+                return None;
+            }
+            let path = block.get("path")?.as_str()?.to_string();
+            let old = block.get("oldText").and_then(Value::as_str);
+            let new = block.get("newText")?.as_str()?;
+            Some(FileChangeDiffView {
+                path: path.clone(),
+                change_type: if old.is_none() {
+                    "add"
+                } else if new.is_empty() {
+                    "delete"
+                } else {
+                    "update"
+                }
+                .to_string(),
+                diff: file_diff(&path, old, new),
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn plan_update(update: &Value, session: &mut SessionRuntime) -> TranscriptOp {
@@ -580,15 +697,21 @@ fn plan_update_inner(update: &Value, session: &mut SessionRuntime) -> Transcript
             {
                 meta.title = title.to_string();
             }
-            if let Some(command) = update
-                .get("rawInput")
-                .and_then(|input| input.get("command"))
-                .and_then(Value::as_str)
-            {
-                meta.command = Some(command.to_string());
+            if let Some(input) = update.get("rawInput").filter(|input| !input.is_null()) {
+                let command = input.get("command").and_then(Value::as_str);
+                if let Some(command) = command {
+                    meta.command = Some(command.to_string());
+                }
+                meta.input = command
+                    .map(str::to_string)
+                    .or_else(|| raw_value_text(input));
             }
             if let Some(output) = tool_output(update) {
                 meta.output = Some(output);
+            }
+            let changes = tool_file_changes(update);
+            if !changes.is_empty() {
+                meta.file_changes = changes;
             }
             if let Some(status) = update.get("status").and_then(Value::as_str) {
                 meta.status = tool_status(Some(status));
@@ -617,7 +740,9 @@ fn plan_update_inner(update: &Value, session: &mut SessionRuntime) -> Transcript
                 path: meta.path.clone(),
                 title: meta.title.clone(),
                 command: meta.command.clone(),
+                input: meta.input.clone(),
                 output: meta.output.clone(),
+                file_changes: meta.file_changes.clone(),
                 status: meta.status.clone(),
             }
         }
@@ -685,12 +810,16 @@ fn available_commands(update: &Value) -> Vec<crate::protocol::ProviderSkillView>
 fn tool_view(
     title: &str,
     command: Option<&str>,
+    input: Option<&str>,
     output: Option<&str>,
     kind: Option<&str>,
     path: Option<&str>,
+    file_changes: Vec<FileChangeDiffView>,
 ) -> ToolCallView {
     ToolCallView {
-        item_type: if command.is_some() {
+        item_type: if !file_changes.is_empty() {
+            "fileChange".to_string()
+        } else if command.is_some() {
             "command_execution".to_string()
         } else {
             "tool_call".to_string()
@@ -703,10 +832,10 @@ fn tool_view(
         path: path.map(str::to_string),
         url: None,
         command: command.map(str::to_string),
-        input_preview: command.map(str::to_string),
+        input_preview: input.map(str::to_string),
         result_preview: output.map(str::to_string),
         diff: None,
-        file_changes: Vec::new(),
+        file_changes,
         apply_state: None,
         file_changes_omitted: false,
         can_apply: None,
@@ -767,7 +896,9 @@ pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp
             path,
             title,
             command,
+            input,
             output,
+            file_changes,
             status,
         } => TranscriptEntryView {
             // A raw provider read: not a relay row until the relay numbers it.
@@ -783,9 +914,11 @@ pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp
             tool: Some(tool_view(
                 &title,
                 command.as_deref(),
+                input.as_deref(),
                 output.as_deref(),
                 kind.as_deref(),
                 path.as_deref(),
+                file_changes,
             )),
             content_state: TranscriptContentState::Full,
             injection: None,
@@ -919,15 +1052,19 @@ pub(crate) fn apply_op(
             path,
             title,
             command,
+            input,
             output,
+            file_changes,
             status,
         } => {
             let tool = tool_view(
                 &title,
                 command.as_deref(),
+                input.as_deref(),
                 output.as_deref(),
                 kind.as_deref(),
                 path.as_deref(),
+                file_changes,
             );
             if background {
                 relay.bg_upsert_transcript_item(

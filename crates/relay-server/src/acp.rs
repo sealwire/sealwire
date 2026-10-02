@@ -229,7 +229,9 @@ impl From<&str> for NativeEventRange {
 pub(crate) struct ToolMeta {
     pub(crate) title: String,
     pub(crate) command: Option<String>,
+    pub(crate) input: Option<String>,
     pub(crate) output: Option<String>,
+    pub(crate) file_changes: Vec<crate::protocol::FileChangeDiffView>,
     /// Sticky like `status`: ACP lets a `tool_call_update` omit every field but
     /// `toolCallId`, so a trailing content-only update must not blank these.
     pub(crate) kind: Option<String>,
@@ -248,7 +250,9 @@ impl Default for ToolMeta {
         Self {
             title: String::new(),
             command: None,
+            input: None,
             output: None,
+            file_changes: Vec::new(),
             kind: None,
             path: None,
             status: "pending".to_string(),
