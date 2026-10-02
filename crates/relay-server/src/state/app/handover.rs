@@ -787,6 +787,9 @@ handover — try again"
                 .map_err(HandoverError::Failed)?;
             (name.to_string(), bridge.clone())
         };
+        bridge
+            .validate_permissions(approval_policy, sandbox)
+            .map_err(HandoverError::Failed)?;
         let provider_models = self
             .load_provider_model_catalog(&provider_name, &bridge)
             .await;

@@ -585,7 +585,9 @@ fn absolute_path(path: PathBuf, cwd: &Path) -> PathBuf {
 }
 
 fn permissions(approval: &str, sandbox: &str) -> Result<(), String> {
-    if approval != "bypass" || sandbox != "danger-full-access" {
+    // YOLO sessions on other providers retain workspace-write in relay settings.
+    // That field must not turn their unrestricted delegates into unsupported Pi sessions.
+    if approval != "bypass" || !matches!(sandbox, "workspace-write" | "danger-full-access") {
         return Err("Pi requires Full access (YOLO): its RPC interface has no tool approval or filesystem sandbox. Read-only sessions are not supported.".into());
     }
     Ok(())
@@ -647,6 +649,10 @@ fn catalog(models: &[Value]) -> Vec<ModelOptionView> {
 
 #[async_trait]
 impl ProviderBridge for PiBridge {
+    fn validate_permissions(&self, approval: &str, sandbox: &str) -> Result<(), String> {
+        permissions(approval, sandbox)
+    }
+
     async fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
         let _attach = self.attach.lock().await;
@@ -692,9 +698,6 @@ impl ProviderBridge for PiBridge {
     }
     fn provider_name(&self) -> &'static str {
         "pi"
-    }
-    fn supports_read_only_reviews(&self) -> bool {
-        false
     }
     fn read_thread_reports_activity_time(&self) -> bool {
         true

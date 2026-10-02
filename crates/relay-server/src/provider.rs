@@ -462,6 +462,9 @@ pub trait ProviderBridge: Send + Sync {
     /// The model a new session in `cwd` would run if the relay named none, as the
     /// provider's own configuration decides it. Not a catalog's "recommended" flag.
     async fn default_model(&self, cwd: &str) -> Result<String, String>;
+    fn validate_permissions(&self, _approval: &str, _sandbox: &str) -> Result<(), String> {
+        Ok(())
+    }
     async fn start_thread(&self, request: StartThreadRequest) -> Result<StartThreadResult, String>;
     async fn fork_thread(
         &self,

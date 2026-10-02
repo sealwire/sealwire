@@ -204,7 +204,423 @@ fn unsupported_permissions_fail_closed() {
         assert!(permissions(policy, "workspace-write").is_err());
     }
     assert!(permissions("bypass", "read-only").is_err());
+    assert!(permissions("bypass", "unknown").is_err());
+    assert!(permissions("bypass", "workspace-write").is_ok());
     assert!(permissions("bypass", "danger-full-access").is_ok());
+}
+
+async fn creation_app(
+    root: &Path,
+) -> (
+    crate::state::AppState,
+    Arc<PiBridge>,
+    Arc<crate::fake_provider::FakeProviderBridge>,
+) {
+    let (tx, _) = watch::channel(0);
+    let state = Arc::new(RwLock::new(RelayState::new(
+        root.canonicalize().unwrap().to_string_lossy().into_owned(),
+        tx.clone(),
+        SecurityProfile::private(),
+    )));
+    let fake = Arc::new(
+        crate::fake_provider::FakeProviderBridge::spawn(state.clone())
+            .await
+            .unwrap(),
+    );
+    let pi = Arc::new(bridge(root, state.clone()));
+    let providers: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::from([
+        ("fake".into(), fake.clone() as Arc<dyn ProviderBridge>),
+        ("pi".into(), pi.clone() as Arc<dyn ProviderBridge>),
+    ]);
+    (
+        crate::state::AppState::from_parts(state, providers, tx),
+        pi,
+        fake,
+    )
+}
+
+fn session_input(provider: &str, approval: Option<&str>) -> crate::protocol::StartSessionInput {
+    crate::protocol::StartSessionInput {
+        provider: Some(provider.into()),
+        approval_policy: approval.map(str::to_string),
+        sandbox: Some("workspace-write".into()).filter(|_| provider != "pi"),
+        model: Some("test/echo".into()).filter(|_| provider == "pi"),
+        device_id: Some("pi-creation-test".into()),
+        cwd: None,
+        effort: None,
+        initial_prompt: None,
+        project_id: None,
+    }
+}
+
+async fn wait_for_session(state: &Arc<RwLock<RelayState>>, id: &str) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if state
+                .read()
+                .await
+                .runtime_for_thread(id)
+                .is_some_and(|r| !r.has_live_turn())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn pi_creation_defaults_delegate_handover_and_fork_accept_full_access() {
+    use relay_api::delegation::{AskRequest, StartedBy};
+    use relay_api::handover::HandoverRequest;
+
+    let root = tempfile::tempdir().unwrap();
+    let (app, pi, _) = creation_app(root.path()).await;
+    let source = app
+        .start_session(session_input("fake", Some("bypass")))
+        .await
+        .unwrap()
+        .active_thread_id
+        .unwrap();
+    let standalone = app.start_session(session_input("pi", None)).await.unwrap();
+    assert_eq!(standalone.approval_policy, "bypass");
+    assert_eq!(standalone.sandbox, "danger-full-access");
+
+    for started_by in [StartedBy::Person, StartedBy::Agent] {
+        let peer = app
+            .delegate(
+                &source,
+                AskRequest {
+                    provider: Some("pi".into()),
+                    model: Some("test/echo".into()),
+                    message: "review the parser".into(),
+                    peer_thread_id: None,
+                    effort: None,
+                    device_id: None,
+                    started_by,
+                },
+            )
+            .await
+            .unwrap();
+        wait_for_session(&pi.state, &peer).await;
+        assert!(pi
+            .read_thread(&peer)
+            .await
+            .unwrap()
+            .to_views()
+            .iter()
+            .any(|row| row
+                .text
+                .as_deref()
+                .is_some_and(|text| text.contains("report_back"))));
+    }
+
+    let target = app
+        .handover(
+            &source,
+            HandoverRequest {
+                provider: Some("pi".into()),
+                model: Some("test/echo".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    wait_for_session(&pi.state, &target).await;
+    let existing = standalone.active_thread_id.unwrap();
+    assert_eq!(
+        app.handover(
+            &source,
+            HandoverRequest {
+                target_thread_id: Some(existing.clone()),
+                ..Default::default()
+            }
+        )
+        .await
+        .unwrap(),
+        existing
+    );
+    wait_for_session(&pi.state, &existing).await;
+
+    let forked = app
+        .fork_session(crate::protocol::ForkSessionInput {
+            source_thread_id: source,
+            provider: Some("pi".into()),
+            model: Some("test/echo".into()),
+            device_id: Some("pi-creation-test".into()),
+            cwd: None,
+            approval_policy: None,
+            sandbox: None,
+            effort: None,
+            initial_prompt: None,
+            project_id: None,
+            up_to_item_id: None,
+        })
+        .await
+        .unwrap()
+        .active_thread_id
+        .unwrap();
+    wait_for_session(&pi.state, &forked).await;
+    pi.shutdown().await;
+}
+
+#[tokio::test]
+async fn restricted_pi_delegate_is_refused_before_writing_a_brief() {
+    use relay_api::delegation::{AskRequest, StartedBy};
+    let root = tempfile::tempdir().unwrap();
+    let (app, pi, _) = creation_app(root.path()).await;
+    let source = app
+        .start_session(session_input("fake", Some("on-request")))
+        .await
+        .unwrap()
+        .active_thread_id
+        .unwrap();
+    let error = app
+        .delegate_detached(
+            &source,
+            AskRequest {
+                provider: Some("pi".into()),
+                model: Some("test/echo".into()),
+                message: "review the parser".into(),
+                peer_thread_id: None,
+                effort: None,
+                device_id: None,
+                started_by: StartedBy::Person,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(error.message().contains("Full access"));
+    let relay = pi.state.read().await;
+    assert!(relay.asks_of_asker(&source).is_empty());
+    assert!(relay
+        .runtime_for_thread(&source)
+        .unwrap()
+        .transcript
+        .is_empty());
+    drop(relay);
+    assert!(pi.sessions.lock().await.is_empty());
+    pi.shutdown().await;
+}
+
+#[tokio::test]
+async fn explicitly_restricted_pi_start_is_refused_without_creating_a_session() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, pi, fake) = creation_app(root.path()).await;
+    for (approval, sandbox) in [
+        (Some("untrusted"), None),
+        (Some("on-request"), None),
+        (Some("never"), None),
+        (None, Some("read-only")),
+    ] {
+        let mut input = session_input("pi", approval);
+        input.sandbox = sandbox.map(str::to_string);
+        let error = app.start_session(input).await.unwrap_err();
+        assert!(error.contains("Full access"));
+        assert!(app.snapshot().await.active_thread_id.is_none());
+        assert!(pi.sessions.lock().await.is_empty());
+        assert!(fake.list_threads(20).await.unwrap().is_empty());
+    }
+    pi.shutdown().await;
+}
+
+#[tokio::test]
+async fn restricted_pi_handover_is_refused_before_the_summary_or_target_starts() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, pi, fake) = creation_app(root.path()).await;
+    let source = app
+        .start_session(session_input("fake", Some("on-request")))
+        .await
+        .unwrap()
+        .active_thread_id
+        .unwrap();
+    let error = app
+        .handover_detached(
+            &source,
+            relay_api::handover::HandoverRequest {
+                provider: Some("pi".into()),
+                model: Some("test/echo".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(error.message().contains("Full access"));
+    assert!(fake
+        .read_thread(&source)
+        .await
+        .unwrap()
+        .transcript
+        .is_empty());
+    assert!(pi.sessions.lock().await.is_empty());
+    assert!(pi
+        .state
+        .read()
+        .await
+        .reviews_response(None)
+        .handovers
+        .is_empty());
+    assert_eq!(
+        app.snapshot().await.active_thread_id.as_deref(),
+        Some(source.as_str())
+    );
+    pi.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_fork_without_remembered_source_permissions_uses_pi_defaults() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, pi, fake) = creation_app(root.path()).await;
+    app.start_session(session_input("fake", Some("on-request")))
+        .await
+        .unwrap();
+    let cwd = root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let imported = fake
+        .start_thread(StartThreadRequest::new(
+            &cwd,
+            "fake-echo",
+            "on-request",
+            "workspace-write",
+        ))
+        .await
+        .unwrap()
+        .thread
+        .id;
+    app.list_threads(20, Some("pi-creation-test".into()))
+        .await
+        .unwrap();
+    assert!(pi
+        .state
+        .read()
+        .await
+        .remembered_thread_settings(&imported)
+        .is_none());
+
+    let fork = app
+        .fork_session(crate::protocol::ForkSessionInput {
+            source_thread_id: imported,
+            provider: Some("pi".into()),
+            model: Some("test/echo".into()),
+            device_id: Some("pi-creation-test".into()),
+            cwd: None,
+            approval_policy: None,
+            sandbox: None,
+            effort: None,
+            initial_prompt: None,
+            project_id: None,
+            up_to_item_id: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(fork.provider, "pi");
+    assert_eq!(fork.approval_policy, "bypass");
+    assert_eq!(fork.sandbox, "danger-full-access");
+    wait_for_session(&pi.state, fork.active_thread_id.as_deref().unwrap()).await;
+    pi.shutdown().await;
+}
+
+#[tokio::test]
+async fn pi_reviews_and_reused_reviewers_receive_do_not_modify_instructions() {
+    use crate::protocol::{RequestReviewInput, SendMessageInput, TranscriptEntryKind};
+    use crate::state::ReviewJobStatus;
+
+    let root = tempfile::tempdir().unwrap();
+    let (app, pi, _) = creation_app(root.path()).await;
+    pi.state.write().await.trusted_workspaces.push(
+        root.path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let parent = app
+        .start_session(session_input("fake", Some("on-request")))
+        .await
+        .unwrap()
+        .active_thread_id
+        .unwrap();
+    app.send_message(SendMessageInput {
+        thread_id: parent.clone(),
+        text: "Inspect the parser changes".into(),
+        model: None,
+        effort: None,
+        device_id: Some("pi-creation-test".into()),
+    })
+    .await
+    .unwrap();
+    wait_for_session(&pi.state, &parent).await;
+
+    let mut reviewer = None;
+    for round in 1..=2 {
+        let receipt = app
+            .request_review(RequestReviewInput {
+                parent_thread_id: Some(parent.clone()),
+                reviewer_provider: "pi".into(),
+                reviewer_model: Some("test/echo".into()),
+                reviewer_effort: None,
+                reviewer_thread_id: reviewer.clone(),
+                instructions: Some("Focus on regressions".into()),
+                recap_source: Some("last_message".into()),
+                max_rounds: Some(1),
+                continues_review_id: None,
+                device_id: Some("pi-creation-test".into()),
+            })
+            .await
+            .unwrap();
+        let job = timeout(Duration::from_secs(10), async {
+            loop {
+                let job = pi
+                    .state
+                    .read()
+                    .await
+                    .review_job(&receipt.review_job_id)
+                    .cloned()
+                    .unwrap();
+                if job.status.is_terminal() {
+                    break job;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(job.status, ReviewJobStatus::Complete, "{:?}", job.error);
+        let id = job.reviewer_thread_id.unwrap();
+        if let Some(previous) = &reviewer {
+            assert_eq!(&id, previous);
+        }
+        let history = pi.read_thread(&id).await.unwrap().to_views();
+        assert_eq!(
+            history
+                .iter()
+                .filter(|row| row.kind == TranscriptEntryKind::UserText
+                    && row
+                        .text
+                        .as_deref()
+                        .is_some_and(|text| text.contains("Do not modify files.")))
+                .count(),
+            round
+        );
+        let relay = pi.state.read().await;
+        let settings = relay.thread_settings(&id).unwrap();
+        assert_eq!(settings.approval_policy, "bypass");
+        assert_eq!(settings.sandbox, "danger-full-access");
+        assert_eq!(
+            relay.thread_settings(&parent).unwrap().approval_policy,
+            "on-request"
+        );
+        drop(relay);
+        wait_for_session(&pi.state, &parent).await;
+        reviewer = Some(id);
+    }
+    pi.shutdown().await;
 }
 
 #[test]

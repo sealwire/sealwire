@@ -2645,9 +2645,6 @@ available; pick another one under Working tree to review"
             .filter(|value| !value.is_empty())
             .or_else(|| default_effort_for_model(&provider_models, &model))
             .unwrap_or_else(|| DEFAULT_EFFORT.to_string());
-        // Keep the reviewer read-only where the provider supports it (Codex honors
-        // a read-only sandbox); otherwise fall back to a permission-prompting mode
-        // and warn, since the review must not mutate the work under review.
         let (approval_policy, sandbox, read_only_enforced) =
             reviewer_thread_settings(&provider_name, &defaults.approval_policy, &defaults.sandbox);
 
@@ -2692,6 +2689,11 @@ available; pick another one under Working tree to review"
             relay.register_reviewer_thread(reviewer_thread_id, parent_thread_id);
             let (level, note) = if read_only_enforced {
                 ("info", "read-only sandbox enforced")
+            } else if provider_name == "pi" {
+                (
+                    "info",
+                    "prompt-only review; the reviewer is instructed not to modify files",
+                )
             } else {
                 (
                     "warn",
@@ -3575,6 +3577,12 @@ pub(super) fn reviewer_thread_settings(
         // The fake provider has no filesystem at all — it cannot write whatever
         // it is told, which is exactly the property `read_only_enforced` names.
         "fake" => ("never".to_string(), "read-only".to_string(), true),
+        // Pi has no restricted execution mode; the review prompt forbids edits.
+        "pi" => (
+            "bypass".to_string(),
+            "danger-full-access".to_string(),
+            false,
+        ),
         // Cursor over ACP has modes (`agent`/`plan`/`ask`), not an OS sandbox.
         // `review_read_only` is what the ACP bridge maps onto `plan`, so the
         // reviewer is contained at the prompt/tool level — but that is NOT
@@ -3871,6 +3879,19 @@ mod reviewer_settings_tests {
             "ACP modes are not a sandbox; claiming enforcement would let a \
              cursor reviewer be accepted where a hard read-only one is required"
         );
+    }
+
+    #[test]
+    fn pi_reviews_use_prompt_only_read_only_instructions() {
+        assert_eq!(
+            reviewer_thread_settings("pi", "on-request", "read-only"),
+            (
+                "bypass".to_string(),
+                "danger-full-access".to_string(),
+                false
+            )
+        );
+        assert!(!super::reviewer_read_only_is_enforced("pi"));
     }
 
     #[test]

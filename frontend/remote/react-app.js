@@ -1688,6 +1688,7 @@ function RemoteApp() {
     activeProvider: session?.provider || "",
     onEnsureProviderModels: ensureRemoteProviderModels,
   };
+  const composerModelCatalogKey = React.useMemo(() => JSON.stringify(remoteUi.providerModels), [remoteUi.providerModels]);
   const canRequestRemoteReview = canRequestReview(session, remoteDeviceId, remoteViewedThreadId);
   const forkDialog = remoteUi.forkDialog || {};
   // Gated on the dialog actually being open: RemoteApp re-renders on every
@@ -2629,6 +2630,7 @@ function RemoteApp() {
               remoteViewedThreadId || "",
               session?.provider || "",
               session?.current_cwd || "",
+              composerModelCatalogKey,
             ].join("|"),
             // The command door only: the request modal shows the relay's reason inline
             // itself, and the controller turns this rejection into a bare `false`.

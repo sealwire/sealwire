@@ -3715,6 +3715,7 @@ async function refreshProviderCatalogs(session) {
         const models = payload.data || [];
         state.providerModels[provider] = models;
         catalogsChanged ||= models.length > 0;
+        composerCommandController?.refreshContext?.();
       }
     }));
     if (catalogsChanged) {

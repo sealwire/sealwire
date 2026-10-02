@@ -152,3 +152,17 @@ test("OpenCode is offered as a reviewer with its provider model catalog", () => 
   assert.deepEqual(onlyOpenCode.providerOptions.map((option) => option.value), ["opencode"]);
   assert.equal(onlyOpenCode.defaultProvider, "opencode");
 });
+
+test("Pi is offered as a prompt-only reviewer, including on a Pi-only relay", () => {
+  const launch = selectReviewLaunchModel({
+    providers: ["pi", "codex"],
+    providerModels: { pi: [{ model: "openai/gpt-6.1-sol" }] },
+    session: { provider: "codex" },
+  });
+  assert.deepEqual(launch.providerOptions.map((option) => option.value), ["pi", "codex"]);
+  assert.equal(launch.defaultProvider, "pi");
+  assert.equal(launch.models[0].provider, "pi");
+  const onlyPi = selectReviewLaunchModel({ providers: ["pi"], session: { provider: "pi" } });
+  assert.deepEqual(onlyPi.providerOptions.map((option) => option.value), ["pi"]);
+  assert.equal(onlyPi.defaultProvider, "pi");
+});

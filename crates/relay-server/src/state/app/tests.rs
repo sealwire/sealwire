@@ -31335,9 +31335,9 @@ watchdog settle this Blocked",
                 AskRequest {
                     device_id: None,
                     started_by: relay_api::delegation::StartedBy::Person,
-                    peer_thread_id: None,
-                    // No such provider: the background half cannot get anywhere.
-                    provider: Some("nonexistent-provider".to_string()),
+                    // The peer is gone when the brief is handed over.
+                    peer_thread_id: Some("missing-peer".to_string()),
+                    provider: Some("fake".to_string()),
                     model: None,
                     effort: None,
                     message: "look at the retry loop".to_string(),
@@ -32024,7 +32024,7 @@ watchdog settle this Blocked",
     }
 
     // A delegate that has been accepted can still fail after its brief has created the
-    // session — starting the peer is the next thing that can go wrong. The card written
+    // session — the peer may be unavailable when the brief is handed over. The card written
     // when it was accepted is the only place the caller ever hears about that, so the
     // failure has to land on it, still naming the session that asked and still visible
     // to the scoped device it was for.
@@ -32043,10 +32043,9 @@ watchdog settle this Blocked",
                 AskRequest {
                     device_id: None,
                     started_by: relay_api::delegation::StartedBy::Person,
-                    peer_thread_id: None,
-                    // Nothing checks this until the peer is started, which is after the
-                    // brief has run — so the delegate is accepted and then fails there.
-                    provider: Some("no-such-provider".to_string()),
+                    // Peer admission happens after the brief materializes the source.
+                    peer_thread_id: Some("missing-peer".to_string()),
+                    provider: Some("fake".to_string()),
                     model: None,
                     effort: None,
                     message: "look at the retry loop".to_string(),

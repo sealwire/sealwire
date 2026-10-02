@@ -430,6 +430,13 @@ Carry on with one of those instead of bringing in another."
             )));
         }
 
+        if request.peer_thread_id.is_none() {
+            let (_, bridge) = self.peer_provider(request, &asker_provider)?;
+            bridge
+                .validate_permissions(&asker_approval, &asker_sandbox)
+                .map_err(AskError::Failed)?;
+        }
+
         Ok(PrecheckedAsk {
             asker_thread_id: asker_thread_id.clone(),
             message,

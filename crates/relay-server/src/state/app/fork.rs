@@ -169,6 +169,7 @@ impl AppState {
             let (name, bridge) = self.resolve_provider(Some(target_provider_lookup))?;
             (name.to_string(), bridge.clone())
         };
+        let defaults = defaults.for_provider(&target_provider_name);
         let provider_models = self
             .load_provider_model_catalog(&target_provider_name, &target_bridge)
             .await;

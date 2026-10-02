@@ -632,8 +632,18 @@ pub(crate) fn peer_is_wider_than_asker(
     peer_approval: &str,
     peer_sandbox: &str,
 ) -> bool {
+    // Full access can retain workspace-write in the UI; explicit read-only still
+    // bounds ACP sessions running in plan mode.
+    let effective_sandbox = |approval: &str, sandbox: &str| {
+        if approval == "bypass" && sandbox == "workspace-write" {
+            sandbox_rank("danger-full-access")
+        } else {
+            sandbox_rank(sandbox)
+        }
+    };
     approval_rank(peer_approval) > approval_rank(asker_approval)
-        || sandbox_rank(peer_sandbox) > sandbox_rank(asker_sandbox)
+        || effective_sandbox(peer_approval, peer_sandbox)
+            > effective_sandbox(asker_approval, asker_sandbox)
 }
 
 /// What a peer thread runs as.
@@ -736,6 +746,28 @@ and got {sandbox}",
             peer_thread_settings("on-request", "workspace-write", None, None),
             ("on-request".to_string(), "workspace-write".to_string())
         );
+    }
+
+    #[test]
+    fn full_access_is_equivalent_across_provider_sandbox_fields() {
+        assert!(!peer_is_wider_than_asker(
+            "bypass",
+            "workspace-write",
+            "bypass",
+            "danger-full-access"
+        ));
+        assert!(peer_is_wider_than_asker(
+            "on-request",
+            "workspace-write",
+            "bypass",
+            "danger-full-access"
+        ));
+        assert!(peer_is_wider_than_asker(
+            "bypass",
+            "read-only",
+            "bypass",
+            "danger-full-access"
+        ));
     }
 
     #[test]

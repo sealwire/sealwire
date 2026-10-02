@@ -14,7 +14,8 @@ impl AppState {
         // Hold the session guard for the whole start (incl. the optional initial
         // turn below), so a review can't interleave.
         let _slot = self.acquire_session_slot()?;
-        let defaults = self.defaults().await;
+        let (provider_name, bridge) = self.resolve_provider(input.provider.as_deref())?;
+        let defaults = self.defaults().await.for_provider(provider_name);
         let cwd = normalize_cwd(&non_empty(input.cwd).unwrap_or(defaults.current_cwd));
         {
             let relay = self.relay.read().await;
@@ -32,7 +33,7 @@ impl AppState {
         let model_selection = ModelSelection::new(input.model);
         let approval_policy = non_empty(input.approval_policy).unwrap_or(defaults.approval_policy);
         let sandbox = non_empty(input.sandbox).unwrap_or(defaults.sandbox);
-        let (provider_name, bridge) = self.resolve_provider(input.provider.as_deref())?;
+        bridge.validate_permissions(&approval_policy, &sandbox)?;
         let provider_models = self
             .load_provider_model_catalog(provider_name, bridge)
             .await;

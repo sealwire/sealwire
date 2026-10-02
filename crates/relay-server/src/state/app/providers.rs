@@ -69,6 +69,7 @@ impl AppState {
         bridge: &Arc<dyn ProviderBridge>,
         request: StartThreadRequest,
     ) -> Result<AdoptedStartThreadResult, String> {
+        bridge.validate_permissions(&request.approval_policy, &request.sandbox)?;
         let result = bridge.start_thread(request).await?;
         self.adopt_provider_start_result(provider_name, bridge, result)
             .await
