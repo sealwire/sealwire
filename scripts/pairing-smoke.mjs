@@ -6,6 +6,9 @@ const prompt = process.env.PAIRING_SMOKE_PROMPT || "Reply with exactly: pairing-
 const cwd = process.env.PAIRING_SMOKE_CWD || process.cwd();
 const timeoutMs = Number(process.env.PAIRING_SMOKE_TIMEOUT_MS || 25000);
 
+const BROKER_PROTOCOL_VERSION = 1;
+const RELAY_PROTOCOL_VERSION = 3;
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -26,6 +29,10 @@ function encryptJson(secret, value) {
   const plaintext = encoder.encode(JSON.stringify(value));
   const ciphertext = nacl.secretbox(plaintext, nonce, deriveKey(secret));
   return { nonce: bytesToBase64(nonce), ciphertext: bytesToBase64(ciphertext) };
+}
+
+function encryptActionRequest(secret, actionId, request) {
+  return encryptJson(secret, { action_id: actionId, request });
 }
 
 function decryptJson(secret, envelope) {
@@ -110,8 +117,8 @@ function createFrameQueue(ws) {
 async function main() {
   const pairingEnvelope = await fetch(`${relayBase}/api/pairing/start`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: "{}",
+    headers: { "content-type": "application/json", "X-Agent-Relay-CSRF": "1" },
+    body: JSON.stringify({ device_id: "smoke-local" }),
   }).then((response) => response.json());
   if (!pairingEnvelope.ok) {
     throw new Error(`pairing/start failed: ${JSON.stringify(pairingEnvelope)}`);
@@ -142,7 +149,9 @@ async function main() {
   ws.send(
     JSON.stringify({
       type: "publish",
+      protocol_version: BROKER_PROTOCOL_VERSION,
       payload: {
+        protocol_version: RELAY_PROTOCOL_VERSION,
         kind: "pairing_request",
         pairing_id: ticket.pairing_id,
         envelope: encryptJson(ticket.pairing_secret, {
@@ -165,8 +174,8 @@ async function main() {
     `${relayBase}/api/pairings/${encodeURIComponent(ticket.pairing_id)}/decision`,
     {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ decision: "approve" }),
+      headers: { "content-type": "application/json", "X-Agent-Relay-CSRF": "1" },
+      body: JSON.stringify({ decision: "approve", device_id: "smoke-local" }),
     }
   ).then((response) => response.json());
   if (!approveEnvelope.ok) {
@@ -191,11 +200,13 @@ async function main() {
   ws.send(
     JSON.stringify({
       type: "publish",
+      protocol_version: BROKER_PROTOCOL_VERSION,
       payload: {
+        protocol_version: RELAY_PROTOCOL_VERSION,
         kind: "encrypted_remote_action",
         action_id: "claim-challenge-smoke",
         device_id: deviceId,
-        envelope: encryptJson(payloadSecret, {
+        envelope: encryptActionRequest(payloadSecret, "claim-challenge-smoke", {
           type: "claim_challenge",
           proof: bytesToBase64(
             nacl.sign.detached(
@@ -223,11 +234,13 @@ async function main() {
   ws.send(
     JSON.stringify({
       type: "publish",
+      protocol_version: BROKER_PROTOCOL_VERSION,
       payload: {
+        protocol_version: RELAY_PROTOCOL_VERSION,
         kind: "encrypted_remote_action",
         action_id: "claim-smoke",
         device_id: deviceId,
-        envelope: encryptJson(payloadSecret, {
+        envelope: encryptActionRequest(payloadSecret, "claim-smoke", {
           type: "claim_device",
           challenge_id: challengeResult.claim_challenge_id,
           proof: bytesToBase64(
@@ -263,12 +276,14 @@ async function main() {
   ws.send(
     JSON.stringify({
       type: "publish",
+      protocol_version: BROKER_PROTOCOL_VERSION,
       payload: {
+        protocol_version: RELAY_PROTOCOL_VERSION,
         kind: "encrypted_remote_action",
         action_id: "start-smoke",
         device_id: deviceId,
         session_claim: claimResult.session_claim,
-        envelope: encryptJson(payloadSecret, {
+        envelope: encryptActionRequest(payloadSecret, "start-smoke", {
           type: "start_session",
           input: {
             cwd,

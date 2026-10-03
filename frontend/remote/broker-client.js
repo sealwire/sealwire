@@ -23,8 +23,8 @@ import {
 } from "./surface-state.js";
 
 const BROKER_PROTOCOL_VERSION = 1;
-// 2: chunked action results carry `data` (JSON text) instead of `data_base64`. Must stay
-// in lockstep with RELAY_PROTOCOL_VERSION in crates/relay-server/src/broker.rs.
+// Old clients leave the deduplication key outside the authenticated ciphertext. Keep
+// this version in lockstep with RELAY_PROTOCOL_VERSION in crates/relay-server/src/broker.rs.
 const RELAY_PROTOCOL_VERSION = 3;
 const DEVICE_SESSION_ROOM_MAX_BYTES = 512;
 const SOCKET_RECONNECT_BASE_DELAY_MS = 1500;
