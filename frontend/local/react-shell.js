@@ -46,7 +46,7 @@ function IconRail() {
     { className: "icon-rail", "aria-label": "Primary" },
     h("img", {
       className: "icon-rail-logo",
-      src: "/static/sealwire_logo.png",
+      src: "/static/sealwire_mark.png",
       alt: "Sealwire",
       width: 30,
       height: 30,

@@ -41,9 +41,7 @@
 .desktop-shell .desktop-logo {
   width: 34px;
   height: 34px;
-  border-radius: var(--r-sm);
-  object-fit: cover;
-  background: var(--bg-elevated);
+  object-fit: contain;
 }
 
 .desktop-shell .desktop-title {

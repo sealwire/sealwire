@@ -62,7 +62,7 @@ export function SidebarBrand() {
     { className: "sidebar-brand" },
     h("img", {
       className: "sidebar-brand-logo",
-      src: "/static/sealwire_logo.png",
+      src: "/static/sealwire_mark.png",
       alt: "",
       width: 24,
       height: 24,

@@ -77,7 +77,7 @@ function render() {
 function renderHeader(relay) {
   return el("header", { className: "desktop-header" }, [
     el("div", { className: "desktop-brand" }, [
-      el("img", { className: "desktop-logo", alt: "", src: "/sealwire_logo.png" }),
+      el("img", { className: "desktop-logo", alt: "", src: "/sealwire_mark.png" }),
       el("div", { className: "desktop-title" }, [
         el("strong", {}, ["Sealwire Desktop"]),
         el("span", {}, [relay.running ? relay.workspaceDir || "" : "Relay stopped"]),

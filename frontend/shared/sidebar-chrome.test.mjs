@@ -40,7 +40,7 @@ const noop = () => {};
 test("the brand renders the seal beside the wordmark", () => {
   const html = renderToStaticMarkup(h(SidebarBrand));
   assert.match(html, /class="sidebar-brand"/);
-  assert.match(html, /src="\/static\/sealwire_logo\.png"/);
+  assert.match(html, /src="\/static\/sealwire_mark\.png"/);
   assert.match(html, /Sealwire</, "the wordmark names the app");
 });
 
