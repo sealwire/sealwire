@@ -16,7 +16,7 @@ export function createPollingController(ctx) {
   const loadThreads = (...args) => ctx.loadThreads(...args);
 
   function scheduleSessionPoll() {
-    if (state.streamConnected || (state.authRequired && !state.authenticated)) {
+    if (state.streamConnected) {
       return;
     }
 
@@ -39,11 +39,6 @@ export function createPollingController(ctx) {
   }
 
   function scheduleThreadsPoll() {
-    if (state.authRequired && !state.authenticated) {
-      cancelThreadsPoll();
-      return;
-    }
-
     if (state.threadsPollTimer) {
       window.clearTimeout(state.threadsPollTimer);
     }

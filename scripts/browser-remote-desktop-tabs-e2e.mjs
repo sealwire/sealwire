@@ -1,3 +1,4 @@
+import { addEncryptedBrokerInitScript } from "./e2e/harness/encrypted-broker-mock.mjs";
 // The session tab strip on the REMOTE surface, and the device gate that decides whether
 // it exists at all.
 //
@@ -57,7 +58,7 @@ function installFakeRelay({ relayId, threadActive, threadB, threadC, threadD, ta
     brokerUrl: "ws://fake-broker.test",
     brokerChannelId: "room-e2e",
     relayPeerId: "relay-peer-e2e",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-e2e",
     deviceLabel: "Browser E2E",
     hasStoredPayloadSecret: true,
@@ -90,9 +91,9 @@ function installFakeRelay({ relayId, threadActive, threadB, threadC, threadD, ta
     broker_connected: true,
     broker_channel_id: "room-e2e",
     broker_peer_id: "relay-peer-e2e",
-    security_mode: "managed",
-    e2ee_enabled: false,
-    broker_can_read_content: true,
+    security_mode: "private",
+    e2ee_enabled: true,
+    broker_can_read_content: false,
     audit_enabled: false,
     active_thread_id: threadActive,
     active_controller_device_id: "device-e2e",
@@ -294,13 +295,13 @@ function installFakeRelay({ relayId, threadActive, threadB, threadC, threadD, ta
       this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(frame) }));
     }
   }
-  window.WebSocket = FakeWebSocket;
+  window.WebSocket = window.__sealwireEncryptedMock(FakeWebSocket);
 }
 
 async function openSurface(browserContext, origin, label, { tallTranscript = false } = {}) {
   const page = await browserContext.newPage();
   attachPageDebugLogging(page, "remote", { prefix: `remote-desktop-tabs-e2e:${label}` });
-  await page.addInitScript(installFakeRelay, {
+  await addEncryptedBrokerInitScript(page, installFakeRelay, {
     relayId: RELAY_ID,
     threadActive: THREAD_ACTIVE,
     threadB: THREAD_B,

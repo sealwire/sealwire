@@ -130,7 +130,7 @@ function makeController({ ensureConversationTranscript, fetchFreshTranscriptPage
     // dedicated regression test can supply `() => false` and prove the
     // repair fires anyway; every other test's default here is inert.
     isViewingConversation: isViewingConversation || (() => true),
-    handleUnauthorized() {},
+
     logLine() {},
     renderSession: renderSessionAndClearPendingFlush,
     scheduleSessionPoll() {},

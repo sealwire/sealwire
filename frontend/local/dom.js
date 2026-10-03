@@ -1,9 +1,5 @@
 export const appShell = document.querySelector(".app-shell");
 export const transcript = document.querySelector("#transcript");
-export const connectionForm = document.querySelector("#connection-form");
-export const apiTokenLabel = connectionForm.querySelector("label[for='api-token-input']");
-export const apiTokenInput = document.querySelector("#api-token-input");
-export const applyTokenButton = document.querySelector("#apply-token-button");
 export const settingsModal = document.querySelector("#settings-modal");
 export const settingsRoot = document.querySelector("#settings-root");
 export const iconRailSettingsButton = document.querySelector("#icon-rail-settings");

@@ -2,16 +2,9 @@ use relay_broker::protocol::{ClientMessage, BROKER_PROTOCOL_VERSION};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::protocol::{
-    ApprovalReceipt, AskUserQuestionDetailResponse, ModelOptionView, PairedDeviceView,
-    SessionSnapshot, ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsResponse,
-};
+use crate::protocol::{PairedDeviceView, ThreadTranscriptResponse};
 
-use super::{
-    crypto::EncryptedEnvelope,
-    remote_actions::{RemoteActionKind, RemoteActionRequest},
-    RELAY_PROTOCOL_VERSION,
-};
+use super::{crypto::EncryptedEnvelope, remote_actions::RemoteActionKind, RELAY_PROTOCOL_VERSION};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct PairingRequestPlaintext {
@@ -28,12 +21,6 @@ pub(super) enum InboundBrokerPayload {
         pairing_id: String,
         envelope: EncryptedEnvelope,
     },
-    RemoteAction {
-        action_id: String,
-        session_claim: Option<String>,
-        device_id: Option<String>,
-        request: RemoteActionRequest,
-    },
     EncryptedRemoteAction {
         action_id: String,
         session_claim: Option<String>,
@@ -45,37 +32,10 @@ pub(super) enum InboundBrokerPayload {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum OutboundBrokerPayload {
-    SessionSnapshot {
-        snapshot: SessionSnapshot,
-    },
-    TranscriptDelta {
-        thread_id: String,
-        /// Which run minted `row_id` — see `TranscriptDeltaEvent`.
-        transcript_generation: String,
-        base_revision: u64,
-        revision: u64,
-        entry_seq: u64,
-        order_seq: i64,
-        server_time: u64,
-        row_id: String,
-        /// Compatibility alias, same value as `row_id`.
-        item_id: String,
-        turn_id: Option<String>,
-        delta: String,
-        delta_kind: String,
-        text_offset: Option<u64>,
-    },
     EncryptedTranscriptDelta {
         target_peer_id: String,
         device_id: String,
         envelope: EncryptedEnvelope,
-    },
-    /// A `TranscriptResyncEvent` a broker may read.
-    TranscriptResync {
-        thread_id: String,
-        transcript_generation: String,
-        revision: u64,
-        reason: crate::protocol::TranscriptResyncReason,
     },
     /// A sealed transcript event; the envelope holds a `TranscriptResyncEvent`.
     EncryptedTranscriptEvent {
@@ -83,105 +43,10 @@ pub(super) enum OutboundBrokerPayload {
         device_id: String,
         envelope: EncryptedEnvelope,
     },
-    RemoteActionAck {
-        action_id: String,
-        target_peer_id: String,
-        action: RemoteActionKind,
-        ok: bool,
-        error: Option<String>,
-    },
-    /// Not an answer: "someone is already running this, keep waiting". Sent in the clear
-    /// in every mode, because it carries only the action id the broker routed on anyway.
+    // Carries only routing metadata, never an action result.
     RemoteActionPending {
         action_id: String,
         target_peer_id: String,
-    },
-    RemoteApprovalResult {
-        action_id: String,
-        target_peer_id: String,
-        action: RemoteActionKind,
-        ok: bool,
-        receipt: Option<ApprovalReceipt>,
-        error: Option<String>,
-    },
-    RemoteControlResult {
-        action_id: String,
-        target_peer_id: String,
-        action: RemoteActionKind,
-        ok: bool,
-        session_claim: Option<String>,
-        session_claim_expires_at: Option<u64>,
-        claim_challenge_id: Option<String>,
-        claim_challenge: Option<String>,
-        claim_challenge_expires_at: Option<u64>,
-        error: Option<String>,
-    },
-    RemoteSessionResult {
-        action_id: String,
-        target_peer_id: String,
-        action: RemoteActionKind,
-        ok: bool,
-        snapshot: SessionSnapshot,
-        session_claim: Option<String>,
-        session_claim_expires_at: Option<u64>,
-        error: Option<String>,
-    },
-    RemoteThreadsResult {
-        action_id: String,
-        target_peer_id: String,
-        action: RemoteActionKind,
-        ok: bool,
-        providers: Option<Vec<String>>,
-        models: Option<Vec<ModelOptionView>>,
-        threads: Option<ThreadsResponse>,
-        error: Option<String>,
-    },
-    RemoteTranscriptResult {
-        action_id: String,
-        target_peer_id: String,
-        action: RemoteActionKind,
-        ok: bool,
-        thread_entry_detail: Option<ThreadEntryDetailResponse>,
-        thread_transcript: Option<ThreadTranscriptResponse>,
-        workspace_diff: Option<crate::protocol::WorkspaceDiffResponse>,
-        /// Missing from THIS variant means dropped on the plaintext path only —
-        /// the same silent-drop trap `reviews` and `projects` each fell into.
-        workspace_git_context: Option<crate::protocol::WorkspaceGitContextView>,
-        /// Must be copied on the plaintext path or the picker is empty on that transport.
-        thread_workspace: Option<crate::protocol::ResolvedWorkspace>,
-        /// Same plaintext-vs-sealed asymmetry as the fields above: absent here and
-        /// the fork dialog's settings arrive only on sealed transport.
-        thread_settings: Option<crate::protocol::ThreadSettingsView>,
-        /// The "/" menu's provider skills. Same plaintext-drop trap as the fields above.
-        thread_skills: Option<crate::protocol::ThreadSkillsView>,
-        /// The `fetch_reviews` payload (review cards + reviewer threads). Without this the
-        /// PLAINTEXT path silently dropped it — the sealed path serializes
-        /// `RemoteActionResultPlaintext` wholesale and always carried it — so a phone's
-        /// reuse picker in "Request review" showed no existing reviewers while local did.
-        reviews: Option<crate::protocol::ReviewsResponse>,
-        workflows: Option<crate::protocol::WorkflowsResponse>,
-        devices: Option<crate::protocol::DevicesResponse>,
-        /// The `fetch_projects` payload (project list + membership + revision). Same
-        /// plaintext-vs-sealed asymmetry as `reviews` above — must be copied in the
-        /// plaintext path or the remote Projects view silently sees nothing.
-        projects: Option<crate::protocol::ProjectsResponse>,
-        ask_user_question_detail: Option<AskUserQuestionDetailResponse>,
-        /// Full ask bodies for Agents hover (`fetch_ask`). Same plaintext-drop trap as
-        /// `reviews` / `ask_user_question_detail` — must be copied on this path.
-        ask_detail: Option<crate::protocol::AskDetailResponse>,
-        error: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error_code: Option<crate::protocol::ClientErrorCode>,
-    },
-    RemoteActionResultChunk {
-        action_id: String,
-        target_peer_id: String,
-        action: RemoteActionKind,
-        chunk_index: usize,
-        chunk_count: usize,
-        /// A text slice of the serialized result. Was `data_base64`; see
-        /// `RemoteActionResultChunkPlaintext::data`.
-        data: String,
     },
     EncryptedSessionSnapshot {
         target_peer_id: String,
@@ -239,10 +104,10 @@ pub(super) fn parse_inbound_payload(
     payload: Value,
 ) -> Result<Option<InboundBrokerPayload>, String> {
     let kind = payload.get("kind").and_then(Value::as_str);
-    if !matches!(
-        kind,
-        Some("remote_action" | "pairing_request" | "encrypted_remote_action")
-    ) {
+    if kind == Some("remote_action") {
+        return Err("plaintext remote actions are not supported".to_string());
+    }
+    if !matches!(kind, Some("pairing_request" | "encrypted_remote_action")) {
         return Ok(None);
     }
     validate_relay_payload_protocol_version(&payload)?;
@@ -292,218 +157,24 @@ pub(super) fn summarize_thread_transcript_response(page: &ThreadTranscriptRespon
 
 pub(super) fn summarize_outbound_payload(payload: &OutboundBrokerPayload) -> String {
     match payload {
-        OutboundBrokerPayload::SessionSnapshot { snapshot } => format!(
-            "kind=session_snapshot active_thread_id={} transcript_entries={} logs={} status={}",
-            snapshot.active_thread_id.as_deref().unwrap_or("-"),
-            snapshot.transcript.len(),
-            snapshot.logs.len(),
-            snapshot.current_status,
-        ),
-        OutboundBrokerPayload::RemoteActionPending {
-            action_id,
-            target_peer_id,
-        } => format!("kind=remote_action_pending action_id={action_id} target_peer_id={target_peer_id}"),
-        OutboundBrokerPayload::RemoteActionAck {
-            action_id,
-            target_peer_id,
-            action,
-            ok,
-            error,
-        } => format!(
-            "kind=remote_action_ack action={} action_id={} target_peer_id={} ok={} error={}",
-            action.as_str(),
-            action_id,
-            target_peer_id,
-            ok,
-            error.as_deref().unwrap_or("-"),
-        ),
-        OutboundBrokerPayload::RemoteApprovalResult {
-            action_id,
-            target_peer_id,
-            action,
-            ok,
-            error,
-            ..
-        } => format!(
-            "kind=remote_approval_result action={} action_id={} target_peer_id={} ok={} error={}",
-            action.as_str(),
-            action_id,
-            target_peer_id,
-            ok,
-            error.as_deref().unwrap_or("-"),
-        ),
-        OutboundBrokerPayload::RemoteControlResult {
-            action_id,
-            target_peer_id,
-            action,
-            ok,
-            error,
-            ..
-        } => format!(
-            "kind=remote_control_result action={} action_id={} target_peer_id={} ok={} error={}",
-            action.as_str(),
-            action_id,
-            target_peer_id,
-            ok,
-            error.as_deref().unwrap_or("-"),
-        ),
-        OutboundBrokerPayload::RemoteSessionResult {
-            action_id,
-            target_peer_id,
-            action,
-            ok,
-            snapshot,
-            error,
-            ..
-        } => format!(
-            "kind=remote_session_result action={} action_id={} target_peer_id={} ok={} active_thread_id={} transcript_entries={} error={}",
-            action.as_str(),
-            action_id,
-            target_peer_id,
-            ok,
-            snapshot.active_thread_id.as_deref().unwrap_or("-"),
-            snapshot.transcript.len(),
-            error.as_deref().unwrap_or("-"),
-        ),
-        OutboundBrokerPayload::RemoteThreadsResult {
-            action_id,
-            target_peer_id,
-            action,
-            ok,
-            providers,
-            models,
-            threads,
-            error,
-        } => format!(
-            "kind=remote_threads_result action={} action_id={} target_peer_id={} ok={} providers={} models={} threads={} error={}",
-            action.as_str(),
-            action_id,
-            target_peer_id,
-            ok,
-            providers.as_ref().map(|items| items.len()).unwrap_or(0),
-            models.as_ref().map(|items| items.len()).unwrap_or(0),
-            threads.as_ref().map(|response| response.threads.len()).unwrap_or(0),
-            error.as_deref().unwrap_or("-"),
-        ),
-        OutboundBrokerPayload::RemoteTranscriptResult {
-            action_id,
-            target_peer_id,
-            action,
-            ok,
-            thread_transcript,
-            error,
-            ..
-        } => format!(
-            "kind=remote_transcript_result action={} action_id={} target_peer_id={} ok={} {} error={}",
-            action.as_str(),
-            action_id,
-            target_peer_id,
-            ok,
-            thread_transcript
-                .as_ref()
-                .map(summarize_thread_transcript_response)
-                .unwrap_or_else(|| "thread_transcript=-".to_string()),
-            error.as_deref().unwrap_or("-"),
-        ),
-        OutboundBrokerPayload::RemoteActionResultChunk {
-            action_id,
-            target_peer_id,
-            action,
-            chunk_index,
-            chunk_count,
-            ..
-        } => format!(
-            "kind=remote_action_result_chunk action={} action_id={} target_peer_id={} chunk={}/{}",
-            action.as_str(),
-            action_id,
-            target_peer_id,
-            chunk_index + 1,
-            chunk_count
-        ),
-        OutboundBrokerPayload::EncryptedSessionSnapshot {
-            target_peer_id,
-            device_id,
-            ..
-        } => format!(
-            "kind=encrypted_session_snapshot target_peer_id={} device_id={}",
-            target_peer_id, device_id
-        ),
-        OutboundBrokerPayload::TranscriptDelta { item_id, delta_kind, .. } => {
-            format!("kind=transcript_delta item_id={} delta_kind={}", item_id, delta_kind)
-        }
-        OutboundBrokerPayload::EncryptedTranscriptDelta {
-            target_peer_id,
-            device_id,
-            ..
-        } => format!(
-            "kind=encrypted_transcript_delta target_peer_id={} device_id={}",
-            target_peer_id, device_id
-        ),
-        OutboundBrokerPayload::TranscriptResync {
-            thread_id,
-            revision,
-            reason,
-            ..
-        } => format!(
-            "kind=transcript_resync thread_id={thread_id} revision={revision} reason={reason:?}"
-        ),
-        OutboundBrokerPayload::EncryptedTranscriptEvent {
-            target_peer_id,
-            device_id,
-            ..
-        } => format!(
-            "kind=encrypted_transcript_event target_peer_id={target_peer_id} device_id={device_id}"
-        ),
-        OutboundBrokerPayload::EncryptedRemoteActionResult {
-            action_id,
-            target_peer_id,
-            device_id,
-            ..
-        } => format!(
-            "kind=encrypted_remote_action_result action_id={} target_peer_id={} device_id={}",
-            action_id, target_peer_id, device_id
-        ),
-        OutboundBrokerPayload::EncryptedRemoteActionResultChunk {
-            action_id,
-            target_peer_id,
-            device_id,
-            action,
-            chunk_index,
-            chunk_count,
-            ..
-        } => format!(
-            "kind=encrypted_remote_action_result_chunk action={} action_id={} target_peer_id={} device_id={} chunk={}/{}",
-            action.as_str(),
-            action_id,
-            target_peer_id,
-            device_id,
-            chunk_index + 1,
-            chunk_count
-        ),
-        OutboundBrokerPayload::EncryptedPairingResult {
-            pairing_id,
-            target_peer_id,
-            ..
-        } => format!(
-            "kind=encrypted_pairing_result pairing_id={} target_peer_id={}",
-            pairing_id, target_peer_id
-        ),
         OutboundBrokerPayload::TargetedMessages { messages } => {
-            let inner_kinds = messages
-                .iter()
-                .map(|message| summarize_outbound_payload(&message.payload))
-                .collect::<Vec<_>>()
-                .join(";");
-            format!(
-                "kind=targeted_messages target_count={} inner={}",
-                messages.len(),
-                if inner_kinds.is_empty() {
-                    "-"
-                } else {
-                    inner_kinds.as_str()
-                }
-            )
+            let inner = messages.iter().map(|message| summarize_outbound_payload(&message.payload)).collect::<Vec<_>>().join(";");
+            format!("kind=targeted_messages target_count={} inner={inner}", messages.len())
         }
+        OutboundBrokerPayload::RemoteActionPending { action_id, target_peer_id } =>
+            format!("kind=remote_action_pending action_id={action_id} target_peer_id={target_peer_id}"),
+        OutboundBrokerPayload::EncryptedSessionSnapshot { target_peer_id, device_id, .. } =>
+            format!("kind=encrypted_session_snapshot target_peer_id={target_peer_id} device_id={device_id}"),
+        OutboundBrokerPayload::EncryptedTranscriptDelta { target_peer_id, device_id, .. } =>
+            format!("kind=encrypted_transcript_delta target_peer_id={target_peer_id} device_id={device_id}"),
+        OutboundBrokerPayload::EncryptedTranscriptEvent { target_peer_id, device_id, .. } =>
+            format!("kind=encrypted_transcript_event target_peer_id={target_peer_id} device_id={device_id}"),
+        OutboundBrokerPayload::EncryptedRemoteActionResult { action_id, target_peer_id, device_id, .. } =>
+            format!("kind=encrypted_remote_action_result action_id={action_id} target_peer_id={target_peer_id} device_id={device_id}"),
+        OutboundBrokerPayload::EncryptedRemoteActionResultChunk { action_id, target_peer_id, device_id, chunk_index, chunk_count, .. } =>
+            format!("kind=encrypted_remote_action_result_chunk action_id={action_id} target_peer_id={target_peer_id} device_id={device_id} chunk={}/{}", chunk_index + 1, chunk_count),
+        OutboundBrokerPayload::EncryptedPairingResult { pairing_id, target_peer_id, .. } =>
+            format!("kind=encrypted_pairing_result pairing_id={pairing_id} target_peer_id={target_peer_id}"),
     }
 }
 

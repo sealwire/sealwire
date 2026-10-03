@@ -50,3 +50,40 @@ fn invalid_state_reports_its_path_and_cause_without_a_panic_or_overwrite() {
     assert!(!stderr.contains("Codex app-server bridge"), "{stderr}");
     assert_eq!(std::fs::read(&path).unwrap(), original);
 }
+
+#[test]
+fn retired_local_access_settings_are_refused_before_loading_state() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("session.json");
+    std::fs::write(&path, "invalid state JSON").unwrap();
+    for name in [
+        "RELAY_API_TOKEN",
+        "RELAY_ALLOW_INSECURE_NO_AUTH",
+        "RELAY_ALLOWED_HOSTS",
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_relay-server"));
+        command
+            .env_clear()
+            .current_dir(root.path())
+            .env("HOME", root.path())
+            .env("USERPROFILE", root.path())
+            .env("RELAY_STATE_PATH", &path)
+            .env("BIND_HOST", "127.0.0.1")
+            .env("PORT", "0")
+            .env(name, "retired-setting")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            command.env("SystemRoot", system_root);
+        }
+        let output = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(
+            stderr.contains(name) && stderr.contains("no longer supported"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("panicked"), "{stderr}");
+    }
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "invalid state JSON");
+}

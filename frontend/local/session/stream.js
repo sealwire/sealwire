@@ -44,7 +44,6 @@ export function createStreamController(ctx) {
     logLine,
     seedDefaults,
     renderSession,
-    handleUnauthorized,
   } = ctx;
   const applySessionSnapshot = (...args) => ctx.applySessionSnapshot(...args);
   // Resolved lazily: the controller is built before the transcript controller exists.
@@ -167,10 +166,6 @@ export function createStreamController(ctx) {
   }
 
   function connectSessionStream() {
-    if (state.authRequired && !state.authenticated) {
-      return;
-    }
-
     if (typeof fetch !== "function" || typeof AbortController === "undefined") {
       logLine("Fetch streaming is unavailable. Falling back to polling.");
       state.streamConnected = false;
@@ -192,7 +187,6 @@ export function createStreamController(ctx) {
         surfaceId: state.surfaceId,
         surfaceGeneration: state.surfaceGeneration,
       }),
-      apiToken: state.apiToken,
       onSession(data) {
         try {
           const snapshot = JSON.parse(data);
@@ -228,12 +222,6 @@ export function createStreamController(ctx) {
       },
       onError(error) {
         if (state.sessionStream !== stream) {
-          return;
-        }
-
-        if (error?.code === "unauthorized") {
-          state.sessionStream = null;
-          handleUnauthorized("Local auth session expired. Sign in again.");
           return;
         }
 

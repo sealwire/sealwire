@@ -14,10 +14,11 @@ const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "sealwire
 const cwd = path.join(root, "project");
 const agent = path.join(root, "agent");
 const bashPidFile = path.join(root, "bash.pid");
-const apiToken = "!literal-$SEALWIRE_PI_TEST_TOKEN";
 await fs.mkdir(cwd);
 await fs.mkdir(agent);
 await fs.writeFile(path.join(cwd, "fixture.txt"), "PI_TOOL_RESULT");
+const mcpDir = path.join(root, "mcp-$literal!");
+await fs.symlink(path.resolve("claude-worker"), mcpDir, "dir");
 let requests = 0;
 const modelPrompts = [];
 let imageReceived = false;
@@ -50,7 +51,7 @@ const modelServer = http.createServer(async (request, response) => {
     chunk({}, "tool_calls");
     response.end("data: [DONE]\n\n");
   } else if (text.includes("PI_BASH") && !usedTool) {
-    chunk({ role: "assistant", tool_calls: [{ index: 0, id: `pi-bash-${requests}`, type: "function", function: { name: "bash", arguments: JSON.stringify({ command: `test -z "$SEALWIRE_PI_MCP" && test -z "$RELAY_API_TOKEN" || exit 66; echo $$ > "${bashPidFile}"; sleep 120` }) } }] });
+    chunk({ role: "assistant", tool_calls: [{ index: 0, id: `pi-bash-${requests}`, type: "function", function: { name: "bash", arguments: JSON.stringify({ command: `test -z "$SEALWIRE_PI_MCP" || exit 66; echo $$ > "${bashPidFile}"; sleep 120` }) } }] });
     chunk({}, "tool_calls");
     response.end("data: [DONE]\n\n");
   } else if (text.includes("PI_USE_TOOL") && !usedTool) {
@@ -156,10 +157,11 @@ async function boot() {
   const port = await getFreePort();
   const { command, args } = resolveRelayServerCommand();
   relay = spawnManagedProcess("pi-relay", command, args, {
-    AGENT_PROVIDERS: "pi", BIND_HOST: "127.0.0.1", PORT: String(port), RELAY_API_TOKEN: apiToken,
+    AGENT_PROVIDERS: "pi", BIND_HOST: "127.0.0.1", PORT: String(port),
     RELAY_STATE_PATH: path.join(root, "relay", "session.json"), PI_CODING_AGENT_DIR: agent,
     PI_CODING_AGENT_SESSION_DIR: path.join(root, "sessions"),
     PI_OFFLINE: "1", PI_TELEMETRY: "0",
+    CLAUDE_WORKER_PATH: path.join(mcpDir, "worker.mjs"),
   }, { stripInherited: (name) => /^(RELAY_|SEALWIRE_|PI_|ANTHROPIC_|OPENAI_|GOOGLE_|GEMINI_|AWS_|AZURE_|GITHUB_|GH_TOKEN|COPILOT_|OPENROUTER_|XAI_|GROQ_|MISTRAL_)/.test(name) });
   base = `http://127.0.0.1:${port}`;
   await waitForHealth(`${base}/api/health`, 90000);
@@ -168,7 +170,7 @@ async function boot() {
 async function api(route, data) {
   const response = await fetch(`${base}${route}`, {
     method: data === undefined ? "GET" : "POST",
-    headers: { "content-type": "application/json", Authorization: `Bearer ${apiToken}` },
+    headers: { "content-type": "application/json", "X-Agent-Relay-CSRF": "1" },
     body: data === undefined ? undefined : JSON.stringify({ device_id: "pi-e2e", ...data }),
     signal: AbortSignal.timeout(45000),
   });

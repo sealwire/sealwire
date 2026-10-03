@@ -7,7 +7,6 @@
       "local-scroll-to-bottom",
       "local-stick-to-bottom",
       "transcript-expand-scroll",
-      "local-auth",
       "local-allowed-roots",
       "local-file-diff",
       "local-file-diff-cards",
@@ -39,7 +38,6 @@
       "local-stick-to-bottom",
       "transcript-expand-scroll",
       "local-multi-live-follow",
-      "local-auth",
       "local-allowed-roots",
       "local-file-diff",
       "local-file-diff-cards",
@@ -268,15 +266,6 @@
       "coverage": [
         "mobile-session-switch",
         "mobile-layout"
-      ]
-    },
-    "local-auth": {
-      "script": "browser-local-auth-e2e.mjs",
-      "tier": "core",
-      "provider": "fake-compatible",
-      "transport": "local",
-      "coverage": [
-        "auth"
       ]
     },
     "local-allowed-roots": {

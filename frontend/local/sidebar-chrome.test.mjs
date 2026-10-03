@@ -177,20 +177,11 @@ test("the rail and the rows are driven by one props object", () => {
 // distinction load-bearing for the first time. As static markup in the shell it
 // could not go missing; rendered into `#sidebar-nav` it appears only when something
 // calls renderSidebarNav(), and the shell has three top-level states that each
-// repaint independently. Two of them are exactly the states where a user most needs
-// to be able to navigate:
-//
-//   renderAuthRequiredState  — runs at BOOT when there is no API token, so this
-//                              gap meant a signed-out user saw no nav at all;
-//   renderSessionUnavailable — the relay is offline.
-//
-// Named individually rather than counted, because the failure is silent: the
-// sidebar renders, the rows simply are not in it.
+// repaint independently, including when the relay is unavailable.
 test("every shell state renders the nav, including the ones with no session", () => {
   for (const entry of [
     "renderSession",
     "renderSessionUnavailable",
-    "renderAuthRequiredState",
   ]) {
     const start = renderSession.indexOf(`function ${entry}(`);
     assert.ok(start >= 0, `expected ${entry} to exist`);
@@ -203,11 +194,11 @@ test("every shell state renders the nav, including the ones with no session", ()
   }
 });
 
-// The FOURTH state, and the one the three-state guard above cannot see: "boot has not
+// Another state, before boot settles: "boot has not
 // reached any terminal state yet".
 //
 // `renderLocalShell()` is synchronous and paints only the empty mounts. `boot()` then
-// awaits TWO network round trips (`refreshAuthSession`, then `loadSession`) before the
+// awaits a network round trip (`loadSession`) before the
 // first `renderSession`. So between first paint and boot settling, the sidebar has no
 // search or bell buttons and no Sessions/Tasks rows.
 //
@@ -309,14 +300,11 @@ test("the local sidebar brand is the shared lockup", () => {
   );
 });
 
-// Same hazard as the nav, and the same three states. The search field and the two toggles
-// were static markup before; a mount only shows what something renders into it, and
-// `renderAuthRequiredState` runs at BOOT when there is no API token.
+// Search and toggles must also render when the relay is unavailable.
 test("every shell state renders the sidebar chrome", () => {
   for (const entry of [
     "renderSession",
     "renderSessionUnavailable",
-    "renderAuthRequiredState",
   ]) {
     const start = renderSession.indexOf(`function ${entry}(`);
     assert.ok(start >= 0, `expected ${entry} to exist`);

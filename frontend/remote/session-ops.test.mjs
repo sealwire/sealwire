@@ -1,3 +1,4 @@
+import { decodeActionFrame, deliverEncryptedTestPayload } from "./test-support/encrypted-transport.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
@@ -238,7 +239,7 @@ test("applySessionSnapshot hydrates truncated transcript with full tail entries"
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -258,10 +259,10 @@ test("applySessionSnapshot hydrates truncated transcript with full tail entries"
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -304,7 +305,7 @@ test("applySessionSnapshot hydrates truncated transcript with full tail entries"
     approval_policy: "untrusted",
     audit_enabled: false,
     available_models: [],
-    broker_can_read_content: true,
+    broker_can_read_content: false,
     broker_channel_id: "room-a",
     broker_connected: true,
     broker_peer_id: "relay-1",
@@ -314,7 +315,7 @@ test("applySessionSnapshot hydrates truncated transcript with full tail entries"
     current_cwd: "/tmp/project",
     current_status: "idle",
     device_records: [],
-    e2ee_enabled: false,
+    e2ee_enabled: true,
     logs: [],
     model: "gpt-5.4",
     paired_devices: [],
@@ -323,7 +324,7 @@ test("applySessionSnapshot hydrates truncated transcript with full tail entries"
     provider: "codex",
     reasoning_effort: "medium",
     sandbox: "workspace-write",
-    security_mode: "managed",
+    security_mode: "private",
     service_ready: true,
     transcript_truncated: true,
     transcript: [
@@ -405,7 +406,7 @@ test("resumeRemoteSession sends only thread id so relay restores per-thread sett
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -424,10 +425,10 @@ test("resumeRemoteSession sends only thread id so relay restores per-thread sett
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_session_result",
           action_id: frame.payload.action_id,
           action: "resume_session",
@@ -442,7 +443,7 @@ test("resumeRemoteSession sends only thread id so relay restores per-thread sett
             approval_policy: "bypass",
             audit_enabled: false,
             available_models: [],
-            broker_can_read_content: true,
+            broker_can_read_content: false,
             broker_channel_id: "room-a",
             broker_connected: true,
             broker_peer_id: "relay-1",
@@ -452,7 +453,7 @@ test("resumeRemoteSession sends only thread id so relay restores per-thread sett
             current_cwd: "/tmp/project",
             current_status: "idle",
             device_records: [],
-            e2ee_enabled: false,
+            e2ee_enabled: true,
             logs: [],
             model: "fake-echo",
             paired_devices: [],
@@ -461,7 +462,7 @@ test("resumeRemoteSession sends only thread id so relay restores per-thread sett
             provider: "fake",
             reasoning_effort: "high",
             sandbox: "workspace-write",
-            security_mode: "managed",
+            security_mode: "private",
             service_ready: true,
             transcript_truncated: false,
             transcript: [],
@@ -499,7 +500,7 @@ test("view-only thread stays pinned across live snapshots and review completion"
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -516,9 +517,9 @@ test("view-only thread stays pinned across live snapshots and review completion"
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -552,7 +553,7 @@ test("view-only thread stays pinned across live snapshots and review completion"
     approval_policy: "untrusted",
     audit_enabled: false,
     available_models: [],
-    broker_can_read_content: true,
+    broker_can_read_content: false,
     broker_channel_id: "room-a",
     broker_connected: true,
     broker_peer_id: "relay-1",
@@ -562,7 +563,7 @@ test("view-only thread stays pinned across live snapshots and review completion"
     current_cwd: "/tmp/project",
     current_status: "idle",
     device_records: [],
-    e2ee_enabled: false,
+    e2ee_enabled: true,
     logs: [],
     model: "gpt-5.4",
     paired_devices: [],
@@ -571,7 +572,7 @@ test("view-only thread stays pinned across live snapshots and review completion"
     provider: "codex",
     reasoning_effort: "medium",
     sandbox: "workspace-write",
-    security_mode: "managed",
+    security_mode: "private",
     service_ready: true,
     transcript_truncated: false,
     transcript: [],
@@ -772,7 +773,7 @@ test("remote view of an idle saved Codex thread stays composable despite stale a
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -792,9 +793,9 @@ test("remote view of an idle saved Codex thread stays composable despite stale a
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -898,7 +899,7 @@ test("remote send clamps a foreign effort the codex model rejects", async () => 
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -941,7 +942,7 @@ test("remote send clamps a foreign effort the codex model rejects", async () => 
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       // Only the send_message frame carries an effort. The surface also emits
       // watch_threads frames to declare what it has on screen, and capturing
       // whichever frame happened to go last would read null off one of those.
@@ -950,7 +951,7 @@ test("remote send clamps a foreign effort the codex model rejects", async () => 
       }
       sentEffort = frame.payload?.request?.input?.effort ?? null;
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_session_result",
           action_id: frame.payload.action_id,
           action: "send_message",
@@ -996,7 +997,7 @@ test("stale view-only fetch cannot override a newer resume", async () => {
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -1015,10 +1016,10 @@ test("stale view-only fetch cannot override a newer resume", async () => {
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       if (frame.payload.request?.type === "fetch_thread_transcript") {
         resolveViewFetch = () => {
-          void handleRemoteBrokerPayload({
+          void deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
             kind: "remote_action_result",
             action_id: frame.payload.action_id,
             action: "fetch_thread_transcript",
@@ -1044,7 +1045,7 @@ test("stale view-only fetch cannot override a newer resume", async () => {
       }
       if (frame.payload.request?.type === "resume_session") {
         setImmediate(() => {
-          void handleRemoteBrokerPayload({
+          void deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
             kind: "remote_action_result",
             action_id: frame.payload.action_id,
             action: "resume_session",
@@ -1120,7 +1121,7 @@ test("transcript hydration retries after an incomplete entry fetch", async () =>
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -1140,10 +1141,10 @@ test("transcript hydration retries after an incomplete entry fetch", async () =>
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -1180,7 +1181,7 @@ test("transcript hydration retries after an incomplete entry fetch", async () =>
     approval_policy: "untrusted",
     audit_enabled: false,
     available_models: [],
-    broker_can_read_content: true,
+    broker_can_read_content: false,
     broker_channel_id: "room-a",
     broker_connected: true,
     broker_peer_id: "relay-1",
@@ -1190,7 +1191,7 @@ test("transcript hydration retries after an incomplete entry fetch", async () =>
     current_cwd: "/tmp/project",
     current_status: "idle",
     device_records: [],
-    e2ee_enabled: false,
+    e2ee_enabled: true,
     logs: [],
     model: "gpt-5.4",
     paired_devices: [],
@@ -1199,7 +1200,7 @@ test("transcript hydration retries after an incomplete entry fetch", async () =>
     provider: "codex",
     reasoning_effort: "medium",
     sandbox: "workspace-write",
-    security_mode: "managed",
+    security_mode: "private",
     service_ready: true,
     transcript_truncated: true,
     transcript: [
@@ -1245,7 +1246,7 @@ test("hydrated transcript stays expanded when a later snapshot changes only the 
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -1265,10 +1266,10 @@ test("hydrated transcript stays expanded when a later snapshot changes only the 
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -1303,7 +1304,7 @@ test("hydrated transcript stays expanded when a later snapshot changes only the 
     approval_policy: "untrusted",
     audit_enabled: false,
     available_models: [],
-    broker_can_read_content: true,
+    broker_can_read_content: false,
     broker_channel_id: "room-a",
     broker_connected: true,
     broker_peer_id: "relay-1",
@@ -1313,7 +1314,7 @@ test("hydrated transcript stays expanded when a later snapshot changes only the 
     current_cwd: "/tmp/project",
     current_status: "idle",
     device_records: [],
-    e2ee_enabled: false,
+    e2ee_enabled: true,
     logs: [],
     model: "gpt-5.4",
     paired_devices: [],
@@ -1322,7 +1323,7 @@ test("hydrated transcript stays expanded when a later snapshot changes only the 
     provider: "codex",
     reasoning_effort: "medium",
     sandbox: "workspace-write",
-    security_mode: "managed",
+    security_mode: "private",
     service_ready: true,
     transcript_truncated: true,
     transcript: [
@@ -1353,7 +1354,7 @@ test("hydrated transcript stays expanded when a later snapshot changes only the 
     approval_policy: "untrusted",
     audit_enabled: false,
     available_models: [],
-    broker_can_read_content: true,
+    broker_can_read_content: false,
     broker_channel_id: "room-a",
     broker_connected: true,
     broker_peer_id: "relay-1",
@@ -1363,7 +1364,7 @@ test("hydrated transcript stays expanded when a later snapshot changes only the 
     current_cwd: "/tmp/project",
     current_status: "idle",
     device_records: [],
-    e2ee_enabled: false,
+    e2ee_enabled: true,
     logs: [],
     model: "gpt-5.4",
     paired_devices: [],
@@ -1372,7 +1373,7 @@ test("hydrated transcript stays expanded when a later snapshot changes only the 
     provider: "codex",
     reasoning_effort: "medium",
     sandbox: "workspace-write",
-    security_mode: "managed",
+    security_mode: "private",
     service_ready: true,
     transcript_truncated: true,
     transcript: [
@@ -1409,7 +1410,7 @@ test("remote hydration backfills a compact user-only tail until agent text is vi
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -1497,12 +1498,12 @@ test("remote hydration backfills a compact user-only tail until agent text is vi
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       const before = frame.payload.request?.input?.before ?? null;
       setImmediate(async () => {
         const page = pages.get(before);
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -1528,7 +1529,7 @@ test("remote hydration backfills a compact user-only tail until agent text is vi
     approval_policy: "untrusted",
     audit_enabled: false,
     available_models: [],
-    broker_can_read_content: true,
+    broker_can_read_content: false,
     broker_channel_id: "room-a",
     broker_connected: true,
     broker_peer_id: "relay-1",
@@ -1538,7 +1539,7 @@ test("remote hydration backfills a compact user-only tail until agent text is vi
     current_cwd: "/tmp/project",
     current_status: "idle",
     device_records: [],
-    e2ee_enabled: false,
+    e2ee_enabled: true,
     logs: [],
     model: "gpt-5.4",
     paired_devices: [],
@@ -1547,7 +1548,7 @@ test("remote hydration backfills a compact user-only tail until agent text is vi
     provider: "codex",
     reasoning_effort: "medium",
     sandbox: "workspace-write",
-    security_mode: "managed",
+    security_mode: "private",
     service_ready: true,
     transcript_truncated: true,
     transcript: [
@@ -1609,7 +1610,7 @@ test("reapplying the same compact snapshot while hydration is loading does not r
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -1629,7 +1630,7 @@ test("reapplying the same compact snapshot while hydration is loading does not r
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
     },
   };
@@ -1644,7 +1645,7 @@ test("reapplying the same compact snapshot while hydration is loading does not r
     approval_policy: "untrusted",
     audit_enabled: false,
     available_models: [],
-    broker_can_read_content: true,
+    broker_can_read_content: false,
     broker_channel_id: "room-a",
     broker_connected: true,
     broker_peer_id: "relay-1",
@@ -1654,7 +1655,7 @@ test("reapplying the same compact snapshot while hydration is loading does not r
     current_cwd: "/tmp/project",
     current_status: "idle",
     device_records: [],
-    e2ee_enabled: false,
+    e2ee_enabled: true,
     logs: [],
     model: "gpt-5.4",
     paired_devices: [],
@@ -1663,7 +1664,7 @@ test("reapplying the same compact snapshot while hydration is loading does not r
     provider: "codex",
     reasoning_effort: "medium",
     sandbox: "workspace-write",
-    security_mode: "managed",
+    security_mode: "private",
     service_ready: true,
     transcript_truncated: true,
     transcript: [
@@ -1694,7 +1695,7 @@ test("reapplying the same compact snapshot while hydration is loading does not r
     ["fetch_thread_transcript"]
   );
 
-  await handleRemoteBrokerPayload({
+  await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
     kind: "remote_action_result",
     action_id: sentPayloads[0].action_id,
     action: "fetch_thread_transcript",
@@ -1731,7 +1732,7 @@ test("hydration stops automatically once the tail entries are complete", async (
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -1751,10 +1752,10 @@ test("hydration stops automatically once the tail entries are complete", async (
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -1789,7 +1790,7 @@ test("hydration stops automatically once the tail entries are complete", async (
     approval_policy: "untrusted",
     audit_enabled: false,
     available_models: [],
-    broker_can_read_content: true,
+    broker_can_read_content: false,
     broker_channel_id: "room-a",
     broker_connected: true,
     broker_peer_id: "relay-1",
@@ -1799,7 +1800,7 @@ test("hydration stops automatically once the tail entries are complete", async (
     current_cwd: "/tmp/project",
     current_status: "idle",
     device_records: [],
-    e2ee_enabled: false,
+    e2ee_enabled: true,
     logs: [],
     model: "gpt-5.4",
     paired_devices: [],
@@ -1808,7 +1809,7 @@ test("hydration stops automatically once the tail entries are complete", async (
     provider: "codex",
     reasoning_effort: "medium",
     sandbox: "workspace-write",
-    security_mode: "managed",
+    security_mode: "private",
     service_ready: true,
     transcript_truncated: true,
     transcript: [
@@ -1847,7 +1848,7 @@ function olderHistorySnapshot() {
     approval_policy: "untrusted",
     audit_enabled: false,
     available_models: [],
-    broker_can_read_content: true,
+    broker_can_read_content: false,
     broker_channel_id: "room-a",
     broker_connected: true,
     broker_peer_id: "relay-1",
@@ -1857,7 +1858,7 @@ function olderHistorySnapshot() {
     current_cwd: "/tmp/project",
     current_status: "idle",
     device_records: [],
-    e2ee_enabled: false,
+    e2ee_enabled: true,
     logs: [],
     model: "gpt-5.4",
     paired_devices: [],
@@ -1866,7 +1867,7 @@ function olderHistorySnapshot() {
     provider: "codex",
     reasoning_effort: "medium",
     sandbox: "workspace-write",
-    security_mode: "managed",
+    security_mode: "private",
     service_ready: true,
     transcript_truncated: true,
     transcript: [
@@ -1908,7 +1909,7 @@ test("maybeLoadOlderTranscriptHistory prepends older complete transcript pages",
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -1930,11 +1931,11 @@ test("maybeLoadOlderTranscriptHistory prepends older complete transcript pages",
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       setImmediate(async () => {
         fetchCount += 1;
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -2027,7 +2028,7 @@ test("maybeLoadOlderTranscriptHistory rebuilds the window when the relay rejects
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -2062,12 +2063,12 @@ test("maybeLoadOlderTranscriptHistory rebuilds the window when the relay rejects
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       const before = frame.payload.request?.input?.before ?? null;
       setImmediate(async () => {
         const rejected = before === "tc1.rebuilt-away.1";
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -2122,7 +2123,7 @@ test("maybeLoadOlderTranscriptHistory asks again, unprompted, while the relay is
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -2157,13 +2158,13 @@ test("maybeLoadOlderTranscriptHistory asks again, unprompted, while the relay is
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       const before = frame.payload.request?.input?.before ?? null;
       const olderRequests = sentPayloads.filter((payload) => payload.request?.input?.before);
       setImmediate(async () => {
         const stillReading = before != null && olderRequests.length === 1;
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -2225,7 +2226,7 @@ test("startRemoteSession re-enables the start button when the relay does not rep
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -2275,7 +2276,7 @@ test("startRemoteSession resolves with the relay's reason when the relay refuses
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -2294,12 +2295,12 @@ test("startRemoteSession resolves with the relay's reason when the relay refuses
   state.socket = {
     readyState: 1,
     send(raw) {
-      const frame = JSON.parse(raw);
+      const frame = decodeActionFrame(raw);
       if (frame.payload?.request?.type !== "start_session") {
         return;
       }
       setImmediate(() =>
-        handleRemoteBrokerPayload({
+        deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "start_session",
@@ -2336,7 +2337,7 @@ test("startRemoteSession carries the chosen project so a phone can file a sessio
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -2354,7 +2355,7 @@ test("startRemoteSession carries the chosen project so a phone can file a sessio
   state.socket = {
     readyState: 1,
     send(raw) {
-      sent.push(JSON.parse(raw));
+      sent.push(decodeActionFrame(raw));
     },
   };
 
@@ -2388,7 +2389,7 @@ test("Pi remote Full access does not submit a hidden workspace sandbox", async (
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -2406,7 +2407,7 @@ test("Pi remote Full access does not submit a hidden workspace sandbox", async (
   state.socket = {
     readyState: 1,
     send(raw) {
-      sent.push(JSON.parse(raw));
+      sent.push(decodeActionFrame(raw));
     },
   };
 
@@ -2444,7 +2445,7 @@ test("an unfiled remote session sends a null project rather than omitting it", a
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -2462,7 +2463,7 @@ test("an unfiled remote session sends a null project rather than omitting it", a
   state.socket = {
     readyState: 1,
     send(raw) {
-      sent.push(JSON.parse(raw));
+      sent.push(decodeActionFrame(raw));
     },
   };
 
@@ -2496,7 +2497,7 @@ test("refreshRemoteThreads clears loading state and records an error when the re
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -2544,7 +2545,7 @@ test("remote thread list auto-refreshes on a poll without a manual refresh", asy
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-poll",
     relayPeerId: "relay-poll",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-poll",
@@ -2580,7 +2581,7 @@ test("remote thread list auto-refreshes on a poll without a manual refresh", asy
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText, "payload-secret-poll");
       if (frame.payload?.request?.type !== "list_threads") {
         return;
       }
@@ -2588,7 +2589,7 @@ test("remote thread list auto-refreshes on a poll without a manual refresh", asy
         threadRevisions[Math.min(listThreadsSent.length, threadRevisions.length - 1)];
       listThreadsSent.push(frame.payload);
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "list_threads",
@@ -2636,7 +2637,7 @@ test("cancelRemoteThreadsPoll stops the recurring remote thread poll", async () 
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-cancel",
     relayPeerId: "relay-cancel",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-cancel",
@@ -2658,7 +2659,7 @@ test("cancelRemoteThreadsPoll stops the recurring remote thread poll", async () 
   state.socket = {
     readyState: 1,
     send(frameText) {
-      sentTypes.push(JSON.parse(frameText).payload?.request?.type || null);
+      sentTypes.push(decodeActionFrame(frameText).payload?.request?.type || null);
     },
   };
 
@@ -2691,7 +2692,7 @@ test("the remote thread poll idles without a network round trip while disconnect
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-offline",
     relayPeerId: "relay-offline",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-offline",
@@ -2713,7 +2714,7 @@ test("the remote thread poll idles without a network round trip while disconnect
   state.socket = {
     readyState: 1,
     send(frameText) {
-      sentTypes.push(JSON.parse(frameText).payload?.request?.type || null);
+      sentTypes.push(decodeActionFrame(frameText).payload?.request?.type || null);
     },
   };
 
@@ -2744,7 +2745,7 @@ test("sendMessage clears pending state when the relay does not reply", async () 
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -2786,7 +2787,7 @@ test("an ordinary send supersedes the NOT SENT line on that thread", async () =>
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -2835,7 +2836,7 @@ test("a failed remote stop records the reason for the composer, not just the log
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -2884,7 +2885,7 @@ test("a failed remote settings change records the reason for the composer, not j
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -2940,7 +2941,7 @@ test("a /goal refused by the relay puts its reason on the phone's composer", asy
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -2994,7 +2995,7 @@ test("a /goal that works clears the line its own earlier attempt left", async ()
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -3015,9 +3016,9 @@ test("a /goal that works clears the line its own earlier attempt left", async ()
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       setImmediate(() => {
-        void handleRemoteBrokerPayload({
+        void deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "set_goal",
@@ -3061,7 +3062,7 @@ test("an over-limit /goal from the phone reaches the real held writer, not the e
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -3121,7 +3122,7 @@ test("a refused Stop from the goal card lands on the card, not behind the modal"
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -3192,7 +3193,7 @@ test("a goal card's button goes out as the claimed goal_card action, and its ref
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -3214,10 +3215,10 @@ test("a goal card's button goes out as the claimed goal_card action, and its ref
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sent.push(frame.payload);
       setImmediate(() => {
-        void handleRemoteBrokerPayload({
+        void deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: frame.payload.request?.type,
@@ -3267,7 +3268,7 @@ test("a refused delegate says why on the composer, not only in the log", async (
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -3314,7 +3315,7 @@ test("Stop the surface stopped itself retires the previous red line", async () =
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -3354,7 +3355,7 @@ test("Stop with no turn id is held, not reported as a failure", async () => {
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -3396,7 +3397,7 @@ test("a successful remote settings update clears only that thread's composer err
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -3421,9 +3422,9 @@ test("a successful remote settings update clears only that thread's composer err
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       setImmediate(() => {
-        void handleRemoteBrokerPayload({
+        void deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "update_session_settings",
@@ -3470,7 +3471,7 @@ test("a failed remote send records the reason for the composer, not just the log
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -3541,7 +3542,7 @@ test("a workspace repair the relay accepted is reported as success, not as a scr
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -3561,7 +3562,7 @@ test("a workspace repair the relay accepted is reported as success, not as a scr
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       const requestType = frame.payload.request?.type;
       dispatched.push(requestType);
       setImmediate(async () => {
@@ -3569,7 +3570,7 @@ test("a workspace repair the relay accepted is reported as success, not as a scr
         // an in-flight key, so leaving it unanswered parks a promise that never
         // settles and every later test asking for the same page waits on it.
         if (requestType === "fetch_thread_transcript") {
-          await handleRemoteBrokerPayload({
+          await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
             kind: "remote_action_result",
             action_id: frame.payload.action_id,
             action: "fetch_thread_transcript",
@@ -3584,7 +3585,7 @@ test("a workspace repair the relay accepted is reported as success, not as a scr
           });
           return;
         }
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_session_result",
           action_id: frame.payload.action_id,
           action: "repair_workspace",
@@ -3605,6 +3606,7 @@ test("a workspace repair the relay accepted is reported as success, not as a scr
   // The refresh is not incidental: the banner goes away on the relay's own verdict
   // in the next transcript payload, so a repair that never reaches this line leaves
   // a "workspace is gone" banner sitting over a workspace that is back.
+  await waitFor(() => dispatched.includes("fetch_thread_transcript"));
   assert.deepEqual(dispatched, ["repair_workspace", "fetch_thread_transcript"]);
   assert.equal(
     readWorkspaceRepair(state, "thread-repair-1").error,
@@ -4736,7 +4738,7 @@ test("applyTranscriptDelta gap repair fetches the authoritative tail and converg
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -4756,13 +4758,13 @@ test("applyTranscriptDelta gap repair fetches the authoritative tail and converg
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       if (frame.payload.request?.type !== "fetch_thread_transcript") {
         return;
       }
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -4850,7 +4852,7 @@ test("a gap repair page read before a newer change to a row does not undo that c
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -4886,7 +4888,7 @@ test("a gap repair page read before a newer change to a row does not undo that c
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       if (frame.payload.request?.type !== "fetch_thread_transcript") {
         return;
       }
@@ -4900,7 +4902,7 @@ test("a gap repair page read before a newer change to a row does not undo that c
         };
         state.transcriptRowSeenRevisions = new Map([["tool-1", 4]]);
         // The page was read at revision 3, before that.
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -4959,7 +4961,7 @@ test("a gap repair for a thread other than the window's leaves the window's row 
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -4980,13 +4982,13 @@ test("a gap repair for a thread other than the window's leaves the window's row 
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       if (frame.payload.request?.type !== "fetch_thread_transcript") {
         return;
       }
       fetches += 1;
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -5053,7 +5055,7 @@ test("gap repair updates the live session while preserving a view-only thread", 
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -5109,10 +5111,10 @@ test("gap repair updates the live session while preserving a view-only thread", 
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -5171,7 +5173,7 @@ function createHeldTranscriptPageSocket(handleRemoteBrokerPayload) {
     socket: {
       readyState: 1,
       send(frameText) {
-        const frame = JSON.parse(frameText);
+        const frame = decodeActionFrame(frameText);
         if (frame.payload.request?.type === "fetch_thread_transcript") {
           held.push(frame.payload.action_id);
         }
@@ -5180,7 +5182,7 @@ function createHeldTranscriptPageSocket(handleRemoteBrokerPayload) {
     answer(index, threadTranscript) {
       const [actionId] = held.splice(index, 1);
       assert.ok(actionId, "expected a held transcript page request");
-      return handleRemoteBrokerPayload({
+      return deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
         kind: "remote_action_result",
         action_id: actionId,
         action: "fetch_thread_transcript",
@@ -5307,13 +5309,13 @@ test("a viewed thread's page sent before a confirmed model change does not bring
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       if (frame.payload.request?.type !== "update_session_settings") {
         holdPages(frameText);
         return;
       }
       setImmediate(() => {
-        void handleRemoteBrokerPayload({
+        void deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "update_session_settings",
@@ -5392,13 +5394,13 @@ async function setUpRemoteSettingsRace() {
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       if (frame.payload.request?.type !== "update_session_settings") {
         holdPages(frameText);
         return;
       }
       setImmediate(() => {
-        void handleRemoteBrokerPayload({
+        void deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "update_session_settings",
@@ -5577,7 +5579,7 @@ test("applyTranscriptDelta gap repair retries after a transient fetch failure an
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -5597,7 +5599,7 @@ test("applyTranscriptDelta gap repair retries after a transient fetch failure an
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       if (frame.payload.request?.type !== "fetch_thread_transcript") {
         return;
@@ -5607,7 +5609,7 @@ test("applyTranscriptDelta gap repair retries after a transient fetch failure an
       setImmediate(async () => {
         if (attempt === 1) {
           // First repair fetch fails transiently; the loop must retry, not bail.
-          await handleRemoteBrokerPayload({
+          await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
             kind: "remote_action_result",
             action_id: frame.payload.action_id,
             action: "fetch_thread_transcript",
@@ -5616,7 +5618,7 @@ test("applyTranscriptDelta gap repair retries after a transient fetch failure an
           });
           return;
         }
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -5696,7 +5698,7 @@ test("applyTranscriptDelta gap repair honors a higher-revision gap that arrives 
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -5724,7 +5726,7 @@ test("applyTranscriptDelta gap repair honors a higher-revision gap that arrives 
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       if (frame.payload.request?.type !== "fetch_thread_transcript") {
         return;
@@ -5748,7 +5750,7 @@ test("applyTranscriptDelta gap repair honors a higher-revision gap that arrives 
       }
       const tail = tailByAttempt[Math.min(attempt, tailByAttempt.length) - 1];
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -5832,7 +5834,7 @@ test("applyTranscriptDelta gap repair retries when fetch returns an incomplete (
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -5852,7 +5854,7 @@ test("applyTranscriptDelta gap repair retries when fetch returns an incomplete (
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       if (frame.payload.request?.type !== "fetch_thread_transcript") {
         return;
@@ -5860,7 +5862,7 @@ test("applyTranscriptDelta gap repair retries when fetch returns an incomplete (
       fetchAttempts += 1;
       const attempt = fetchAttempts;
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -6321,7 +6323,7 @@ test("sendHeartbeat dispatches a heartbeat when the current device holds control
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -6344,7 +6346,7 @@ test("sendHeartbeat dispatches a heartbeat when the current device holds control
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
     },
   };
@@ -6386,7 +6388,7 @@ test("applySessionSnapshot re-hydrates a long final message added after the firs
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -6406,7 +6408,7 @@ test("applySessionSnapshot re-hydrates a long final message added after the firs
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       const type = frame.payload.request?.type;
       if (type !== "fetch_thread_transcript" && type !== "fetch_thread_rows") {
@@ -6415,7 +6417,7 @@ test("applySessionSnapshot re-hydrates a long final message added after the firs
       // A rows read answers only the rows it named.
       const wanted = type === "fetch_thread_rows" ? frame.payload.request.input.row_ids : null;
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: type,
@@ -6447,7 +6449,7 @@ test("applySessionSnapshot re-hydrates a long final message added after the firs
     approval_policy: "untrusted",
     audit_enabled: false,
     available_models: [],
-    broker_can_read_content: true,
+    broker_can_read_content: false,
     broker_channel_id: "room-a",
     broker_connected: true,
     broker_peer_id: "relay-1",
@@ -6457,7 +6459,7 @@ test("applySessionSnapshot re-hydrates a long final message added after the firs
     current_cwd: "/tmp/project",
     current_status: "idle",
     device_records: [],
-    e2ee_enabled: false,
+    e2ee_enabled: true,
     logs: [],
     model: "gpt-5.4",
     paired_devices: [],
@@ -6466,7 +6468,7 @@ test("applySessionSnapshot re-hydrates a long final message added after the firs
     provider: "codex",
     reasoning_effort: "medium",
     sandbox: "workspace-write",
-    security_mode: "managed",
+    security_mode: "private",
     service_ready: true,
     transcript_truncated: true,
     transcript,
@@ -6701,7 +6703,7 @@ test("a delta for the view-only thread updates the projection, not the live sess
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -6804,7 +6806,7 @@ test("a delta for a thread that is neither live nor pinned is still ignored", as
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -6875,7 +6877,7 @@ function seedRemoteViewedTerminalRefreshFixture(state, saveRemoteAuth) {
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -6906,7 +6908,7 @@ function createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload) {
     socket: {
       readyState: 1,
       send(frameText) {
-        const frame = JSON.parse(frameText);
+        const frame = decodeActionFrame(frameText);
         if (frame.payload.request?.type !== "fetch_thread_transcript") {
           return;
         }
@@ -6914,7 +6916,7 @@ function createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload) {
         const threadId = frame.payload.request.input.thread_id;
         pending.push((fail = false) => {
           if (fail) {
-            void handleRemoteBrokerPayload({
+            void deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
               kind: "remote_action_result",
               action_id: frame.payload.action_id,
               action: "fetch_thread_transcript",
@@ -6923,7 +6925,7 @@ function createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload) {
             });
             return;
           }
-          void handleRemoteBrokerPayload({
+          void deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
             kind: "remote_action_result",
             action_id: frame.payload.action_id,
             action: "fetch_thread_transcript",
@@ -7373,7 +7375,7 @@ test("applying a snapshot does not force a layout just to build a debug line", a
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -7442,7 +7444,7 @@ test("verbose broker logging restores the snapshot scroll trace", async () => {
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -7644,7 +7646,7 @@ test("repairActiveTranscriptTail resyncs the loaded window to the repaired text 
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -7684,10 +7686,10 @@ test("repairActiveTranscriptTail resyncs the loaded window to the repaired text 
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -7773,7 +7775,7 @@ test("repairActiveTranscriptTail's order/never-shorten/positionless invariants r
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -7822,10 +7824,10 @@ test("repairActiveTranscriptTail's order/never-shorten/positionless invariants r
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -7898,7 +7900,7 @@ test("repairActiveTranscriptTail still invalidates a window entry the repair pag
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -7936,10 +7938,10 @@ test("repairActiveTranscriptTail still invalidates a window entry the repair pag
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -8016,7 +8018,7 @@ test("a delta immediately after a tail repair is checked against the REPAIRED te
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -8052,10 +8054,10 @@ test("a delta immediately after a tail repair is checked against the REPAIRED te
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -8714,7 +8716,7 @@ test("viewRemoteThread settles the outgoing live window before switching hydrati
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -8757,9 +8759,9 @@ test("viewRemoteThread settles the outgoing live window before switching hydrati
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -8856,7 +8858,7 @@ test("a run change releases the view-only pin, refetches once, and re-pins under
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -8885,7 +8887,7 @@ test("a run change releases the view-only pin, refetches once, and re-pins under
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       const request = frame.payload.request;
       if (request?.type !== "fetch_thread_transcript") {
         return;
@@ -8893,7 +8895,7 @@ test("a run change releases the view-only pin, refetches once, and re-pins under
       transcriptFetches.push(request.thread_id ?? request.threadId ?? null);
       const generation = generationForPages;
       setImmediate(() => {
-        void handleRemoteBrokerPayload({
+        void deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -8976,7 +8978,7 @@ for (const [fromGeneration, toGeneration, label] of [
       brokerUrl: "wss://broker.example.test",
       brokerChannelId: "room-a",
       relayPeerId: "relay-1",
-      securityMode: "managed",
+      securityMode: "private",
       deviceId: "device-1",
       deviceLabel: "Primary Phone",
       payloadSecret: "payload-secret-1",
@@ -9005,14 +9007,14 @@ for (const [fromGeneration, toGeneration, label] of [
     state.socket = {
       readyState: 1,
       send(frameText) {
-        const frame = JSON.parse(frameText);
+        const frame = decodeActionFrame(frameText);
         if (frame.payload.request?.type !== "fetch_thread_transcript") {
           return;
         }
         transcriptFetches.push(1);
         const generation = generationForPages;
         setImmediate(() => {
-          void handleRemoteBrokerPayload({
+          void deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
             kind: "remote_action_result",
             action_id: frame.payload.action_id,
             action: "fetch_thread_transcript",
@@ -9067,7 +9069,7 @@ test("a relay that left makes the phone declare its watch set again", async () =
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -9087,7 +9089,7 @@ test("a relay that left makes the phone declare its watch set again", async () =
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       if (frame.payload?.request?.type === "watch_threads") {
         declared.push(frame.payload.request.input.thread_ids.join(" "));
       }
@@ -9130,7 +9132,7 @@ test("a resync for the pinned thread re-reads it only when the pin is behind", a
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -9160,14 +9162,14 @@ test("a resync for the pinned thread re-reads it only when the pin is behind", a
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       const request = frame.payload?.request;
       if (request?.type !== "fetch_thread_transcript") {
         return;
       }
       fetched.push(request.input.thread_id);
       setImmediate(() => {
-        void handleRemoteBrokerPayload({
+        void deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "fetch_thread_transcript",
@@ -9229,7 +9231,7 @@ test("viewing a background thread declares the watch without waiting for a snaps
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -9258,7 +9260,7 @@ test("viewing a background thread declares the watch without waiting for a snaps
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       const request = frame.payload?.request;
       if (request?.type === "watch_threads") {
         declared.push(request.input.thread_ids);
@@ -9266,7 +9268,7 @@ test("viewing a background thread declares the watch without waiting for a snaps
       }
       if (request?.type === "fetch_thread_transcript") {
         setImmediate(() => {
-          void handleRemoteBrokerPayload({
+          void deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
             kind: "remote_action_result",
             action_id: frame.payload.action_id,
             action: "fetch_thread_transcript",
@@ -9286,6 +9288,7 @@ test("viewing a background thread declares the watch without waiting for a snaps
   };
 
   assert.equal(await viewRemoteThread("background-thread"), true);
+  await waitFor(() => declared.some((threadIds) => threadIds.includes("background-thread")));
   assert.ok(
     declared.some((threadIds) => threadIds.includes("background-thread")),
     `the viewed thread must be watched as soon as it is pinned, got ${JSON.stringify(declared)}`
@@ -9379,7 +9382,7 @@ test("a skill-only send reaches the relay with the skill's name and path beside 
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -9408,11 +9411,11 @@ test("a skill-only send reaches the relay with the skill's name and path beside 
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       if (frame.payload?.request?.type !== "send_message") return;
       request = frame.payload.request;
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_session_result",
           action_id: frame.payload.action_id,
           action: "send_message",

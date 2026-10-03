@@ -4,19 +4,22 @@ Security is a core part of the product, not a later add-on. This page is the
 summary. See [`DEPLOYMENT.md`](../DEPLOYMENT.md) for setup and pairing, and
 [`.env.example`](../.env.example) for connection and security settings.
 
-## The default: `private` mode
+## Remote access
 
-- `private` mode is the default. Broker-mediated remote traffic is end-to-end
-  encrypted, and the broker is treated as **blind transport** rather than a
-  content-reading execution layer.
-- Privacy follows from that default: your remote control path stays usable
-  without requiring the broker to see session content in plaintext.
-- `managed` mode exists for deployments that explicitly want broker or org
-  services to be able to read content. It is selectable today
-  (`RELAY_SECURITY_MODE=managed`) and flips `e2ee_enabled` /
-  `broker_can_read_content`, but **the audit trail it is meant to enable is not
-  implemented yet** — `audit_enabled` is surfaced, not consumed. Don't deploy
-  `managed` expecting audit records.
+- Remote clients connect through SealWire Cloud or a self-hosted broker.
+- Remote session content and actions are always end-to-end encrypted. The
+  broker routes ciphertext; it does not receive plaintext session content.
+- `private` is the only security mode. `RELAY_SECURITY_MODE=managed` is rejected.
+
+## Local access
+
+- `relay-server` only listens on loopback IP addresses and answers to loopback
+  hostnames. Direct LAN access and external relay hostnames are unsupported.
+- The local interface has no token login or session cookies. Host and browser
+  origin checks protect the local API.
+- Retired `RELAY_API_TOKEN`, `RELAY_ALLOW_INSECURE_NO_AUTH`, and
+  `RELAY_ALLOWED_HOSTS` settings cause startup to fail. Remove them and use a
+  broker for remote access.
 
 ## Identity and control
 

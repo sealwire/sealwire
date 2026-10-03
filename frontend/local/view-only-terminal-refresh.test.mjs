@@ -94,7 +94,7 @@ function createHarness() {
     logLine: () => {},
     seedDefaults: () => {},
     renderSession: streamRenderSession,
-    handleUnauthorized: () => {},
+
     applySessionSnapshot: () => {},
     cancelSessionPoll: () => {},
     cancelStreamReconnect: () => {},

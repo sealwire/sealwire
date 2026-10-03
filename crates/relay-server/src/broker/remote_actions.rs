@@ -1,4 +1,3 @@
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -38,8 +37,7 @@ use super::{
     crypto::{decrypt_json, encrypt_json, EncryptedEnvelope},
     frame_message_for_payload, issue_session_claim,
     protocol::{frame_bytes_for_payload, OutboundBrokerPayload},
-    publish_payload, verify_device_claim_challenge_proof, verify_device_claim_init_proof,
-    verify_session_claim,
+    publish_payload, verify_device_claim_challenge_proof, verify_session_claim,
     writer::{BrokerWriter, TrainHandoff},
     FrameOrigin, MAX_BROKER_TEXT_FRAME_BYTES,
 };
@@ -1028,274 +1026,6 @@ impl RemoteActionFailure {
     }
 }
 
-pub(super) async fn handle_remote_action(
-    state: &AppState,
-    writer: &BrokerWriter,
-    origin: FrameOrigin,
-    from_peer_id: String,
-    action_id: String,
-    session_claim: Option<String>,
-    device_id: Option<String>,
-    request: RemoteActionRequest,
-) -> Result<(), String> {
-    if !state.broker_can_read_content().await {
-        return Err("plaintext remote actions are disabled in private mode".to_string());
-    }
-    let action_kind = request.kind();
-    let action_started_at = Instant::now();
-    info!(
-        transport = "plaintext",
-        action = action_kind.as_str(),
-        action_id,
-        from_peer_id,
-        "broker remote action handling started"
-    );
-    if remote_action_emits_info_log(action_kind) {
-        state
-            .push_runtime_log(
-                "info",
-                format!(
-                    "Broker action `{}` received from {}.",
-                    action_kind.as_str(),
-                    from_peer_id
-                ),
-            )
-            .await;
-    }
-
-    let resolved_device_id = match resolve_plain_remote_device(
-        state,
-        &from_peer_id,
-        &action_id,
-        session_claim.as_deref(),
-        device_id.as_deref(),
-        &request,
-    )
-    .await
-    {
-        Ok(device_id) => device_id,
-        Err(error) => {
-            state
-                .push_runtime_log(
-                    "warn",
-                    format!(
-                        "Broker action `{}` from {} failed: {error}",
-                        action_kind.as_str(),
-                        from_peer_id
-                    ),
-                )
-                .await;
-            let snapshot = state.snapshot().await;
-            let result_device_id = device_id.unwrap_or_else(|| "unknown-device".to_string());
-            return publish_plain_remote_action_result(
-                state,
-                writer,
-                from_peer_id,
-                action_id,
-                action_kind,
-                remote_action_result_snapshot(action_kind, snapshot),
-                RemoteActionOutcome::default(),
-                Some(error),
-                false,
-                result_device_id,
-                Some(origin.lease),
-            )
-            .await;
-        }
-    };
-    if is_fire_and_forget_action(action_kind) {
-        return execute_fire_and_forget_remote_action(
-            state,
-            action_kind,
-            &resolved_device_id,
-            &from_peer_id,
-            request.bind_device(resolved_device_id.clone(), &from_peer_id, origin),
-            false,
-            origin,
-        )
-        .await;
-    }
-    match state
-        .reserve_remote_action(&resolved_device_id, &action_id, action_kind.as_str())
-        .await
-    {
-        Ok(RemoteActionReplayDecision::Execute) => {}
-        Ok(RemoteActionReplayDecision::Replay(cached)) => {
-            return replay_plain_remote_action_result(
-                state,
-                writer,
-                from_peer_id,
-                action_id,
-                action_kind,
-                cached,
-                Some(origin.lease),
-            )
-            .await;
-        }
-        Ok(RemoteActionReplayDecision::InFlight(wait)) => {
-            // Almost always a phone that reconnected: its first attempt is still running,
-            // and the writer it would have answered through died with the old session.
-            // Answer this one when the original finishes.
-            let state = state.clone();
-            let writer = writer.clone();
-            let device_id = resolved_device_id.clone();
-            let waited_peer_id = from_peer_id.clone();
-            tokio::spawn(async move {
-                if let Some(cached) = await_remote_action_result(
-                    &state,
-                    &writer,
-                    &waited_peer_id,
-                    &device_id,
-                    &action_id,
-                    wait,
-                )
-                .await
-                {
-                    let _ = replay_plain_remote_action_result(
-                        &state,
-                        &writer,
-                        from_peer_id,
-                        action_id,
-                        action_kind,
-                        cached,
-                        Some(origin.lease),
-                    )
-                    .await;
-                }
-            });
-            return Ok(());
-        }
-        Err(error) => {
-            let snapshot = state.snapshot().await;
-            let cached = cached_remote_action_result(
-                action_kind,
-                snapshot,
-                RemoteActionOutcome::default(),
-                Some(error),
-                false,
-                None,
-            );
-            state
-                .store_remote_action_result(&resolved_device_id, &action_id, cached.clone())
-                .await;
-            return replay_plain_remote_action_result(
-                state,
-                writer,
-                from_peer_id,
-                action_id,
-                action_kind,
-                cached,
-                Some(origin.lease),
-            )
-            .await;
-        }
-    }
-
-    let result: Result<RemoteActionOutcome, RemoteActionFailure> = match request {
-        RemoteActionRequest::ClaimChallenge { .. } => {
-            issue_claim_challenge_outcome(state, &resolved_device_id, &from_peer_id, origin.lease)
-                .await
-                .map_err(RemoteActionFailure::from)
-        }
-        RemoteActionRequest::ClaimDevice {
-            challenge_id,
-            proof,
-        } => issue_claim_outcome(
-            state,
-            &resolved_device_id,
-            &from_peer_id,
-            &challenge_id,
-            &proof,
-            origin.lease,
-        )
-        .await
-        .map_err(RemoteActionFailure::from),
-        request => {
-            match state
-                .mark_remote_device_seen(&resolved_device_id, &from_peer_id, Some(origin.lease))
-                .await
-            {
-                Ok(()) => match run_remote_action(
-                    state,
-                    request.bind_device(resolved_device_id.clone(), &from_peer_id, origin),
-                    origin.ingress,
-                )
-                .await
-                {
-                    Ok(outcome) => attach_session_claim_if_needed(
-                        action_kind,
-                        &resolved_device_id,
-                        &from_peer_id,
-                        outcome,
-                    )
-                    .map_err(RemoteActionFailure::from),
-                    Err(failure) => Err(failure),
-                },
-                Err(error) => Err(RemoteActionFailure::from(error)),
-            }
-        }
-    };
-    let snapshot = state.snapshot().await;
-    info!(
-        action = action_kind.as_str(),
-        active_thread_id = snapshot.active_thread_id.as_deref().unwrap_or("-"),
-        active_turn_id = snapshot.active_turn_id.as_deref().unwrap_or("-"),
-        transcript_entries = snapshot.transcript.len(),
-        transcript_truncated = snapshot.transcript_truncated,
-        logs = snapshot.logs.len(),
-        "publishing plaintext remote action result snapshot"
-    );
-
-    let (ok, outcome, error) = match result {
-        Ok(outcome) => (true, outcome, None),
-        Err(failure) => {
-            let (outcome, error) = failure.into_refusal();
-            state
-                .push_runtime_log(
-                    "warn",
-                    format!(
-                        "Broker action `{}` from {} failed: {error}",
-                        action_kind.as_str(),
-                        from_peer_id
-                    ),
-                )
-                .await;
-            (false, outcome, Some(error))
-        }
-    };
-    let cached = cached_remote_action_result(action_kind, snapshot, outcome, error, ok, None);
-    state
-        .store_remote_action_result(&resolved_device_id, &action_id, cached.clone())
-        .await;
-    let replay_result = replay_plain_remote_action_result(
-        state,
-        writer,
-        from_peer_id,
-        action_id,
-        action_kind,
-        cached,
-        Some(origin.lease),
-    )
-    .await;
-    let elapsed_ms = action_started_at.elapsed().as_millis();
-    if elapsed_ms >= REMOTE_ACTION_SLOW_WARN_MILLIS {
-        warn!(
-            transport = "plaintext",
-            action = action_kind.as_str(),
-            elapsed_ms,
-            "broker remote action handling was slow"
-        );
-    } else {
-        info!(
-            transport = "plaintext",
-            action = action_kind.as_str(),
-            elapsed_ms,
-            "broker remote action handling completed"
-        );
-    }
-    replay_result
-}
-
 pub(super) async fn handle_encrypted_remote_action(
     state: &AppState,
     writer: &BrokerWriter,
@@ -1399,7 +1129,6 @@ pub(super) async fn handle_encrypted_remote_action(
             &device_id,
             &from_peer_id,
             request.bind_device(device_id.clone(), &from_peer_id, origin),
-            true,
             origin,
         )
         .await;
@@ -2171,7 +1900,6 @@ async fn execute_fire_and_forget_remote_action(
     device_id: &str,
     peer_id: &str,
     request: RemoteActionRequest,
-    encrypted: bool,
     origin: FrameOrigin,
 ) -> Result<(), String> {
     state
@@ -2181,7 +1909,7 @@ async fn execute_fire_and_forget_remote_action(
         warn!(
             action = action.as_str(),
             peer_id = %peer_id,
-            transport = if encrypted { "encrypted" } else { "plaintext" },
+            transport = "encrypted",
             %error,
             "fire-and-forget broker action failed"
         );
@@ -2222,38 +1950,6 @@ fn decrypt_remote_action_with_secret(
     envelope: &EncryptedEnvelope,
 ) -> Result<RemoteActionRequest, String> {
     decrypt_json(secret, envelope)
-}
-
-async fn resolve_plain_remote_device(
-    state: &AppState,
-    from_peer_id: &str,
-    action_id: &str,
-    session_claim: Option<&str>,
-    device_id: Option<&str>,
-    request: &RemoteActionRequest,
-) -> Result<String, String> {
-    if let Some(claim) = session_claim {
-        return verify_session_claim(state, claim, from_peer_id).await;
-    }
-
-    let action_kind = request.kind();
-    let device_id = device_id.map(str::to_string).ok_or_else(|| {
-        if requires_session_claim(action_kind) {
-            SESSION_CONTROL_REQUIRED_ERROR.to_string()
-        } else {
-            format!("{} requires device_id", action_kind.as_str())
-        }
-    })?;
-
-    if requires_session_claim(action_kind) {
-        return Err(SESSION_CONTROL_REQUIRED_ERROR.to_string());
-    }
-
-    if let RemoteActionRequest::ClaimChallenge { proof } = request {
-        verify_remote_device_claim_init(state, &device_id, action_id, from_peer_id, proof).await?;
-    }
-
-    Ok(device_id)
 }
 
 async fn resolve_encrypted_action_context(
@@ -2310,17 +2006,6 @@ async fn verify_remote_device_claim(
         &verify_key,
         proof,
     )
-}
-
-async fn verify_remote_device_claim_init(
-    state: &AppState,
-    device_id: &str,
-    action_id: &str,
-    peer_id: &str,
-    proof: &str,
-) -> Result<(), String> {
-    let verify_key = state.paired_device_verify_key(device_id).await?;
-    verify_device_claim_init_proof(action_id, device_id, peer_id, &verify_key, proof)
 }
 
 async fn issue_claim_challenge_outcome(
@@ -2419,172 +2104,6 @@ fn ask_user_answer_error_message(error: AskUserAnswerError) -> String {
     }
 }
 
-async fn publish_plain_remote_action_result(
-    state: &AppState,
-    writer: &BrokerWriter,
-    target_peer_id: String,
-    action_id: String,
-    action: RemoteActionKind,
-    snapshot: Option<SessionSnapshot>,
-    outcome: RemoteActionOutcome,
-    error: Option<String>,
-    ok: bool,
-    _device_id: String,
-    lease: Option<u64>,
-) -> Result<(), String> {
-    let input_transcript_entries = snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.transcript.len())
-        .unwrap_or(0);
-    let input_transcript_truncated = snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.transcript_truncated)
-        .unwrap_or(false);
-    let snapshot = snapshot.map(|snapshot| {
-        snapshot.compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface)
-    });
-    info!(
-        action = action.as_str(),
-        input_transcript_entries,
-        input_transcript_truncated,
-        compacted_transcript_entries = snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.transcript.len())
-            .unwrap_or(0),
-        compacted_transcript_truncated = snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.transcript_truncated)
-            .unwrap_or(false),
-        "publishing plaintext remote action result compacted snapshot"
-    );
-    let threads = outcome.threads.map(|threads| {
-        threads.compact_for(crate::protocol::ThreadsResponseCompactProfile::RemoteSurface)
-    });
-    let RemoteActionOutcome {
-        receipt,
-        ask_user_answer_receipt,
-        providers,
-        models,
-        thread_entry_detail,
-        thread_transcript,
-        workspace_diff,
-        workspace_git_context,
-        thread_workspace,
-        thread_settings,
-        thread_skills,
-        reviews,
-        workflows,
-        devices,
-        projects,
-        ask_user_question_detail,
-        ask_detail,
-        session_claim,
-        session_claim_expires_at,
-        claim_challenge_id,
-        claim_challenge,
-        claim_challenge_expires_at,
-        error_code,
-        ..
-    } = outcome;
-    let size_breakdown = measure_remote_action_result_sizes(
-        action,
-        ok,
-        snapshot.as_ref(),
-        receipt.as_ref(),
-        providers.as_ref(),
-        models.as_ref(),
-        threads.as_ref(),
-        thread_entry_detail.as_ref(),
-        thread_transcript.as_ref(),
-        workspace_diff.as_ref(),
-        workspace_git_context.as_ref(),
-        thread_workspace.as_ref(),
-        thread_settings.as_ref(),
-        thread_skills.as_ref(),
-        reviews.as_ref(),
-        workflows.as_ref(),
-        devices.as_ref(),
-        projects.as_ref(),
-        ask_user_question_detail.as_ref(),
-        ask_detail.as_ref(),
-        session_claim.as_ref(),
-        session_claim_expires_at,
-        claim_challenge_id.as_ref(),
-        claim_challenge.as_ref(),
-        claim_challenge_expires_at,
-        error.as_ref(),
-        error_code,
-    );
-    let plaintext = RemoteActionResultPlaintext {
-        kind: remote_action_result_kind(action),
-        action,
-        ok,
-        snapshot,
-        receipt,
-        ask_user_answer_receipt,
-        providers,
-        models,
-        threads,
-        thread_entry_detail,
-        thread_transcript,
-        workspace_diff,
-        workspace_git_context,
-        thread_workspace,
-        thread_settings,
-        thread_skills,
-        reviews,
-        workflows,
-        devices,
-        projects,
-        ask_user_question_detail,
-        ask_detail,
-        session_claim,
-        session_claim_expires_at,
-        claim_challenge_id,
-        claim_challenge,
-        claim_challenge_expires_at,
-        error,
-        error_code,
-    };
-    let payload =
-        build_plain_remote_action_result_payload(&action_id, &target_peer_id, &plaintext)?;
-    let frame_bytes = frame_bytes_for_payload(&payload);
-    log_remote_action_result_sizes("plaintext", action, &size_breakdown, None, frame_bytes);
-    if frame_bytes <= MAX_BROKER_TEXT_FRAME_BYTES {
-        return publish_payload(writer, payload)
-            .await
-            .map_err(|error| format!("broker action result publish failed: {error}"));
-    }
-
-    let chunk_payloads =
-        build_plain_remote_action_result_chunk_payloads(&action_id, &target_peer_id, &plaintext)?;
-    info!(
-        transport = "plaintext",
-        action = action.as_str(),
-        action_id,
-        chunk_count = chunk_payloads.len(),
-        "falling back to chunked remote action result transport"
-    );
-    if publish_remote_action_result_chunks(
-        state,
-        writer,
-        chunk_payloads,
-        "broker action result chunk",
-        &target_peer_id,
-        lease,
-    )
-    .await?
-        == TrainHandoff::Busy
-    {
-        let busy = busy_remote_action_result(plaintext.kind, action);
-        let payload = build_plain_remote_action_result_payload(&action_id, &target_peer_id, &busy)?;
-        return publish_payload(writer, payload)
-            .await
-            .map_err(|error| format!("busy remote action result publish failed: {error}"));
-    }
-    Ok(())
-}
-
 /// Hand a chunked action reply to the writer, paced but not awaited.
 ///
 /// This used to publish every chunk here, sleeping
@@ -2644,92 +2163,6 @@ async fn publish_remote_action_result_chunks(
         );
     }
     Ok(handoff)
-}
-
-fn build_plain_remote_action_result_payload(
-    action_id: &str,
-    target_peer_id: &str,
-    result: &RemoteActionResultPlaintext,
-) -> Result<OutboundBrokerPayload, String> {
-    let action_id = action_id.to_string();
-    let target_peer_id = target_peer_id.to_string();
-    Ok(match result.kind {
-        RemoteActionResultKind::RemoteActionAck => OutboundBrokerPayload::RemoteActionAck {
-            action_id,
-            target_peer_id,
-            action: result.action,
-            ok: result.ok,
-            error: result.error.clone(),
-        },
-        RemoteActionResultKind::RemoteApprovalResult => {
-            OutboundBrokerPayload::RemoteApprovalResult {
-                action_id,
-                target_peer_id,
-                action: result.action,
-                ok: result.ok,
-                receipt: result.receipt.clone(),
-                error: result.error.clone(),
-            }
-        }
-        RemoteActionResultKind::RemoteControlResult => OutboundBrokerPayload::RemoteControlResult {
-            action_id,
-            target_peer_id,
-            action: result.action,
-            ok: result.ok,
-            session_claim: result.session_claim.clone(),
-            session_claim_expires_at: result.session_claim_expires_at,
-            claim_challenge_id: result.claim_challenge_id.clone(),
-            claim_challenge: result.claim_challenge.clone(),
-            claim_challenge_expires_at: result.claim_challenge_expires_at,
-            error: result.error.clone(),
-        },
-        RemoteActionResultKind::RemoteSessionResult => OutboundBrokerPayload::RemoteSessionResult {
-            action_id,
-            target_peer_id,
-            action: result.action,
-            ok: result.ok,
-            snapshot: result
-                .snapshot
-                .clone()
-                .ok_or_else(|| "remote session result is missing snapshot".to_string())?,
-            session_claim: result.session_claim.clone(),
-            session_claim_expires_at: result.session_claim_expires_at,
-            error: result.error.clone(),
-        },
-        RemoteActionResultKind::RemoteThreadsResult => OutboundBrokerPayload::RemoteThreadsResult {
-            action_id,
-            target_peer_id,
-            action: result.action,
-            ok: result.ok,
-            providers: result.providers.clone(),
-            models: result.models.clone(),
-            threads: result.threads.clone(),
-            error: result.error.clone(),
-        },
-        RemoteActionResultKind::RemoteTranscriptResult => {
-            OutboundBrokerPayload::RemoteTranscriptResult {
-                action_id,
-                target_peer_id,
-                action: result.action,
-                ok: result.ok,
-                thread_entry_detail: result.thread_entry_detail.clone(),
-                thread_transcript: result.thread_transcript.clone(),
-                workspace_diff: result.workspace_diff.clone(),
-                workspace_git_context: result.workspace_git_context.clone(),
-                thread_workspace: result.thread_workspace.clone(),
-                thread_settings: result.thread_settings.clone(),
-                thread_skills: result.thread_skills.clone(),
-                reviews: result.reviews.clone(),
-                workflows: result.workflows.clone(),
-                devices: result.devices.clone(),
-                projects: result.projects.clone(),
-                ask_user_question_detail: result.ask_user_question_detail.clone(),
-                ask_detail: result.ask_detail.clone(),
-                error: result.error.clone(),
-                error_code: result.error_code,
-            }
-        }
-    })
 }
 
 /// Wait for an action someone else is already running.
@@ -2798,56 +2231,6 @@ async fn await_remote_action_result(
         return None;
     }
     state.completed_remote_action(device_id, action_id).await
-}
-
-async fn replay_plain_remote_action_result(
-    state: &AppState,
-    writer: &BrokerWriter,
-    target_peer_id: String,
-    action_id: String,
-    action: RemoteActionKind,
-    cached: CachedRemoteActionResult,
-    lease: Option<u64>,
-) -> Result<(), String> {
-    publish_plain_remote_action_result(
-        state,
-        writer,
-        target_peer_id,
-        action_id,
-        action,
-        cached.snapshot,
-        RemoteActionOutcome {
-            receipt: cached.receipt,
-            ask_user_answer_receipt: cached.ask_user_answer_receipt,
-            providers: cached.providers,
-            models: cached.models,
-            threads: cached.threads,
-            thread_entry_detail: cached.thread_entry_detail,
-            thread_transcript: cached.thread_transcript,
-            workspace_diff: cached.workspace_diff,
-            workspace_git_context: cached.workspace_git_context,
-            thread_workspace: cached.thread_workspace,
-            thread_settings: cached.thread_settings,
-            thread_skills: cached.thread_skills,
-            reviews: cached.reviews,
-            workflows: cached.workflows,
-            devices: cached.devices,
-            projects: cached.projects,
-            ask_user_question_detail: cached.ask_user_question_detail,
-            ask_detail: cached.ask_detail,
-            session_claim: cached.session_claim,
-            session_claim_expires_at: cached.session_claim_expires_at,
-            claim_challenge_id: cached.claim_challenge_id,
-            claim_challenge: cached.claim_challenge,
-            claim_challenge_expires_at: cached.claim_challenge_expires_at,
-            error_code: cached.error_code,
-        },
-        cached.error,
-        cached.ok,
-        "cached-device".to_string(),
-        lease,
-    )
-    .await
 }
 
 async fn publish_remote_action_result_private(
@@ -3159,47 +2542,6 @@ where
         }
         chunk_chars = (chunk_chars / 2).max(REMOTE_ACTION_RESULT_CHUNK_MIN_CHARS);
     }
-}
-
-fn build_plain_remote_action_result_chunk_payloads(
-    action_id: &str,
-    target_peer_id: &str,
-    plaintext: &RemoteActionResultPlaintext,
-) -> Result<Vec<OutboundBrokerPayload>, String> {
-    let serialized = serialized_json_string(plaintext)?;
-    let pieces = fit_chunks(
-        &serialized,
-        REMOTE_ACTION_RESULT_CHUNK_TARGET_CHARS,
-        |piece, chunk_index, chunk_count| {
-            frame_bytes_for_payload(&OutboundBrokerPayload::RemoteActionResultChunk {
-                action_id: action_id.to_string(),
-                target_peer_id: target_peer_id.to_string(),
-                action: plaintext.action,
-                chunk_index,
-                chunk_count,
-                data: piece.to_string(),
-            })
-        },
-    )
-    .ok_or_else(|| {
-        "remote action result chunk payload still exceeds broker frame limit".to_string()
-    })?;
-
-    let chunk_count = pieces.len();
-    Ok(pieces
-        .into_iter()
-        .enumerate()
-        .map(
-            |(chunk_index, piece)| OutboundBrokerPayload::RemoteActionResultChunk {
-                action_id: action_id.to_string(),
-                target_peer_id: target_peer_id.to_string(),
-                action: plaintext.action,
-                chunk_index,
-                chunk_count,
-                data: piece.to_string(),
-            },
-        )
-        .collect())
 }
 
 fn build_encrypted_remote_action_result_chunk_payloads(

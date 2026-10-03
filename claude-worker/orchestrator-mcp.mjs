@@ -19,11 +19,9 @@ const SEAT_RUN_ID = process.env.SEALWIRE_SEAT_RUN_ID || null;
 // only ever present inside the subprocess the relay launched — a thread id would
 // prove nothing, since any client can read the whole thread list.
 const ASK_TOKEN = process.env.SEALWIRE_ASK_TOKEN || null;
-const API_TOKEN = process.env.RELAY_API_TOKEN || null;
 
 function headers() {
-  const value = { "content-type": "application/json" };
-  if (API_TOKEN) value.authorization = `Bearer ${API_TOKEN}`;
+  const value = { "content-type": "application/json", "X-Agent-Relay-CSRF": "1" };
   return value;
 }
 

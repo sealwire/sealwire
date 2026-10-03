@@ -23,13 +23,10 @@ artifact references. The local relay resolves artifact references, renders
 allowlisted templates, invokes providers, reads/writes the repository, stores
 sensitive outputs, and applies run-state mutations.
 
-The broker's remote-control path is separate. In default `private` mode,
-broker-mediated relay/surface traffic is end-to-end encrypted and the broker is
-blind transport. In `managed` mode (`RELAY_SECURITY_MODE=managed`), that E2EE
-property is intentionally disabled so broker/org services can read remote
-control content. Neither broker mode is the Cloud task-team orchestration
-channel; future Cloud orchestration remains constrained to the stricter
-content-blind schema.
+The broker's remote-control path is separate. Relay/surface traffic is always
+end-to-end encrypted and the broker is blind transport. This remote-control
+path is separate from the Cloud task-team orchestration channel; future Cloud
+orchestration remains constrained to the content-blind schema.
 
 ## Cloud Allowlist
 

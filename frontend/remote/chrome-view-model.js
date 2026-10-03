@@ -182,7 +182,7 @@ export function selectDeviceChromeRenderModel(currentState) {
         },
         {
           label: securityModeLabel(currentState, currentState.session),
-          tone: currentState.remoteAuth.securityMode === "managed" ? "alert" : "ready",
+          tone: "ready",
         },
         {
           label: remoteAccessStatusText(currentState),
@@ -415,16 +415,12 @@ function selectWorkspaceRepairBanner(currentState, session) {
   };
 }
 
-function securityModeLabel(currentState, session) {
-  const mode = session?.security_mode || currentState.remoteAuth?.securityMode || "private";
-  return mode === "managed" ? "Managed" : "Private";
+function securityModeLabel() {
+  return "Private";
 }
 
-function contentVisibilityLabel(session) {
-  if (session?.broker_can_read_content) {
-    return session.audit_enabled ? "Org-readable + audit" : "Readable";
-  }
-  return session?.e2ee_enabled ? "E2EE broker-blind" : "Broker-blind";
+function contentVisibilityLabel() {
+  return "E2EE broker-blind";
 }
 
 function brokerStatusLabel(currentState, session) {

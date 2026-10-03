@@ -3418,43 +3418,6 @@ fn an_acp_seat_mcp_entry_is_array_shaped_with_env_pairs_and_no_peer_identity() {
     );
 }
 
-#[test]
-fn acp_seat_and_peer_mcp_include_non_empty_relay_api_token_only() {
-    let seat = crate::acp::seat_mcp_server_entry_with_transport_for_test("run-9", Some("secret"));
-    let seat_env = seat["env"].as_array().expect("env");
-    assert!(seat_env
-        .iter()
-        .any(|p| p["name"] == "RELAY_API_TOKEN" && p["value"] == "secret"));
-    assert!(seat_env
-        .iter()
-        .all(|p| p["name"] != "SEALWIRE_ASK_TOKEN" && p["name"] != "SEALWIRE_DEVICE_ID"));
-
-    let peer = crate::acp::peer_mcp_server_entry_with_transport_for_test("tok-1", Some("secret"));
-    let peer_env = peer["env"].as_array().expect("env");
-    assert!(peer_env
-        .iter()
-        .any(|p| p["name"] == "RELAY_API_TOKEN" && p["value"] == "secret"));
-    assert!(peer_env
-        .iter()
-        .any(|p| p["name"] == "SEALWIRE_ASK_TOKEN" && p["value"] == "tok-1"));
-    assert!(peer_env
-        .iter()
-        .all(|p| p["name"] != "SEALWIRE_SEAT_RUN_ID" && p["name"] != "SEALWIRE_DEVICE_ID"));
-
-    for absent in [None, Some("")] {
-        for entry in [
-            crate::acp::seat_mcp_server_entry_with_transport_for_test("run-9", absent),
-            crate::acp::peer_mcp_server_entry_with_transport_for_test("tok-1", absent),
-        ] {
-            assert!(entry["env"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|p| p["name"] != "RELAY_API_TOKEN"));
-        }
-    }
-}
-
 /// Drive `start_thread` against a scripted agent and return the `session/new`
 /// request the bridge actually put on the wire.
 async fn drive_acp_start_thread(

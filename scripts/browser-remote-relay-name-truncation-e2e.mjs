@@ -1,3 +1,4 @@
+import { addEncryptedBrokerInitScript } from "./e2e/harness/encrypted-broker-mock.mjs";
 // Regression: the remote sidebar relay name must use the 1fr title track, not
 // collapse into the 14px lead slot.
 //
@@ -67,7 +68,7 @@ function buildInitScript() {
       brokerUrl: "ws://fake-broker.test",
       brokerChannelId: "room-e2e",
       relayPeerId: "relay-peer-e2e",
-      securityMode: "managed",
+      securityMode: "private",
       deviceId: "device-e2e",
       deviceLabel: "Browser E2E",
       hasStoredPayloadSecret: true,
@@ -91,9 +92,9 @@ function buildInitScript() {
       broker_connected: true,
       broker_channel_id: "room-e2e",
       broker_peer_id: "relay-peer-e2e",
-      security_mode: "managed",
-      e2ee_enabled: false,
-      broker_can_read_content: true,
+      security_mode: "private",
+      e2ee_enabled: true,
+      broker_can_read_content: false,
       audit_enabled: false,
       active_thread_id: threadId,
       active_controller_device_id: "device-e2e",
@@ -242,7 +243,7 @@ function buildInitScript() {
         this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(frame) }));
       }
     }
-    window.WebSocket = FakeWebSocket;
+    window.WebSocket = window.__sealwireEncryptedMock(FakeWebSocket);
   };
 }
 
@@ -391,7 +392,7 @@ async function main() {
     ]) {
       ({ context, page } = await runPass(browser, profile, name));
 
-      await page.addInitScript(buildInitScript(), {
+      await addEncryptedBrokerInitScript(page, buildInitScript(), {
         relayId: RELAY_ID,
         relayLabel: RELAY_LABEL,
         threadId: THREAD_ID,

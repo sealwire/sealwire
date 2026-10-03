@@ -1,6 +1,5 @@
 mod acp;
 mod acp_local;
-mod auth;
 mod broker;
 mod claude;
 mod codex;
@@ -28,16 +27,11 @@ mod usage;
 mod windows_state_permissions;
 
 use std::{convert::Infallible, process::ExitCode, time::Duration};
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::PathBuf,
-};
+use std::{net::SocketAddr, path::PathBuf};
 
-use auth::AuthConfig;
 use axum::{
     body::Body,
     extract::{DefaultBodyLimit, Path, Query, Request, State},
-    http::header::HeaderName,
     http::{header, HeaderMap, Method, StatusCode, Uri},
     middleware::{self, Next},
     response::{
@@ -53,27 +47,26 @@ use host_guard::HostPolicy;
 use protocol::{
     AllowedRootsInput, AllowedRootsReceipt, ApiEnvelope, ApiError, ApplyFileChangeInput,
     ApplyFileChangeReceipt, ApprovalDecisionInput, ApprovalReceipt, AskDetailResponse,
-    AskUserAnswerReceipt, AuthSessionInput, AuthSessionView, BulkRevokeDevicesReceipt,
-    ClientErrorCode, CommentHandBackInput, CommentMutationReceipt, CommentResolveInput,
-    CreateCommentInput, DeleteThreadInput, DevicesResponse, ForkSessionInput, HealthResponse,
-    HeartbeatInput, ListCommentsQuery, ListCommentsResponse, ListReviewTicksQuery,
-    ListReviewTicksResponse, LocalTranscriptEvent, ModelOptionView, PairingDecisionInput,
-    PairingDecisionReceipt, PairingStartInput, PairingTicketView, ProjectActionInput,
-    ProjectActionReceipt, ProjectsResponse, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
-    RenameThreadInput, RepairWorkspaceInput, RequestReviewInput, RequestReviewReceipt,
-    ResolvedWorkspace, ResumeSessionInput, ReviewAcceptReceipt, ReviewActionInput,
-    ReviewDeleteReceipt, ReviewsResponse, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
-    SessionSnapshotCompactProfile, SetThreadFlagInput, SkillInvocationInput, StartSessionInput,
-    StartTeamInput, StartTeamReceipt, StartWorkflowInput, StartWorkflowReceipt, StopTurnInput,
-    SubmitAskUserAnswerInput, TakeOverInput, TeamActionInput, TeamActionReceipt, TeamFileResponse,
-    TeamMarkInput, TeamsResponse, ThreadArchiveReceipt, ThreadDeleteReceipt,
-    ThreadEntryDetailResponse, ThreadFlagReceipt, ThreadRenameReceipt, ThreadSettingsView,
-    ThreadSkillsView, ThreadTranscriptResponse, ThreadWorkspaceInput, ThreadsQuery,
-    ThreadsResponse, TickReviewFileInput, TranscriptCursorToken, TranscriptDeltaEvent,
-    TranscriptResyncEvent, UpdateSessionSettingsInput, WatchThreadsInput, WorkflowActionInput,
-    WorkflowActionReceipt, WorkflowsResponse, WorkspaceDiffResponse, WorkspaceGitContextView,
-    WorkspaceTrustInput, WorkspaceTrustReceipt, TRANSCRIPT_RESYNC_EVENT_KIND,
-    TRANSCRIPT_STREAM_LAGGED_EVENT_KIND,
+    AskUserAnswerReceipt, BulkRevokeDevicesReceipt, ClientErrorCode, CommentHandBackInput,
+    CommentMutationReceipt, CommentResolveInput, CreateCommentInput, DeleteThreadInput,
+    DevicesResponse, ForkSessionInput, HealthResponse, HeartbeatInput, ListCommentsQuery,
+    ListCommentsResponse, ListReviewTicksQuery, ListReviewTicksResponse, LocalTranscriptEvent,
+    ModelOptionView, PairingDecisionInput, PairingDecisionReceipt, PairingStartInput,
+    PairingTicketView, ProjectActionInput, ProjectActionReceipt, ProjectsResponse,
+    ReadThreadEntryDetailInput, ReadThreadTranscriptInput, RenameThreadInput, RepairWorkspaceInput,
+    RequestReviewInput, RequestReviewReceipt, ResolvedWorkspace, ResumeSessionInput,
+    ReviewAcceptReceipt, ReviewActionInput, ReviewDeleteReceipt, ReviewsResponse,
+    RevokeDeviceReceipt, SendMessageInput, SessionSnapshot, SessionSnapshotCompactProfile,
+    SetThreadFlagInput, SkillInvocationInput, StartSessionInput, StartTeamInput, StartTeamReceipt,
+    StartWorkflowInput, StartWorkflowReceipt, StopTurnInput, SubmitAskUserAnswerInput,
+    TakeOverInput, TeamActionInput, TeamActionReceipt, TeamFileResponse, TeamMarkInput,
+    TeamsResponse, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse,
+    ThreadFlagReceipt, ThreadRenameReceipt, ThreadSettingsView, ThreadSkillsView,
+    ThreadTranscriptResponse, ThreadWorkspaceInput, ThreadsQuery, ThreadsResponse,
+    TickReviewFileInput, TranscriptCursorToken, TranscriptDeltaEvent, TranscriptResyncEvent,
+    UpdateSessionSettingsInput, WatchThreadsInput, WorkflowActionInput, WorkflowActionReceipt,
+    WorkflowsResponse, WorkspaceDiffResponse, WorkspaceGitContextView, WorkspaceTrustInput,
+    WorkspaceTrustReceipt, TRANSCRIPT_RESYNC_EVENT_KIND, TRANSCRIPT_STREAM_LAGGED_EVENT_KIND,
 };
 use provider::ProviderImage;
 use relay_http::{
@@ -120,7 +113,6 @@ enum WebAssets {
 #[derive(Clone)]
 struct AppContext {
     app: AppState,
-    auth: AuthConfig,
     launch_id: Option<String>,
     security_headers: SecurityHeadersConfig,
     host_policy: HostPolicy,
@@ -238,26 +230,13 @@ async fn main() -> ExitCode {
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(8787);
-    let host = std::env::var("BIND_HOST")
-        .ok()
-        .and_then(|value| value.parse::<IpAddr>().ok())
-        .unwrap_or(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
-    let auth = AuthConfig::from_env_for_bind_host(host)
-        .unwrap_or_else(|error| panic!("relay-server auth config is invalid: {error}"));
-    let host_policy = HostPolicy::from_env_for_bind_host(host)
-        .unwrap_or_else(|error| panic!("relay-server host allowlist is invalid: {error}"));
+    let host = host_guard::bind_host_from_env().unwrap_or_else(|error| {
+        eprintln!("relay-server: {error}");
+        std::process::exit(1);
+    });
+    let host_policy = HostPolicy::loopback_only();
     let security_headers = security_headers_from_env()
         .unwrap_or_else(|error| panic!("relay-server security header config is invalid: {error}"));
-    if auth.enabled() {
-        info!("relay-server API token auth is enabled for protected /api routes");
-    } else if auth.insecure_no_auth_override_active() {
-        warn!(
-            "relay-server API auth is disabled on a non-loopback bind because RELAY_ALLOW_INSECURE_NO_AUTH is set"
-        );
-    } else {
-        info!("relay-server API auth is disabled because the server is bound to loopback only");
-    }
-
     // One live relay-server per RELAY_STATE_PATH: a second process for the
     // same session file must not become a concurrent writer (that corrupts /
     // forks session.json). The dev restart scripts `pkill` the previous relay
@@ -361,7 +340,6 @@ async fn main() -> ExitCode {
     let shutdown_state = state.clone();
     let context = AppContext {
         app: state,
-        auth,
         launch_id: std::env::var(LAUNCH_ID_ENV)
             .ok()
             .filter(|value| !value.is_empty()),
@@ -460,12 +438,6 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         )
         .route("/api/providers", get(list_providers))
         .route("/api/providers/:provider/models", get(list_provider_models))
-        .route(
-            "/api/auth/session",
-            get(auth_session_status)
-                .post(auth_session_login)
-                .delete(auth_session_logout),
-        )
         .route("/api/session", get(session_snapshot))
         .route("/api/workspace/diff", get(workspace_diff))
         .route("/api/workspace/git-context", get(workspace_git_context))
@@ -591,10 +563,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
     let host_policy_context = context.clone();
     router
         .with_state(context.clone())
-        .layer(middleware::from_fn_with_state(
-            context.clone(),
-            with_csrf_protection,
-        ))
+        .layer(middleware::from_fn(with_csrf_protection))
         .layer(middleware::from_fn_with_state(
             context,
             with_security_headers,
@@ -738,11 +707,8 @@ fn default_usage_bucket() -> String {
 
 async fn usage_report(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Query(query): Query<UsageReportQuery>,
 ) -> Result<Json<ApiEnvelope<crate::usage::report::UsageReport>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .usage_report(
@@ -758,23 +724,17 @@ async fn usage_report(
 
 async fn team_catalog(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
 ) -> Result<Json<ApiEnvelope<crate::teams::TeamCatalogReport>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     Ok(Json(ApiEnvelope::ok(context.app.team_catalog().await)))
 }
 
 async fn ensure_orchestrator(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<crate::protocol::EnsureOrchestratorInput>,
 ) -> Result<
     Json<ApiEnvelope<crate::protocol::EnsureOrchestratorReceipt>>,
     (StatusCode, Json<ApiError>),
 > {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .ensure_orchestrator(input.device_id)
@@ -794,14 +754,11 @@ async fn ensure_orchestrator(
 /// it takes a deliberate press rather than riding on a screen load.
 async fn reset_orchestrator(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<crate::protocol::EnsureOrchestratorInput>,
 ) -> Result<
     Json<ApiEnvelope<crate::protocol::EnsureOrchestratorReceipt>>,
     (StatusCode, Json<ApiError>),
 > {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .reset_orchestrator(input.device_id)
@@ -816,13 +773,10 @@ async fn reset_orchestrator(
 
 async fn list_orchestrator_proposals(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
 ) -> Result<
     Json<ApiEnvelope<crate::protocol::OrchestratorProposalsResponse>>,
     (StatusCode, Json<ApiError>),
 > {
-    authorize_api(&context, &headers, &uri)?;
     Ok(Json(ApiEnvelope::ok(
         context.app.orchestrator_proposals().await,
     )))
@@ -830,14 +784,11 @@ async fn list_orchestrator_proposals(
 
 async fn propose_orchestrator_task(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<crate::protocol::ProposeOrchestratorTaskInput>,
 ) -> Result<
     Json<ApiEnvelope<crate::protocol::ProposeOrchestratorTaskReceipt>>,
     (StatusCode, Json<ApiError>),
 > {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .propose_orchestrator_task(input)
@@ -848,12 +799,9 @@ async fn propose_orchestrator_task(
 
 async fn confirm_orchestrator_proposal(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Path(proposal_id): Path<String>,
     Json(input): Json<crate::protocol::ConfirmOrchestratorProposalInput>,
 ) -> Result<Json<ApiEnvelope<crate::protocol::StartTeamReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .confirm_orchestrator_proposal(&proposal_id, input)
@@ -959,11 +907,8 @@ struct OrchestratorToolListQuery {
 
 async fn set_session_goal(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<GoalInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     let outcome = if input.objective.trim().is_empty() {
         context
             .app
@@ -990,11 +935,8 @@ async fn set_session_goal(
 
 async fn act_on_goal_card(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<GoalCardInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     let outcome = match crate::state::app::GoalCardAction::parse(&input.action) {
         Some(action) => context
             .app
@@ -1010,11 +952,8 @@ async fn act_on_goal_card(
 
 async fn delegate_to_agent(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<DelegateInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     // Answered once accepted: the transcript shows the brief being written, and a
     // composer held for its minutes could say nothing about it.
     let outcome = context
@@ -1049,11 +988,8 @@ async fn delegate_to_agent(
 /// budget is five minutes of a composer that cannot say whether anything happened.
 async fn hand_over_session(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<HandoverInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     let outcome = context
         .app
         .handover_detached(
@@ -1086,11 +1022,8 @@ given where the work stands and will carry on from there."
 /// the composer's own "a new attempt retires the last one's line".
 async fn acknowledge_handover_outcome(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<HandoverAckInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     let outcome = context
         .app
         // Loopback callers carry no path scope to be checked against.
@@ -1107,11 +1040,8 @@ async fn acknowledge_handover_outcome(
 
 async fn list_orchestrator_tools(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Query(query): Query<OrchestratorToolListQuery>,
 ) -> Result<Json<ApiEnvelope<serde_json::Value>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     // Precedence mirrors the bridge's: a seat first, then an ordinary session,
     // then the Orchestrator. Only one env key is ever set, so at most one matches.
     let tools = match (query.seat_run_id, query.ask_token) {
@@ -1129,12 +1059,9 @@ async fn list_orchestrator_tools(
 /// transport failure, which it can only respond to by retrying the same call.
 async fn call_orchestrator_tool(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Path(tool_name): Path<String>,
     Json(input): Json<OrchestratorToolCallInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     if let Some(token) = input.ask_token.as_deref() {
         let outcome = context
             .app
@@ -1165,15 +1092,12 @@ async fn call_orchestrator_tool(
 
 async fn revise_orchestrator_proposal(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Path(proposal_id): Path<String>,
     Json(input): Json<crate::protocol::ReviseOrchestratorProposalInput>,
 ) -> Result<
     Json<ApiEnvelope<crate::protocol::ProposeOrchestratorTaskReceipt>>,
     (StatusCode, Json<ApiError>),
 > {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .revise_orchestrator_proposal(&proposal_id, input)
@@ -1184,12 +1108,9 @@ async fn revise_orchestrator_proposal(
 
 async fn dismiss_orchestrator_proposal(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Path(proposal_id): Path<String>,
     Json(input): Json<crate::protocol::DismissOrchestratorProposalInput>,
 ) -> Result<Json<ApiEnvelope<()>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .dismiss_orchestrator_proposal(&proposal_id, input)
@@ -1204,11 +1125,8 @@ async fn list_providers(State(context): State<AppContext>) -> Json<ApiEnvelope<V
 
 async fn list_provider_models(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Path(provider): Path<String>,
 ) -> Result<Json<ApiEnvelope<Vec<ModelOptionView>>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .provider_models(&provider)
@@ -1217,66 +1135,9 @@ async fn list_provider_models(
         .map_err(bad_gateway)
 }
 
-async fn auth_session_status(
-    State(context): State<AppContext>,
-    headers: HeaderMap,
-) -> Json<ApiEnvelope<AuthSessionView>> {
-    Json(ApiEnvelope::ok(context.auth.session_view(&headers)))
-}
-
-async fn auth_session_login(
-    State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
-    Json(input): Json<AuthSessionInput>,
-) -> Result<(HeaderMap, Json<ApiEnvelope<AuthSessionView>>), (StatusCode, Json<ApiError>)> {
-    let mut response_headers = HeaderMap::new();
-    if let Some(cookie) = context
-        .auth
-        .issue_session_cookie(&input.token, request_uses_https(&headers, Some(&uri)))?
-    {
-        response_headers.insert(HeaderName::from_static("set-cookie"), cookie);
-    }
-
-    Ok((
-        response_headers,
-        Json(ApiEnvelope::ok(AuthSessionView {
-            auth_required: context.auth.enabled(),
-            authenticated: true,
-            cookie_session: context.auth.enabled(),
-        })),
-    ))
-}
-
-async fn auth_session_logout(
-    State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
-) -> (HeaderMap, Json<ApiEnvelope<AuthSessionView>>) {
-    let mut response_headers = HeaderMap::new();
-    response_headers.insert(
-        HeaderName::from_static("set-cookie"),
-        context
-            .auth
-            .clear_session_cookie(request_uses_https(&headers, Some(&uri))),
-    );
-
-    (
-        response_headers,
-        Json(ApiEnvelope::ok(AuthSessionView {
-            auth_required: context.auth.enabled(),
-            authenticated: !context.auth.enabled(),
-            cookie_session: false,
-        })),
-    )
-}
-
 async fn session_snapshot(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
 ) -> Result<Json<ApiEnvelope<SessionSnapshot>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     Ok(Json(ApiEnvelope::ok(compact_local_snapshot(
         context.app.snapshot().await,
     ))))
@@ -1284,11 +1145,8 @@ async fn session_snapshot(
 
 async fn workspace_diff(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Query(query): Query<WorkspaceDiffQuery>,
 ) -> Result<Json<ApiEnvelope<WorkspaceDiffResponse>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .workspace_diff(None, query.thread_id, query.view_root)
@@ -1306,11 +1164,8 @@ struct WorkspaceGitContextQuery {
 
 async fn workspace_git_context(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Query(query): Query<WorkspaceGitContextQuery>,
 ) -> Result<Json<ApiEnvelope<WorkspaceGitContextView>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .workspace_git_context(None, query.cwd)
@@ -1324,11 +1179,8 @@ async fn workspace_git_context(
 /// Resolved working tree for this session.
 async fn thread_workspace(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Query(query): Query<ThreadWorkspaceQuery>,
 ) -> Result<Json<ApiEnvelope<ResolvedWorkspace>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     let mut resolved = context
         .app
         .resolve_thread_workspace(&query.thread_id, query.device_id.as_deref())
@@ -1345,11 +1197,8 @@ async fn thread_workspace(
 /// Pin (`cwd`) or un-pin (`cwd: null`); response is the re-resolved state.
 async fn pin_thread_workspace(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<ThreadWorkspaceInput>,
 ) -> Result<Json<ApiEnvelope<ResolvedWorkspace>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .pin_thread_workspace(input)
@@ -1362,12 +1211,9 @@ async fn pin_thread_workspace(
 /// the thread's own workspace by `thread_settings_view`.
 async fn thread_settings(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Path(thread_id): Path<String>,
     Query(query): Query<DeviceQuery>,
 ) -> Result<Json<ApiEnvelope<ThreadSettingsView>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .thread_settings_view(query.device_id, &thread_id)
@@ -1379,12 +1225,9 @@ async fn thread_settings(
 /// The skills this thread's own provider offers in its own folder, for the "/" menu.
 async fn thread_skills(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Path(thread_id): Path<String>,
     Query(query): Query<DeviceQuery>,
 ) -> Result<Json<ApiEnvelope<ThreadSkillsView>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .thread_skills(query.device_id, &thread_id)
@@ -1413,14 +1256,11 @@ struct SessionStreamQuery {
 
 async fn session_stream(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Query(query): Query<SessionStreamQuery>,
 ) -> Result<
     Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>,
     (StatusCode, Json<ApiError>),
 > {
-    authorize_api(&context, &headers, &uri)?;
     let initial_state = context.app.clone();
     let updates_state = context.app.clone();
     let delta_state = context.app.clone();
@@ -1534,11 +1374,8 @@ async fn session_stream(
 
 async fn list_threads(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Query(query): Query<ThreadsQuery>,
 ) -> Result<Json<ApiEnvelope<ThreadsResponse>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     let limit = query.limit.unwrap_or(100).clamp(1, 200);
     context
         .app
@@ -1551,11 +1388,8 @@ async fn list_threads(
 async fn thread_transcript(
     Path(thread_id): Path<String>,
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Query(query): Query<ThreadTranscriptQuery>,
 ) -> Result<Json<ApiEnvelope<ThreadTranscriptResponse>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .read_thread_transcript(ReadThreadTranscriptInput {
@@ -1591,11 +1425,8 @@ struct ThreadTranscriptRowsQuery {
 async fn thread_transcript_rows(
     Path(thread_id): Path<String>,
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Query(query): Query<ThreadTranscriptRowsQuery>,
 ) -> Result<Json<ApiEnvelope<ThreadTranscriptResponse>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     let row_ids: Vec<String> = serde_json::from_str(&query.ids)
         .map_err(|error| bad_request(format!("`ids` must be a JSON array of row ids: {error}")))?;
     crate::protocol::validate_transcript_row_ids(&row_ids).map_err(bad_request)?;
@@ -1614,11 +1445,8 @@ async fn thread_transcript_rows(
 async fn thread_entry_detail(
     Path((thread_id, item_id)): Path<(String, String)>,
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Query(query): Query<ThreadEntryDetailQuery>,
 ) -> Result<Json<ApiEnvelope<ThreadEntryDetailResponse>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .read_thread_entry_detail(ReadThreadEntryDetailInput {
@@ -1637,11 +1465,8 @@ async fn thread_entry_detail(
 /// alongside it, which is what keeps the grant a local act.
 async fn set_workspace_trust(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<WorkspaceTrustInput>,
 ) -> Result<Json<ApiEnvelope<WorkspaceTrustReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .set_workspace_trust(input)
@@ -1652,11 +1477,8 @@ async fn set_workspace_trust(
 
 async fn update_usage_budget(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<crate::protocol::UsageBudgetInput>,
 ) -> Result<Json<ApiEnvelope<crate::protocol::UsageBudgetReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .update_usage_budget(input)
@@ -1667,11 +1489,8 @@ async fn update_usage_budget(
 
 async fn update_allowed_roots(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<AllowedRootsInput>,
 ) -> Result<Json<ApiEnvelope<AllowedRootsReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .update_allowed_roots(input)
@@ -1682,11 +1501,8 @@ async fn update_allowed_roots(
 
 async fn project_action(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<ProjectActionInput>,
 ) -> Result<Json<ApiEnvelope<ProjectActionReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .project_action(input)
@@ -1699,17 +1515,12 @@ async fn project_action(
 // decoupled from the byte-budgeted session snapshot.
 async fn fetch_projects(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
 ) -> Result<Json<ApiEnvelope<ProjectsResponse>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     Ok(Json(ApiEnvelope::ok(context.app.fetch_projects().await)))
 }
 
 async fn rename_thread(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Path(thread_id): Path<String>,
     // A REQUIRED body, deliberately unlike the neighbouring archive/delete handlers.
     //
@@ -1728,7 +1539,6 @@ async fn rename_thread(
     // send. Anything unparseable now gets axum's own 400/415 instead of destroying data.
     Json(input): Json<RenameThreadInput>,
 ) -> Result<Json<ApiEnvelope<ThreadRenameReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .rename_thread(&thread_id, input)
@@ -1745,12 +1555,9 @@ async fn rename_thread(
 /// missing key; no hand-rolled parsing needed here.
 async fn flag_thread(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Path(thread_id): Path<String>,
     Json(input): Json<SetThreadFlagInput>,
 ) -> Result<Json<ApiEnvelope<ThreadFlagReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .set_thread_flag(&thread_id, input)
@@ -1765,14 +1572,11 @@ async fn flag_thread(
 /// caller's banner turns back into a composer without a second round trip.
 async fn repair_thread_workspace(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Path(thread_id): Path<String>,
     // Optional body: the repair carries no choices (the recorded path is the only one
     // that can work), so an absent body is a complete request, not a degraded one.
     body: Option<Json<RepairWorkspaceInput>>,
 ) -> Result<Json<ApiEnvelope<SessionSnapshot>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     let input = body.map(|Json(input)| input).unwrap_or_default();
     context
         .app
@@ -1786,8 +1590,6 @@ async fn repair_thread_workspace(
 
 async fn archive_thread(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Path(thread_id): Path<String>,
     // Optional body: absent → non-destructive default (keep reviewer threads as
     // normal, un-hidden threads); present → honour the user's explicit choice
@@ -1795,7 +1597,6 @@ async fn archive_thread(
     // transcript when no choice was transmitted.
     body: Option<Json<DeleteThreadInput>>,
 ) -> Result<Json<ApiEnvelope<ThreadArchiveReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     let delete_reviewers = body.and_then(|Json(input)| input.delete_reviewers);
     context
         .app
@@ -1813,14 +1614,11 @@ async fn archive_thread(
 
 async fn delete_thread_permanently(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Path(thread_id): Path<String>,
     // Optional body: absent (the pre-feature client) → default delete of reviewer
     // threads; present → honour the user's choice.
     body: Option<Json<DeleteThreadInput>>,
 ) -> Result<Json<ApiEnvelope<ThreadDeleteReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     let delete_reviewers = body.and_then(|Json(input)| input.delete_reviewers);
     context
         .app
@@ -1838,11 +1636,8 @@ async fn delete_thread_permanently(
 
 async fn start_session(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<LocalStartSessionInput>,
 ) -> Result<Json<ApiEnvelope<SessionSnapshot>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     let images = parse_local_message_images(input.images).map_err(bad_request)?;
     context
         .app
@@ -1854,11 +1649,8 @@ async fn start_session(
 
 async fn fork_session(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<LocalForkSessionInput>,
 ) -> Result<Json<ApiEnvelope<SessionSnapshot>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     let images = parse_local_message_images(input.images).map_err(bad_request)?;
     context
         .app
@@ -1870,11 +1662,8 @@ async fn fork_session(
 
 async fn resume_session(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<ResumeSessionInput>,
 ) -> Result<Json<ApiEnvelope<SessionSnapshot>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .resume_session(input)
@@ -1885,11 +1674,8 @@ async fn resume_session(
 
 async fn update_session_settings(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<UpdateSessionSettingsInput>,
 ) -> Result<Json<ApiEnvelope<SessionSnapshot>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .update_session_settings(input)
@@ -1900,11 +1686,8 @@ async fn update_session_settings(
 
 async fn send_message(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<LocalSendMessageInput>,
 ) -> Result<Json<ApiEnvelope<SessionSnapshot>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     let images = parse_local_message_images(input.images).map_err(bad_request)?;
     context
         .app
@@ -1988,11 +1771,8 @@ fn image_bytes_match_media_type(media_type: &str, bytes: &[u8]) -> bool {
 
 async fn stop_active_turn(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<StopTurnInput>,
 ) -> Result<Json<ApiEnvelope<SessionSnapshot>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .stop_active_turn(input)
@@ -2003,11 +1783,8 @@ async fn stop_active_turn(
 
 async fn request_review(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<RequestReviewInput>,
 ) -> Result<Json<ApiEnvelope<RequestReviewReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .request_review(input)
@@ -2018,11 +1795,8 @@ async fn request_review(
 
 async fn start_workflow(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<StartWorkflowInput>,
 ) -> Result<Json<ApiEnvelope<StartWorkflowReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .start_code_workflow(input)
@@ -2033,11 +1807,8 @@ async fn start_workflow(
 
 async fn resolve_review(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<ReviewActionInput>,
 ) -> Result<Json<ApiEnvelope<RequestReviewReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     // Stop/cancel the active review — works for ANY non-terminal review (blocked OR
     // just stuck mid-turn), not only the cleanup-failed `Blocked` case.
     context
@@ -2050,11 +1821,8 @@ async fn resolve_review(
 
 async fn resolve_workflow(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<WorkflowActionInput>,
 ) -> Result<Json<ApiEnvelope<WorkflowActionReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .resolve_blocked_workflow(input)
@@ -2065,10 +1833,7 @@ async fn resolve_workflow(
 
 async fn list_reviews(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
 ) -> Result<Json<ApiEnvelope<ReviewsResponse>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     // The reviewer panel's dedicated, UNCOMPACTED channel: full review cards + reviewer
     // threads + a `reviews_revision` cache key. Decoupled from the byte-budgeted snapshot
     // so the panel survives live-turn compaction (which drains `active_review_jobs`).
@@ -2079,10 +1844,7 @@ async fn list_reviews(
 async fn get_ask_detail(
     Path(ask_id): Path<String>,
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
 ) -> Result<Json<ApiEnvelope<AskDetailResponse>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     // Local operator surface: no device scope, same as `list_reviews`. Full bodies —
     // the reviews list only ships ledger previews so a fat ask cannot bloat every paint.
     context
@@ -2097,11 +1859,8 @@ async fn get_ask_detail(
 async fn decide_model_request(
     Path(ask_id): Path<String>,
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<crate::protocol::ModelRequestDecisionInput>,
 ) -> Result<Json<ApiEnvelope<crate::protocol::AskView>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     // Local operator surface: no device scope, same as `get_ask_detail`.
     context
         .app
@@ -2113,20 +1872,14 @@ async fn decide_model_request(
 
 async fn list_workflows(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
 ) -> Result<Json<ApiEnvelope<WorkflowsResponse>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     Ok(Json(ApiEnvelope::ok(context.app.workflows(None).await)))
 }
 
 async fn start_team(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<StartTeamInput>,
 ) -> Result<Json<ApiEnvelope<StartTeamReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .start_team(input)
@@ -2138,12 +1891,9 @@ async fn start_team(
 /// The five whole-run actions share one body; only the verb differs.
 async fn team_action(
     context: AppContext,
-    headers: HeaderMap,
-    uri: Uri,
     action: TeamAction2,
     input: TeamActionInput,
 ) -> Result<Json<ApiEnvelope<TeamActionReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .team_action(action, input)
@@ -2154,77 +1904,58 @@ async fn team_action(
 
 async fn pause_team(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<TeamActionInput>,
 ) -> Result<Json<ApiEnvelope<TeamActionReceipt>>, (StatusCode, Json<ApiError>)> {
-    team_action(context, headers, uri, TeamAction2::Pause, input).await
+    team_action(context, TeamAction2::Pause, input).await
 }
 
 async fn stop_team(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<TeamActionInput>,
 ) -> Result<Json<ApiEnvelope<TeamActionReceipt>>, (StatusCode, Json<ApiError>)> {
-    team_action(context, headers, uri, TeamAction2::Stop, input).await
+    team_action(context, TeamAction2::Stop, input).await
 }
 
 async fn cancel_team(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<TeamActionInput>,
 ) -> Result<Json<ApiEnvelope<TeamActionReceipt>>, (StatusCode, Json<ApiError>)> {
-    team_action(context, headers, uri, TeamAction2::Cancel, input).await
+    team_action(context, TeamAction2::Cancel, input).await
 }
 
 async fn mark_team(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<TeamMarkInput>,
 ) -> Result<Json<ApiEnvelope<TeamActionReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     let receipt = context.app.mark_team(input).await.map_err(bad_request)?;
     Ok(Json(ApiEnvelope::ok(receipt)))
 }
 
 async fn delete_team(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<TeamActionInput>,
 ) -> Result<Json<ApiEnvelope<TeamActionReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     let receipt = context.app.delete_team(input).await.map_err(bad_request)?;
     Ok(Json(ApiEnvelope::ok(receipt)))
 }
 
 async fn resume_team(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<TeamActionInput>,
 ) -> Result<Json<ApiEnvelope<TeamActionReceipt>>, (StatusCode, Json<ApiError>)> {
-    team_action(context, headers, uri, TeamAction2::Resume, input).await
+    team_action(context, TeamAction2::Resume, input).await
 }
 
 async fn resolve_team(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<TeamActionInput>,
 ) -> Result<Json<ApiEnvelope<TeamActionReceipt>>, (StatusCode, Json<ApiError>)> {
-    team_action(context, headers, uri, TeamAction2::Resolve, input).await
+    team_action(context, TeamAction2::Resolve, input).await
 }
 
 async fn list_teams(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
 ) -> Result<Json<ApiEnvelope<TeamsResponse>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     Ok(Json(ApiEnvelope::ok(context.app.teams().await)))
 }
 
@@ -2254,11 +1985,8 @@ struct TeamFileQuery {
 /// What a task team changed, against a base the caller picks.
 async fn team_diff(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Query(query): Query<TeamDiffQuery>,
 ) -> Result<Json<ApiEnvelope<crate::protocol::TeamDiffResponse>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .team_diff(query.team_run_id.as_deref(), query.base, query.device_id)
@@ -2270,11 +1998,8 @@ async fn team_diff(
 /// One file from a task worktree or its diff base.
 async fn team_file(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Query(query): Query<TeamFileQuery>,
 ) -> Result<Json<ApiEnvelope<TeamFileResponse>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .team_file(
@@ -2291,11 +2016,8 @@ async fn team_file(
 
 async fn list_comments(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Query(query): Query<ListCommentsQuery>,
 ) -> Result<Json<ApiEnvelope<ListCommentsResponse>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .list_review_comments(query.scope, query.device_id)
@@ -2306,11 +2028,8 @@ async fn list_comments(
 
 async fn create_comment(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<CreateCommentInput>,
 ) -> Result<Json<ApiEnvelope<CommentMutationReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .create_review_comment(input)
@@ -2321,12 +2040,9 @@ async fn create_comment(
 
 async fn resolve_comment(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Path(comment_id): Path<String>,
     Json(input): Json<CommentResolveInput>,
 ) -> Result<Json<ApiEnvelope<CommentMutationReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .resolve_review_comment(comment_id, input)
@@ -2337,12 +2053,9 @@ async fn resolve_comment(
 
 async fn hand_back_comment(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Path(comment_id): Path<String>,
     Json(input): Json<CommentHandBackInput>,
 ) -> Result<Json<ApiEnvelope<CommentMutationReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .hand_back_review_comment(comment_id, input)
@@ -2353,11 +2066,8 @@ async fn hand_back_comment(
 
 async fn list_review_ticks(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Query(query): Query<ListReviewTicksQuery>,
 ) -> Result<Json<ApiEnvelope<ListReviewTicksResponse>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .list_review_ticks(query)
@@ -2368,11 +2078,8 @@ async fn list_review_ticks(
 
 async fn tick_review_file(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<TickReviewFileInput>,
 ) -> Result<Json<ApiEnvelope<relay_api::FileReviewTickView>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .tick_review_file(input)
@@ -2383,21 +2090,15 @@ async fn tick_review_file(
 
 async fn list_devices(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
 ) -> Result<Json<ApiEnvelope<DevicesResponse>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     Ok(Json(ApiEnvelope::ok(context.app.devices().await)))
 }
 
 async fn delete_review(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Path(review_id): Path<String>,
     Json(input): Json<ReviewActionInput>,
 ) -> Result<Json<ApiEnvelope<ReviewDeleteReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .delete_review(review_id, input.device_id)
@@ -2408,12 +2109,9 @@ async fn delete_review(
 
 async fn accept_review(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Path(review_id): Path<String>,
     Json(input): Json<ReviewActionInput>,
 ) -> Result<Json<ApiEnvelope<ReviewAcceptReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .accept_review(review_id, input.device_id)
@@ -2424,11 +2122,8 @@ async fn accept_review(
 
 async fn session_heartbeat(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<HeartbeatInput>,
 ) -> Result<Json<ApiEnvelope<SessionSnapshot>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .heartbeat_session(input)
@@ -2441,11 +2136,8 @@ async fn session_heartbeat(
 /// declaration changes nothing renderable, and the caller fires it on every navigation.
 async fn session_watch_threads(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<WatchThreadsInput>,
 ) -> Result<Json<ApiEnvelope<()>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .set_watched_threads(input)
@@ -2456,11 +2148,8 @@ async fn session_watch_threads(
 
 async fn take_over_session(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<TakeOverInput>,
 ) -> Result<Json<ApiEnvelope<SessionSnapshot>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .take_over_control(input)
@@ -2472,11 +2161,8 @@ async fn take_over_session(
 async fn decide_approval(
     Path(request_id): Path<String>,
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<ApprovalDecisionInput>,
 ) -> Result<Json<ApiEnvelope<ApprovalReceipt>>, impl IntoResponse> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .decide_approval(&request_id, input)
@@ -2500,11 +2186,8 @@ async fn decide_approval(
 async fn submit_ask_user_answer(
     Path(request_id): Path<String>,
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<SubmitAskUserAnswerInput>,
 ) -> Result<Json<ApiEnvelope<AskUserAnswerReceipt>>, impl IntoResponse> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .submit_ask_user_answer(&request_id, input)
@@ -2535,11 +2218,8 @@ async fn submit_ask_user_answer(
 async fn apply_file_change(
     Path(item_id): Path<String>,
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<ApplyFileChangeInput>,
 ) -> Result<Json<ApiEnvelope<ApplyFileChangeReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .apply_file_change(&item_id, input)
@@ -2550,11 +2230,8 @@ async fn apply_file_change(
 
 async fn start_pairing(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<PairingStartInput>,
 ) -> Result<Json<ApiEnvelope<PairingTicketView>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .start_pairing(input)
@@ -2566,10 +2243,7 @@ async fn start_pairing(
 async fn revoke_device(
     Path(device_id): Path<String>,
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
 ) -> Result<Json<ApiEnvelope<RevokeDeviceReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .revoke_device(&device_id)
@@ -2580,13 +2254,10 @@ async fn revoke_device(
 
 async fn clear_device_history(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
 ) -> Result<
     Json<ApiEnvelope<crate::protocol::ClearDeviceHistoryReceipt>>,
     (StatusCode, Json<ApiError>),
 > {
-    authorize_api(&context, &headers, &uri)?;
     Ok(Json(ApiEnvelope::ok(
         context.app.clear_device_history().await,
     )))
@@ -2595,10 +2266,7 @@ async fn clear_device_history(
 /// Answers at once; any change reaches clients on the next snapshot.
 async fn recheck_signed_out_providers(
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
 ) -> Result<Json<ApiEnvelope<()>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context.app.spawn_signed_out_recheck();
     Ok(Json(ApiEnvelope::ok(())))
 }
@@ -2606,10 +2274,7 @@ async fn recheck_signed_out_providers(
 async fn revoke_other_devices(
     Path(device_id): Path<String>,
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
 ) -> Result<Json<ApiEnvelope<BulkRevokeDevicesReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .revoke_other_devices(&device_id)
@@ -2621,25 +2286,14 @@ async fn revoke_other_devices(
 async fn decide_pairing_request(
     Path(pairing_id): Path<String>,
     State(context): State<AppContext>,
-    headers: HeaderMap,
-    uri: Uri,
     Json(input): Json<PairingDecisionInput>,
 ) -> Result<Json<ApiEnvelope<PairingDecisionReceipt>>, (StatusCode, Json<ApiError>)> {
-    authorize_api(&context, &headers, &uri)?;
     context
         .app
         .decide_pairing_request(&pairing_id, input)
         .await
         .map(|receipt| Json(ApiEnvelope::ok(receipt)))
         .map_err(bad_request)
-}
-
-fn authorize_api(
-    context: &AppContext,
-    headers: &HeaderMap,
-    uri: &Uri,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
-    context.auth.authorize(headers, uri)
 }
 
 fn workspace_root() -> PathBuf {
@@ -2949,13 +2603,7 @@ async fn with_host_allowlist(
     };
 
     if !allowed {
-        // Without this the symptom of a legitimate custom hostname (a hosts-file
-        // alias, a local reverse proxy) is an unexplained 421 on every request.
-        warn!(
-            "refused a request addressed to Host `{host}`; \
-             set {} to add it if this hostname is yours",
-            host_guard::ALLOWED_HOSTS_ENV
-        );
+        warn!("refused a request addressed to non-loopback Host `{host}`");
         return (
             StatusCode::MISDIRECTED_REQUEST,
             Json(ApiError::new(
@@ -2969,17 +2617,10 @@ async fn with_host_allowlist(
     next.run(request).await
 }
 
-async fn with_csrf_protection(
-    State(context): State<AppContext>,
-    request: Request,
-    next: Next,
-) -> Response {
-    if let Err(error) = authorize_csrf_protection(
-        &context.auth,
-        request.method(),
-        request.headers(),
-        request.uri(),
-    ) {
+async fn with_csrf_protection(request: Request, next: Next) -> Response {
+    if let Err(error) =
+        authorize_csrf_protection(request.method(), request.headers(), request.uri())
+    {
         return error.into_response();
     }
 
@@ -2987,7 +2628,6 @@ async fn with_csrf_protection(
 }
 
 fn authorize_csrf_protection(
-    auth: &AuthConfig,
     method: &Method,
     headers: &HeaderMap,
     uri: &Uri,
@@ -2996,46 +2636,7 @@ fn authorize_csrf_protection(
         return Ok(());
     }
 
-    // A bearer token is not ambient authority: a hostile page cannot read it,
-    // so it cannot be replayed through a confused deputy.
-    if auth.authenticates_with_bearer(headers) {
-        return Ok(());
-    }
-
-    if auth.enabled() && auth.authenticates_with_cookie(headers) {
-        // Cookie credentials ARE ambient. Demand the custom header (which a
-        // cross-origin page cannot set without a preflight this server never
-        // grants) *and* a trusted origin.
-        if !has_valid_csrf_header(headers) {
-            return Err(forbidden_csrf(
-                "Cookie-authenticated requests must include X-Agent-Relay-CSRF.",
-            ));
-        }
-
-        return match classify_request_origin(headers, uri) {
-            RequestOrigin::Trusted => Ok(()),
-            _ => Err(forbidden_csrf(
-                "Cookie-authenticated requests must come from the same Origin or Referer.",
-            )),
-        };
-    }
-
-    if auth.enabled() {
-        // Authenticated by neither cookie nor bearer: `authorize_api` turns
-        // this away on its own merits, and doing it there keeps the 401/403
-        // distinction honest.
-        return Ok(());
-    }
-
-    // No token configured — the laptop default, and the case the old
-    // `!auth.enabled()` short-circuit skipped entirely. Every caller is
-    // ambiently authorized here, so the browser check has to apply.
-    //
-    // Judging on a *declared* origin (rather than demanding one) is what keeps
-    // this from breaking every non-browser client: curl, the Node e2e scripts
-    // and the Tauri shell declare no origin, while a browser always attaches
-    // one to a cross-site mutating request — including the CORS-simple form
-    // posts that reach the body-less revoke routes.
+    // Non-browser clients omit Origin; browser requests must declare a trusted source.
     match classify_request_origin(headers, uri) {
         RequestOrigin::Untrusted => Err(forbidden_csrf(
             "Cross-origin requests are refused on the local API.",

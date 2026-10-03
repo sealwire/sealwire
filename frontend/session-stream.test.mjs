@@ -7,14 +7,13 @@ function nextTick() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-test("session stream uses authorization header instead of query access_token", async () => {
+test("session stream opens without cookies or authorization", async () => {
   const fetchCalls = [];
   let controllerRef = null;
   let sessionPayload = null;
   let opened = false;
 
   const stream = openSessionStream({
-    apiToken: "secret-token",
     url: sessionStreamUrl("https://relay.example.test"),
     fetchImpl: async (url, options) => {
       fetchCalls.push({
@@ -51,16 +50,16 @@ test("session stream uses authorization header instead of query access_token", a
   assert.equal(fetchCalls.length, 1);
   assert.equal(fetchCalls[0].url, "https://relay.example.test/api/stream");
   assert.ok(!fetchCalls[0].url.includes("access_token="));
-  assert.equal(fetchCalls[0].headers.get("Authorization"), "Bearer secret-token");
+  assert.equal(fetchCalls[0].headers.get("Authorization"), null);
   assert.equal(fetchCalls[0].headers.get("Accept"), "text/event-stream");
-  assert.equal(fetchCalls[0].credentials, "same-origin");
+  assert.equal(fetchCalls[0].credentials, "omit");
   assert.equal(opened, true);
   assert.deepEqual(sessionPayload, { current_status: "ready" });
 
   await stream.ready;
 });
 
-test("session stream surfaces unauthorized errors for expired local auth", async () => {
+test("session stream surfaces HTTP errors", async () => {
   let observedError = null;
 
   const stream = openSessionStream({
@@ -76,7 +75,6 @@ test("session stream surfaces unauthorized errors for expired local auth", async
 
   await stream.ready;
 
-  assert.equal(observedError?.code, "unauthorized");
   assert.match(observedError?.message || "", /401/);
 });
 

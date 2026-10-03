@@ -44,8 +44,6 @@ function noop() {}
 
 function createRendererOptions() {
   const state = {
-    authenticated: false,
-    authRequired: true,
     deviceId: "device-test",
     localUiStore: null,
     providerModels: {},

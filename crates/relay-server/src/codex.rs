@@ -308,20 +308,10 @@ impl ProviderBridge for CodexBridge {
 /// Shape differs from Claude's (a map, `mcp_servers`, env as an object) and from
 /// ACP's (an array, env as name/value pairs) — same bridge, three spellings.
 fn peer_mcp_servers(token: &str) -> Value {
-    peer_mcp_servers_with_transport(
-        token,
-        crate::provider::sealwire_relay_api_token().as_deref(),
-    )
-}
-
-fn peer_mcp_servers_with_transport(token: &str, relay_api_token: Option<&str>) -> Value {
-    let mut env = json!({
+    let env = json!({
         "SEALWIRE_ASK_TOKEN": token,
         "SEALWIRE_RELAY_URL": crate::provider::sealwire_relay_url(),
     });
-    if let Some(api_token) = relay_api_token.filter(|t| !t.is_empty()) {
-        env["RELAY_API_TOKEN"] = Value::String(api_token.to_string());
-    }
     let server = json!({
         "command": std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".to_string()),
         "args": [crate::provider::sealwire_mcp_bridge_path()],
@@ -340,20 +330,10 @@ fn peer_mcp_servers_with_transport(token: &str, relay_api_token: Option<&str>) -
 /// No device id and no ask token — those unlock write/peer surfaces a seat
 /// must not hold. Only `SEALWIRE_SEAT_RUN_ID` scopes `task_definition`.
 fn seat_mcp_servers(run_id: &str) -> Value {
-    seat_mcp_servers_with_transport(
-        run_id,
-        crate::provider::sealwire_relay_api_token().as_deref(),
-    )
-}
-
-fn seat_mcp_servers_with_transport(run_id: &str, relay_api_token: Option<&str>) -> Value {
-    let mut env = json!({
+    let env = json!({
         "SEALWIRE_SEAT_RUN_ID": run_id,
         "SEALWIRE_RELAY_URL": crate::provider::sealwire_relay_url(),
     });
-    if let Some(api_token) = relay_api_token.filter(|t| !t.is_empty()) {
-        env["RELAY_API_TOKEN"] = Value::String(api_token.to_string());
-    }
     json!({
         "sealwire": {
             "command": std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".to_string()),

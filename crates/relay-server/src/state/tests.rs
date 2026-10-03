@@ -248,7 +248,7 @@ fn a_local_goal_change_takes_its_place_in_the_same_order_as_a_phone() {
     // position at all — and a phone's frame still queued behind something slow would land
     // afterwards and overwrite what was just done on the laptop.
     let (change_tx, _) = watch::channel(0_u64);
-    let mut relay = RelayState::new("/tmp".to_string(), change_tx, SecurityProfile::managed());
+    let mut relay = RelayState::new("/tmp".to_string(), change_tx, SecurityProfile::private());
 
     assert!(
         relay.claim_goal_ingress("thread-1", None),
@@ -266,7 +266,7 @@ fn a_connection_that_drops_without_a_goodbye_still_counts_its_surfaces_as_gone()
     // surfaces queued are still draining on detached workers, so "we never heard it go"
     // must not read as "it is still here".
     let (change_tx, _) = watch::channel(0_u64);
-    let mut relay = RelayState::new("/tmp".to_string(), change_tx, SecurityProfile::managed());
+    let mut relay = RelayState::new("/tmp".to_string(), change_tx, SecurityProfile::private());
     relay.mark_surface_peer_online("surface-a");
     relay.set_broker_connection(true);
 

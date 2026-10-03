@@ -99,7 +99,6 @@ function buildController({ respond }) {
     renderSessionUnavailable: () => {},
     renderThreadListMessage: () => {},
     renderThreads: () => {},
-    renderAuthRequiredState: () => {},
     runViewTransition: (fn) => fn(),
     setStartControlsBusy: () => {},
     liveElement: () => null,

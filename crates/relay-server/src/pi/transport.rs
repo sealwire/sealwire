@@ -55,7 +55,6 @@ impl Connection {
             .args(["--mode", "rpc"])
             .args(args)
             .env_remove("SEALWIRE_PI_MCP")
-            .env_remove("RELAY_API_TOKEN")
             .env_remove("SEALWIRE_ASK_TOKEN")
             .env_remove("SEALWIRE_SEAT_RUN_ID")
             .env_remove("SEALWIRE_DEVICE_ID")

@@ -29,7 +29,7 @@ const port = await getFreePort();
 const base = `http://127.0.0.1:${port}`;
 const { command, args } = resolveRelayServerCommand();
 const relay = spawnManagedProcess("pi-live", command, args, {
-  AGENT_PROVIDERS: "pi", BIND_HOST: "127.0.0.1", PORT: String(port), RELAY_API_TOKEN: "",
+  AGENT_PROVIDERS: "pi", BIND_HOST: "127.0.0.1", PORT: String(port),
   RELAY_STATE_PATH: path.join(root, "relay", "session.json"),
   PI_CODING_AGENT_DIR: agent, PI_CODING_AGENT_SESSION_DIR: path.join(root, "sessions"),
   PI_OFFLINE: "1", PI_TELEMETRY: "0",

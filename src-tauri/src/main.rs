@@ -967,18 +967,16 @@ fn relay_env(
     Ok(envs)
 }
 
-/// Env vars the launcher takes full control of, so a value inherited from the
-/// user's shell can never leak into the relay sidecar. Broker vars are set from
-/// the picker; `RELAY_API_TOKEN` is scrubbed because the desktop relay is a
-/// zero-config loopback server with auth disabled — inheriting a token would
-/// enable auth and make both the local webview and `/api/session` provider
-/// polling demand a bearer the launcher never sends.
+/// Desktop owns broker and bind settings; inherited proxy auth settings would
+/// otherwise prevent its independently configured loopback sidecar from starting.
 fn is_launcher_managed_env(key: &str) -> bool {
     matches!(
         key,
         "AGENT_RELAY_PUBLIC_BROKER_ORIGIN"
             | "AGENT_RELAY_PUBLIC_BROKER_URL"
             | "RELAY_API_TOKEN"
+            | "RELAY_ALLOWED_HOSTS"
+            | "RELAY_ALLOW_INSECURE_NO_AUTH"
             | "RELAY_BROKER_AUTH_MODE"
             | "RELAY_BROKER_CONTROL_URL"
             | "RELAY_BROKER_PUBLIC_URL"
@@ -1717,16 +1715,18 @@ mod tests {
         assert!(parse_provider_status(r#"{"ok":true,"data":{}}"#).is_empty());
     }
 
-    // The desktop relay is loopback + auth-disabled by design. An inherited
-    // RELAY_API_TOKEN would flip auth on and make the local webview and the
-    // provider poll demand a bearer the launcher never sends, so it must be
-    // scrubbed from the sidecar env alongside the broker vars.
     #[test]
-    fn launcher_scrubs_inherited_auth_and_broker_env() {
-        assert!(
-            is_launcher_managed_env("RELAY_API_TOKEN"),
-            "inherited RELAY_API_TOKEN must be scrubbed"
-        );
+    fn launcher_scrubs_inherited_broker_and_retired_access_env() {
+        for key in [
+            "RELAY_API_TOKEN",
+            "RELAY_ALLOWED_HOSTS",
+            "RELAY_ALLOW_INSECURE_NO_AUTH",
+        ] {
+            assert!(
+                is_launcher_managed_env(key),
+                "desktop sidecar must not inherit {key}"
+            );
+        }
         assert!(is_launcher_managed_env("RELAY_BROKER_URL"));
         assert!(is_launcher_managed_env("RELAY_BROKER_AUTH_MODE"));
         assert!(!is_launcher_managed_env("PATH"));

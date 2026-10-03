@@ -1,3 +1,4 @@
+import { decodeActionFrame, deliverEncryptedTestPayload } from "./test-support/encrypted-transport.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
@@ -220,7 +221,7 @@ test("a fire-and-forget action cannot migrate to a replacement socket", async ()
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -264,7 +265,7 @@ test("ensureRemoteClaim performs challenge-response without rotating payload sec
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -284,11 +285,11 @@ test("ensureRemoteClaim performs challenge-response without rotating payload sec
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       setImmediate(async () => {
         if (frame.payload.request?.type === "claim_challenge") {
-          await handleRemoteBrokerPayload({
+          await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
             kind: "remote_action_result",
             action_id: frame.payload.action_id,
             action: "claim_challenge",
@@ -302,7 +303,7 @@ test("ensureRemoteClaim performs challenge-response without rotating payload sec
         }
 
         if (frame.payload.request?.type === "claim_device") {
-          await handleRemoteBrokerPayload({
+          await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
             kind: "remote_action_result",
             action_id: frame.payload.action_id,
             action: "claim_device",
@@ -380,7 +381,7 @@ test("encrypted remote action results decrypt with the persisted payload secret"
     session_claim_expires_at: Math.floor(Date.now() / 1000) + 300,
   });
 
-  await handleRemoteBrokerPayload({
+  await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
     kind: "encrypted_remote_action_result",
     action_id: "action-1",
     target_peer_id: "surface-peer-1",
@@ -434,7 +435,7 @@ test("encrypted remote action result chunks reassemble before resolving", async 
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       setImmediate(async () => {
         const result = {
           action: "fetch_thread_transcript",
@@ -475,7 +476,7 @@ test("encrypted remote action result chunks reassemble before resolving", async 
             chunk_count: chunks.length,
             data: chunk.data,
           });
-          await handleRemoteBrokerPayload({
+          await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
             kind: "encrypted_remote_action_result_chunk",
             action_id: frame.payload.action_id,
             target_peer_id: "surface-peer-1",
@@ -516,7 +517,7 @@ test("list_threads uses device access without pre-claiming control", async () =>
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -534,10 +535,10 @@ test("list_threads uses device access without pre-claiming control", async () =>
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       setImmediate(async () => {
-        await handleRemoteBrokerPayload({
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
           action: "list_threads",
@@ -588,7 +589,7 @@ test("remote actions time out when the relay never replies", async () => {
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -638,7 +639,7 @@ test("recoverRemoteSession only auto-claims when this device still controls the 
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -686,7 +687,7 @@ test("handleRemoteBrokerPayload routes transcript_delta to onApplyTranscriptDelt
     onApplyTranscriptDelta: (delta) => received.push(delta),
   });
 
-  await handleRemoteBrokerPayload({
+  await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
     kind: "transcript_delta",
     thread_id: "thread-1",
     item_id: "item-1",
@@ -712,7 +713,7 @@ test("handleRemoteBrokerPayload routes typed transcript events", async () => {
     onApplyTranscriptEvent: (event) => received.push(event),
   });
 
-  await handleRemoteBrokerPayload({
+  await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
     kind: "transcript_entry_completed",
     thread_id: "thread-1",
     item_id: "item-1",
@@ -734,7 +735,7 @@ test("handleRemoteBrokerPayload routes transcript_resync as a typed transcript e
     onApplyTranscriptEvent: (event) => received.push(event),
   });
 
-  await handleRemoteBrokerPayload({
+  await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
     kind: "transcript_resync",
     thread_id: "thread-1",
     transcript_generation: "gen-1",
@@ -760,7 +761,7 @@ test("a refused action rejects with the relay's error code", async () => {
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -783,7 +784,7 @@ test("a refused action rejects with the relay's error code", async () => {
     resolve: () => {},
   });
 
-  await handleRemoteBrokerPayload({
+  await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
     kind: "remote_transcript_result",
     action_id: "action-page",
     target_peer_id: "surface-mine",
@@ -834,7 +835,7 @@ test("handleRemoteBrokerPayload decrypts encrypted typed transcript events", asy
     request_id: "approval-1",
   });
 
-  await handleRemoteBrokerPayload({
+  await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
     kind: "encrypted_transcript_event",
     target_peer_id: "surface-peer-1",
     device_id: "device-1",
@@ -886,7 +887,7 @@ test("handleRemoteBrokerPayload decrypts encrypted transcript deltas with delta_
     delta_kind: "agent_text",
   });
 
-  await handleRemoteBrokerPayload({
+  await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
     kind: "encrypted_transcript_delta",
     target_peer_id: "surface-peer-1",
     device_id: "device-1",
@@ -909,7 +910,7 @@ test("handleRemoteBrokerPayload does not apply snapshot for heartbeat action res
     onApplySessionSnapshot: () => { snapshotApplied = true; },
   });
 
-  await handleRemoteBrokerPayload({
+  await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
     kind: "remote_action_result",
     action_id: "action-1",
     action: "heartbeat",
@@ -930,7 +931,7 @@ test("handleRemoteBrokerPayload keeps control results out of the transcript chan
     onApplySessionSnapshot: () => { snapshotApplied = true; },
   });
 
-  await handleRemoteBrokerPayload({
+  await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
     kind: "remote_control_result",
     action_id: "action-control",
     action: "heartbeat",
@@ -951,7 +952,7 @@ test("handleRemoteBrokerPayload applies snapshots only from session results", as
     onApplySessionSnapshot: (snapshot) => { applied.push(snapshot); },
   });
 
-  await handleRemoteBrokerPayload({
+  await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
     kind: "remote_session_result",
     action_id: "action-session",
     action: "start_session",
@@ -973,7 +974,7 @@ test("handleRemoteBrokerPayload does not apply snapshot for claim_challenge acti
     onApplySessionSnapshot: () => { snapshotApplied = true; },
   });
 
-  await handleRemoteBrokerPayload({
+  await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
     kind: "remote_action_result",
     action_id: "action-2",
     action: "claim_challenge",
@@ -1028,7 +1029,7 @@ test("a frame addressed to another surface does not notify the remote store", as
   try {
     // One chunked action result belonging to a DIFFERENT surface of the same device.
     for (let index = 0; index < 12; index += 1) {
-      await handleRemoteBrokerPayload({
+      await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
         kind: "encrypted_remote_action_result_chunk",
         action_id: "action-for-another-surface",
         action: "fetch_workspace_diff",
@@ -1040,7 +1041,7 @@ test("a frame addressed to another surface does not notify the remote store", as
         envelope: "envelope-that-must-not-be-opened",
       });
     }
-    await handleRemoteBrokerPayload({
+    await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
       kind: "encrypted_remote_action_result",
       action_id: "action-for-another-surface",
       target_peer_id: "surface-other",
@@ -1093,7 +1094,7 @@ test("verbose broker logging restores the discarded-frame trace", async () => {
   });
 
   try {
-    await handleRemoteBrokerPayload({
+    await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
       kind: "encrypted_remote_action_result_chunk",
       action_id: "action-for-another-surface",
       action: "fetch_workspace_diff",
@@ -1134,7 +1135,7 @@ test("each chunk of a reply extends the action deadline", async () => {
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -1167,7 +1168,7 @@ test("each chunk of a reply extends the action deadline", async () => {
   });
 
   const armedBefore = timers.length;
-  await handleRemoteBrokerPayload({
+  await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
     kind: "remote_action_result_chunk",
     action_id: "action-big",
     action: "fetch_workspace_diff",
@@ -1238,7 +1239,7 @@ test("this surface's own chunks do not each re-render the app", async () => {
 
   try {
     for (let index = 0; index < 12; index += 1) {
-      await handleRemoteBrokerPayload({
+      await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
         kind: "encrypted_remote_action_result_chunk",
         action_id: "action-mine",
         action: "fetch_workspace_diff",
@@ -1275,7 +1276,7 @@ test("a repeated chunk does not renew the action deadline", async () => {
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -1304,7 +1305,7 @@ test("a repeated chunk does not renew the action deadline", async () => {
   });
 
   const sendChunkZero = () =>
-    handleRemoteBrokerPayload({
+    deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
       kind: "remote_action_result_chunk",
       action_id: "action-stalled",
       action: "fetch_workspace_diff",
@@ -1369,7 +1370,7 @@ test("this surface's own snapshots do not re-render the app just to be traced", 
     notifications += 1;
   });
   try {
-    await handleRemoteBrokerPayload({
+    await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
       kind: "encrypted_session_snapshot",
       target_peer_id: "surface-mine",
       device_id: "device-1",
@@ -1423,7 +1424,7 @@ test("resending an unanswered action reuses its original action id", async () =>
   state.socket = {
     readyState: 1,
     send(frameText) {
-      const frame = JSON.parse(frameText);
+      const frame = decodeActionFrame(frameText);
       // Never answered: this models the reply that got dropped.
       sentActionIds.push(frame.payload?.action_id);
     },
@@ -1514,7 +1515,7 @@ test("a push registration stays pending until the relay answers it", async () =>
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -1533,7 +1534,7 @@ test("a push registration stays pending until the relay answers it", async () =>
     readyState: 1,
     // Never answers: this models a relay that was not in the room to hear it.
     send(frameText) {
-      sent.push(JSON.parse(frameText));
+      sent.push(decodeActionFrame(frameText));
     },
   };
   const registration = {
@@ -1594,7 +1595,7 @@ test("a push unregistration stays pending until the relay answers it", async () 
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -1612,7 +1613,7 @@ test("a push unregistration stays pending until the relay answers it", async () 
   state.socket = {
     readyState: 1,
     send(frameText) {
-      sent.push(JSON.parse(frameText));
+      sent.push(decodeActionFrame(frameText));
     },
   };
   const registration = {
@@ -1700,7 +1701,7 @@ test("a relay saying it is still working restarts the phone's deadline", async (
     resolve: () => {},
   });
 
-  await handleRemoteBrokerPayload({ kind: "remote_action_pending", action_id: "action-waiting" });
+  await deliverEncryptedTestPayload(handleRemoteBrokerPayload, { kind: "remote_action_pending", action_id: "action-waiting" });
 
   assert.equal(rejected, false, "a relay still working on it must not fail the action");
   assert.ok(
@@ -1738,7 +1739,7 @@ test("a relay coming back does not leave recovery waiting on a dead claim", asyn
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-1",
-    securityMode: "managed",
+    securityMode: "private",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
     payloadSecret: "payload-secret-1",
@@ -1777,5 +1778,57 @@ test("a relay coming back does not leave recovery waiting on a dead claim", asyn
   assert.equal(state.claimPromise, null, "with the lifecycle cleared for a new attempt");
 
   state.pendingActions.clear();
+  state.socket = null;
+});
+
+test("remote transport ignores plaintext content and encrypts actions despite a stale mode label", async () => {
+  installBrowserStubs();
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { configureRemoteActions, dispatchRemoteActionWithoutReply, handleRemoteBrokerPayload } = await import("./actions.js");
+  const { decryptJson, encryptJson } = await import("./crypto.js");
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1", brokerUrl: "wss://broker.example.test", brokerChannelId: "room-a",
+    relayPeerId: "relay-1", deviceId: "device-1", payloadSecret: "payload-secret-1",
+    securityMode: "managed", sessionClaim: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  state.pendingActionChunks.clear();
+  let applied = 0;
+  let settled = false;
+  configureRemoteActions({
+    onApplySessionSnapshot: () => { applied += 1; },
+    onApplyTranscriptDelta: () => { applied += 1; },
+    onApplyTranscriptEvent: () => { applied += 1; },
+  });
+  state.pendingActions.set("plain-result", {
+    actionType: "list_threads", timeoutId: 0, reject: () => { settled = true; }, resolve: () => { settled = true; },
+  });
+  for (const payload of [
+    { kind: "session_snapshot", snapshot: {} },
+    { kind: "transcript_delta", delta: "unsealed" },
+    { kind: "transcript_resync", thread_id: "thread-1", revision: 1 },
+    { kind: "remote_action_result", action_id: "plain-result", action: "list_threads", ok: true },
+    { kind: "remote_session_result", action_id: "plain-result", action: "start_session", ok: true, snapshot: {} },
+    { kind: "remote_action_result_chunk", action_id: "plain-result", chunk_index: 0, chunk_count: 1, data: "{}" },
+  ]) {
+    await handleRemoteBrokerPayload(payload);
+  }
+  assert.equal(applied, 0);
+  assert.equal(settled, false);
+  assert.equal(state.pendingActionChunks.size, 0);
+  await handleRemoteBrokerPayload({
+    kind: "encrypted_remote_action_result", action_id: "plain-result", target_peer_id: "surface-peer-1", device_id: "device-1",
+    envelope: await encryptJson("payload-secret-1", { kind: "remote_threads_result", action: "list_threads", ok: true }),
+  });
+  assert.equal(settled, true);
+
+  const sent = [];
+  state.socket = { readyState: 1, send: (text) => sent.push(JSON.parse(text)) };
+  await dispatchRemoteActionWithoutReply("heartbeat", { input: {} });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].payload.kind, "encrypted_remote_action");
+  assert.equal(sent[0].payload.request, undefined);
+  assert.equal((await decryptJson("payload-secret-1", sent[0].payload.envelope)).type, "heartbeat");
   state.socket = null;
 });

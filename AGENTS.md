@@ -68,9 +68,9 @@ port with its own `RELAY_STATE_PATH` (see below) — never touch the one the use
 is working through.
 
 The relay is a plain JSON HTTP API on `127.0.0.1:8787` (`npm run dev:full`), so
-an agent can drive it without a browser. On loopback with no `RELAY_API_TOKEN`
-set, send `X-Agent-Relay-CSRF: 1` and nothing else; with a token, send
-`Authorization: Bearer $RELAY_API_TOKEN` instead. Every mutating call needs a
+an agent can drive it without a browser. The relay only listens on loopback;
+remote clients connect through a broker. Send `X-Agent-Relay-CSRF: 1` on
+mutating requests. The local API has no token login or cookies. Every mutating call needs a
 non-empty `device_id` — any string; pairing is for remote clients.
 
 - `GET /api/health`, `GET /api/session` — the snapshot everything else reads back

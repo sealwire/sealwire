@@ -1,3 +1,4 @@
+import { addEncryptedBrokerInitScript } from "./e2e/harness/encrypted-broker-mock.mjs";
 // Switching between two streaming sessions on a phone, against a stubbed relay socket that
 // holds a reply while the old session ends — the timing a real broker almost never shows.
 
@@ -47,9 +48,9 @@ function installFakeRelay({ relayId, threads }) {
     broker_connected: true,
     broker_channel_id: "room-e2e",
     broker_peer_id: "relay-peer-e2e",
-    security_mode: "managed",
-    e2ee_enabled: false,
-    broker_can_read_content: true,
+    security_mode: "private",
+    e2ee_enabled: true,
+    broker_can_read_content: false,
     audit_enabled: false,
     active_thread_id: "thread-a",
     active_controller_device_id: "device-e2e",
@@ -97,7 +98,7 @@ function installFakeRelay({ relayId, threads }) {
           brokerUrl: "ws://fake-broker.test",
           brokerChannelId: "room-e2e",
           relayPeerId: "relay-peer-e2e",
-          securityMode: "managed",
+          securityMode: "private",
           deviceId: "device-e2e",
           deviceLabel: "Browser E2E",
           hasStoredPayloadSecret: true,
@@ -244,14 +245,14 @@ function installFakeRelay({ relayId, threads }) {
       this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(frame) }));
     }
   }
-  window.WebSocket = FakeWebSocket;
+  window.WebSocket = window.__sealwireEncryptedMock(FakeWebSocket);
 }
 
 async function openPage(context, origin) {
   const page = await context.newPage();
   page.on("pageerror", (error) => console.error(`[stream-switch-e2e:pageerror] ${error.stack || error.message}`));
   if (process.env.E2E_DEBUG) page.on("console", (message) => console.log(`[page] ${message.text()}`));
-  await page.addInitScript(installFakeRelay, { relayId: RELAY_ID, threads: THREADS });
+  await addEncryptedBrokerInitScript(page, installFakeRelay, { relayId: RELAY_ID, threads: THREADS });
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__agentRelaySecretReady === true, null, { timeout: TIMEOUT_MS });
   await page.reload({ waitUntil: "domcontentloaded" });

@@ -1,3 +1,4 @@
+import { addEncryptedBrokerInitScript } from "./e2e/harness/encrypted-broker-mock.mjs";
 // The phone half of the pinned question card.
 //
 // On a 390x844 screen the card has to be reachable without scrolling and must not
@@ -52,7 +53,7 @@ async function main() {
     page = await context.newPage();
     attachPageDebugLogging(page, "remote", { prefix: "remote-ask-user-inline-e2e" });
 
-    await page.addInitScript(
+    await addEncryptedBrokerInitScript(page,
       ({ relayId, threadId, trailingText }) => {
         const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state";
         const REMOTE_STATE_SCHEMA_VERSION = 1;
@@ -65,7 +66,7 @@ async function main() {
           brokerUrl: "ws://fake-broker.test",
           brokerChannelId: "room-e2e",
           relayPeerId: "relay-peer-e2e",
-          securityMode: "managed",
+          securityMode: "private",
           deviceId: "device-e2e",
           deviceLabel: "Browser E2E",
           hasStoredPayloadSecret: true,
@@ -109,9 +110,9 @@ async function main() {
           broker_connected: true,
           broker_channel_id: "room-e2e",
           broker_peer_id: "relay-peer-e2e",
-          security_mode: "managed",
-          e2ee_enabled: false,
-          broker_can_read_content: true,
+          security_mode: "private",
+          e2ee_enabled: true,
+          broker_can_read_content: false,
           audit_enabled: false,
           active_thread_id: threadId,
           active_controller_device_id: "device-e2e",
@@ -440,7 +441,7 @@ async function main() {
             this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(frame) }));
           }
         }
-        window.WebSocket = FakeWebSocket;
+        window.WebSocket = window.__sealwireEncryptedMock(FakeWebSocket);
       },
       { relayId: RELAY_ID, threadId: THREAD_ID, trailingText: TRAILING_TEXT }
     );

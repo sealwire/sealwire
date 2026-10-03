@@ -96,3 +96,24 @@ test("launcher honors an explicit CLAUDE_WORKER_PATH override", async () => {
   });
   assert.equal(captured, override);
 });
+
+
+test("launcher refuses LAN and wildcard addresses before starting a relay", async () => {
+  for (const host of ["0.0.0.0", "::", "192.168.1.2", "invalid", "::1%lo0"]) {
+    const result = await runLauncher({ args: ["--host", host] });
+    assert.equal(result.code, 2);
+    assert.equal(result.captured, null);
+    assert.match(result.stderr, /loopback/);
+  }
+  const result = await runLauncher({ extraEnv: { BIND_HOST: "0.0.0.0" } });
+  assert.equal(result.code, 2);
+  assert.equal(result.captured, null);
+});
+
+test("launcher accepts IPv4 and IPv6 loopback addresses", async () => {
+  for (const host of ["127.0.0.2", "::1", "0:0:0:0:0:0:0:1"]) {
+    const result = await runLauncher({ args: ["--host", host] });
+    assert.equal(result.code, 0, result.stderr);
+    assert.notEqual(result.captured, null);
+  }
+});

@@ -1,8 +1,5 @@
 import {
-  apiTokenInput,
-  apiTokenLabel,
   appShell,
-  applyTokenButton,
   archiveThreadButton,
   renameThreadButton,
   flagThreadButton,
@@ -18,7 +15,6 @@ import {
   composerAttachments,
   composerCommandMount,
   composerError,
-  connectionForm,
   controlBanner,
   cwdInput,
   deleteThreadButton,
@@ -97,9 +93,6 @@ import { reviewerPreviewEntriesFromPage } from "./shared/reviewer-panel.js";
 import { pendingApprovalForThread } from "./shared/session-view-model.js";
 import {
   createApiFetch,
-  createAuthSession,
-  deleteAuthSession,
-  fetchAuthSession,
   getDevices,
   getReviews,
   getAskDetail,
@@ -151,7 +144,6 @@ import { createSettingsController } from "./local/settings-controller.js";
 import { createSessionRenderer } from "./local/render-session.js";
 import { createSessionController } from "./local/session-controller.js";
 import {
-  loadLocalSessionData,
   runLocalBootDataPhase,
   syncProjectsForSession,
 } from "./local/boot-session-view.js";
@@ -363,7 +355,6 @@ import {
 } from "./local/image-attachments.js";
 
 const DEVICE_STORAGE_KEY = "agent-relay.device-id";
-const API_TOKEN_STORAGE_KEY = "agent-relay.api-token";
 
 // Identifies this page load as a CONNECTION, distinct from the device identity below.
 //
@@ -395,10 +386,6 @@ function loadOrCreateSurfaceId() {
 export { loadOrCreateSurfaceId };
 
 const state = {
-  apiToken: loadApiToken(),
-  authRequired: false,
-  authenticated: false,
-  cookieSession: false,
   controllerHeartbeatTimer: null,
   controllerLeaseRefreshTimer: null,
   currentApprovalId: null,
@@ -686,14 +673,7 @@ const sessionViewController = createSessionViewController({
 });
 state.sessionViewController = sessionViewController;
 
-const apiFetch = createApiFetch({
-  getApiToken() {
-    return state.apiToken;
-  },
-  onUnauthorized(message) {
-    handleUnauthorized(message);
-  },
-});
+const apiFetch = createApiFetch();
 
 const reviewsCache = createReviewsCache();
 const workflowsCache = createWorkflowsCache();
@@ -1053,8 +1033,6 @@ configureSecurityRenderers({
 });
 
 let controller;
-
-
 
 fetchBuildInfo("relay").then((info) => {
   const el = document.querySelector("#build-info-local");
@@ -1589,9 +1567,7 @@ controller = createSessionController({
   renderSessionUnavailable: renderer.renderSessionUnavailable,
   renderThreadListMessage: renderer.renderThreadListMessage,
   renderThreads: renderer.renderThreads,
-  renderAuthRequiredState: renderer.renderAuthRequiredState,
   runViewTransition: renderer.runViewTransition,
-  handleUnauthorized,
   renderSettings: () => settings.render(),
 });
 // Stash on state so React render paths (e.g. transcript-react.js's
@@ -1600,7 +1576,6 @@ controller = createSessionController({
 state.controller = controller;
 
 const {
-  renderAuthRequiredState,
   renderSession,
   renderSessionMeta,
   // The search + bell toggles and the search field. Repainted on its own rather than
@@ -1634,9 +1609,6 @@ sessionViewController.subscribe((change) => {
 const {
   cancelControllerHeartbeat,
   cancelControllerLeaseRefresh,
-  cancelSessionPoll,
-  cancelStreamReconnect,
-  cancelThreadsPoll,
   connectSessionStream,
   decidePairingRequest,
   forkSession,
@@ -1670,11 +1642,6 @@ installThreadListWheelProxy({
   shouldProxyWheel() {
     return Boolean(sessionHistoryDrawer?.open);
   },
-});
-
-connectionForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  void submitAuthSession();
 });
 
 // Three gears, one modal, each owning a state the others cannot reach:
@@ -2703,7 +2670,6 @@ async function submitStartSession() {
 // membership change rides the snapshot's projects_revision bump (assign calls notify),
 // same as every other project mutation, so the sidebar/overview refresh on their own.
 
-
 // The banner is one slot with one button, but which button it is depends on why the
 // banner is up (see local/control-banner.js), so both are bound here by id.
 controlBanner?.addEventListener("click", (event) => {
@@ -2865,7 +2831,6 @@ document.addEventListener("click", (event) => {
   renderForkImageAttachments();
   document.getElementById(FORK_PROMPT_INPUT_ID)?.focus();
 });
-
 
 // Delegated: the dialog renders on demand, so there is nothing to bind at boot.
 document.addEventListener("paste", (event) => {
@@ -3444,25 +3409,9 @@ void boot();
 
 async function boot() {
   // Painted before anything is fetched: the LEFT half needs no catalogue, and the sidebar
-  // must not be missing its primary action while auth and providers settle. The caret
+  // must not be missing its primary action while providers settle. The caret
   // half appears on the re-render below, once there is more than one agent to pick.
   renderStartSessionSplit();
-  apiTokenInput.value = state.apiToken;
-  updateConnectionForm();
-
-  await refreshAuthSession("initial boot");
-  if (state.apiToken && state.authRequired && !state.authenticated) {
-    await signInWithApiToken(state.apiToken, "stored token migration");
-  }
-  if (state.authRequired && !state.authenticated) {
-    clearStoredApiToken();
-    state.apiToken = "";
-    apiTokenInput.value = "";
-    updateConnectionForm();
-    renderAuthRequiredState("Enter RELAY_API_TOKEN to access the local relay.");
-    return;
-  }
-
   // No `preview` intent, unlike the popstate handler above. Boot means "route to
   // this, changing nothing about a tab that already exists": a link to a session
   // you are not holding open opens a kept tab, while a refresh on one you were
@@ -3484,166 +3433,6 @@ async function boot() {
     onRestoreError: (error) =>
       logLine(`Session view history restore failed during boot: ${error?.message || error}`),
   });
-}
-
-async function refreshAuthSession(reason) {
-  try {
-    const data = await fetchAuthSession();
-    applyAuthSessionState(data);
-    return data;
-  } catch (error) {
-    logLine(`Auth session check failed (${reason}): ${error.message}`);
-    return null;
-  }
-}
-
-async function submitAuthSession() {
-  if (!state.authRequired) {
-    logLine("This relay does not require an API token on the current bind host.");
-    return;
-  }
-
-  const token = apiTokenInput.value.trim();
-  if (token) {
-    await signInWithApiToken(token, "manual sign-in");
-    return;
-  }
-
-  if (!state.authenticated) {
-    logLine("Enter RELAY_API_TOKEN to sign in.");
-    apiTokenInput.focus();
-    return;
-  }
-
-  await signOutAuthSession("manual sign-out");
-}
-
-async function signInWithApiToken(token, reason) {
-  setConnectionFormBusy(true);
-
-  try {
-    const data = await createAuthSession(token);
-    clearStoredApiToken();
-    state.apiToken = "";
-    apiTokenInput.value = "";
-    applyAuthSessionState(data);
-    logLine(`Local relay sign-in succeeded (${reason}).`);
-    await resumeAfterAuthChange("sign-in");
-  } catch (error) {
-    clearStoredApiToken();
-    state.apiToken = "";
-    logLine(`Local relay sign-in failed: ${error.message}`);
-  } finally {
-    setConnectionFormBusy(false);
-  }
-}
-
-async function signOutAuthSession(reason) {
-  setConnectionFormBusy(true);
-
-  try {
-    const data = await deleteAuthSession();
-    clearStoredApiToken();
-    state.apiToken = "";
-    apiTokenInput.value = "";
-    applyAuthSessionState(data);
-    logLine(`Local relay sign-out succeeded (${reason}).`);
-    await resumeAfterAuthChange("sign-out");
-  } catch (error) {
-    logLine(`Local relay sign-out failed: ${error.message}`);
-  } finally {
-    setConnectionFormBusy(false);
-  }
-}
-
-function applyAuthSessionState(view) {
-  state.authRequired = Boolean(view?.auth_required);
-  state.authenticated = Boolean(view?.authenticated);
-  state.cookieSession = Boolean(view?.cookie_session);
-  if (state.authenticated || !state.authRequired) {
-    clearStoredApiToken();
-    state.apiToken = "";
-  }
-  updateConnectionForm();
-}
-
-function updateConnectionForm() {
-  if (!apiTokenLabel || !applyTokenButton) {
-    return;
-  }
-
-  connectionForm.hidden = !state.authRequired;
-
-  if (!state.authRequired) {
-    apiTokenLabel.textContent = "Local Access";
-    apiTokenInput.value = "";
-    apiTokenInput.disabled = true;
-    apiTokenInput.placeholder = "No API token required on this relay";
-    applyTokenButton.textContent = "Ready";
-    applyTokenButton.disabled = true;
-    return;
-  }
-
-  apiTokenLabel.textContent = state.cookieSession ? "Local Session" : "API Token";
-  apiTokenInput.disabled = false;
-  applyTokenButton.disabled = false;
-
-  if (state.authenticated) {
-    apiTokenInput.placeholder = "Signed in. Submit an empty field to sign out.";
-    applyTokenButton.textContent = "Sign Out";
-  } else {
-    apiTokenInput.placeholder = "Enter RELAY_API_TOKEN to sign in";
-    applyTokenButton.textContent = "Sign In";
-  }
-}
-
-function setConnectionFormBusy(busy) {
-  apiTokenInput.disabled = busy || !state.authRequired;
-  applyTokenButton.disabled = busy || !state.authRequired;
-}
-
-async function resumeAfterAuthChange(reason) {
-  state.streamConnected = false;
-  cancelStreamReconnect();
-  cancelSessionPoll();
-  cancelThreadsPoll();
-  if (state.sessionStream) {
-    state.sessionStream.close();
-    state.sessionStream = null;
-  }
-
-  if (state.authRequired && !state.authenticated) {
-    renderAuthRequiredState("Enter RELAY_API_TOKEN to access the local relay.");
-    return;
-  }
-
-  await loadLocalSessionData({
-    loadSession: () => loadSession(reason),
-    loadThreads: () => loadThreads(reason),
-    connectSessionStream,
-  });
-}
-
-function handleUnauthorized(message) {
-  const alreadySignedOut = state.authRequired && !state.authenticated;
-  clearStoredApiToken();
-  state.apiToken = "";
-  apiTokenInput.value = "";
-  state.authenticated = false;
-  state.cookieSession = false;
-  state.streamConnected = false;
-  cancelStreamReconnect();
-  cancelSessionPoll();
-  cancelThreadsPoll();
-  if (state.sessionStream) {
-    state.sessionStream.close();
-    state.sessionStream = null;
-  }
-  updateConnectionForm();
-  renderAuthRequiredState(message);
-  if (!alreadySignedOut) {
-    logLine(message);
-  }
 }
 
 function seedDefaults(session) {
@@ -5099,18 +4888,12 @@ function sessionStatusLabel(session, approval) {
   return "Live";
 }
 
-function securityModeLabel(session) {
-  if (session?.security_mode === "managed") {
-    return "Managed policy";
-  }
+function securityModeLabel() {
   return "Private";
 }
 
-function contentVisibilityLabel(session) {
-  if (session?.broker_can_read_content) {
-    return session.audit_enabled ? "Broker-readable with audit" : "Broker-readable";
-  }
-  return session?.e2ee_enabled ? "End-to-end encrypted" : "Broker cannot read content";
+function contentVisibilityLabel() {
+  return "End-to-end encrypted";
 }
 
 function brokerStatusLabel(session) {
@@ -5296,14 +5079,6 @@ function loadOrCreateDeviceId() {
     : `device-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   window.localStorage.setItem(DEVICE_STORAGE_KEY, generated);
   return generated;
-}
-
-function loadApiToken() {
-  return window.localStorage.getItem(API_TOKEN_STORAGE_KEY)?.trim() || "";
-}
-
-function clearStoredApiToken() {
-  window.localStorage.removeItem(API_TOKEN_STORAGE_KEY);
 }
 
 function logLine(message) {

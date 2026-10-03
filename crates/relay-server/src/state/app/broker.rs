@@ -56,11 +56,6 @@ impl AppState {
         relay.drain_pending_broker_messages()
     }
 
-    pub(crate) async fn broker_can_read_content(&self) -> bool {
-        let relay = self.relay.read().await;
-        relay.snapshot().broker_can_read_content
-    }
-
     /// Whether a surface peer is still in the broker room. See
     /// `RelayState::surface_peer_is_online`.
     pub(crate) async fn surface_peer_is_online(&self, peer_id: &str) -> bool {

@@ -22,14 +22,13 @@ import {
   createClaimLifecyclePatch,
 } from "./surface-state.js";
 import { sendBrokerFrame } from "./broker-client.js";
-import { relayError, TRANSCRIPT_RESYNC_EVENT } from "../shared/transcript-protocol.js";
+import { relayError } from "../shared/transcript-protocol.js";
 
 // One deadline for every action. Not because they are all quick — the relay still
 // awaits list_threads and send_message in its single receive loop, and a cold Codex
 // catalog alone is allowed 30s — but because a longer deadline is the wrong cure for
 // that: the relay is stalled either way, and waiting through it just hides that.
 const REMOTE_ACTION_TIMEOUT_MS = 15_000;
-
 
 let onApplySessionSnapshot = () => {};
 let onSyncRemoteSnapshot = async () => {};
@@ -46,18 +45,8 @@ export function configureRemoteActions(handlers) {
 export async function handleRemoteBrokerPayload(payload) {
   const kind = payload?.kind;
 
-  if (kind === "transcript_delta") {
-    onApplyTranscriptDelta(payload);
-    return;
-  }
-
   if (kind === "encrypted_transcript_delta") {
     await handleEncryptedTranscriptDelta(payload);
-    return;
-  }
-
-  if (isTranscriptEventKind(kind)) {
-    onApplyTranscriptEvent(payload);
     return;
   }
 
@@ -81,20 +70,6 @@ export async function handleRemoteBrokerPayload(payload) {
     return;
   }
 
-  if (kind === "session_snapshot") {
-    if (!isVerboseBrokerLoggingEnabled()) {
-      onApplySessionSnapshot(payload.snapshot);
-      return;
-    }
-    const message = `[scroll-source] kind=session_snapshot entries=${payload.snapshot?.transcript?.length || 0} truncated=${payload.snapshot?.transcript_truncated ? "1" : "0"} has_truncated=${Object.prototype.hasOwnProperty.call(payload.snapshot || {}, "transcript_truncated") ? "1" : "0"} thread=${payload.snapshot?.active_thread_id || "-"} status=${payload.snapshot?.current_status || "-"}`;
-    renderLog(message);
-    // TODO(remote-monitor-debug): Remove this console mirror once snapshot routing is stable.
-    console.log(message);
-    onApplySessionSnapshot(payload.snapshot);
-    renderLog("Received managed-mode session snapshot from broker.");
-    return;
-  }
-
   // Not an answer, so it must not settle anything: the relay is telling this browser that
   // an earlier attempt at the same action is still running. Its own deadline is shorter
   // than a slow provider call, and the failure it would report invites a retry under a
@@ -104,14 +79,6 @@ export async function handleRemoteBrokerPayload(payload) {
     return;
   }
 
-  if (isRemoteActionResultKind(kind)) {
-    handleRemoteActionResult(payload.action_id, payload);
-    return;
-  }
-
-  if (kind === "remote_action_result_chunk") {
-    handleRemoteActionResultChunk(payload.action_id, payload);
-  }
 }
 
 export async function ensureRemoteClaim({
@@ -472,17 +439,6 @@ function isHighVolumeEncryptedPayloadKind(kind) {
     || kind === "encrypted_session_snapshot";
 }
 
-function isTranscriptEventKind(kind) {
-  return kind === "session_meta_updated"
-    || kind === "transcript_entry_started"
-    || kind === "transcript_entry_delta"
-    || kind === "transcript_entry_completed"
-    || kind === "transcript_entry_patched"
-    || kind === "approval_added"
-    || kind === "approval_resolved"
-    || kind === TRANSCRIPT_RESYNC_EVENT;
-}
-
 function isVerboseBrokerLoggingEnabled() {
   return typeof window !== "undefined" && window.__agentRelayVerboseBrokerLogs === true;
 }
@@ -544,17 +500,6 @@ function handleRemoteActionResult(actionId, result) {
   }
 
   renderLog(`Remote ${result.action} failed: ${result.error || "unknown error"}`);
-}
-
-function isRemoteActionResultKind(kind) {
-  return kind === "remote_action_ack"
-    || kind === "remote_action_result"
-    || kind === "remote_approval_result"
-    || kind === "remote_control_result"
-    || kind === "remote_models_result"
-    || kind === "remote_session_result"
-    || kind === "remote_threads_result"
-    || kind === "remote_transcript_result";
 }
 
 function handleRemoteActionResultChunk(actionId, chunk) {
@@ -728,18 +673,6 @@ async function buildClaimChallengePayload(actionId) {
     deviceKeypair
   );
 
-  if (state.remoteAuth.securityMode === "managed") {
-    return {
-      kind: "remote_action",
-      action_id: actionId,
-      device_id: state.remoteAuth.deviceId,
-      request: {
-        type: "claim_challenge",
-        proof,
-      },
-    };
-  }
-
   return {
     kind: "encrypted_remote_action",
     action_id: actionId,
@@ -768,19 +701,6 @@ async function buildClaimDevicePayload(actionId, request) {
     deviceKeypair
   );
 
-  if (state.remoteAuth.securityMode === "managed") {
-    return {
-      kind: "remote_action",
-      action_id: actionId,
-      device_id: state.remoteAuth.deviceId,
-      request: {
-        type: "claim_device",
-        challenge_id: request.challenge_id,
-        proof: claimProof,
-      },
-    };
-  }
-
   return {
     kind: "encrypted_remote_action",
     action_id: actionId,
@@ -794,19 +714,6 @@ async function buildClaimDevicePayload(actionId, request) {
 }
 
 async function buildClaimedActionPayload(actionId, actionType, request) {
-  if (state.remoteAuth.securityMode === "managed") {
-    return {
-      kind: "remote_action",
-      action_id: actionId,
-      session_claim: state.remoteAuth.sessionClaim,
-      device_id: state.remoteAuth.deviceId,
-      request: {
-        type: actionType,
-        ...request,
-      },
-    };
-  }
-
   return {
     kind: "encrypted_remote_action",
     action_id: actionId,
@@ -820,18 +727,6 @@ async function buildClaimedActionPayload(actionId, actionType, request) {
 }
 
 async function buildDeviceActionPayload(actionId, actionType, request) {
-  if (state.remoteAuth.securityMode === "managed") {
-    return {
-      kind: "remote_action",
-      action_id: actionId,
-      device_id: state.remoteAuth.deviceId,
-      request: {
-        type: actionType,
-        ...request,
-      },
-    };
-  }
-
   return {
     kind: "encrypted_remote_action",
     action_id: actionId,

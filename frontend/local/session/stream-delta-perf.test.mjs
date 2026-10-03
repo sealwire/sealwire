@@ -53,7 +53,7 @@ function buildHarness(n) {
     logLine: () => {},
     seedDefaults: () => {},
     renderSession: () => {},
-    handleUnauthorized: () => {},
+
     applySessionSnapshot: () => {},
     cancelSessionPoll: () => {},
     cancelStreamReconnect: () => {},
@@ -197,7 +197,7 @@ test("the pre-hydration fallback (no window loaded yet) also counts its full-arr
     logLine: () => {},
     seedDefaults: () => {},
     renderSession: () => {},
-    handleUnauthorized: () => {},
+
     applySessionSnapshot: () => {},
     cancelSessionPoll: () => {},
     cancelStreamReconnect: () => {},

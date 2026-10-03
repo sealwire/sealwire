@@ -41,7 +41,6 @@ Useful browser E2E commands:
 - `npm run test:browser:pairing`
 - `npm run test:browser:local-delete`
 - `npm run test:browser:local-allowed-roots`
-- `npm run test:browser:local-auth`
 - `npm run test:browser:local-session`
 - `npm run test:browser:public`
 - `npm run test:browser:public-enrollment`

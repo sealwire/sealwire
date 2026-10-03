@@ -6,7 +6,7 @@ import { JSDOM } from "jsdom";
 
 // The one element `dom.js` reaches into as the module loads.
 const dom = new JSDOM(
-  '<!doctype html><html><body><form id="connection-form"></form></body></html>',
+  '<!doctype html><html><body></body></html>',
   { url: "http://localhost/" }
 );
 global.window = dom.window;
@@ -34,9 +34,8 @@ function controllerForTest() {
     renderSessionUnavailable: noop,
     renderThreadListMessage: noop,
     renderThreads: noop,
-    renderAuthRequiredState: noop,
     runViewTransition: (run) => run(),
-    handleUnauthorized: noop,
+
   });
 }
 

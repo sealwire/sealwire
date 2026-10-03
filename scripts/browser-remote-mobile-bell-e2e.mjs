@@ -1,3 +1,4 @@
+import { addEncryptedBrokerInitScript } from "./e2e/harness/encrypted-broker-mock.mjs";
 // Regression guard for the ACTIVITY BELL on a phone-sized remote surface.
 //
 // The bell re-buckets the session list by state (Needs input / Working / Reviewing /
@@ -64,7 +65,7 @@ async function main() {
   attachPageDebugLogging(page, "remote", { prefix: "remote-mobile-bell-e2e" });
 
   try {
-    await page.addInitScript(
+    await addEncryptedBrokerInitScript(page,
       ({ relayId, threadId, threadId2, threadId3, threadId4 }) => {
         const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state";
         const REMOTE_STATE_SCHEMA_VERSION = 1;
@@ -77,7 +78,7 @@ async function main() {
           brokerUrl: "ws://fake-broker.test",
           brokerChannelId: "room-e2e",
           relayPeerId: "relay-peer-e2e",
-          securityMode: "managed",
+          securityMode: "private",
           deviceId: "device-e2e",
           deviceLabel: "Browser E2E",
           hasStoredPayloadSecret: true,
@@ -122,9 +123,9 @@ async function main() {
           broker_connected: true,
           broker_channel_id: "room-e2e",
           broker_peer_id: "relay-peer-e2e",
-          security_mode: "managed",
-          e2ee_enabled: false,
-          broker_can_read_content: true,
+          security_mode: "private",
+          e2ee_enabled: true,
+          broker_can_read_content: false,
           audit_enabled: false,
           // The IDLE thread is the viewed one on purpose: attention badges are only set
           // for threads you are NOT looking at (thread-attention.js drops the badge for
@@ -398,7 +399,7 @@ async function main() {
             this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(frame) }));
           }
         }
-        window.WebSocket = FakeWebSocket;
+        window.WebSocket = window.__sealwireEncryptedMock(FakeWebSocket);
       },
       { relayId: RELAY_ID, threadId: THREAD_ID, threadId2: THREAD_ID_2, threadId3: THREAD_ID_3, threadId4: THREAD_ID_4 }
     );

@@ -42,7 +42,6 @@ test("browser e2e core suites keep required coverage", async () => {
     "transcript-delta",
   ]);
   assertCoverage(manifest, "local-core", [
-    "auth",
     "file-diff",
     "history",
     "scroll-to-bottom",

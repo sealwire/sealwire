@@ -1,38 +1,9 @@
 use super::*;
-use crate::auth::AuthConfig;
 use axum::http::{header, header::HeaderName, Method, StatusCode};
 use relay_http::{
     apply_standard_security_headers, build_content_security_policy, DEFAULT_CONNECT_SRC,
     PERMISSIONS_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS,
 };
-
-fn test_auth() -> AuthConfig {
-    AuthConfig::from_parts(
-        Some("secret".to_string()),
-        None,
-        "127.0.0.1".parse().expect("loopback should parse"),
-    )
-    .expect("auth config should parse")
-}
-
-fn cookie_headers() -> HeaderMap {
-    let auth = test_auth();
-    let set_cookie = auth
-        .issue_session_cookie("secret", false)
-        .expect("cookie issuance should succeed")
-        .expect("auth-enabled config should issue a cookie");
-    let cookie = set_cookie
-        .to_str()
-        .expect("cookie header should be utf-8")
-        .split(';')
-        .next()
-        .expect("cookie should have a name=value pair")
-        .to_string();
-    let mut headers = HeaderMap::new();
-    headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8787"));
-    headers.insert(header::COOKIE, HeaderValue::from_str(&cookie).unwrap());
-    headers
-}
 
 // Every route that accepts pasted images must lift axum's 2 MB default body
 // limit, or a single retina screenshot 413s before the handler (and its
@@ -63,7 +34,6 @@ async fn image_accepting_routes_accept_a_body_over_the_default_limit() {
                 std::collections::HashMap::new(),
                 change_tx,
             ),
-            auth: test_auth(),
             launch_id: None,
             security_headers: SecurityHeadersConfig::default(),
             host_policy: HostPolicy::loopback_only(),
@@ -75,15 +45,14 @@ async fn image_accepting_routes_accept_a_body_over_the_default_limit() {
             r#"{{"source_thread_id":"t","cwd":"/tmp","device_id":"d","padding":"{}"}}"#,
             "a".repeat(3 * 1024 * 1024)
         );
-        // Bearer auth (not cookie) so the request clears CSRF and actually
-        // reaches the body extractor, which is what the limit guards.
+        // Reach the body extractor so this checks the limit rather than an earlier refusal.
         let response = router
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri(route)
                     .header(header::HOST, "127.0.0.1:8787")
-                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(HeaderName::from_static(CSRF_HEADER_NAME), CSRF_HEADER_VALUE)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(body))
                     .expect("request should build"),
@@ -294,115 +263,6 @@ fn invalid_security_header_overrides_are_rejected() {
     )
     .expect_err("invalid HSTS override should fail");
     assert!(hsts_error.contains(HSTS_VALUE_ENV));
-}
-
-#[test]
-fn csrf_protection_rejects_cookie_authenticated_post_without_csrf_header() {
-    let auth = test_auth();
-    let mut headers = cookie_headers();
-    headers.insert(
-        header::ORIGIN,
-        HeaderValue::from_static("http://127.0.0.1:8787"),
-    );
-
-    let error = authorize_csrf_protection(
-        &auth,
-        &Method::POST,
-        &headers,
-        &Uri::from_static("/api/session/message"),
-    )
-    .expect_err("cookie-authenticated post should require csrf header");
-
-    assert_eq!(error.0, StatusCode::FORBIDDEN);
-    assert_eq!(error.1 .0.error.code, "csrf_rejected");
-}
-
-#[test]
-fn csrf_protection_allows_cookie_authenticated_post_with_same_origin_and_header() {
-    let auth = test_auth();
-    let mut headers = cookie_headers();
-    headers.insert(
-        header::ORIGIN,
-        HeaderValue::from_static("http://127.0.0.1:8787"),
-    );
-    headers.insert(
-        HeaderName::from_static(CSRF_HEADER_NAME),
-        HeaderValue::from_static(CSRF_HEADER_VALUE),
-    );
-
-    assert!(authorize_csrf_protection(
-        &auth,
-        &Method::POST,
-        &headers,
-        &Uri::from_static("/api/session/message"),
-    )
-    .is_ok());
-}
-
-#[test]
-fn csrf_protection_allows_matching_referer_when_origin_is_missing() {
-    let auth = test_auth();
-    let mut headers = cookie_headers();
-    headers.insert(
-        header::REFERER,
-        HeaderValue::from_static("http://127.0.0.1:8787/app?tab=remote"),
-    );
-    headers.insert(
-        HeaderName::from_static(CSRF_HEADER_NAME),
-        HeaderValue::from_static(CSRF_HEADER_VALUE),
-    );
-
-    assert!(authorize_csrf_protection(
-        &auth,
-        &Method::DELETE,
-        &headers,
-        &Uri::from_static("/api/auth/session"),
-    )
-    .is_ok());
-}
-
-#[test]
-fn csrf_protection_rejects_cross_origin_cookie_authenticated_post() {
-    let auth = test_auth();
-    let mut headers = cookie_headers();
-    headers.insert(
-        header::ORIGIN,
-        HeaderValue::from_static("https://evil.example"),
-    );
-    headers.insert(
-        HeaderName::from_static(CSRF_HEADER_NAME),
-        HeaderValue::from_static(CSRF_HEADER_VALUE),
-    );
-
-    let error = authorize_csrf_protection(
-        &auth,
-        &Method::POST,
-        &headers,
-        &Uri::from_static("/api/session/start"),
-    )
-    .expect_err("cross-origin cookie-authenticated post should be rejected");
-
-    assert_eq!(error.0, StatusCode::FORBIDDEN);
-    assert_eq!(error.1 .0.error.code, "csrf_rejected");
-}
-
-#[test]
-fn csrf_protection_does_not_apply_to_bearer_authenticated_post() {
-    let auth = test_auth();
-    let mut headers = HeaderMap::new();
-    headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8787"));
-    headers.insert(
-        header::AUTHORIZATION,
-        HeaderValue::from_static("Bearer secret"),
-    );
-
-    assert!(authorize_csrf_protection(
-        &auth,
-        &Method::POST,
-        &headers,
-        &Uri::from_static("/api/session/message"),
-    )
-    .is_ok());
 }
 
 #[test]
@@ -779,7 +639,6 @@ async fn rename_thread_refuses_an_unparseable_body_instead_of_clearing_the_name(
                 std::collections::HashMap::new(),
                 change_tx,
             ),
-            auth: test_auth(),
             launch_id: None,
             security_headers: SecurityHeadersConfig::default(),
             host_policy: HostPolicy::loopback_only(),
@@ -790,7 +649,7 @@ async fn rename_thread_refuses_an_unparseable_body_instead_of_clearing_the_name(
             .method(Method::POST)
             .uri("/api/threads/t1/rename")
             .header(header::HOST, "127.0.0.1:8787")
-            .header(header::AUTHORIZATION, "Bearer secret");
+            .header(HeaderName::from_static(CSRF_HEADER_NAME), CSRF_HEADER_VALUE);
         if let Some(content_type) = content_type {
             request = request.header(header::CONTENT_TYPE, content_type);
         }
@@ -833,7 +692,6 @@ async fn rename_thread_refuses_a_body_that_omits_the_name_field() {
     )));
     let context = AppContext {
         app: crate::state::AppState::from_parts(relay, std::collections::HashMap::new(), change_tx),
-        auth: test_auth(),
         launch_id: None,
         security_headers: SecurityHeadersConfig::default(),
         host_policy: HostPolicy::loopback_only(),
@@ -846,7 +704,7 @@ async fn rename_thread_refuses_a_body_that_omits_the_name_field() {
                 .method(Method::POST)
                 .uri("/api/threads/t1/rename")
                 .header(header::HOST, "127.0.0.1:8787")
-                .header(header::AUTHORIZATION, "Bearer secret")
+                .header(HeaderName::from_static(CSRF_HEADER_NAME), CSRF_HEADER_VALUE)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from("{}"))
                 .expect("request should build"),
@@ -884,7 +742,6 @@ async fn rename_thread_accepts_an_explicit_null_name_as_a_reset() {
         .current_cwd = project.path().display().to_string();
     let context = AppContext {
         app: crate::state::AppState::from_parts(relay, std::collections::HashMap::new(), change_tx),
-        auth: test_auth(),
         launch_id: None,
         security_headers: SecurityHeadersConfig::default(),
         host_policy: HostPolicy::loopback_only(),
@@ -897,7 +754,7 @@ async fn rename_thread_accepts_an_explicit_null_name_as_a_reset() {
                 .method(Method::POST)
                 .uri("/api/threads/t1/rename")
                 .header(header::HOST, "127.0.0.1:8787")
-                .header(header::AUTHORIZATION, "Bearer secret")
+                .header(HeaderName::from_static(CSRF_HEADER_NAME), CSRF_HEADER_VALUE)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"name":null}"#))
                 .expect("request should build"),
@@ -929,7 +786,6 @@ async fn a_rejected_transcript_cursor_is_answered_with_its_own_code() {
         .current_cwd = project.path().display().to_string();
     let context = AppContext {
         app: crate::state::AppState::from_parts(relay, std::collections::HashMap::new(), change_tx),
-        auth: test_auth(),
         launch_id: None,
         security_headers: SecurityHeadersConfig::default(),
         host_policy: HostPolicy::loopback_only(),
@@ -944,7 +800,7 @@ async fn a_rejected_transcript_cursor_is_answered_with_its_own_code() {
                     .method(Method::GET)
                     .uri(format!("/api/threads/t1/transcript?before={before}"))
                     .header(header::HOST, "127.0.0.1:8787")
-                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(HeaderName::from_static(CSRF_HEADER_NAME), CSRF_HEADER_VALUE)
                     .body(Body::empty())
                     .expect("request should build"),
             )
@@ -1005,7 +861,6 @@ async fn the_first_stream_frame_is_built_fresh_not_served_from_the_fanout_cache(
 
     let context = AppContext {
         app: app.clone(),
-        auth: test_auth(),
         launch_id: None,
         security_headers: SecurityHeadersConfig::default(),
         host_policy: HostPolicy::loopback_only(),
@@ -1018,7 +873,7 @@ async fn the_first_stream_frame_is_built_fresh_not_served_from_the_fanout_cache(
                 .method(Method::GET)
                 .uri("/api/stream?surface_id=surface-1")
                 .header(header::HOST, "127.0.0.1:8787")
-                .header(header::AUTHORIZATION, "Bearer secret")
+                .header(HeaderName::from_static(CSRF_HEADER_NAME), CSRF_HEADER_VALUE)
                 .body(Body::empty())
                 .expect("request should build"),
         )
@@ -1049,21 +904,12 @@ async fn the_first_stream_frame_is_built_fresh_not_served_from_the_fanout_cache(
 }
 
 // ---------------------------------------------------------------------------
-// Local surface hardening: Host allowlist + CSRF on the unauthenticated path.
+// Local surface hardening: Host allowlist + CSRF.
 // ---------------------------------------------------------------------------
-
-fn no_auth() -> AuthConfig {
-    AuthConfig::from_parts(
-        None,
-        None,
-        "127.0.0.1".parse().expect("loopback should parse"),
-    )
-    .expect("a loopback bind with no token is a valid config")
-}
 
 /// Returns the `TempDir` alongside the context: the caller has to hold it for
 /// the lifetime of the router, and dropping it cleans the directory up.
-fn test_context(auth: AuthConfig, host_policy: HostPolicy) -> (AppContext, tempfile::TempDir) {
+fn test_context(host_policy: HostPolicy) -> (AppContext, tempfile::TempDir) {
     let project = tempfile::TempDir::new().expect("project tempdir");
     let (change_tx, _rx) = tokio::sync::watch::channel(0_u64);
     let relay = std::sync::Arc::new(tokio::sync::RwLock::new(crate::state::RelayState::new(
@@ -1073,7 +919,6 @@ fn test_context(auth: AuthConfig, host_policy: HostPolicy) -> (AppContext, tempf
     )));
     let context = AppContext {
         app: crate::state::AppState::from_parts(relay, std::collections::HashMap::new(), change_tx),
-        auth,
         launch_id: None,
         security_headers: SecurityHeadersConfig::default(),
         host_policy,
@@ -1092,7 +937,7 @@ async fn a_rebound_attacker_host_is_rejected_before_routing() {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    let (context, _project) = test_context(no_auth(), HostPolicy::loopback_only());
+    let (context, _project) = test_context(HostPolicy::loopback_only());
     let router = build_router(context, WebAssets::Embedded);
 
     let response = router
@@ -1142,34 +987,10 @@ fn the_host_allowlist_accepts_loopback_names_and_the_configured_bind_host() {
             "{host} must be rejected by a loopback-only policy"
         );
     }
-
-    let bound = HostPolicy::from_parts("192.168.1.166".parse().expect("ip"), None)
-        .expect("a non-loopback bind with no explicit list is valid");
-    assert!(
-        bound.allows_host(Some("anything.example")),
-        "a non-loopback bind with no explicit allowlist must not enforce, or every \
-         existing reverse-proxy deployment breaks"
-    );
-
-    let listed = HostPolicy::from_parts(
-        "0.0.0.0".parse().expect("ip"),
-        Some("relay.example, other.example".to_string()),
-    )
-    .expect("an explicit allowlist is valid");
-    assert!(listed.allows_host(Some("relay.example")));
-    assert!(listed.allows_host(Some("other.example:8787")));
-    assert!(
-        listed.allows_host(Some("localhost:8787")),
-        "loopback stays allowed alongside an explicit list"
-    );
-    assert!(!listed.allows_host(Some("evil.example")));
 }
 
-/// The `!auth.enabled()` short-circuit is what this pins: with no token
-/// configured — the default for the laptop UI — a mutating `/api/` request
-/// carrying a foreign Origin currently sails straight through.
 #[test]
-fn csrf_rejects_a_foreign_origin_when_no_token_is_configured() {
+fn csrf_rejects_a_foreign_origin() {
     let mut headers = HeaderMap::new();
     headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8787"));
     headers.insert(
@@ -1178,12 +999,11 @@ fn csrf_rejects_a_foreign_origin_when_no_token_is_configured() {
     );
 
     let error = authorize_csrf_protection(
-        &no_auth(),
         &Method::POST,
         &headers,
         &Uri::from_static("/api/session/start"),
     )
-    .expect_err("a foreign origin must be rejected even with auth disabled");
+    .expect_err("a foreign origin must be rejected on the local API");
 
     assert_eq!(error.0, StatusCode::FORBIDDEN);
     assert_eq!(error.1 .0.error.code, "csrf_rejected");
@@ -1200,7 +1020,6 @@ fn csrf_allows_a_mutating_request_that_carries_no_origin_at_all() {
 
     assert!(
         authorize_csrf_protection(
-            &no_auth(),
             &Method::POST,
             &headers,
             &Uri::from_static("/api/session/start"),
@@ -1234,7 +1053,6 @@ fn csrf_allows_a_loopback_origin_from_the_vite_dev_proxy() {
 
     assert!(
         authorize_csrf_protection(
-            &no_auth(),
             &Method::POST,
             &headers,
             &Uri::from_static("/api/session/start"),
@@ -1260,7 +1078,7 @@ async fn body_less_revoke_routes_reject_a_cross_origin_form_post() {
         "/api/devices/clear-history",
         "/api/providers/recheck-signed-out",
     ] {
-        let (context, _project) = test_context(no_auth(), HostPolicy::loopback_only());
+        let (context, _project) = test_context(HostPolicy::loopback_only());
         let router = build_router(context, WebAssets::Embedded);
 
         let response = router
@@ -1301,7 +1119,7 @@ async fn an_opaque_origin_is_not_mistaken_for_a_non_browser_client() {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    let (context, _project) = test_context(no_auth(), HostPolicy::loopback_only());
+    let (context, _project) = test_context(HostPolicy::loopback_only());
     let router = build_router(context, WebAssets::Embedded);
 
     let response = router
@@ -1337,7 +1155,6 @@ fn an_opaque_or_unparseable_origin_is_refused_rather_than_ignored() {
 
         assert!(
             authorize_csrf_protection(
-                &no_auth(),
                 &Method::POST,
                 &headers,
                 &Uri::from_static("/api/session/start"),
@@ -1363,7 +1180,6 @@ fn an_opaque_origin_does_not_fall_through_to_a_friendly_referer() {
 
     assert!(
         authorize_csrf_protection(
-            &no_auth(),
             &Method::POST,
             &headers,
             &Uri::from_static("/api/session/start"),
@@ -1389,7 +1205,6 @@ fn another_loopback_page_cannot_post_without_the_csrf_header() {
 
     assert!(
         authorize_csrf_protection(
-            &no_auth(),
             &Method::POST,
             &headers,
             &Uri::from_static("/api/session/start"),
@@ -1423,7 +1238,6 @@ async fn git_context_router(
     relay.write().await.trusted_workspaces = trusted;
     let context = AppContext {
         app: crate::state::AppState::from_parts(relay, std::collections::HashMap::new(), change_tx),
-        auth: test_auth(),
         launch_id: None,
         security_headers: SecurityHeadersConfig::default(),
         host_policy: HostPolicy::loopback_only(),
@@ -1442,7 +1256,7 @@ async fn get_json(router: axum::Router, uri: &str) -> (StatusCode, serde_json::V
                 .method(Method::GET)
                 .uri(uri)
                 .header(header::HOST, "127.0.0.1:8787")
-                .header(header::AUTHORIZATION, "Bearer secret")
+                .header(HeaderName::from_static(CSRF_HEADER_NAME), CSRF_HEADER_VALUE)
                 .body(Body::empty())
                 .expect("request should build"),
         )
@@ -1500,7 +1314,6 @@ async fn thread_workspace_router(cwd: &str, thread_id: &str) -> axum::Router {
     }
     let context = AppContext {
         app: crate::state::AppState::from_parts(relay, std::collections::HashMap::new(), change_tx),
-        auth: test_auth(),
         launch_id: None,
         security_headers: SecurityHeadersConfig::default(),
         host_policy: HostPolicy::loopback_only(),
@@ -1608,7 +1421,7 @@ async fn post_json(
                 .method(Method::POST)
                 .uri(uri)
                 .header(header::HOST, "127.0.0.1:8787")
-                .header(header::AUTHORIZATION, "Bearer secret")
+                .header(HeaderName::from_static(CSRF_HEADER_NAME), CSRF_HEADER_VALUE)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))
                 .expect("request should build"),
@@ -1652,7 +1465,6 @@ async fn handover_router(cwd: &str) -> (axum::Router, crate::state::AppState) {
     let app = crate::state::AppState::from_parts(relay, providers, change_tx);
     let context = AppContext {
         app: app.clone(),
-        auth: test_auth(),
         launch_id: None,
         security_headers: SecurityHeadersConfig::default(),
         host_policy: HostPolicy::loopback_only(),
@@ -1728,4 +1540,119 @@ async fn the_handover_route_accepts_a_bare_thread_and_answers_refusals_as_text()
             > 0,
         "a silent refusal is indistinguishable from a dead Send: {body}"
     );
+}
+
+#[test]
+fn relay_bind_addresses_are_strictly_loopback() {
+    assert_eq!(
+        host_guard::parse_bind_host(None).unwrap().to_string(),
+        "127.0.0.1"
+    );
+    for host in ["127.0.0.1", "127.0.0.53", "::1", "0:0:0:0:0:0:0:1"] {
+        assert!(host_guard::parse_bind_host(Some(host))
+            .unwrap()
+            .is_loopback());
+    }
+    for host in [
+        "0.0.0.0",
+        "::",
+        "192.168.1.2",
+        "10.0.0.1",
+        "203.0.113.1",
+        "::ffff:192.168.1.2",
+        "localhost",
+        "invalid",
+        "",
+    ] {
+        assert!(host_guard::parse_bind_host(Some(host)).is_err(), "{host}");
+    }
+}
+
+#[tokio::test]
+async fn local_api_needs_no_login_and_does_not_issue_cookies() {
+    use axum::http::Request;
+    use tower::ServiceExt;
+    let (context, _project) = test_context(HostPolicy::loopback_only());
+    let router = build_router(context, WebAssets::Embedded);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/session")
+                .header(header::HOST, "127.0.0.1:8787")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get(header::SET_COOKIE).is_none());
+    for method in [Method::GET, Method::POST, Method::DELETE] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri("/api/auth/session")
+                    .header(header::HOST, "127.0.0.1:8787")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+    }
+}
+
+#[test]
+fn bearer_headers_cannot_bypass_local_origin_checks() {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8787"));
+    headers.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("https://foreign.example"),
+    );
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer ignored"),
+    );
+    headers.insert(
+        HeaderName::from_static(CSRF_HEADER_NAME),
+        HeaderValue::from_static(CSRF_HEADER_VALUE),
+    );
+    assert!(authorize_csrf_protection(
+        &Method::POST,
+        &headers,
+        &Uri::from_static("/api/session/start")
+    )
+    .is_err());
+}
+
+#[test]
+fn csrf_checks_referer_when_origin_is_absent() {
+    for (referer, allowed) in [
+        ("http://127.0.0.1:8787/app", true),
+        ("http://localhost:5173/app", true),
+        ("https://foreign.example/app", false),
+        ("not a url", false),
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8787"));
+        headers.insert(header::REFERER, HeaderValue::from_static(referer));
+        headers.insert(
+            HeaderName::from_static(CSRF_HEADER_NAME),
+            HeaderValue::from_static(CSRF_HEADER_VALUE),
+        );
+        assert_eq!(
+            authorize_csrf_protection(
+                &Method::POST,
+                &headers,
+                &Uri::from_static("/api/session/start")
+            )
+            .is_ok(),
+            allowed,
+            "{referer}"
+        );
+    }
 }

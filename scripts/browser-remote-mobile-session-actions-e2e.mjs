@@ -1,3 +1,4 @@
+import { addEncryptedBrokerInitScript } from "./e2e/harness/encrypted-broker-mock.mjs";
 // Regression guard for reaching SESSION ACTIONS from a phone on the remote surface.
 //
 // Remote used to bind the row's actions to `contextmenu`, which a touch long-press
@@ -61,7 +62,7 @@ async function main() {
   attachPageDebugLogging(page, "remote", { prefix: "remote-mobile-session-actions-e2e" });
 
   try {
-    await page.addInitScript(
+    await addEncryptedBrokerInitScript(page,
       ({ relayId, threadId, threadId2 }) => {
         const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state";
         const REMOTE_STATE_SCHEMA_VERSION = 1;
@@ -74,7 +75,7 @@ async function main() {
           brokerUrl: "ws://fake-broker.test",
           brokerChannelId: "room-e2e",
           relayPeerId: "relay-peer-e2e",
-          securityMode: "managed",
+          securityMode: "private",
           deviceId: "device-e2e",
           deviceLabel: "Browser E2E",
           hasStoredPayloadSecret: true,
@@ -107,9 +108,9 @@ async function main() {
           broker_connected: true,
           broker_channel_id: "room-e2e",
           broker_peer_id: "relay-peer-e2e",
-          security_mode: "managed",
-          e2ee_enabled: false,
-          broker_can_read_content: true,
+          security_mode: "private",
+          e2ee_enabled: true,
+          broker_can_read_content: false,
           audit_enabled: false,
           active_thread_id: threadId,
           active_controller_device_id: "device-e2e",
@@ -308,7 +309,7 @@ async function main() {
             this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(frame) }));
           }
         }
-        window.WebSocket = FakeWebSocket;
+        window.WebSocket = window.__sealwireEncryptedMock(FakeWebSocket);
       },
       { relayId: RELAY_ID, threadId: THREAD_ID, threadId2: THREAD_ID_2 }
     );

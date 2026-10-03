@@ -15,8 +15,12 @@ From your project directory, run:
 npx sealwire
 ```
 
-SealWire opens its web interface at <http://localhost:8787>. By default, it is
-accessible only from that computer.
+SealWire opens its web interface at <http://localhost:8787>. It is accessible only
+from that computer; non-loopback relay bind addresses are rejected. Remote
+access goes through SealWire Cloud or your self-hosted broker. The local
+interface does not use a token login or session cookies. Remove retired
+`RELAY_API_TOKEN`, `RELAY_ALLOW_INSECURE_NO_AUTH`, and `RELAY_ALLOWED_HOSTS`
+settings; the relay refuses to start when they are present.
 
 To explicitly run without a broker connection:
 
@@ -37,6 +41,10 @@ and approve the pairing on your computer.
 Paired devices can follow your sessions, send messages, respond to approvals,
 and receive notifications. Add the phone interface to your home screen to use
 it like an app. Your computer must stay running for remote access.
+
+All remote connections use end-to-end encryption. The broker cannot read
+messages, transcripts, or action results. Plaintext remote connections are not
+supported.
 
 You can remove paired devices from Settings. To release this computer's Cloud
 access:

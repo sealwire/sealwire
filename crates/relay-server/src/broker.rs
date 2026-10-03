@@ -59,9 +59,9 @@ use self::protocol::{
     summarize_outbound_payload, validate_broker_protocol_version, InboundBrokerPayload,
     OutboundBrokerPayload, PairingRequestPlaintext, PairingResultPlaintext, TargetedBrokerMessage,
 };
+use self::remote_actions::handle_encrypted_remote_action;
 #[cfg(test)]
 use self::remote_actions::RemoteActionRequest;
-use self::remote_actions::{handle_encrypted_remote_action, handle_remote_action};
 use self::session_claim::{issue_session_claim, verify_session_claim};
 use self::writer::{spawn_broker_writer, BrokerWriter};
 #[cfg(test)]
@@ -2045,24 +2045,6 @@ async fn handle_server_message(
                 }) => {
                     handle_pairing_request(state, writer, from_peer_id, pairing_id, envelope).await
                 }
-                Some(InboundBrokerPayload::RemoteAction {
-                    action_id,
-                    session_claim,
-                    device_id,
-                    request,
-                }) => {
-                    handle_remote_action(
-                        state,
-                        writer,
-                        origin,
-                        from_peer_id,
-                        action_id,
-                        session_claim,
-                        device_id,
-                        request,
-                    )
-                    .await
-                }
                 Some(InboundBrokerPayload::EncryptedRemoteAction {
                     action_id,
                     session_claim,
@@ -2084,20 +2066,7 @@ async fn handle_server_message(
                 None => Ok(()),
             };
 
-            // A handler's failure belongs to the surface that caused it, not to the room.
-            //
-            // Parsing is not the only way a surface's message can fail, and refusing it is
-            // not even unusual: plaintext remote actions are rejected in private mode,
-            // which is the DEFAULT, so an ordinary misconfigured client produces one of
-            // these on every request. Propagating it ends `run_broker_session`, which
-            // disconnects every other surface in the room and resyncs a full snapshot on
-            // the way back — repeatable at will by whoever sent the message.
-            //
-            // Nothing that genuinely requires a reconnect is lost by swallowing this:
-            // - a dead writer has its own `select!` arm in the session loop, which is
-            //   where write failures have arrived since publishing became a hand-off;
-            // - a broker `rate_limited` is a `ServerMessage::Error`, handled in the arm
-            //   below and still fatal on purpose.
+            // A malformed surface request must not disconnect every other device.
             if let Err(error) = outcome {
                 warn!(
                     from_peer_id = from_peer_id_for_log,
@@ -2274,7 +2243,6 @@ async fn publish_snapshot(writer: &BrokerWriter, state: &AppState) -> Result<(),
         return Ok(());
     }
     let snapshot = state.snapshot().await;
-    let broker_can_read_content = state.broker_can_read_content().await;
     let compacted = snapshot
         .clone()
         .compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
@@ -2287,25 +2255,9 @@ async fn publish_snapshot(writer: &BrokerWriter, state: &AppState) -> Result<(),
         compacted_transcript_truncated = compacted.transcript_truncated,
         raw_logs = snapshot.logs.len(),
         compacted_logs = compacted.logs.len(),
-        delivery_mode = if broker_can_read_content {
-            "broker_readable_broadcast"
-        } else {
-            "e2ee_targeted"
-        },
+        delivery_mode = "e2ee_targeted",
         "publishing broker session snapshot"
     );
-    if broker_can_read_content {
-        publish_payload(
-            writer,
-            OutboundBrokerPayload::SessionSnapshot {
-                snapshot: compacted,
-            },
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        return Ok(());
-    }
-
     let target_summary = targets
         .iter()
         .map(|target| format!("{}:{}", target.device_id, target.peer_id))
@@ -2477,56 +2429,15 @@ fn can_merge_transcript_delta(
         && current.revision == next.base_revision
 }
 
-/// Decide who a transcript delta goes to and in what form.
-///
-/// Split out from the socket write so the delivery contract is testable without a live
-/// websocket: which peers are targeted, and what each one actually receives. Both
-/// delivery modes are TARGETED — managed mode used to broadcast one frame and let each
-/// client discard threads it wasn't showing, which cannot work once every background
-/// thread streams (N open threads would cost every paired surface N streams).
-///
-/// Targets come from the relay's own peer bookkeeping (`online_surface_peer_devices`),
-/// which a broadcast never consulted. A paired surface is bound the moment it joins
-/// (presence/welcome -> mark_remote_device_seen; a device join ticket must carry a
-/// device_id, see relay-broker join_ticket.rs), so the only gap is the few ms before its
-/// presence frame arrives. Snapshots are still broadcast in managed mode, and the client
-/// has not rendered anything yet at that point, so nothing goes blank.
-///
-/// Surfaces that are mid-pairing carry no device_id and no payload_secret; they were
-/// never in `broker_targets()`, before targeting or after.
+// Encrypt per device and address only the peers currently watching this thread.
 fn build_transcript_delta_messages(
     targets: Vec<BrokerTarget>,
-    broker_can_read_content: bool,
     delta: &PendingTranscriptDelta,
 ) -> Result<Vec<TargetedBrokerMessage>, String> {
     let kind = match delta.kind {
         TranscriptDeltaKind::AgentText => "agent_text",
         TranscriptDeltaKind::CommandOutput => "command_output",
     };
-
-    if broker_can_read_content {
-        return Ok(targets
-            .into_iter()
-            .map(|target| TargetedBrokerMessage {
-                target_peer_id: target.peer_id,
-                payload: Box::new(OutboundBrokerPayload::TranscriptDelta {
-                    thread_id: delta.thread_id.clone(),
-                    base_revision: delta.base_revision,
-                    revision: delta.revision,
-                    entry_seq: delta.entry_seq,
-                    order_seq: delta.order_seq,
-                    server_time: delta.server_time,
-                    transcript_generation: delta.transcript_generation.clone(),
-                    row_id: delta.row_id.clone(),
-                    item_id: delta.row_id.clone(),
-                    turn_id: delta.turn_id.clone(),
-                    delta: delta.delta.clone(),
-                    delta_kind: kind.to_string(),
-                    text_offset: delta.text_offset,
-                }),
-            })
-            .collect());
-    }
 
     let mut messages = Vec::new();
     for target in targets {
@@ -2585,7 +2496,6 @@ async fn publish_transcript_delta(
         return Ok(());
     }
 
-    let broker_can_read_content = state.broker_can_read_content().await;
     let target_summary = targets
         .iter()
         .map(|target| format!("{}:{}", target.device_id, target.peer_id))
@@ -2599,15 +2509,11 @@ async fn publish_transcript_delta(
         thread_id = %delta.thread_id,
         turn_id = delta.turn_id.as_deref().unwrap_or("-"),
         delta_kind = kind,
-        delivery_mode = if broker_can_read_content {
-            "broker_readable_targeted"
-        } else {
-            "e2ee_targeted"
-        },
+        delivery_mode = "e2ee_targeted",
         "resolved broker surface targets"
     );
 
-    let messages = build_transcript_delta_messages(targets, broker_can_read_content, &delta)?;
+    let messages = build_transcript_delta_messages(targets, &delta)?;
     publish_targeted_messages(writer, messages).await?;
 
     Ok(())
@@ -2622,7 +2528,6 @@ async fn publish_transcript_resync(
     if targets.is_empty() {
         return Ok(());
     }
-    let broker_can_read_content = state.broker_can_read_content().await;
     info!(
         scope = "transcript_resync",
         target_count = targets.len(),
@@ -2631,33 +2536,23 @@ async fn publish_transcript_resync(
         reason = ?resync.reason,
         "resolved broker surface targets"
     );
-    let messages = build_transcript_resync_messages(targets, broker_can_read_content, &resync)?;
+    let messages = build_transcript_resync_messages(targets, &resync)?;
     publish_targeted_messages(writer, messages).await
 }
 
 /// Addressed exactly like a delta: one frame per peer watching the thread, sealed per
-/// device unless the broker is allowed to read content.
+/// device.
 fn build_transcript_resync_messages(
     targets: Vec<BrokerTarget>,
-    broker_can_read_content: bool,
     resync: &TranscriptResyncEvent,
 ) -> Result<Vec<TargetedBrokerMessage>, String> {
     targets
         .into_iter()
         .map(|target| {
-            let payload = if broker_can_read_content {
-                OutboundBrokerPayload::TranscriptResync {
-                    thread_id: resync.thread_id.clone(),
-                    transcript_generation: resync.transcript_generation.clone(),
-                    revision: resync.revision,
-                    reason: resync.reason,
-                }
-            } else {
-                OutboundBrokerPayload::EncryptedTranscriptEvent {
-                    target_peer_id: target.peer_id.clone(),
-                    device_id: target.device_id.clone(),
-                    envelope: encrypt_json(&target.payload_secret, resync)?,
-                }
+            let payload = OutboundBrokerPayload::EncryptedTranscriptEvent {
+                target_peer_id: target.peer_id.clone(),
+                device_id: target.device_id.clone(),
+                envelope: encrypt_json(&target.payload_secret, resync)?,
             };
             Ok(TargetedBrokerMessage {
                 target_peer_id: target.peer_id,
@@ -3255,6 +3150,7 @@ pub(super) fn verify_device_claim_challenge_proof(
         .map_err(|_| "device claim proof is invalid".to_string())
 }
 
+#[cfg(test)]
 pub(super) fn verify_device_claim_init_proof(
     action_id: &str,
     device_id: &str,
@@ -3300,6 +3196,7 @@ fn device_claim_proof_message(
     format!("agent-relay:claim-challenge:{challenge_id}:{challenge}:{device_id}:{peer_id}")
 }
 
+#[cfg(test)]
 fn device_claim_init_proof_message(action_id: &str, device_id: &str, peer_id: &str) -> String {
     format!("agent-relay:claim-init:{action_id}:{device_id}:{peer_id}")
 }

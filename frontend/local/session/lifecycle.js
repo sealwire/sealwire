@@ -63,7 +63,6 @@ import {
   workspaceRepairResolved,
 } from "../workspace-repair.js";
 import {
-  clearTranscriptHydration,
   restoreHydratedTranscript,
   settleTranscriptProjection,
   switchTranscriptHydrationThread,
@@ -177,7 +176,6 @@ export function createLifecycleController(ctx) {
     renderSessionUnavailable,
     renderThreadListMessage,
     renderThreads,
-    renderAuthRequiredState,
     runViewTransition,
     setStartControlsBusy,
     liveElement,
@@ -214,13 +212,6 @@ export function createLifecycleController(ctx) {
       seedDefaults(payload.data);
       applySessionSnapshot(payload.data);
     } catch (error) {
-      if (state.authRequired && !state.authenticated) {
-        clearTranscriptHydration(state);
-        renderAuthRequiredState("Enter RELAY_API_TOKEN to access the local relay.");
-        logLine(`Session fetch blocked by local auth: ${error.message}`);
-        return;
-      }
-
       state.session = null;
       resetTranscriptHydrationState();
       cancelControllerHeartbeat();
@@ -298,14 +289,6 @@ export function createLifecycleController(ctx) {
         return;
       }
       state.threadListStore.getState().failRefresh(error.message);
-      if (state.authRequired && !state.authenticated) {
-        state.threadGroups = [];
-        state.threads = [];
-        renderThreadListMessage("Sign in", "Enter RELAY_API_TOKEN to load sessions.");
-        logLine(`Session list fetch blocked by local auth: ${error.message}`);
-        return;
-      }
-
       state.threadGroups = [];
       state.threads = [];
       renderThreadListMessage("Error", error.message);

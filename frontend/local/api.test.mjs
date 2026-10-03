@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  createApiFetch,
   deleteReview,
   getAskDetail,
   getReviews,
@@ -367,4 +368,19 @@ test("startTeam POSTs the flat spec as JSON and returns the receipt", async () =
   assert.equal(body.title, "Add a parser");
   assert.equal(body.agreed_scope, "Parser only.");
   assert.equal(body.device_id, "device-a");
+});
+
+test("local requests omit cookies and keep the CSRF header on writes", async () => {
+  const calls = [];
+  const apiFetch = createApiFetch({ fetchImpl: async (input, init) => {
+    calls.push({input, init});
+    return { ok: true };
+  }});
+  await apiFetch("/api/session");
+  await apiFetch("/api/session/message", { method: "post" });
+  for (const {init} of calls) {
+    assert.equal(init.credentials, "omit");
+    assert.equal(init.headers.get("Authorization"), null);
+  }
+  assert.equal(calls[1].init.headers.get("X-Agent-Relay-CSRF"), "1");
 });

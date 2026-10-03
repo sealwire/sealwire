@@ -118,7 +118,7 @@ function buildController({ draft = defaultDraft(), respond, runViewTransition = 
     renderSessionUnavailable: () => {},
     renderThreadListMessage: () => {},
     renderThreads: () => {},
-    renderAuthRequiredState: () => {},
+
     // Seam: skipping the DOM swap keeps these on the request contract.
     runViewTransition,
     setStartControlsBusy: () => {},

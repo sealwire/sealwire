@@ -457,20 +457,10 @@ use crate::provider::relay_mcp_server_name;
 
 /// Peer MCP entry as ACP wants it: array element, env as name/value pairs.
 fn peer_mcp_server_entry(token: &str) -> Value {
-    peer_mcp_server_entry_with_transport(
-        token,
-        crate::provider::sealwire_relay_api_token().as_deref(),
-    )
-}
-
-fn peer_mcp_server_entry_with_transport(token: &str, relay_api_token: Option<&str>) -> Value {
-    let mut env = vec![
+    let env = vec![
         json!({ "name": "SEALWIRE_ASK_TOKEN", "value": token }),
         json!({ "name": "SEALWIRE_RELAY_URL", "value": crate::provider::sealwire_relay_url() }),
     ];
-    if let Some(api_token) = relay_api_token.filter(|t| !t.is_empty()) {
-        env.push(json!({ "name": "RELAY_API_TOKEN", "value": api_token }));
-    }
     json!({
         "name": relay_mcp_server_name(token),
         "command": std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".to_string()),
@@ -481,20 +471,10 @@ fn peer_mcp_server_entry_with_transport(token: &str, relay_api_token: Option<&st
 
 /// Seat MCP entry for ACP: same array shape, run id only — no ask token, no device.
 fn seat_mcp_server_entry(run_id: &str) -> Value {
-    seat_mcp_server_entry_with_transport(
-        run_id,
-        crate::provider::sealwire_relay_api_token().as_deref(),
-    )
-}
-
-fn seat_mcp_server_entry_with_transport(run_id: &str, relay_api_token: Option<&str>) -> Value {
-    let mut env = vec![
+    let env = vec![
         json!({ "name": "SEALWIRE_SEAT_RUN_ID", "value": run_id }),
         json!({ "name": "SEALWIRE_RELAY_URL", "value": crate::provider::sealwire_relay_url() }),
     ];
-    if let Some(api_token) = relay_api_token.filter(|t| !t.is_empty()) {
-        env.push(json!({ "name": "RELAY_API_TOKEN", "value": api_token }));
-    }
     json!({
         "name": "sealwire",
         "command": std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".to_string()),
@@ -505,23 +485,7 @@ fn seat_mcp_server_entry_with_transport(run_id: &str, relay_api_token: Option<&s
 
 #[cfg(test)]
 pub(crate) fn seat_mcp_server_entry_for_test(run_id: &str) -> Value {
-    seat_mcp_server_entry_with_transport(run_id, None)
-}
-
-#[cfg(test)]
-pub(crate) fn seat_mcp_server_entry_with_transport_for_test(
-    run_id: &str,
-    relay_api_token: Option<&str>,
-) -> Value {
-    seat_mcp_server_entry_with_transport(run_id, relay_api_token)
-}
-
-#[cfg(test)]
-pub(crate) fn peer_mcp_server_entry_with_transport_for_test(
-    token: &str,
-    relay_api_token: Option<&str>,
-) -> Value {
-    peer_mcp_server_entry_with_transport(token, relay_api_token)
+    seat_mcp_server_entry(run_id)
 }
 
 impl AcpBridge {

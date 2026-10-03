@@ -13,65 +13,45 @@
 //! deputy. It does nothing about code already running as you — that process
 //! can set any header it likes.
 
-use std::collections::BTreeSet;
 use std::net::IpAddr;
 
-pub(crate) const ALLOWED_HOSTS_ENV: &str = "RELAY_ALLOWED_HOSTS";
+pub fn bind_host_from_env() -> Result<IpAddr, String> {
+    // Refuse retired access settings so an upgrade cannot silently remove proxy authentication.
+    for name in [
+        "RELAY_API_TOKEN",
+        "RELAY_ALLOW_INSECURE_NO_AUTH",
+        "RELAY_ALLOWED_HOSTS",
+    ] {
+        if std::env::var_os(name).is_some() {
+            return Err(format!("{name} is no longer supported; remove it and use Cloud or a self-hosted broker for remote access"));
+        }
+    }
+    parse_bind_host(std::env::var("BIND_HOST").ok().as_deref())
+}
+
+pub fn parse_bind_host(value: Option<&str>) -> Result<IpAddr, String> {
+    let host: IpAddr = value
+        .unwrap_or("127.0.0.1")
+        .parse()
+        .map_err(|_| "BIND_HOST must be a loopback IP address".to_string())?;
+    if !host.is_loopback() {
+        return Err("relay-server only supports loopback BIND_HOST; use Cloud or a self-hosted broker for remote access".to_string());
+    }
+    Ok(host)
+}
 
 /// Which `Host` values this process will answer to.
 #[derive(Clone, Debug)]
-pub struct HostPolicy {
-    /// Non-loopback binds with no explicit allowlist opt out entirely: we
-    /// cannot guess the reverse-proxy hostname, and guessing wrong takes the
-    /// deployment down. Those binds already require a token (`AuthConfig`).
-    enforced: bool,
-    /// Extra names beyond the always-allowed loopback set.
-    allowed: BTreeSet<String>,
-}
+pub struct HostPolicy;
 
 impl HostPolicy {
-    pub fn from_env_for_bind_host(bind_host: IpAddr) -> Result<Self, String> {
-        Self::from_parts(bind_host, std::env::var(ALLOWED_HOSTS_ENV).ok())
-    }
-
-    pub fn from_parts(bind_host: IpAddr, allowed_hosts: Option<String>) -> Result<Self, String> {
-        let mut allowed = BTreeSet::new();
-        for entry in allowed_hosts.iter().flat_map(|raw| raw.split(',')) {
-            let Some(host) = normalize_host(entry) else {
-                continue;
-            };
-            allowed.insert(host);
-        }
-        // Only an operator-supplied list counts as opting in. The bind address
-        // added below is derived, not chosen, so it must not flip enforcement
-        // on for a deployment that never asked for it.
-        let opted_in = !allowed.is_empty();
-
-        // A concrete bind address is a legitimate way to reach this process.
-        // `0.0.0.0` / `::` name no host in particular, so they add nothing.
-        if !bind_host.is_unspecified() && !bind_host.is_loopback() {
-            allowed.insert(bind_host.to_string().to_ascii_lowercase());
-        }
-
-        Ok(Self {
-            enforced: bind_host.is_loopback() || opted_in,
-            allowed,
-        })
-    }
-
-    /// The default posture: loopback bind, no extra names.
     pub fn loopback_only() -> Self {
-        Self::from_parts(IpAddr::from([127, 0, 0, 1]), None)
-            .expect("a loopback bind with no allowlist is always valid")
+        Self
     }
 
     /// `raw` is the `Host` header, or the request URI's authority when the
     /// protocol carries it there instead (HTTP/2 `:authority`).
     pub fn allows_host(&self, raw: Option<&str>) -> bool {
-        if !self.enforced {
-            return true;
-        }
-
         // HTTP/1.1 requires Host and every browser sends it. Refusing the
         // ambiguous case keeps the allowlist from being bypassed by omission.
         let Some(raw) = raw else {
@@ -81,14 +61,11 @@ impl HostPolicy {
             return false;
         };
 
-        host_is_loopback(&host) || self.allowed.contains(&host)
+        host_is_loopback(&host)
     }
 }
 
-/// Whether an authority (`localhost:5173`, `[::1]`, `127.0.0.1:8787`) names a
-/// loopback host. Used to accept the vite dev proxy's cross-port `Origin`: a
-/// hostile page can never present a loopback origin, so this widens the
-/// same-origin comparison without widening the threat model.
+/// Loopback origins also need the CSRF header when their port differs from the relay.
 pub(crate) fn authority_is_loopback(raw: &str) -> bool {
     normalize_host(raw).is_some_and(|host| host_is_loopback(&host))
 }

@@ -872,55 +872,6 @@ export function createSessionRenderer({
     );
   }
 
-  function renderAuthRequiredState(message) {
-    state.session = null;
-    state.threads = [];
-    state.threadGroups = [];
-    // This path runs at BOOT whenever there is no API token, so it is the first thing a
-    // signed-out user sees. Without this the sidebar rendered with no destinations in it
-    // at all — the nav was static markup before it was a mount, so nothing had to think
-    // about which states repaint it.
-    renderSidebarNav();
-    renderSidebarChrome();
-    cancelControllerHeartbeat();
-    cancelControllerLeaseRefresh();
-    // Clear the independently-mounted Reviewer tab so it does not retain job
-    // metadata or already-fetched review text after the user signs out.
-    if (typeof setReviewSlice === "function") {
-      setReviewSlice({
-        reviewJobs: [],
-        workflowRuns: [],
-        reviewModel: {},
-        workflowModel: {},
-        canRequest: false,
-        canStartWorkflow: false,
-        blocked: false,
-      });
-    }
-    openSessionDetailsButton.disabled = true;
-    renderHostStatus();
-    renderOverviewState(null, message);
-    renderWorkspaceSuggestions(null);
-    renderThreadListMessage("Sign in", "Enter RELAY_API_TOKEN to load sessions.");
-    renderHeaderModelBadge(null);
-    renderSettings();
-    statusBadge.textContent = "Sign in";
-    statusBadge.className = "status-badge status-badge-offline";
-    if (sessionDetailsPath) {
-      sessionDetailsPath.textContent = "No workspace path yet.";
-    }
-    renderReactContent(
-      sessionMeta,
-      h(SessionMetaPanel, { emptyMessage: message })
-    );
-    renderConversationContent(
-      h(ConversationEmptyState, {
-        copy: message,
-        title: "Authentication required",
-      })
-    );
-  }
-
   let pairingExpiryTimer = null;
   let pairingHintTimer = null;
   function schedulePairingExpiryTick(requests) {
@@ -1033,17 +984,10 @@ export function createSessionRenderer({
     if (!sidebarHostStatus) {
       return;
     }
-    // When auth is required but not yet completed, neither the stream nor the polling
-    // fallback runs — so don't claim "Polling". Show a signed-out state instead.
-    const signedOut = Boolean(state.authRequired && !state.authenticated);
-    const live = !signedOut && Boolean(state.streamConnected);
+    const live = Boolean(state.streamConnected);
     sidebarHostStatus.classList.toggle("is-degraded", !live);
     if (sidebarHostLabel) {
-      sidebarHostLabel.textContent = signedOut
-        ? "Local relay · Signed out"
-        : live
-          ? "Local relay · Live"
-          : "Local relay · Polling";
+      sidebarHostLabel.textContent = live ? "Local relay · Live" : "Local relay · Polling";
     }
   }
 
@@ -3249,7 +3193,6 @@ export function createSessionRenderer({
   }
 
   return {
-    renderAuthRequiredState,
     renderOverviewState,
     renderSession,
     renderSidebarChrome,

@@ -1,3 +1,4 @@
+import { deliverEncryptedTestPayload } from "./test-support/encrypted-transport.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
@@ -41,6 +42,8 @@ function installBrowserStubs() {
   };
   const windowObject = {
     crypto: webcrypto,
+    btoa: globalThis.btoa,
+    atob: globalThis.atob,
     history: { replaceState() {} },
     location: { href: "https://remote.example.test/" },
     localStorage: {
@@ -234,6 +237,8 @@ async function createReplayRuntime() {
     handleRemoteBrokerPayload,
   } = await import("./actions.js");
   resetReplayState(state);
+  state.remoteAuth = { deviceId: "device-replay", payloadSecret: "replay-secret" };
+  state.socketPeerId = "surface-replay";
   configureRemoteActions({
     onApplySessionSnapshot: applySessionSnapshot,
     onApplyTranscriptDelta: applyTranscriptDelta,
@@ -303,7 +308,7 @@ async function applyProtocolFrame(frame, {
     case "remote_session_result":
     case "remote_threads_result":
     case "remote_transcript_result":
-      await handleRemoteBrokerPayload(frame);
+      await deliverEncryptedTestPayload(handleRemoteBrokerPayload, frame);
       return;
     case "transcript_delta":
       applyTranscriptDelta(withoutKind(frame));

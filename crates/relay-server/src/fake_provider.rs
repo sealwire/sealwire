@@ -2810,12 +2810,9 @@ async fn fake_report_back(
         "{}/api/orchestrator/tools/report_back/call",
         crate::provider::sealwire_relay_url()
     );
-    let mut request = reqwest::Client::new()
+    let request = reqwest::Client::new()
         .post(url)
         .json(&serde_json::json!({ "arguments": arguments, "ask_token": token }));
-    if let Some(api_token) = crate::provider::sealwire_relay_api_token() {
-        request = request.bearer_auth(api_token);
-    }
     if let Err(error) = request.send().await {
         tracing::warn!("fake report_back could not reach the relay: {error}");
     }
@@ -2873,12 +2870,9 @@ async fn fake_peer_call(
         crate::provider::sealwire_relay_url(),
         call.name
     );
-    let mut request = reqwest::Client::new()
+    let request = reqwest::Client::new()
         .post(url)
         .json(&serde_json::json!({ "arguments": call.arguments, "ask_token": token }));
-    if let Some(api_token) = crate::provider::sealwire_relay_api_token() {
-        request = request.bearer_auth(api_token);
-    }
     let envelope = match request.send().await {
         Ok(response) => response
             .json::<serde_json::Value>()

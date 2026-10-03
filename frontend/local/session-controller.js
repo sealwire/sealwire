@@ -35,9 +35,7 @@ export function createSessionController({
   renderSessionUnavailable,
   renderThreadListMessage,
   renderThreads,
-  renderAuthRequiredState,
   runViewTransition,
-  handleUnauthorized,
   renderSettings = () => {},
 }) {
   function setStartControlsBusy(busy) {
@@ -160,9 +158,7 @@ export function createSessionController({
     renderSessionUnavailable,
     renderThreadListMessage,
     renderThreads,
-    renderAuthRequiredState,
     runViewTransition,
-    handleUnauthorized,
     renderSettings,
     setStartControlsBusy,
     liveElement,

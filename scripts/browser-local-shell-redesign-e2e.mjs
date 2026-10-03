@@ -136,8 +136,7 @@ async function run() {
 
     // --- The sidebar has chrome BEFORE the relay answers ---
     // The nav, search toggle and bell are rendered into mounts by render-session, and
-    // `boot()` does not reach its first render until `refreshAuthSession` and `loadSession`
-    // have both returned. The shell's own synchronous render paints only empty mounts, so
+    // `boot()` does not reach its first render until `loadSession` has returned. The shell's own synchronous render paints only empty mounts, so
     // without an explicit paint at module scope the sidebar is chromeless for the whole
     // round trip — unbounded if the relay is slow or down.
     //

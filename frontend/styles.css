@@ -1094,12 +1094,6 @@ button:disabled {
   background: var(--surface-1);
 }
 
-.auth-form {
-  padding: 16px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--bg-base) 88%, white 12%);
-}
 
 .launch-copy {
   display: grid;

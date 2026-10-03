@@ -64,6 +64,15 @@ if (args.unbind) {
   process.exit(runCloudUnbind());
 }
 
+const bindHost = args.host || process.env.BIND_HOST || defaultHost;
+const loopbackHost = isIP(bindHost) === 4
+  ? bindHost.split(".")[0] === "127"
+  : isIP(bindHost) === 6 && !bindHost.includes("%") && new URL(`http://[${bindHost}]`).hostname === "[::1]";
+if (!loopbackHost) {
+  console.error("sealwire: relay-server only supports loopback --host / BIND_HOST; use Cloud or a self-hosted broker for remote access.");
+  process.exit(2);
+}
+
 // Capture activation inputs immediately after argument validation and BEFORE any
 // binary/PATH probes that spawn subprocesses (cargo/codex --version inherit env).
 let capturedAccessKey = process.env[CLOUD_ACCESS_KEY_ENV] ?? null;
@@ -116,8 +125,7 @@ const launchId = randomUUID();
 const env = {
   ...process.env,
   PORT: args.port || process.env.PORT || defaultPort,
-  BIND_HOST: args.host || process.env.BIND_HOST || defaultHost,
-  RELAY_SECURITY_MODE: process.env.RELAY_SECURITY_MODE || "private",
+  BIND_HOST: bindHost,
   RELAY_BROKER_PEER_ID: process.env.RELAY_BROKER_PEER_ID || defaultPeerId(),
   CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || defaultCargoTargetDir(),
   [LAUNCH_ID_ENV]: launchId,
@@ -654,14 +662,7 @@ function localBrowserTarget(bindHost, portValue) {
     return null;
   }
 
-  const parsedHost = isIP(bindHost) ? bindHost : defaultHost;
-  let browserHost = parsedHost;
-  if (parsedHost === "0.0.0.0") {
-    browserHost = defaultHost;
-  } else if (parsedHost === "::") {
-    browserHost = "::1";
-  }
-  const urlHost = isIP(browserHost) === 6 ? `[${browserHost}]` : browserHost;
+  const urlHost = isIP(bindHost) === 6 ? `[${bindHost}]` : bindHost;
   const browserUrl = `http://${urlHost}:${parsedPort}`;
   return {
     browserUrl,
@@ -849,8 +850,7 @@ Commands:
   local         Run with no broker; remote pairing is disabled (alias for
                 --no-broker). Ignores any configured broker origin and strips
                 every RELAY_BROKER_* variable (case-insensitively) so the relay
-                never dials out. Does not change the bind host — pass --host to
-                control network exposure.
+                never dials out. The relay always listens on loopback.
   cloud         Attach to the hosted SealWire Cloud broker so remote devices can pair
                 (the opposite of local). Uses a configured broker origin if one
                 is set (--broker / AGENT_RELAY_PUBLIC_BROKER_URL / packaged
@@ -872,7 +872,7 @@ Flags:
                 freely with local/cloud. Equivalent to SEALWIRE_BETA=1.
 
 Defaults:
-  --host        127.0.0.1
+  --host        127.0.0.1 (loopback IP addresses only)
   --port        8787
   --broker      AGENT_RELAY_PUBLIC_BROKER_URL, if set by the package publisher or user
   browser       Opens the local web UI once the relay is ready; pass --no-open

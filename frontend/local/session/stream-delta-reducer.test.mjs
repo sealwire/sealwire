@@ -109,7 +109,7 @@ function harness({
     logLine: () => {},
     seedDefaults: () => {},
     renderSession,
-    handleUnauthorized: () => {},
+
     applySessionSnapshot: () => {},
     cancelSessionPoll: () => {},
     cancelStreamReconnect: () => {},
@@ -476,7 +476,7 @@ function orchHarness({ orchThreadId = "orch-1", entries = null } = {}) {
     logLine: () => {},
     seedDefaults: () => {},
     renderSession,
-    handleUnauthorized: () => {},
+
     applySessionSnapshot: () => {},
     cancelSessionPoll: () => {},
     cancelStreamReconnect: () => {},

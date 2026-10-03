@@ -186,7 +186,6 @@ function buildHarness() {
     renderSessionUnavailable: () => {},
     renderThreadListMessage: () => {},
     renderThreads: () => {},
-    renderAuthRequiredState: () => {},
     runViewTransition: (fn) => fn(),
     setStartControlsBusy: () => {},
     liveElement: () => null,
@@ -194,7 +193,7 @@ function buildHarness() {
     queryClient: null,
     transcriptFlushScheduler,
     ensureConversationTranscript: () => {},
-    handleUnauthorized: () => {},
+
     applySessionSnapshot: () => {},
     cancelSessionPoll: () => {},
     cancelStreamReconnect: () => {},

@@ -1,11 +1,8 @@
-function sessionStreamHeaders(apiToken) {
+function sessionStreamHeaders() {
   const headers = new Headers({
     Accept: "text/event-stream",
     "Cache-Control": "no-store",
   });
-  if (apiToken) {
-    headers.set("Authorization", `Bearer ${apiToken}`);
-  }
   return headers;
 }
 
@@ -32,7 +29,6 @@ export function sessionStreamUrl(
 }
 
 export function openSessionStream({
-  apiToken,
   url = sessionStreamUrl(),
   fetchImpl = globalThis.fetch,
   onOpen = () => {},
@@ -54,16 +50,13 @@ export function openSessionStream({
     try {
       const response = await fetchImpl(url, {
         method: "GET",
-        credentials: "same-origin",
-        headers: sessionStreamHeaders(apiToken),
+        credentials: "omit",
+        headers: sessionStreamHeaders(),
         cache: "no-store",
         signal: controller.signal,
       });
       if (!response.ok) {
         const error = new Error(`session stream request failed (${response.status})`);
-        if (response.status === 401) {
-          error.code = "unauthorized";
-        }
         throw error;
       }
       if (!response.body || typeof response.body.getReader !== "function") {

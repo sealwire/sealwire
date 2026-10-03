@@ -53,9 +53,6 @@ impl PiBridge {
             _ => return (None, None),
         };
         env["SEALWIRE_PI_MARKS"] = json!("1");
-        if let Some(api_token) = provider::sealwire_relay_api_token() {
-            env["RELAY_API_TOKEN"] = json!(api_token);
-        }
         for value in env.as_object_mut().unwrap().values_mut() {
             *value = json!(literal(value.as_str().unwrap()));
         }
@@ -69,8 +66,8 @@ impl PiBridge {
             Some(json!({
                 "name": name,
                 "server": {
-                    "command": literal(&std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".into())),
-                    "args": [literal(&path.to_string_lossy())],
+                    "command": std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".into()),
+                    "args": [path.to_string_lossy()],
                     "env": env,
                     "exposure": "direct",
                 }

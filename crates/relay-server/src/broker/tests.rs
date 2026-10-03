@@ -1003,73 +1003,6 @@ async fn broker_config_self_hosted_can_issue_expiring_device_join_credentials() 
 }
 
 #[test]
-fn parse_inbound_payload_parses_remote_action_requests() {
-    let payload = serde_json::json!({
-        "protocol_version": RELAY_PROTOCOL_VERSION,
-        "kind": "remote_action",
-        "action_id": "act-1",
-        "device_id": "phone-1",
-        "request": {
-            "type": "send_message",
-            "input": {
-                "text": "hello",
-                "thread_id": "thread-1"
-            }
-        }
-    });
-
-    let action = parse_inbound_payload(payload)
-        .expect("payload should parse")
-        .expect("payload should be handled");
-    match action {
-        InboundBrokerPayload::RemoteAction {
-            action_id,
-            device_id,
-            request: RemoteActionRequest::SendMessage { input, skill },
-            session_claim,
-        } => {
-            assert_eq!(action_id, "act-1");
-            assert!(skill.is_none(), "an older client's send carries no skill");
-            assert_eq!(device_id.as_deref(), Some("phone-1"));
-            assert!(session_claim.is_none());
-            assert_eq!(input.text, "hello");
-        }
-        other => panic!("unexpected request: {other:?}"),
-    }
-}
-
-#[test]
-fn parse_inbound_payload_parses_list_threads_requests() {
-    let payload = serde_json::json!({
-        "protocol_version": RELAY_PROTOCOL_VERSION,
-        "kind": "remote_action",
-        "action_id": "act-threads",
-        "device_id": "phone-1",
-        "request": {
-            "type": "list_threads",
-            "query": {
-                "limit": 40
-            }
-        }
-    });
-
-    let action = parse_inbound_payload(payload)
-        .expect("payload should parse")
-        .expect("payload should be handled");
-    match action {
-        InboundBrokerPayload::RemoteAction {
-            action_id,
-            request: RemoteActionRequest::ListThreads { query },
-            ..
-        } => {
-            assert_eq!(action_id, "act-threads");
-            assert_eq!(query.limit, Some(40));
-        }
-        other => panic!("unexpected request: {other:?}"),
-    }
-}
-
-#[test]
 fn parse_inbound_payload_parses_pairing_requests() {
     let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
     let device_id = "phone-1";
@@ -1182,77 +1115,9 @@ fn parse_inbound_payload_parses_encrypted_remote_actions() {
 }
 
 #[test]
-fn parse_inbound_payload_parses_claim_challenge_request() {
-    let payload = serde_json::json!({
-        "protocol_version": RELAY_PROTOCOL_VERSION,
-        "kind": "remote_action",
-        "action_id": "claim-start-1",
-        "device_id": "phone-1",
-        "request": {
-            "type": "claim_challenge",
-            "proof": "claim-init-proof"
-        }
-    });
-
-    let action = parse_inbound_payload(payload)
-        .expect("payload should parse")
-        .expect("payload should be handled");
-    match action {
-        InboundBrokerPayload::RemoteAction {
-            action_id,
-            device_id,
-            request: RemoteActionRequest::ClaimChallenge { proof },
-            ..
-        } => {
-            assert_eq!(action_id, "claim-start-1");
-            assert_eq!(device_id.as_deref(), Some("phone-1"));
-            assert_eq!(proof, "claim-init-proof");
-        }
-        other => panic!("unexpected request: {other:?}"),
-    }
-}
-
-#[test]
-fn parse_inbound_payload_parses_claim_device_proof() {
-    let payload = serde_json::json!({
-        "protocol_version": RELAY_PROTOCOL_VERSION,
-        "kind": "remote_action",
-        "action_id": "claim-finish-1",
-        "device_id": "phone-1",
-        "request": {
-            "type": "claim_device",
-            "challenge_id": "challenge-1",
-            "proof": "signed-proof"
-        }
-    });
-
-    let action = parse_inbound_payload(payload)
-        .expect("payload should parse")
-        .expect("payload should be handled");
-    match action {
-        InboundBrokerPayload::RemoteAction {
-            action_id,
-            device_id,
-            request:
-                RemoteActionRequest::ClaimDevice {
-                    challenge_id,
-                    proof,
-                },
-            ..
-        } => {
-            assert_eq!(action_id, "claim-finish-1");
-            assert_eq!(device_id.as_deref(), Some("phone-1"));
-            assert_eq!(challenge_id, "challenge-1");
-            assert_eq!(proof, "signed-proof");
-        }
-        other => panic!("unexpected request: {other:?}"),
-    }
-}
-
-#[test]
 fn parse_inbound_payload_requires_relay_protocol_version() {
     let payload = serde_json::json!({
-        "kind": "remote_action",
+        "kind": "encrypted_remote_action",
         "action_id": "act-missing-version",
         "device_id": "phone-1",
         "request": {
@@ -1269,7 +1134,7 @@ fn parse_inbound_payload_requires_relay_protocol_version() {
 fn parse_inbound_payload_rejects_unsupported_relay_protocol_version() {
     let payload = serde_json::json!({
         "protocol_version": RELAY_PROTOCOL_VERSION + 1,
-        "kind": "remote_action",
+        "kind": "encrypted_remote_action",
         "action_id": "act-new-version",
         "device_id": "phone-1",
         "request": {
@@ -1629,39 +1494,6 @@ mod transcript_delta_delivery {
         peers
     }
 
-    /// MANAGED: one frame per watching peer, addressed to that peer. The pre-targeting
-    /// behavior was a single un-addressed broadcast the whole room received.
-    #[test]
-    fn managed_mode_addresses_only_the_watching_peer() {
-        let mut relay = relay_with_two_phones();
-        relay.set_watched_threads("peer-a", "phone-a", vec!["thread-x".to_string()]);
-        relay.set_watched_threads("peer-b", "phone-b", vec!["thread-other".to_string()]);
-
-        let messages = build_transcript_delta_messages(
-            targets_for(&relay, "thread-x"),
-            true,
-            &delta("thread-x", "hello"),
-        )
-        .expect("managed delivery should build");
-
-        assert_eq!(addressed_peers(&messages), vec!["peer-a".to_string()]);
-        match &*messages[0].payload {
-            OutboundBrokerPayload::TranscriptDelta {
-                thread_id,
-                delta,
-                delta_kind,
-                text_offset,
-                ..
-            } => {
-                assert_eq!(thread_id, "thread-x");
-                assert_eq!(delta, "hello");
-                assert_eq!(delta_kind, "agent_text");
-                assert_eq!(*text_offset, Some(11));
-            }
-            other => panic!("managed mode must send a plaintext delta, got: {other:?}"),
-        }
-    }
-
     /// E2EE: one envelope per watching peer, and ONLY that peer's device key opens it.
     #[test]
     fn e2ee_mode_encrypts_per_device_and_addresses_only_the_watcher() {
@@ -1671,7 +1503,6 @@ mod transcript_delta_delivery {
 
         let messages = build_transcript_delta_messages(
             targets_for(&relay, "thread-x"),
-            false,
             &delta("thread-x", "secret text"),
         )
         .expect("e2ee delivery should build");
@@ -1711,45 +1542,14 @@ mod transcript_delta_delivery {
         resync
     }
 
-    /// Only the watcher gets it, with the thread and revision spelled out.
-    #[test]
-    fn a_readable_resync_reaches_only_the_watcher_under_the_resync_kind() {
-        let mut relay = relay_with_two_phones();
-        relay.set_watched_threads("peer-a", "phone-a", vec!["thread-x".to_string()]);
-        relay.set_watched_threads("peer-b", "phone-b", vec!["thread-other".to_string()]);
-
-        let messages = build_transcript_resync_messages(
-            targets_for(&relay, "thread-x"),
-            true,
-            &resync("thread-x"),
-        )
-        .expect("managed delivery should build");
-
-        assert_eq!(addressed_peers(&messages), vec!["peer-a".to_string()]);
-        let wire = serde_json::to_value(&*messages[0].payload).expect("serializes");
-        assert_eq!(
-            wire,
-            serde_json::json!({
-                "kind": "transcript_resync",
-                "thread_id": "thread-x",
-                "transcript_generation": "gen-1",
-                "revision": 42,
-                "reason": "watch_started",
-            })
-        );
-    }
-
     #[test]
     fn a_sealed_resync_opens_to_the_same_event_for_its_device_only() {
         let mut relay = relay_with_two_phones();
         relay.set_watched_threads("peer-a", "phone-a", vec!["thread-x".to_string()]);
 
-        let messages = build_transcript_resync_messages(
-            targets_for(&relay, "thread-x"),
-            false,
-            &resync("thread-x"),
-        )
-        .expect("e2ee delivery should build");
+        let messages =
+            build_transcript_resync_messages(targets_for(&relay, "thread-x"), &resync("thread-x"))
+                .expect("e2ee delivery should build");
 
         assert_eq!(addressed_peers(&messages), vec!["peer-a".to_string()]);
         match &*messages[0].payload {
@@ -1768,6 +1568,7 @@ mod transcript_delta_delivery {
                 assert_eq!(opened["thread_id"], "thread-x");
                 assert_eq!(opened["revision"], 42);
                 assert_eq!(opened["reason"], "watch_started");
+                assert_eq!(opened["transcript_generation"], "gen-1");
                 assert!(decrypt_json::<serde_json::Value>(SECRET_B, envelope).is_err());
             }
             other => panic!("private mode must encrypt, got: {other:?}"),
@@ -1784,7 +1585,6 @@ mod transcript_delta_delivery {
 
         let messages = build_transcript_delta_messages(
             targets_for(&relay, "thread-x"),
-            false,
             &delta("thread-x", "shared"),
         )
         .expect("e2ee delivery should build");
@@ -1823,16 +1623,15 @@ mod transcript_delta_delivery {
         relay.set_watched_threads("peer-a", "phone-a", vec!["thread-other".to_string()]);
         relay.set_watched_threads("peer-b", "phone-b", vec!["thread-other".to_string()]);
 
-        for broker_can_read_content in [true, false] {
+        {
             let messages = build_transcript_delta_messages(
                 targets_for(&relay, "thread-x"),
-                broker_can_read_content,
                 &delta("thread-x", "hello"),
             )
             .expect("building should succeed");
             assert!(
                 messages.is_empty(),
-                "an unwatched thread must produce no frames (broker_readable={broker_can_read_content})"
+                "an unwatched thread must produce no frames"
             );
         }
     }
@@ -1871,7 +1670,6 @@ mod transcript_delta_delivery {
 
         let a = build_transcript_delta_messages(
             targets_for(&relay, "thread-a"),
-            true,
             &delta("thread-a", "A"),
         )
         .expect("build");
@@ -1879,7 +1677,6 @@ mod transcript_delta_delivery {
 
         let b = build_transcript_delta_messages(
             targets_for(&relay, "thread-b"),
-            true,
             &delta("thread-b", "B"),
         )
         .expect("build");
@@ -1907,7 +1704,6 @@ mod transcript_delta_delivery {
 
         let messages = build_transcript_delta_messages(
             targets_for(&relay, "thread-x"),
-            false,
             &delta("thread-x", "nope"),
         )
         .expect("build");
@@ -2024,23 +1820,20 @@ fn workspace_with_a_large_diff() -> tempfile::TempDir {
     dir
 }
 
-/// Managed mode so the test can build plaintext action frames by hand. The chunked
-/// publish path under test is shared with the encrypted one — both reach
-/// `publish_remote_action_result_chunks` — so this exercises the same coupling.
-async fn managed_broker_state(cwd: &str) -> AppState {
-    managed_broker_state_with_providers(cwd, HashMap::new()).await
+async fn encrypted_broker_state(cwd: &str) -> AppState {
+    encrypted_broker_state_with_providers(cwd, HashMap::new()).await
 }
 
-async fn managed_broker_state_with_providers(
+async fn encrypted_broker_state_with_providers(
     cwd: &str,
     providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>>,
 ) -> AppState {
-    managed_broker_state_parts(cwd, providers).await.0
+    encrypted_broker_state_parts(cwd, providers).await.0
 }
 
 /// Also hands back the relay itself: `AppState` keeps it private, and some of what the
 /// broker does is only observable as state while a session is still running.
-async fn managed_broker_state_parts(
+async fn encrypted_broker_state_parts(
     cwd: &str,
     providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>>,
 ) -> (AppState, Arc<RwLock<RelayState>>) {
@@ -2048,7 +1841,7 @@ async fn managed_broker_state_parts(
     let relay = Arc::new(RwLock::new(RelayState::new(
         cwd.to_string(),
         change_tx.clone(),
-        SecurityProfile::managed(),
+        SecurityProfile::private(),
     )));
     // An untrusted workspace answers a diff with a short "cannot read this", which is
     // indistinguishable from a small diff to any test that measures the reply.
@@ -2381,6 +2174,17 @@ impl BrokerObservations {
     }
 }
 
+fn encrypted_action_result_ok(frame: &serde_json::Value) -> Option<bool> {
+    let payload = frame.get("payload")?;
+    if payload.get("kind")?.as_str()? != "encrypted_remote_action_result" {
+        return None;
+    }
+    let envelope =
+        serde_json::from_value(payload["envelope"].clone()).expect("reply envelope parses");
+    let opened: serde_json::Value = decrypt_json("secret", &envelope).expect("reply decrypts");
+    Some(opened["ok"].as_bool().expect("reply must carry an ok flag"))
+}
+
 fn surface_peer(peer_id: &str, device_id: &str) -> relay_broker::protocol::PeerSummary {
     relay_broker::protocol::PeerSummary {
         peer_id: peer_id.to_string(),
@@ -2389,14 +2193,18 @@ fn surface_peer(peer_id: &str, device_id: &str) -> relay_broker::protocol::PeerS
     }
 }
 
-fn plain_action_frame(from_peer_id: &str, action_id: &str, request: serde_json::Value) -> String {
+fn encrypted_action_frame(
+    from_peer_id: &str,
+    action_id: &str,
+    request: serde_json::Value,
+) -> String {
     serde_json::to_string(&serde_json::json!({
         "type": "message",
         "channel_id": "room-e2e",
         "from_peer_id": from_peer_id,
         "from_role": "surface",
         "payload": {
-            "kind": "remote_action",
+            "kind": "encrypted_remote_action",
             // The constant, not a literal. A payload the relay considers the wrong version
             // is a PARSE-level failure that kills the whole session, so a stale literal
             // here does not fail one action — it produces a session that publishes
@@ -2404,7 +2212,7 @@ fn plain_action_frame(from_peer_id: &str, action_id: &str, request: serde_json::
             "protocol_version": RELAY_PROTOCOL_VERSION,
             "action_id": action_id,
             "device_id": "phone-1",
-            "request": request,
+            "envelope": encrypt_json("secret", &request).expect("request encrypts"),
         }
     }))
     .expect("action frame serializes")
@@ -2461,7 +2269,7 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
 
         // A asks the thing that never comes back.
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-a",
                 "action-threads",
                 serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
@@ -2485,7 +2293,7 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
 
         // A asks a SECOND thing, behind its own hung one. Same surface, so it must wait.
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-a",
                 "action-a-projects",
                 serde_json::json!({ "type": "fetch_projects" }),
@@ -2495,7 +2303,7 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
 
         // B asks something the relay can answer without any provider at all.
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-b",
                 "action-b-projects",
                 serde_json::json!({ "type": "fetch_projects" }),
@@ -2549,7 +2357,7 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
         let relay = Arc::new(RwLock::new(RelayState::new(
             cwd.clone(),
             change_tx.clone(),
-            SecurityProfile::managed(),
+            SecurityProfile::private(),
         )));
         relay.write().await.paired_devices.insert(
             "phone-1".to_string(),
@@ -2603,7 +2411,7 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
     // A's reply is `remote_threads_result` and must be absent — if it arrived, the
     // provider answered and this test proved nothing about a slow one.
     assert_eq!(
-        seen.count_of("remote_threads_result"),
+        seen.count_of("encrypted_remote_action_result"),
         0,
         "the hanging provider answered, so nothing here was actually slow; saw {kinds:?}"
     );
@@ -2675,7 +2483,7 @@ async fn a_stale_declaration_does_not_overwrite_the_replacement_connections_watc
             .expect("welcome sends");
 
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-old",
                 "action-hangs",
                 serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
@@ -2703,7 +2511,7 @@ async fn a_stale_declaration_does_not_overwrite_the_replacement_connections_watc
             ),
         ] {
             socket
-                .send(Message::Text(plain_action_frame(
+                .send(Message::Text(encrypted_action_frame(
                     "surface-old",
                     action_id,
                     request,
@@ -2731,7 +2539,7 @@ async fn a_stale_declaration_does_not_overwrite_the_replacement_connections_watc
 
         // The replacement connection declares what the phone is really looking at.
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-new",
                 "action-live-watch",
                 serde_json::json!({
@@ -2785,7 +2593,7 @@ async fn a_stale_declaration_does_not_overwrite_the_replacement_connections_watc
             entries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }),
     );
-    let (state, relay) = managed_broker_state_parts(&cwd, providers).await;
+    let (state, relay) = encrypted_broker_state_parts(&cwd, providers).await;
     let session_state = state.clone();
     let session = tokio::spawn(async move {
         let mut change_rx = session_state.subscribe();
@@ -2884,7 +2692,7 @@ async fn a_result_reaches_the_session_that_asked_again_after_a_reconnect() {
             entries: Arc::clone(&provider_entries),
         }),
     );
-    let (state, _relay) = managed_broker_state_parts(&cwd, providers).await;
+    let (state, _relay) = encrypted_broker_state_parts(&cwd, providers).await;
 
     // Session one: ask, and get as far as the provider.
     let first_listener = TcpListener::bind(("127.0.0.1", 0))
@@ -2911,7 +2719,7 @@ async fn a_result_reaches_the_session_that_asked_again_after_a_reconnect() {
             .await
             .expect("welcome sends");
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-a",
                 "action-survives",
                 serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
@@ -2979,7 +2787,7 @@ async fn a_result_reaches_the_session_that_asked_again_after_a_reconnect() {
             .await
             .expect("welcome sends");
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-a",
                 "action-survives",
                 serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
@@ -3004,15 +2812,11 @@ async fn a_result_reaches_the_session_that_asked_again_after_a_reconnect() {
                             .map(str::to_string)
                     };
                     let kind = field("kind").unwrap_or_else(|| "unknown".to_string());
-                    let ok = payload
-                        .as_ref()
-                        .and_then(|value| value.get("payload"))
-                        .and_then(|payload| payload.get("ok"))
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false);
-                    let label = match field("action_id") {
-                        Some(action_id) => format!("{kind}:{action_id}:{ok}"),
-                        None => kind,
+                    let ok = payload.as_ref().and_then(encrypted_action_result_ok);
+                    let label = match (field("action_id"), ok) {
+                        (Some(action_id), Some(ok)) => format!("{kind}:{action_id}:{ok}"),
+                        (Some(action_id), None) => format!("{kind}:{action_id}"),
+                        (None, _) => kind,
                     };
                     broker_view
                         .lock()
@@ -3144,7 +2948,7 @@ async fn a_panicking_action_answers_the_device_rather_than_going_quiet() {
             .await
             .expect("welcome sends");
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-a",
                 "action-panics",
                 serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
@@ -3169,15 +2973,11 @@ async fn a_panicking_action_answers_the_device_rather_than_going_quiet() {
                             .map(str::to_string)
                     };
                     let kind = field("kind").unwrap_or_else(|| "unknown".to_string());
-                    let ok = payload
-                        .as_ref()
-                        .and_then(|value| value.get("payload"))
-                        .and_then(|payload| payload.get("ok"))
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(true);
-                    let label = match field("action_id") {
-                        Some(action_id) => format!("{kind}:{action_id}:{ok}"),
-                        None => kind,
+                    let ok = payload.as_ref().and_then(encrypted_action_result_ok);
+                    let label = match (field("action_id"), ok) {
+                        (Some(action_id), Some(ok)) => format!("{kind}:{action_id}:{ok}"),
+                        (Some(action_id), None) => format!("{kind}:{action_id}"),
+                        (None, _) => kind,
                     };
                     broker_view
                         .lock()
@@ -3193,7 +2993,7 @@ async fn a_panicking_action_answers_the_device_rather_than_going_quiet() {
     let config = heartbeat_test_config(format!("ws://{address}")).await;
     let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> = HashMap::new();
     providers.insert("panics".to_string(), Arc::new(PanickingProvider));
-    let (state, _relay) = managed_broker_state_parts(&cwd, providers).await;
+    let (state, _relay) = encrypted_broker_state_parts(&cwd, providers).await;
     let session_state = state.clone();
     let session = tokio::spawn(async move {
         let mut change_rx = session_state.subscribe();
@@ -3287,7 +3087,7 @@ async fn an_arrival_queued_before_a_departure_cannot_undo_it() {
 
         // Bury this surface's worker, so anything the router hands it stays unhandled.
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-a",
                 "action-hangs",
                 serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
@@ -3315,7 +3115,7 @@ async fn an_arrival_queued_before_a_departure_cannot_undo_it() {
         // Behind the arrival in wire order, so its reply is proof the arrival has been
         // dealt with — the hanging request's own reply is not, it comes first either way.
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-a",
                 "action-after-arrival",
                 serde_json::json!({ "type": "fetch_projects" }),
@@ -3377,7 +3177,7 @@ async fn an_arrival_queued_before_a_departure_cannot_undo_it() {
             entries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }),
     );
-    let (state, relay) = managed_broker_state_parts(&cwd, providers).await;
+    let (state, relay) = encrypted_broker_state_parts(&cwd, providers).await;
     let session_state = state.clone();
     let session = tokio::spawn(async move {
         let mut change_rx = session_state.subscribe();
@@ -3485,7 +3285,7 @@ async fn a_frame_queued_before_a_departure_does_not_re_register_the_surface() {
             .expect("welcome sends");
 
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-a",
                 "action-hangs",
                 serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
@@ -3502,7 +3302,7 @@ async fn a_frame_queued_before_a_departure_does_not_re_register_the_surface() {
         // Both queue behind the hang. The second one only exists so the test can tell
         // when the first has run: a watch declaration is answered with nothing.
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-a",
                 "action-watch",
                 serde_json::json!({
@@ -3513,7 +3313,7 @@ async fn a_frame_queued_before_a_departure_does_not_re_register_the_surface() {
             .await
             .expect("watch request sends");
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-a",
                 "action-after-watch",
                 serde_json::json!({ "type": "fetch_projects" }),
@@ -3577,7 +3377,7 @@ async fn a_frame_queued_before_a_departure_does_not_re_register_the_surface() {
             entries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }),
     );
-    let (state, relay) = managed_broker_state_parts(&cwd, providers).await;
+    let (state, relay) = encrypted_broker_state_parts(&cwd, providers).await;
     let session_state = state.clone();
     let session = tokio::spawn(async move {
         let mut change_rx = session_state.subscribe();
@@ -3693,7 +3493,7 @@ async fn a_late_frame_does_not_rebind_a_device_to_its_closed_connection() {
             .expect("welcome sends");
 
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-old",
                 "action-hangs",
                 serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
@@ -3708,7 +3508,7 @@ async fn a_late_frame_does_not_rebind_a_device_to_its_closed_connection() {
         }
 
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-old",
                 "action-late",
                 serde_json::json!({ "type": "fetch_projects" }),
@@ -3778,7 +3578,7 @@ async fn a_late_frame_does_not_rebind_a_device_to_its_closed_connection() {
             entries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }),
     );
-    let (state, relay) = managed_broker_state_parts(&cwd, providers).await;
+    let (state, relay) = encrypted_broker_state_parts(&cwd, providers).await;
     let session_state = state.clone();
     let session = tokio::spawn(async move {
         let mut change_rx = session_state.subscribe();
@@ -3917,7 +3717,7 @@ async fn a_big_reply_is_not_paced_at_a_surface_the_relay_saw_leave() {
         )
         .await;
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-a",
                 "action-diff",
                 serde_json::json!({ "type": "fetch_workspace_diff" }),
@@ -3955,7 +3755,7 @@ async fn a_big_reply_is_not_paced_at_a_surface_the_relay_saw_leave() {
     });
 
     let config = heartbeat_test_config(format!("ws://{address}")).await;
-    let (state, relay) = managed_broker_state_parts(&cwd, HashMap::new()).await;
+    let (state, relay) = encrypted_broker_state_parts(&cwd, HashMap::new()).await;
     let session_state = state.clone();
     let session = tokio::spawn(async move {
         let mut change_rx = session_state.subscribe();
@@ -4002,7 +3802,7 @@ async fn a_big_reply_is_not_paced_at_a_surface_the_relay_saw_leave() {
         "the departure was never recorded, so the reply below was not aimed at a surface \
          the relay knew had gone; saw {kinds:?}"
     );
-    let chunks = seen.count_of("remote_action_result_chunk");
+    let chunks = seen.count_of("encrypted_remote_action_result_chunk");
     assert!(
         chunks <= 1,
         "the relay paced {chunks} chunks at a surface it had already watched leave, and \
@@ -4058,7 +3858,7 @@ async fn a_departure_is_recorded_while_that_surface_is_still_hanging() {
             .expect("welcome sends");
 
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-a",
                 "action-hangs",
                 serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
@@ -4107,7 +3907,7 @@ async fn a_departure_is_recorded_while_that_surface_is_still_hanging() {
             entered_list_threads: Arc::clone(&entered_the_hang),
         }),
     );
-    let (state, relay) = managed_broker_state_parts(&cwd, providers).await;
+    let (state, relay) = encrypted_broker_state_parts(&cwd, providers).await;
 
     let session_state = state.clone();
     let session = tokio::spawn(async move {
@@ -4209,7 +4009,7 @@ async fn a_full_surface_queue_ends_the_session_rather_than_shedding_a_frame() {
             .expect("welcome sends");
 
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-a",
                 "action-hangs",
                 serde_json::json!({ "type": "list_threads", "query": { "limit": 20 } }),
@@ -4227,7 +4027,7 @@ async fn a_full_surface_queue_ends_the_session_rather_than_shedding_a_frame() {
 
         for index in 0..(SURFACE_MESSAGE_QUEUE_CAPACITY + overflowed_by) {
             socket
-                .send(Message::Text(plain_action_frame(
+                .send(Message::Text(encrypted_action_frame(
                     "surface-a",
                     &format!("action-buried-{index}"),
                     serde_json::json!({ "type": "fetch_projects" }),
@@ -4256,7 +4056,7 @@ async fn a_full_surface_queue_ends_the_session_rather_than_shedding_a_frame() {
             entered_list_threads: Arc::clone(&entered_the_hang),
         }),
     );
-    let state = managed_broker_state_with_providers(&cwd, providers).await;
+    let state = encrypted_broker_state_with_providers(&cwd, providers).await;
     let mut change_rx = state.subscribe();
 
     let outcome = tokio::time::timeout(
@@ -4351,7 +4151,7 @@ async fn a_departing_surface_does_not_stall_the_relay_for_everyone_else() {
 
         // A asks for the big diff.
         socket
-            .send(Message::Text(plain_action_frame(
+            .send(Message::Text(encrypted_action_frame(
                 "surface-a",
                 "action-diff",
                 serde_json::json!({ "type": "fetch_workspace_diff" }),
@@ -4368,25 +4168,31 @@ async fn a_departing_surface_does_not_stall_the_relay_for_everyone_else() {
                 }
                 Message::Close(_) => break,
                 Message::Text(text) => {
-                    let kind = serde_json::from_str::<serde_json::Value>(&text)
-                        .ok()
-                        .and_then(|value| {
-                            value
-                                .get("payload")
-                                .and_then(|payload| payload.get("kind"))
-                                .and_then(|kind| kind.as_str())
-                                .map(str::to_string)
-                        })
+                    let payload: serde_json::Value =
+                        serde_json::from_str(&text).expect("broker frame parses");
+                    let kind = payload
+                        .get("payload")
+                        .and_then(|payload| payload.get("kind"))
+                        .and_then(|kind| kind.as_str())
+                        .map(str::to_string)
                         .unwrap_or_else(|| "unknown".to_string());
-                    broker_view
-                        .lock()
-                        .unwrap()
-                        .frames
-                        .push((kind.clone(), std::time::Instant::now()));
+                    broker_view.lock().unwrap().frames.push((
+                        if kind == "encrypted_remote_action_result" {
+                            format!(
+                                "{kind}:{}",
+                                payload["payload"]["action_id"]
+                                    .as_str()
+                                    .expect("reply has an action id")
+                            )
+                        } else {
+                            kind.clone()
+                        },
+                        std::time::Instant::now(),
+                    ));
 
                     // The moment A's reply starts streaming, A goes away and B asks
                     // something. This is the interleaving the old code could not serve.
-                    if kind == "remote_action_result_chunk" && !announced_departure {
+                    if kind == "encrypted_remote_action_result_chunk" && !announced_departure {
                         announced_departure = true;
                         let left = ServerMessage::Presence {
                             channel_id: "room-e2e".to_string(),
@@ -4400,7 +4206,7 @@ async fn a_departing_surface_does_not_stall_the_relay_for_everyone_else() {
                             .await
                             .expect("presence sends");
                         socket
-                            .send(Message::Text(plain_action_frame(
+                            .send(Message::Text(encrypted_action_frame(
                                 "surface-b",
                                 "action-threads",
                                 serde_json::json!({ "type": "list_threads", "query": { "limit": 5 } }),
@@ -4415,7 +4221,7 @@ async fn a_departing_surface_does_not_stall_the_relay_for_everyone_else() {
     });
 
     let config = heartbeat_test_config(format!("ws://{address}")).await;
-    let state = managed_broker_state(&cwd).await;
+    let state = encrypted_broker_state(&cwd).await;
     let mut change_rx = state.subscribe();
 
     let _session = tokio::time::timeout(
@@ -4438,10 +4244,10 @@ async fn a_departing_surface_does_not_stall_the_relay_for_everyone_else() {
     // `expect` takes a literal, so the `{kinds:?}` this used to pass never interpolated —
     // the failure told you nothing about what actually arrived.
     let first_chunk_at = seen
-        .first_at("remote_action_result_chunk")
+        .first_at("encrypted_remote_action_result_chunk")
         .unwrap_or_else(|| panic!("the diff reply must be chunked; saw {kinds:?}"));
     let threads_at = seen
-        .first_at("remote_threads_result")
+        .first_at("encrypted_remote_action_result:action-threads")
         .unwrap_or_else(|| panic!("surface B was never answered at all; saw {kinds:?}"));
 
     let b_waited = threads_at.saturating_duration_since(first_chunk_at);
@@ -4453,7 +4259,7 @@ async fn a_departing_surface_does_not_stall_the_relay_for_everyone_else() {
         b_waited.as_millis()
     );
 
-    let chunks = seen.count_of("remote_action_result_chunk");
+    let chunks = seen.count_of("encrypted_remote_action_result_chunk");
     assert!(
         chunks < 8,
         "surface A left after its first chunk, so its train should have been abandoned; \
@@ -4548,7 +4354,7 @@ async fn a_dropped_publish_ends_the_session_instead_of_passing_unnoticed() {
 // property nobody can test by hand.
 // ---------------------------------------------------------------------------
 
-fn plain_action_frame_versioned(
+fn encrypted_action_frame_versioned(
     from_peer_id: &str,
     action_id: &str,
     request: serde_json::Value,
@@ -4560,17 +4366,17 @@ fn plain_action_frame_versioned(
         "from_peer_id": from_peer_id,
         "from_role": "surface",
         "payload": {
-            "kind": "remote_action",
+            "kind": "encrypted_remote_action",
             "protocol_version": protocol_version,
             "action_id": action_id,
             "device_id": "phone-1",
-            "request": request,
+            "envelope": encrypt_json("secret", &request).expect("request encrypts"),
         }
     }))
     .expect("action frame serializes")
 }
 
-/// Same as [`managed_broker_state`] but in PRIVATE mode, which is the default and the
+/// Same as [`encrypted_broker_state`] but in PRIVATE mode, which is the default and the
 /// one where plaintext remote actions are refused.
 async fn private_broker_state(cwd: &str) -> AppState {
     let (change_tx, _) = watch::channel(0_u64);
@@ -4646,21 +4452,27 @@ async fn observe_relay_session_with_state(
                 }
                 Message::Close(_) => break,
                 Message::Text(text) => {
-                    let kind = serde_json::from_str::<serde_json::Value>(&text)
-                        .ok()
-                        .and_then(|value| {
-                            value
-                                .get("payload")
-                                .and_then(|payload| payload.get("kind"))
-                                .and_then(|kind| kind.as_str())
-                                .map(str::to_string)
-                        })
+                    let payload: serde_json::Value =
+                        serde_json::from_str(&text).expect("broker frame parses");
+                    let kind = payload
+                        .get("payload")
+                        .and_then(|payload| payload.get("kind"))
+                        .and_then(|kind| kind.as_str())
+                        .map(str::to_string)
                         .unwrap_or_else(|| "unknown".to_string());
-                    broker_view
-                        .lock()
-                        .unwrap()
-                        .frames
-                        .push((kind, std::time::Instant::now()));
+                    broker_view.lock().unwrap().frames.push((
+                        if kind == "encrypted_remote_action_result" {
+                            format!(
+                                "{kind}:{}",
+                                payload["payload"]["action_id"]
+                                    .as_str()
+                                    .expect("reply has an action id")
+                            )
+                        } else {
+                            kind
+                        },
+                        std::time::Instant::now(),
+                    ));
                 }
                 _ => {}
             }
@@ -4672,7 +4484,7 @@ async fn observe_relay_session_with_state(
     let config = heartbeat_test_config(format!("ws://{address}")).await;
     let state = match state_override {
         Some(state) => state,
-        None => managed_broker_state(&cwd).await,
+        None => encrypted_broker_state(&cwd).await,
     };
     let mut change_rx = state.subscribe();
 
@@ -4703,13 +4515,13 @@ async fn observe_relay_session_with_state(
 #[tokio::test]
 async fn a_previous_version_request_does_not_end_the_session() {
     let kinds = observe_relay_session_for_frames(vec![
-        plain_action_frame_versioned(
+        encrypted_action_frame_versioned(
             "surface-a",
             "action-old",
             serde_json::json!({ "type": "list_threads", "query": { "limit": 5 } }),
             1,
         ),
-        plain_action_frame_versioned(
+        encrypted_action_frame_versioned(
             "surface-a",
             "action-new",
             serde_json::json!({ "type": "list_threads", "query": { "limit": 5 } }),
@@ -4720,8 +4532,11 @@ async fn a_previous_version_request_does_not_end_the_session() {
 
     let answered = kinds
         .iter()
-        .filter(|kind| kind.as_str() == "remote_threads_result")
+        .filter(|kind| kind.starts_with("encrypted_remote_action_result:"))
         .count();
+    assert!(kinds
+        .iter()
+        .any(|kind| kind == "encrypted_remote_action_result:action-new"));
     assert_eq!(
         answered, 1,
         "the current-version request must still be answered after a previous-version one \
@@ -4739,13 +4554,13 @@ async fn a_previous_version_request_does_not_end_the_session() {
 #[tokio::test]
 async fn an_unparseable_payload_does_not_end_the_session() {
     let kinds = observe_relay_session_for_frames(vec![
-        plain_action_frame_versioned(
+        encrypted_action_frame_versioned(
             "surface-a",
             "action-garbage",
             serde_json::json!({ "type": "list_threads", "query": { "limit": 5 } }),
             9_999,
         ),
-        plain_action_frame_versioned(
+        encrypted_action_frame_versioned(
             "surface-a",
             "action-good",
             serde_json::json!({ "type": "list_threads", "query": { "limit": 5 } }),
@@ -4755,41 +4570,34 @@ async fn an_unparseable_payload_does_not_end_the_session() {
     .await;
 
     assert!(
-        kinds.iter().any(|kind| kind == "remote_threads_result"),
+        kinds
+            .iter()
+            .any(|kind| kind == "encrypted_remote_action_result:action-good"),
         "a valid request after an unparseable one must still be answered; one surface \
          sending junk must not disconnect the room. Saw {kinds:?}"
     );
 }
 
-/// A message that fails AFTER it parses must not end the session either.
-///
-/// The parse-level guard is not enough on its own. A structurally valid request can still
-/// be refused by its handler, and the commonest case needs no malice at all: plaintext
-/// remote actions are disabled in **private mode, which is the default**, so any surface
-/// that sends one gets an error returned from the handler. That error used to propagate out
-/// of `handle_server_message` and take the whole session with it — every other surface
-/// disconnected, and a full snapshot resync on the way back — which a surface could repeat
-/// at will.
-///
-/// Connection-level failures still end the session, and do not need this path to do it: a
-/// dead writer has its own `select!` arm, and a broker `rate_limited` is handled in its own
-/// match arm.
+// A missing device identity must cost its request, not the room's connection.
 #[tokio::test]
 async fn a_handler_error_after_parsing_does_not_end_the_session() {
     let dir = tempfile::TempDir::new().expect("tmpdir");
     let state = private_broker_state(&dir.path().to_string_lossy()).await;
 
-    // Structurally valid, current version, and refused by the handler because this relay
-    // is private.
-    let refused = plain_action_frame_versioned(
+    let refused = encrypted_action_frame_versioned(
         "surface-a",
-        "action-plaintext",
+        "action-missing-device",
         serde_json::json!({ "type": "list_threads", "query": { "limit": 5 } }),
         RELAY_PROTOCOL_VERSION,
     );
 
-    // A request the private relay WILL serve, so the assertion is about the session
-    // surviving rather than about plaintext being refused.
+    let mut refused: serde_json::Value = serde_json::from_str(&refused).expect("frame parses");
+    refused["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("device_id");
+    let refused = serde_json::to_string(&refused).expect("frame serializes");
+    // A valid encrypted request must still be served after the refusal.
     let envelope = encrypt_json(
         "secret",
         &RemoteActionRequest::ListThreads {
@@ -4818,8 +4626,8 @@ async fn a_handler_error_after_parsing_does_not_end_the_session() {
     assert!(
         kinds
             .iter()
-            .any(|kind| kind == "encrypted_remote_action_result" || kind == "targeted_messages"),
-        "the sealed request must still be answered after the plaintext one was refused. \
+            .any(|kind| kind == "encrypted_remote_action_result:action-sealed"),
+        "the valid request must still be answered after the missing-device request was refused. \
          A handler error belongs to the surface that caused it, not to the room. Saw {kinds:?}"
     );
 }
@@ -6355,18 +6163,6 @@ async fn published_snapshot_payloads(state: &AppState) -> Vec<serde_json::Value>
 }
 
 #[tokio::test]
-async fn managed_snapshot_is_not_published_without_a_live_paired_surface() {
-    let state = snapshot_publish_state(SecurityProfile::managed()).await;
-
-    let payloads = published_snapshot_payloads(&state).await;
-
-    assert!(
-        payloads.is_empty(),
-        "nobody live can read a managed snapshot, so none may be broadcast; got {payloads:?}"
-    );
-}
-
-#[tokio::test]
 async fn private_snapshot_is_not_published_without_a_live_paired_surface() {
     let state = snapshot_publish_state(SecurityProfile::private()).await;
 
@@ -6376,23 +6172,6 @@ async fn private_snapshot_is_not_published_without_a_live_paired_surface() {
         payloads.is_empty(),
         "nobody live can open a private snapshot, so none may be sent; got {payloads:?}"
     );
-}
-
-#[tokio::test]
-async fn managed_snapshot_is_still_one_broadcast_once_a_paired_surface_is_live() {
-    let state = snapshot_publish_state(SecurityProfile::managed()).await;
-    bring_paired_phone_online(&state).await;
-
-    let payloads = published_snapshot_payloads(&state).await;
-
-    assert_eq!(payloads.len(), 1, "expected one frame, got {payloads:?}");
-    let payload = &payloads[0];
-    assert_eq!(payload["kind"], "session_snapshot");
-    assert!(
-        payload.get("target_peer_id").is_none() && payload.get("messages").is_none(),
-        "managed snapshots stay an un-addressed broadcast; got {payload}"
-    );
-    assert_eq!(payload["snapshot"]["broker_can_read_content"], true);
 }
 
 #[tokio::test]
@@ -6419,4 +6198,107 @@ async fn private_snapshot_is_sealed_for_the_live_paired_surface_only() {
     let snapshot: serde_json::Value =
         decrypt_json("secret", &envelope).expect("the phone's own secret opens the snapshot");
     assert_eq!(snapshot["broker_can_read_content"], false);
+}
+
+#[test]
+fn plaintext_remote_actions_are_rejected() {
+    for request in [
+        serde_json::json!({"type":"list_threads"}),
+        serde_json::json!({"type":"claim_challenge","proof":"proof"}),
+    ] {
+        let error = parse_inbound_payload(serde_json::json!({
+            "kind":"remote_action", "protocol_version":RELAY_PROTOCOL_VERSION,
+            "action_id":"plain", "device_id":"phone-1", "request":request
+        }))
+        .expect_err("plaintext must never be accepted");
+        assert!(error.contains("plaintext"));
+    }
+}
+
+fn open_encrypted_request_json(action_id: &str, request: serde_json::Value) -> RemoteActionRequest {
+    let action = parse_inbound_payload(serde_json::json!({
+        "kind": "encrypted_remote_action",
+        "protocol_version": RELAY_PROTOCOL_VERSION,
+        "action_id": action_id,
+        "device_id": "phone-1",
+        "envelope": encrypt_json("secret", &request).expect("request encrypts"),
+    }))
+    .expect("payload parses")
+    .expect("payload is handled");
+    match action {
+        InboundBrokerPayload::EncryptedRemoteAction {
+            action_id: parsed_id,
+            device_id,
+            session_claim,
+            envelope,
+        } => {
+            assert_eq!(parsed_id, action_id);
+            assert_eq!(device_id.as_deref(), Some("phone-1"));
+            assert!(session_claim.is_none());
+            decrypt_json("secret", &envelope).expect("request JSON parses")
+        }
+        other => panic!("unexpected payload: {other:?}"),
+    }
+}
+
+#[test]
+fn parse_encrypted_send_message_json() {
+    match open_encrypted_request_json(
+        "act-message",
+        serde_json::json!({
+            "type": "send_message", "input": { "text": "hello", "thread_id": "thread-1" }
+        }),
+    ) {
+        RemoteActionRequest::SendMessage { input, skill } => {
+            assert_eq!(input.text, "hello");
+            assert_eq!(input.thread_id, "thread-1");
+            assert!(skill.is_none());
+        }
+        other => panic!("unexpected request: {other:?}"),
+    }
+}
+
+#[test]
+fn parse_encrypted_list_threads_json() {
+    match open_encrypted_request_json(
+        "act-threads",
+        serde_json::json!({
+            "type": "list_threads", "query": { "limit": 40 }
+        }),
+    ) {
+        RemoteActionRequest::ListThreads { query } => assert_eq!(query.limit, Some(40)),
+        other => panic!("unexpected request: {other:?}"),
+    }
+}
+
+#[test]
+fn parse_encrypted_claim_challenge_json() {
+    match open_encrypted_request_json(
+        "claim-start",
+        serde_json::json!({
+            "type": "claim_challenge", "proof": "claim-init-proof"
+        }),
+    ) {
+        RemoteActionRequest::ClaimChallenge { proof } => assert_eq!(proof, "claim-init-proof"),
+        other => panic!("unexpected request: {other:?}"),
+    }
+}
+
+#[test]
+fn parse_encrypted_claim_device_json() {
+    match open_encrypted_request_json(
+        "claim-finish",
+        serde_json::json!({
+            "type": "claim_device", "challenge_id": "challenge-1", "proof": "signed-proof"
+        }),
+    ) {
+        RemoteActionRequest::ClaimDevice {
+            challenge_id,
+            proof,
+        } => {
+            assert_eq!(challenge_id, "challenge-1");
+            assert_eq!(proof, "signed-proof");
+        }
+        other => panic!("unexpected request: {other:?}"),
+    }
 }

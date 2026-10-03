@@ -1,13 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
 
-function authHeaders(bearerToken) {
-  return bearerToken
-    ? {
-        Authorization: `Bearer ${bearerToken}`,
-      }
-    : {};
-}
-
 function extractErrorMessage(payload, fallback) {
   return (
     payload?.error?.message ||
@@ -17,9 +9,8 @@ function extractErrorMessage(payload, fallback) {
   );
 }
 
-export async function fetchSession(relayPort, { bearerToken } = {}) {
+export async function fetchSession(relayPort) {
   const response = await fetch(`http://127.0.0.1:${relayPort}/api/session`, {
-    headers: authHeaders(bearerToken),
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
@@ -32,9 +23,8 @@ export async function fetchSession(relayPort, { bearerToken } = {}) {
 // high-frequency session snapshot into the dedicated Devices channel
 // (`GET /api/devices`); `/api/session` now always reports them empty. Tests that
 // assert device lifecycle state must read this channel, not `fetchSession`.
-export async function fetchDevices(relayPort, { bearerToken } = {}) {
+export async function fetchDevices(relayPort) {
   const response = await fetch(`http://127.0.0.1:${relayPort}/api/devices`, {
-    headers: authHeaders(bearerToken),
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
@@ -43,10 +33,9 @@ export async function fetchDevices(relayPort, { bearerToken } = {}) {
   return payload.data;
 }
 
-export async function listThreads(relayPort, { bearerToken, cwd } = {}) {
+export async function listThreads(relayPort, { cwd } = {}) {
   const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
   const response = await fetch(`http://127.0.0.1:${relayPort}/api/threads${query}`, {
-    headers: authHeaders(bearerToken),
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
@@ -60,7 +49,7 @@ export async function listThreads(relayPort, { bearerToken, cwd } = {}) {
 export async function deleteThreadAndWait(
   relayPort,
   threadId,
-  { bearerToken, cwd, timeoutMs = 15000 } = {}
+  { cwd, timeoutMs = 15000 } = {}
 ) {
   if (!threadId) {
     return;
@@ -68,7 +57,7 @@ export async function deleteThreadAndWait(
 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const session = await fetchSession(relayPort, { bearerToken });
+    const session = await fetchSession(relayPort);
     if (session.active_thread_id !== threadId || !session.active_turn_id) {
       break;
     }
@@ -81,7 +70,7 @@ export async function deleteThreadAndWait(
       `http://127.0.0.1:${relayPort}/api/threads/${encodeURIComponent(threadId)}/delete`,
       {
         method: "POST",
-        headers: authHeaders(bearerToken),
+        headers: { "X-Agent-Relay-CSRF": "1" },
       }
     );
     const payload = await response.json();
@@ -105,7 +94,7 @@ export async function deleteThreadAndWait(
   }
 
   while (Date.now() < deadline) {
-    const threads = await listThreads(relayPort, { bearerToken, cwd });
+    const threads = await listThreads(relayPort, { cwd });
     if (!threads.some((thread) => thread.id === threadId)) {
       return;
     }
@@ -118,7 +107,7 @@ export async function deleteThreadAndWait(
 export async function deleteThreadsForCwdAndWait(
   relayPort,
   cwd,
-  { bearerToken, timeoutMs = 15000 } = {}
+  { timeoutMs = 15000 } = {}
 ) {
   if (!cwd) {
     return [];
@@ -128,7 +117,7 @@ export async function deleteThreadsForCwdAndWait(
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    const threads = await listThreads(relayPort, { bearerToken, cwd });
+    const threads = await listThreads(relayPort, { cwd });
     if (threads.length === 0) {
       return deletedThreadIds;
     }
@@ -140,7 +129,6 @@ export async function deleteThreadsForCwdAndWait(
       }
 
       await deleteThreadAndWait(relayPort, thread.id, {
-        bearerToken,
         cwd,
         timeoutMs: remainingMs,
       });
@@ -148,7 +136,7 @@ export async function deleteThreadsForCwdAndWait(
     }
   }
 
-  const leftoverThreads = await listThreads(relayPort, { bearerToken, cwd });
+  const leftoverThreads = await listThreads(relayPort, { cwd });
   if (leftoverThreads.length > 0) {
     throw new Error(`timed out waiting to delete ${leftoverThreads.length} thread(s) for ${cwd}`);
   }

@@ -364,20 +364,29 @@ pub fn sealwire_mcp_bridge_path() -> String {
 pub fn sealwire_relay_url() -> String {
     std::env::var("SEALWIRE_RELAY_URL").unwrap_or_else(|_| {
         let port = std::env::var("PORT").unwrap_or_else(|_| "8787".to_string());
-        format!("http://127.0.0.1:{port}")
+        let host = std::env::var("BIND_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        local_relay_url(&host, &port)
     })
 }
 
-/// `RELAY_API_TOKEN` for MCP subprocess transport auth, using the same
-/// normalization as [`crate::auth::AuthConfig`]: trim surrounding whitespace,
-/// then treat empty as absent. Independent of seat / peer / device identity.
-pub fn sealwire_relay_api_token() -> Option<String> {
-    sealwire_relay_api_token_from(std::env::var("RELAY_API_TOKEN").ok())
+fn local_relay_url(host: &str, port: &str) -> String {
+    if host.contains(':') {
+        format!("http://[{host}]:{port}")
+    } else {
+        format!("http://{host}:{port}")
+    }
 }
 
-/// Pure form of [`sealwire_relay_api_token`] for tests and shared normalization.
-pub fn sealwire_relay_api_token_from(value: Option<String>) -> Option<String> {
-    relay_util::trimmed_option_string(value)
+#[cfg(test)]
+mod relay_url_tests {
+    #[test]
+    fn mcp_url_follows_ipv4_and_ipv6_loopback_binds() {
+        assert_eq!(
+            super::local_relay_url("127.0.0.2", "8787"),
+            "http://127.0.0.2:8787"
+        );
+        assert_eq!(super::local_relay_url("::1", "8787"), "http://[::1]:8787");
+    }
 }
 
 impl StartThreadRequest {
@@ -1077,26 +1086,6 @@ mod event_ingress_audit;
 #[cfg(test)]
 mod registry_tests {
     use super::*;
-
-    #[test]
-    fn sealwire_relay_api_token_matches_authconfig_trim() {
-        // AuthConfig::from_env_for_bind_host uses trimmed_option_string on the
-        // same env var; MCP subprocesses must see exactly that token.
-        assert_eq!(sealwire_relay_api_token_from(None), None);
-        assert_eq!(sealwire_relay_api_token_from(Some(String::new())), None);
-        assert_eq!(
-            sealwire_relay_api_token_from(Some("   \t\n".to_string())),
-            None
-        );
-        assert_eq!(
-            sealwire_relay_api_token_from(Some("  secret  ".to_string())).as_deref(),
-            Some("secret")
-        );
-        assert_eq!(
-            sealwire_relay_api_token_from(Some("relay-secret".to_string())).as_deref(),
-            Some("relay-secret")
-        );
-    }
 
     #[test]
     fn the_default_provider_is_declared_not_an_accident_of_spawn_order() {

@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 
-const dom = new JSDOM('<!doctype html><html><body><form id="connection-form"></form></body></html>', {
+const dom = new JSDOM('<!doctype html><html><body></body></html>', {
   url: "http://localhost/",
 });
 global.window = dom.window;

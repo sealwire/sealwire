@@ -245,19 +245,7 @@ fn peer_allowed_tools(server: &str, unrestricted: bool) -> Value {
 /// thread id proves nothing about who is calling. The token only ever exists
 /// inside the subprocess the relay launched.
 fn peer_mcp_config(worker_path: &str, token: &str) -> Value {
-    peer_mcp_config_with_transport(
-        worker_path,
-        token,
-        crate::provider::sealwire_relay_api_token().as_deref(),
-    )
-}
-
-fn peer_mcp_config_with_transport(
-    worker_path: &str,
-    token: &str,
-    relay_api_token: Option<&str>,
-) -> Value {
-    let mut config = orchestrator_mcp_config_with_transport(worker_path, "", relay_api_token);
+    let mut config = orchestrator_mcp_config(worker_path, "");
     let mut server = config["sealwire"].take();
     if let Some(env) = server["env"].as_object_mut() {
         env.remove("SEALWIRE_DEVICE_ID");
@@ -285,19 +273,7 @@ fn orchestrator_allowed_tools() -> Value {
 /// MCP config for a team seat: same bridge, run id instead of a device id, so
 /// the seat's own tool calls land on the read-only path.
 fn seat_mcp_config(worker_path: &str, run_id: &str) -> Value {
-    seat_mcp_config_with_transport(
-        worker_path,
-        run_id,
-        crate::provider::sealwire_relay_api_token().as_deref(),
-    )
-}
-
-fn seat_mcp_config_with_transport(
-    worker_path: &str,
-    run_id: &str,
-    relay_api_token: Option<&str>,
-) -> Value {
-    let mut config = orchestrator_mcp_config_with_transport(worker_path, "", relay_api_token);
+    let mut config = orchestrator_mcp_config(worker_path, "");
     if let Some(env) = config["sealwire"]["env"].as_object_mut() {
         env.remove("SEALWIRE_DEVICE_ID");
         env.insert(
@@ -309,30 +285,14 @@ fn seat_mcp_config_with_transport(
 }
 
 fn orchestrator_mcp_config(worker_path: &str, device_id: &str) -> Value {
-    orchestrator_mcp_config_with_transport(
-        worker_path,
-        device_id,
-        crate::provider::sealwire_relay_api_token().as_deref(),
-    )
-}
-
-fn orchestrator_mcp_config_with_transport(
-    worker_path: &str,
-    device_id: &str,
-    relay_api_token: Option<&str>,
-) -> Value {
     let bridge = std::path::Path::new(worker_path)
         .parent()
         .map(|dir| dir.join("orchestrator-mcp.mjs").display().to_string())
         .unwrap_or_else(|| "claude-worker/orchestrator-mcp.mjs".to_string());
-    let mut env = json!({
+    let env = json!({
         "SEALWIRE_DEVICE_ID": device_id,
         "SEALWIRE_RELAY_URL": crate::provider::sealwire_relay_url(),
     });
-    // Same AuthConfig normalization as Codex/ACP: trim, omit empty/whitespace-only.
-    if let Some(token) = relay_api_token.filter(|token| !token.is_empty()) {
-        env["RELAY_API_TOKEN"] = Value::String(token.to_string());
-    }
     json!({
         "sealwire": {
             "type": "stdio",
@@ -3701,7 +3661,7 @@ for await (const line of rl) {
     /// Orchestrator's key, and it unlocks the write tools.
     #[test]
     fn a_seats_mcp_config_carries_the_run_and_no_device() {
-        let config = seat_mcp_config_with_transport("/tmp/claude-worker/worker.mjs", "run-7", None);
+        let config = seat_mcp_config("/tmp/claude-worker/worker.mjs", "run-7");
         let env = config["sealwire"]["env"].as_object().expect("env object");
         assert_eq!(
             env.get("SEALWIRE_SEAT_RUN_ID").and_then(|v| v.as_str()),
@@ -3710,54 +3670,6 @@ for await (const line of rl) {
         assert!(env.get("SEALWIRE_DEVICE_ID").is_none(), "{env:?}");
         assert!(env.get("SEALWIRE_ASK_TOKEN").is_none(), "{env:?}");
         assert!(env.get("RELAY_API_TOKEN").is_none(), "{env:?}");
-    }
-
-    #[test]
-    fn claude_seat_and_peer_mcp_include_trimmed_relay_api_token_only() {
-        let seat = seat_mcp_config_with_transport(
-            "/tmp/claude-worker/worker.mjs",
-            "run-7",
-            crate::provider::sealwire_relay_api_token_from(Some("  secret  ".to_string()))
-                .as_deref(),
-        );
-        let seat_env = seat["sealwire"]["env"].as_object().expect("seat env");
-        assert_eq!(
-            seat_env.get("RELAY_API_TOKEN").and_then(|v| v.as_str()),
-            Some("secret")
-        );
-        assert!(seat_env.get("SEALWIRE_ASK_TOKEN").is_none(), "{seat_env:?}");
-        assert!(seat_env.get("SEALWIRE_DEVICE_ID").is_none(), "{seat_env:?}");
-
-        let peer = peer_mcp_config_with_transport(
-            "/tmp/claude-worker/worker.mjs",
-            "tok-1",
-            crate::provider::sealwire_relay_api_token_from(Some("  secret  ".to_string()))
-                .as_deref(),
-        );
-        let server = crate::provider::relay_mcp_server_name("tok-1");
-        let server = server.as_str();
-        assert_eq!(peer[server]["env"]["RELAY_API_TOKEN"], "secret");
-        assert_eq!(peer[server]["env"]["SEALWIRE_ASK_TOKEN"], "tok-1");
-        assert!(peer[server]["env"].get("SEALWIRE_DEVICE_ID").is_none());
-
-        for absent in [
-            crate::provider::sealwire_relay_api_token_from(None),
-            crate::provider::sealwire_relay_api_token_from(Some(String::new())),
-            crate::provider::sealwire_relay_api_token_from(Some("   \t\n".to_string())),
-        ] {
-            let seat = seat_mcp_config_with_transport(
-                "/tmp/claude-worker/worker.mjs",
-                "run-7",
-                absent.as_deref(),
-            );
-            assert!(seat["sealwire"]["env"].get("RELAY_API_TOKEN").is_none());
-            let peer = peer_mcp_config_with_transport(
-                "/tmp/claude-worker/worker.mjs",
-                "tok-1",
-                absent.as_deref(),
-            );
-            assert!(peer[server]["env"].get("RELAY_API_TOKEN").is_none());
-        }
     }
 
     /// `tools: []` is how the Orchestrator is stripped down to a chat surface.

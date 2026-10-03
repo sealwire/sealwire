@@ -5478,7 +5478,7 @@ fn a_restricted_codex_peer_is_not_stopped_to_approve_the_relays_own_tools() {
 
 #[test]
 fn a_codex_seat_mcp_config_carries_the_run_and_no_peer_or_device_identity() {
-    let config = super::seat_mcp_servers_with_transport("run-7", None);
+    let config = super::seat_mcp_servers("run-7");
     assert!(
         config.is_object(),
         "seat mcp_servers must stay map-shaped like peer"
@@ -5497,29 +5497,6 @@ fn a_codex_seat_mcp_config_carries_the_run_and_no_peer_or_device_identity() {
             .is_some(),
         "{env:?}"
     );
-}
-
-#[test]
-fn codex_seat_and_peer_mcp_include_non_empty_relay_api_token_only() {
-    let seat = super::seat_mcp_servers_with_transport("run-7", Some("relay-secret"));
-    assert_eq!(seat["sealwire"]["env"]["RELAY_API_TOKEN"], "relay-secret");
-    assert!(seat["sealwire"]["env"].get("SEALWIRE_ASK_TOKEN").is_none());
-    assert!(seat["sealwire"]["env"].get("SEALWIRE_DEVICE_ID").is_none());
-
-    let name = crate::provider::relay_mcp_server_name("tok-1");
-    let name = name.as_str();
-    let peer = super::peer_mcp_servers_with_transport("tok-1", Some("relay-secret"));
-    assert_eq!(peer[name]["env"]["RELAY_API_TOKEN"], "relay-secret");
-    assert_eq!(peer[name]["env"]["SEALWIRE_ASK_TOKEN"], "tok-1");
-    assert!(peer[name]["env"].get("SEALWIRE_SEAT_RUN_ID").is_none());
-    assert!(peer[name]["env"].get("SEALWIRE_DEVICE_ID").is_none());
-
-    for absent in [None, Some("")] {
-        let seat = super::seat_mcp_servers_with_transport("run-7", absent);
-        assert!(seat["sealwire"]["env"].get("RELAY_API_TOKEN").is_none());
-        let peer = super::peer_mcp_servers_with_transport("tok-1", absent);
-        assert!(peer[name]["env"].get("RELAY_API_TOKEN").is_none());
-    }
 }
 
 fn codex_thread_start_mcp(payload: &Value) -> Option<&Value> {

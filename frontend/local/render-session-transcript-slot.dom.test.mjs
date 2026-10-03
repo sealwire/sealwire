@@ -83,8 +83,6 @@ function noop() {}
 
 function createRendererOptions() {
   const state = {
-    authenticated: false,
-    authRequired: true,
     deviceId: "device-test",
     localUiStore: null,
     providerModels: {},
@@ -209,13 +207,13 @@ test("renderSession publishes transcript content through LocalShell without crea
     const renderer = createSessionRenderer(createRendererOptions());
 
     act(() => {
-      renderer.renderAuthRequiredState("Auth required marker");
+      renderer.renderSessionUnavailable("Unavailable marker");
     });
 
     assert.equal(host.querySelector("#transcript"), transcript);
     assert.equal(host.querySelectorAll("#transcript").length, 1);
-    assert.match(transcript.textContent, /Authentication required/);
-    assert.match(transcript.textContent, /Auth required marker/);
+    assert.match(transcript.textContent, /Relay unavailable/);
+    assert.match(transcript.textContent, /Unavailable marker/);
     assert.deepEqual(
       getCreateRootContainersForTest()
         .filter((container) => container?.id === "transcript")

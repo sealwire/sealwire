@@ -51,7 +51,7 @@ if (process.env.RELAY_BROKER_AUTH_MODE?.trim().toLowerCase() === "public") {
 const relayEnv = {
   ...sharedEnv,
   PORT: process.env.RELAY_SERVER_PORT || relayPort,
-  BIND_HOST: process.env.RELAY_SERVER_BIND_HOST || process.env.BIND_HOST || "127.0.0.1",
+  BIND_HOST: process.env.RELAY_SERVER_BIND_HOST || "127.0.0.1",
   RELAY_BROKER_URL: process.env.RELAY_BROKER_URL || defaultBrokerUrl,
   RELAY_BROKER_PUBLIC_URL: brokerPublicUrl,
   RELAY_BROKER_CHANNEL_ID: process.env.RELAY_BROKER_CHANNEL_ID || "dev-room",

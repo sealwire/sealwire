@@ -71,23 +71,10 @@ pub struct HealthResponse {
     pub launch_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct AuthSessionView {
-    pub auth_required: bool,
-    pub authenticated: bool,
-    pub cookie_session: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct AuthSessionInput {
-    pub token: String,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SecurityMode {
     Private,
-    Managed,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]

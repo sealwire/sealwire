@@ -114,7 +114,6 @@ function Sidebar() {
     h("div", { className: "sidebar-search-mount", id: "sidebar-search-mount" }),
     // No state pills under the bell: turning it on re-groups the list by state, and
     // those bucket headers already say everything a pill row could.
-    h(AuthForm),
     // No Sessions/Projects toggle: selecting a project PINS it to the top of a list
     // that stays complete, so there was never a second mode to be in. The Project
     // switcher in the header is the whole control.
@@ -173,25 +172,6 @@ function Sidebar() {
  * remote rendered it conditionally, local could not, because three ids inside it had
  * to resolve for app.js. Retiring those ids is what made one component possible.
  */
-
-function AuthForm() {
-  return h(
-    "form",
-    { className: "workspace-form auth-form", hidden: true, id: "connection-form" },
-    h("label", { className: "sidebar-label", htmlFor: "api-token-input" }, "API Token"),
-    h(
-      "div",
-      { className: "workspace-picker" },
-      h("input", {
-        autoComplete: "off",
-        id: "api-token-input",
-        placeholder: "Enter RELAY_API_TOKEN to sign in",
-        type: "password",
-      }),
-      h("button", { className: "load-button", id: "apply-token-button", type: "submit" }, "Sign In")
-    )
-  );
-}
 
 // A mount, not the control. The split button's right half lists the AVAILABLE agents,
 // which this file cannot know: the provider catalogue is fetched after boot into

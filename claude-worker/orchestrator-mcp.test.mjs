@@ -212,24 +212,3 @@ test("an unreachable relay is reported as a tool error, not a session fault", as
     server.close();
   }
 });
-
-test("the API token is sent only when the relay is configured to want one", async () => {
-  const { server, seen, port } = await startStubRelay(() => ({ body: TOOLS_BODY }));
-  {
-    const { client, transport } = await connect(port);
-    await client.listTools();
-    await transport.close();
-    assert.equal(
-      seen.at(-1).authorization,
-      null,
-      "a loopback relay with no token must not be sent a bogus header"
-    );
-  }
-  {
-    const { client, transport } = await connect(port, { RELAY_API_TOKEN: "s3cret" });
-    await client.listTools();
-    await transport.close();
-    assert.equal(seen.at(-1).authorization, "Bearer s3cret");
-  }
-  server.close();
-});

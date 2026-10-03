@@ -467,98 +467,6 @@ fn push_subscription_actions_round_trip_and_are_not_claim_gated() {
 }
 
 #[test]
-fn plain_remote_action_result_payload_splits_control_results_from_session_results() {
-    let control = RemoteActionResultPlaintext {
-        kind: RemoteActionResultKind::RemoteControlResult,
-        action: RemoteActionKind::Heartbeat,
-        ok: true,
-        snapshot: Some(make_snapshot()),
-        receipt: None,
-        ask_user_answer_receipt: None,
-        providers: None,
-        models: None,
-        threads: None,
-        thread_entry_detail: None,
-        thread_transcript: None,
-        workspace_diff: None,
-        workspace_git_context: None,
-        thread_workspace: None,
-        thread_settings: None,
-        thread_skills: None,
-        reviews: None,
-        workflows: None,
-        devices: None,
-        projects: None,
-        ask_user_question_detail: None,
-        ask_detail: None,
-        session_claim: None,
-        session_claim_expires_at: None,
-        claim_challenge_id: None,
-        claim_challenge: None,
-        claim_challenge_expires_at: None,
-        error: None,
-        error_code: None,
-    };
-
-    let payload = build_plain_remote_action_result_payload("action-1", "surface-1", &control)
-        .expect("control payload");
-    match payload {
-        OutboundBrokerPayload::RemoteControlResult { action, .. } => {
-            assert_eq!(action, RemoteActionKind::Heartbeat);
-        }
-        other => panic!("unexpected control payload: {other:?}"),
-    }
-
-    let session = RemoteActionResultPlaintext {
-        kind: RemoteActionResultKind::RemoteSessionResult,
-        action: RemoteActionKind::StartSession,
-        ok: true,
-        snapshot: Some(make_snapshot()),
-        receipt: None,
-        ask_user_answer_receipt: None,
-        providers: None,
-        models: None,
-        threads: None,
-        thread_entry_detail: None,
-        thread_transcript: None,
-        workspace_diff: None,
-        workspace_git_context: None,
-        thread_workspace: None,
-        thread_settings: None,
-        thread_skills: None,
-        reviews: None,
-        workflows: None,
-        devices: None,
-        projects: None,
-        ask_user_question_detail: None,
-        ask_detail: None,
-        session_claim: Some("claim-1".to_string()),
-        session_claim_expires_at: Some(123),
-        claim_challenge_id: None,
-        claim_challenge: None,
-        claim_challenge_expires_at: None,
-        error: None,
-        error_code: None,
-    };
-
-    let payload = build_plain_remote_action_result_payload("action-2", "surface-1", &session)
-        .expect("session payload");
-    match payload {
-        OutboundBrokerPayload::RemoteSessionResult {
-            action,
-            snapshot,
-            session_claim,
-            ..
-        } => {
-            assert_eq!(action, RemoteActionKind::StartSession);
-            assert_eq!(snapshot.active_thread_id.as_deref(), Some("thread-1"));
-            assert_eq!(session_claim.as_deref(), Some("claim-1"));
-        }
-        other => panic!("unexpected session payload: {other:?}"),
-    }
-}
-
-#[test]
 fn cached_remote_action_result_keeps_canonical_threads() {
     let threads = make_threads();
 
@@ -940,7 +848,7 @@ fn dedicated_workflows_and_devices_actions_are_read_only_data_fetches() {
 fn fetch_projects_action_round_trips_and_is_not_claim_gated() {
     // The dedicated Projects read channel for remote (mirrors fetch_reviews): read-only,
     // parses from `{}`, binds the device, is NOT claim-gated, and routes to the data
-    // (transcript-result) kind so its `projects` payload rides the plaintext path.
+    // (transcript-result) kind so its `projects` payload reaches the device.
     let request: RemoteActionRequest =
         serde_json::from_value(serde_json::json!({ "type": "fetch_projects" }))
             .expect("fetch_projects should parse");
@@ -1056,19 +964,6 @@ fn resolve_and_delete_review_actions_round_trip_and_bind_device() {
 }
 
 #[test]
-fn plain_remote_action_result_chunk_payloads_fit_within_broker_limit() {
-    let plaintext = make_large_thread_transcript_plaintext();
-    let payloads =
-        build_plain_remote_action_result_chunk_payloads("action-1", "surface-1", &plaintext)
-            .expect("plain chunk payloads");
-
-    assert!(payloads.len() > 1);
-    assert!(payloads
-        .iter()
-        .all(|payload| frame_bytes_for_payload(payload) <= MAX_BROKER_TEXT_FRAME_BYTES));
-}
-
-#[test]
 fn encrypted_remote_action_result_chunk_payloads_fit_within_broker_limit() {
     let plaintext = make_large_thread_transcript_plaintext();
     let payloads = build_encrypted_remote_action_result_chunk_payloads(
@@ -1089,9 +984,6 @@ fn encrypted_remote_action_result_chunk_payloads_fit_within_broker_limit() {
 #[test]
 fn large_ask_user_detail_result_chunks_fit_within_broker_limit() {
     let plaintext = make_large_ask_user_detail_plaintext();
-    let plain_payloads =
-        build_plain_remote_action_result_chunk_payloads("action-1", "surface-1", &plaintext)
-            .expect("plain ask-user detail chunks");
     let encrypted_payloads = build_encrypted_remote_action_result_chunk_payloads(
         "action-1",
         "surface-1",
@@ -1101,31 +993,14 @@ fn large_ask_user_detail_result_chunks_fit_within_broker_limit() {
     )
     .expect("encrypted ask-user detail chunks");
 
-    assert!(plain_payloads.len() > 1);
     assert!(encrypted_payloads.len() > 1);
-    assert!(plain_payloads
-        .iter()
-        .all(|payload| frame_bytes_for_payload(payload) <= MAX_BROKER_TEXT_FRAME_BYTES));
     assert!(encrypted_payloads
         .iter()
         .all(|payload| frame_bytes_for_payload(payload) <= MAX_BROKER_TEXT_FRAME_BYTES));
 }
 
 #[test]
-fn plain_fetch_reviews_result_carries_the_reviews_payload_to_the_device() {
-    // REPRO (remote reuse picker is empty): `fetch_reviews` computes the full
-    // ReviewsResponse server-side and puts it on the outcome, but the PLAINTEXT broker
-    // envelope for a transcript-kind result never forwards it — OutboundBrokerPayload::
-    // RemoteTranscriptResult has no `reviews` field at all. So the phone's
-    // fetchRemoteReviews() reads `result.reviews` as undefined and the reuse dropdown in
-    // "Request review" shows no existing reviewers, while local (which reads the same data
-    // over /api/session/reviews) shows them.
-    //
-    // Only this ONE path lost it, which is why the symptom was intermittent: the encrypted
-    // path and the plaintext CHUNKED fallback both serialize RemoteActionResultPlaintext
-    // wholesale (it has a `reviews` field), so they always carried it. A reviews payload
-    // only chunks when it exceeds MAX_BROKER_TEXT_FRAME_BYTES — so the field survived on
-    // big workspaces and vanished on small ones.
+fn encrypted_fetch_reviews_result_carries_the_reviews_payload_to_the_device() {
     let reviews = crate::protocol::ReviewsResponse {
         handovers: Vec::new(),
         handover_links: Vec::new(),
@@ -1176,8 +1051,7 @@ fn plain_fetch_reviews_result_carries_the_reviews_payload_to_the_device() {
         error_code: None,
     };
 
-    let payload = build_plain_remote_action_result_payload("action-reviews", "surface-1", &result)
-        .expect("reviews payload");
+    let payload = sealed_result_value(&result).expect("reviews payload");
     let json = serde_json::to_value(&payload).expect("serialize reviews payload");
     let carried = json
         .get("reviews")
@@ -1185,7 +1059,7 @@ fn plain_fetch_reviews_result_carries_the_reviews_payload_to_the_device() {
         .clone();
     assert!(
         !carried.is_null(),
-        "the plaintext fetch_reviews envelope must carry `reviews` to the device; got: {json}"
+        "the encrypted fetch_reviews envelope must carry `reviews` to the device; got: {json}"
     );
     assert_eq!(
         carried["reviewer_threads"][0]["reviewer_thread_id"], "reviewer-1",
@@ -1194,9 +1068,7 @@ fn plain_fetch_reviews_result_carries_the_reviews_payload_to_the_device() {
 }
 
 #[test]
-fn plain_fetch_ask_result_carries_the_ask_detail_payload_to_the_device() {
-    // Same plaintext-drop trap as fetch_reviews: RemoteTranscriptResult must copy
-    // `ask_detail` or Agents hover on the phone gets undefined while local works.
+fn encrypted_fetch_ask_result_carries_the_ask_detail_payload_to_the_device() {
     let ask_detail = crate::protocol::AskDetailResponse {
         id: "ask-1".to_string(),
         asker_thread_id: "asker".to_string(),
@@ -1244,8 +1116,7 @@ fn plain_fetch_ask_result_carries_the_ask_detail_payload_to_the_device() {
         error_code: None,
     };
 
-    let payload = build_plain_remote_action_result_payload("action-ask", "surface-1", &result)
-        .expect("ask detail payload");
+    let payload = sealed_result_value(&result).expect("ask detail payload");
     let json = serde_json::to_value(&payload).expect("serialize ask detail payload");
     let carried = json
         .get("ask_detail")
@@ -1253,7 +1124,7 @@ fn plain_fetch_ask_result_carries_the_ask_detail_payload_to_the_device() {
         .clone();
     assert!(
         !carried.is_null(),
-        "the plaintext fetch_ask envelope must carry `ask_detail` to the device; got: {json}"
+        "the encrypted fetch_ask envelope must carry `ask_detail` to the device; got: {json}"
     );
     assert_eq!(carried["id"], "ask-1");
     assert_eq!(carried["message"], "full prompt with context");
@@ -1261,7 +1132,7 @@ fn plain_fetch_ask_result_carries_the_ask_detail_payload_to_the_device() {
 }
 
 #[test]
-fn plain_dedicated_workflows_and_devices_payloads_reach_the_device() {
+fn encrypted_dedicated_workflows_and_devices_payloads_reach_the_device() {
     let result = RemoteActionResultPlaintext {
         kind: RemoteActionResultKind::RemoteTranscriptResult,
         action: RemoteActionKind::FetchWorkflows,
@@ -1302,19 +1173,14 @@ fn plain_dedicated_workflows_and_devices_payloads_reach_the_device() {
         error_code: None,
     };
 
-    let payload = build_plain_remote_action_result_payload("action-data", "surface-1", &result)
-        .expect("dedicated data payload");
+    let payload = sealed_result_value(&result).expect("dedicated data payload");
     let json = serde_json::to_value(payload).expect("serialize payload");
     assert_eq!(json["workflows"]["workflows_revision"], 4);
     assert_eq!(json["devices"]["devices_revision"], 5);
 }
 
 #[test]
-fn plain_fetch_projects_result_carries_the_projects_payload_to_the_device() {
-    // Same plaintext-vs-sealed asymmetry as reviews (above): fetch_projects computes the
-    // full ProjectsResponse server-side, but the PLAINTEXT transcript-kind envelope only
-    // carries it if build_plain_remote_action_result_payload copies the new field. Guard
-    // the silent-drop trap so the remote Projects view isn't empty on small workspaces.
+fn encrypted_fetch_projects_result_carries_the_projects_payload_to_the_device() {
     let mut thread_project_id = std::collections::HashMap::new();
     thread_project_id.insert("thread-1".to_string(), "proj-1".to_string());
     let projects = crate::protocol::ProjectsResponse {
@@ -1358,8 +1224,7 @@ fn plain_fetch_projects_result_carries_the_projects_payload_to_the_device() {
         error_code: None,
     };
 
-    let payload = build_plain_remote_action_result_payload("action-projects", "surface-1", &result)
-        .expect("projects payload");
+    let payload = sealed_result_value(&result).expect("projects payload");
     let json = serde_json::to_value(&payload).expect("serialize projects payload");
     let carried = json
         .get("projects")
@@ -1367,7 +1232,7 @@ fn plain_fetch_projects_result_carries_the_projects_payload_to_the_device() {
         .clone();
     assert!(
         !carried.is_null(),
-        "the plaintext fetch_projects envelope must carry `projects` to the device; got: {json}"
+        "the encrypted fetch_projects envelope must carry `projects` to the device; got: {json}"
     );
     assert_eq!(carried["projects_revision"], 42);
     assert_eq!(carried["projects"][0]["id"], "proj-1");
@@ -1378,9 +1243,7 @@ fn plain_fetch_projects_result_carries_the_projects_payload_to_the_device() {
 }
 
 #[test]
-fn plain_fetch_workspace_git_context_result_reaches_the_device() {
-    // Missing from the plaintext envelope builder fails only on unsealed transport.
-    // Request binding is covered elsewhere; this locks the RESULT path.
+fn encrypted_fetch_workspace_git_context_result_reaches_the_device() {
     let result = RemoteActionResultPlaintext {
         kind: remote_action_result_kind(RemoteActionKind::FetchWorkspaceGitContext),
         action: RemoteActionKind::FetchWorkspaceGitContext,
@@ -1421,8 +1284,7 @@ fn plain_fetch_workspace_git_context_result_reaches_the_device() {
         error_code: None,
     };
 
-    let payload = build_plain_remote_action_result_payload("action-git", "surface-1", &result)
-        .expect("git context payload");
+    let payload = sealed_result_value(&result).expect("git context payload");
     let json = serde_json::to_value(&payload).expect("serialize git context payload");
     let carried = json
         .get("workspace_git_context")
@@ -1430,7 +1292,7 @@ fn plain_fetch_workspace_git_context_result_reaches_the_device() {
         .clone();
     assert!(
         !carried.is_null(),
-        "the plaintext envelope must carry `workspace_git_context`; got: {json}"
+        "the decrypted result must carry `workspace_git_context`; got: {json}"
     );
     assert_eq!(carried["branch"], "main");
     assert_eq!(carried["dirty"], true);
@@ -1757,13 +1619,15 @@ async fn queueing_a_chunk_train_does_not_block_the_read_loop() {
 fn workspace_diff_chunks(target_peer_id: &str, chunk_count: usize) -> Vec<OutboundBrokerPayload> {
     (0..chunk_count)
         .map(
-            |chunk_index| OutboundBrokerPayload::RemoteActionResultChunk {
+            |chunk_index| OutboundBrokerPayload::EncryptedRemoteActionResultChunk {
                 action_id: "action-1".to_string(),
                 target_peer_id: target_peer_id.to_string(),
                 action: RemoteActionKind::FetchWorkspaceDiff,
                 chunk_index,
                 chunk_count,
-                data: "payload".to_string(),
+                device_id: "phone-1".to_string(),
+                envelope: encrypt_json("secret", &serde_json::json!({"data":"payload"}))
+                    .expect("chunk encrypts"),
             },
         )
         .collect()
@@ -1804,19 +1668,6 @@ fn a_chunked_reply_does_not_pay_for_base64_twice() {
          unavoidable for ciphertext; a second one is pure waste, and at ~1.78x it is a \
          quarter of the bandwidth bill for the largest thing the relay sends."
     );
-
-    let plain =
-        build_plain_remote_action_result_chunk_payloads("action-1", "surface-1", &plaintext)
-            .expect("plain chunk payloads");
-    let plain_wire: usize = plain.iter().map(frame_bytes_for_payload).sum();
-    let plain_ratio = plain_wire as f64 / payload_bytes as f64;
-
-    assert!(
-        plain_ratio < 1.15,
-        "a plaintext chunked reply cost {plain_ratio:.3}x its payload ({plain_wire} bytes \
-         for {payload_bytes}). Nothing is encrypted here, so there is no ciphertext to \
-         encode — the chunks are JSON text and should travel as text."
-    );
 }
 
 /// Build the same large transcript, but out of text that makes chunking hard: multi-byte
@@ -1856,37 +1707,6 @@ fn unicode_and_escape_heavy_chunks_stay_within_the_frame_limit_and_round_trip() 
     let plaintext = make_unicode_heavy_transcript_plaintext();
     let expected = serde_json::to_value(&plaintext).expect("plaintext serializes");
 
-    let plain =
-        build_plain_remote_action_result_chunk_payloads("action-1", "surface-1", &plaintext)
-            .expect("plain chunk payloads");
-    assert!(plain.len() > 1, "the fixture must actually chunk");
-
-    let mut reassembled = String::new();
-    for payload in &plain {
-        assert!(
-            frame_bytes_for_payload(payload) <= MAX_BROKER_TEXT_FRAME_BYTES,
-            "a chunk of multi-byte / escape-heavy text produced an oversized frame. The \
-             fit loop has to measure EVERY piece: character-boundary pieces are not \
-             uniform, and the broker drops an over-limit frame, which this relay treats \
-             as fatal."
-        );
-        match payload {
-            OutboundBrokerPayload::RemoteActionResultChunk { data, .. } => {
-                reassembled.push_str(data)
-            }
-            other => panic!("expected a plain chunk, got {other:?}"),
-        }
-    }
-    // Exactly what the browser does: concatenate the pieces and parse the result.
-    let parsed: serde_json::Value =
-        serde_json::from_str(&reassembled).expect("reassembled chunks must be valid JSON");
-    assert_eq!(
-        parsed, expected,
-        "reassembling the chunks must reproduce the result byte for byte; a split that \
-         landed mid-character would corrupt it here"
-    );
-
-    // The encrypted path fits against ciphertext length, so it needs its own coverage.
     let encrypted = build_encrypted_remote_action_result_chunk_payloads(
         "action-1",
         "surface-1",
@@ -2369,7 +2189,7 @@ fn fetch_thread_skills_binds_the_asking_device_and_needs_no_session_claim() {
 }
 
 #[test]
-fn plain_fetch_thread_skills_result_reaches_the_device() {
+fn encrypted_fetch_thread_skills_result_reaches_the_device() {
     let result = RemoteActionResultPlaintext {
         kind: remote_action_result_kind(RemoteActionKind::FetchThreadSkills),
         action: RemoteActionKind::FetchThreadSkills,
@@ -2416,13 +2236,12 @@ fn plain_fetch_thread_skills_result_reaches_the_device() {
         error: None,
         error_code: None,
     };
-    let payload = build_plain_remote_action_result_payload("action-skills", "surface-1", &result)
-        .expect("skills payload");
+    let payload = sealed_result_value(&result).expect("skills payload");
     let json = serde_json::to_value(&payload).expect("serialize skills payload");
     let carried = &json["thread_skills"];
     assert_eq!(
         carried["provider"], "codex",
-        "plaintext must carry thread_skills: {json}"
+        "the decrypted result must carry thread_skills: {json}"
     );
     assert_eq!(carried["cwd"], "/repo");
     assert_eq!(
@@ -2432,7 +2251,7 @@ fn plain_fetch_thread_skills_result_reaches_the_device() {
 }
 
 // The phone reloads the latest page on this code alone, so it must survive every way a
-// result travels: sealed, plaintext, and replayed from the cache.
+// result travels: encrypted and replayed from the cache.
 #[tokio::test]
 async fn a_rejected_transcript_cursor_reaches_the_device_as_its_code() {
     use crate::state::{RelayState, SecurityProfile};
@@ -2483,12 +2302,6 @@ async fn a_rejected_transcript_cursor_reaches_the_device_as_its_code() {
     result.error_code = cached.error_code;
     let sealed = serde_json::to_value(&result).expect("sealed result");
     assert_eq!(sealed["error_code"], "transcript_cursor_rejected");
-    let plain = serde_json::to_value(
-        build_plain_remote_action_result_payload("action-1", "surface-1", &result)
-            .expect("plaintext payload"),
-    )
-    .expect("plaintext json");
-    assert_eq!(plain["error_code"], "transcript_cursor_rejected");
 }
 
 // The phone recovers shelled rows by id; the action must parse and answer like a page.
@@ -2552,4 +2365,9 @@ fn recheck_signed_out_providers_is_a_claim_free_remote_action() {
     assert!(!requires_session_claim(
         RemoteActionKind::RecheckSignedOutProviders
     ));
+}
+
+fn sealed_result_value(result: &RemoteActionResultPlaintext) -> Result<serde_json::Value, String> {
+    let envelope = encrypt_json("payload-secret", result)?;
+    decrypt_json("payload-secret", &envelope)
 }
