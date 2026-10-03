@@ -47,6 +47,9 @@ fs4 = "1.1.0"
 rpassword = "7.3"
 zeroize = "1.8"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+
 [build-dependencies]
 serde_json.workspace = true
 

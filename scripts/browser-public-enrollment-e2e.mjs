@@ -40,7 +40,7 @@ const ENROLLMENT_PROMPT =
   process.env.BROWSER_E2E_PUBLIC_ENROLLMENT_PROMPT ||
   "Reply with exactly: public-enrollment-e2e";
 const PUBLIC_ISSUER_SECRET =
-  process.env.BROWSER_E2E_PUBLIC_ISSUER_SECRET || "browser-e2e-public-issuer";
+  process.env.BROWSER_E2E_PUBLIC_ISSUER_SECRET || "browser-e2e-public-issuer-a3f76b4c2089d15e6b0fa873c4e9521d";
 const USE_FAKE_PROVIDER = process.env.AGENT_PROVIDERS === "fake";
 
 async function main() {

@@ -1,672 +1,119 @@
 # Deployment
 
-## Hosted Cloud vs self-host OpenAccess
+Run SealWire on the computer that has your projects and coding agents. Use it
+locally, connect your phone through SealWire Cloud, or run your own broker for
+remote access.
 
-Two different products share related code; do not confuse them:
+## Run locally
 
-| | SealWire Cloud (hosted) | Public self-host broker |
-|--|-------------------------|-------------------------|
-| How users attach | `npx sealwire cloud` (or `RELAY_BROKER_URL` to the hosted origin) | You run your own broker |
-| Binary | **`sealwire-broker-private`** (private repo, commercial license policy) | Public **`relay-broker`** (`docker/broker.Dockerfile`) |
-| Deploy config | Private repository only | Explicit example: `examples/self-host-broker/` |
-| Default in this repo | **No** root Railway config / **no** auto-deploy workflow | Docker Compose / example Railway.toml you opt into |
+Install Node.js 18+ and sign in to the coding agent you want to use. See the
+[README](README.md) for supported agents and setup.
 
-The public repository must **not** automatically deploy OpenAccess `relay-broker`
-onto the hosted Cloud service. There is intentionally **no** root `railway.toml`
-and **no** GitHub Action that runs `railway up` for the broker.
-
-## Recommended shape
-
-The recommended deployment model today is:
-
-- run `relay-server` on the workstation, VM, or jump host that already has the
-  real workspace and logged-in `codex` CLI
-- deploy `relay-broker` separately when you want phones or remote browsers to
-  attach over LAN or the public internet
-
-The broker is the easiest piece to deploy first because it does not run Codex
-or touch your workspace directly.
-
-## Local development
-
-For local development, `npm run dev:full` launches:
-
-- Vite on `5173`
-- `relay-server` on `8787`
-- `relay-broker` on `8788`
-
-When a private LAN IP is available, pairing links default to that LAN address.
-Use `npm run dev:full:local` if you want localhost-only pairing links and a
-localhost-only broker.
-
-### Run from source
-
-Running from source is the path for contributors, or for any platform without a
-prebuilt binary. You will need:
-
-- **Rust toolchain** (`cargo`) — to build `relay-server`
-- **Node.js 18+** and `npm` — to build the web UI and run the Claude Code
-  worker
-- **Agent auth** for whichever provider you use:
-  - Codex: the [`codex`](https://github.com/openai/codex) CLI installed and
-    logged in
-  - Claude Code: an `ANTHROPIC_API_KEY`, or an existing
-    [Claude Code](https://docs.claude.com/en/docs/claude-code/overview) login
-    (no separate `claude` CLI required)
-
-Then:
-
-```bash
-git clone https://github.com/sealwire/sealwire.git
-cd sealwire
-
-npm install                            # vite + frontend tooling
-(cd claude-worker && npm install)      # only needed for Claude Code sessions
-
-# Config for attaching to the hosted SealWire Cloud broker. This file is gitignored.
-cat > .env.cloud.local <<'EOF'
-RELAY_BROKER_URL=wss://app.sealwire.dev
-RELAY_BROKER_AUTH_MODE=public
-EOF
-
-npm run dev:restart:cloud
-```
-
-`npm run dev:restart:cloud` sources `.env.cloud.local` (falling back to the
-legacy `.env.public.local`), rebuilds the web UI, and starts `relay-server`.
-Re-run it anytime to pick up code or config changes — it kills the previous
-process first.
-
-Open <http://localhost:8787> and pair a phone or remote browser from the
-Settings panel. If you only want a localhost-only setup with no remote pairing,
-use `npm run dev:restart:local` (no broker config needed) instead.
-
-The product overview — what sealwire is, the security model, and what is and is
-not built yet — is in [`README.md`](README.md); testing and CI in
-[`TESTING.md`](TESTING.md).
-
-### Desktop app (preview)
-
-The macOS desktop shell is a Tauri app that supervises the existing
-`relay-server` binary as a sidecar. It keeps the local and remote web surfaces
-as separate native webview windows and adds a small control window for workspace
-selection, broker mode, restart/stop, and relay logs.
-
-```bash
-npm run desktop:dev
-npm run desktop:check
-npm run desktop:build
-```
-
-The desktop scripts build the Vite web assets, compile `relay-server`, download
-and verify a fixed Node.js LTS runtime, stage `claude-worker` with production
-dependencies, and copy the sidecars into `src-tauri/binaries/` with Tauri's
-target-triple sidecar names. Generated sidecars, runtime caches, staged
-resources, and bundles are ignored by git.
-
-## `npx sealwire`
-
-`sealwire` is published on npm, so on macOS you can skip the Rust toolchain
-entirely:
+From your project directory, run:
 
 ```bash
 npx sealwire
 ```
 
-The `npm Release` GitHub Actions workflow builds a prebuilt `relay-server`
-binary (with the web UI embedded), stages it under `bin/<platform>-<arch>/`,
-and publishes when `NPM_TOKEN` is configured. **Only macOS binaries
-(`darwin-arm64`, `darwin-x64`) ship today** — the Linux and Windows targets are
-temporarily commented out in the workflow while they're untested. On those
-platforms `npx sealwire` still runs, but it falls back to building
-`relay-server` from source via Cargo.
+SealWire opens its web interface at <http://localhost:8787>. By default, it is
+accessible only from that computer.
 
-By default `npx sealwire` starts a **localhost-only** relay; it does not attach
-to a broker unless you tell it to. Commands and flags:
-
-When a broker is configured, the relay reads the broker's minimum supported
-SealWire version and broker protocol version from `GET /api/health` before it
-opens the local server. The broker also checks the version on relay WebSocket
-joins. Set `RELAY_BROKER_MIN_RELAY_VERSION` on the broker to a stable
-`major.minor.patch` release (default `0.11.3`). Deploy the broker and publish
-the client with this handshake as one coordinated release: older clients omit
-`client_version` and are refused by the new broker, while updated clients need
-the new health fields. Clients from before this handshake cannot exit before
-startup; the broker can only reject their remote connection. Subsequent client
-releases can be rolled out before raising the broker minimum. An outdated npm
-client should be restarted with `npx sealwire@latest cloud`, or updated globally
-with `npm install -g sealwire@latest`. Desktop users should install the latest
-app release. Local-only launches have no broker to check.
+To explicitly run without a broker connection:
 
 ```bash
-# pair remote devices through the hosted licensed Cloud broker
-sealwire cloud                          # attach to hosted Cloud (default
-                                        # wss://app.sealwire.dev)
-                                        # — commercial policy runs server-side;
-                                        # this public package never ships it
-sealwire --broker wss://app.sealwire.dev  # or point at your own self-host broker
-
-sealwire local                          # no broker (alias for --no-broker)
-sealwire --no-broker                    # same: run without a broker
-sealwire --host 127.0.0.1 --port 8787   # bind address / port
-sealwire --no-open                      # do not open the browser automatically
+npx sealwire local
 ```
 
-You can also set `AGENT_RELAY_PUBLIC_BROKER_URL` instead of passing `--broker`.
-By default the launcher waits for the newly started relay to identify itself
-through its health check, then opens its local web UI in your default browser.
-It skips browser opening in CI; pass `--no-open` to disable it explicitly in
-any environment.
+## Connect your phone or another computer
 
-The `local` command (and `--no-broker`) is an explicit "stay offline" request:
-it ignores any configured broker origin **and** strips every `RELAY_BROKER_*`
-variable from the environment — case-insensitively, so a stray `relay_broker_url`
-on Windows can't sneak back in — before starting the relay. It does not change
-the bind host; pass `--host` if you need to control network exposure.
-
-## Relay env vars
-
-To attach to the hosted SealWire Cloud broker, only two variables are required:
-
-```ini
-# .env.cloud.local — gitignored; read by `npm run dev:restart:cloud`
-RELAY_BROKER_URL=wss://app.sealwire.dev
-RELAY_BROKER_AUTH_MODE=public
+```bash
+npx sealwire cloud
 ```
 
-`scripts/restart-dev-cloud.sh` (run via `npm run dev:restart:cloud`) sources
-this file before launching `relay-server`. The `relay-server` binary itself
-reads from the process environment and does not auto-load `.env` files, so if
-you launch it without the script you will need to `export` the vars or feed
-them in some other way (e.g. `direnv`, `dotenv-cli`).
+The first time, enter your SealWire Cloud access key when prompted. Open
+Settings in the local interface, scan the pairing QR code on your other device,
+and approve the pairing on your computer.
 
-Everything else has a sensible default:
+Paired devices can follow your sessions, send messages, respond to approvals,
+and receive notifications. Add the phone interface to your home screen to use
+it like an app. Your computer must stay running for remote access.
 
-- `RELAY_BROKER_CONTROL_URL` is derived from `RELAY_BROKER_URL`
-  (`wss://` becomes `https://`)
-- `RELAY_BROKER_PUBLIC_URL` falls back to `RELAY_BROKER_URL`; only set it
-  separately when the relay reaches the broker through a different hostname
-  than remote devices do (e.g. a Docker network)
-- `RELAY_BROKER_PEER_ID` defaults to `local-relay`
-- `RELAY_BROKER_REGISTRATION_PATH` and `RELAY_BROKER_IDENTITY_PATH` default to
-  the relay's state directory, alongside `session.json`
-- `RELAY_SECURITY_MODE` already defaults to `private`
-- `BIND_HOST` and `PORT` already default to `127.0.0.1` and `8787`
+You can remove paired devices from Settings. To release this computer's Cloud
+access:
 
-`RELAY_BROKER_AUTH_MODE` (how the relay authenticates to the broker) and
-`RELAY_SECURITY_MODE` (whether the broker can see session content) are
-independent: `auth_mode=public` + `security=private` is the recommended
-combination — use the hosted broker for transport, keep payloads end-to-end
-encrypted so the broker stays blind to content.
+```bash
+npx sealwire cloud unbind
+```
 
-Relay state (sessions, projects, paired devices, broker identity) lives in one
-place per machine — `~/.agent-relay/` — so it does not fork when you launch
-from a different folder. Leave `RELAY_STATE_PATH` unset unless you want an
-isolated throwaway relay; see
-[`DEPLOYMENT.md`](DEPLOYMENT.md#relay-state-location) for the details.
+## Use your own broker
 
-Notes:
+A self-hosted broker lets you connect devices through a server you control.
+Your projects and coding agents stay on the computer running SealWire.
 
-- the server binds to `127.0.0.1` by default
-- `web/` is generated and gitignored, so build the frontend before running the Rust web servers
-- set `BIND_HOST=0.0.0.0` only when you intentionally want network reachability
-- set `RELAY_API_TOKEN` to protect `/api` routes
-- when `BIND_HOST` is non-loopback, `RELAY_API_TOKEN` is now required by default
-- `RELAY_ALLOW_INSECURE_NO_AUTH=1` only exists as an explicit insecure development escape hatch for non-loopback binds
-- **`RELAY_ALLOWED_HOSTS` — read this if you run the relay behind a reverse proxy.** The relay now refuses any request whose `Host` header is not one it recognises, answering `421 Misdirected Request`. This is the DNS-rebinding defence: after a rebind the browser still sends the attacker's hostname, so an `Origin` check cannot catch it (the expected origin is *derived* from `Host`, and the two agree) — only pinning the hostname does.
-  - always accepted: `localhost`, anything in `127.0.0.0/8`, `::1`, and a non-loopback `BIND_HOST`'s own address
-  - enforced when `BIND_HOST` is loopback (the default) **or** when `RELAY_ALLOWED_HOSTS` is set
-  - not enforced when `BIND_HOST` is non-loopback and `RELAY_ALLOWED_HOSTS` is unset, since the external hostname cannot be guessed and those binds already require a token
-  - **migration:** if nginx/Caddy proxies to a loopback-bound relay while preserving the external `Host` (`proxy_set_header Host $host`, which is Caddy's default), every request starts returning 421 after upgrading. Set `RELAY_ALLOWED_HOSTS=relay.example.com` (comma-separated for several names, port optional). The alternative is to have the proxy send the relay's own name instead (`proxy_set_header Host $proxy_host`).
-  - a refused request is logged with the `Host` it carried, so a hosts-file alias that stops working is diagnosable rather than mysterious
-- the local web UI now exchanges `RELAY_API_TOKEN` for an `HttpOnly` same-site session cookie, so normal browser use no longer needs to keep sending the raw token on every request
-- direct `Authorization: Bearer ...` API access still works for scripts and manual clients
-- relay HTTP responses now send CSP, `Permissions-Policy`, `Referrer-Policy: no-referrer`, and `X-Content-Type-Options: nosniff`
-- relay CSP keeps `connect-src` wide by default for local/LAN development; set `RELAY_CSP_CONNECT_SRC` only when you want to tighten production origins
-- set `RELAY_ENABLE_HSTS=1` only when the relay is actually behind HTTPS and forwards `X-Forwarded-Proto: https`
-- set `RELAY_HSTS_VALUE` if you need a narrower HSTS policy than the default `max-age=31536000; includeSubDomains`
-- set `RELAY_SECURITY_MODE=private` or `RELAY_SECURITY_MODE=managed` to switch visibility mode
-- use `npm run dev` when iterating on the web UI, then `npm run build` to refresh the
-  Rust-served assets under `web/`
-- use `npm run dev:full` to build the Rust-served frontend once, keep `web/`
-  rebuilding on change, and launch relay-server on `8787` plus relay-broker on
-  `8788`; when a private LAN IP is available, pairing links default to that LAN address
-- use `npm run dev:full:local` if you want localhost-only pairing links and a
-  localhost-only broker
-- override `RELAY_DEV_SERVER_PORT` or `RELAY_DEV_BROKER_PORT` if those defaults
-  are already in use
-- if you want to override the detected LAN address, set
-  `RELAY_BROKER_PUBLIC_URL=ws://<your-lan-ip>:8788`
+Set `RELAY_BROKER_TICKET_SECRET` to the same secret on the broker and the
+SealWire computer. Generate it once with `openssl rand -base64 48` and keep
+it across restarts.
+
+For the included [Docker Compose setup](docker-compose.yml), run
+`docker compose up -d --build` on the broker server. On the SealWire computer,
+connect with:
+
+```bash
+RELAY_BROKER_AUTH_MODE=self_hosted \
+RELAY_BROKER_TICKET_SECRET="$RELAY_BROKER_TICKET_SECRET" \
+RELAY_BROKER_CHANNEL_ID=my-relay \
+npx sealwire --broker https://broker.example.com
+```
+
+See the [self-hosted deployment example](examples/self-host-broker/README.md) and
+[configuration reference](.env.example) for other deployment options. Use HTTPS for internet access
+and keep the broker's settings and data across restarts so paired devices can
+reconnect.
+
+## Desktop app
+
+The macOS desktop app is available as a preview. It provides a menu-bar icon and
+windows for your local workspace and remote sessions. See the
+[README](README.md) for an overview.
+
+## Common options
+
+| Command | Use |
+| --- | --- |
+| `npx sealwire --port 8788` | Use a different local port. |
+| `npx sealwire --no-open` | Start without opening a browser. |
+| `npx sealwire --help` | Show all available commands and options. |
 
 ## Relay state location
 
-`relay-server` keeps its durable state in **one directory per machine**:
-`~/.agent-relay/`. The directory you launch from is the default *workspace* for
-new sessions (each session stores its own `cwd`, and the UI groups sessions by
-folder) — it does not select which state you get. Launching from a second
-folder therefore continues the same sessions, projects, and paired devices
-rather than starting a blank relay.
+Sessions, projects, paired devices, and connection credentials are saved in
+`~/.agent-relay/`. Restarting SealWire or launching from another project keeps
+that saved state. Back up the whole directory when moving to another computer.
 
-Four files make up that state, and they are **one identity set**:
+Run one SealWire instance at a time with the default state location. Advanced
+settings, including a separate state location, are in
+[`.env.example`](.env.example).
 
-| File | What it holds |
-|---|---|
-| `session.json` | sessions, projects, paired devices, per-thread settings |
-| `public-broker-registration.json` | relay id + refresh token for the public broker |
-| `public-broker-identity.json` | the relay's long-lived signing seed |
-| `vapid.key` | Web Push key; losing it invalidates every phone subscription |
+## Privacy
 
-`RELAY_STATE_PATH` moves `session.json`, and the other three follow it into the
-same directory. Use it for an isolated, throwaway relay:
+Private mode is the default: session content sent between your devices is
+end-to-end encrypted. New devices require your approval before they can
+connect. See the [security model](docs/security-model.md) for more information.
 
-```ini
-RELAY_STATE_PATH=/tmp/sealwire-scratch/session.json
-```
+## Updating
 
-The per-file overrides (`RELAY_BROKER_REGISTRATION_PATH`,
-`RELAY_BROKER_IDENTITY_PATH`, `RELAY_VAPID_KEY_PATH`) exist for split setups,
-but pointing one **outside** the state directory splits the identity set: the
-relay can then fail to find its registration, enroll as a brand-new relay, and
-orphan already-paired devices. It is honoured, with a warning at startup naming
-the variable and where the file landed. A wholly relative configuration (a
-relative `RELAY_STATE_PATH` *and* relative sibling paths, as
-`scripts/restart-dev-cloud-pg.sh` uses) moves as one unit and is not a split.
-
-There is no migration from older per-directory state: if the shared location
-has no `session.json`, the relay starts a fresh one.
-
-Only one relay may run against a given state file — a second start refuses with
-a message pointing at the running one instead of corrupting the file. With
-shared state that means one relay per machine by default; give a second relay
-its own `RELAY_STATE_PATH` to run it alongside.
-
-## Self-hosted broker (OpenAccess)
-
-Build and run the **public** `relay-broker` image (not SealWire Cloud):
+Restart using the latest package in the mode you normally use:
 
 ```bash
-docker compose up --build relay-broker
+npx sealwire@latest
+# For Cloud access:
+npx sealwire@latest cloud
 ```
 
-Or directly with Docker:
+Your saved sessions and paired devices are retained. If SealWire reports that
+your version is too old to connect, update the package or desktop app before
+trying again.
 
-```bash
-docker build -f docker/broker.Dockerfile -t agent-relay-broker .
-docker run --rm -p 8788:8788 -e BIND_HOST=0.0.0.0 agent-relay-broker
-```
-
-For an explicit Railway self-host layout (volume, VAPID path, single replica),
-see [`examples/self-host-broker/`](examples/self-host-broker/). That example is
-opt-in; copying it is a conscious choice and never the hosted Cloud deploy path.
-
-Then point your local relay-server at that broker:
-
-```bash
-RELAY_BROKER_URL=ws://127.0.0.1:8788 \
-RELAY_BROKER_PUBLIC_URL=ws://192.168.1.105:8788 \
-RELAY_BROKER_CHANNEL_ID=dev-room \
-RELAY_BROKER_PEER_ID=local-relay \
-RELAY_BROKER_TICKET_SECRET=change-me \
-cargo run -p relay-server
-```
-
-Notes:
-
-- `RELAY_BROKER_AUTH_MODE` defaults to `self_hosted`
-- `relay-server` still expects local Codex access and a real workspace, so it
-  is usually better to run it on the machine that already owns the repo and CLI
-  session
-- when the broker is only locally reachable from the relay host, set
-  `RELAY_BROKER_PUBLIC_URL` to the LAN or public `ws://` / `wss://` address that
-  remote phones and browsers should use for pairing
-- `RELAY_BROKER_URL` and `RELAY_BROKER_PUBLIC_URL` should still point at the
-  same broker instance; they only differ in how the relay host versus remote
-  devices reach that broker
-- `RELAY_BROKER_TICKET_SECRET` must match on both the broker and relay-server
-  in `self_hosted` mode
-- `RELAY_BROKER_DEVICE_JOIN_TTL_SECS` is optional in `self_hosted` mode. If it
-  is unset, paired-device broker join tickets stay valid until revoke; if it is
-  set, saved remote access expires after that many seconds and requires
-  re-pairing
-
-## Public broker mode
-
-`public` broker auth runs as a hosted auth plane inside the broker service
-itself. In that mode, the broker issues short-lived websocket access tokens
-over HTTP and verifies them itself; the relay no longer signs broker join
-tickets directly.
-
-`public` mode uses a hosted control-plane API on the broker itself.
-
-Broker env:
-
-- `RELAY_BROKER_AUTH_MODE=public`
-- `RELAY_BROKER_PUBLIC_ISSUER_SECRET`
-- `RELAY_BROKER_PUBLIC_STATE_PATH` in production or any non-loopback bind
-- optional `RELAY_BROKER_PUBLIC_STATE_PATH` for localhost-only development
-- optional `RELAY_BROKER_PUBLIC_POSTGRES_URL` — durable control-plane state in
-  Postgres instead of the JSON file (set exactly one of state path or Postgres URL)
-  - On startup the broker requires GIN indexes over `superseded_tokens`, which let it
-    check a rotated-away token without scanning the table. It builds any that are
-    missing with `CREATE INDEX CONCURRENTLY` (writes carry on, up to 10 minutes), and
-    refuses to start if one exists but is invalid, printing the exact SQL to run.
-    If the platform's startup healthcheck is shorter than the 10-minute build timeout,
-    build both indexes while the old broker is still serving, **before** deploying:
-    `CREATE INDEX CONCURRENTLY IF NOT EXISTS public_device_grants_superseded_idx ON public_device_grants USING GIN ((superseded_tokens::jsonb) jsonb_path_ops);`
-    and the same for `public_client_identities`. Before the rollout, verify that
-    both rows from the following query have `indisvalid = true`:
-    `SELECT c.relname, i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname IN ('public_device_grants_superseded_idx', 'public_client_identities_superseded_idx');`
-    An interrupted concurrent build can leave an invalid index that prevents the
-    new broker from starting.
-- optional `RELAY_BROKER_PUBLIC_POSTGRES_RELOAD_BEFORE_USE=1` — **cross-instance
-  revocation visibility** (NOT full HA). With a single broker process the
-  in-memory control plane is authoritative and the broker skips reloading from
-  Postgres before every operation (much lower QR / approval / login latency). Set
-  this to `1` if more than one broker process can run against the same database at
-  once — including brief blue/green or rolling-deploy overlap — so each instance
-  re-reads committed state before every op; otherwise a revoke or credential
-  rotation on one instance is not observed by another until it restarts. NOTE:
-  this only bounds how stale a *read* can be. It does NOT serialize cross-instance
-  invariants — operations are still read-modify-write outside the SQL transaction,
-  so e.g. two instances can each pass the same device-limit check and both insert
-  a grant. True multi-broker HA needs database-level locking, which this flag does
-  not provide. A single-replica self-host deployment (`examples/self-host-broker/railway.toml`
-  `numReplicas = 1`, no deploy overlap) does not need it.
-- optional `RELAY_BROKER_PUBLIC_RELAY_WS_TTL_SECS`
-- optional `RELAY_BROKER_PUBLIC_DEVICE_WS_TTL_SECS`
-
-Optional hardening env:
-
-- `RELAY_BROKER_PUBLIC_API_RATE_LIMIT_PER_MINUTE`
-- `RELAY_BROKER_JOIN_RATE_LIMIT_PER_MINUTE` — per client address and room (default 40)
-- `RELAY_BROKER_JOIN_IP_RATE_LIMIT_PER_MINUTE` — per client address across all rooms,
-  IPv6 grouped by /64 (default 120). The room is caller-chosen, so the per-room limit
-  alone does not bound join attempts.
-- `RELAY_BROKER_PAIRING_TICKET_RATE_LIMIT_PER_MINUTE` — pairing tickets one relay may
-  mint (default 30). Tickets are also capped at 600s regardless of the requested expiry.
-- `RELAY_BROKER_PUBLISH_RATE_LIMIT_PER_MINUTE` — surface peers (default 240)
-- `RELAY_BROKER_RELAY_PUBLISH_RATE_LIMIT_PER_MINUTE` — relay peers (default 36000).
-  Relays are first-party and an order of magnitude busier than a surface: transcript
-  deltas alone batch into a 100ms window and publish one frame each. Going over makes
-  the broker **drop that frame**, which the relay treats as fatal: it ends the session
-  and reconnects to resync rather than carry on with a hole in what the surface
-  received. Setting this below real traffic therefore causes repeated reconnects, not
-  just slowdown — and the broker's window is keyed by peer, so it does not reset when
-  the relay reconnects. It bounds frames, not bytes — see the byte budgets below for that.
-  Leaving it unset while the generic limit above **is** set keeps the generic limit
-  governing relays, so an already-tightened deployment is not widened by upgrading.
-- `RELAY_BROKER_PUBLISH_BYTES_PER_MINUTE` — surface peers (default 8MiB)
-- `RELAY_BROKER_RELAY_PUBLISH_BYTES_PER_MINUTE` — relay peers (default 512MiB).
-  The bandwidth counterpart to the frame allowances: a frame count is a poor proxy for
-  size, and 36000 frames at the 64KiB cap is ~2.2GiB/min from one peer. The relay default
-  is ~6.8x the chunked-reply ceiling of **75MiB/min**, leaving room for transcript deltas
-  and snapshots running alongside it.
-  **Do not re-derive that ceiling from the 32KiB chunk target.** That is a *payload* size,
-  and the frame carrying it is bigger. The 75MiB/min figure is instead
-  `RELAY_BROKER_MAX_TEXT_FRAME_BYTES` x the 50ms publish cadence — an upper bound, because
-  the relay's chunk builders shrink a chunk until its frame fits that cap, and the writer
-  paces chunks that far apart *including across consecutive replies*.
-  **The same fatal-on-refusal caveat applies as for the frame limit, and matters more
-  here**: a refused relay publish ends the session, and the resync sends a full snapshot —
-  so a budget set near real traffic reconnects in a loop and spends more bandwidth than it
-  saves. Set to `0` to disable the byte budget entirely. Follows the same migration rule: an
-  explicitly set generic byte budget governs relays until the relay-specific one is set.
-- `RELAY_BROKER_PUBLISH_BURST_BYTES` / `RELAY_BROKER_RELAY_PUBLISH_BURST_BYTES` —
-  burst is a **separate quota** from the rate: how much a peer may publish back-to-back
-  after idling (defaults 2MiB / 16MiB). Without it the first large reply after a quiet
-  period is refused, which is exactly when one is most likely. A burst below
-  `RELAY_BROKER_MAX_TEXT_FRAME_BYTES` is raised to it, since a smaller one could never
-  afford a single frame the broker itself accepts.
-- Global egress (measured **after** fan-out, so a broadcast counts once per recipient) is
-  **observed, not enforced**. Refusing on a global condition would punish a peer for its
-  neighbours' traffic, and for a relay that means a teardown whose resync adds egress —
-  the control would amplify the overload it fired on. It is counted, and a minute above
-  2GiB logs a warning. Watch `publish_limits.peak_egress_bytes_per_minute` on
-  `/api/admin/stats` before deciding whether enforcement is ever warranted.
-  Its scope is **`ServerMessage` bytes written to client sockets** — welcomes, presence,
-  messages and errors, including the error sent to a rejected join. Within that scope it is
-  exact rather than modelled: counted where each frame is serialized on its way out, so
-  fan-out is included by construction and a frame that failed to send is not counted. It
-  deliberately excludes WebSocket **control** frames (ping/pong), which carry no
-  application payload, so this is what the broker was asked to deliver rather than raw
-  socket throughput.
-- Both allowances are keyed on the **authenticated ticket identity** (`device_id` /
-  `pairing_id`), not on the broker-assigned `peer_id`. A surface gets a fresh `peer_id`
-  on every join, so keying on that would let any surface reset its budget by reconnecting.
-  A consequence worth knowing: two tabs on the same device share one budget.
-- `RELAY_BROKER_MAX_CONNECTIONS_PER_IP` — IPv6 clients are counted per /64.
-- `RELAY_BROKER_MAX_TOTAL_CONNECTIONS` — open websocket connections across all clients
-  (default 2048). Each can buffer up to twice the frame cap (128KiB by default), so the
-  default bounds that at ~256MiB. Past it new joins are refused with `rate_limited` while
-  seated sockets carry on; raise it with the instance's memory and `ulimit -n`.
-- `RELAY_BROKER_MAX_TEXT_FRAME_BYTES` — **has a 64KiB floor**, and values below it are
-  raised with a warning rather than honoured. relay-server fits every chunk against a fixed
-  64KiB limit compiled into its binary and never learns this setting, so a smaller cap does
-  not make relay frames smaller — it rejects them, and the broker closes the socket on
-  `frame_too_large`, so the reconnect replays the same reply and fails identically. Raising
-  the value above 64KiB works normally.
-- `RELAY_BROKER_IDLE_TIMEOUT_SECS`
-- `RELAY_BROKER_CSP_CONNECT_SRC` when you want production `connect-src` tighter
-  than the default dev/LAN-friendly policy
-- `RELAY_BROKER_ENABLE_HSTS=1` only behind HTTPS with
-  `X-Forwarded-Proto: https`
-- `RELAY_BROKER_HSTS_VALUE` if you need a custom HSTS policy instead of
-  `max-age=31536000; includeSubDomains`
-
-Relay-server env:
-
-- `RELAY_BROKER_AUTH_MODE=public`
-- optional `RELAY_BROKER_CONTROL_URL`
-- optional `RELAY_BROKER_REGISTRATION_PATH`
-- optional `RELAY_BROKER_IDENTITY_PATH`
-
-A relay without a cached registration now generates a local Ed25519 identity,
-requests a short-lived enrollment challenge from the broker, signs it locally,
-and caches the resulting `relay_id`, `broker_room_id`, and
-`relay_refresh_token` in `RELAY_BROKER_REGISTRATION_PATH` automatically.
-
-In `public` mode, approved devices now receive:
-
-- a short-lived broker websocket token
-- a long-lived `device_refresh_token`
-- the remote web surface immediately exchanges that refresh token for an
-  `HttpOnly` broker cookie and then uses the cookie to rotate broker access
-  instead of forcing re-pairing on every websocket token expiry
-- when the browser supports `WebCrypto` + `IndexedDB`, the remote surface keeps
-  its device signing key in browser-managed crypto storage instead of a
-  `localStorage` string; legacy or non-secure contexts still fall back to the
-  older storage path
-- browser `localStorage` keeps only durable device metadata plus the current
-  `device_token`; it no longer persists the refresh token, broker websocket
-  token, or `session_claim`
-
-Public-mode device refresh grants are persisted via
-`RELAY_BROKER_PUBLIC_STATE_PATH`; when the broker binds to a non-loopback host,
-startup now requires that path so refresh survives restart and revoke remains
-effective.
-
-The broker remote surface is installable as a PWA. Open the broker root, then
-use your browser's install action to pin it on a phone or desktop.
-
-Pairing and encrypted broker traffic work on plain LAN `http://` pages, but
-service worker registration still only works on `https://` origins or
-`localhost`.
-
-Public mode example:
-
-```bash
-RELAY_BROKER_AUTH_MODE=public \
-RELAY_BROKER_PUBLIC_ISSUER_SECRET=change-me \
-RELAY_BROKER_PUBLIC_STATE_PATH=/var/lib/agent-relay/public-control.json \
-docker compose up --build relay-broker
-```
-
-```bash
-RELAY_BROKER_URL=wss://broker.example.com \
-RELAY_BROKER_PUBLIC_URL=wss://broker.example.com \
-RELAY_BROKER_CONTROL_URL=https://broker.example.com \
-RELAY_BROKER_AUTH_MODE=public \
-RELAY_BROKER_PEER_ID=local-relay \
-cargo run -p relay-server
-```
-
-On first startup without a cached registration, the relay creates a local
-broker identity, requests an enrollment challenge from the broker, signs it,
-and caches the returned registration automatically. No shared broker admin
-token is required for the default public-mode bootstrap path.
-
-An authenticated relay can call `POST /api/public/relay/access/release` to
-tear down its access binding. After the injected access strategy accepts the
-release, the broker attempts public registration/grant cleanup, then always
-force-closes live room sockets, and returns the cleanup result. Strategy denial
-leaves registration and sockets intact. A typed unavailable cleanup failure
-still closes sockets; clients may retry with the same bearer when it remains
-valid. If an earlier authenticated release returned 503 and a later retry gets
-Unauthorized, the binding may already be gone (ambiguous durable outcome — treat
-as released).
-
-## Origin bypass protection (broker behind Cloudflare)
-
-Proxying the broker's hostname through Cloudflare does not hide the origin. On
-Railway, the CNAME target your custom domain points at (`<target>.up.railway.app`)
-routes by `Host`: anyone who connects to it with `Host: broker.example.com`
-reaches the service and skips Cloudflare's WAF, rate and bot rules, whether or
-not the service also has a generated public domain. With origin auth on, the
-broker refuses any request that lacks a secret header only Cloudflare adds.
-
-| Variable | Meaning |
-|---|---|
-| `RELAY_BROKER_ORIGIN_AUTH_SECRET` | Turns the check on. 32–512 characters from `A-Z a-z 0-9 - . _ ~ + / =`, at least 10 distinct. Generate with `openssl rand -base64 48`. |
-| `RELAY_BROKER_ORIGIN_AUTH_HEADER` | Optional header name, default `x-relay-origin-auth`. Lowercase `a-z 0-9 -`. Names the proxy or the app already use (`authorization`, `cookie`, `host`, `upgrade`, `cf-*`, `sec-*`, `x-forwarded-*`, …) are refused. |
-| `RELAY_BROKER_REQUIRE_ORIGIN_AUTH` | `1` means the secret must be present. Set it with the secret, so that deleting the secret later stops the broker instead of quietly reopening the origin. |
-
-**What is checked.** Every route on the broker's router: the web UI (`/`,
-`/static/*`, `/sw.js`, manifest, icons), `/api/public/*`, `/api/admin/stats`,
-the `/ws/:channel_id` WebSocket upgrade, and unknown paths. The only exception
-is `/api/health`, because Railway's deploy healthcheck calls the origin
-directly and cannot carry the header. Routes that a wrapping binary merges onto
-this router afterwards (the hosted build's own admin and readiness routes) are
-outside the check and keep their own authentication.
-
-**What passes.** Exactly one header line whose value matches the secret byte for
-byte. The comparison is between SHA-256 digests, in constant time. A missing
-header, a second copy of it, a comma-joined value, or a wrong value gets `403`
-`{"error":"forbidden","message":"request failed"}` with `Cache-Control:
-no-store`. The broker removes the header before any handler runs.
-
-**Bad config fails closed.** A secret that is present but empty (an unresolved
-platform variable reference expands to exactly that), too short, a placeholder,
-or contains other characters; a header name without a secret; a bad header name;
-`REQUIRE` without a secret; an unreadable `REQUIRE` value:
-
-- the `relay-broker` binary logs which variable is wrong (never its value) and
-  exits with status 1 before it binds;
-- a binary that embeds the router through `relay_broker::app*` answers `503` on
-  every route, and `/api/health` answers `503 {"status":"misconfigured"}` so a
-  healthcheck pointed at it fails the deploy. Embedders should call
-  `relay_broker::OriginGuard::from_env()` before binding so they refuse to
-  start instead, and hand the result to
-  `app_with_access_strategy_public_control_and_origin_guard`.
-
-### Cloudflare setup
-
-1. **SSL/TLS mode Full — not Full (strict) — for the broker hostname.** Railway
-   says proxied custom domains must use Full: Cloudflare reaches Railway with
-   Railway's `*.up.railway.app` certificate, so strict validation fails
-   (<https://docs.railway.com/networking/domains/working-with-domains>). Full
-   still encrypts the Cloudflare-to-origin hop the secret travels on; it does
-   not check the origin's certificate. Never use Flexible, which sends the
-   secret in plain text. To leave the zone's own mode alone, set it for this
-   hostname only: **Rules → Configuration Rules**, when
-   `http.host eq "broker.example.com"`, **SSL → Full**.
-2. **Network → WebSockets: on.**
-3. **Rules → Transform Rules → Modify Request Header → Create rule.** When
-   `http.host eq "broker.example.com"`, **Set static** header
-   `x-relay-origin-auth` to the secret. *Set static* overrides any copy the
-   client sent. Scope it to this hostname so the secret is not sent to other
-   origins on the zone. Anyone who can read the zone's rules can read the value;
-   treat that access like access to the secret.
-4. **Nothing that shows a challenge page on this hostname** (Bot Fight Mode,
-   "Under Attack", managed-challenge WAF rules). Relays and WebSocket
-   reconnects are not browsers and cannot solve one.
-
-### Rollout order
-
-Each step can be checked before the next, and nothing is refused until step 5.
-
-1. Deploy a build that has origin auth, with none of the variables set.
-   Behaviour is unchanged.
-2. Create the Configuration Rule and the Transform Rule. Neither has any effect
-   while the record is DNS-only.
-3. Switch the DNS record to **Proxied**. Pair a device, connect a relay, and
-   watch a live turn through Cloudflare. The origin ignores the header while no
-   secret is set.
-4. Wait longer than the old record's TTL (Cloudflare's Auto TTL for DNS-only
-   records is 5 minutes) so clients stop resolving straight to the origin.
-5. Set `RELAY_BROKER_ORIGIN_AUTH_SECRET` (the same value) and
-   `RELAY_BROKER_REQUIRE_ORIGIN_AUTH=1` on the service and redeploy. The restart
-   drops open sockets; they reconnect through Cloudflare.
-6. Verify (below). Only after that, if you want per-client limits back, set
-   `RELAY_BROKER_TRUSTED_CLIENT_IP_HEADER=cf-connecting-ip` and redeploy; see
-   *Client IP*. Never set it before step 5 is live.
-
-Nothing in the checks needs the secret on a command line. `O` is the Railway
-CNAME target (the value of your hostname's CNAME record). Railway routes it by
-`Host`, so every direct check names your hostname; a bare request gets
-Railway's own 404, which says nothing about the broker.
-
-```bash
-code() { curl -s -o /dev/null -w '%{http_code}\n' "$@"; }
-O=https://<target>.up.railway.app
-H=(-H 'Host: broker.example.com')
-code https://broker.example.com/api/health          # 200
-code https://broker.example.com/                    # 200 (Cloudflare added the header)
-code "${H[@]}" "$O/"                                # 403
-code "${H[@]}" "$O/api/public/relays"               # 403
-code "${H[@]}" "$O/api/health"                      # 200 (Railway readiness)
-code "${H[@]}" --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
-  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-  "$O/ws/probe"                                     # 403
-code "$O/api/health"                                # 404 from Railway, not the broker
-```
-
-A direct `403` counts only if its body is the broker's
-`{"error":"forbidden","message":"request failed"}`; check one with
-`curl -s "${H[@]}" "$O/"`.
-
-Then pair a phone and run a turn end to end once more.
-
-**Rollback.** Undo in reverse order. First remove
-`RELAY_BROKER_TRUSTED_CLIENT_IP_HEADER` if you set it to `cf-connecting-ip`:
-without origin auth any direct caller can write that header. Then remove
-`RELAY_BROKER_REQUIRE_ORIGIN_AUTH` and `RELAY_BROKER_ORIGIN_AUTH_SECRET`
-together and redeploy; only after that, switch the record back to DNS-only if
-you want to. In the other order every
-direct request is refused until the redeploy. Removing only the secret while
-`REQUIRE=1` stays set makes the broker refuse to start.
-
-**Rotation.** Only one secret is accepted at a time, so rotating has a short
-window of `403`s between the Transform Rule change and the redeploy. Update both
-back to back at a quiet time.
-
-### Things that change once the hostname is proxied
-
-- **Client IP.** Per-IP connection and rate limits and the IP blocklist key on
-  the socket address unless `RELAY_BROKER_TRUSTED_CLIENT_IP_HEADER` names a
-  header. Behind Cloudflare the socket address and `X-Real-IP` belong to
-  Cloudflare or the platform's proxy, so many users share one limit.
-  `cf-connecting-ip` fixes that, and is safe **only while origin auth is
-  enforced**. The blocklist check wraps the origin check, so it reads the header
-  first — but a request that did not come through Cloudflare is then refused
-  before any handler, per-IP limit or connection count sees the address it
-  claimed. What a direct caller can still do is pick the address the blocklist
-  sees for its own already-refused request, and for `/api/health`, which has no
-  per-IP state. Cloudflare sets `cf-connecting-ip` itself, with one exception:
-  a Worker's subrequest to its own zone copies `x-real-ip`, which the caller
-  controls. Do not trust the header if a Worker on that zone forwards to the
-  broker. It only covers routes of this router; routes a wrapping binary adds
-  (the hosted build's admin namespace) keep their own IP policy.
-- **Idle WebSockets.** Cloudflare closes a WebSocket that carries nothing for
-  about 100 seconds. Relays ping every 20 seconds and are unaffected; an idle
-  browser tab may reconnect a little before the broker's own 120-second idle
-  timeout would have closed it.
+Self-hosted brokers now reject short or placeholder signing secrets such as
+`change-me`. Replace weak values with generated secrets. For `self_hosted`
+authentication, update the secret on both sides and pair devices again.

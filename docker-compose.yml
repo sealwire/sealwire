@@ -9,6 +9,7 @@ services:
       BIND_HOST: 0.0.0.0
       PORT: 8788
       RUST_LOG: relay_broker=info,tower_http=info
+      RELAY_BROKER_TICKET_SECRET: ${RELAY_BROKER_TICKET_SECRET:?Set RELAY_BROKER_TICKET_SECRET to a generated secret}
     ports:
       - "8788:8788"
     restart: unless-stopped

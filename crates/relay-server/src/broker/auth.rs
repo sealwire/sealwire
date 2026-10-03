@@ -149,7 +149,8 @@ impl BrokerAuthConfig {
                             "{JOIN_TICKET_SECRET_ENV} is required in self-hosted broker auth mode"
                         )
                     })?;
-                let join_ticket_key = JoinTicketKey::from_secret(join_ticket_secret.as_bytes())?;
+                let join_ticket_key = JoinTicketKey::from_secret(join_ticket_secret.as_bytes())
+                    .map_err(|error| format!("{JOIN_TICKET_SECRET_ENV}: {error}"))?;
                 Ok(Self::SelfHostedSharedSecret {
                     join_ticket_key,
                     device_join_ttl_secs: parse_optional_u64_env(

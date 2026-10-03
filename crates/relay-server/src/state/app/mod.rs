@@ -532,17 +532,12 @@ impl AppState {
             .canonicalize()
             .map_err(|error| format!("failed to canonicalize current directory: {error}"))?;
         let persistence = PersistenceStore::resolve(&cwd);
-        let restored_state = match persistence.load().await {
-            Ok(state) => state,
-            Err(error) => {
-                warn!(
-                    "failed to load relay state from {}: {}",
-                    persistence.path().display(),
-                    error
-                );
-                None
-            }
-        };
+        let restored_state = persistence.load().await.map_err(|error| {
+            format!(
+                "failed to load relay state from {}: {error}",
+                persistence.path().display()
+            )
+        })?;
         let (change_tx, _) = watch::channel(0_u64);
         let relay = Arc::new(RwLock::new(RelayState::new(
             cwd.display().to_string(),

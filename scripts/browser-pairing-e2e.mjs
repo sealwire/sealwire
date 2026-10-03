@@ -34,7 +34,7 @@ const ROOT = process.cwd();
 const PAIRING_TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
 const PROMPT = process.env.BROWSER_E2E_PROMPT || "Reply with exactly: browser-pairing-e2e";
 const BROKER_TICKET_SECRET =
-  process.env.BROWSER_E2E_BROKER_TICKET_SECRET || "browser-e2e-broker-secret";
+  process.env.BROWSER_E2E_BROKER_TICKET_SECRET || "browser-e2e-broker-secret-a3f76b4c2089d15e6b0fa873c4e9521d";
 const USE_FAKE_PROVIDER = process.env.AGENT_PROVIDERS === "fake";
 
 async function main() {

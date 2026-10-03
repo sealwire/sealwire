@@ -20,6 +20,7 @@ use tokio_tungstenite::{
 use super::*;
 use crate::auth::BrokerAuthMode;
 use crate::join_ticket::{JoinTicketClaims, JoinTicketKey};
+
 use crate::public_control::{
     client_claim_message, AccessReleaseRequest, AccessReleaseResponse, ClientClaimRequest,
     ClientClaimResponse, ClientGrantRequest, ClientGrantResponse, ClientIdentityRevokeResponse,
@@ -31,6 +32,145 @@ use crate::public_control::{
     RelayEnrollmentCompleteRequest, RelayEnrollmentResponse, RelayWsTokenRequest,
     RelayWsTokenResponse,
 };
+
+#[tokio::test(start_paused = true)]
+async fn stalled_socket_writes_time_out() {
+    let mut sender = Box::pin(futures_util::sink::unfold(
+        (),
+        |(), _: super::Message| async {
+            std::future::pending::<Result<(), std::io::Error>>().await
+        },
+    ));
+    let error = send_socket_message(&mut sender, super::Message::Text("hello".to_string()))
+        .await
+        .expect_err("a stalled writer must time out");
+    assert!(error.contains("timed out"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_overflowing_peer_disconnects_and_releases_its_seat_without_disrupting_others() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let broker = BrokerState::default();
+        let address = spawn_app_with_state(
+            broker.clone(),
+            BrokerJoinVerifier::SelfHosted(test_join_ticket_key()),
+            BrokerHardeningConfig {
+                max_connections_per_ip: 3,
+                max_total_connections: 3,
+                ..BrokerHardeningConfig::default()
+            },
+            SecurityHeadersConfig::default(),
+        )
+        .await;
+        let relay_url = websocket_url(
+            address,
+            "overflow-room",
+            protocol::PeerRole::Relay,
+            Some("relay-1"),
+            JoinTicketClaims::relay_join("overflow-room", "relay-1"),
+        );
+        let slow_url = websocket_url(
+            address,
+            "overflow-room",
+            protocol::PeerRole::Surface,
+            None,
+            JoinTicketClaims::pairing_surface_join("overflow-room", "slow-pair", u64::MAX),
+        );
+        let healthy_url = websocket_url(
+            address,
+            "overflow-room",
+            protocol::PeerRole::Surface,
+            None,
+            JoinTicketClaims::pairing_surface_join("overflow-room", "healthy-pair", u64::MAX),
+        );
+        let (mut relay, _) = connect_async(&relay_url).await.unwrap();
+        assert!(matches!(
+            next_server_message(&mut relay).await,
+            ServerMessage::Welcome { .. }
+        ));
+        let (mut slow, _) = connect_async(&slow_url).await.unwrap();
+        let slow_peer_id = match next_server_message(&mut slow).await {
+            ServerMessage::Welcome { peer_id, .. } => peer_id,
+            other => panic!("expected slow peer welcome, got {other:?}"),
+        };
+        next_server_message(&mut relay).await;
+        let (mut healthy, _) = connect_async(&healthy_url).await.unwrap();
+        assert!(matches!(
+            next_server_message(&mut healthy).await,
+            ServerMessage::Welcome { .. }
+        ));
+        next_server_message(&mut relay).await;
+        next_server_message(&mut slow).await;
+
+        // Prevent the socket task from draining until its queue is full,
+        // so overflow does not depend on operating-system TCP buffer sizes.
+        tokio::task::unconstrained(async {
+            for index in 0..300 {
+                broker
+                    .publish(
+                        "overflow-room",
+                        "relay-1",
+                        json!({
+                            "kind": "targeted_messages",
+                            "messages": [{
+                                "target_peer_id": slow_peer_id,
+                                "payload": {"kind": "probe", "index": index}
+                            }]
+                        }),
+                    )
+                    .await
+                    .unwrap();
+            }
+        })
+        .await;
+
+        for stream in [&mut relay, &mut healthy] {
+            match next_server_message(stream).await {
+                ServerMessage::Presence { kind, peer, .. } => {
+                    assert_eq!(kind, protocol::PresenceKind::Left);
+                    assert_eq!(peer.peer_id, slow_peer_id);
+                }
+                other => panic!("expected overflow disconnect presence, got {other:?}"),
+            }
+        }
+        while let Some(frame) = slow.next().await {
+            match frame {
+                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(Message::Text(_)) => {}
+                other => panic!("unexpected closing frame: {other:?}"),
+            }
+        }
+
+        let (mut replacement, _) = connect_async(&slow_url)
+            .await
+            .expect("overflow must release the connection limit and pairing seat");
+        match next_server_message(&mut replacement).await {
+            ServerMessage::Welcome { peers, .. } => assert_eq!(peers.len(), 2),
+            other => panic!("expected replacement welcome, got {other:?}"),
+        }
+        next_server_message(&mut relay).await;
+        next_server_message(&mut healthy).await;
+        healthy
+            .send(Message::Text(
+                serde_json::to_string(&ClientMessage::Publish {
+                    protocol_version: protocol::BROKER_PROTOCOL_VERSION,
+                    payload: json!({"kind": "probe", "healthy": true}),
+                })
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        match next_server_message(&mut relay).await {
+            ServerMessage::Message { payload, .. } => assert_eq!(payload["healthy"], true),
+            other => panic!("healthy peer must remain usable: {other:?}"),
+        }
+        relay.close(None).await.unwrap();
+        healthy.close(None).await.unwrap();
+        replacement.close(None).await.unwrap();
+    })
+    .await
+    .expect("overflow handling must finish promptly");
+}
 
 async fn spawn_app() -> SocketAddr {
     spawn_app_with(
@@ -46,12 +186,27 @@ async fn spawn_app_with(
     hardening: BrokerHardeningConfig,
     security_headers: SecurityHeadersConfig,
 ) -> SocketAddr {
+    spawn_app_with_state(
+        BrokerState::default(),
+        join_verifier,
+        hardening,
+        security_headers,
+    )
+    .await
+}
+
+async fn spawn_app_with_state(
+    broker: BrokerState,
+    join_verifier: BrokerJoinVerifier,
+    hardening: BrokerHardeningConfig,
+    security_headers: SecurityHeadersConfig,
+) -> SocketAddr {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
         .expect("listener should bind");
     let address = listener.local_addr().expect("listener should have address");
     let app = app_with_web_root_and_verifier_and_hardening(
-        BrokerState::default(),
+        broker,
         test_web_root(),
         join_verifier,
         hardening,
@@ -420,7 +575,7 @@ fn test_web_root() -> PathBuf {
 }
 
 fn test_join_ticket_key() -> JoinTicketKey {
-    JoinTicketKey::from_secret("broker-test-secret".as_bytes())
+    JoinTicketKey::from_secret("broker-test-secret-a3f76b4c2089d15e6b0fa873c4e9521d".as_bytes())
         .expect("test join-ticket key should construct")
 }
 
@@ -430,7 +585,7 @@ async fn test_public_control_plane() -> PublicControlPlane {
 
 async fn test_public_control_plane_with_room(room: &str) -> PublicControlPlane {
     PublicControlPlane::from_parts(
-        Some("public-broker-issuer-secret".to_string()),
+        Some("public-broker-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
         Some(
             serde_json::to_string(&vec![serde_json::json!({
                 "relay_id": "relay-1",
@@ -453,7 +608,7 @@ async fn test_public_control_plane_with_parts(
     device_ws_ttl_secs: Option<&str>,
 ) -> PublicControlPlane {
     PublicControlPlane::from_parts(
-        Some("public-broker-issuer-secret".to_string()),
+        Some("public-broker-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
         Some(
             serde_json::to_string(&vec![serde_json::json!({
                 "relay_id": "relay-1",
@@ -1371,7 +1526,7 @@ async fn public_auth_plane_health_reports_ready() {
 #[tokio::test]
 async fn public_control_plane_rejects_multiple_persistence_backends() {
     let result = PublicControlPlane::from_parts_with_postgres(
-        Some("public-broker-issuer-secret".to_string()),
+        Some("public-broker-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
         None,
         Some(temp_state_path("public-control-conflict")),
         Some("postgres://localhost/agent_relay".to_string()),
@@ -1733,7 +1888,7 @@ fn invalid_security_header_overrides_are_rejected() {
 #[tokio::test]
 async fn public_relay_challenge_enrollment_can_issue_registration_and_relay_tokens() {
     let control_plane = PublicControlPlane::from_parts(
-        Some("public-broker-issuer-secret".to_string()),
+        Some("public-broker-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
         None,
         None,
         Some("300".to_string()),
@@ -1882,10 +2037,11 @@ async fn a_pairing_ticket_never_outlives_the_relay_pairing_cap() {
         &pairing_ticket_request("relay-1", "room-a", "pair-forever", u64::MAX - 1),
     )
     .await;
-    let claims = JoinTicketKey::from_secret(b"public-broker-issuer-secret")
-        .expect("issuer key")
-        .verify(&response.pairing_join_ticket)
-        .expect("the minted ticket should verify");
+    let claims =
+        JoinTicketKey::from_secret(b"public-broker-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d")
+            .expect("issuer key")
+            .verify(&response.pairing_join_ticket)
+            .expect("the minted ticket should verify");
     let cap = crate::join_ticket::unix_now() + 600;
     assert!(
         claims
@@ -1920,7 +2076,7 @@ async fn a_pairing_ticket_never_outlives_the_relay_pairing_cap() {
 #[tokio::test]
 async fn pairing_tickets_have_a_per_relay_budget() {
     let plane = PublicControlPlane::from_parts(
-        Some("public-broker-issuer-secret".to_string()),
+        Some("public-broker-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
         Some(
             serde_json::to_string(&vec![
                 json!({"relay_id": "relay-1", "broker_room_id": "room-a", "refresh_token": "relay-refresh-1"}),
@@ -6147,7 +6303,10 @@ async fn required_public_control_plane_from_env_rejects_self_hosted_and_missing_
     // Valid public config constructs once without binding a listener.
     let dir = tempfile_dir("required-public-ok");
     let state_path = dir.join("public-control.json");
-    std::env::set_var(PUBLIC_ISSUER_SECRET_ENV, "unit-test-issuer-secret");
+    std::env::set_var(
+        PUBLIC_ISSUER_SECRET_ENV,
+        "unit-test-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d",
+    );
     std::env::set_var(
         crate::public_control::PUBLIC_STATE_PATH_ENV,
         state_path.to_str().unwrap(),

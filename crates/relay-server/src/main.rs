@@ -24,8 +24,10 @@ mod state;
 mod state_paths;
 mod teams;
 mod usage;
+#[cfg(windows)]
+mod windows_state_permissions;
 
-use std::{convert::Infallible, time::Duration};
+use std::{convert::Infallible, process::ExitCode, time::Duration};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
@@ -198,7 +200,7 @@ struct LocalImageInput {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
         Some("cloud-access-release") => {
             let code = broker::run_cloud_access_release().await;
@@ -308,16 +310,22 @@ async fn main() {
                 std::process::exit(1);
             }
             Err(error) => {
-                panic!(
-                    "failed to acquire the relay-server instance lock for {state_path:?}: {error}"
+                eprintln!(
+                    "relay-server: failed to acquire the instance lock for {}: {error}",
+                    state_path.display()
                 );
+                return ExitCode::FAILURE;
             }
         }
     };
 
-    let state = AppState::new(broker_startup)
-        .await
-        .expect("failed to initialize Codex app-server bridge");
+    let state = match AppState::new(broker_startup).await {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("relay-server: failed to start: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     // Register the private orchestration engines, when this build has them. The
     // engines take the state as their `RelayPort`; the registry goes onto the
     // clone everything downstream uses, so it must be installed before the state
@@ -391,6 +399,7 @@ async fn main() {
     // `lock_guard` (if any) is dropped here, releasing the OS lock as the
     // process exits — kept alive up to this point on purpose (see
     // InstanceLockGuard's doc comment).
+    ExitCode::SUCCESS
 }
 
 async fn shutdown_signal() {

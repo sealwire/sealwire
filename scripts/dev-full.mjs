@@ -6,6 +6,8 @@ import os from "node:os";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { resolveDevBrokerIssuerSecret, resolveDevBrokerTicketSecret } from "./dev-broker-secret.mjs";
+
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 const relayPort = process.env.RELAY_DEV_SERVER_PORT || "8787";
 const brokerPort = process.env.RELAY_DEV_BROKER_PORT || "8788";
@@ -27,6 +29,8 @@ const sharedEnv = {
   RELAY_DEV_BROKER_PORT: brokerPort,
 };
 
+const brokerTicketSecret = resolveDevBrokerTicketSecret();
+
 const buildEnv = {
   ...sharedEnv,
   RELAY_DEV_RELOAD: "1",
@@ -38,9 +42,11 @@ const brokerEnv = {
   PORT: process.env.RELAY_BROKER_PORT || brokerPort,
   BIND_HOST:
     process.env.RELAY_BROKER_BIND_HOST || process.env.BIND_HOST || defaultBrokerBindHost,
-  RELAY_BROKER_TICKET_SECRET:
-    process.env.RELAY_BROKER_TICKET_SECRET || "change-me-dev-broker-ticket-secret",
+  RELAY_BROKER_TICKET_SECRET: brokerTicketSecret,
 };
+if (process.env.RELAY_BROKER_AUTH_MODE?.trim().toLowerCase() === "public") {
+  brokerEnv.RELAY_BROKER_PUBLIC_ISSUER_SECRET = resolveDevBrokerIssuerSecret();
+}
 
 const relayEnv = {
   ...sharedEnv,
@@ -50,8 +56,7 @@ const relayEnv = {
   RELAY_BROKER_PUBLIC_URL: brokerPublicUrl,
   RELAY_BROKER_CHANNEL_ID: process.env.RELAY_BROKER_CHANNEL_ID || "dev-room",
   RELAY_BROKER_PEER_ID: process.env.RELAY_BROKER_PEER_ID || "local-relay",
-  RELAY_BROKER_TICKET_SECRET:
-    process.env.RELAY_BROKER_TICKET_SECRET || "change-me-dev-broker-ticket-secret",
+  RELAY_BROKER_TICKET_SECRET: brokerTicketSecret,
 };
 
 const children = [];

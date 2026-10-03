@@ -114,7 +114,7 @@ export default defineConfig({
   publicDir: resolve(rootDir, "frontend/public"),
   plugins: [buildMetaPlugin(), devReloadPlugin()],
   server: {
-    host: true,
+    host: "127.0.0.1",
     port: vitePort,
     proxy: {
       "/api": {

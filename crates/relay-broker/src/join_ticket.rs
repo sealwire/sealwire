@@ -10,6 +10,9 @@ use crate::protocol::PeerRole;
 
 const JOIN_TICKET_VERSION: u32 = 1;
 pub const JOIN_TICKET_SECRET_ENV: &str = "RELAY_BROKER_TICKET_SECRET";
+const MIN_SECRET_BYTES: usize = 32;
+const MAX_SECRET_BYTES: usize = 512;
+const MIN_SECRET_DISTINCT_BYTES: usize = 10;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -46,8 +49,26 @@ pub struct JoinTicketClaims {
 impl JoinTicketKey {
     pub fn from_secret(secret: impl AsRef<[u8]>) -> Result<Self, String> {
         let secret = secret.as_ref();
-        if secret.is_empty() {
-            return Err("join_ticket secret cannot be empty".to_string());
+        if !(MIN_SECRET_BYTES..=MAX_SECRET_BYTES).contains(&secret.len()) {
+            return Err(format!(
+                "join_ticket secret must be {MIN_SECRET_BYTES}-{MAX_SECRET_BYTES} bytes; generate one with `openssl rand -base64 48`"
+            ));
+        }
+        let mut seen = [false; 256];
+        let distinct = secret
+            .iter()
+            .filter(|byte| !std::mem::replace(&mut seen[**byte as usize], true))
+            .count();
+        let placeholder = String::from_utf8_lossy(secret).to_ascii_lowercase();
+        if distinct < MIN_SECRET_DISTINCT_BYTES
+            || ["change-me", "change_me", "replace-me", "replace_me"]
+                .iter()
+                .any(|prefix| placeholder.starts_with(prefix))
+        {
+            return Err(
+                "join_ticket secret looks like a placeholder; generate one with `openssl rand -base64 48`"
+                    .to_string(),
+            );
         }
         Ok(Self {
             secret: secret.to_vec(),
@@ -56,7 +77,9 @@ impl JoinTicketKey {
 
     pub fn from_env_var(name: &str) -> Result<Option<Self>, String> {
         match std::env::var(name) {
-            Ok(secret) => Self::from_secret(secret.trim().as_bytes()).map(Some),
+            Ok(secret) => Self::from_secret(secret.trim().as_bytes())
+                .map(Some)
+                .map_err(|error| format!("{name}: {error}")),
             Err(std::env::VarError::NotPresent) => Ok(None),
             Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid utf-8")),
         }
@@ -248,4 +271,38 @@ fn random_nonce() -> String {
         .map(char::from)
         .collect::<String>()
         .to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_weak_and_placeholder_secrets_without_echoing_them() {
+        for secret in [
+            "",
+            "change-me",
+            "short-ticket-secret",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "01234567012345670123456701234567",
+            "change-me-dev-broker-ticket-secret",
+            "replace-me-with-a-long-production-secret",
+        ] {
+            let error = JoinTicketKey::from_secret(secret).expect_err("weak secret");
+            if !secret.is_empty() {
+                assert!(!error.contains(secret));
+            }
+        }
+        assert!(JoinTicketKey::from_secret(vec![b'a'; MAX_SECRET_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn accepts_a_random_key_and_verifies_its_tickets() {
+        let mut secret = [0_u8; 48];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
+        let key = JoinTicketKey::from_secret(secret).expect("random key");
+        let claims = JoinTicketClaims::relay_join("room", "relay");
+        let ticket = key.mint(&claims).expect("ticket");
+        assert_eq!(key.verify(&ticket).expect("verified"), claims);
+    }
 }

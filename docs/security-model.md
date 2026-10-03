@@ -1,8 +1,8 @@
 # Security model
 
 Security is a core part of the product, not a later add-on. This page is the
-summary; the operational detail — broker modes, pairing, and how to run the
-relay exposed — lives in [`DEPLOYMENT.md`](../DEPLOYMENT.md).
+summary. See [`DEPLOYMENT.md`](../DEPLOYMENT.md) for setup and pairing, and
+[`.env.example`](../.env.example) for connection and security settings.
 
 ## The default: `private` mode
 

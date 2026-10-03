@@ -5,6 +5,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
 use tokio::sync::{watch, RwLock};
 use tracing::warn;
 
@@ -469,13 +470,43 @@ impl PersistenceStore {
     }
 
     pub(super) async fn load(&self) -> Result<Option<PersistedRelayState>, String> {
-        let contents = match tokio::fs::read(&self.path).await {
-            Ok(contents) => contents,
+        let mut file = match tokio::fs::File::open(&self.path).await {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => {
                 return Err(format!("failed to read persisted state file: {error}"));
             }
         };
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .await
+                .map_err(|error| {
+                    format!("failed to restrict persisted state permissions: {error}")
+                })?;
+        }
+        let parent = self
+            .path
+            .parent()
+            .ok_or("persisted state path must have a parent directory")?
+            .to_path_buf();
+        #[cfg(windows)]
+        let state_path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::state_paths::ensure_state_directory(&parent)?;
+            #[cfg(windows)]
+            crate::windows_state_permissions::restrict_existing(&state_path, false)?;
+            Ok::<_, std::io::Error>(())
+        })
+        .await
+        .map_err(|error| format!("state directory task panicked: {error}"))?
+        .map_err(|error| format!("failed to prepare persisted state directory: {error}"))?;
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents)
+            .await
+            .map_err(|error| format!("failed to read persisted state file: {error}"))?;
 
         let state: PersistedRelayState = serde_json::from_slice(&contents)
             .map_err(|error| format!("failed to decode persisted state: {error}"))?;
@@ -493,9 +524,7 @@ impl PersistenceStore {
         let Some(parent) = self.path.parent() else {
             return Err("persisted state path must have a parent directory".to_string());
         };
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|error| format!("failed to create persisted state directory: {error}"))?;
+        let parent = parent.to_path_buf();
 
         let serialized = serde_json::to_vec_pretty(state)
             .map_err(|error| format!("failed to encode persisted state: {error}"))?;
@@ -507,7 +536,12 @@ impl PersistenceStore {
         // `instance_lock::record_owner`.
         let write_path = temporary_path.clone();
         tokio::task::spawn_blocking(move || {
-            crate::instance_lock::write_new_exclusive(&write_path, &serialized)
+            crate::state_paths::ensure_state_directory(&parent)?;
+            crate::instance_lock::write_new_exclusive_with_mode(
+                &write_path,
+                &serialized,
+                Some(0o600),
+            )
         })
         .await
         .map_err(|error| format!("temp file write task panicked: {error}"))?
@@ -560,6 +594,69 @@ pub(super) fn spawn_persistence_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn startup_refuses_an_invalid_state_without_overwriting_it() {
+        let _lock = crate::state_paths::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        let original = b"not valid persisted JSON";
+        std::fs::write(&path, original).unwrap();
+        let _state_path = crate::state_paths::EnvVarGuard::set("RELAY_STATE_PATH", Some(&path));
+        let error = crate::state::AppState::new(crate::broker::BrokerStartupContext::default())
+            .await
+            .err()
+            .expect("failed state loading must refuse startup");
+        assert!(error.contains("failed to decode persisted state"));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_state_permissions_cover_save_load_and_failed_rename() {
+        use crate::windows_state_permissions::{assert_private_acl, make_world_readable};
+
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join(".agent-relay");
+        let path = directory.join("session.json");
+        let store = PersistenceStore::from_path(path.clone());
+        store.save(&sample_state()).await.unwrap();
+        assert_private_acl(&directory);
+        assert_private_acl(&path);
+        let original = std::fs::read(&path).unwrap();
+        make_world_readable(&directory);
+        make_world_readable(&path);
+        assert!(store.load().await.unwrap().is_some());
+        assert_private_acl(&directory);
+        assert_private_acl(&path);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        store.save(&sample_state()).await.unwrap();
+        assert_private_acl(&path);
+
+        let invalid_path = directory.join("invalid.json");
+        std::fs::create_dir(&invalid_path).unwrap();
+        let invalid_store = PersistenceStore::from_path(invalid_path.clone());
+        assert!(invalid_store.save(&sample_state()).await.is_err());
+        assert_private_acl(&invalid_path.with_extension("tmp"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_state_permissions_preserve_a_shared_parent_directory() {
+        use crate::windows_state_permissions::{
+            acl_snapshot, assert_private_acl, make_world_readable,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        make_world_readable(root.path());
+        let before = acl_snapshot(root.path());
+        let path = root.path().join("session.json");
+        let store = PersistenceStore::from_path(path.clone());
+        store.save(&sample_state()).await.unwrap();
+        store.load().await.unwrap();
+        assert_private_acl(&path);
+        assert_eq!(acl_snapshot(root.path()), before);
+    }
 
     // Only the fields WITHOUT `#[serde(default)]` need to be supplied here —
     // everything else (maps/vecs the rest of the struct carries) defaults to
@@ -725,6 +822,86 @@ mod tests {
         assert!(
             !temp_path.exists(),
             "the temp file must be renamed away, not left behind"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn state_and_dedicated_directory_are_private_on_save_and_load() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join(".agent-relay");
+        let state_path = state_dir.join("session.json");
+        let store = PersistenceStore::from_path(state_path.clone());
+        store.save(&sample_state()).await.unwrap();
+        assert_eq!(
+            std::fs::metadata(&state_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&state_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(store.load().await.unwrap().is_some());
+        assert_eq!(
+            std::fs::metadata(&state_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&state_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        store.save(&sample_state()).await.unwrap();
+        assert_eq!(
+            std::fs::metadata(&state_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_state_file_does_not_change_shared_directory_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().join("custom-session.json");
+        let store = PersistenceStore::from_path(path.clone());
+        store.save(&sample_state()).await.unwrap();
+        store.load().await.unwrap();
+        assert_eq!(
+            std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_rename_does_not_leave_a_readable_temporary_state_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        std::fs::create_dir(&path).unwrap();
+        let store = PersistenceStore::from_path(path.clone());
+        assert!(store.save(&sample_state()).await.is_err());
+        assert_eq!(
+            std::fs::metadata(path.with_extension("tmp"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
         );
     }
 }

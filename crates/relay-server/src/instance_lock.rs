@@ -339,8 +339,26 @@ pub(crate) fn write_new_exclusive(path: &Path, contents: &[u8]) -> io::Result<()
     write_new_exclusive_with_mode(path, contents, None)
 }
 
-/// Like [`write_new_exclusive`], optionally applying a Unix file mode (e.g. 0o600)
-/// on the newly created file before returning. Best-effort elsewhere.
+pub(crate) fn create_new_private_file(path: &Path) -> io::Result<File> {
+    #[cfg(windows)]
+    {
+        crate::windows_state_permissions::create_new_file(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(path)
+    }
+}
+
+/// Like [`write_new_exclusive`], with a creation mode on Unix; 0o600 uses a
+/// protected, account-scoped ACL at creation on Windows.
 pub(crate) fn write_new_exclusive_with_mode(
     path: &Path,
     contents: &[u8],
@@ -356,7 +374,12 @@ pub(crate) fn write_new_exclusive_with_mode(
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(mode);
         }
-        match opts.open(path) {
+        let opened = if mode == Some(0o600) {
+            create_new_private_file(path)
+        } else {
+            opts.open(path)
+        };
+        match opened {
             Ok(mut file) => {
                 use std::io::Write;
                 file.write_all(contents)?;
@@ -443,7 +466,7 @@ fn acquire_within(state_path: &Path, workspace_root: &Path) -> io::Result<LockOu
     let lock_path = lock_path_for(&identity);
     let owner_info_path = owner_info_path_for(&identity);
     if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::state_paths::ensure_state_directory(parent)?;
     }
     reject_if_symlink(&lock_path)?;
     let file = OpenOptions::new()

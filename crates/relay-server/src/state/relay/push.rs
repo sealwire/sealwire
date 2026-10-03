@@ -383,8 +383,26 @@ pub fn load_or_generate_vapid(path: &Path) -> Result<VapidKeys, String> {
     // would rotate the VAPID identity and silently break every existing push
     // subscription. Surface it instead — the caller treats an error as "run
     // without push" and leaves the on-disk key untouched.
-    match std::fs::read_to_string(path) {
-        Ok(contents) => {
+    match std::fs::File::open(path) {
+        Ok(mut file) => {
+            #[cfg(windows)]
+            (|| {
+                if let Some(parent) = path.parent() {
+                    crate::state_paths::ensure_state_directory(parent)?;
+                }
+                crate::windows_state_permissions::restrict_existing(path, false)
+            })()
+            .map_err(|error| {
+                format!(
+                    "failed to restrict VAPID key permissions {}: {error}",
+                    path.display()
+                )
+            })?;
+            use std::io::Read as _;
+            let mut contents = String::new();
+            file.read_to_string(&mut contents).map_err(|error| {
+                format!("failed to read VAPID key at {}: {error}", path.display())
+            })?;
             let scalar = b64url_decode(contents.trim())
                 .map_err(|e| format!("failed to decode VAPID key at {}: {e}", path.display()))?;
             let signing_key = SigningKey::from_slice(&scalar)
@@ -407,9 +425,6 @@ pub fn load_or_generate_vapid(path: &Path) -> Result<VapidKeys, String> {
 
     let signing_key = SigningKey::random(&mut OsRng);
     let scalar = signing_key.to_bytes();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     // Persist with an exclusive create (`create_new`): it writes only when the
     // path is truly absent, so it refuses to follow a pre-planted symlink (an
     // agent could dangle one here to redirect the private key outside the
@@ -417,14 +432,14 @@ pub fn load_or_generate_vapid(path: &Path) -> Result<VapidKeys, String> {
     // finds — it never deletes or replaces an existing entry, which for
     // permanent key material could destroy a still-valid key that appeared
     // between the read above and this write.
-    let persisted = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .and_then(|mut file| {
-            use std::io::Write as _;
-            file.write_all(URL_SAFE_NO_PAD.encode(scalar).as_bytes())
-        });
+    let persisted = (|| {
+        use std::io::Write as _;
+        if let Some(parent) = path.parent() {
+            crate::state_paths::ensure_state_directory(parent)?;
+        }
+        let mut file = crate::instance_lock::create_new_private_file(path)?;
+        file.write_all(URL_SAFE_NO_PAD.encode(scalar).as_bytes())
+    })();
     if let Err(error) = persisted {
         warn!(
             "failed to persist VAPID key to {}: {error}; push subscriptions will not survive restart",
@@ -1237,6 +1252,27 @@ mod tests {
         assert_eq!(raw.len(), 65);
         assert_eq!(raw[0], 0x04);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_state_permissions_preserve_the_vapid_identity() {
+        use crate::windows_state_permissions::{assert_private_acl, make_world_readable};
+
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join(".agent-relay");
+        let path = directory.join("vapid.key");
+        let first = load_or_generate_vapid(&path).unwrap();
+        assert_private_acl(&directory);
+        assert_private_acl(&path);
+        let original = std::fs::read(&path).unwrap();
+        make_world_readable(&directory);
+        make_world_readable(&path);
+        let second = load_or_generate_vapid(&path).unwrap();
+        assert_eq!(first.public_b64url(), second.public_b64url());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_private_acl(&directory);
+        assert_private_acl(&path);
     }
 
     // Test-only receiver side: ECDH + same derivation, then AES-128-GCM decrypt.

@@ -252,7 +252,7 @@ async fn heartbeat_test_config(broker_url: String) -> BrokerConfig {
         Some("room-stalled".to_string()),
         Some("relay-stalled".to_string()),
         Some("self_hosted".to_string()),
-        Some("test-broker-ticket-secret".to_string()),
+        Some("test-broker-ticket-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
         None,
         None,
         None,
@@ -336,7 +336,7 @@ async fn broker_config_builds_websocket_url() {
         Some("demo-room".to_string()),
         Some("relay-1".to_string()),
         None,
-        Some("test-broker-ticket-secret".to_string()),
+        Some("test-broker-ticket-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
         None,
         None,
         None,
@@ -409,7 +409,7 @@ async fn broker_config_supports_distinct_public_url_for_pairing() {
         Some("demo-room".to_string()),
         Some("relay-1".to_string()),
         None,
-        Some("test-broker-ticket-secret".to_string()),
+        Some("test-broker-ticket-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
         None,
         None,
         None,
@@ -432,7 +432,7 @@ async fn broker_config_requires_channel() {
         None,
         Some("relay-1".to_string()),
         None,
-        Some("test-broker-ticket-secret".to_string()),
+        Some("test-broker-ticket-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
         None,
         None,
         None,
@@ -453,7 +453,7 @@ async fn broker_config_disables_when_url_is_missing() {
         Some("demo-room".to_string()),
         None,
         None,
-        Some("test-broker-ticket-secret".to_string()),
+        Some("test-broker-ticket-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
         None,
         None,
         None,
@@ -474,7 +474,7 @@ async fn broker_config_rejects_invalid_public_url_scheme() {
         Some("demo-room".to_string()),
         Some("relay-1".to_string()),
         None,
-        Some("test-broker-ticket-secret".to_string()),
+        Some("test-broker-ticket-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
         None,
         None,
         None,
@@ -983,7 +983,7 @@ async fn broker_config_self_hosted_can_issue_expiring_device_join_credentials() 
         Some("demo-room".to_string()),
         Some("relay-1".to_string()),
         Some("self_hosted".to_string()),
-        Some("test-broker-ticket-secret".to_string()),
+        Some("test-broker-ticket-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
         None,
         None,
         None,
@@ -5433,6 +5433,57 @@ async fn registration_and_identity_files_are_mode_0600() {
         & 0o777;
     assert_eq!(reg_mode, 0o600, "registration must be owner-only");
     assert_eq!(id_mode, 0o600, "identity must be owner-only");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_state_permissions_protect_broker_credentials_without_rotating_them() {
+    use crate::windows_state_permissions::{assert_private_acl, make_world_readable};
+
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join(".agent-relay");
+    let registration_path = directory.join("public-broker-registration.json");
+    let identity_path = directory.join("public-broker-identity.json");
+    let control_url = "https://broker.example.test";
+    let identity = load_or_create_public_relay_identity(&identity_path, control_url)
+        .await
+        .unwrap();
+    let registration = PublicRelayRegistration {
+        relay_id: "test-relay".into(),
+        broker_room_id: "test-room".into(),
+        relay_refresh_token: "test-refresh-token".into(),
+    };
+    save_public_relay_registration(&registration_path, control_url, &registration)
+        .await
+        .unwrap();
+    assert_private_acl(&directory);
+    assert_private_acl(&registration_path);
+    assert_private_acl(&identity_path);
+    let registration_bytes = std::fs::read(&registration_path).unwrap();
+    let identity_bytes = std::fs::read(&identity_path).unwrap();
+    make_world_readable(&directory);
+    make_world_readable(&registration_path);
+    make_world_readable(&identity_path);
+    let loaded = load_public_relay_registration(&registration_path, control_url)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.relay_refresh_token, registration.relay_refresh_token);
+    let reloaded = load_or_create_public_relay_identity(&identity_path, control_url)
+        .await
+        .unwrap();
+    assert_eq!(
+        reloaded.signing_key.to_bytes(),
+        identity.signing_key.to_bytes()
+    );
+    assert_private_acl(&directory);
+    assert_private_acl(&registration_path);
+    assert_private_acl(&identity_path);
+    assert_eq!(
+        std::fs::read(&registration_path).unwrap(),
+        registration_bytes
+    );
+    assert_eq!(std::fs::read(&identity_path).unwrap(), identity_bytes);
 }
 
 #[tokio::test]

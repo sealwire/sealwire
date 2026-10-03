@@ -198,8 +198,7 @@ jobs:
   # Until this job existed, `cfg(windows)` code was compiled in exactly one
   # place: the release workflow. A Windows-only type error therefore stayed
   # invisible through every green push and surfaced as a failed release build.
-  # Check only — the tests need a real provider environment, and compiling is
-  # what was missing.
+  # The ACL tests use isolated temporary state and do not need provider logins.
   windows:
     name: windows-check
     runs-on: windows-latest
@@ -208,6 +207,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -219,6 +223,18 @@ jobs:
 
       - name: cargo check
         run: cargo check --workspace
+
+      - name: Windows state ACL tests
+        run: cargo test -p relay-server windows_state_permissions
+
+      - name: State loading failure refuses startup
+        run: cargo test -p relay-server startup_refuses_an_invalid_state_without_overwriting_it
+
+      - name: Startup failure diagnostics
+        run: cargo test -p relay-server --test startup_failure
+
+      - name: Development broker secret ACL tests
+        run: node --test scripts/dev-broker-secret.test.mjs
 
   review-recap-modes-e2e:
     name: relay-http-e2e

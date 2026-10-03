@@ -47,7 +47,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use futures_util::{sink::SinkExt, StreamExt};
+use futures_util::{sink::SinkExt, Sink, StreamExt};
 use join_ticket::{JoinTicketClaims, JoinTicketKey, JoinTicketKind, JOIN_TICKET_SECRET_ENV};
 use protocol::{
     ClientMessage, ConnectQuery, HealthResponse, PublicBrokerMonitoring, ServerMessage,
@@ -218,6 +218,7 @@ const DEFAULT_MAX_TEXT_FRAME_BYTES: usize = 64 * 1024;
 /// `this_relays_frame_size_fits_the_brokers_guaranteed_minimum`).
 pub const MIN_MAX_TEXT_FRAME_BYTES: usize = 64 * 1024;
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 120;
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEVICE_SESSION_COOKIE_NAME: &str = "agent_relay_device_session";
 const DEVICE_SCOPED_SESSION_COOKIE_PATH: &str = "/api/public/device";
 const DEVICE_SESSION_ROOM_MAX_BYTES: usize = 512;
@@ -3058,11 +3059,15 @@ async fn handle_socket(
 
     loop {
         tokio::select! {
+            _ = join.overflow.notified() => {
+                warn!(channel_id, peer_id, "closing broker peer whose outbound queue is full");
+                break;
+            }
             outbound_message = outbound.recv() => {
                 let Some(message) = outbound_message else {
                     break;
                 };
-                if send_message(&state.hardening.publish_metrics, &mut sender, &message).await.is_err() {
+                if send_text(&state.hardening.publish_metrics, &mut sender, message.text).await.is_err() {
                     break;
                 }
                 idle_sleep.as_mut().reset(Instant::now() + idle_timeout);
@@ -3138,7 +3143,7 @@ async fn handle_socket(
                                         payload = %payload_summary,
                                         "broker publish rate limit exceeded"
                                     );
-                                    let _ = send_message(
+                                    if send_message(
                                         &state.hardening.publish_metrics,
                                         &mut sender,
                                         &ServerMessage::Error {
@@ -3146,7 +3151,9 @@ async fn handle_socket(
                                             message: "broker publish rate limit exceeded for this peer".to_string(),
                                         },
                                     )
-                                    .await;
+                                    .await.is_err() {
+                                        break;
+                                    }
                                     continue;
                                 }
                                 // Charged on the raw frame, so a peer pays for what it
@@ -3173,7 +3180,7 @@ async fn handle_socket(
                                         payload = %payload_summary,
                                         "broker publish byte limit exceeded"
                                     );
-                                    let _ = send_message(
+                                    if send_message(
                                         &state.hardening.publish_metrics,
                                         &mut sender,
                                         &ServerMessage::Error {
@@ -3181,7 +3188,9 @@ async fn handle_socket(
                                             message: "broker publish byte limit exceeded for this peer".to_string(),
                                         },
                                     )
-                                    .await;
+                                    .await.is_err() {
+                                        break;
+                                    }
                                     continue;
                                 }
                                 match state
@@ -3196,7 +3205,7 @@ async fn handle_socket(
                                 {
                                     Ok(()) => {
                                         // Inbound only. The egress this fans out to is
-                                        // counted per recipient in `send_message`, where
+                                        // counted per recipient in `send_text`, where
                                         // the real serialized length is known.
                                         state
                                             .hardening
@@ -3234,7 +3243,7 @@ async fn handle_socket(
                     }
                     Ok(Message::Close(_)) => break,
                     Ok(Message::Ping(payload)) => {
-                        if sender.send(Message::Pong(payload)).await.is_err() {
+                        if send_socket_message(&mut sender, Message::Pong(payload)).await.is_err() {
                             break;
                         }
                     }
@@ -3271,45 +3280,52 @@ async fn handle_socket(
         .await;
 }
 
-/// Write one frame to a peer socket, accounting its exact serialized length as egress.
-///
-/// This is the only place a `ServerMessage` becomes bytes, which makes it the only place
-/// egress can be known rather than modelled. Counting here is also free: the
-/// serialization already had to happen. An earlier revision estimated egress at publish
-/// time from a fan-out count and the inbound frame size, which silently assumed every
-/// target of a `targeted_messages` wrapper got a similar-sized payload — one large
-/// delivered payload beside one tiny undelivered one reported half the true figure.
-///
-/// Only a successful write counts: a frame the socket rejected never left.
 async fn send_message(
     metrics: &PublishMetrics,
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     message: &ServerMessage,
-) -> Result<(), axum::Error> {
+) -> Result<(), String> {
     let payload = serde_json::to_string(message).expect("server messages should serialize");
+    send_text(metrics, sender, payload).await
+}
+
+async fn send_text(
+    metrics: &PublishMetrics,
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    payload: String,
+) -> Result<(), String> {
     let bytes = payload.len() as u64;
-    let result = sender.send(Message::Text(payload)).await;
-    if result.is_ok() {
-        metrics.record_egress(bytes);
+    send_socket_message(sender, Message::Text(payload)).await?;
+    metrics.record_egress(bytes);
+    Ok(())
+}
+
+async fn send_socket_message<S>(sender: &mut S, message: Message) -> Result<(), String>
+where
+    S: Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    match tokio::time::timeout(SOCKET_WRITE_TIMEOUT, sender.send(message)).await {
+        Ok(result) => result.map_err(|error| format!("broker socket write failed: {error}")),
+        Err(_) => {
+            warn!("broker socket write timed out");
+            Err("broker socket write timed out".to_string())
+        }
     }
-    result
 }
 
 async fn reject_socket(metrics: &PublishMetrics, socket: WebSocket, code: &str, message: &str) {
     let (mut sender, _) = socket.split();
-    let payload = serde_json::to_string(&ServerMessage::Error {
-        code: code.to_string(),
-        message: message.to_string(),
-    })
-    .expect("error message should serialize");
-    let bytes = payload.len() as u64;
-    // Counted like any other `ServerMessage`. A rejection frame is small, but leaving it
-    // out would make `egress_bytes` mean "egress except the one path an abusive client
-    // can drive hardest" — a rejected join is exactly what a flood produces.
-    if sender.send(Message::Text(payload)).await.is_ok() {
-        metrics.record_egress(bytes);
-    }
-    let _ = sender.close().await;
+    let _ = send_message(
+        metrics,
+        &mut sender,
+        &ServerMessage::Error {
+            code: code.to_string(),
+            message: message.to_string(),
+        },
+    )
+    .await;
+    let _ = tokio::time::timeout(SOCKET_WRITE_TIMEOUT, sender.close()).await;
 }
 
 fn default_web_root() -> PathBuf {

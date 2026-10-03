@@ -167,7 +167,7 @@ async fn test_broker_config(
         Some(channel_id.to_string()),
         Some(peer_id.to_string()),
         None,
-        Some("test-broker-ticket-secret".to_string()),
+        Some("test-broker-ticket-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
         None,
         None,
         None,

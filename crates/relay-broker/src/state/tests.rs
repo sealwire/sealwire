@@ -29,6 +29,7 @@ async fn join_publish_and_leave_broadcast_presence() {
         .receiver
         .recv()
         .await
+        .map(decode)
         .expect("relay should see join presence");
     assert_eq!(
         joined,
@@ -51,6 +52,7 @@ async fn join_publish_and_leave_broadcast_presence() {
         .receiver
         .recv()
         .await
+        .map(decode)
         .expect("surface should receive message");
     assert_eq!(
         relayed,
@@ -67,6 +69,7 @@ async fn join_publish_and_leave_broadcast_presence() {
         .receiver
         .recv()
         .await
+        .map(decode)
         .expect("relay should see leave presence");
     assert_eq!(
         left,
@@ -130,7 +133,7 @@ async fn relay_reconnect_replaces_old_connection_without_old_leave_removing_new_
         }]
     );
     assert_eq!(
-        old_relay.receiver.recv().await,
+        old_relay.receiver.recv().await.map(decode),
         None,
         "replacing the peer should close the old connection's outbound channel"
     );
@@ -159,7 +162,7 @@ async fn relay_reconnect_replaces_old_connection_without_old_leave_removing_new_
         .await
         .expect("old connection cleanup must not remove the replacement");
     assert!(matches!(
-        surface.receiver.recv().await,
+        surface.receiver.recv().await.map(decode),
         Some(ServerMessage::Message { from_peer_id, .. }) if from_peer_id == "relay-1"
     ));
 }
@@ -211,7 +214,7 @@ async fn targeted_messages_publish_only_to_listed_peers() {
         .expect("targeted publish should succeed");
 
     assert_eq!(
-        surface_a.receiver.recv().await,
+        surface_a.receiver.recv().await.map(decode),
         Some(ServerMessage::Message {
             channel_id: "room-a".to_string(),
             from_peer_id: "relay-1".to_string(),
@@ -220,7 +223,7 @@ async fn targeted_messages_publish_only_to_listed_peers() {
         })
     );
     assert_eq!(
-        surface_c.receiver.recv().await,
+        surface_c.receiver.recv().await.map(decode),
         Some(ServerMessage::Message {
             channel_id: "room-a".to_string(),
             from_peer_id: "relay-1".to_string(),
@@ -445,7 +448,7 @@ async fn a_directed_remote_action_result_still_fans_out() {
     // No drain here: the surface joined last, so nothing was queued for it before
     // the publish (and `drain_presence` would swallow the very frame under test —
     // its `try_recv` consumes the first non-Presence message).
-    match surface.try_recv() {
+    match surface.try_recv().map(decode) {
         Ok(ServerMessage::Message { payload, .. }) => {
             assert_eq!(payload["kind"], "encrypted_remote_action_result");
         }
@@ -487,6 +490,95 @@ async fn force_close_room_removes_all_peers() {
     );
 }
 
-async fn drain_presence(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<ServerMessage>) {
-    while matches!(receiver.try_recv(), Ok(ServerMessage::Presence { .. })) {}
+async fn drain_presence(receiver: &mut tokio::sync::mpsc::Receiver<OutboundMessage>) {
+    while matches!(
+        receiver.try_recv().map(decode),
+        Ok(ServerMessage::Presence { .. })
+    ) {}
+}
+
+fn decode(message: OutboundMessage) -> ServerMessage {
+    serde_json::from_str(&message.text).expect("queued server message")
+}
+
+#[tokio::test]
+async fn message_count_limit_signals_a_slow_peer_without_blocking_a_healthy_peer() {
+    let state = BrokerState::default();
+    let mut relay = state
+        .join("room", "relay", PeerRole::Relay, None, None)
+        .await
+        .unwrap();
+    let slow = state
+        .join("room", "slow", PeerRole::Surface, None, None)
+        .await
+        .unwrap();
+    let mut healthy = state
+        .join("room", "healthy", PeerRole::Surface, None, None)
+        .await
+        .unwrap();
+    drain_presence(&mut relay.receiver).await;
+
+    for n in 0..=OUTBOUND_QUEUE_CAPACITY {
+        state
+            .publish("room", "relay", json!({"n": n}))
+            .await
+            .unwrap();
+        assert!(matches!(
+            healthy.receiver.recv().await.map(decode),
+            Some(ServerMessage::Message { .. })
+        ));
+    }
+    assert_eq!(slow.receiver.len(), OUTBOUND_QUEUE_CAPACITY);
+    tokio::time::timeout(std::time::Duration::from_secs(1), slow.overflow.notified())
+        .await
+        .unwrap();
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(10),
+        healthy.overflow.notified()
+    )
+    .await
+    .is_err());
+}
+
+#[tokio::test]
+async fn byte_limit_also_bounds_targeted_messages_and_releases_consumed_bytes() {
+    let state = BrokerState::default();
+    let mut relay = state
+        .join("room", "relay", PeerRole::Relay, None, None)
+        .await
+        .unwrap();
+    let mut slow = state
+        .join("room", "slow", PeerRole::Surface, None, None)
+        .await
+        .unwrap();
+    drain_presence(&mut relay.receiver).await;
+    let payload = json!({
+        "kind": "targeted_messages",
+        "messages": [{"target_peer_id": "slow", "payload": {"ciphertext": "x".repeat(64 * 1024 - 256)}}]
+    });
+
+    for _ in 0..OUTBOUND_QUEUE_CAPACITY {
+        state
+            .publish("room", "relay", payload.clone())
+            .await
+            .unwrap();
+        assert!(slow.receiver.recv().await.is_some());
+    }
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(10),
+        slow.overflow.notified()
+    )
+    .await
+    .is_err());
+
+    for _ in 0..OUTBOUND_QUEUE_CAPACITY {
+        state
+            .publish("room", "relay", payload.clone())
+            .await
+            .unwrap();
+    }
+    assert!(slow.receiver.len() < OUTBOUND_QUEUE_CAPACITY);
+    tokio::time::timeout(std::time::Duration::from_secs(1), slow.overflow.notified())
+        .await
+        .unwrap();
 }

@@ -1,10 +1,19 @@
 use std::{collections::HashMap, sync::Arc};
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tracing::{info, warn};
 
 use crate::events::{UsageEvent, UsageEventKind, UsageEventSink};
 use crate::protocol::{PeerRole, PeerSummary, PresenceKind, ServerMessage};
+
+const OUTBOUND_QUEUE_CAPACITY: usize = 256;
+const OUTBOUND_QUEUE_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug)]
+pub struct OutboundMessage {
+    pub(crate) text: String,
+    _permit: OwnedSemaphorePermit,
+}
 
 #[derive(Clone, Default)]
 pub struct BrokerState {
@@ -35,14 +44,40 @@ struct PeerHandle {
     /// Set when this peer was seated by a pairing join ticket. One ticket may hold
     /// at most one seat at a time (see [`BrokerState::join`]).
     pairing_id: Option<String>,
-    tx: mpsc::UnboundedSender<ServerMessage>,
+    tx: mpsc::Sender<OutboundMessage>,
+    budget: Arc<Semaphore>,
+    overflow: Arc<Notify>,
+}
+
+impl PeerHandle {
+    fn enqueue(&self, message: ServerMessage) -> Result<(), ()> {
+        let text = serde_json::to_string(&message).expect("server messages should serialize");
+        if text.len() > OUTBOUND_QUEUE_BYTES {
+            self.overflow.notify_one();
+            return Err(());
+        }
+        let permit = Arc::clone(&self.budget)
+            .try_acquire_many_owned(text.len() as u32)
+            .map_err(|_| self.overflow.notify_one())?;
+        self.tx
+            .try_send(OutboundMessage {
+                text,
+                _permit: permit,
+            })
+            .map_err(|error| {
+                if matches!(error, mpsc::error::TrySendError::Full(_)) {
+                    self.overflow.notify_one();
+                }
+            })
+    }
 }
 
 #[derive(Debug)]
 pub struct JoinResult {
     pub connection_id: u64,
     pub existing_peers: Vec<PeerSummary>,
-    pub receiver: mpsc::UnboundedReceiver<ServerMessage>,
+    pub receiver: mpsc::Receiver<OutboundMessage>,
+    pub overflow: Arc<Notify>,
 }
 
 impl BrokerState {
@@ -127,7 +162,8 @@ impl BrokerState {
         pairing_id: Option<String>,
         expected_epoch: Option<u64>,
     ) -> Result<JoinResult, String> {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
+        let overflow = Arc::new(Notify::new());
         let joined_peer = PeerSummary {
             peer_id: peer_id.to_string(),
             role,
@@ -204,7 +240,7 @@ impl BrokerState {
                 superseded_peer_id = %superseded_peer_id,
                 "broker surface superseded by a later join on the same pairing ticket"
             );
-            let _ = handle.tx.send(ServerMessage::Error {
+            let _ = handle.enqueue(ServerMessage::Error {
                 code: "pairing_ticket_superseded".to_string(),
                 message: "another client joined with this pairing ticket".to_string(),
             });
@@ -214,7 +250,7 @@ impl BrokerState {
                 device_id: handle.device_id.clone(),
             };
             for remaining in room.peers.values() {
-                let _ = remaining.tx.send(ServerMessage::Presence {
+                let _ = remaining.enqueue(ServerMessage::Presence {
                     channel_id: channel_id.to_string(),
                     kind: PresenceKind::Left,
                     peer: left_peer.clone(),
@@ -244,7 +280,7 @@ impl BrokerState {
             if existing_peer_id == peer_id {
                 continue;
             }
-            let _ = handle.tx.send(ServerMessage::Presence {
+            let _ = handle.enqueue(ServerMessage::Presence {
                 channel_id: channel_id.to_string(),
                 kind: PresenceKind::Joined,
                 peer: joined_peer.clone(),
@@ -259,6 +295,8 @@ impl BrokerState {
                 device_id,
                 pairing_id,
                 tx,
+                budget: Arc::new(Semaphore::new(OUTBOUND_QUEUE_BYTES)),
+                overflow: Arc::clone(&overflow),
             },
         );
 
@@ -274,6 +312,7 @@ impl BrokerState {
             connection_id,
             existing_peers,
             receiver: rx,
+            overflow,
         })
     }
 
@@ -290,7 +329,7 @@ impl BrokerState {
         };
         let mut closed = 0usize;
         for (peer_id, handle) in room.peers {
-            let _ = handle.tx.send(ServerMessage::Error {
+            let _ = handle.enqueue(ServerMessage::Error {
                 code: code.to_string(),
                 message: message.to_string(),
             });
@@ -363,7 +402,7 @@ impl BrokerState {
         };
 
         for peer in room.peers.values() {
-            let _ = peer.tx.send(ServerMessage::Presence {
+            let _ = peer.enqueue(ServerMessage::Presence {
                 channel_id: channel_id.to_string(),
                 kind: PresenceKind::Left,
                 peer: left_peer.clone(),
@@ -479,8 +518,7 @@ impl BrokerState {
                     continue;
                 };
                 if handle
-                    .tx
-                    .send(ServerMessage::Message {
+                    .enqueue(ServerMessage::Message {
                         channel_id: channel_id.to_string(),
                         from_peer_id: from_peer_id.to_string(),
                         from_role: sender_role,
@@ -495,7 +533,7 @@ impl BrokerState {
                         channel_id,
                         from_peer_id,
                         target_peer_id = %message.target_peer_id,
-                        "broker targeted publish receiver is closed"
+                        "broker targeted publish queue is full or closed"
                     );
                 }
             }
@@ -540,8 +578,7 @@ impl BrokerState {
 
             recipient_count += 1;
             if handle
-                .tx
-                .send(ServerMessage::Message {
+                .enqueue(ServerMessage::Message {
                     channel_id: channel_id.to_string(),
                     from_peer_id: from_peer_id.to_string(),
                     from_role: sender_role,
@@ -557,7 +594,7 @@ impl BrokerState {
                     from_peer_id,
                     target_peer_id = %peer_id,
                     payload_kind = %outbound_payload_kind,
-                    "broker publish receiver is closed"
+                    "broker publish queue is full or closed"
                 );
             }
         }
@@ -574,13 +611,6 @@ impl BrokerState {
         Ok(())
     }
 }
-
-// Egress is NOT accounted here. An earlier revision returned a fan-out count from this
-// module and estimated egress from it at the publish site; that model assumed the targets
-// of a `targeted_messages` wrapper received similar-sized payloads, and reported half the
-// true figure for one large delivered payload beside one tiny undelivered one. Egress is
-// now counted in `send_message`, the single place a `ServerMessage` becomes bytes, where
-// the real serialized length is already known.
 
 #[derive(serde::Deserialize)]
 struct TargetedMessagesPayload {

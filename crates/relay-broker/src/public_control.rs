@@ -921,7 +921,8 @@ impl PublicControlPlane {
         let issuer_secret = trimmed_option_string(issuer_secret).ok_or_else(|| {
             format!("{PUBLIC_ISSUER_SECRET_ENV} is required in public broker auth mode")
         })?;
-        let issuer_key = JoinTicketKey::from_secret(issuer_secret.as_bytes())?;
+        let issuer_key = JoinTicketKey::from_secret(issuer_secret.as_bytes())
+            .map_err(|error| format!("{PUBLIC_ISSUER_SECRET_ENV}: {error}"))?;
         let persistence = PublicControlPersistence::from_config(state_path, postgres_url).await?;
         if !persistence.has_persistent_state() && public_mode_requires_persistent_state() {
             return Err(format!(
@@ -4245,7 +4246,7 @@ mod postgres_round_trip_tests {
             return;
         };
 
-        let issuer = Some("test-issuer-secret".to_string());
+        let issuer = Some("test-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string());
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -4326,7 +4327,7 @@ mod postgres_round_trip_tests {
             );
             return;
         };
-        let issuer = Some("test-issuer-secret".to_string());
+        let issuer = Some("test-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string());
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -4457,7 +4458,7 @@ mod device_revoke_tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("agent-relay-revoke-{unique}.json"));
         let path_str = path.to_str().expect("temp path is utf8").to_string();
-        let issuer = Some("revoke-test-issuer".to_string());
+        let issuer = Some("revoke-test-issuer-a3f76b4c2089d15e6b0fa873c4e9521d".to_string());
 
         let plane = PublicControlPlane::from_parts(
             issuer.clone(),
@@ -4540,7 +4541,7 @@ mod device_limit_tests {
 
     async fn in_memory_plane() -> PublicControlPlane {
         PublicControlPlane::from_parts(
-            Some("device-limit-test-issuer".to_string()),
+            Some("device-limit-test-issuer-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
             None,
             None,
             None,
@@ -5565,7 +5566,7 @@ mod postgres_persistence_opt_tests {
         let verify_key = format!("reenroll-vk-{unique}");
 
         let plane = PublicControlPlane::from_parts_with_postgres(
-            Some("test-issuer-secret".to_string()),
+            Some("test-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
             None,
             None,
             Some(url.clone()),
@@ -5590,7 +5591,7 @@ mod postgres_persistence_opt_tests {
 
         // Fresh instance loads from Postgres → the rotated registration survived.
         let plane_b = PublicControlPlane::from_parts_with_postgres(
-            Some("test-issuer-secret".to_string()),
+            Some("test-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
             None,
             None,
             Some(url.clone()),
@@ -5847,8 +5848,10 @@ mod postgres_persistence_opt_tests {
     fn postgres_plane(pool: PgPool, reload_before_use: bool) -> PublicControlPlane {
         PublicControlPlane {
             inner: Arc::new(PublicControlPlaneInner {
-                issuer_key: JoinTicketKey::from_secret(b"client-lockout-repro-issuer")
-                    .expect("issuer key"),
+                issuer_key: JoinTicketKey::from_secret(
+                    b"client-lockout-repro-issuer-a3f76b4c2089d15e6b0fa873c4e9521d",
+                )
+                .expect("issuer key"),
                 relay_ws_ttl_secs: DEFAULT_PUBLIC_RELAY_WS_TTL_SECS,
                 device_ws_ttl_secs: DEFAULT_PUBLIC_DEVICE_WS_TTL_SECS,
                 rotation_grace_secs: DEFAULT_PUBLIC_ROTATION_GRACE_SECS,
@@ -6351,7 +6354,7 @@ mod anonymous_input_tests {
 
     async fn in_memory_plane() -> PublicControlPlane {
         PublicControlPlane::from_parts(
-            Some("input-test-issuer".to_string()),
+            Some("input-test-issuer-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
             None,
             None,
             None,
@@ -6456,7 +6459,7 @@ mod miss_reload_tests {
 
     async fn json_plane(path: &Path) -> PublicControlPlane {
         PublicControlPlane::from_parts(
-            Some("miss-reload-test-issuer".to_string()),
+            Some("miss-reload-test-issuer-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
             None,
             Some(path.display().to_string()),
             None,

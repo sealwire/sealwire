@@ -25,6 +25,7 @@
 
 use std::{
     ffi::OsString,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -41,6 +42,35 @@ pub(crate) const PUBLIC_BROKER_IDENTITY_FILE: &str = "public-broker-identity.jso
 pub(crate) const VAPID_KEY_FILE: &str = "vapid.key";
 
 pub(crate) const STATE_PATH_ENV: &str = "RELAY_STATE_PATH";
+
+pub(crate) fn ensure_state_directory(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        return crate::windows_state_permissions::ensure_directory(
+            path,
+            path.file_name().is_some_and(|name| name == STATE_DIR_NAME),
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(path)?;
+        #[cfg(unix)]
+        if path.file_name().is_some_and(|name| name == STATE_DIR_NAME) {
+            use std::os::unix::fs::PermissionsExt;
+            // Explicit state paths may live in a shared directory such as /tmp.
+            // Only the relay's dedicated directory may have existing permissions changed.
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+}
 
 /// `$HOME` (or `%USERPROFILE%`), when it is usable as an anchor. An unset or
 /// relative value is rejected rather than silently rebuilding the per-cwd

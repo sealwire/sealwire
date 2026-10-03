@@ -40,7 +40,7 @@
   "scripts": {
     "start": "node scripts/sealwire.mjs",
     "lint": "eslint .",
-    "dev": "vite --host",
+    "dev": "vite",
     "dev:full": "scripts/with-private.sh node scripts/dev-full.mjs",
     "dev:full:local": "RELAY_DEV_LOCALHOST_ONLY=1 scripts/with-private.sh node scripts/dev-full.mjs",
     "dev:restart": "scripts/with-private.sh sh scripts/restart-dev.sh",
@@ -77,7 +77,7 @@
     "prepare": "node scripts/install-git-hooks.mjs",
     "prepack": "npm run build",
     "prepublishOnly": "scripts/check-no-private.sh",
-    "preview": "vite preview --host",
+    "preview": "vite preview",
     "smoke:pairing": "node scripts/pairing-smoke.mjs",
     "test:browser:smoke": "npm run build && node scripts/browser-page-smoke-e2e.mjs",
     "test:browser:composer-commands": "npm run build && node scripts/browser-composer-commands-e2e.mjs",

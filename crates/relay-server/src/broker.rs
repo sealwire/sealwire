@@ -2827,6 +2827,19 @@ pub(crate) fn load_public_relay_registration_raw(
             ))
         }
     };
+    #[cfg(windows)]
+    (|| {
+        if let Some(parent) = path.parent() {
+            crate::state_paths::ensure_state_directory(parent)?;
+        }
+        crate::windows_state_permissions::restrict_existing(path, false)
+    })()
+    .map_err(|error| {
+        format!(
+            "failed to restrict broker registration permissions {}: {error}",
+            path.display()
+        )
+    })?;
     if let Ok(meta) = file.metadata() {
         if meta.len() > MAX_REGISTRATION_BYTES as u64 {
             return Err(format!(
@@ -2994,13 +3007,18 @@ async fn load_public_relay_registration(
 /// or hard link pre-planted at the temp path instead of following it to an
 /// external target: the relay isn't sandboxed, so without this a
 /// workspace-write-confined agent could redirect these broker cache / key
-/// writes to a fixed filename outside the workspace. Callers create the parent
-/// directory first. Mirrors `state::persistence::save`; `write_new_exclusive`
+/// writes to a fixed filename outside the workspace. Mirrors
+/// `state::persistence::save`; `write_new_exclusive`
 /// is sync I/O, hence the blocking pool.
 async fn persist_bytes_atomically(path: &Path, payload: Vec<u8>) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or("broker state path must have a parent directory")?
+        .to_path_buf();
     let temporary_path = path.with_extension("tmp");
     let write_path = temporary_path.clone();
     tokio::task::spawn_blocking(move || {
+        crate::state_paths::ensure_state_directory(&parent)?;
         crate::instance_lock::write_new_exclusive_with_mode(&write_path, &payload, Some(0o600))
     })
     .await
@@ -3022,12 +3040,6 @@ async fn save_public_relay_registration(
     control_url: &str,
     registration: &PublicRelayRegistration,
 ) -> Result<(), String> {
-    let Some(parent) = path.parent() else {
-        return Err("broker registration cache path must have a parent directory".to_string());
-    };
-    tokio::fs::create_dir_all(parent)
-        .await
-        .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
     let payload = serde_json::to_vec_pretty(&PersistedPublicRelayRegistration {
         schema_version: PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION,
         control_url: control_url.to_string(),
@@ -3108,6 +3120,19 @@ fn load_public_relay_identity_raw(
             ))
         }
     };
+    #[cfg(windows)]
+    (|| {
+        if let Some(parent) = path.parent() {
+            crate::state_paths::ensure_state_directory(parent)?;
+        }
+        crate::windows_state_permissions::restrict_existing(path, false)
+    })()
+    .map_err(|error| {
+        format!(
+            "failed to restrict broker identity permissions {}: {error}",
+            path.display()
+        )
+    })?;
     if let Ok(meta) = file.metadata() {
         if meta.len() > MAX_IDENTITY_BYTES as u64 {
             return Err(format!(
@@ -3151,12 +3176,6 @@ async fn save_public_relay_identity(
     control_url: &str,
     identity: &PublicRelayIdentity,
 ) -> Result<(), String> {
-    let Some(parent) = path.parent() else {
-        return Err("broker relay identity path must have a parent directory".to_string());
-    };
-    tokio::fs::create_dir_all(parent)
-        .await
-        .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
     let payload = serde_json::to_vec_pretty(&PersistedPublicRelayIdentity {
         schema_version: PUBLIC_RELAY_IDENTITY_SCHEMA_VERSION,
         control_url: control_url.to_string(),
