@@ -1436,10 +1436,8 @@ function RemoteApp() {
           // out at length.
           if (change.action?.reason === BOOT_RESTORE_REASON) {
             void Promise.resolve(viewed).then((shown) => {
-              // The decision itself lives on the host (`shouldRepairBootRestore`), where it
-              // is checkable without rendering — notably the part that makes `false` safe
-              // to act on, since `viewRemoteThread` returns it both for a failed fetch and
-              // for one a newer navigation superseded.
+              // The decision lives on the host (`shouldRepairBootRestore`), where it is
+              // checkable without rendering; `shown` is null when a newer navigation won.
               const liveThreadId = liveThreadIdRef.current;
               if (!sessionTabsHost.shouldRepairBootRestore({ shown, liveThreadId })) return;
               void sessionTabsHost.adoptViewedThread({

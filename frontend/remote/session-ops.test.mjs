@@ -1098,7 +1098,7 @@ test("stale view-only fetch cannot override a newer resume", async () => {
   });
 
   resolveViewFetch();
-  assert.equal(await pendingView, false, "the stale view response is discarded");
+  assert.equal(await pendingView, null, "the stale view response is discarded");
   assert.equal(
     state.session.active_thread_id,
     "thread-new-live",
@@ -7149,6 +7149,28 @@ test("the refresh owed after a failed switch cannot override a newer tap", async
   cleanup();
 });
 
+// Only a failure reports false, and a reload's restore falls back to the live session on
+// it. A view a newer navigation replaced has not failed; the newer one owns the screen.
+test("a view a newer navigation replaced resolves null, whether its fetch answered or failed", async () => {
+  const { transcriptFetch, viewRemoteThread, cleanup } = await viewStreamingThreadB();
+
+  const answered = viewRemoteThread("thread-c");
+  await waitFor(() => transcriptFetch.fetchCount >= 2);
+  const failed = viewRemoteThread("thread-d");
+  await waitFor(() => transcriptFetch.fetchCount >= 3);
+  const newest = viewRemoteThread("thread-e");
+  await waitFor(() => transcriptFetch.fetchCount >= 4);
+
+  transcriptFetch.completeNext();
+  assert.equal(await answered, null);
+  transcriptFetch.failNext();
+  assert.equal(await failed, null);
+  transcriptFetch.completeNext();
+  assert.equal(await newest, true);
+
+  cleanup();
+});
+
 test("a superseded switch does not release the held-back refresh over the newer tap", async () => {
   const { state, transcriptFetch, applyActivity, viewRemoteThread, cleanup } = await viewStreamingThreadB();
 
@@ -7159,7 +7181,7 @@ test("a superseded switch does not release the held-back refresh over the newer 
   await waitFor(() => transcriptFetch.fetchCount >= 3);
 
   transcriptFetch.completeNext();
-  assert.equal(await supersededView, false);
+  assert.equal(await supersededView, null);
   await nextTick();
   await nextTick();
   assert.equal(transcriptFetch.fetchCount, 3, "thread-b's refresh is still owed, but not while thread-d loads");

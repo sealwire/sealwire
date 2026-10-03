@@ -319,9 +319,6 @@ export function createRemoteSessionTabsHost({
      */
     openThread({ threadId, threadProjectId = null, preview = undefined } = {}) {
       if (!threadId) return Promise.resolve(null);
-      // A tap is the user's own navigation, even onto the restored session: its retry
-      // supersedes the restore's view, and that `false` must not fall back to the live one.
-      bootRestoredThreadId = null;
       return controller.openThread(threadId, {
         context: selectOwningContext({ threadId, threadProjectId }),
         preview,
@@ -350,10 +347,8 @@ export function createRemoteSessionTabsHost({
      * The one predicate two different decisions need, which is why it is state and not a
      * flag. An adoption yields to the restore only while the restore is still what is on
      * screen; and the repair for a FAILED restore may only fire while that is still true —
-     * `viewRemoteThread` returns `false` both when a fetch failed and when a NEWER
-     * navigation superseded it (`session-ops.js`'s generation guard), so without this the
-     * user tapping another session mid-boot would be dragged to the live thread by the
-     * stale answer to a fetch they had already walked away from.
+     * moving to a project with no open sessions views nothing, so the restore's fetch is
+     * never replaced, and its failing must not drag the user back out of that project.
      */
     isShowingBootRestore() {
       return (
@@ -369,10 +364,9 @@ export function createRemoteSessionTabsHost({
      * rule is checkable without rendering anything — as every other decision in this file
      * is. Three conditions, each for its own reason:
      *
-     *   - `shown === false` only. `undefined` means no handler ran at all, which is not a
-     *     failure report.
-     *   - the restore must still be on screen — see `isShowingBootRestore`, and the
-     *     superseded-vs-failed conflation it exists to survive.
+     *   - `shown === false` only. `null` is a view a newer navigation replaced, and
+     *     `undefined` means no handler ran at all; neither is a failure report.
+     *   - the restore must still be on screen — see `isShowingBootRestore`.
      *   - there must BE a live thread. Without one there is nothing better to show, so the
      *     location keeps naming a session that never loaded. Accepted: a relay with no
      *     active thread has no conversation to fall back to, and inventing one would be a

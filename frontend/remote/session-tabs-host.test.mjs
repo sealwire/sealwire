@@ -818,6 +818,11 @@ test("the repair fires only for a failed view that is still on screen", async ()
     "no handler having run is not a failure report either"
   );
   assert.equal(
+    host.shouldRepairBootRestore({ shown: null, liveThreadId: "LIVE" }),
+    false,
+    "nor is a view a newer navigation replaced, even one that came back to this session"
+  );
+  assert.equal(
     host.shouldRepairBootRestore({ shown: false, liveThreadId: null }),
     false,
     "with no live thread there is nothing better to show"
@@ -864,22 +869,6 @@ test("re-tapping a selected session that is not on screen asks for the view agai
     host.shouldRetryView({ change: retap, threadId: "C", viewedThreadId: "B" }),
     false,
     "a late retry for C must not override a newer tap on D"
-  );
-});
-
-// Re-tapping the restored session while it loads retries the view, which supersedes the
-// restore's own; that `false` must not then send the user to the live session.
-test("re-tapping the restored session takes it out of the restore's fallback", async () => {
-  const host = await restoredSurface();
-  await host.adoptViewedThread({ threadId: "LIVE", threadProjectId: {} });
-  assert.equal(host.controller.getState().location.threadId, "A");
-
-  const retap = await host.openThread({ threadId: "A", threadProjectId: { A: "P" } });
-  assert.equal(host.shouldRetryView({ change: retap, threadId: "A", viewedThreadId: "LIVE" }), true);
-  assert.equal(
-    host.shouldRepairBootRestore({ shown: false, liveThreadId: "LIVE" }),
-    false,
-    "the user asked for A, so the restore's superseded view must not fall back"
   );
 });
 
@@ -959,10 +948,8 @@ test("a dissolved project does not reappear on the next boot", async () => {
   );
 });
 
-// The predicate the repair for a failed restore keys on. `viewRemoteThread` returns
-// `false` for two unrelated reasons — the fetch failed, or a NEWER navigation superseded
-// it — so a repair that only checks the boolean would drag a user who tapped another
-// session mid-boot back to the relay's live thread.
+// The predicate the repair for a failed restore keys on. Once the location has left, its
+// failure must not act: a move to an empty project views nothing, so replaces no fetch.
 test("the surface stops reporting a boot restore once it has moved on", async () => {
   const host = await restoredSurface();
   await host.adoptViewedThread({ threadId: "LIVE", threadProjectId: {} });

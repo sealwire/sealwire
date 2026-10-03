@@ -7,6 +7,7 @@ import process from "node:process";
 
 import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
 import { launchBrowser } from "./e2e/harness/browser.mjs";
+import { projectSwitcherOption } from "./e2e/harness/project-switcher.mjs";
 import { startStaticServer } from "./e2e/harness/static-server.mjs";
 
 const ROOT = process.cwd();
@@ -173,7 +174,16 @@ function installFakeRelay({ relayId, threads }) {
         case "list_threads":
           return ok("list_threads", { threads: { threads: threadSummaries } });
         case "fetch_projects":
-          return ok("fetch_projects", { projects: { projects_revision: 1, projects: [], thread_project_id: {} } });
+          return ok("fetch_projects", {
+            projects: {
+              projects_revision: 1,
+              projects: [
+                { id: "project-beta", name: "Beta project" },
+                { id: "project-empty", name: "Empty project" },
+              ],
+              thread_project_id: { "thread-b": "project-beta" },
+            },
+          });
         case "fetch_reviews":
           return ok("fetch_reviews", { reviews: { reviews: [] } });
         case "fetch_workflows":
@@ -253,6 +263,22 @@ async function tapSession(page, threadId) {
   await page.tap("#remote-nav-toggle-button");
   // Playwright's tap waits for the drawer's slide-in to settle before it lands.
   await page.locator(`button.conversation-item[data-thread-id="${threadId}"]`).tap({ timeout: TIMEOUT_MS });
+}
+
+async function chooseProject(page, label) {
+  if ((await page.getAttribute(".remote-app-shell", "data-remote-nav-state")) !== "open") {
+    await page.tap("#remote-nav-toggle-button");
+  }
+  if ((await page.getAttribute(".sidebar .project-switcher-trigger", "aria-expanded")) !== "true") {
+    await page.locator(".sidebar .project-switcher-trigger").tap({ timeout: TIMEOUT_MS });
+  }
+  await projectSwitcherOption(page, label, { scope: ".sidebar" }).tap({ timeout: TIMEOUT_MS });
+  await page.waitForFunction(
+    (expected) =>
+      document.querySelector("#remote-pinned-project .pinned-project-chip-name")?.textContent?.trim() === expected,
+    label,
+    { timeout: TIMEOUT_MS }
+  );
 }
 
 async function expectOnScreen(page, threadId, message = `${THREADS[threadId]} should be on screen`) {
@@ -350,6 +376,30 @@ const SCENARIOS = {
     });
     await expectOnScreen(page, "thread-b");
     await expectStaysOnScreen(page, "thread-b", "the tapped session must stay on screen");
+  },
+
+  // Leaving the restored session's project and coming back views it again, which replaces
+  // the reload's view; that must not count as the reload failing.
+  async "returning to the restored session's project while it loads keeps it"(page) {
+    await tapSession(page, "thread-b");
+    await expectOnScreen(page, "thread-b");
+
+    await page.evaluate(() => {
+      window.localStorage.setItem("e2e-transcript-mode", JSON.stringify({ "thread-b": "hold" }));
+    });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => window.__heldTranscripts.length >= 1, null, { timeout: TIMEOUT_MS });
+    await expectOnScreen(page, "thread-a", "the live session shows while the restored one loads");
+
+    await chooseProject(page, "Empty project");
+    await chooseProject(page, "Beta project");
+    await page.waitForTimeout(300);
+    await page.evaluate(() => {
+      delete window.__transcriptMode["thread-b"];
+      window.__releaseHeldTranscripts();
+    });
+    await expectOnScreen(page, "thread-b");
+    await expectStaysOnScreen(page, "thread-b", "the restored session must stay on screen");
   },
 };
 

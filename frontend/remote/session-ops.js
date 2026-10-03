@@ -1877,6 +1877,8 @@ export async function updateRemoteSessionSettings({ approval_policy, sandbox, ef
   }
 }
 
+// Resolves true once shown, false if the view failed, and null if a newer navigation
+// replaced it: only a failure may send the reload's restore back to the live session.
 export async function viewRemoteThread(threadId) {
   if (!threadId) {
     return false;
@@ -1906,7 +1908,7 @@ export async function viewRemoteThread(threadId) {
     // A newer view, resume, start, or relay reset won while this fetch was in
     // flight. Do not let this stale response restore an old read-only projection.
     if (navigationGeneration !== viewOnlyNavigationGeneration) {
-      return false;
+      return null;
     }
     if (!page || page.thread_id !== threadId) {
       throw new Error("remote transcript page response is incomplete");
@@ -1980,7 +1982,7 @@ export async function viewRemoteThread(threadId) {
     return true;
   } catch (error) {
     renderLog(`Remote session view failed: ${error.message}`);
-    return false;
+    return navigationGeneration === viewOnlyNavigationGeneration ? false : null;
   } finally {
     if (navigationGeneration === viewOnlyNavigationGeneration) {
       viewOnlyNavigationTarget = null;
