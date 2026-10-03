@@ -134,7 +134,7 @@ function installFakeRelay({ relayId, threads }) {
   window.__transcriptFetches = [];
 
   const BROKER_PROTOCOL_VERSION = 1;
-  const RELAY_PROTOCOL_VERSION = 2;
+  const RELAY_PROTOCOL_VERSION = 3;
 
   class FakeWebSocket extends EventTarget {
     static OPEN = 1;

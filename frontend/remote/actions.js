@@ -678,8 +678,8 @@ async function buildClaimChallengePayload(actionId) {
     action_id: actionId,
     device_id: state.remoteAuth.deviceId,
     envelope: await encryptJson(state.remoteAuth.payloadSecret, {
-      type: "claim_challenge",
-      proof,
+      action_id: actionId,
+      request: { type: "claim_challenge", proof },
     }),
   };
 }
@@ -706,9 +706,12 @@ async function buildClaimDevicePayload(actionId, request) {
     action_id: actionId,
     device_id: state.remoteAuth.deviceId,
     envelope: await encryptJson(state.remoteAuth.payloadSecret, {
-      type: "claim_device",
-      challenge_id: request.challenge_id,
-      proof: claimProof,
+      action_id: actionId,
+      request: {
+        type: "claim_device",
+        challenge_id: request.challenge_id,
+        proof: claimProof,
+      },
     }),
   };
 }
@@ -720,8 +723,8 @@ async function buildClaimedActionPayload(actionId, actionType, request) {
     session_claim: state.remoteAuth.sessionClaim,
     device_id: state.remoteAuth.deviceId,
     envelope: await encryptJson(state.remoteAuth.payloadSecret, {
-      type: actionType,
-      ...request,
+      action_id: actionId,
+      request: { type: actionType, ...request },
     }),
   };
 }
@@ -732,8 +735,8 @@ async function buildDeviceActionPayload(actionId, actionType, request) {
     action_id: actionId,
     device_id: state.remoteAuth.deviceId,
     envelope: await encryptJson(state.remoteAuth.payloadSecret, {
-      type: actionType,
-      ...request,
+      action_id: actionId,
+      request: { type: actionType, ...request },
     }),
   };
 }

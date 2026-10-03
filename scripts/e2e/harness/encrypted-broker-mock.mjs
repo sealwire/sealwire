@@ -45,10 +45,14 @@ export function installEncryptedMock() {
         throw new Error("mock relay permits only protocol fields outside ciphertext");
       }
       const { nonce, ciphertext } = frame.payload.envelope;
-      void key.then((secret) => {
+      return key.then((secret) => {
         const bytes = nacl.secretbox.open(decode(ciphertext), decode(nonce), secret);
         if (!bytes) throw new Error("mock relay could not decrypt action");
-        frame.payload.request = JSON.parse(decoder.decode(bytes));
+        const payload = JSON.parse(decoder.decode(bytes));
+        if (typeof payload.action_id !== "string" || payload.action_id !== frame.payload.action_id) {
+          throw new Error("encrypted remote action action_id does not match outer action_id");
+        }
+        frame.payload.request = payload.request;
         super.send(JSON.stringify(frame));
       });
     }

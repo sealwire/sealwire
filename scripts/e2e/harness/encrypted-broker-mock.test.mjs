@@ -9,7 +9,7 @@ import { installEncryptedMock } from "./encrypted-broker-mock.mjs";
 
 const request = { type: "heartbeat", input: { device_id: "phone-1" } };
 
-function encryptedFrame(secret) {
+function encryptedFrame(secret, payload = { action_id: "action-1", request }) {
   const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
   return {
     type: "publish",
@@ -19,7 +19,7 @@ function encryptedFrame(secret) {
       envelope: {
         nonce: Buffer.from(nonce).toString("base64"),
         ciphertext: Buffer.from(nacl.secretbox(
-          new TextEncoder().encode(JSON.stringify(request)),
+          new TextEncoder().encode(JSON.stringify(payload)),
           nonce,
           sha256(new TextEncoder().encode(secret)),
         )).toString("base64"),
@@ -49,7 +49,7 @@ for (const [name, secret, consumer] of [
   })],
   ["browser mock", "payload-secret-e2e", () => {
     const { socket, sent } = browserMock();
-    return { consume: (raw) => socket.send(raw), result: (raw) => { socket.send(raw); return sent; } };
+    return { consume: (raw) => socket.send(raw), result: async (raw) => { await socket.send(raw); return sent; } };
   }],
 ]) {
   test(`${name} rejects plaintext action frames`, () => {
@@ -83,11 +83,23 @@ for (const [name, secret, consumer] of [
     }
   });
 
+  test(`${name} rejects a changed outer action ID`, async () => {
+    const { result } = consumer();
+    const frame = encryptedFrame(secret);
+    frame.payload.action_id = "changed-action";
+    await assert.rejects(async () => result(JSON.stringify(frame)), /action_id does not match/);
+  });
+
+  test(`${name} rejects ciphertext without a bound action ID`, async () => {
+    const { result } = consumer();
+    await assert.rejects(async () => result(JSON.stringify(encryptedFrame(secret, request))), /action_id does not match/);
+  });
+
   test(`${name} decrypts the request in a valid encrypted frame`, { timeout: 2000 }, async () => {
     const { result } = consumer();
     const input = encryptedFrame(secret);
-    input.protocol_version = 2;
-    Object.assign(input.payload, { protocol_version: 2, device_id: "phone-1", session_claim: "claim-1" });
+    input.protocol_version = 1;
+    Object.assign(input.payload, { protocol_version: 3, device_id: "phone-1", session_claim: "claim-1" });
     const frame = await result(JSON.stringify(input));
     assert.equal(frame.payload.action_id, "action-1");
     assert.deepEqual(frame.payload.request, request);

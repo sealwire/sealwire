@@ -278,7 +278,7 @@ function buildInitScript({ relayId, threadId, projectId, projectName, latinProje
     // does not know via `renderLog`, so a stale fixture reaches no console: the page
     // connects, sends its requests, and silently ignores every answer.
     const BROKER_PROTOCOL_VERSION = 1;
-    const RELAY_PROTOCOL_VERSION = 2;
+    const RELAY_PROTOCOL_VERSION = 3;
 
     class FakeWebSocket extends EventTarget {
       static OPEN = 1;

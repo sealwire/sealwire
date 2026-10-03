@@ -358,7 +358,7 @@ async function main() {
           };
 
           const BROKER_PROTOCOL_VERSION = 1;
-          const RELAY_PROTOCOL_VERSION = 2;
+          const RELAY_PROTOCOL_VERSION = 3;
 
           // Counted so a failure can say whether the page ever ASKED for the
           // catalogue — "never asked" and "asked and dropped it" are different bugs.

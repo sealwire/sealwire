@@ -23,7 +23,11 @@ export function decodeActionFrame(text, secret = "payload-secret-1") {
     sha256(new TextEncoder().encode(secret))
   );
   if (!bytes) throw new Error("mock relay could not decrypt action");
-  frame.payload.request = JSON.parse(new TextDecoder().decode(bytes));
+  const payload = JSON.parse(new TextDecoder().decode(bytes));
+  if (typeof payload.action_id !== "string" || payload.action_id !== frame.payload.action_id) {
+    throw new Error("encrypted remote action action_id does not match outer action_id");
+  }
+  frame.payload.request = payload.request;
   return frame;
 }
 

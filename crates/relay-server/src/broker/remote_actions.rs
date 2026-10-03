@@ -63,6 +63,12 @@ const REMOTE_ACTION_RESULT_CHUNK_MIN_CHARS: usize = 1_024;
 pub(super) const REMOTE_ACTION_RESULT_CHUNK_PUBLISH_INTERVAL_MILLIS: u64 = 50;
 const REMOTE_ACTION_SLOW_WARN_MILLIS: u128 = 1_000;
 
+#[derive(Deserialize)]
+struct EncryptedRemoteActionPlaintext {
+    action_id: String,
+    request: RemoteActionRequest,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum RemoteActionRequest {
@@ -1045,6 +1051,7 @@ pub(super) async fn handle_encrypted_remote_action(
     } = match resolve_encrypted_action_context(
         state,
         &from_peer_id,
+        &action_id,
         session_claim.as_deref(),
         device_id.as_deref(),
         &envelope,
@@ -1056,7 +1063,7 @@ pub(super) async fn handle_encrypted_remote_action(
             let Some(device_id) = hinted_device_id else {
                 return Err(error);
             };
-            let action_kind = decrypt_remote_action_kind(state, &device_id, &envelope)
+            let action_kind = decrypt_remote_action_kind(state, &device_id, &action_id, &envelope)
                 .await
                 .unwrap_or(RemoteActionKind::ClaimDevice);
             state
@@ -1930,31 +1937,39 @@ fn issues_session_claim(action: RemoteActionKind) -> bool {
 async fn decrypt_remote_action_kind(
     state: &AppState,
     device_id: &str,
+    action_id: &str,
     envelope: &EncryptedEnvelope,
 ) -> Result<RemoteActionKind, String> {
-    let request = decrypt_remote_action(state, device_id, envelope).await?;
+    let request = decrypt_remote_action(state, device_id, action_id, envelope).await?;
     Ok(request.kind())
 }
 
 async fn decrypt_remote_action(
     state: &AppState,
     device_id: &str,
+    action_id: &str,
     envelope: &EncryptedEnvelope,
 ) -> Result<RemoteActionRequest, String> {
     let secret = state.paired_device_payload_secret(device_id).await?;
-    decrypt_remote_action_with_secret(&secret, envelope)
+    decrypt_remote_action_with_secret(&secret, action_id, envelope)
 }
 
-fn decrypt_remote_action_with_secret(
+pub(super) fn decrypt_remote_action_with_secret(
     secret: &str,
+    action_id: &str,
     envelope: &EncryptedEnvelope,
 ) -> Result<RemoteActionRequest, String> {
-    decrypt_json(secret, envelope)
+    let payload: EncryptedRemoteActionPlaintext = decrypt_json(secret, envelope)?;
+    if payload.action_id != action_id {
+        return Err("encrypted remote action action_id does not match outer action_id".to_string());
+    }
+    Ok(payload.request)
 }
 
 async fn resolve_encrypted_action_context(
     state: &AppState,
     from_peer_id: &str,
+    action_id: &str,
     session_claim: Option<&str>,
     device_id: Option<&str>,
     envelope: &EncryptedEnvelope,
@@ -1962,7 +1977,7 @@ async fn resolve_encrypted_action_context(
     if let Some(claim) = session_claim {
         let device_id = verify_session_claim(state, claim, from_peer_id).await?;
         let response_secret = state.paired_device_payload_secret(&device_id).await?;
-        let request = decrypt_remote_action_with_secret(&response_secret, envelope)?;
+        let request = decrypt_remote_action_with_secret(&response_secret, action_id, envelope)?;
         let action_kind = request.kind();
         return Ok(ResolvedEncryptedAction {
             device_id,
@@ -1976,7 +1991,7 @@ async fn resolve_encrypted_action_context(
         .map(str::to_string)
         .ok_or_else(|| "encrypted remote action is missing device_id".to_string())?;
     let response_secret = state.paired_device_payload_secret(&device_id).await?;
-    let request = decrypt_remote_action_with_secret(&response_secret, envelope)?;
+    let request = decrypt_remote_action_with_secret(&response_secret, action_id, envelope)?;
     let action_kind = request.kind();
     if requires_session_claim(action_kind) {
         return Err(SESSION_CONTROL_REQUIRED_ERROR.to_string());

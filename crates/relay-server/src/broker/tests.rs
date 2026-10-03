@@ -1054,8 +1054,9 @@ fn parse_inbound_payload_parses_pairing_requests() {
 
 #[test]
 fn parse_inbound_payload_parses_encrypted_remote_actions() {
-    let envelope = encrypt_json(
+    let envelope = bound_action_envelope(
         "device-secret",
+        "act-2",
         &RemoteActionRequest::SendMessage {
             input: SendMessageInput {
                 text: "encrypted hello".to_string(),
@@ -1092,8 +1093,12 @@ fn parse_inbound_payload_parses_encrypted_remote_actions() {
             assert_eq!(action_id, "act-2");
             assert_eq!(device_id.as_deref(), Some("phone-1"));
             assert!(session_claim.is_none());
-            let request: RemoteActionRequest =
-                decrypt_json("device-secret", &envelope).expect("payload should decrypt");
+            let request: RemoteActionRequest = remote_actions::decrypt_remote_action_with_secret(
+                "device-secret",
+                &action_id,
+                &envelope,
+            )
+            .expect("payload should decrypt");
             match request {
                 RemoteActionRequest::SendMessage { input, skill } => {
                     assert_eq!(input.text, "encrypted hello");
@@ -2193,6 +2198,17 @@ fn surface_peer(peer_id: &str, device_id: &str) -> relay_broker::protocol::PeerS
     }
 }
 
+fn bound_action_envelope(
+    secret: &str,
+    action_id: &str,
+    request: &impl serde::Serialize,
+) -> Result<EncryptedEnvelope, String> {
+    encrypt_json(
+        secret,
+        &serde_json::json!({ "action_id": action_id, "request": request }),
+    )
+}
+
 fn encrypted_action_frame(
     from_peer_id: &str,
     action_id: &str,
@@ -2212,7 +2228,7 @@ fn encrypted_action_frame(
             "protocol_version": RELAY_PROTOCOL_VERSION,
             "action_id": action_id,
             "device_id": "phone-1",
-            "envelope": encrypt_json("secret", &request).expect("request encrypts"),
+            "envelope": bound_action_envelope("secret", action_id, &request).expect("request encrypts"),
         }
     }))
     .expect("action frame serializes")
@@ -4370,7 +4386,7 @@ fn encrypted_action_frame_versioned(
             "protocol_version": protocol_version,
             "action_id": action_id,
             "device_id": "phone-1",
-            "envelope": encrypt_json("secret", &request).expect("request encrypts"),
+            "envelope": bound_action_envelope("secret", action_id, &request).expect("request encrypts"),
         }
     }))
     .expect("action frame serializes")
@@ -4519,7 +4535,7 @@ async fn a_previous_version_request_does_not_end_the_session() {
             "surface-a",
             "action-old",
             serde_json::json!({ "type": "list_threads", "query": { "limit": 5 } }),
-            1,
+            RELAY_PROTOCOL_VERSION - 1,
         ),
         encrypted_action_frame_versioned(
             "surface-a",
@@ -4564,7 +4580,7 @@ async fn an_unparseable_payload_does_not_end_the_session() {
             "surface-a",
             "action-good",
             serde_json::json!({ "type": "list_threads", "query": { "limit": 5 } }),
-            2,
+            RELAY_PROTOCOL_VERSION,
         ),
     ])
     .await;
@@ -4598,8 +4614,9 @@ async fn a_handler_error_after_parsing_does_not_end_the_session() {
         .remove("device_id");
     let refused = serde_json::to_string(&refused).expect("frame serializes");
     // A valid encrypted request must still be served after the refusal.
-    let envelope = encrypt_json(
+    let envelope = bound_action_envelope(
         "secret",
+        "action-sealed",
         &RemoteActionRequest::ListThreads {
             query: serde_json::from_value(serde_json::json!({ "limit": 5 }))
                 .expect("threads query parses"),
@@ -6221,7 +6238,7 @@ fn open_encrypted_request_json(action_id: &str, request: serde_json::Value) -> R
         "protocol_version": RELAY_PROTOCOL_VERSION,
         "action_id": action_id,
         "device_id": "phone-1",
-        "envelope": encrypt_json("secret", &request).expect("request encrypts"),
+        "envelope": bound_action_envelope("secret", action_id, &request).expect("request encrypts"),
     }))
     .expect("payload parses")
     .expect("payload is handled");
@@ -6235,7 +6252,8 @@ fn open_encrypted_request_json(action_id: &str, request: serde_json::Value) -> R
             assert_eq!(parsed_id, action_id);
             assert_eq!(device_id.as_deref(), Some("phone-1"));
             assert!(session_claim.is_none());
-            decrypt_json("secret", &envelope).expect("request JSON parses")
+            remote_actions::decrypt_remote_action_with_secret("secret", &parsed_id, &envelope)
+                .expect("request JSON parses")
         }
         other => panic!("unexpected payload: {other:?}"),
     }
@@ -6301,4 +6319,300 @@ fn parse_encrypted_claim_device_json() {
         }
         other => panic!("unexpected request: {other:?}"),
     }
+}
+
+async fn next_encrypted_action_reply(
+    replies: &mut tokio::sync::mpsc::Receiver<Message>,
+) -> (serde_json::Value, serde_json::Value) {
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(2), replies.recv())
+            .await
+            .expect("reply arrives")
+            .expect("writer remains open");
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let frame: serde_json::Value = serde_json::from_str(&text).expect("reply frame");
+        let payload = &frame["payload"];
+        if payload["kind"] != "encrypted_remote_action_result" {
+            continue;
+        }
+        let envelope = serde_json::from_value(payload["envelope"].clone()).expect("reply envelope");
+        let result = decrypt_json("secret", &envelope).expect("reply decrypts");
+        return (payload.clone(), result);
+    }
+}
+
+#[tokio::test]
+async fn bound_action_retries_wait_and_replay_without_reexecuting_the_provider() {
+    let dir = tempfile::TempDir::new().expect("tmpdir");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let released = Arc::new(tokio::sync::Notify::new());
+    let entries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> = HashMap::new();
+    providers.insert(
+        "gated".to_string(),
+        Arc::new(GatedThreadsProvider {
+            entered_list_threads: entered.clone(),
+            released: released.clone(),
+            entries: entries.clone(),
+        }),
+    );
+    let (state, relay) =
+        encrypted_broker_state_parts(&dir.path().to_string_lossy(), providers).await;
+    let (origin, retry_origin) = {
+        let mut relay = relay.write().await;
+        relay.mark_surface_peer_online("surface-a");
+        relay.mark_surface_peer_online("surface-b");
+        (
+            FrameOrigin {
+                ingress: crate::state::next_relay_ingress(),
+                lease: relay.current_surface_lease("surface-a").unwrap(),
+            },
+            FrameOrigin {
+                ingress: crate::state::next_relay_ingress(),
+                lease: relay.current_surface_lease("surface-b").unwrap(),
+            },
+        )
+    };
+    let envelope = bound_action_envelope(
+        "secret",
+        "original",
+        &serde_json::json!({
+            "type": "list_threads", "query": {"limit": 5},
+        }),
+    )
+    .expect("encrypt request");
+    let (writer, mut replies, _trains) = super::writer::test_writer();
+    let first = {
+        let state = state.clone();
+        let writer = writer.clone();
+        let envelope = envelope.clone();
+        tokio::spawn(async move {
+            handle_encrypted_remote_action(
+                &state,
+                &writer,
+                origin,
+                "surface-a".to_string(),
+                "original".to_string(),
+                None,
+                Some("phone-1".to_string()),
+                envelope,
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("provider entered");
+    handle_encrypted_remote_action(
+        &state,
+        &writer,
+        retry_origin,
+        "surface-b".to_string(),
+        "original".to_string(),
+        None,
+        Some("phone-1".to_string()),
+        envelope.clone(),
+    )
+    .await
+    .expect("same ID waits in flight");
+    let pending = tokio::time::timeout(Duration::from_secs(2), replies.recv())
+        .await
+        .expect("in-flight notice arrives")
+        .expect("writer open");
+    let Message::Text(pending) = pending else {
+        panic!("notice must be text")
+    };
+    let pending: serde_json::Value = serde_json::from_str(&pending).expect("notice JSON");
+    assert_eq!(pending["payload"]["kind"], "remote_action_pending");
+    assert_eq!(pending["payload"]["action_id"], "original");
+    handle_encrypted_remote_action(
+        &state,
+        &writer,
+        origin,
+        "surface-a".to_string(),
+        "changed".to_string(),
+        None,
+        Some("phone-1".to_string()),
+        envelope.clone(),
+    )
+    .await
+    .expect("refusal delivered");
+    let (payload, refusal) = next_encrypted_action_reply(&mut replies).await;
+    assert_eq!(payload["action_id"], "changed");
+    assert_eq!(refusal["ok"], false);
+    assert!(refusal["error"]
+        .as_str()
+        .unwrap()
+        .contains("action_id does not match"));
+    assert!(relay
+        .read()
+        .await
+        .completed_remote_action("phone-1", "changed")
+        .is_none());
+    released.notify_one();
+    first
+        .await
+        .expect("handler joins")
+        .expect("original completes");
+    for _ in 0..2 {
+        let (payload, result) = next_encrypted_action_reply(&mut replies).await;
+        assert_eq!(payload["action_id"], "original");
+        assert_eq!(result["ok"], true);
+    }
+    handle_encrypted_remote_action(
+        &state,
+        &writer,
+        retry_origin,
+        "surface-b".to_string(),
+        "original".to_string(),
+        None,
+        Some("phone-1".to_string()),
+        envelope.clone(),
+    )
+    .await
+    .expect("completed result replayed");
+    let (payload, result) = next_encrypted_action_reply(&mut replies).await;
+    assert_eq!(payload["action_id"], "original");
+    assert_eq!(result["ok"], true);
+    handle_encrypted_remote_action(
+        &state,
+        &writer,
+        origin,
+        "surface-a".to_string(),
+        "changed".to_string(),
+        None,
+        Some("phone-1".to_string()),
+        envelope,
+    )
+    .await
+    .expect("changed ID is also refused after completion");
+    let (payload, result) = next_encrypted_action_reply(&mut replies).await;
+    assert_eq!(payload["action_id"], "changed");
+    assert_eq!(result["ok"], false);
+    assert!(result["error"]
+        .as_str()
+        .unwrap()
+        .contains("action_id does not match"));
+    assert_eq!(entries.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(matches!(
+        state
+            .reserve_remote_action("phone-1", "changed", "list_threads")
+            .await,
+        Ok(crate::state::RemoteActionReplayDecision::Execute)
+    ));
+}
+
+#[tokio::test]
+async fn invalid_action_binding_cannot_change_device_or_claim_state() {
+    let dir = tempfile::TempDir::new().expect("tmpdir");
+    let (state, relay) =
+        encrypted_broker_state_parts(&dir.path().to_string_lossy(), HashMap::new()).await;
+    let (writer, mut replies, _trains) = super::writer::test_writer();
+    let origin = {
+        let mut relay = relay.write().await;
+        relay.mark_surface_peer_online("surface-a");
+        FrameOrigin {
+            ingress: crate::state::next_relay_ingress(),
+            lease: relay.current_surface_lease("surface-a").unwrap(),
+        }
+    };
+    let claim = issue_session_claim("phone-1", "surface-a")
+        .expect("issue test claim")
+        .token;
+    for session_claim in [None, Some(claim)] {
+        for request in [
+            serde_json::json!({"type": "claim_challenge", "proof": "proof"}),
+            serde_json::json!({"type": "claim_device", "challenge_id": "challenge", "proof": "proof"}),
+            serde_json::json!({"type": "heartbeat", "input": {}}),
+            serde_json::json!({"type": "watch_threads", "input": {"thread_ids": ["t1"]}}),
+        ] {
+            for envelope in [
+                bound_action_envelope("secret", "original", &request).expect("bound request"),
+                encrypt_json("secret", &request).expect("old unbound request"),
+            ] {
+                handle_encrypted_remote_action(
+                    &state,
+                    &writer,
+                    origin,
+                    "surface-a".to_string(),
+                    "changed".to_string(),
+                    session_claim.clone(),
+                    Some("phone-1".to_string()),
+                    envelope,
+                )
+                .await
+                .expect("refusal delivered without ending session");
+                let (_, result) = next_encrypted_action_reply(&mut replies).await;
+                assert_eq!(result["ok"], false);
+                assert!(result["session_claim"].is_null());
+                let relay = relay.read().await;
+                assert_eq!(relay.paired_devices["phone-1"].last_peer_id, None);
+                assert_eq!(relay.paired_devices["phone-1"].last_seen_at, Some(1));
+                assert!(relay.pending_claim_challenges.is_empty());
+                assert!(relay
+                    .completed_remote_action("phone-1", "changed")
+                    .is_none());
+                assert!(!relay.any_device_watches_thread("t1"));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_invalid_encrypted_request_does_not_end_the_session() {
+    let mut unbound: serde_json::Value = serde_json::from_str(&encrypted_action_frame_versioned(
+        "surface-a",
+        "unbound",
+        serde_json::json!({"type": "list_threads"}),
+        RELAY_PROTOCOL_VERSION,
+    ))
+    .expect("frame");
+    unbound["payload"]["envelope"] = serde_json::to_value(
+        encrypt_json(
+            "secret",
+            &serde_json::json!({
+                "type": "list_threads", "query": {"limit": 5},
+            }),
+        )
+        .expect("unbound request"),
+    )
+    .expect("envelope");
+    let mut changed = unbound.clone();
+    changed["payload"]["action_id"] = serde_json::json!("changed");
+    changed["payload"]["envelope"] = serde_json::to_value(
+        bound_action_envelope(
+            "secret",
+            "original",
+            &serde_json::json!({
+                "type": "list_threads", "query": {"limit": 5},
+            }),
+        )
+        .expect("bound request"),
+    )
+    .expect("envelope");
+    let kinds = observe_relay_session_for_frames(vec![
+        unbound.to_string(),
+        changed.to_string(),
+        encrypted_action_frame_versioned(
+            "surface-a",
+            "malformed",
+            serde_json::json!({"type": "unknown_action"}),
+            RELAY_PROTOCOL_VERSION,
+        ),
+        encrypted_action_frame_versioned(
+            "surface-a",
+            "valid",
+            serde_json::json!({"type": "list_threads", "query": {"limit": 5}}),
+            RELAY_PROTOCOL_VERSION,
+        ),
+    ])
+    .await;
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| kind == "encrypted_remote_action_result:valid"),
+        "saw {kinds:?}"
+    );
 }

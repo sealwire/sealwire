@@ -25,7 +25,7 @@ import {
 const BROKER_PROTOCOL_VERSION = 1;
 // 2: chunked action results carry `data` (JSON text) instead of `data_base64`. Must stay
 // in lockstep with RELAY_PROTOCOL_VERSION in crates/relay-server/src/broker.rs.
-const RELAY_PROTOCOL_VERSION = 2;
+const RELAY_PROTOCOL_VERSION = 3;
 const DEVICE_SESSION_ROOM_MAX_BYTES = 512;
 const SOCKET_RECONNECT_BASE_DELAY_MS = 1500;
 const SOCKET_RECONNECT_MAX_DELAY_MS = 60_000;

@@ -253,12 +253,8 @@ const INBOUND_MESSAGE_QUEUE_CAPACITY: usize = 256;
 const SURFACE_MESSAGE_QUEUE_CAPACITY: usize = 64;
 pub(crate) const RELAY_BROKER_IDENTITY_PATH_ENV: &str = "RELAY_BROKER_IDENTITY_PATH";
 const MAX_BROKER_TEXT_FRAME_BYTES: usize = 65_536;
-/// Bumped to 2 when chunked action results stopped base64'ing their payload: the field
-/// `data_base64` became `data` and now carries JSON text rather than base64 of bytes. A
-/// client that still expects `data_base64` rejects a v2 payload and tells the user to
-/// refresh — which is the whole fix, since the surface bundle is served by the broker —
-/// instead of silently failing to reassemble and sitting out the action deadline.
-const RELAY_PROTOCOL_VERSION: u64 = 2;
+// Version 3 requires the action ID inside the authenticated ciphertext as well as outside.
+const RELAY_PROTOCOL_VERSION: u64 = 3;
 
 type BrokerSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 

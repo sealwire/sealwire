@@ -188,7 +188,7 @@ export function installFakeRelay({ relayId, threadId, projectId, projectName, fu
   // does not know via `renderLog`, so a stale fixture reaches no console: the page
   // connects, sends its requests, and silently ignores every answer.
   const BROKER_PROTOCOL_VERSION = 1;
-  const RELAY_PROTOCOL_VERSION = 2;
+  const RELAY_PROTOCOL_VERSION = 3;
 
   // What the fake relay currently reports; a test can move the session's folder.
   let liveSnapshot = truncatedSnapshot;

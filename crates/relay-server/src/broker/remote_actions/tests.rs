@@ -2371,3 +2371,30 @@ fn sealed_result_value(result: &RemoteActionResultPlaintext) -> Result<serde_jso
     let envelope = encrypt_json("payload-secret", result)?;
     decrypt_json("payload-secret", &envelope)
 }
+
+#[test]
+fn encrypted_actions_require_the_authenticated_action_id() {
+    for request in [
+        serde_json::json!({"type": "list_threads", "query": {"limit": 5}}),
+        serde_json::json!({"type": "claim_challenge", "proof": "proof"}),
+        serde_json::json!({"type": "claim_device", "challenge_id": "challenge", "proof": "proof"}),
+        serde_json::json!({"type": "heartbeat", "input": {}}),
+    ] {
+        let envelope = encrypt_json(
+            "secret",
+            &serde_json::json!({
+                "action_id": "original", "request": request,
+            }),
+        )
+        .expect("encrypt bound request");
+        decrypt_remote_action_with_secret("secret", "original", &envelope)
+            .expect("matching IDs are accepted");
+        assert!(
+            decrypt_remote_action_with_secret("secret", "changed", &envelope)
+                .expect_err("changed outer ID is refused")
+                .contains("action_id does not match")
+        );
+        let unbound = encrypt_json("secret", &request).expect("encrypt old request");
+        assert!(decrypt_remote_action_with_secret("secret", "original", &unbound).is_err());
+    }
+}

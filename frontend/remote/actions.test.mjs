@@ -326,6 +326,12 @@ test("ensureRemoteClaim performs challenge-response without rotating payload sec
 
   assert.equal(sessionClaim, "session-claim-2");
   assert.equal(sentPayloads.length, 2);
+  const { decryptJson } = await import("./crypto.js");
+  for (const payload of sentPayloads) {
+    const plaintext = await decryptJson("payload-secret-1", payload.envelope);
+    assert.equal(plaintext.action_id, payload.action_id);
+    assert.deepEqual(plaintext.request, payload.request);
+  }
   assert.equal(sentPayloads[0].request.type, "claim_challenge");
   assert.equal(sentPayloads[0].device_id, "device-1");
   assert.ok(typeof sentPayloads[0].request.proof === "string");
@@ -1829,6 +1835,8 @@ test("remote transport ignores plaintext content and encrypts actions despite a 
   assert.equal(sent.length, 1);
   assert.equal(sent[0].payload.kind, "encrypted_remote_action");
   assert.equal(sent[0].payload.request, undefined);
-  assert.equal((await decryptJson("payload-secret-1", sent[0].payload.envelope)).type, "heartbeat");
+  const plaintext = await decryptJson("payload-secret-1", sent[0].payload.envelope);
+  assert.equal(plaintext.action_id, sent[0].payload.action_id);
+  assert.equal(plaintext.request.type, "heartbeat");
   state.socket = null;
 });
