@@ -1,11 +1,14 @@
 const STORAGE_KEY = "agent-relay.theme";
+const DEFAULT_THEME = "light";
 
 export function getStoredTheme() {
   try {
     const value = window.localStorage.getItem(STORAGE_KEY);
-    return value === "light" || value === "dark" ? value : "auto";
+    return value === "light" || value === "dark" || value === "auto"
+      ? value
+      : DEFAULT_THEME;
   } catch {
-    return "auto";
+    return DEFAULT_THEME;
   }
 }
 
@@ -26,9 +29,7 @@ function applyResolved() {
 
 export function setStoredTheme(value) {
   try {
-    if (value === "auto") {
-      window.localStorage.removeItem(STORAGE_KEY);
-    } else if (value === "light" || value === "dark") {
+    if (value === "light" || value === "dark" || value === "auto") {
       window.localStorage.setItem(STORAGE_KEY, value);
     }
   } catch {}

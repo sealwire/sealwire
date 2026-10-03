@@ -3,8 +3,8 @@
   function read() {
     try {
       var v = localStorage.getItem(KEY);
-      return v === "light" || v === "dark" ? v : "auto";
-    } catch (e) { return "auto"; }
+      return v === "light" || v === "dark" || v === "auto" ? v : "light";
+    } catch (e) { return "light"; }
   }
   function osLight() {
     return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches);
