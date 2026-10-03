@@ -26,9 +26,9 @@
   <img src="docs/images/desktop-home.png" alt="桌面上的 Sealwire：侧边栏和标签页里是 Claude Code、Codex 与 Cursor 会话，中间是对话，以及它改动的具体代码行" width="100%">
 </p>
 
-Sealwire 把 Claude Code、Codex 和 Cursor 收进同一个简洁界面。在书桌前开工，用手机盯进度，在沙发上批准下一步。智能体跑在你自己的电脑上、紧挨着你的代码 —— Sealwire 本身看不到那些内容。
+Sealwire 把 Claude Code、Codex、Cursor、OpenCode 和 Pi 收进同一个简洁界面。在书桌前开工，用手机盯进度，在沙发上批准下一步。智能体跑在你自己的电脑上、紧挨着你的代码 —— Sealwire 本身看不到那些内容。
 
-- **所有智能体，一处搞定。** Claude Code、Codex、Cursor 并排出现在同一窗口、同一套操作里。每个任务用你顺手的那个，项目做到一半也能切换。
+- **所有智能体，一处搞定。** Claude Code、Codex、Cursor、OpenCode、Pi 并排出现在同一窗口、同一套操作里。每个任务用你顺手的那个，项目做到一半也能切换。
 - **互相检查对方的活。** 让*另一个*智能体来审刚写完的东西 —— Claude 审 Codex，Codex 审 Claude —— 来回对打，直到审阅方满意为止。
 - **像团队一样干活。** 设一个目标让智能体自己跑完，把支线交给另一个，或把整件事交接出去 —— 每一步都是一条斜杠命令。
 - **走到哪，接到哪。** 同一会话跟着你从笔记本到浏览器到手机。智能体需要你时会通知你，当场就能批准。
@@ -42,6 +42,8 @@ Sealwire 把 Claude Code、Codex 和 Cursor 收进同一个简洁界面。在书
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — Claude 登录，或设置 `ANTHROPIC_API_KEY`。其余依赖都已打进包里。
 - **[Codex](https://github.com/openai/codex)** — 命令行工具 `codex`。
 - **[Cursor](https://cursor.com/cli)** — 命令行工具 `cursor-agent`。
+- **[OpenCode](https://opencode.ai/docs/acp/)** — 命令行工具 `opencode`，并配好模型。
+- **[Pi](https://github.com/earendil-works/pi)** — `npm install -g @earendil-works/pi-coding-agent`，并配好模型。Pi 会话固定以完全权限运行。
 
 然后，进入你要干活的目录：
 
@@ -65,14 +67,10 @@ npx sealwire cloud
 
 同一个模型自己改自己的作业，算不上真正的检查。在 Sealwire 里，审阅一键搞定：选谁来审、用哪个模型、允许多少轮来回。
 
-<p align="center">
-  <img src="docs/images/desktop-review-dialog.png" alt="「请求审阅」对话框：选择审阅智能体、模型、说明和轮数" width="100%">
-</p>
-
 审阅方在自己的会话里工作，看的是真实改动，再把发现 —— 以及明确结论 —— 发回你的对话。允许多轮时，两边会一直对打到审阅方通过为止。
 
 <p align="center">
-  <img src="docs/images/desktop-review-result.png" alt="Codex 的审阅结果发回对话；旁边是 Agents 面板，显示目标、三轮审阅，以及交给其他智能体的问题" width="100%">
+  <img src="docs/images/desktop-review-result.png" alt="对话里两轮 Codex 审阅：第一轮列出要改的问题，第二轮通过；旁边的 Agents 面板里是交接、目标的计划和审阅" width="100%">
 </p>
 
 ## 四条挑大梁的命令
@@ -99,7 +97,7 @@ npx sealwire cloud
 <p align="center">
   <img src="docs/images/phone-sessions.png" alt="手机上的 Sealwire：会话列表，Claude Code、Codex、Cursor 会话并排显示" width="320">
   &nbsp;&nbsp;
-  <img src="docs/images/phone-goal.png" alt="手机上的 Sealwire：Agents 面板，目标进行到第 3 / 20 轮，以及 Codex 已回答的问题" width="320">
+  <img src="docs/images/phone-goal.png" alt="手机上的 Sealwire：目标的计划，五步完成了三步，以及 Codex 已回答的问题" width="320">
 </p>
 
 智能体要跑命令或改动重要东西时，你会看到它具体在求什么，当场批准或拒绝。推送会告诉你某个会话需要你、做完了、或出了状况；**Take over** 则把控制权接到手里这台设备上。
@@ -130,7 +128,7 @@ npx sealwire --help          # 其余全部选项
 
 - **Tasks 与任务团队** —— 给 Sealwire 一个目标，协调智能体做计划、拆给多个智能体，落地前再审一遍。你批准计划，其余它来。
 - **用量与费用** —— 每个智能体、每个项目每周用了多少 token、花了多少钱。
-- 不止 Claude Code、Codex、Cursor 的更多智能体。
+- 更多智能体。
 - 原生移动应用 —— 网页版触到天花板的那些地方。
 
 ## 安全

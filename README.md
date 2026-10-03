@@ -26,13 +26,13 @@
   <img src="docs/images/desktop-home.png" alt="Sealwire on the desktop: Claude Code, Codex and Cursor sessions in the sidebar and tabs, the conversation, and the exact lines it changed" width="100%">
 </p>
 
-Sealwire puts Claude Code, Codex and Cursor behind one simple screen. Start
+Sealwire puts Claude Code, Codex, Cursor, OpenCode and Pi behind one simple screen. Start
 work at your desk, check on it from your phone, approve the next step from the
 couch. The agents run on your computer, next to your code — Sealwire itself never
 sees it.
 
-- **All your agents in one place.** Claude Code, Codex and Cursor side by side,
-  in the same window, with the same controls. Use whichever one you like for
+- **All your agents in one place.** Claude Code, Codex, Cursor, OpenCode and Pi
+  side by side, in the same window, with the same controls. Use whichever one you like for
   each job, or switch mid-project.
 - **Agents that check each other's work.** Ask a *different* agent to review
   what was just written — Claude reviews Codex, Codex reviews Claude — and let
@@ -58,8 +58,10 @@ You need at least one of these installed and logged in:
   login or an `ANTHROPIC_API_KEY`. Everything else it needs comes bundled.
 - **[Codex](https://github.com/openai/codex)** — the `codex` command-line tool.
 - **[Cursor](https://cursor.com/cli)** — the `cursor-agent` command-line tool.
-- **[OpenCode](https://opencode.ai/docs/acp/)** — the `opencode` command-line tool
-  with a model configured. Use `opencode auth login` if your model needs a login.
+- **[OpenCode](https://opencode.ai/docs/acp/)** — the `opencode` command-line tool,
+  with a model set up.
+- **[Pi](https://github.com/earendil-works/pi)** — `npm install -g @earendil-works/pi-coding-agent`,
+  with a model set up. Pi sessions always run with full access.
 
 Then, in the folder you want to work on:
 
@@ -72,99 +74,6 @@ your own machine until you decide otherwise.
 
 **Tip:** run it on a computer that's always on — a desktop, a home server — and
 long jobs keep going even with your laptop closed.
-
-### Pi
-
-Sealwire controls [Pi](https://github.com/earendil-works/pi) through its native
-`pi --mode rpc` interface, with one process per session. Install
-`npm install -g @earendil-works/pi-coding-agent` (Node.js 22.19+) and configure a
-model in Pi, then select **Pi** in Sealwire. To run only Pi, use
-`AGENT_PROVIDERS=pi npx sealwire`. This integration targets Pi 1.0.0's RPC protocol.
-
-Pi supports streamed text, thinking, tool results, images, model selection,
-cancellation, extension slash commands, prompt templates, skills, and resuming its
-version 3 session files. Sealwire injects its MCP tools into ordinary sessions.
-Extension select/confirm/input/editor dialogs appear as questions in the transcript.
-`/compact` and `/reload` are also available; other Pi terminal-only commands are
-not RPC commands. Commands cannot switch, fork, or navigate the native session
-behind the relay thread. Use Sealwire for those operations.
-History follows the active branch and includes messages before compaction.
-New sessions use Pi's native storage settings, including `sessionDir` and
-`PI_CODING_AGENT_SESSION_DIR`. History discovery scans the environment's session
-directory or the default `~/.pi/agent/sessions`, plus sessions Sealwire created.
-Empty session metadata lives beside Sealwire's state file.
-History listing reads bounded summaries; transcript pages contain up to 100 rows,
-with tool details loaded on demand. Malformed history is marked incomplete.
-Idle processes are reclaimed after ten minutes, with a target cache of eight;
-active turns and in-use sessions are retained.
-Withdrawing workspace trust closes that workspace's Pi processes and stops active
-turns. Granting trust preserves running turns; the next idle resume loads the new configuration.
-Stopping during prompt preflight terminates that Pi process because its extension
-hooks cannot be cancelled through RPC; the next turn resumes the saved session.
-
-**Full access (YOLO)** is the only supported permission mode: Pi's RPC interface
-provides no tool approval or OS filesystem sandbox. Read-only reviews, Task
-seats, and Orchestrator sessions are unavailable. Forking uses Sealwire's
-transcript replay, and archiving is unavailable. Permanent deletion removes the
-native session file.
-
-Token usage and provider-reported cost are recorded for turns run through
-Sealwire, including retries and compaction. Reading old history does not add
-usage. Cache warming is disabled for managed Pi sessions so it cannot spend
-unreported tokens between assistant messages.
-
-Extensions that await a dialog during initial `session_start` may fail to initialize
-in Pi 1.0.0's RPC mode; disable those startup prompts for this integration.
-
-Run `node scripts/pi-provider-e2e.mjs` with Pi on `PATH` to verify the integration
-against a local test model and a separate relay; no model subscription is used.
-For an opt-in real-model check, set `PI_LIVE_MODEL=provider/model` and run
-`node scripts/pi-provider-live-smoke.mjs`. It uses your Pi login for one short
-turn with one read-only MCP call in an isolated workspace.
-
-### OpenCode
-
-Sealwire launches one `opencode acp` process per session, using your OpenCode
-models, agents, commands, and MCP configuration. Idle processes are reclaimed,
-keeping at most two warm sessions; active turns are retained. Verified with OpenCode 1.18.34.
-To run only this provider, use `AGENT_PROVIDERS=opencode npx sealwire`.
-
-Sealwire applies its permission selection to each native OpenCode session,
-overriding OpenCode's agent and project permission rules. **Ask first** asks for
-tool calls; **Ask before changes** allows file reads and searches but asks for writes,
-shell commands and other tools. **Auto-approve** and **Full access (YOLO)** allow
-tools without prompts. YOLO also enables unrestricted delegation and Goal mode.
-Sealwire's own session tools authorize each call in the relay and need no extra
-approval. In the two ask modes, native subagents and commands that start them are
-disabled because OpenCode does not pass approval requirements to subagents; use
-Sealwire `/delegate` instead. Native commands that expand shell/file references
-or have an opaque template are also refused in restricted modes because their
-expansion bypasses OpenCode tool approvals. Send a normal message to use tool
-approvals instead. Reads of `.env` files still ask for approval.
-These controls are at the tool level, without an OS filesystem sandbox.
-OpenCode persists these rules on the native session: they also apply when you
-continue that session outside Sealwire, including auto-approval if selected.
-
-Ordinary OpenCode reviewers use best-effort read-only permissions: dedicated
-write tools, subagents, and external MCP tools are denied; inspection tools and
-shell commands are allowed. Shell commands can still write, so this does not
-qualify OpenCode for Code Flow's hard read-only reviewer guarantee.
-
-Sealwire Goal and `/review`, `/delegate`, `/handover`, and `/goal` are available
-for ordinary sessions. Each process carries only its own Sealwire MCP identity,
-including after reattachment. Task and Task Team seats remain unsupported.
-
-Model discovery opens a temporary session without a prompt, then closes and
-deletes it. The complete model and effort catalog is fetched once per relay
-launch and reused in memory; only unsuccessful discovery is retried. Background
-discovery uses a relay-owned directory; new sessions read the selected workspace's
-configuration. The model menu includes each model's
-native effort options before starting a session. History queries scan only directories
-already used by OpenCode through Sealwire, and may load their OpenCode plugins.
-Native forks preserve OpenCode context at the session tip or a complete message
-boundary. Points inside a native message use transcript replay.
-Archiving sets OpenCode's native archive timestamp and hides the session from
-history. Permanent deletion uses OpenCode's `session delete` command.
 
 ### Connect your phone
 
@@ -182,16 +91,12 @@ One model checking its own homework isn't much of a check. In Sealwire, review
 is one click: pick who should review, which model, and how many rounds of back
 and forth you'll allow.
 
-<p align="center">
-  <img src="docs/images/desktop-review-dialog.png" alt="The Request review dialog: choose the reviewer agent, model, instructions and number of rounds" width="100%">
-</p>
-
 The reviewer works in its own session, looks at the actual changes, and posts
 its findings — and a clear verdict — back into your conversation. Allow more
 than one round and the two agents keep going until the reviewer approves.
 
 <p align="center">
-  <img src="docs/images/desktop-review-result.png" alt="A Codex review posted back into the conversation; beside it, the Agents panel with the goal, three review rounds, and questions handed to other agents" width="100%">
+  <img src="docs/images/desktop-review-result.png" alt="Two Codex review rounds in the conversation: the first lists what to fix, the second approves; beside them, the Agents panel with the handover, the goal's plan and the review" width="100%">
 </p>
 
 ## Four commands that do the heavy lifting
@@ -224,7 +129,7 @@ and what the agents you brought in came back with.
 <p align="center">
   <img src="docs/images/phone-sessions.png" alt="Sealwire on a phone: the session list, with Claude Code, Codex and Cursor sessions side by side" width="320">
   &nbsp;&nbsp;
-  <img src="docs/images/phone-goal.png" alt="Sealwire on a phone: the Agents panel, with a goal on turn 3 of 20 and an answered question from Codex" width="320">
+  <img src="docs/images/phone-goal.png" alt="Sealwire on a phone: a goal's plan, three of five steps done, and an answered question from Codex" width="320">
 </p>
 
 When an agent wants to run a command or change something important, you see
@@ -265,7 +170,7 @@ Prefer to run your own connection server instead of Sealwire Cloud? Point
   it lands. You approve the plan; it does the rest.
 - **Usage and cost** — how many tokens, and how much money, each agent and
   project is using, week by week.
-- More agents beyond Claude Code, Codex and Cursor.
+- More agents.
 - A native mobile app, where the web version hits its limits.
 
 ## Security
