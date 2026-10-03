@@ -172,7 +172,7 @@ test("the search box sits at the top with a mouse too, while focus stays on the 
   const menu = view.host.querySelector(".model-picker-menu");
   const search = menu.querySelector("input");
   assert.ok(search, "visible before anything is typed");
-  assert.equal(menu.firstElementChild, search.closest("label"));
+  assert.ok(menu.firstElementChild.contains(search), "the search box heads the menu");
   assert.equal(label(focused()), "Claude", "arrow keys still walk the providers");
 });
 
@@ -257,7 +257,7 @@ test("one provider's picker lists its models straight away, under a search box",
   const menu = view.host.querySelector(".model-picker-menu");
   assert.equal(view.host.querySelectorAll(".model-picker-provider").length, 0, "no provider level");
   assert.equal(flyout(view.host), null, "no second panel");
-  assert.equal(menu.firstElementChild, menu.querySelector("input").closest("label"));
+  assert.ok(menu.firstElementChild.contains(menu.querySelector("input")), "the search box heads the menu");
   assert.deepEqual(
     [...menu.querySelectorAll(".model-picker-heading")].map((node) => node.textContent),
     ["gpt-6.1", "gpt-6", "gpt-5.6"]

@@ -39,11 +39,15 @@ function providerRowNode(menu, provider) {
 function revealInPanel(node) {
   const panel = node?.closest?.(".context-menu");
   if (!panel) return;
+  // A row scrolled under the pinned head is inside the panel and still hidden.
+  const head = panel.querySelector(":scope > .model-picker-head");
+  if (head?.contains(node)) return;
   const room = panel.getBoundingClientRect();
+  const top = head ? head.getBoundingClientRect().bottom : room.top;
   const box = node.getBoundingClientRect();
   const inset = 4;
-  if (box.top < room.top + inset) {
-    panel.scrollTop -= room.top + inset - box.top;
+  if (box.top < top + inset) {
+    panel.scrollTop -= top + inset - box.top;
   } else if (box.bottom > room.bottom - inset) {
     panel.scrollTop += box.bottom - (room.bottom - inset);
   }
@@ -488,6 +492,9 @@ export function ModelPicker({
     );
   };
 
+  // Pinned: the list opens scrolled to the chosen model, which can be far below these.
+  const head = (...rows) => h("div", { className: "model-picker-head", key: "head" }, ...rows);
+
   const searchBox = () =>
     h(
       "label",
@@ -511,7 +518,7 @@ export function ModelPicker({
   let firstLevel;
   if (query) {
     firstLevel = [
-      searchBox(),
+      head(searchBox()),
       results.length
         ? results.map((option) =>
             h(ModelRow, {
@@ -526,7 +533,7 @@ export function ModelPicker({
     ];
   } else if (single && activeGroup) {
     firstLevel = [
-      searchBox(),
+      head(searchBox()),
       ...ModelList({
         group: activeGroup,
         onChoose: (option) => choose(option, activeGroup),
@@ -536,24 +543,26 @@ export function ModelPicker({
     ];
   } else if (drill && drilled && activeGroup) {
     firstLevel = [
-      searchBox(),
-      h(
-        "button",
-        {
-          className: "context-menu-button model-picker-back",
-          key: "back",
-          onClick: () => {
-            setDrilled(false);
-            requestFocus("provider");
+      head(
+        searchBox(),
+        h(
+          "button",
+          {
+            className: "context-menu-button model-picker-back",
+            key: "back",
+            onClick: () => {
+              setDrilled(false);
+              requestFocus("provider");
+            },
+            role: "menuitem",
+            type: "button",
           },
-          role: "menuitem",
-          type: "button",
-        },
-        h(MenuGlyph, { className: "context-menu-chevron model-picker-back-caret", svg: CHEVRON_RIGHT_SVG }),
-        providerMarkSlot(activeGroup.provider, { className: "model-picker-mark" }),
-        h("span", { className: "context-menu-label" }, activeGroup.label)
+          h(MenuGlyph, { className: "context-menu-chevron model-picker-back-caret", svg: CHEVRON_RIGHT_SVG }),
+          providerMarkSlot(activeGroup.provider, { className: "model-picker-mark" }),
+          h("span", { className: "context-menu-label" }, activeGroup.label)
+        ),
+        h("div", { className: "context-menu-separator", key: "back-sep", role: "separator" })
       ),
-      h("div", { className: "context-menu-separator", key: "back-sep", role: "separator" }),
       ...ModelList({
         group: activeGroup,
         onChoose: (option) => choose(option, activeGroup),
@@ -564,7 +573,7 @@ export function ModelPicker({
   } else {
     const direct = groups.filter((group) => group.direct);
     firstLevel = [
-      searchBox(),
+      head(searchBox()),
       ...direct.map(directRow),
       direct.length ? h("div", { className: "context-menu-separator", key: "direct-sep", role: "separator" }) : null,
       ...groups.filter((group) => !group.direct).map(providerRow),

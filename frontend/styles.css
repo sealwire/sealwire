@@ -10581,6 +10581,20 @@ button.team-role-name.is-link {
   visibility: hidden;
 }
 
+/* Out to the menu's 4px padding so it sticks flush and rows pass under it, not beside it. */
+.model-picker-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: -4px -4px 0;
+  padding: 4px 4px 0;
+  background: var(--menu-bg);
+}
+
 .model-picker-provider.is-current .context-menu-label {
   font-weight: var(--weight-strong);
 }

@@ -1,6 +1,8 @@
 // Opening the model picker must show the model already chosen, without the user
 // scrolling for it: in the New session dialog's models panel and in a thread's
 // composer, for a model low in the list and for one folded under Other models.
+// The search box, and on a phone the row back to the providers, stay reachable
+// while the list is scrolled to that model.
 //
 // Serves the frontend through Vite and answers every API call in the page, so no
 // relay runs; an unrouted call fails closed rather than reaching one on 8787.
@@ -126,28 +128,52 @@ async function routeApi(page, { model }) {
   });
 }
 
-// Runs in the page. The ticked row has to be inside its panel's visible box and on top.
-function readCheckedRow() {
-  const panel = document.querySelector(".model-picker-flyout") || document.querySelector(".model-picker-menu");
+// Runs in the page. "On top" is a hit test: a row scrolled under the pinned search
+// box is inside its panel's box and still cannot be seen or tapped.
+function readMenu() {
+  const onTop = (node) => {
+    if (!node) return null;
+    const box = node.getBoundingClientRect();
+    const hit = document.elementFromPoint(
+      Math.round(box.left + Math.min(24, box.width / 2)),
+      Math.round(box.top + box.height / 2)
+    );
+    return Boolean(hit && (hit === node || node.contains(hit)));
+  };
+  const menu = document.querySelector(".model-picker-menu");
+  const panel = document.querySelector(".model-picker-flyout") || menu;
   const row = panel?.querySelector('.model-picker-option[aria-checked="true"]');
   if (!row) return { checked: null };
   const room = panel.getBoundingClientRect();
   const box = row.getBoundingClientRect();
-  const hit = document.elementFromPoint(Math.round(box.left + box.width / 2), Math.round(box.top + box.height / 2));
   return {
+    back: onTop(menu.querySelector(".model-picker-back")),
     checked: row.dataset.value,
     inPanel: box.top >= room.top - 0.5 && box.bottom <= room.bottom + 0.5,
-    onTop: Boolean(hit && (hit === row || row.contains(hit))),
+    onTop: onTop(row),
     panelScrolls: panel.scrollHeight > panel.clientHeight,
     scrollTop: Math.round(panel.scrollTop),
+    search: onTop(menu.querySelector(".context-menu-filter input")),
+  };
+}
+
+function readFocusedRow() {
+  const node = document.activeElement;
+  const box = node?.getBoundingClientRect();
+  const hit = box && document.elementFromPoint(Math.round(box.left + Math.min(24, box.width / 2)), Math.round(box.top + box.height / 2));
+  return {
+    inPicker: Boolean(node?.closest(".model-picker-layer")),
+    reachable: Boolean(hit && (hit === node || node.contains(hit))),
+    value: node?.dataset?.value ?? node?.tagName ?? null,
   };
 }
 
 const frames = (page) =>
   page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 
-async function openPicker(page, triggerSelector, { flyout }) {
-  await page.click(triggerSelector);
+async function openPicker(page, triggerSelector, { flyout, touch = false }) {
+  if (touch) await page.tap(triggerSelector);
+  else await page.click(triggerSelector);
   await page.waitForSelector(flyout ? ".model-picker-flyout[data-placed='true']" : ".model-picker-menu[data-placed='true']", {
     timeout: TIMEOUT_MS,
   });
@@ -159,15 +185,19 @@ async function closePicker(page) {
   await page.waitForSelector(".model-picker-menu", { state: "detached", timeout: TIMEOUT_MS });
 }
 
-function assertVisible(where, wanted, seen) {
+function assertVisible(where, wanted, seen, { back = false } = {}) {
   assert.equal(seen.checked, wanted, `${where}: the ticked row is the chosen model`);
   assert.ok(seen.panelScrolls, `${where}: the list must be taller than its panel for this to mean anything`);
   assert.ok(seen.inPanel && seen.onTop, `${where}: ${wanted} must be on screen when the menu opens, got ${JSON.stringify(seen)}`);
+  assert.equal(seen.search, true, `${where}: the search box stays on screen, got ${JSON.stringify(seen)}`);
+  if (back) assert.equal(seen.back, true, `${where}: the way back to the providers stays on screen, got ${JSON.stringify(seen)}`);
 }
 
-async function newSessionCase(context, baseUrl, wanted) {
+// A phone has no room for the models beside the providers, so they replace them.
+async function newSessionCase(context, baseUrl, wanted, { phone = false } = {}) {
   const page = await context.newPage();
-  const where = `New session, ${wanted}`;
+  const where = `New session${phone ? " (phone)" : ""}, ${wanted}`;
+  const models = phone ? ".model-picker-menu" : ".model-picker-flyout";
   try {
     await routeApi(page, { model: "gpt-6.1-sol" });
     await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: TIMEOUT_MS });
@@ -179,23 +209,28 @@ async function newSessionCase(context, baseUrl, wanted) {
     const trigger = "#launch-start-session-dialog-model";
 
     // Choose it the way a user does: through the menu, unfolding Other if it is there.
-    await openPicker(page, trigger, { flyout: true });
-    await page.evaluate(async (value) => {
-      const flyout = document.querySelector(".model-picker-flyout");
-      if (!flyout.querySelector(`[data-value="${value}"]`)) {
-        flyout.querySelector('.model-picker-other[aria-expanded="false"]')?.click();
+    await openPicker(page, trigger, { flyout: !phone, touch: phone });
+    if (phone) await page.waitForSelector(".model-picker-back", { timeout: TIMEOUT_MS });
+    await page.evaluate(async ({ models, value }) => {
+      const panel = document.querySelector(models);
+      if (!panel.querySelector(`[data-value="${value}"]`)) {
+        panel.querySelector('.model-picker-other[aria-expanded="false"]')?.click();
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
-      document.querySelector(`.model-picker-flyout [data-value="${value}"]`).click();
-    }, wanted);
+      document.querySelector(`${models} [data-value="${value}"]`).click();
+    }, { models, value: wanted });
     await page.waitForSelector(".model-picker-menu", { state: "detached", timeout: TIMEOUT_MS });
 
-    await openPicker(page, trigger, { flyout: true });
-    const seen = await page.evaluate(readCheckedRow);
-    const shot = path.join(os.tmpdir(), `model-picker-new-session-${wanted}.png`);
+    await openPicker(page, trigger, { flyout: !phone, touch: phone });
+    const seen = await page.evaluate(readMenu);
+    const shot = path.join(os.tmpdir(), `model-picker-new-session${phone ? "-phone" : ""}-${wanted}.png`);
     await page.screenshot({ path: shot });
     logStep(where, { ...seen, shot });
-    assertVisible(where, wanted, seen);
+    assertVisible(where, wanted, seen, { back: phone });
+    if (phone) {
+      await page.tap(".model-picker-back");
+      await page.waitForSelector(".model-picker-provider", { timeout: TIMEOUT_MS });
+    }
     await closePicker(page);
   } catch (error) {
     await writeFailureArtifacts({ localPage: page, scenario: `model-picker-selected-new-session-${wanted}` }).catch(() => {});
@@ -222,11 +257,19 @@ async function composerCase(context, baseUrl, wanted) {
     );
 
     await openPicker(page, "#message-model-picker", { flyout: false });
-    const seen = await page.evaluate(readCheckedRow);
+    const seen = await page.evaluate(readMenu);
     const shot = path.join(os.tmpdir(), `model-picker-composer-${wanted}.png`);
     await page.screenshot({ path: shot });
     logStep(where, { ...seen, shot });
     assertVisible(where, wanted, seen);
+
+    // Walking up the list moves rows toward the pinned search box; the one with focus
+    // must never end up underneath it.
+    for (let step = 0; step < 12; step += 1) {
+      await page.keyboard.press("ArrowUp");
+      const row = await page.evaluate(readFocusedRow);
+      assert.ok(row.inPicker && row.reachable, `${where}: ArrowUp ${step + 1} lands on a row you can see, got ${JSON.stringify(row)}`);
+    }
     await closePicker(page);
   } catch (error) {
     await writeFailureArtifacts({ localPage: page, scenario: `model-picker-selected-composer-${wanted}` }).catch(() => {});
@@ -248,15 +291,25 @@ async function main() {
   );
   let browser;
   let context;
+  let phone;
   const failures = [];
   try {
     await waitForHealth(baseUrl, TIMEOUT_MS);
     ({ browser, context } = await launchBrowser({
       contextOptions: { serviceWorkers: "block", viewport: { height: 900, width: 1280 } },
     }));
+    phone = await browser.newContext({
+      deviceScaleFactor: 2,
+      hasTouch: true,
+      isMobile: true,
+      serviceWorkers: "block",
+      viewport: { height: 844, width: 390 },
+    });
     const cases = [
       () => newSessionCase(context, baseUrl, LOW),
       () => newSessionCase(context, baseUrl, FOLDED),
+      () => newSessionCase(phone, baseUrl, LOW, { phone: true }),
+      () => newSessionCase(phone, baseUrl, FOLDED, { phone: true }),
       () => composerCase(context, baseUrl, LOW),
       () => composerCase(context, baseUrl, FOLDED),
     ];
@@ -273,6 +326,7 @@ async function main() {
     dumpProcessLogs(vite);
     throw error;
   } finally {
+    await phone?.close().catch(() => {});
     await context?.close().catch(() => {});
     await browser?.close().catch(() => {});
     await stopManagedProcess(vite);
