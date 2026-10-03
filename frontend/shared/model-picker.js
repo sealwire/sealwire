@@ -269,6 +269,8 @@ export function ModelPicker({
     flyout.style.maxHeight = `${Math.round(Math.min(selfCap, placed.maxHeight))}px`;
     flyout.style.maxWidth = `${Math.floor(placed.width)}px`;
     flyout.scrollTop = scrolled;
+    // Focus is still on the provider row, so nothing else would bring the chosen model into view.
+    if (flyout.dataset.placed !== "true") revealInPanel(flyout.querySelector('[aria-checked="true"]'));
     flyout.dataset.side = placed.side;
     flyout.dataset.placed = "true";
   }, []);

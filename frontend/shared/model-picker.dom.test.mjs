@@ -458,6 +458,20 @@ const inView = (node) => {
   return box.top >= panel.top && box.bottom <= panel.bottom;
 };
 
+test("the models panel opens scrolled to the chosen model, a folded one too", () => {
+  withPanelLayout(() => {
+    for (const model of ["gpt-5.6-luna", "gpt-5.5"]) {
+      const view = mountWithCatalogue(CODEX, model);
+      click(trigger(view.host));
+      const chosen = flyout(view.host).querySelector('[aria-checked="true"]');
+      assert.equal(chosen?.dataset.value, model);
+      assert.ok(inView(chosen), `${model} is on screen without scrolling`);
+      assert.equal(label(focused()), "Codex", "focus stays on the provider until the user steps in");
+      view.cleanup();
+    }
+  });
+});
+
 test("a catalogue refresh that pushes the focused model down keeps it in view", () => {
   // The panel's size does not change, so only the re-render can notice the row moved.
   withPanelLayout(() => {
