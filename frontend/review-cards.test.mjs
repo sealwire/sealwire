@@ -324,7 +324,7 @@ test("the reviewer thread opens on a request card and closes each round with one
   assert.match(markup, /class="handover-card-title">Fix goal gate</);
   assert.match(markup, /Gate set_goal on tool availability/);
   assert.match(markup, /3a0e1f2…7be04d1 · 6 files · \+84 −41/);
-  assert.match(markup, /data-open-thread-id="parent"[^>]*>Source thread/);
+  assert.match(markup, /data-open-thread-id="parent"[^>]*>Reviewed thread/);
   assert.match(markup, /Result sent to Claude/);
   assert.equal((markup.match(/Result sent to Claude/g) || []).length, 1, "loading the request adds no second result");
   assert.match(markup, /· 1 blocker, 1 medium/);
@@ -341,6 +341,7 @@ test("the reviewer reply page shows its result without loading the request page"
   assert.match(markup, /VERDICT: APPROVE/, "the review text stays readable");
   assert.match(markup, /Result sent to Claude/);
   assert.equal((markup.match(/Result sent to Claude/g) || []).length, 1);
+  assert.match(markup, /data-open-thread-id="parent"[^>]*>Reviewed thread/);
 });
 
 test("an unrelated user row between request and reply does not duplicate the result", () => {

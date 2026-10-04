@@ -240,12 +240,23 @@
 /* The reviewer thread's close of a round (24c). */
 .review-result-line {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   min-height: 22px;
   padding-left: var(--assistant-text-inset);
   font-size: var(--text-sm);
   color: var(--text-tertiary);
+}
+.review-result-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.review-result-line > .handover-card-link {
+  flex: none;
+  margin-left: auto;
 }
 .review-result-outcome.is-blocker {
   color: var(--err-fg);

@@ -233,8 +233,21 @@ export function handoversForThread(reviews, viewedThreadId) {
  * @param {Array<{id?: string, name?: string}>|null|undefined} threads
  */
 export function agentsPanelSlice(reviews, viewedThreadId, threads) {
+  const reviewer = viewedThreadId
+    ? (reviews?.reviewer_threads || []).find((entry) => entry?.reviewer_thread_id === viewedThreadId)
+    : null;
+  const reviewedThread = reviewer?.parent_thread_id
+    ? (threads || []).find((thread) => thread?.id === reviewer.parent_thread_id)
+    : null;
   return {
     reviewJobs: reviewCardsForViewedThread(reviews, viewedThreadId),
+    reviewedSession: reviewer?.parent_thread_id
+      ? {
+          threadId: reviewer.parent_thread_id,
+          title: reviewedThread?.name || reviewedThread?.preview || "Another session",
+          provider: reviewedThread?.provider || null,
+        }
+      : null,
     goal: goalForThread(reviews, viewedThreadId),
     asks: asksForThread(reviews, viewedThreadId, threads),
     handovers: handoversForThread(reviews, viewedThreadId),

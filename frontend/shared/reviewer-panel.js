@@ -847,6 +847,48 @@ function agentMark(provider, name) {
   );
 }
 
+function ReviewedSessionSlot({ session, onOpen }) {
+  return h(
+    React.Fragment,
+    null,
+    h(LedgerHeading, { label: "Reviewing for" }),
+    h(
+      "section",
+      { className: "reviewer-agent reviewer-review-source" },
+      h(
+        "div",
+        { className: "reviewer-agent-head" },
+        providerMark(session.provider, "reviewer-agent-mark"),
+        h(
+          "span",
+          { className: "reviewer-agent-name reviewer-handover-name", title: session.title },
+          session.title
+        )
+      ),
+      onOpen
+        ? h(
+            "div",
+            { className: "reviewer-card" },
+            h(
+              "div",
+              { className: "reviewer-handover-foot" },
+              h(
+                "button",
+                {
+                  type: "button",
+                  className: "reviewer-handover-link",
+                  "data-open-thread": session.threadId,
+                  onClick: leavingPanel(() => onOpen(session.threadId)),
+                },
+                "Reviewed thread"
+              )
+            )
+          )
+        : null
+    )
+  );
+}
+
 // Same row and card as an agent group, so its text starts where theirs does; the
 // direction word and the summary lines are what differ.
 function HandoverItem({ item, onOpen = null }) {
@@ -948,6 +990,7 @@ function reviewerThreadName(job, reviewerThreads) {
 //   fetchAskDetail: (askId) => Promise<{ message, answer?, error? }>
 export function ReviewerPanel({
   reviewJobs = [],
+  reviewedSession = null,
   asks = [],
   handovers = [],
   goal = null,
@@ -1015,6 +1058,7 @@ export function ReviewerPanel({
   const hasWorkflowRuns = CODE_FLOW_ENABLED && workflowRuns.length > 0;
   const hasCards =
     Boolean(review) ||
+    Boolean(reviewedSession) ||
     agents.length > 0 ||
     handoverSections.length > 0 ||
     hasWorkflowRuns ||
@@ -1028,6 +1072,10 @@ export function ReviewerPanel({
     h(
       "div",
       { className: "reviewer-panel-body" },
+      reviewedSession ? h(ReviewedSessionSlot, { session: reviewedSession, onOpen: onOpenThread }) : null,
+      reviewedSession && (handoverSections.length || goal || review || agents.length)
+        ? h("hr", { className: "reviewer-ledger-rule" })
+        : null,
       // Pinned first: where this session's work came from, or went.
       ...handoverSections.flatMap(([label, items], index) => [
         index ? h("hr", { className: "reviewer-ledger-rule", key: `${label}-rule` }) : null,

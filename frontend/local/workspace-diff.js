@@ -976,14 +976,16 @@ export function ReviewerChip({ store, onTap }) {
   // could start one" state the chip says nothing and just competes for composer
   // space with the diff chip and the "Want a second opinion?" idle nudge already
   // shown there, so stay hidden and let those handle discovery + launch.
-  if (!hasReviews) return null;
+  if (!hasReviews && !review.reviewedSession) return null;
   const running = !blocked && (active || activeWorkflow);
-  const badge = blocked ? "⚠" : running ? null : "✓";
-  const modifier = blocked ? "is-blocked" : running ? "is-active" : "is-done";
+  const badge = blocked ? "⚠" : running || !hasReviews ? null : "✓";
+  const modifier = blocked ? "is-blocked" : running ? "is-active" : hasReviews ? "is-done" : "";
   // The pill is one door to several things, so the tooltip names whichever is loudest —
   // a goal outranks a review the same way it does in the panel.
   const title = goal
     ? GOAL_CHIP_TITLE[goal.status] || "Tap to see this session's goal"
+    : !hasReviews
+    ? "Tap to see the reviewed session"
     : blocked
     ? "Review blocked — tap to resolve"
     : active || activeWorkflow
@@ -1004,11 +1006,13 @@ export function ReviewerChip({ store, onTap }) {
     // Running borrows the sidebar's working-session dot; a "•" glyph was too small to see.
     running
       ? h("span", { className: "conversation-activity-dot", "aria-hidden": "true" })
-      : h(
-          "span",
-          { className: `workspace-diff-chip-review ${modifier}`, "aria-hidden": "true" },
-          badge
-        )
+      : badge
+        ? h(
+            "span",
+            { className: `workspace-diff-chip-review ${modifier}`, "aria-hidden": "true" },
+            badge
+          )
+        : null
   );
 }
 

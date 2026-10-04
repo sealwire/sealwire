@@ -96,6 +96,7 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
       ? h(ReviewerPanel, {
           panelId,
           reviewJobs: review.reviewJobs || [],
+          reviewedSession: review.reviewedSession || null,
           asks: review.asks || [],
           handovers: review.handovers || [],
           goal: review.goal || null,

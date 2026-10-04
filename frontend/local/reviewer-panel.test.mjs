@@ -142,6 +142,17 @@ test("ReviewerChip stays hidden when there is no review (idle), regardless of ca
   assert.equal(idle, "");
 });
 
+test("a reviewer's mobile Agents entry opens its source without claiming the review is complete", () => {
+  const store = makeStore({
+    review: { reviewedSession: { threadId: "author", title: "Fix the retry loop" } },
+  });
+  const html = renderToStaticMarkup(h(ReviewerChip, { store }));
+  assert.match(html, /reviewer-chip/);
+  assert.match(html, />Agents</);
+  assert.match(html, /Tap to see the reviewed session/);
+  assert.doesNotMatch(html, /is-done|✓|Review complete/);
+});
+
 test("ReviewerChip is a labeled pill that surfaces review status", () => {
   const done = renderToStaticMarkup(
     h(ReviewerChip, {

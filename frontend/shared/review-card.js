@@ -478,7 +478,7 @@ function BriefCard({ review, onFold = null }) {
       "div",
       { className: "handover-card-foot" },
       h("span", { className: "handover-card-spacer" }),
-      h(OpenThreadLink, { threadId: review.parent_thread_id, label: "Source thread" })
+      h(OpenThreadLink, { threadId: review.parent_thread_id, label: "Reviewed thread" })
     )
   );
 }
@@ -580,10 +580,15 @@ export function ReviewResultLine({ entry }) {
           : "";
   return h(
     "div",
-    { className: "review-result-line", role: "status", "data-transcript-entry-id": entry.id },
-    h(CardIcon, { paths: ["M2 8h9M8 4.5 11.5 8 8 11.5"], size: 11 }),
-    h("span", null, `Result sent to ${parent}`),
-    outcome ? h("span", { className: `review-result-outcome is-${tone}` }, `· ${outcome}`) : null
+    { className: "review-result-line", "data-transcript-entry-id": entry.id },
+    h(
+      "span",
+      { className: "review-result-status", role: "status" },
+      h(CardIcon, { paths: ["M2 8h9M8 4.5 11.5 8 8 11.5"], size: 11 }),
+      h("span", null, `Result sent to ${parent}`),
+      outcome ? h("span", { className: `review-result-outcome is-${tone}` }, `· ${outcome}`) : null
+    ),
+    h(OpenThreadLink, { threadId: review.parent_thread_id, label: "Reviewed thread" })
   );
 }
 

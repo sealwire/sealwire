@@ -180,6 +180,7 @@ test("the panel slice carries every thread-scoped thing the panel renders", () =
     "handovers",
     "parentThreadId",
     "reviewJobs",
+    "reviewedSession",
     "reviewerThreads",
   ]);
   assert.deepEqual(
@@ -197,7 +198,30 @@ test("the panel slice carries every thread-scoped thing the panel renders", () =
   const empty = agentsPanelSlice({}, "t-empty", THREADS);
   assert.deepEqual(Object.keys(empty).sort(), Object.keys(slice).sort());
   assert.deepEqual(empty.reviewJobs, []);
+  assert.equal(empty.reviewedSession, null);
   assert.equal(empty.goal, null);
   assert.deepEqual(empty.asks, []);
   assert.deepEqual(empty.handovers, []);
+});
+
+test("a reviewer's panel links to its reviewed session after the review job is gone", () => {
+  const reviews = {
+    review_jobs: [],
+    reviewer_threads: [
+      { reviewer_thread_id: "reviewer-1", parent_thread_id: "t1" },
+      { reviewer_thread_id: "reviewer-2", parent_thread_id: "t9" },
+    ],
+  };
+  assert.deepEqual(agentsPanelSlice(reviews, "reviewer-1", THREADS).reviewedSession, {
+    threadId: "t1",
+    title: "Mobile surface",
+    provider: "claude_code",
+  });
+  assert.equal(agentsPanelSlice(reviews, "t1", THREADS).reviewedSession, null);
+  assert.equal(agentsPanelSlice(reviews, null, THREADS).reviewedSession, null);
+  assert.deepEqual(agentsPanelSlice(reviews, "reviewer-2", []).reviewedSession, {
+    threadId: "t9",
+    title: "Another session",
+    provider: null,
+  });
 });

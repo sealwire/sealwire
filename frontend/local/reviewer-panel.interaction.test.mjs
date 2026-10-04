@@ -28,6 +28,7 @@ const React = (await import("react")).default;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { ReviewerPanel } = await import("../shared/reviewer-panel.js");
+const { agentsPanelSlice } = await import("../shared/reviews-cache.js");
 
 const h = React.createElement;
 
@@ -196,6 +197,35 @@ test("a handover's link opens the session at its other end", async () => {
   assert.equal(link.tagName, "BUTTON", "a real control, reachable by keyboard");
   await act(async () => click(link));
   assert.deepEqual(opened, ["target"]);
+});
+
+test("a reviewer can open its reviewed session and switching views clears that card", async () => {
+  const opened = [];
+  const reviews = {
+    reviewer_threads: [{ reviewer_thread_id: "reviewer", parent_thread_id: "author" }],
+  };
+  const threads = [{ id: "author", name: "Fix the retry loop", provider: "claude_code" }];
+  const { container, rerender, unmount } = await mountPanel({
+    ...agentsPanelSlice(reviews, "reviewer", threads),
+    onOpenThread: (threadId) => opened.push(threadId),
+  });
+  try {
+    const card = container.querySelector(".reviewer-review-source");
+    assert.ok(card);
+    assert.equal(card.querySelector(".reviewer-agent-name").textContent, "Fix the retry loop");
+    assert.equal(container.querySelector(".reviewer-empty"), null);
+    const link = card.querySelector('[data-open-thread="author"]');
+    assert.equal(link.tagName, "BUTTON");
+    assert.equal(link.textContent, "Reviewed thread");
+    await act(async () => click(link));
+    assert.deepEqual(opened, ["author"]);
+
+    await rerender(agentsPanelSlice(reviews, "author", threads));
+    assert.equal(container.querySelector(".reviewer-review-source"), null);
+    assert.ok(container.querySelector(".reviewer-empty"));
+  } finally {
+    await unmount();
+  }
 });
 
 test("focusing an ask card lazily loads the full prompt onto title=", async () => {
