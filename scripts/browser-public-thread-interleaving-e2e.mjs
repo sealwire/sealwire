@@ -67,7 +67,7 @@ async function main() {
       },
     },
     matchers: [{
-      contains: [DELEGATE_QUESTION, "Another agent asked for this"],
+      contains: [DELEGATE_QUESTION, "Do it yourself unless"],
       scenario: {
         tool_calls: 12,
         tool_call_delay_ms: 25,

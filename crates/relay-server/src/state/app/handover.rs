@@ -45,11 +45,11 @@ fn no_summary_written() -> String {
 /// prevent is a summary that reads well and omits the one thing the next agent
 /// needed. Asking for "a summary" reliably produced a paragraph about what was
 /// done and nothing about what was left.
-fn handover_summary_prompt(note: &str) -> String {
-    let mut prompt = String::from(
+fn handover_summary_prompt(note: &str, reader: &str) -> String {
+    let mut prompt = format!(
         "This work is being handed over to another agent, in a session that \
-cannot see any of this conversation. Write the handover itself — everything \
-that agent needs in order to pick the work up and carry it on.\n\n\
+cannot see any of this conversation. That agent is {reader}. Write the handover \
+itself — everything that agent needs in order to pick the work up and carry it on.\n\n\
 Use these headings, each written as a markdown `## ` heading, and drop one only if \
 there is genuinely nothing under it:\n\n\
 Goal — what this work is trying to achieve.\n\
@@ -566,7 +566,12 @@ finished"
                 .latest_assistant_entry(&source_thread_id)
                 .await
                 .map(|(item_id, _)| item_id);
-            let prompt = handover_summary_prompt(&note);
+            let reader = super::delegation::describe_thread_agent(
+                &*self.relay.read().await,
+                &target_thread_id,
+                model.as_deref(),
+            );
+            let prompt = handover_summary_prompt(&note, &reader);
             self.record_handover_mark(handover_id, &note).await;
             self.expect_injection(&request_tag, &source_thread_id, &prompt)
                 .await;
@@ -872,7 +877,7 @@ mod prompt_tests {
         // The failure this replaced: "summarise the work" reliably produced what was
         // DONE and nothing about what was left, which is the only part the next agent
         // cannot reconstruct by reading the tree.
-        let prompt = handover_summary_prompt("");
+        let prompt = handover_summary_prompt("", "Codex");
         for heading in [
             "Goal",
             "Current state",
@@ -901,14 +906,14 @@ mod prompt_tests {
 
     #[test]
     fn a_note_steers_the_handover_instead_of_replacing_it() {
-        let prompt = handover_summary_prompt("mind the retry loop");
+        let prompt = handover_summary_prompt("mind the retry loop", "Codex");
         assert!(prompt.contains("mind the retry loop"));
         assert!(
             prompt.contains("it does not replace any of the headings"),
             "a note must not be read as the whole brief"
         );
         // …and an empty one adds nothing at all, rather than an empty quotation.
-        assert!(!handover_summary_prompt("").contains("The person handing over added"));
+        assert!(!handover_summary_prompt("", "Codex").contains("The person handing over added"));
     }
 
     #[test]

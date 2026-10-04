@@ -936,7 +936,10 @@ fn render_fork_replay_context(
     tail_blocks: &[String],
 ) -> String {
     let mut prompt = String::new();
-    prompt.push_str("You are starting from a forked agent session.\n");
+    let target = crate::provider::provider_display_name(target_provider);
+    prompt.push_str(&format!(
+        "You are {target}, starting from a forked agent session.\n"
+    ));
     prompt.push_str("Use the preserved context below as authoritative handoff context, then execute the task for this fork.\n\n");
     prompt.push_str("Fork metadata:\n");
     prompt.push_str(&format!("- Source provider: {source_provider}\n"));
@@ -1210,6 +1213,17 @@ mod tests {
 
         assert!(prompt.len() <= MAX_FORK_REPLAY_PROMPT_CHARS);
         assert!(prompt.contains("Task for this fork:\npreserve this exact fork task"));
+    }
+
+    // "Target provider: codex" in a metadata list does not tell Codex that a task
+    // naming Codex means itself.
+    #[test]
+    fn replay_prompt_tells_the_fork_which_agent_it_is() {
+        let source = source_with_transcript(vec![agent_entry("a", "earlier work")]);
+        let (prompt, _) =
+            build_fork_replay_prompt("claude_code", "codex", &source, "let codex carry on");
+        let target = crate::provider::provider_display_name("codex");
+        assert!(prompt.contains(&format!("You are {target}")), "{prompt}");
     }
 
     fn agent_entry(item_id: &str, text: &str) -> TranscriptEntryView {

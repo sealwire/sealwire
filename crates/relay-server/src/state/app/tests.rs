@@ -32547,6 +32547,26 @@ watchdog settle this Blocked",
             !ask.status.is_terminal(),
             "settling now hands A a placeholder and wakes it while C is still working"
         );
+
+        // Seen live: C had answered but the answer had not reached B yet, B was nudged
+        // first, and A got "I don't have the review yet" as its answer.
+        {
+            let mut relay = app.relay.write().await;
+            let c_ask = relay.asks_of_asker(&b)[0].id.clone();
+            relay.update_ask(&c_ask, |ask| ask.finish("C's review".to_string()));
+        }
+        app.settle_and_deliver_asks_at(crate::state::unix_now())
+            .await;
+        let relay = app.relay.read().await;
+        let ask = relay
+            .asks_of_asker(&a)
+            .into_iter()
+            .find(|ask| ask.peer_thread_id == b)
+            .expect("A's ask is on record");
+        assert!(
+            !ask.nudged,
+            "C's answer has not reached B yet, so B is still waiting, not ignoring A"
+        );
     }
 
     #[tokio::test]
@@ -36146,6 +36166,69 @@ mod delegate_card_tests {
             .collect();
         assert_eq!(reported, ["call-report"]);
     }
+
+    // Seen live: "let Claude look at the design" became a brief saying "hand this to
+    // Claude", and the Claude reading it did.
+    #[tokio::test]
+    async fn the_brief_writer_is_told_which_agent_will_read_it() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = session(&app, &cwd).await;
+
+        app.delegate(
+            &asker,
+            AskRequest {
+                effort: Some("xhigh".to_string()),
+                ..request(StartedBy::Person, "let fake look at the design")
+            },
+        )
+        .await
+        .expect("the delegate goes through");
+
+        let (row, _) = row_marked(&app, &asker, InjectionKind::DelegateRequest).await;
+        let asked = row.text.unwrap_or_default();
+        let reader = crate::provider::provider_display_name("fake");
+        assert!(
+            asked.contains(&format!("That agent is {reader}")),
+            "{asked}"
+        );
+        // Fake supports up to high, so the send lowers xhigh; naming it would be false.
+        assert!(!asked.contains("xhigh"), "{asked}");
+    }
+
+    // Carrying on keeps the agent's model when none is named, so that is the one to name.
+    #[tokio::test]
+    async fn the_brief_names_the_model_an_existing_agent_runs_on() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = session(&app, &cwd).await;
+        let peer = session(&app, &cwd).await;
+        let model = app
+            .relay
+            .read()
+            .await
+            .thread_settings(&peer)
+            .expect("settings")
+            .model;
+
+        app.delegate(
+            &asker,
+            AskRequest {
+                peer_thread_id: Some(peer.clone()),
+                ..request(StartedBy::Person, "carry on with the parser")
+            },
+        )
+        .await
+        .expect("the delegate goes through");
+
+        let (row, _) = row_marked(&app, &asker, InjectionKind::DelegateRequest).await;
+        let asked = row.text.unwrap_or_default();
+        assert!(asked.contains(&format!("model {model}")), "{asked}");
+    }
 }
 
 #[cfg(test)]
@@ -38129,6 +38212,58 @@ mod handover_tests {
             !message.starts_with("carry on with the parser"),
             "the raw note is not the handover: {message}"
         );
+    }
+
+    // A note like "let Codex take it from here" otherwise comes back as "hand this to
+    // Codex", and the Codex reading it is left to guess that it means itself.
+    #[tokio::test]
+    async fn the_source_is_told_which_agent_takes_over() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+
+        app.handover(&source, request())
+            .await
+            .expect("the handover goes through");
+
+        let asked = received(&app, &source).await;
+        let prompt = asked.last().expect("the source was asked to write it");
+        let reader = crate::provider::provider_display_name("fake");
+        assert!(
+            prompt.contains(&format!("That agent is {reader}")),
+            "{prompt}"
+        );
+    }
+
+    // The send uses a requested model over the target's own; effort is left out because
+    // the send may lower it to what that model supports.
+    #[tokio::test]
+    async fn the_source_is_told_the_model_an_existing_target_will_run_on() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let source = session(&app, &cwd, "never").await;
+        let existing = session(&app, &cwd, "never").await;
+
+        app.handover(
+            &source,
+            HandoverRequest {
+                target_thread_id: Some(existing.clone()),
+                model: Some("fake-other".to_string()),
+                effort: Some("high".to_string()),
+                ..request()
+            },
+        )
+        .await
+        .expect("the handover goes through");
+
+        let asked = received(&app, &source).await;
+        let prompt = asked.last().expect("the source was asked to write it");
+        assert!(prompt.contains("model fake-other"), "{prompt}");
+        assert!(!prompt.contains("effort"), "{prompt}");
     }
 
     #[tokio::test]

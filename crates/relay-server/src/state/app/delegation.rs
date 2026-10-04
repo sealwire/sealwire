@@ -27,13 +27,22 @@ use crate::state::{clip_chars, unix_now, AppState, InjectionTag, TurnOutcome};
 /// capped — the goal turn budget already bounds the loop that drives them.
 const MAX_PEERS_PER_ASKER: usize = 5;
 
-fn answer_instruction(provider: &str) -> &'static str {
-    if !crate::provider::supports_session_mcp(provider) {
-        return "\n\n---\nAnother agent asked for this and cannot see your session. Finish with a self-contained final answer; Sealwire will forward it to that agent.";
-    }
-    "\n\n---\nAnother agent asked for this and cannot see your session. When \
-you are done, call the `report_back` tool with what it needs to know. That is \
-what it will be shown."
+fn answer_instruction(provider: &str, started_by: StartedBy) -> String {
+    let who = match started_by {
+        StartedBy::Person => {
+            "The user asked for this from another session, which cannot see yours."
+        }
+        StartedBy::Agent => "Another agent asked for this and cannot see your session.",
+    };
+    let reply = if crate::provider::supports_session_mcp(provider) {
+        "When you are done, call the `report_back` tool with what they need to know. \
+That is what they will be shown."
+    } else {
+        "Finish with a self-contained final answer; Sealwire will forward it to that agent."
+    };
+    // Advice, not a rule: a peer that reads "get Claude to look" as an order to delegate
+    // leaves its asker waiting on a middleman.
+    format!("\n\n---\n{who} Do it yourself unless you really need another agent. {reply}")
 }
 
 /// Sent once if a peer finishes without calling `report_back`.
@@ -93,11 +102,13 @@ whole task in the command"
 /// It says "rewrite", not "answer": the agent must not do the work here, only
 /// describe it. Left vague, models start solving the problem in this turn.
 /// The shape is the cards': the first line is their title, `## Context` their Context line.
-fn brief_prompt(task: &str) -> String {
+/// Naming the reader matters: "let Claude review it" otherwise becomes a brief telling
+/// Claude to hand the review to Claude.
+fn brief_prompt(task: &str, reader: &str) -> String {
     format!(
         "Another agent is about to be given this task, in a fresh session that \
-cannot see this conversation:\n\n{task}\n\nWrite the instructions it should \
-get, in this shape:\n\n\
+cannot see this conversation:\n\n{task}\n\nThat agent is {reader}; address it as \
+\"you\".\n\nWrite the instructions it should get, in this shape:\n\n\
 First line: the request as one sentence.\n\
 Then: what to do, and how it will know it is done.\n\
 Last: a `## Context` section with what it needs from what we have been doing — \
@@ -105,6 +116,31 @@ what the goal is, which files and decisions matter, what \"this\" and \"the next
 step\" refer to.\n\n\
 Do NOT do the work, and do not reply to me: reply with the instructions \
 themselves and nothing else."
+    )
+}
+
+/// An agent as the session briefing it should hear it, so "let Claude do it" has a referent.
+/// No effort: the send may lower it to what the model supports, so naming it can be false.
+fn describe_agent(provider: &str, model: Option<&str>) -> String {
+    let name = crate::provider::provider_display_name(provider);
+    match model.filter(|model| !model.is_empty() && *model != "default") {
+        Some(model) => format!("{name} (model {model})"),
+        None => name.to_string(),
+    }
+}
+
+/// `thread_id` as its next turn will run: a model not overridden is its own, as a send fills it in.
+pub(super) fn describe_thread_agent(
+    relay: &crate::state::RelayState,
+    thread_id: &str,
+    model: Option<&str>,
+) -> String {
+    let own = relay
+        .thread_settings(thread_id)
+        .map(|settings| settings.model);
+    describe_agent(
+        &relay.provider_of_thread(thread_id),
+        model.or(own.as_deref()),
     )
 }
 
@@ -520,8 +556,14 @@ Carry on with one of those instead of bringing in another."
         // costs a turn on the asking agent, which is why it is opt-in: an agent
         // calling the tool already wrote its message with the context in view.
         let message = if request.started_by == StartedBy::Person {
-            self.brief_from_asker(&asker_thread_id, &message, existing_ask_id.as_deref())
-                .await?
+            let reader = self.brief_reader(&request, &asker_provider).await?;
+            self.brief_from_asker(
+                &asker_thread_id,
+                &message,
+                &reader,
+                existing_ask_id.as_deref(),
+            )
+            .await?
         } else {
             message
         };
@@ -713,7 +755,7 @@ Carry on with one of those instead of bringing in another."
         // peer working with nobody waiting for it. The reverse — recorded but not
         // sent — is visible and settles as a failure.
         let ask_id = existing_ask_id.clone().unwrap_or_else(new_ask_id);
-        let instruction = answer_instruction(&peer_provider);
+        let instruction = answer_instruction(&peer_provider, request.started_by);
         {
             let mut relay = self.relay.write().await;
             if relay
@@ -756,7 +798,7 @@ Carry on with one of those instead of bringing in another."
                 relay.notify();
             }
             relay.edit_delegate_mark(&ask_id, |mark| {
-                mark.instruction = instruction.to_string();
+                mark.instruction = instruction.clone();
             });
         }
 
@@ -1072,6 +1114,7 @@ write the brief — try again once it is done"
         &self,
         asker_thread_id: &str,
         task: &str,
+        reader: &str,
         ask_id: Option<&str>,
     ) -> Result<String, AskError> {
         // ONE budget for the whole delegate — queueing behind another turn and waiting for
@@ -1087,7 +1130,7 @@ write the brief — try again once it is done"
             .await
             .map(|(item_id, _)| item_id);
 
-        let prompt = brief_prompt(task);
+        let prompt = brief_prompt(task, reader);
         let sent = match ask_id {
             Some(ask_id) => {
                 let tag =
@@ -1256,6 +1299,20 @@ get around your own permissions"
             .or_else(|| names.first())
             .cloned()
             .unwrap_or_else(|| asker_provider.to_string())
+    }
+
+    /// The name a person's brief is written to: the agent being carried on with, or
+    /// the provider a new one will run on.
+    async fn brief_reader(
+        &self,
+        request: &AskRequest,
+        asker_provider: &str,
+    ) -> Result<String, AskError> {
+        let model = request.model.as_deref();
+        Ok(match request.peer_thread_id.as_deref() {
+            Some(peer) => describe_thread_agent(&*self.relay.read().await, peer, model),
+            None => describe_agent(&self.peer_provider(request, asker_provider)?.0, model),
+        })
     }
 
     fn peer_provider(
@@ -1467,11 +1524,13 @@ impl AppState {
                 // A peer that handed part of the job to its own peer is waiting, not
                 // ignoring us: it is woken when that answer lands, and not before then
                 // can it answer us. Ends the chain at whatever depth it reaches.
+                // Still waiting until the answer is delivered, not just settled: nudged
+                // in that gap, it had nothing to give and its placeholder closed our ask.
                 working
                     || relay
                         .asks_of_asker(&peer_thread_id)
                         .into_iter()
-                        .any(|ask| !ask.status.is_terminal())
+                        .any(|ask| !ask.status.is_terminal() || ask.owed_to_asker())
             };
             if busy {
                 continue;
@@ -1828,11 +1887,35 @@ mod wake_tests {
     use super::*;
     use relay_api::delegation::AskStatus;
 
+    // A peer that reads "get Claude to review this" with a delegate tool in hand will
+    // otherwise hand it on, leaving the asker waiting on a middleman.
+    #[test]
+    fn the_peer_is_told_the_task_is_its_own_to_do() {
+        for provider in ["claude_code", "a-provider-without-session-tools"] {
+            for started_by in [StartedBy::Person, StartedBy::Agent] {
+                let instruction = answer_instruction(provider, started_by);
+                assert!(
+                    instruction.contains("yourself"),
+                    "{provider}: {instruction}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_brief_names_the_reader_with_what_it_runs_on() {
+        assert_eq!(
+            describe_agent("claude_code", Some("opus[1m]")),
+            "Claude Code (model opus[1m])"
+        );
+        assert_eq!(describe_agent("codex", Some("default")), "Codex");
+    }
+
     #[test]
     fn opencode_is_asked_to_report_back_through_its_session_tools() {
-        let instruction = answer_instruction("opencode");
+        let instruction = answer_instruction("opencode", StartedBy::Agent);
         assert!(instruction.contains("report_back"));
-        assert!(answer_instruction("claude_code").contains("report_back"));
+        assert!(answer_instruction("claude_code", StartedBy::Agent).contains("report_back"));
     }
 
     #[test]
@@ -1893,7 +1976,7 @@ mod wake_tests {
     // the brief's `## Context`, so the prompt asks for exactly that shape.
     #[test]
     fn the_brief_is_asked_for_in_the_shape_its_card_draws() {
-        let prompt = brief_prompt("ask codex how remote reads the text");
+        let prompt = brief_prompt("ask codex how remote reads the text", "Codex");
         assert!(prompt.contains("ask codex how remote reads the text"));
         assert!(prompt.contains("First line:"), "{prompt}");
         assert!(prompt.contains("a `## Context` section"), "{prompt}");

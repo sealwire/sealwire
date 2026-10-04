@@ -149,7 +149,7 @@ async fn a_replayed_fork_draws_its_first_message_as_a_card_that_survives_a_resta
         first[*index]
             .text
             .as_deref()
-            .is_some_and(|text| text.contains("You are starting from a forked agent session")),
+            .is_some_and(|text| text.contains("starting from a forked agent session")),
         "the card stands on the replayed message itself"
     );
     assert_eq!(card.source_thread_id, source);

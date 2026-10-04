@@ -324,6 +324,9 @@ Return only:\n\
 Do not make new code changes in this turn."
 }
 
+pub(crate) const REVIEWER_ROLE: &str =
+    "You are the reviewer, even if the instructions below name another agent.";
+
 /// Prompt handed to a fresh reviewer (doc §Reviewer Prompt). The review is
 /// read-only; the diff is authoritative over the recap.
 pub(crate) fn reviewer_prompt(
@@ -505,7 +508,7 @@ review context independently."
     };
 
     format!(
-        "{intro}\n\n\
+        "{intro} {REVIEWER_ROLE}\n\n\
 {workspace_line}\
 No repository changes were produced by this author turn. Do not review an \
 unrelated historical commit as a substitute. Do not modify files. Inspect the \
@@ -633,7 +636,7 @@ fn build_committed_review_prompt(
         .unwrap_or_default();
 
     format!(
-        "{intro}\n\n\
+        "{intro} {REVIEWER_ROLE}\n\n\
 {workspace_line}\
 Do not modify files. Review only the committed Git objects named below; ignore \
 uncommitted, unstaged, and untracked files in the working tree because they are \
@@ -713,7 +716,7 @@ fn build_checkpoint_review_prompt(
         .unwrap_or_default();
 
     format!(
-        "{intro}\n\n\
+        "{intro} {REVIEWER_ROLE}\n\n\
 {workspace_line}\
 Do not modify files. This is an UNCOMMITTED WORKTREE SNAPSHOT, not a commit on any \
 branch: the author has not committed, so the relay captured the current dirty state as \
@@ -791,7 +794,7 @@ working tree)"
     };
 
     let mut prompt = format!(
-        "{intro}\n\n\
+        "{intro} {REVIEWER_ROLE}\n\n\
 {workspace_line}\
 Do not modify files. Inspect the working tree and report findings only.\n\
 Prioritize bugs, regressions, security risks, race conditions, data loss,\n\
@@ -1357,6 +1360,35 @@ VERDICT: NEEDS_CHANGES";
                 "only a reviewer with earlier findings is asked which got fixed: {prompt}"
             );
             assert!(prompt.trim_end().ends_with("as-is.") || prompt.contains("Use NEEDS_CHANGES"));
+        }
+    }
+
+    // The person's instructions can say "have Codex check the auth path" to a reviewer
+    // that is Codex; handing that on leaves the review loop waiting on a stranger.
+    #[test]
+    fn every_reviewer_is_told_it_is_the_reviewer() {
+        let target = GitReviewTarget {
+            cwd: "/tmp/wt".to_string(),
+            base_sha: "a".repeat(40),
+            candidate_sha: "b".repeat(40),
+            generated_at: 1,
+            manifest: "M\tsrc/lib.rs".to_string(),
+            stat: " src/lib.rs | 2 +-".to_string(),
+        };
+        let diff = WorkspaceDiffResponse::unavailable();
+        for prompt in [
+            reviewer_prompt("recap", &diff, None, ""),
+            reviewer_prompt_for_target("recap", &target, None, ""),
+            reviewer_prompt_for_checkpoint("recap", &target, None, ""),
+            re_review_prompt("recap", &diff, None, ""),
+            re_review_prompt_for_target("recap", &target, None, ""),
+            re_review_prompt_for_checkpoint("recap", &target, None, ""),
+            handoff_review_prompt("recap", &diff, None, "", "old"),
+            handoff_review_prompt_for_target("recap", &target, None, "", "old"),
+            handoff_review_prompt_for_checkpoint("recap", &target, None, "", "old"),
+            reviewer_prompt_for_no_change("report", None, "", false, None),
+        ] {
+            assert!(prompt.contains(REVIEWER_ROLE), "{prompt}");
         }
     }
 

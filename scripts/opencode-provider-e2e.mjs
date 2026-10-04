@@ -60,7 +60,7 @@ const modelServer = http.createServer(async (request, response) => {
     }
     const sequence = text.startsWith("SEALWIRE_AGENT_DELEGATE") ? [["delegate", { provider: "opencode", model: "sealwire_test/echo", message: "SEALWIRE_MCP_PEER: report your result" }]]
       : !isReviewer && !text.includes("Nobody is waiting on a reply") && text.includes("SEALWIRE_GOAL") ? goalSequence
-      : text.includes("Another agent asked for this") && text.includes("report_back") ? [["report_back", { answer: "first response" }]] : [];
+      : text.includes("Do it yourself unless") && text.includes("report_back") ? [["report_back", { answer: "first response" }]] : [];
     const next = sequence[calls.length];
     const tool = !body.tools?.length ? null : isReviewer && !alreadyCalled ? {
       id: `call_review_${requests.length}`, type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "cat approved.txt", description: "Inspect the test fixture" }) },
