@@ -4,7 +4,7 @@
 # binary. SealWire Cloud (licensed) is built from the private repository as
 # `sealwire-broker-private` and must never use this Dockerfile as its production
 # image.
-FROM node:25.2.1-bookworm AS frontend-build
+FROM node:26.10.0-bookworm AS frontend-build
 WORKDIR /app
 
 COPY package.json package-lock.json vite.config.js ./

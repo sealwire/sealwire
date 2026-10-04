@@ -16,7 +16,7 @@ import path from "node:path";
 import process from "node:process";
 import { selectWorkerFiles } from "./tauri-worker-files.mjs";
 
-const NODE_VERSION = process.env.TAURI_NODE_VERSION || "v22.23.1";
+const NODE_VERSION = process.env.TAURI_NODE_VERSION || "v22.23.3";
 const NODE_SIDECAR = "node";
 const RELAY_SIDECAR = "relay-server";
 
