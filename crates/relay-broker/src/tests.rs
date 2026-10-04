@@ -2479,6 +2479,446 @@ async fn cookie_authenticated_relay_directory_is_no_store() {
 }
 
 #[tokio::test]
+async fn public_superseded_client_token_cannot_rotate_into_a_fresh_token() {
+    let address = spawn_public_mode_app().await;
+    let key = SigningKey::from_bytes(&[31; 32]);
+    let client = public_client_pair(
+        address,
+        "relay-refresh-1",
+        &key,
+        &ClientGrantRequest {
+            relay_id: "relay-1".into(),
+            broker_room_id: "room-a".into(),
+            device_id: "phone-fixed-grace".into(),
+            client_verify_key: STANDARD.encode(key.verifying_key().to_bytes()),
+            client_label: None,
+            device_label: None,
+        },
+    )
+    .await;
+    public_post_response(
+        address,
+        "/api/public/client/rotate",
+        &client.client_refresh_token,
+        &json!({}),
+    )
+    .await
+    .error_for_status()
+    .expect("current token can rotate");
+    let rejected = public_post_response(
+        address,
+        "/api/public/client/rotate",
+        &client.client_refresh_token,
+        &json!({}),
+    )
+    .await;
+    assert_eq!(rejected.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+async fn signed_refresh_request(
+    address: SocketAddr,
+    key: &SigningKey,
+    client_id: &str,
+    room: Option<&str>,
+) -> serde_json::Value {
+    signed_refresh_request_with_origin(address, address, key, client_id, room).await
+}
+
+async fn signed_refresh_request_with_origin(
+    address: SocketAddr,
+    origin_address: SocketAddr,
+    key: &SigningKey,
+    client_id: &str,
+    room: Option<&str>,
+) -> serde_json::Value {
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{address}/api/public/client/refresh/challenge"
+        ))
+        .header(reqwest::header::HOST, origin_address.to_string())
+        .json(&refresh_init_body(
+            origin_address,
+            key,
+            client_id,
+            room,
+            None,
+            "test-init-nonce",
+        ))
+        .send()
+        .await
+        .expect("challenge request completes");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let challenge: serde_json::Value = response.json().await.expect("challenge decodes");
+    let message = format!(
+        "agent-relay:credential-refresh:http://{origin_address}:{}:{}:{}:{}:{}",
+        challenge["challenge_id"].as_str().unwrap(),
+        challenge["nonce"].as_str().unwrap(),
+        client_id,
+        room.unwrap_or_default(),
+        challenge["device_id"].as_str().unwrap_or_default(),
+    );
+    json!({
+        "challenge_id": challenge["challenge_id"],
+        "signature": STANDARD.encode(key.sign(message.as_bytes()).to_bytes()),
+    })
+}
+
+async fn redeem_signed_refresh(
+    address: SocketAddr,
+    request: &serde_json::Value,
+) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://{address}/api/public/client/refresh"))
+        .json(request)
+        .send()
+        .await
+        .expect("signed refresh request completes")
+}
+
+async fn review_refresh_fixture(seed: u8) -> (SocketAddr, SigningKey, ClientClaimResponse) {
+    let address = spawn_public_mode_app().await;
+    let key = SigningKey::from_bytes(&[seed; 32]);
+    let _: DeviceGrantResponse = public_post(
+        address,
+        "/api/public/devices",
+        "relay-refresh-1",
+        &DeviceGrantRequest {
+            relay_id: "relay-1".into(),
+            broker_room_id: "room-a".into(),
+            device_id: "review-phone".into(),
+        },
+    )
+    .await;
+    let client = public_client_pair(
+        address,
+        "relay-refresh-1",
+        &key,
+        &ClientGrantRequest {
+            relay_id: "relay-1".into(),
+            broker_room_id: "room-a".into(),
+            device_id: "review-phone".into(),
+            client_verify_key: STANDARD.encode(key.verifying_key().to_bytes()),
+            client_label: None,
+            device_label: None,
+        },
+    )
+    .await;
+    (address, key, client)
+}
+
+fn refresh_init_body(
+    address: SocketAddr,
+    key: &SigningKey,
+    client_id: &str,
+    room: Option<&str>,
+    device_id: Option<&str>,
+    nonce: &str,
+) -> serde_json::Value {
+    let message = format!(
+        "agent-relay:credential-refresh-init:http://{address}:{client_id}:{}:{}:{nonce}",
+        room.unwrap_or_default(),
+        device_id.unwrap_or_default(),
+    );
+    json!({
+        "client_id": client_id, "broker_room_id": room, "device_id": device_id,
+        "nonce": nonce, "signature": STANDARD.encode(key.sign(message.as_bytes()).to_bytes()),
+    })
+}
+
+#[tokio::test]
+async fn public_signed_refresh_cannot_be_redeemed_under_another_origin() {
+    let (address, key, client) = review_refresh_fixture(81).await;
+    let request = signed_refresh_request(address, &key, &client.client_id, None).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/public/client/refresh"))
+        .header(reqwest::header::HOST, "other-broker.example")
+        .json(&request)
+        .send()
+        .await
+        .expect("refresh completes");
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert!(response
+        .headers()
+        .get(reqwest::header::SET_COOKIE)
+        .is_none());
+}
+
+#[tokio::test]
+async fn public_lost_refresh_challenge_allows_recovery_after_broker_restart() {
+    let path = temp_state_path("lost-refresh-challenge");
+    let owner =
+        test_public_control_plane_with_parts(Some(path.clone()), Some("300"), Some("300")).await;
+    let address = spawn_public_mode_app_with(
+        owner,
+        BrokerHardeningConfig::default(),
+        SecurityHeadersConfig::default(),
+    )
+    .await;
+    let key = SigningKey::from_bytes(&[90; 32]);
+    let client = public_client_pair(
+        address,
+        "relay-refresh-1",
+        &key,
+        &ClientGrantRequest {
+            relay_id: "relay-1".into(),
+            broker_room_id: "room-a".into(),
+            device_id: "restart-phone".into(),
+            client_verify_key: STANDARD.encode(key.verifying_key().to_bytes()),
+            client_label: None,
+            device_label: None,
+        },
+    )
+    .await;
+    let request = signed_refresh_request(address, &key, &client.client_id, None).await;
+    let restarted = spawn_public_mode_app_with(
+        test_public_control_plane_with_parts(Some(path.clone()), Some("300"), Some("300")).await,
+        BrokerHardeningConfig::default(),
+        SecurityHeadersConfig::default(),
+    )
+    .await;
+    let lost = reqwest::Client::new()
+        .post(format!("http://{restarted}/api/public/client/refresh"))
+        .header(reqwest::header::HOST, address.to_string())
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert!(lost.headers().get(reqwest::header::SET_COOKIE).is_none());
+    let status = lost.status();
+    let fresh =
+        signed_refresh_request_with_origin(restarted, address, &key, &client.client_id, None).await;
+    assert_ne!(fresh["challenge_id"], request["challenge_id"]);
+    let restored = reqwest::Client::new()
+        .post(format!("http://{restarted}/api/public/client/refresh"))
+        .header(reqwest::header::HOST, address.to_string())
+        .json(&fresh)
+        .send()
+        .await
+        .unwrap();
+    fs::remove_file(path).unwrap();
+    assert_eq!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST,
+        "losing a challenge is not a client authorization failure",
+    );
+    assert_eq!(restored.status(), reqwest::StatusCode::OK);
+    assert!(restored
+        .headers()
+        .get(reqwest::header::SET_COOKIE)
+        .is_some());
+}
+
+#[tokio::test]
+async fn public_unsigned_refresh_challenge_cannot_reveal_pairing() {
+    let (address, _, client) = review_refresh_fixture(82).await;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{address}/api/public/client/refresh/challenge"
+        ))
+        .json(&json!({
+            "client_id": client.client_id, "broker_room_id": "room-a", "device_id": "review-phone",
+            "nonce": "unsigned-request", "signature": STANDARD.encode([0_u8; 64]),
+        }))
+        .send()
+        .await
+        .expect("challenge completes");
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(body.get("device_id").is_none());
+    assert!(body.get("challenge_id").is_none());
+}
+
+#[tokio::test]
+async fn public_refresh_challenges_are_bounded_per_client() {
+    let (address, key, client) = review_refresh_fixture(83).await;
+    for index in 0..5 {
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://{address}/api/public/client/refresh/challenge"
+            ))
+            .json(&refresh_init_body(
+                address,
+                &key,
+                &client.client_id,
+                None,
+                None,
+                &format!("nonce-{index}"),
+            ))
+            .send()
+            .await
+            .expect("challenge completes");
+        if index < 4 {
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+        } else {
+            assert!(
+                response.status().is_client_error(),
+                "one client cannot occupy the global challenge table"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn public_signed_refresh_rejects_ungranted_rooms_and_other_devices() {
+    let (address, key, client) = review_refresh_fixture(84).await;
+    for (room, device) in [
+        ("room-not-granted", "review-phone"),
+        ("room-a", "other-device"),
+    ] {
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://{address}/api/public/client/refresh/challenge"
+            ))
+            .json(&refresh_init_body(
+                address,
+                &key,
+                &client.client_id,
+                Some(room),
+                Some(device),
+                "scope-test",
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert!(response
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn public_signed_refresh_restores_cookies_without_a_refresh_token() {
+    let address = spawn_public_mode_app().await;
+    let key = SigningKey::from_bytes(&[32; 32]);
+    let device_id = "phone-signed-refresh";
+    let _: DeviceGrantResponse = public_post(
+        address,
+        "/api/public/devices",
+        "relay-refresh-1",
+        &DeviceGrantRequest {
+            relay_id: "relay-1".into(),
+            broker_room_id: "room-a".into(),
+            device_id: device_id.into(),
+        },
+    )
+    .await;
+    let client = public_client_pair(
+        address,
+        "relay-refresh-1",
+        &key,
+        &ClientGrantRequest {
+            relay_id: "relay-1".into(),
+            broker_room_id: "room-a".into(),
+            device_id: device_id.into(),
+            client_verify_key: STANDARD.encode(key.verifying_key().to_bytes()),
+            client_label: None,
+            device_label: None,
+        },
+    )
+    .await;
+    let request = signed_refresh_request(address, &key, &client.client_id, Some("room-a")).await;
+    let response = redeem_signed_refresh(address, &request).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let cookies = response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .map(|cookie| cookie.to_str().unwrap().split(';').next().unwrap())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let payload: serde_json::Value = response.json().await.expect("refresh response decodes");
+    assert_eq!(payload["client_id"], client.client_id);
+    assert_eq!(payload["device"]["device_id"], device_id);
+    assert!(payload.get("client_refresh_token").is_none());
+    let directory = reqwest::Client::new()
+        .get(format!("http://{address}/api/public/relays"))
+        .header(reqwest::header::COOKIE, &cookies)
+        .send()
+        .await
+        .expect("directory request completes");
+    assert_eq!(directory.status(), reqwest::StatusCode::OK);
+    let ws = reqwest::Client::new()
+        .post(format!(
+            "http://{address}/api/public/device/room-a/ws-token"
+        ))
+        .header(reqwest::header::COOKIE, &cookies)
+        .send()
+        .await
+        .expect("ws token request completes");
+    assert_eq!(ws.status(), reqwest::StatusCode::OK);
+    let replay = redeem_signed_refresh(address, &request).await;
+    assert!(replay.headers().get(reqwest::header::SET_COOKIE).is_none());
+    assert_eq!(
+        replay.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "a signature cannot be replayed",
+    );
+
+    let pending = signed_refresh_request(address, &key, &client.client_id, Some("room-a")).await;
+    let _: DeviceGrantRevokeResponse = public_post(
+        address,
+        &format!("/api/public/devices/{device_id}/revoke"),
+        "relay-refresh-1",
+        &DeviceGrantRevokeRequest {
+            relay_id: "relay-1".into(),
+            broker_room_id: "room-a".into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        redeem_signed_refresh(address, &pending).await.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "a pending challenge cannot restore a revoked device",
+    );
+}
+
+#[tokio::test]
+async fn public_signed_refresh_rejects_wrong_keys_and_revoked_clients() {
+    let address = spawn_public_mode_app().await;
+    let key = SigningKey::from_bytes(&[33; 32]);
+    let client = public_client_pair(
+        address,
+        "relay-refresh-1",
+        &key,
+        &ClientGrantRequest {
+            relay_id: "relay-1".into(),
+            broker_room_id: "room-a".into(),
+            device_id: "phone-signature-check".into(),
+            client_verify_key: STANDARD.encode(key.verifying_key().to_bytes()),
+            client_label: None,
+            device_label: None,
+        },
+    )
+    .await;
+    let wrong_key = SigningKey::from_bytes(&[34; 32]);
+    let mut wrong = signed_refresh_request(address, &key, &client.client_id, None).await;
+    wrong["signature"] = json!(STANDARD.encode(wrong_key.sign(b"wrong signing key").to_bytes()));
+    let refused = redeem_signed_refresh(address, &wrong).await;
+    assert_eq!(refused.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert!(refused.headers().get(reqwest::header::SET_COOKIE).is_none());
+
+    let valid = signed_refresh_request(address, &key, &client.client_id, None).await;
+    let response = redeem_signed_refresh(address, &valid).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let cookie = set_cookie_name_value(&response);
+    let pending = signed_refresh_request(address, &key, &client.client_id, None).await;
+    let revoke = reqwest::Client::new()
+        .delete(format!("http://{address}/api/public/client"))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await
+        .expect("revoke completes");
+    assert_eq!(revoke.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        redeem_signed_refresh(address, &pending).await.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "a pending challenge cannot restore a revoked client",
+    );
+}
+
+#[tokio::test]
 async fn public_client_refresh_token_can_rotate() {
     let address = spawn_public_mode_app().await;
     let signing_key = SigningKey::from_bytes(&[9_u8; 32]);

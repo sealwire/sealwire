@@ -1,6 +1,6 @@
 import { renderLog } from "./session-surface.js";
 import { classifyBrokerPairingError, expiredPairingMessage } from "./pairing-errors.js";
-import { clearPairingQueryFromUrl } from "./crypto.js";
+import { clearPairingQueryFromUrl, signCredentialRefresh, signCredentialRefreshInit } from "./crypto.js";
 import {
   brokerControlUrl,
   canRefreshDeviceJoinTicket,
@@ -246,6 +246,9 @@ export async function connectBroker(reason) {
         return;
       }
       renderLog(`Device broker token refresh failed: ${error.message}`);
+      if (currentConnectionSelectionKey() === selectionKey && canRefreshDeviceJoinTicket()) {
+        scheduleSocketReconnect();
+      }
       return;
     }
     if (currentConnectionSelectionKey() !== selectionKey) {
@@ -586,6 +589,82 @@ export async function clearClientRefreshSession(brokerUrl) {
   }).catch(() => {});
 }
 
+async function refreshBrokerCredentials(brokerUrl, { room = null, deviceId = null, signal } = {}) {
+  const clientAuth = state.clientAuth;
+  const clientId = clientAuth?.clientId;
+  const base = brokerControlUrl(brokerUrl);
+  const brokerOrigin = new URL(base).origin;
+  if (
+    brokerOrigin !== new URL(clientAuth.brokerControlUrl).origin ||
+    brokerOrigin !== new URL(window.location.href).origin
+  ) {
+    const error = new Error("broker credential recovery requires the original page and broker");
+    error.status = 401;
+    throw error;
+  }
+  const stillCurrent = () => state.clientAuth?.clientId === clientId &&
+    state.clientAuth?.brokerControlUrl === clientAuth?.brokerControlUrl;
+  const ensureCurrent = () => {
+    if (!stillCurrent()) {
+      throw new Error("client authorization changed during broker credential recovery");
+    }
+  };
+  const post = async (path, body) => {
+    const response = await fetch(new URL(path, base), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      const error = new Error(payload?.message || payload?.error || "broker credential recovery failed");
+      error.status = response.status;
+      throw error;
+    }
+    return payload;
+  };
+  const proof = await signCredentialRefreshInit({ brokerOrigin, clientId, room, deviceId });
+  ensureCurrent();
+  const challenge = await post("/api/public/client/refresh/challenge", {
+    client_id: clientId,
+    broker_room_id: room,
+    device_id: deviceId,
+    ...proof,
+  });
+  if (
+    !challenge?.challenge_id || !challenge?.nonce ||
+    challenge.broker_origin !== brokerOrigin ||
+    challenge.client_id !== clientId ||
+    (challenge.broker_room_id || null) !== room ||
+    (challenge.device_id || null) !== deviceId
+  ) {
+    const error = new Error("broker credential recovery returned the wrong identity");
+    error.status = 401;
+    throw error;
+  }
+  ensureCurrent();
+  const signature = await signCredentialRefresh(challenge);
+  ensureCurrent();
+  const payload = await post("/api/public/client/refresh", {
+    challenge_id: challenge.challenge_id,
+    signature,
+  });
+  // A forgotten identity must not be signed back in by a response already in flight.
+  if (!stillCurrent()) {
+    await clearClientRefreshSession(base);
+    if (room) {
+      await clearDeviceRefreshSession(base, room, { allowLegacyFallback: false });
+    }
+    ensureCurrent();
+  }
+  if (payload?.client_id !== clientId) {
+    throw new Error("broker credential recovery returned the wrong identity");
+  }
+  return payload;
+}
+
 export async function refreshRelayDirectory(reason, { silent = false } = {}) {
   if (!state.clientAuth?.brokerControlUrl) {
     setRelayDirectory([]);
@@ -597,9 +676,13 @@ export async function refreshRelayDirectory(reason, { silent = false } = {}) {
   }
 
   const url = new URL("/api/public/relays", currentClientControlUrl());
-  const response = await fetch(url, {
+  let response = await fetch(url, {
     credentials: "same-origin",
   });
+  if (response.status === 401 && state.clientAuth?.clientId) {
+    await refreshBrokerCredentials(currentClientControlUrl());
+    response = await fetch(url, { credentials: "same-origin" });
+  }
   let payload = null;
   try {
     payload = await response.json();
@@ -890,7 +973,7 @@ async function refreshDeviceJoinTicket(reason) {
       );
     }
 
-    const { endpointMode, response } = tokenResult;
+    let { endpointMode, response } = tokenResult;
     let payload = null;
     try {
       payload = await response.json();
@@ -899,6 +982,29 @@ async function refreshDeviceJoinTicket(reason) {
     }
 
     await ensureDeviceRefreshStillOwnsProfile(relayId, expectedProfileSignature, brokerUrl, room);
+    if (response.status === 401 && state.clientAuth?.clientId && room) {
+      try {
+        const recovered = await refreshBrokerCredentials(brokerUrl, {
+          room,
+          deviceId: remoteAuth.deviceId,
+          signal: controller.signal,
+        });
+        await ensureDeviceRefreshStillOwnsProfile(relayId, expectedProfileSignature, brokerUrl, room);
+        payload = recovered.device;
+        endpointMode = "scoped";
+        response = { ok: true };
+      } catch (error) {
+        await ensureDeviceRefreshStillOwnsProfile(relayId, expectedProfileSignature, brokerUrl, room);
+        if (error.status === 401) {
+          updateRemoteProfile(relayId, {
+            deviceJoinTicket: null,
+            deviceJoinTicketExpiresAt: null,
+            deviceSessionExpired: true,
+          });
+        }
+        throw error;
+      }
+    }
     if (!response.ok) {
       // A 401 means the stored refresh credential (cookie or retained bearer) is
       // gone/invalid. Mark the profile expired so canRefreshDeviceJoinTicket()

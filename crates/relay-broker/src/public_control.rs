@@ -43,12 +43,8 @@ const PUBLIC_DB_QUERY_TIMEOUT_ENV: &str = "RELAY_BROKER_PUBLIC_DB_QUERY_TIMEOUT_
 const PUBLIC_DB_CONCURRENCY_ENV: &str = "RELAY_BROKER_PUBLIC_DB_CONCURRENCY";
 pub const PUBLIC_RELAY_WS_TTL_SECS_ENV: &str = "RELAY_BROKER_PUBLIC_RELAY_WS_TTL_SECS";
 pub const PUBLIC_DEVICE_WS_TTL_SECS_ENV: &str = "RELAY_BROKER_PUBLIC_DEVICE_WS_TTL_SECS";
-/// Grace window during which a rotated-away client/device refresh token keeps
-/// authenticating. Every approval rotates these tokens, but the fresh token only
-/// reaches the session that completes that pairing handshake — an already-paired
-/// device that never sees it would otherwise be bricked by the very approval
-/// meant to (re-)authorize it. Uses within the window slide the expiry forward;
-/// explicit revocation still kills current and superseded tokens immediately.
+/// Pairing only delivers new credentials to the completing session, so other sessions need grace.
+/// A fixed deadline bounds stolen old credentials; explicit revocation cuts access immediately.
 pub const PUBLIC_ROTATION_GRACE_SECS_ENV: &str = "RELAY_BROKER_PUBLIC_ROTATION_GRACE_SECS";
 
 const DEFAULT_PUBLIC_RELAY_WS_TTL_SECS: u64 = 300;
@@ -70,6 +66,9 @@ const DEFAULT_PUBLIC_DB_CONCURRENCY: usize = 8;
 /// one is writable by any authenticated relay, so it needs a bound: without it
 /// a hostile relay can grow it without limit inside the TTL window.
 const MAX_PENDING_CLIENT_CLAIMS: usize = 512;
+// Keep recovery capacity above the default API budget over a challenge's lifetime.
+const MAX_PENDING_CREDENTIAL_REFRESHES: usize = 4096;
+const MAX_PENDING_REFRESHES_PER_CLIENT: usize = 4;
 /// Minimum gap between the end of one full reload and the start of the next.
 const MISS_RELOAD_MIN_INTERVAL: Duration = Duration::from_secs(1);
 /// The expression the superseded-token index covers; the probe must filter on exactly this.
@@ -582,6 +581,39 @@ pub struct ClientSessionResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialRefreshChallengeRequest {
+    pub client_id: String,
+    pub broker_room_id: Option<String>,
+    pub device_id: Option<String>,
+    pub nonce: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialRefreshChallengeResponse {
+    pub broker_origin: String,
+    pub challenge_id: String,
+    pub nonce: String,
+    pub client_id: String,
+    pub broker_room_id: Option<String>,
+    pub device_id: Option<String>,
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialRefreshRequest {
+    pub challenge_id: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialRefreshResponse {
+    pub client_id: String,
+    pub cookie_session: bool,
+    pub device: Option<DeviceWsTokenResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientIdentityRotateResponse {
     pub client_id: String,
     pub rotated: bool,
@@ -643,6 +675,7 @@ struct PublicControlPlaneInner {
     state: Mutex<PublicControlStateStore>,
     relay_enrollment_challenges: Mutex<HashMap<String, PendingRelayEnrollmentChallenge>>,
     pending_client_claims: Mutex<HashMap<String, PendingClientClaim>>,
+    pending_credential_refreshes: Mutex<HashMap<String, PendingCredentialRefresh>>,
     last_full_load: std::sync::Mutex<Option<FullLoad>>,
     miss_reload_min_interval: Duration,
     /// Test-only: treat the JSON file as shared so a second plane on the same
@@ -693,6 +726,7 @@ enum CredentialKind {
     Relay,
     Device,
     Client,
+    ClientId,
 }
 
 #[derive(Clone)]
@@ -746,6 +780,12 @@ struct PendingClientClaim {
     relay_label: Option<String>,
     nonce: String,
     expires_at: u64,
+}
+
+struct PendingCredentialRefresh {
+    challenge: CredentialRefreshChallengeResponse,
+    client_verify_key: String,
+    request_nonce: String,
 }
 
 /// Opaque snapshot of a relay registration captured before re-enrollment, so the
@@ -965,6 +1005,7 @@ impl PublicControlPlane {
                 state: Mutex::new(state),
                 relay_enrollment_challenges: Mutex::new(HashMap::new()),
                 pending_client_claims: Mutex::new(HashMap::new()),
+                pending_credential_refreshes: Mutex::new(HashMap::new()),
                 last_full_load: std::sync::Mutex::new(Some(initial_load)),
                 miss_reload_min_interval: MISS_RELOAD_MIN_INTERVAL,
                 #[cfg(test)]
@@ -1467,9 +1508,8 @@ impl PublicControlPlane {
                 }
             }
         }
-        // A re-registration rotates the device refresh token; keep the replaced
-        // token honored for the grace window so an already-paired device that
-        // never receives this new credential is not bricked by the approval.
+        // Grace lets an already-paired device keep connecting temporarily if it missed
+        // the new credential; usage must not extend the replaced token's lifetime.
         let superseded = store
             .grants_by_hash
             .values()
@@ -1807,12 +1847,191 @@ impl PublicControlPlane {
         &self,
         bearer_token: &str,
     ) -> Result<(String, String), String> {
-        let client = self.authenticate_client(bearer_token).await?;
-        let mut store = self.lock_state().await?;
+        let token_hash = sha256_hex(bearer_token.trim());
+        let now = unix_now();
+        let Some((mut store, (primary_hash, client))) = self
+            .find_credential(CredentialKind::Client, &token_hash, |store| {
+                find_client_identity_for_token(store, &token_hash, now)
+            })
+            .await?
+        else {
+            return Err("client refresh token is invalid".to_string());
+        };
+        // Otherwise a stolen old token could exchange itself into indefinite access.
+        if primary_hash != token_hash {
+            return Err("client refresh token is invalid; signing proof required".to_string());
+        }
         let refreshed_token =
             store.rotate_client_identity(&client, unix_now(), self.inner.rotation_grace_secs);
         self.persist(&mut store).await?;
         Ok((client.client_id, refreshed_token))
+    }
+
+    pub async fn create_credential_refresh_challenge(
+        &self,
+        request: CredentialRefreshChallengeRequest,
+        broker_origin: &str,
+    ) -> Result<CredentialRefreshChallengeResponse, String> {
+        check_id_length("client_id", &request.client_id)?;
+        check_id_length("nonce", &request.nonce)?;
+        if request.nonce.is_empty() {
+            return Err("credential refresh is invalid".to_string());
+        }
+        if let Some(room) = &request.broker_room_id {
+            check_id_length("broker_room_id", room)?;
+        }
+        let Some((store, client)) = self
+            .find_credential(CredentialKind::ClientId, &request.client_id, |store| {
+                store.client_identity_for_id(&request.client_id)
+            })
+            .await?
+        else {
+            return Err("credential refresh is invalid".to_string());
+        };
+        // Pairing metadata and challenge capacity belong only to the key holder.
+        let signature =
+            decode_base64_array::<64>(&request.signature, "credential refresh is invalid")?;
+        parse_relay_verifying_key(&client.client_verify_key)?
+            .verify(
+                credential_refresh_init_message(&request, broker_origin).as_bytes(),
+                &Signature::from_bytes(&signature),
+            )
+            .map_err(|_| "credential refresh is invalid".to_string())?;
+        let device_id = request
+            .broker_room_id
+            .as_deref()
+            .map(|room| {
+                refresh_device_for_client(&store, &client.client_id, room)
+                    .map(|(device, _)| device.device_id)
+            })
+            .transpose()?;
+        if request.device_id.is_some() && request.device_id != device_id {
+            return Err("credential refresh is invalid".to_string());
+        }
+        drop(store);
+        let now = unix_now();
+        let challenge = CredentialRefreshChallengeResponse {
+            broker_origin: broker_origin.to_string(),
+            challenge_id: format!("crf-{}", random_token(24).to_ascii_lowercase()),
+            nonce: random_token(40),
+            client_id: client.client_id,
+            broker_room_id: request.broker_room_id,
+            device_id,
+            expires_at: now.saturating_add(DEFAULT_CLIENT_CLAIM_TTL_SECS),
+        };
+        let mut pending = self.inner.pending_credential_refreshes.lock().await;
+        pending.retain(|_, entry| entry.challenge.expires_at > now);
+        let client_pending: Vec<_> = pending
+            .values()
+            .filter(|entry| entry.challenge.client_id == challenge.client_id)
+            .collect();
+        if let Some(existing) = client_pending.iter().find(|entry| {
+            entry.request_nonce == request.nonce
+                && entry.challenge.broker_origin == broker_origin
+                && entry.challenge.broker_room_id == challenge.broker_room_id
+        }) {
+            return Ok(existing.challenge.clone());
+        }
+        if client_pending.len() >= MAX_PENDING_REFRESHES_PER_CLIENT {
+            return Err(
+                "too many pending credential refreshes for this client; retry shortly".to_string(),
+            );
+        }
+        if pending.len() >= MAX_PENDING_CREDENTIAL_REFRESHES {
+            return Err("too many pending credential refreshes; retry shortly".to_string());
+        }
+        pending.insert(
+            challenge.challenge_id.clone(),
+            PendingCredentialRefresh {
+                challenge: challenge.clone(),
+                client_verify_key: client.client_verify_key,
+                request_nonce: request.nonce,
+            },
+        );
+        Ok(challenge)
+    }
+
+    pub async fn refresh_credentials(
+        &self,
+        request: CredentialRefreshRequest,
+        broker_origin: &str,
+    ) -> Result<(CredentialRefreshResponse, String, Option<String>), String> {
+        let now = unix_now();
+        let pending = {
+            let mut pending = self.inner.pending_credential_refreshes.lock().await;
+            pending.retain(|_, entry| entry.challenge.expires_at > now);
+            // A restart or another broker can lose a challenge without revoking its client.
+            pending.remove(&request.challenge_id).ok_or_else(|| {
+                "credential refresh challenge is unavailable; request a new challenge".to_string()
+            })?
+        };
+        let challenge = pending.challenge;
+        if challenge.broker_origin != broker_origin {
+            return Err("credential refresh is invalid".to_string());
+        }
+        let signature =
+            decode_base64_array::<64>(&request.signature, "credential refresh is invalid")?;
+        parse_relay_verifying_key(&pending.client_verify_key)?
+            .verify(
+                credential_refresh_message(&challenge).as_bytes(),
+                &Signature::from_bytes(&signature),
+            )
+            .map_err(|_| "credential refresh is invalid".to_string())?;
+
+        let mut store = self.lock_state().await?;
+        // Check live authorization after the signature, so a pending challenge cannot undo a revoke.
+        if self.miss_may_be_stale() {
+            *store = self.load_full_state().await?;
+        }
+        let client = store
+            .client_identity_for_id(&challenge.client_id)
+            .filter(|client| client.client_verify_key == pending.client_verify_key)
+            .ok_or_else(|| "credential refresh is invalid".to_string())?;
+        let device = challenge
+            .broker_room_id
+            .as_deref()
+            .map(|room| {
+                let (device, registration) =
+                    refresh_device_for_client(&store, &client.client_id, room)?;
+                if Some(&device.device_id) != challenge.device_id.as_ref() {
+                    return Err("credential refresh is invalid".to_string());
+                }
+                let ws =
+                    self.issue_device_ws_token_for_registration(&registration, &device.device_id)?;
+                Ok((device, ws))
+            })
+            .transpose()?;
+        let client_token =
+            store.rotate_client_identity(&client, now, self.inner.rotation_grace_secs);
+        let (device_token, device_ws) = if let Some((mut device, ws)) = device {
+            let token = format!("dref-{}", random_token(40).to_ascii_lowercase());
+            device.superseded = carry_superseded(
+                &device.superseded,
+                device.refresh_token_hash.clone(),
+                now,
+                self.inner.rotation_grace_secs,
+            );
+            store.grants_by_hash.remove(&device.refresh_token_hash);
+            device.refresh_token_hash = sha256_hex(&token);
+            device.created_at = now;
+            device.last_seen = Some(now);
+            store
+                .grants_by_hash
+                .insert(device.refresh_token_hash.clone(), device);
+            (Some(token), Some(ws))
+        } else {
+            (None, None)
+        };
+        self.persist(&mut store).await?;
+        Ok((
+            CredentialRefreshResponse {
+                client_id: client.client_id,
+                cookie_session: true,
+                device: device_ws,
+            },
+            client_token,
+            device_token,
+        ))
     }
 
     pub async fn revoke_client_identity(
@@ -1841,11 +2060,8 @@ impl PublicControlPlane {
         self.issue_device_ws_token_inner(bearer_token, None).await
     }
 
-    /// Room-scoped ws-token: the resolved grant must belong to `expected_room`.
-    /// The check happens BEFORE any side effect (grace-window slide, `last_seen`
-    /// touch), so a mismatch — e.g. a legacy origin-wide cookie carrying a sibling
-    /// relay's token — leaves all durable state untouched. The generic error keeps
-    /// the endpoint from revealing which rooms exist.
+    /// A sibling room's credential must not affect this room's state.
+    /// The generic error keeps the endpoint from revealing which rooms exist.
     pub async fn issue_device_ws_token_scoped(
         &self,
         bearer_token: &str,
@@ -1874,22 +2090,6 @@ impl PublicControlPlane {
             if let Some(expected) = expected_room {
                 if grant.broker_room_id != expected {
                     return Err("device refresh token is invalid".to_string());
-                }
-            }
-            if primary_hash != token_hash {
-                // Matched via a superseded token inside its grace window: slide
-                // the window forward (throttled, best-effort).
-                if let Some(live) = store.grants_by_hash.get_mut(&primary_hash) {
-                    if bump_superseded_expiry(
-                        &mut live.superseded,
-                        &token_hash,
-                        now,
-                        self.inner.rotation_grace_secs,
-                    ) {
-                        if let Err(error) = self.persist(&mut store).await {
-                            warn!(%error, "failed to persist device grace renewal; continuing");
-                        }
-                    }
                 }
             }
             // Throttled activity marker: at most one durable write per device per
@@ -2199,7 +2399,7 @@ impl PublicControlPlane {
     ) -> Result<PersistedClientIdentity, String> {
         let token_hash = sha256_hex(bearer_token.trim());
         let now = unix_now();
-        let Some((mut store, (primary_hash, identity))) = self
+        let Some((_store, (_, identity))) = self
             .find_credential(CredentialKind::Client, &token_hash, |store| {
                 find_client_identity_for_token(store, &token_hash, now)
             })
@@ -2207,24 +2407,6 @@ impl PublicControlPlane {
         else {
             return Err("client refresh token is invalid".to_string());
         };
-        if primary_hash != token_hash {
-            // Matched via a superseded token inside its grace window: slide the
-            // window forward (throttled) so an actively-used device keeps working
-            // until it picks up a fresh credential. Best-effort persistence — a
-            // failed write must not deny authentication.
-            if let Some(live) = store.client_registrations_by_hash.get_mut(&primary_hash) {
-                if bump_superseded_expiry(
-                    &mut live.superseded,
-                    &token_hash,
-                    now,
-                    self.inner.rotation_grace_secs,
-                ) {
-                    if let Err(error) = self.persist(&mut store).await {
-                        warn!(%error, "failed to persist client grace renewal; continuing");
-                    }
-                }
-            }
-        }
         Ok(identity)
     }
 
@@ -2256,7 +2438,7 @@ impl PublicControlPlane {
     ) -> Result<PersistedDeviceGrant, String> {
         let token_hash = sha256_hex(bearer_token.trim());
         let now = unix_now();
-        let Some((mut store, (primary_hash, grant))) = self
+        let Some((_store, (_, grant))) = self
             .find_credential(CredentialKind::Device, &token_hash, |store| {
                 find_device_grant_for_token(store, &token_hash, now)
             })
@@ -2264,26 +2446,9 @@ impl PublicControlPlane {
         else {
             return Err("device refresh token is invalid".to_string());
         };
-        // Verify the room BEFORE the grace-window bump below, so a wrong-room
-        // request has zero side effects (it must not renew a superseded token's
-        // grace and thereby extend a credential's validity).
         if let Some(expected) = expected_room {
             if grant.broker_room_id != expected {
                 return Err("device refresh token is invalid".to_string());
-            }
-        }
-        if primary_hash != token_hash {
-            if let Some(live) = store.grants_by_hash.get_mut(&primary_hash) {
-                if bump_superseded_expiry(
-                    &mut live.superseded,
-                    &token_hash,
-                    now,
-                    self.inner.rotation_grace_secs,
-                ) {
-                    if let Err(error) = self.persist(&mut store).await {
-                        warn!(%error, "failed to persist device grace renewal; continuing");
-                    }
-                }
             }
         }
         Ok(grant)
@@ -2574,12 +2739,15 @@ impl PublicControlPersistence {
                 let table = match kind {
                     CredentialKind::Relay => "public_relay_registrations",
                     CredentialKind::Device => "public_device_grants",
-                    CredentialKind::Client => "public_client_identities",
+                    CredentialKind::Client | CredentialKind::ClientId => "public_client_identities",
                 };
                 let query = match kind {
                     CredentialKind::Relay => format!(
                         "SELECT EXISTS (SELECT 1 FROM {table} WHERE refresh_token_hash = $1)"
                     ),
+                    CredentialKind::ClientId => {
+                        format!("SELECT EXISTS (SELECT 1 FROM {table} WHERE client_id = $1)")
+                    }
                     CredentialKind::Device | CredentialKind::Client => superseded_probe_sql(table),
                 };
                 let superseded =
@@ -2588,7 +2756,7 @@ impl PublicControlPersistence {
                 gate.run_spare(async {
                     let probe = sqlx::query_scalar::<_, bool>(&query).bind(token_hash);
                     let probe = match kind {
-                        CredentialKind::Relay => probe,
+                        CredentialKind::Relay | CredentialKind::ClientId => probe,
                         CredentialKind::Device | CredentialKind::Client => {
                             probe.bind(&superseded).bind(now)
                         }
@@ -2740,6 +2908,7 @@ impl PublicControlStateStore {
                         .values()
                         .any(|client| superseded(&client.superseded))
             }
+            CredentialKind::ClientId => self.client_identity_for_id(token_hash).is_some(),
         }
     }
 
@@ -2987,6 +3156,13 @@ impl PublicControlStateStore {
         self.client_registrations_by_hash
             .values()
             .find(|registration| registration.client_verify_key == client_verify_key)
+            .cloned()
+    }
+
+    fn client_identity_for_id(&self, client_id: &str) -> Option<PersistedClientIdentity> {
+        self.client_registrations_by_hash
+            .values()
+            .find(|client| client.client_id == client_id)
             .cloned()
     }
 
@@ -3621,31 +3797,43 @@ async fn save_public_control_postgres(
     // rotation a clean delete-then-insert.
 
     // --- Phase 1: DELETE rows present in the snapshot but gone from live state ---
+    // A missing old credential means another broker already rotated or revoked it.
+    // Abort stale writes so they cannot restore access or claim a revoke succeeded.
     for hash in prev.relay_registrations_by_hash.keys() {
         if !next.relay_registrations_by_hash.contains_key(hash) {
-            sqlx::query("DELETE FROM public_relay_registrations WHERE refresh_token_hash = $1")
-                .bind(hash)
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| format!("failed to delete public_relay_registrations: {error}"))?;
+            let deleted =
+                sqlx::query("DELETE FROM public_relay_registrations WHERE refresh_token_hash = $1")
+                    .bind(hash)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| {
+                        format!("failed to delete public_relay_registrations: {error}")
+                    })?;
+            require_deleted_credential(deleted.rows_affected())?;
         }
     }
     for hash in prev.client_registrations_by_hash.keys() {
         if !next.client_registrations_by_hash.contains_key(hash) {
-            sqlx::query("DELETE FROM public_client_identities WHERE refresh_token_hash = $1")
-                .bind(hash)
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| format!("failed to delete public_client_identities: {error}"))?;
+            let deleted =
+                sqlx::query("DELETE FROM public_client_identities WHERE refresh_token_hash = $1")
+                    .bind(hash)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| {
+                        format!("failed to delete public_client_identities: {error}")
+                    })?;
+            require_deleted_credential(deleted.rows_affected())?;
         }
     }
     for hash in prev.grants_by_hash.keys() {
         if !next.grants_by_hash.contains_key(hash) {
-            sqlx::query("DELETE FROM public_device_grants WHERE refresh_token_hash = $1")
-                .bind(hash)
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| format!("failed to delete public_device_grants: {error}"))?;
+            let deleted =
+                sqlx::query("DELETE FROM public_device_grants WHERE refresh_token_hash = $1")
+                    .bind(hash)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| format!("failed to delete public_device_grants: {error}"))?;
+            require_deleted_credential(deleted.rows_affected())?;
         }
     }
     for (key, grant) in &prev.client_relay_grants_by_key {
@@ -3784,6 +3972,14 @@ async fn save_public_control_postgres(
         .await
         .map_err(|error| format!("failed to commit public control-plane transaction: {error}"))?;
     Ok(())
+}
+
+fn require_deleted_credential(rows: u64) -> Result<(), String> {
+    if rows == 1 {
+        Ok(())
+    } else {
+        Err("public control-plane credential changed before save; retry".to_string())
+    }
 }
 
 /// Pre-optimization full wipe-and-rebuild save. Kept ONLY so the persistence
@@ -3971,6 +4167,60 @@ fn find_device_grant_for_token(
         .map(|(hash, grant)| (hash.clone(), grant.clone()))
 }
 
+fn refresh_device_for_client(
+    store: &PublicControlStateStore,
+    client_id: &str,
+    room: &str,
+) -> Result<(PersistedDeviceGrant, PersistedRelayRegistration), String> {
+    let client_grant = store
+        .client_relay_grants_by_key
+        .values()
+        .find(|grant| grant.client_id == client_id && grant.broker_room_id == room)
+        .ok_or_else(|| "credential refresh is invalid".to_string())?;
+    let device = store
+        .grants_by_hash
+        .values()
+        .find(|grant| {
+            grant.relay_id == client_grant.relay_id
+                && grant.broker_room_id == room
+                && grant.device_id == client_grant.device_id
+        })
+        .ok_or_else(|| "credential refresh is invalid".to_string())?;
+    let registration = store
+        .relay_registrations_by_hash
+        .values()
+        .find(|registration| {
+            registration.relay_id == client_grant.relay_id && registration.broker_room_id == room
+        })
+        .ok_or_else(|| "credential refresh is invalid".to_string())?;
+    Ok((device.clone(), registration.clone()))
+}
+
+fn credential_refresh_message(challenge: &CredentialRefreshChallengeResponse) -> String {
+    format!(
+        "agent-relay:credential-refresh:{}:{}:{}:{}:{}:{}",
+        challenge.broker_origin,
+        challenge.challenge_id,
+        challenge.nonce,
+        challenge.client_id,
+        challenge.broker_room_id.as_deref().unwrap_or_default(),
+        challenge.device_id.as_deref().unwrap_or_default(),
+    )
+}
+
+fn credential_refresh_init_message(
+    request: &CredentialRefreshChallengeRequest,
+    origin: &str,
+) -> String {
+    format!(
+        "agent-relay:credential-refresh-init:{origin}:{}:{}:{}:{}",
+        request.client_id,
+        request.broker_room_id.as_deref().unwrap_or_default(),
+        request.device_id.as_deref().unwrap_or_default(),
+        request.nonce,
+    )
+}
+
 fn remove_matching_entries<T>(
     entries: &mut HashMap<String, T>,
     mut matches: impl FnMut(&T) -> bool,
@@ -4069,10 +4319,8 @@ fn client_relay_grant_key(client_id: &str, relay_id: &str) -> String {
     format!("{client_id}:{relay_id}")
 }
 
-/// Build the superseded-token list for a credential rotation: keep the still
-/// unexpired entries, add the token being rotated away with a fresh grace
-/// deadline, and cap the list (oldest first out). A `grace_secs` of 0 disables
-/// the grace window entirely (the new entry is already expired).
+/// Preserve each earlier replacement's deadline so later rotations cannot extend old access.
+/// Bound the retained list to keep repeated approvals from growing stored rows indefinitely.
 fn carry_superseded(
     previous: &[SupersededToken],
     rotated_hash: String,
@@ -4093,29 +4341,6 @@ fn carry_superseded(
         kept.drain(..excess);
     }
     kept
-}
-
-/// Sliding-window renewal: a successful use of a superseded token pushes its
-/// expiry forward (throttled to at most one bump per half-window, so steady
-/// use does not turn into a durable write per request). Returns whether the
-/// entry changed and should be persisted.
-fn bump_superseded_expiry(
-    superseded: &mut [SupersededToken],
-    token_hash: &str,
-    now: u64,
-    grace_secs: u64,
-) -> bool {
-    for token in superseded {
-        if token.refresh_token_hash == token_hash && token.expires_at > now {
-            let renewed = now.saturating_add(grace_secs);
-            if token.expires_at < now.saturating_add(grace_secs / 2) && renewed > token.expires_at {
-                token.expires_at = renewed;
-                return true;
-            }
-            return false;
-        }
-    }
-    false
 }
 
 fn issue_client_id(client_verify_key: &str) -> String {
@@ -4850,6 +5075,315 @@ mod device_limit_tests {
             );
     }
 
+    #[tokio::test]
+    async fn superseded_client_token_use_does_not_extend_grace() {
+        let plane = in_memory_plane().await;
+        let enrolled = enroll(&plane, "fixed-client-grace").await;
+        let first = attest_and_claim(&plane, &enrolled, "phone-1", 24).await;
+        let second = attest_and_claim(&plane, &enrolled, "phone-1", 24).await;
+        let old_hash = sha256_hex(&first.client_refresh_token);
+        let deadline = unix_now().saturating_add(3600);
+        {
+            let mut store = plane.inner.state.lock().await;
+            for identity in store.client_registrations_by_hash.values_mut() {
+                for token in &mut identity.superseded {
+                    token.expires_at = deadline;
+                }
+            }
+        }
+
+        for _ in 0..3 {
+            plane
+                .issue_client_session(&first.client_refresh_token)
+                .await
+                .expect("old token remains usable before its deadline");
+            let store = plane.inner.state.lock().await;
+            let (_, identity) = find_client_identity_for_token(&store, &old_hash, deadline - 1)
+                .expect("old token remains usable until its deadline");
+            assert_eq!(identity.superseded[0].expires_at, deadline);
+            assert!(find_client_identity_for_token(&store, &old_hash, deadline).is_none());
+            assert!(find_client_identity_for_token(
+                &store,
+                &sha256_hex(&second.client_refresh_token),
+                deadline,
+            )
+            .is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn superseded_device_session_use_does_not_extend_grace() {
+        assert_device_token_use_does_not_extend_grace(false).await;
+    }
+
+    #[tokio::test]
+    async fn superseded_device_ws_token_use_does_not_extend_grace() {
+        assert_device_token_use_does_not_extend_grace(true).await;
+    }
+
+    #[tokio::test]
+    async fn signed_refresh_cannot_restore_a_device_revoked_on_another_broker() {
+        assert_signed_refresh_respects_shared_revocation(true).await;
+    }
+
+    #[tokio::test]
+    async fn signed_refresh_cannot_restore_a_client_revoked_on_another_broker() {
+        assert_signed_refresh_respects_shared_revocation(false).await;
+    }
+
+    #[tokio::test]
+    async fn refresh_challenge_capacity_covers_the_default_api_budget() {
+        use ed25519_dalek::Signer;
+        let plane = in_memory_plane().await;
+        let enrolled = enroll(&plane, "refresh-capacity").await;
+        let client = attest_and_claim(&plane, &enrolled, "phone-1", 89).await;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[89; 32]);
+        let origin = "https://broker.test";
+        let mut request = CredentialRefreshChallengeRequest {
+            client_id: client.client_id,
+            broker_room_id: None,
+            device_id: None,
+            nonce: "refresh-capacity-init".into(),
+            signature: String::new(),
+        };
+        request.signature = STANDARD.encode(
+            key.sign(credential_refresh_init_message(&request, origin).as_bytes())
+                .to_bytes(),
+        );
+        let challenge = plane
+            .create_credential_refresh_challenge(request.clone(), origin)
+            .await
+            .unwrap();
+        let budget = crate::DEFAULT_PUBLIC_API_GLOBAL_RATE_LIMIT_PER_MINUTE
+            * DEFAULT_CLIENT_CLAIM_TTL_SECS.div_ceil(crate::RATE_LIMIT_WINDOW_SECS) as usize;
+        {
+            let mut pending = plane.inner.pending_credential_refreshes.lock().await;
+            pending.clear();
+            for index in 0..budget - 1 {
+                let mut busy = challenge.clone();
+                busy.challenge_id = format!("busy-challenge-{index}");
+                busy.client_id =
+                    format!("busy-client-{}", index / MAX_PENDING_REFRESHES_PER_CLIENT);
+                pending.insert(
+                    busy.challenge_id.clone(),
+                    PendingCredentialRefresh {
+                        challenge: busy,
+                        client_verify_key: STANDARD.encode(key.verifying_key().to_bytes()),
+                        request_nonce: format!("busy-nonce-{index}"),
+                    },
+                );
+            }
+        }
+        let result = plane
+            .create_credential_refresh_challenge(request, origin)
+            .await;
+        assert!(
+            result.is_ok(),
+            "pending challenges within the API's default TTL budget must not block another client: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_refresh_rejects_an_expired_challenge() {
+        use ed25519_dalek::Signer;
+        let plane = in_memory_plane().await;
+        let enrolled = enroll(&plane, "expired-refresh").await;
+        let client = attest_and_claim(&plane, &enrolled, "phone-1", 87).await;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[87; 32]);
+        let origin = "https://broker.test";
+        let mut request = CredentialRefreshChallengeRequest {
+            client_id: client.client_id,
+            broker_room_id: None,
+            device_id: None,
+            nonce: "expired-refresh-init".into(),
+            signature: String::new(),
+        };
+        request.signature = STANDARD.encode(
+            key.sign(credential_refresh_init_message(&request, origin).as_bytes())
+                .to_bytes(),
+        );
+        let challenge = plane
+            .create_credential_refresh_challenge(request, origin)
+            .await
+            .unwrap();
+        plane
+            .inner
+            .pending_credential_refreshes
+            .lock()
+            .await
+            .get_mut(&challenge.challenge_id)
+            .unwrap()
+            .challenge
+            .expires_at = 0;
+        let result = plane
+            .refresh_credentials(
+                CredentialRefreshRequest {
+                    challenge_id: challenge.challenge_id.clone(),
+                    signature: STANDARD.encode(
+                        key.sign(credential_refresh_message(&challenge).as_bytes())
+                            .to_bytes(),
+                    ),
+                },
+                origin,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "an expired challenge cannot issue credentials"
+        );
+        plane
+            .issue_client_session(&client.client_refresh_token)
+            .await
+            .expect("rejected recovery leaves the current token intact");
+    }
+
+    async fn assert_signed_refresh_respects_shared_revocation(device: bool) {
+        use ed25519_dalek::Signer;
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("broker-refresh-revoke-{unique}.json"));
+        let issuer = Some("shared-refresh-test-a3f76b4c2089d15e6b0fa873c4e9521d".into());
+        let owner = PublicControlPlane::from_parts(
+            issuer.clone(),
+            None,
+            Some(path.to_string_lossy().into_owned()),
+            None,
+            None,
+        )
+        .await
+        .expect("owner plane");
+        let enrolled = enroll(&owner, "shared-refresh-revoke").await;
+        owner
+            .issue_device_grant(
+                &enrolled.relay_refresh_token,
+                grant_request(&enrolled, "phone-1"),
+                None,
+            )
+            .await
+            .expect("device grant");
+        let client = attest_and_claim(&owner, &enrolled, "phone-1", 35).await;
+        let mut peer = PublicControlPlane::from_parts(
+            issuer,
+            None,
+            Some(path.to_string_lossy().into_owned()),
+            None,
+            None,
+        )
+        .await
+        .expect("peer plane");
+        Arc::get_mut(&mut peer.inner).unwrap().force_shared_backend = true;
+        let origin = "http://broker.test";
+        let key = ed25519_dalek::SigningKey::from_bytes(&[35; 32]);
+        let mut request = CredentialRefreshChallengeRequest {
+            client_id: client.client_id,
+            broker_room_id: device.then(|| enrolled.broker_room_id.clone()),
+            device_id: None,
+            nonce: "shared-revoke-init".into(),
+            signature: String::new(),
+        };
+        request.signature = STANDARD.encode(
+            key.sign(credential_refresh_init_message(&request, origin).as_bytes())
+                .to_bytes(),
+        );
+        let challenge = peer
+            .create_credential_refresh_challenge(request, origin)
+            .await
+            .expect("challenge before revocation");
+        if device {
+            owner
+                .revoke_device_grant(
+                    &enrolled.relay_refresh_token,
+                    "phone-1",
+                    DeviceGrantRevokeRequest {
+                        relay_id: enrolled.relay_id,
+                        broker_room_id: enrolled.broker_room_id,
+                    },
+                )
+                .await
+                .expect("revoke device on owner");
+        } else {
+            owner
+                .revoke_client_identity(&client.client_refresh_token)
+                .await
+                .expect("revoke client on owner");
+        }
+        let result = peer
+            .refresh_credentials(
+                CredentialRefreshRequest {
+                    challenge_id: challenge.challenge_id.clone(),
+                    signature: STANDARD.encode(
+                        key.sign(credential_refresh_message(&challenge).as_bytes())
+                            .to_bytes(),
+                    ),
+                },
+                origin,
+            )
+            .await;
+        let _ = fs::remove_file(path).await;
+        assert!(
+            result.is_err(),
+            "a stale broker must not restore a revoked credential"
+        );
+    }
+
+    async fn assert_device_token_use_does_not_extend_grace(ws_token: bool) {
+        let plane = in_memory_plane().await;
+        let enrolled = enroll(&plane, "fixed-device-grace").await;
+        let first = plane
+            .issue_device_grant(
+                &enrolled.relay_refresh_token,
+                grant_request(&enrolled, "phone-1"),
+                None,
+            )
+            .await
+            .expect("first grant");
+        let second = plane
+            .issue_device_grant(
+                &enrolled.relay_refresh_token,
+                grant_request(&enrolled, "phone-1"),
+                None,
+            )
+            .await
+            .expect("second grant");
+        let old_hash = sha256_hex(&first.device_refresh_token);
+        let deadline = unix_now().saturating_add(3600);
+        {
+            let mut store = plane.inner.state.lock().await;
+            for grant in store.grants_by_hash.values_mut() {
+                for token in &mut grant.superseded {
+                    token.expires_at = deadline;
+                }
+            }
+        }
+
+        for _ in 0..3 {
+            if ws_token {
+                plane
+                    .issue_device_ws_token(&first.device_refresh_token)
+                    .await
+                    .expect("old token remains usable before its deadline");
+            } else {
+                plane
+                    .issue_device_session(&first.device_refresh_token)
+                    .await
+                    .expect("old token remains usable before its deadline");
+            }
+            let store = plane.inner.state.lock().await;
+            let (_, grant) = find_device_grant_for_token(&store, &old_hash, deadline - 1)
+                .expect("old token remains usable until its deadline");
+            assert_eq!(grant.superseded[0].expires_at, deadline);
+            assert!(find_device_grant_for_token(&store, &old_hash, deadline).is_none());
+            assert!(find_device_grant_for_token(
+                &store,
+                &sha256_hex(&second.device_refresh_token),
+                deadline,
+            )
+            .is_some());
+        }
+    }
+
     /// A room-scoped ws-token must only authenticate against its OWN relay's room,
     /// and a mismatch must have zero side effects (no `last_seen` touch) — this is
     /// what keeps a legacy/sibling token from silently refreshing the wrong relay.
@@ -4891,9 +5425,7 @@ mod device_limit_tests {
         );
     }
 
-    /// The scoped establish (session) path must also verify the room BEFORE the
-    /// grace-window renewal, so a wrong-room request using a superseded token can't
-    /// silently extend that token's validity.
+    /// A wrong-room request must not affect a sibling relay's credential.
     #[tokio::test]
     async fn issue_device_session_scoped_room_mismatch_does_not_renew_grace() {
         let plane = in_memory_plane().await;
@@ -5404,6 +5936,62 @@ mod postgres_persistence_opt_tests {
         crate::postgres_test_url().await
     }
 
+    #[tokio::test]
+    async fn postgres_rotation_cannot_restore_a_concurrently_revoked_device() {
+        assert_postgres_rotation_revoke_conflict(false).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_revoke_cannot_report_success_after_a_concurrent_rotation() {
+        assert_postgres_rotation_revoke_conflict(true).await;
+    }
+
+    async fn assert_postgres_rotation_revoke_conflict(rotation_first: bool) {
+        let Some((url, _serial)) = test_url().await else {
+            return;
+        };
+        let pool = connect_and_init(&url).await;
+        truncate_all(&pool).await;
+        let original = store_from(
+            vec![relay_reg("race", None)],
+            vec![client_ident("race")],
+            vec![device_grant("race", None)],
+            vec![],
+        );
+        save_public_control_postgres(&pool, &PublicControlStateStore::default(), &original)
+            .await
+            .expect("seed originals");
+        let mut rotated = original.clone();
+        let mut grant = rotated.grants_by_hash.remove("race").unwrap();
+        grant.refresh_token_hash = "race-new".into();
+        rotated
+            .grants_by_hash
+            .insert(grant.refresh_token_hash.clone(), grant);
+        let mut revoked = original.clone();
+        revoked.grants_by_hash.clear();
+        let (first, second) = if rotation_first {
+            (&rotated, &revoked)
+        } else {
+            (&revoked, &rotated)
+        };
+        save_public_control_postgres(&pool, &original, first)
+            .await
+            .expect("first writer commits");
+        let result = save_public_control_postgres(&pool, &original, second).await;
+        let actual = load_public_control_postgres(&pool)
+            .await
+            .expect("load final state");
+        truncate_all(&pool).await;
+        assert!(
+            result.is_err(),
+            "a stale write must fail instead of restoring access or reporting a false revoke"
+        );
+        assert_eq!(
+            &actual, first,
+            "a failed stale write must leave committed authorization intact"
+        );
+    }
+
     /// The diff-save must apply adds, in-place updates, AND deletes so a reload
     /// reproduces the live state exactly — this is the regression guard that the
     /// switch away from wipe-and-rebuild did not silently drop or stale any row.
@@ -5865,6 +6453,7 @@ mod postgres_persistence_opt_tests {
                 state: Mutex::new(PublicControlStateStore::default()),
                 relay_enrollment_challenges: Mutex::new(HashMap::new()),
                 pending_client_claims: Mutex::new(HashMap::new()),
+                pending_credential_refreshes: Mutex::new(HashMap::new()),
                 last_full_load: std::sync::Mutex::new(None),
                 miss_reload_min_interval: MISS_RELOAD_MIN_INTERVAL,
                 force_shared_backend: false,
@@ -5881,6 +6470,108 @@ mod postgres_persistence_opt_tests {
                 cleanup_pause: std::sync::Mutex::new(None),
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn postgres_signed_refresh_probes_client_id_and_persists_credentials() {
+        use ed25519_dalek::Signer;
+        let Some((url, _serial)) = test_url().await else {
+            return;
+        };
+        let pool = connect_and_init(&url).await;
+        truncate_all(&pool).await;
+        let owner = postgres_plane(pool.clone(), false);
+        let relay = owner
+            .issue_relay_registration_for_verify_key("vk-signed-refresh", None)
+            .await
+            .unwrap();
+        owner
+            .issue_device_grant(
+                &relay.relay_refresh_token,
+                DeviceGrantRequest {
+                    relay_id: relay.relay_id.clone(),
+                    broker_room_id: relay.broker_room_id.clone(),
+                    device_id: "signed-phone".into(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[88; 32]);
+        let attestation = owner
+            .issue_client_grant(
+                &relay.relay_refresh_token,
+                ClientGrantRequest {
+                    relay_id: relay.relay_id.clone(),
+                    broker_room_id: relay.broker_room_id.clone(),
+                    device_id: "signed-phone".into(),
+                    client_verify_key: STANDARD.encode(key.verifying_key().to_bytes()),
+                    client_label: None,
+                    device_label: None,
+                },
+            )
+            .await
+            .unwrap();
+        let client = owner
+            .claim_client_identity(ClientClaimRequest {
+                claim_id: attestation.claim_id.clone(),
+                claim_signature: STANDARD.encode(
+                    key.sign(
+                        client_claim_message(
+                            &attestation.claim_id,
+                            &attestation.claim_nonce,
+                            &attestation.relay_id,
+                        )
+                        .as_bytes(),
+                    )
+                    .to_bytes(),
+                ),
+            })
+            .await
+            .unwrap();
+        let peer = postgres_plane(pool.clone(), false);
+        let origin = "https://broker.test";
+        let mut request = CredentialRefreshChallengeRequest {
+            client_id: client.client_id,
+            broker_room_id: Some(relay.broker_room_id),
+            device_id: Some("signed-phone".into()),
+            nonce: "postgres-refresh-init".into(),
+            signature: String::new(),
+        };
+        request.signature = STANDARD.encode(
+            key.sign(credential_refresh_init_message(&request, origin).as_bytes())
+                .to_bytes(),
+        );
+        let challenge = peer
+            .create_credential_refresh_challenge(request, origin)
+            .await
+            .unwrap();
+        assert_eq!(peer.inner.probe_count.load(Ordering::SeqCst), 1);
+        assert_eq!(peer.inner.full_load_count.load(Ordering::SeqCst), 1);
+        let (response, client_token, device_token) = peer
+            .refresh_credentials(
+                CredentialRefreshRequest {
+                    challenge_id: challenge.challenge_id.clone(),
+                    signature: STANDARD.encode(
+                        key.sign(credential_refresh_message(&challenge).as_bytes())
+                            .to_bytes(),
+                    ),
+                },
+                origin,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.device.as_ref().unwrap().device_id, "signed-phone");
+        let restarted = postgres_plane(pool.clone(), false);
+        restarted
+            .issue_client_session(&client_token)
+            .await
+            .expect("client token survives database reload");
+        restarted
+            .issue_device_ws_token(&device_token.unwrap())
+            .await
+            .expect("device token survives database reload");
+        truncate_all(&pool).await;
     }
 
     /// Insert a client identity straight into Postgres (bypassing the in-memory

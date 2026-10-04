@@ -1889,6 +1889,292 @@ function resetRemoteIdentityState(state) {
   state.pendingActionChunks?.clear?.();
 }
 
+function mockSignedRefreshFetch(calls, room = null) {
+  let recovered = false;
+  const device = {
+    broker_room_id: "room-a",
+    device_id: "device-1",
+    device_ws_token: "signed-recovery-ws-token",
+    device_ws_token_expires_at: Math.floor(Date.now() / 1000) + 300,
+  };
+  return async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    calls.push(path);
+    if (path === "/api/public/client/refresh/challenge") {
+      assert.equal(new URL(url).origin, "https://broker.example.test");
+      const body = JSON.parse(options.body);
+      assert.equal(body.client_id, "client-1");
+      assert.equal(body.broker_room_id, room);
+      assert.equal(body.device_id, room ? "device-1" : null);
+      const { ensureDeviceKeypair } = await import("./crypto.js");
+      const keypair = await ensureDeviceKeypair();
+      const key = await webcrypto.subtle.importKey(
+        "raw", Buffer.from(keypair.verifyKey, "base64"), "Ed25519", false, ["verify"]
+      );
+      const message = `agent-relay:credential-refresh-init:https://broker.example.test:client-1:${room || ""}:${room ? "device-1" : ""}:${body.nonce}`;
+      assert.equal(await webcrypto.subtle.verify(
+        "Ed25519", key, Buffer.from(body.signature, "base64"), new TextEncoder().encode(message)
+      ), true, "challenge creation proves key ownership before revealing pairing metadata");
+      return { ok: true, status: 200, async json() {
+        return {
+          broker_origin: "https://broker.example.test",
+          challenge_id: "refresh-challenge-1",
+          nonce: "broker-nonce-1",
+          client_id: "client-1",
+          broker_room_id: room,
+          device_id: room ? "device-1" : null,
+        };
+      } };
+    }
+    if (path === "/api/public/client/refresh") {
+      const body = JSON.parse(options.body);
+      assert.equal(body.challenge_id, "refresh-challenge-1");
+      const { ensureDeviceKeypair } = await import("./crypto.js");
+      const keypair = await ensureDeviceKeypair();
+      const key = await webcrypto.subtle.importKey(
+        "raw", Buffer.from(keypair.verifyKey, "base64"), "Ed25519", false, ["verify"]
+      );
+      const message = `agent-relay:credential-refresh:https://broker.example.test:refresh-challenge-1:broker-nonce-1:client-1:${room || ""}:${room ? "device-1" : ""}`;
+      assert.equal(await webcrypto.subtle.verify(
+        "Ed25519", key, Buffer.from(body.signature, "base64"), new TextEncoder().encode(message)
+      ), true, "recovery proves possession of the existing private key");
+      recovered = true;
+      return { ok: true, status: 200, async json() {
+        return { client_id: "client-1", cookie_session: true, device: room ? device : null };
+      } };
+    }
+    if (!recovered) {
+      return { ok: false, status: 401, async json() { return { message: "expired old token" }; } };
+    }
+    return { ok: true, status: 200, async json() {
+      return path === "/api/public/relays" ? { client_id: "client-1", relays: [] } : device;
+    } };
+  };
+}
+
+test("broker control URLs preserve HTTPS", async () => {
+  installBrowserStubs();
+  const { brokerControlUrl } = await import("./state.js");
+  assert.equal(brokerControlUrl("https://broker.example.test"), "https://broker.example.test");
+});
+
+test("device recovery never sends client proofs to a different broker", async (t) => {
+  installBrowserStubs();
+  window.location.href = "https://broker.example.test/";
+  FakeWebSocket.instances = [];
+  const { state, saveRemoteAuth } = await import("./state.js");
+  resetRemoteIdentityState(state);
+  t.after(() => resetRemoteIdentityState(state));
+  seedCookieOnlyRoomAProfile(state, saveRemoteAuth);
+  saveRemoteAuth({ ...state.remoteAuth, brokerUrl: "wss://attacker.example.test" });
+  seedPairingState(state);
+  seedSocketState(state);
+  state.clientAuth = { clientId: "client-1", brokerControlUrl: "https://broker.example.test" };
+  const calls = [];
+  globalThis.fetch = mockSignedRefreshFetch(calls, "room-a");
+  const { connectBroker } = await import("./broker-client.js");
+
+  await connectBroker("foreign broker");
+
+  assert.equal(calls.includes("/api/public/client/refresh/challenge"), false);
+  assert.equal(calls.includes("/api/public/client/refresh"), false);
+  assert.equal(FakeWebSocket.instances.length, 0);
+});
+
+test("client recovery never signs for a broker outside the page origin", async (t) => {
+  installBrowserStubs();
+  window.location.href = "https://attacker.example.test/";
+  const { state } = await import("./state.js");
+  resetRemoteIdentityState(state);
+  t.after(() => resetRemoteIdentityState(state));
+  state.clientAuth = { clientId: "client-1", brokerControlUrl: "https://broker.example.test" };
+  const calls = [];
+  globalThis.fetch = mockSignedRefreshFetch(calls);
+  const { refreshRelayDirectory } = await import("./broker-client.js");
+
+  await refreshRelayDirectory("foreign page", { silent: true }).catch(() => {});
+
+  assert.equal(calls.includes("/api/public/client/refresh/challenge"), false);
+  assert.equal(calls.includes("/api/public/client/refresh"), false);
+});
+
+test("expired client cookie recovers with a signed challenge", async (t) => {
+  installBrowserStubs();
+  window.location.href = "https://broker.example.test/";
+  const { state } = await import("./state.js");
+  resetRemoteIdentityState(state);
+  t.after(() => resetRemoteIdentityState(state));
+  state.clientAuth = { clientId: "client-1", brokerControlUrl: "https://broker.example.test" };
+  const calls = [];
+  globalThis.fetch = mockSignedRefreshFetch(calls);
+  const { refreshRelayDirectory } = await import("./broker-client.js");
+
+  await refreshRelayDirectory("expired cookie", { silent: true });
+
+  assert.deepEqual(calls, [
+    "/api/public/relays",
+    "/api/public/client/refresh/challenge",
+    "/api/public/client/refresh",
+    "/api/public/relays",
+  ]);
+});
+
+test("expired device cookie recovers with a signed challenge", async (t) => {
+  installBrowserStubs();
+  window.location.href = "https://broker.example.test/";
+  FakeWebSocket.instances = [];
+  const { state, saveRemoteAuth } = await import("./state.js");
+  resetRemoteIdentityState(state);
+  t.after(() => resetRemoteIdentityState(state));
+  seedCookieOnlyRoomAProfile(state, saveRemoteAuth);
+  saveRemoteAuth({ ...state.remoteAuth, brokerUrl: "wss://broker.example.test" });
+  seedPairingState(state);
+  seedSocketState(state);
+  state.clientAuth = { clientId: "client-1", brokerControlUrl: "https://broker.example.test" };
+  const calls = [];
+  globalThis.fetch = mockSignedRefreshFetch(calls, "room-a");
+  const { connectBroker } = await import("./broker-client.js");
+
+  await connectBroker("expired cookie");
+
+  assert.equal(state.remoteAuth.deviceSessionExpired, false);
+  assert.equal(state.remoteAuth.deviceJoinTicket, "signed-recovery-ws-token");
+  assert.equal(FakeWebSocket.instances.length, 1);
+  assert.match(FakeWebSocket.instances[0].url, /join_ticket=signed-recovery-ws-token/);
+  assert.ok(calls.includes("/api/public/client/refresh"));
+});
+
+test("a lost recovery challenge retries without expiring the paired device", async (t) => {
+  const browser = installBrowserStubs();
+  window.location.href = "https://broker.example.test/";
+  FakeWebSocket.instances = [];
+  const { state, saveRemoteAuth } = await import("./state.js");
+  resetRemoteIdentityState(state);
+  t.after(() => resetRemoteIdentityState(state));
+  seedCookieOnlyRoomAProfile(state, saveRemoteAuth);
+  saveRemoteAuth({ ...state.remoteAuth, brokerUrl: "wss://broker.example.test" });
+  state.clientAuth = { clientId: "client-1", brokerControlUrl: "https://broker.example.test" };
+  const calls = [];
+  const nonces = [];
+  const fetch = mockSignedRefreshFetch(calls, "room-a");
+  let loseChallenge = true;
+  globalThis.fetch = async (url, options) => {
+    const path = new URL(url).pathname;
+    if (path === "/api/public/client/refresh/challenge") {
+      nonces.push(JSON.parse(options.body).nonce);
+    }
+    if (path === "/api/public/client/refresh" && loseChallenge) {
+      calls.push(path);
+      return { ok: false, status: 400, async json() {
+        return { error: "bad_request", message: "credential refresh challenge is unavailable" };
+      } };
+    }
+    return fetch(url, options);
+  };
+  const { connectBroker } = await import("./broker-client.js");
+  await connectBroker("expired cookie");
+
+  assert.equal(state.remoteAuth.deviceSessionExpired, false);
+  assert.equal(browser.scheduledTimerDelays().length, 1, "a lost challenge must schedule another attempt");
+  loseChallenge = false;
+  browser.runTimers();
+  await waitFor(() => FakeWebSocket.instances.length === 1);
+
+  assert.equal(nonces.length, 2);
+  assert.notEqual(nonces[0], nonces[1], "retry requests a fresh challenge");
+  assert.equal(state.remoteAuth.deviceSessionExpired, false);
+  assert.equal(state.remoteAuth.deviceJoinTicket, "signed-recovery-ws-token");
+});
+
+test("revoked device recovery stops without scheduling another attempt", async (t) => {
+  const browser = installBrowserStubs();
+  window.location.href = "https://broker.example.test/";
+  FakeWebSocket.instances = [];
+  const { state, saveRemoteAuth } = await import("./state.js");
+  resetRemoteIdentityState(state);
+  t.after(() => resetRemoteIdentityState(state));
+  seedCookieOnlyRoomAProfile(state, saveRemoteAuth);
+  saveRemoteAuth({ ...state.remoteAuth, brokerUrl: "wss://broker.example.test" });
+  state.clientAuth = { clientId: "client-1", brokerControlUrl: "https://broker.example.test" };
+  const calls = [];
+  const fetch = mockSignedRefreshFetch(calls, "room-a");
+  globalThis.fetch = async (url, options) => {
+    if (new URL(url).pathname === "/api/public/client/refresh") {
+      calls.push("/api/public/client/refresh");
+      return { ok: false, status: 401, async json() {
+        return { error: "unauthorized", message: "request failed" };
+      } };
+    }
+    return fetch(url, options);
+  };
+  const { connectBroker } = await import("./broker-client.js");
+  await connectBroker("revoked device");
+
+  assert.equal(state.remoteAuth.deviceSessionExpired, true);
+  assert.equal(browser.scheduledTimerDelays().length, 0);
+  assert.equal(FakeWebSocket.instances.length, 0);
+  assert.ok(calls.includes("/api/public/client/refresh"));
+});
+
+test("forgetting client authorization during recovery prevents credential redemption", async (t) => {
+  installBrowserStubs();
+  window.location.href = "https://broker.example.test/";
+  const { state } = await import("./state.js");
+  resetRemoteIdentityState(state);
+  t.after(() => resetRemoteIdentityState(state));
+  state.clientAuth = { clientId: "client-1", brokerControlUrl: "https://broker.example.test" };
+  const calls = [];
+  const fetch = mockSignedRefreshFetch(calls);
+  let releaseChallenge;
+  const paused = new Promise((resolve) => { releaseChallenge = resolve; });
+  globalThis.fetch = async (url, options) => {
+    const result = await fetch(url, options);
+    if (new URL(url).pathname === "/api/public/client/refresh/challenge") {
+      await paused;
+    }
+    return result;
+  };
+  const { refreshRelayDirectory } = await import("./broker-client.js");
+  const recovery = refreshRelayDirectory("expired cookie", { silent: true }).catch(() => {});
+  await waitFor(() => calls.includes("/api/public/client/refresh/challenge"));
+  state.clientAuth = null;
+  releaseChallenge();
+  await recovery;
+
+  assert.equal(calls.includes("/api/public/client/refresh"), false);
+  assert.equal(state.clientAuth, null);
+});
+
+test("forgetting client authorization during redemption clears the late cookie", async (t) => {
+  installBrowserStubs();
+  window.location.href = "https://broker.example.test/";
+  const { state } = await import("./state.js");
+  resetRemoteIdentityState(state);
+  t.after(() => resetRemoteIdentityState(state));
+  state.clientAuth = { clientId: "client-1", brokerControlUrl: "https://broker.example.test" };
+  const calls = [];
+  const fetch = mockSignedRefreshFetch(calls);
+  let releaseRedemption;
+  const paused = new Promise((resolve) => { releaseRedemption = resolve; });
+  globalThis.fetch = async (url, options) => {
+    const result = await fetch(url, options);
+    if (new URL(url).pathname === "/api/public/client/refresh") {
+      await paused;
+    }
+    return result;
+  };
+  const { refreshRelayDirectory } = await import("./broker-client.js");
+  const recovery = refreshRelayDirectory("expired cookie", { silent: true }).catch(() => {});
+  await waitFor(() => calls.includes("/api/public/client/refresh"));
+  state.clientAuth = null;
+  releaseRedemption();
+  await recovery;
+
+  assert.equal(calls.includes("/api/public/client/session"), true);
+  assert.equal(calls.filter((path) => path === "/api/public/relays").length, 1);
+  assert.equal(state.clientAuth, null);
+});
+
 function pairedResultBundle(overrides = {}) {
   return {
     ok: true,

@@ -565,7 +565,11 @@ export function hasAnyStoredRelayProfiles() {
 
 export function brokerControlUrl(brokerUrl) {
   const url = new URL(brokerUrl);
-  url.protocol = url.protocol === "wss:" ? "https:" : "http:";
+  if (url.protocol === "wss:") {
+    url.protocol = "https:";
+  } else if (url.protocol === "ws:") {
+    url.protocol = "http:";
+  }
   url.pathname = "";
   url.search = "";
   return url.toString().replace(/\/$/, "");

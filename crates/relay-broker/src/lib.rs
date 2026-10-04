@@ -57,10 +57,12 @@ use public_control::{
     AccessReleaseRequest, AccessReleaseResponse, ClientClaimRequest, ClientClaimResponse,
     ClientGrantRequest, ClientGrantResponse, ClientIdentityRevokeResponse,
     ClientIdentityRotateResponse, ClientRelaysResponse, ClientSessionResponse,
-    DeviceGrantBulkRevokeRequest, DeviceGrantBulkRevokeResponse, DeviceGrantRequest,
-    DeviceGrantResponse, DeviceGrantRevokeRequest, DeviceGrantRevokeResponse,
-    DeviceSessionResponse, DeviceWsTokenResponse, PairingWsTokenRequest, PairingWsTokenResponse,
-    PublicControlPlane, RelayEnrollmentChallengeRequest, RelayEnrollmentChallengeResponse,
+    CredentialRefreshChallengeRequest, CredentialRefreshChallengeResponse,
+    CredentialRefreshRequest, CredentialRefreshResponse, DeviceGrantBulkRevokeRequest,
+    DeviceGrantBulkRevokeResponse, DeviceGrantRequest, DeviceGrantResponse,
+    DeviceGrantRevokeRequest, DeviceGrantRevokeResponse, DeviceSessionResponse,
+    DeviceWsTokenResponse, PairingWsTokenRequest, PairingWsTokenResponse, PublicControlPlane,
+    RelayEnrollmentChallengeRequest, RelayEnrollmentChallengeResponse,
     RelayEnrollmentCompleteRequest, RelayEnrollmentResponse, RelayRegistrationSnapshot,
     RelayWsTokenRequest, RelayWsTokenResponse, DEVICE_LIMIT_REACHED_ERROR_PREFIX,
 };
@@ -1633,6 +1635,14 @@ fn app_with_access_strategy_parts(
             post(public_rotate_client_identity),
         )
         .route(
+            "/api/public/client/refresh/challenge",
+            post(public_create_credential_refresh_challenge),
+        )
+        .route(
+            "/api/public/client/refresh",
+            post(public_refresh_credentials),
+        )
+        .route(
             "/api/public/client",
             axum::routing::delete(public_revoke_client_identity),
         )
@@ -2450,6 +2460,50 @@ async fn public_clear_client_session(
         response_headers,
         Json(DeviceSessionClearResponse { cleared: true }),
     ))
+}
+
+async fn public_create_credential_refresh_challenge(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<BrokerAppState>,
+    headers: HeaderMap,
+    Json(input): Json<CredentialRefreshChallengeRequest>,
+) -> Result<Json<CredentialRefreshChallengeResponse>, (StatusCode, Json<ApiErrorBody>)> {
+    enforce_public_api_rate_limit(&state, remote_addr, "credential_refresh_challenge").await?;
+    let origin = request_origin(&headers, None)
+        .ok_or_else(|| public_api_error("broker origin is required".to_string()))?;
+    require_public_control_plane(&state)?
+        .create_credential_refresh_challenge(input, &origin)
+        .await
+        .map(Json)
+        .map_err(public_api_error)
+}
+
+async fn public_refresh_credentials(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<BrokerAppState>,
+    headers: HeaderMap,
+    Json(input): Json<CredentialRefreshRequest>,
+) -> Result<(HeaderMap, Json<CredentialRefreshResponse>), (StatusCode, Json<ApiErrorBody>)> {
+    enforce_public_api_rate_limit(&state, remote_addr, "credential_refresh").await?;
+    let origin = request_origin(&headers, None)
+        .ok_or_else(|| public_api_error("broker origin is required".to_string()))?;
+    let (response, client_token, device_token) = require_public_control_plane(&state)?
+        .refresh_credentials(input, &origin)
+        .await
+        .map_err(public_api_error)?;
+    let secure = request_uses_https(&headers, None);
+    let mut response_headers = HeaderMap::new();
+    response_headers.append(
+        header::SET_COOKIE,
+        build_client_session_cookie(&client_token, secure)?,
+    );
+    if let (Some(device), Some(token)) = (&response.device, device_token) {
+        response_headers.append(
+            header::SET_COOKIE,
+            build_device_session_cookie_for_room(&device.broker_room_id, &token, secure)?,
+        );
+    }
+    Ok((response_headers, Json(response)))
 }
 
 #[derive(Debug, Clone, Copy)]

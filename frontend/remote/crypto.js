@@ -184,6 +184,22 @@ export async function signClientClaim(claimId, nonce, relayId, keypair = null) {
   );
 }
 
+export async function signCredentialRefresh(challenge, keypair = null) {
+  return signDeviceProof(
+    `agent-relay:credential-refresh:${challenge.broker_origin}:${challenge.challenge_id}:${challenge.nonce}:${challenge.client_id}:${challenge.broker_room_id || ""}:${challenge.device_id || ""}`,
+    keypair || (await ensureDeviceKeypair())
+  );
+}
+
+export async function signCredentialRefreshInit({ brokerOrigin, clientId, room, deviceId }, keypair = null) {
+  const nonce = bytesToBase64(nacl.randomBytes(24));
+  const signature = await signDeviceProof(
+    `agent-relay:credential-refresh-init:${brokerOrigin}:${clientId}:${room || ""}:${deviceId || ""}:${nonce}`,
+    keypair || (await ensureDeviceKeypair())
+  );
+  return { nonce, signature };
+}
+
 async function signDeviceProof(message, keypair) {
   const encodedMessage = new TextEncoder().encode(message);
   const signature = await keypair.sign(encodedMessage);
