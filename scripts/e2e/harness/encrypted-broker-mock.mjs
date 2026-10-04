@@ -1,3 +1,4 @@
+/* global nacl */
 import { readFile } from "node:fs/promises";
 
 export async function addEncryptedBrokerInitScript(page, fixture, args) {
