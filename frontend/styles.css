@@ -9128,9 +9128,54 @@ body.is-resizing-panel {
   max-height: 60vh;
 }
 
+.project-switcher-menu:not(.is-confirming) {
+  overflow: hidden;
+}
+
 /* A capped menu must scroll, not squeeze its rows into each other. */
 .project-switcher-menu > * {
   flex-shrink: 0;
+}
+
+.project-switcher-menu > .project-menu-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.project-menu-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.project-menu-toolbar .project-switcher-option {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.project-menu-search-toggle {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  padding: 8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-2);
+}
+
+.project-menu-search-toggle svg {
+  width: 16px;
+  height: 16px;
+}
+
+.project-menu-search-toggle:hover,
+.project-menu-search-toggle:focus-visible {
+  background: var(--menu-hover);
 }
 
 /* ===== New task dialog ===== */
@@ -10748,15 +10793,19 @@ button.team-role-name.is-link {
   .session-dialog {
     width: 100vw;
     max-width: 100vw;
-    max-height: 92dvh;
+    max-height: calc(var(--session-dialog-viewport-height, 100dvh) * 0.92);
     border-radius: var(--r-lg) var(--r-lg) 0 0;
     border-bottom: 0;
   }
 
   .session-dialog[open] {
     inset: auto auto 0 50%;
+    bottom: var(--session-dialog-keyboard-inset, 0px);
     transform: translateX(-50%);
   }
+
+  /* Safari's input zoom would also disable the sheet's keyboard adjustment. */
+  .project-switcher-menu .context-menu-filter input { font-size: var(--text-md); }
 
   /* The path is the half that can be shortened; the project name is the half
      the user just chose, so it keeps its width. */

@@ -180,8 +180,11 @@ async function assertPhoneProjectMenuScrolls(page) {
   const menu = page.locator(`${within} .project-switcher-menu`);
   await menu.waitFor({ state: "visible", timeout: TIMEOUT_MS });
   await menu.locator('[data-project-id="project-15"]').waitFor();
+  assert.equal(await menu.locator(".context-menu-filter input").count(), 0);
+  assert.equal(await page.evaluate(() => document.activeElement?.tagName === "INPUT"), false);
+  const scroller = menu.locator(".project-menu-rows");
 
-  const initial = await menu.evaluate((node) => {
+  const initial = await scroller.evaluate((node) => {
     const rows = [...node.querySelectorAll(".project-switcher-option")];
     const boxes = rows.map((row) => row.getBoundingClientRect());
     return {
@@ -195,8 +198,8 @@ async function assertPhoneProjectMenuScrolls(page) {
   assert.equal(initial.overflowY, "auto");
   assert.equal(initial.overlappingRows, 0, `project rows overlap: ${JSON.stringify(initial)}`);
 
-  await menu.evaluate((node) => { node.scrollTop = node.scrollHeight; });
-  const bottom = await menu.evaluate((node) => {
+  await scroller.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+  const bottom = await scroller.evaluate((node) => {
     const last = node.lastElementChild;
     const box = last.getBoundingClientRect();
     const menuBox = node.getBoundingClientRect();
@@ -214,6 +217,14 @@ async function assertPhoneProjectMenuScrolls(page) {
   await page.screenshot({ path: shot });
   await menu.locator('[data-project-id="project-15"]').tap();
   assert.match(await page.locator(`${within} .project-picker-trigger`).getAttribute("aria-label"), /Customer support/);
+  await page.locator(`${within} .project-picker-trigger`).tap();
+  await menu.locator(".project-menu-search-toggle").tap();
+  const input = menu.locator(".context-menu-filter input");
+  assert.equal(await input.evaluate((node) => node.ownerDocument.activeElement === node), true);
+  await input.fill("RN");
+  assert.equal(await menu.locator(".project-switcher-option").count(), 1);
+  await menu.locator('[data-project-id="project-1"]').tap();
+  assert.match(await page.locator(`${within} .project-picker-trigger`).getAttribute("aria-label"), /RN/);
   logStep("phone project menu scrolls", { ...initial, ...bottom, shot });
 }
 
@@ -597,6 +608,7 @@ async function main() {
         await page.waitForTimeout(200);
         const edge = await page.evaluate(() => {
           const panel = document.querySelector(".model-picker-menu");
+          panel.scrollTop = 0;
           const room = panel.getBoundingClientRect();
           const rows = [...panel.querySelectorAll(".model-picker-option")];
           const row = rows.find((node) => node.getBoundingClientRect().bottom > room.bottom);

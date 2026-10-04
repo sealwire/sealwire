@@ -389,6 +389,57 @@ function press(target, key, init = {}) {
   });
 }
 
+function enterButton(button) {
+  const event = new dom.window.KeyboardEvent("keydown", {
+    key: "Enter", bubbles: true, cancelable: true,
+  });
+  act(() => {
+    button.focus();
+    button.dispatchEvent(event);
+    // jsdom does not implement the browser's default keyboard click.
+    if (!event.defaultPrevented) button.click();
+  });
+}
+
+test("Enter on the focused Create button creates instead of selecting the filter match", () => {
+  const chosen = [];
+  const created = [];
+  const view = mount({
+    onSelectProject: (id) => chosen.push(id),
+    onCreateProject: (name) => created.push(name),
+  });
+  try {
+    open(view.host);
+    typeFilter(view.host, "pay");
+    enterButton(view.host.querySelector(".project-switcher-create"));
+    assert.deepEqual(created, ["pay"]);
+    assert.deepEqual(chosen, []);
+  } finally {
+    view.cleanup();
+  }
+});
+
+test("Enter on the focused Rename button renames instead of selecting a hovered project", () => {
+  const chosen = [];
+  const renamed = [];
+  const view = mount({
+    activeProjectId: "proj_docs",
+    onSelectProject: (id) => chosen.push(id),
+    onRenameProject: (id, name) => renamed.push([id, name]),
+  });
+  try {
+    open(view.host);
+    act(() => view.host.querySelector('[data-project-id="proj_pay"]').dispatchEvent(
+      new dom.window.MouseEvent("mouseover", { bubbles: true })
+    ));
+    enterButton(view.host.querySelector(".project-switcher-manage"));
+    assert.deepEqual(renamed, [["proj_docs", "Docs"]]);
+    assert.deepEqual(chosen, []);
+  } finally {
+    view.cleanup();
+  }
+});
+
 test("rows count sessions, and the most recently used project comes first", () => {
   const view = mount({
     activeProjectId: null,
@@ -422,6 +473,74 @@ test("the filter takes focus on open and narrows to matching projects", () => {
   assert.deepEqual(options(view.host), ["Payments rework", "Create “pay”"]);
   assert.equal(view.host.querySelector(".context-menu-heading"), null, "the heading steps aside");
   view.cleanup();
+});
+
+test("touch users can choose projects before explicitly opening search", () => {
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = () => ({ matches: false });
+  const chosen = [];
+  const view = mount({ onSelectProject: (id) => chosen.push(id) });
+  try {
+    open(view.host);
+    assert.equal(view.host.querySelector(".context-menu-filter input"), null);
+    assert.notEqual(document.activeElement.tagName, "INPUT");
+    clickOption(view.host, "Docs");
+    assert.deepEqual(chosen, ["proj_docs"]);
+
+    open(view.host);
+    act(() => view.host.querySelector(".project-menu-search-toggle").click());
+    const input = view.host.querySelector(".context-menu-filter input");
+    assert.equal(document.activeElement, input);
+    typeFilter(view.host, "pay");
+    assert.deepEqual(options(view.host), ["Payments rework"]);
+    press(input, "Enter");
+    assert.deepEqual(chosen, ["proj_docs", "proj_pay"]);
+
+    open(view.host);
+    assert.equal(view.host.querySelector(".context-menu-filter input"), null);
+    assert.deepEqual(options(view.host), [ALL_SESSIONS_LABEL, "Docs", "Payments rework"]);
+  } finally {
+    view.cleanup();
+    window.matchMedia = originalMatchMedia;
+  }
+});
+
+test("touch users with a hardware keyboard can choose without expanding search", () => {
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = () => ({ matches: false });
+  const chosen = [];
+  const view = mount({ onSelectProject: (id) => chosen.push(id) });
+  try {
+    open(view.host);
+    const menu = view.host.querySelector(".project-switcher-menu");
+    assert.ok(document.activeElement === menu, "the menu takes non-input focus");
+    press(document.activeElement, "ArrowDown");
+    press(document.activeElement, "Enter");
+    assert.deepEqual(chosen, ["proj_docs"]);
+  } finally {
+    view.cleanup();
+    window.matchMedia = originalMatchMedia;
+  }
+});
+
+test("explicit search takes input focus during the tap's click event", () => {
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = () => ({ matches: false });
+  const view = mount();
+  let focusedDuringClick = false;
+  const inspectFocus = () => {
+    focusedDuringClick = document.activeElement === view.host.querySelector(".context-menu-filter input");
+  };
+  try {
+    open(view.host);
+    document.addEventListener("click", inspectFocus);
+    act(() => view.host.querySelector(".project-menu-search-toggle").click());
+    assert.equal(focusedDuringClick, true, "Safari needs focus while user activation is still active");
+  } finally {
+    document.removeEventListener("click", inspectFocus);
+    view.cleanup();
+    window.matchMedia = originalMatchMedia;
+  }
 });
 
 test("with nothing matching, the typed name is offered as a new project", () => {

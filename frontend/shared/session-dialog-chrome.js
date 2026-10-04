@@ -18,6 +18,38 @@ export function SessionDialogShell({
   onRequestClose = null,
   title,
 }) {
+  const dialogRef = React.useRef(null);
+
+  React.useEffect(() => {
+    const dialog = dialogRef.current;
+    const view = dialog?.ownerDocument.defaultView;
+    const viewport = view?.visualViewport;
+    if (!viewport) return undefined;
+
+    const update = () => {
+      // Pinch zoom changes visible bounds without opening a keyboard.
+      if (viewport.scale !== 1) {
+        dialog.style.removeProperty("--session-dialog-keyboard-inset");
+        dialog.style.removeProperty("--session-dialog-viewport-height");
+        return;
+      }
+      // Some phone browsers resize only the visible viewport when the keyboard opens.
+      // Move the sheet too, or its clipping bounds leave picker menus one row of space.
+      const inset = Math.max(0, view.innerHeight - viewport.offsetTop - viewport.height);
+      dialog.style.setProperty("--session-dialog-keyboard-inset", `${inset}px`);
+      dialog.style.setProperty("--session-dialog-viewport-height", `${viewport.height}px`);
+    };
+    update();
+    viewport.addEventListener("resize", update);
+    viewport.addEventListener("scroll", update);
+    view.addEventListener("resize", update);
+    return () => {
+      viewport.removeEventListener("resize", update);
+      viewport.removeEventListener("scroll", update);
+      view.removeEventListener("resize", update);
+    };
+  }, []);
+
   const close = () => {
     onRequestClose?.();
     document.getElementById(id)?.close?.();
@@ -28,6 +60,7 @@ export function SessionDialogShell({
     {
       className: "panel-modal session-dialog",
       id,
+      ref: dialogRef,
       onClose: () => onRequestClose?.(),
       // Only the backdrop matches: every child renders inside the sections below.
       onClick: (event) => {

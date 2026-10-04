@@ -1,7 +1,8 @@
 // Shared by the top-bar switcher and both launch dialogs. `.project-switcher-*` class
 // names stay: remote's drawer anchoring and the e2e harness key off them.
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 
 import {
   MENU_PLUS_GLYPH,
@@ -15,7 +16,8 @@ import {
 import { isImeComposing } from "./composer-keys.js";
 import { describeProjectDelete } from "./destructive-confirm-copy.js";
 import { filterProjectRows } from "./project-picker-model.js";
-import { CHECK_SVG } from "../svg.js";
+import { hasFinePrimaryPointer } from "./pointer-class.js";
+import { CHECK_SVG, SEARCH_SVG } from "../svg.js";
 
 const h = React.createElement;
 
@@ -50,7 +52,14 @@ export function ProjectMenu({
 }) {
   const [query, setQuery] = useState("");
   const [confirming, setConfirming] = useState(false);
+  const [searchExpanded, setSearchExpanded] = useState(hasFinePrimaryPointer);
   const inputRef = useRef(null);
+  const containerRef = useRef(null);
+  const assignMenuRef = useCallback((node) => {
+    containerRef.current = node;
+    if (typeof menuRef === "function") menuRef(node);
+    else if (menuRef) menuRef.current = node;
+  }, [menuRef]);
 
   const filtering = query.trim().length > 0;
   const pinned = filtering ? [] : [...topRows, ...(defaultRow ? [defaultRow] : [])];
@@ -66,9 +75,10 @@ export function ProjectMenu({
   const current = Math.min(highlight, entries.length - 1);
   const anchor = current >= 0 ? current : entries.findIndex((entry) => entry.active);
 
-  useEffect(() => {
-    inputRef.current?.focus({ preventScroll: true });
-  }, []);
+  useLayoutEffect(() => {
+    const target = searchExpanded ? inputRef.current : containerRef.current;
+    target?.focus({ preventScroll: true });
+  }, [searchExpanded]);
 
   const activate = (entry) => {
     if (!entry) return;
@@ -87,7 +97,10 @@ export function ProjectMenu({
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
       setHighlight(anchor <= 0 ? entries.length - 1 : anchor - 1);
-    } else if (event.key === "Enter" && current >= 0) {
+    } else if (
+      event.key === "Enter" && current >= 0
+      && (event.target === inputRef.current || event.target === containerRef.current)
+    ) {
       event.preventDefault();
       activate(entries[current]);
     }
@@ -154,78 +167,107 @@ export function ProjectMenu({
 
   return h(
     "div",
-    { className: "project-switcher-menu context-menu", id: id || undefined, ref: menuRef, role: "menu" },
-    h(MenuFilter, {
+    {
+      className: "project-switcher-menu context-menu",
+      id: id || undefined,
+      onKeyDown,
+      ref: assignMenuRef,
+      role: "menu",
+      tabIndex: -1,
+    },
+    searchExpanded ? h(MenuFilter, {
       hint: shortcutHint,
       inputRef,
       onChange: (value) => {
         setQuery(value);
         setHighlight(0);
       },
-      onKeyDown,
       placeholder: filterPlaceholder,
       value: query,
-    }),
-    pinned.map(optionRow),
-    pinned.length && projects.length ? h(MenuSeparator) : null,
-    !filtering && heading && projects.length ? h(MenuHeading, null, heading) : null,
-    projects.map(optionRow),
-    createEntry
-      ? h(
-          React.Fragment,
-          null,
-          entries.length > 1 ? h(MenuSeparator) : null,
-          h(
-            "button",
-            {
-              className:
-                "context-menu-button project-switcher-create"
-                + (entries.indexOf(createEntry) === current ? " is-highlighted" : ""),
-              onClick: () => activate(createEntry),
-              onMouseEnter: () => setHighlight(entries.indexOf(createEntry)),
-              role: "menuitem",
-              type: "button",
-            },
-            h(MenuGlyph, { className: "context-menu-lead", svg: MENU_PLUS_GLYPH }),
-            h("span", { className: "context-menu-label" }, createEntry.label)
+    }) : h(
+      "div",
+      { className: "project-menu-toolbar" },
+      pinned.length ? optionRow(pinned[0]) : h(MenuHeading, null, heading || "Projects"),
+      h(
+        "button",
+        {
+          "aria-label": "Search projects",
+          className: "project-menu-search-toggle",
+          onClick: () => {
+            // iOS needs the input mounted and focused before this tap finishes.
+            flushSync(() => setSearchExpanded(true));
+          },
+          role: "menuitem",
+          title: "Search projects",
+          type: "button",
+        },
+        h(MenuGlyph, { svg: SEARCH_SVG })
+      )
+    ),
+    h(
+      "div",
+      { className: "project-menu-rows" },
+      (searchExpanded ? pinned : pinned.slice(1)).map(optionRow),
+      pinned.length && projects.length ? h(MenuSeparator) : null,
+      !filtering && heading && projects.length ? h(MenuHeading, null, heading) : null,
+      projects.map(optionRow),
+      createEntry
+        ? h(
+            React.Fragment,
+            null,
+            entries.length > 1 ? h(MenuSeparator) : null,
+            h(
+              "button",
+              {
+                className:
+                  "context-menu-button project-switcher-create"
+                  + (entries.indexOf(createEntry) === current ? " is-highlighted" : ""),
+                onClick: () => activate(createEntry),
+                onMouseEnter: () => setHighlight(entries.indexOf(createEntry)),
+                role: "menuitem",
+                type: "button",
+              },
+              h(MenuGlyph, { className: "context-menu-lead", svg: MENU_PLUS_GLYPH }),
+              h("span", { className: "context-menu-label" }, createEntry.label)
+            )
           )
-        )
-      : null,
-    // Acts on one project, so it sits apart from the places, destructive last.
-    manage
-      ? h(
-          React.Fragment,
-          null,
-          h(MenuSeparator),
-          onRenameProject
-            ? h(
-                "button",
-                {
-                  className: "context-menu-button project-switcher-manage",
-                  onClick: () => onRenameProject(activeProject.id, activeName),
-                  role: "menuitem",
-                  type: "button",
-                },
-                h("span", { className: "context-menu-label" }, "Rename project…")
-              )
-            : null,
-          onDeleteProject
-            ? h(
-                "button",
-                {
-                  className:
-                    "context-menu-button context-menu-button-danger project-switcher-manage project-switcher-danger",
-                  onClick: () =>
-                    deleteCopy
-                      ? setConfirming(true)
-                      : onDeleteProject(activeProject.id, activeName, { sessionCount: 0 }),
-                  role: "menuitem",
-                  type: "button",
-                },
-                h("span", { className: "context-menu-label" }, "Delete project…")
-              )
-            : null
-        )
-      : null
+        : null,
+      // Acts on one project, so it sits apart from the places, destructive last.
+      manage
+        ? h(
+            React.Fragment,
+            null,
+            h(MenuSeparator),
+            onRenameProject
+              ? h(
+                  "button",
+                  {
+                    className: "context-menu-button project-switcher-manage",
+                    onClick: () => onRenameProject(activeProject.id, activeName),
+                    role: "menuitem",
+                    type: "button",
+                  },
+                  h("span", { className: "context-menu-label" }, "Rename project…")
+                )
+              : null,
+            onDeleteProject
+              ? h(
+                  "button",
+                  {
+                    className:
+                      "context-menu-button context-menu-button-danger project-switcher-manage project-switcher-danger",
+                    onClick: () =>
+                      deleteCopy
+                        ? setConfirming(true)
+                        : onDeleteProject(activeProject.id, activeName, { sessionCount: 0 }),
+                    role: "menuitem",
+                    type: "button",
+                  },
+                  h("span", { className: "context-menu-label" }, "Delete project…")
+                )
+              : null
+          )
+        : null
+    )
   );
 }

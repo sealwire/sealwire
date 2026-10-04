@@ -130,6 +130,62 @@ async function assertMenuUsable(page, cdp, { menuSel, name, triggerSel }) {
   await page.waitForSelector(menuSel, { state: "detached", timeout: TIMEOUT_MS });
 }
 
+async function assertProjectSearchWithKeyboard(page, cdp) {
+  const within = "#launch-start-session-dialog";
+  const menuSel = `${within} .project-switcher-menu`;
+  const height = await page.evaluate(() => visualViewport.height);
+  await tap(cdp, page, `${within} .project-picker-trigger`);
+  const menu = page.locator(menuSel);
+  await menu.waitFor({ state: "visible" });
+  await page.waitForTimeout(500);
+  assert.equal(await menu.locator(".context-menu-filter input").count(), 0);
+  assert.equal(await page.evaluate(() => document.activeElement?.tagName === "INPUT"), false);
+  assert.ok(Math.abs(await page.evaluate(() => visualViewport.height) - height) < 5);
+  await fs.mkdir("artifacts/e2e", { recursive: true });
+  await fs.writeFile("artifacts/e2e/android-project-menu.png", execFileSync(ADB, ["exec-out", "screencap", "-p"]));
+
+  await tap(cdp, page, `${menuSel} .project-menu-search-toggle`);
+  await page.waitForFunction(
+    (before) => visualViewport.height < before - 120,
+    height,
+    { timeout: TIMEOUT_MS }
+  );
+  const input = menu.locator(".context-menu-filter input");
+  assert.equal(await input.evaluate((node) => node.ownerDocument.activeElement === node), true);
+  await input.fill("Keyboard project");
+  assert.equal(await menu.locator(".project-switcher-option").count(), 12);
+  const scroller = menu.locator(".project-menu-rows");
+  await scroller.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+  await page.waitForTimeout(500);
+  const layout = await menu.evaluate((node) => {
+    const box = node.getBoundingClientRect();
+    const inputBox = node.querySelector("input").getBoundingClientRect();
+    const rows = node.querySelector(".project-menu-rows");
+    const last = [...rows.querySelectorAll(".project-switcher-option")].at(-1);
+    const lastBox = last.getBoundingClientRect();
+    const hit = document.elementFromPoint(lastBox.left + lastBox.width / 2, lastBox.top + lastBox.height / 2);
+    return {
+      inputVisible: inputBox.top >= visualViewport.offsetTop
+        && inputBox.bottom <= visualViewport.offsetTop + visualViewport.height,
+      menuVisible: box.top >= visualViewport.offsetTop
+        && box.bottom <= visualViewport.offsetTop + visualViewport.height + 1,
+      rowsHeight: rows.clientHeight,
+      scrollTop: rows.scrollTop,
+      lastReachable: hit === last || last.contains(hit),
+    };
+  });
+  assert.ok(layout.inputVisible && layout.menuVisible, JSON.stringify(layout));
+  assert.ok(layout.rowsHeight >= 84, `keyboard leaves fewer than three rows: ${JSON.stringify(layout)}`);
+  assert.ok(layout.scrollTop > 0 && layout.lastReachable, JSON.stringify(layout));
+  await fs.writeFile("artifacts/e2e/android-project-search.png", execFileSync(ADB, ["exec-out", "screencap", "-p"]));
+  const lastId = await menu.locator(".project-switcher-option").last().getAttribute("data-project-id");
+  await tap(cdp, page, `${menuSel} [data-project-id="${lastId}"]`);
+  await menu.waitFor({ state: "detached" });
+  await page.waitForFunction((before) => visualViewport.height >= before - 5, height);
+  assert.ok(await page.locator(`${within}[open]`).count());
+  logStep("ok project search with native keyboard", layout);
+}
+
 async function main() {
   if (!process.env.ANDROID_E2E) {
     logStep("SKIP (set ANDROID_E2E=1 to run)");
@@ -150,6 +206,15 @@ async function main() {
     relayStatePath: path.join(stateDir, "session.json"),
   });
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
+
+  for (let index = 1; index <= 12; index += 1) {
+    const response = await fetch(`http://127.0.0.1:${relayPort}/api/projects`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Agent-Relay-CSRF": "1" },
+      body: JSON.stringify({ action: "create", name: `Keyboard project ${index}`, device_id: "android-e2e" }),
+    });
+    assert.equal(response.status, 200, await response.text());
+  }
 
   // The device's own loopback, pointed back at the relay on this machine.
   adb("reverse", `tcp:${relayPort}`, `tcp:${relayPort}`);
@@ -175,11 +240,13 @@ async function main() {
     await tap(cdp, page, "#open-start-session-dialog");
     await page.waitForSelector("#launch-start-session-dialog[open]", { timeout: TIMEOUT_MS });
 
+    await assertProjectSearchWithKeyboard(page, cdp);
+
     const within = "#launch-start-session-dialog";
     for (const picker of [
       { menuSel: `${within} .project-switcher-menu`, name: "project", triggerSel: `${within} .project-picker-trigger` },
       { menuSel: `${within} .workspace-picker-panel`, name: "workspace", triggerSel: `${within} .workspace-picker-trigger` },
-      { menuSel: `${within} .setting-pill-menu`, name: "model", triggerSel: `${within}-model` },
+      { menuSel: `${within} .model-picker-menu`, name: "model", triggerSel: `${within}-model` },
       { menuSel: `${within} .setting-pill-menu`, name: "effort", triggerSel: `${within}-effort` },
       { menuSel: `${within} .setting-pill-menu`, name: "approval", triggerSel: `${within}-approval` },
     ]) {
