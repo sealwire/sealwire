@@ -6505,6 +6505,64 @@ async fn bound_action_retries_wait_and_replay_without_reexecuting_the_provider()
 }
 
 #[tokio::test]
+async fn a_bound_send_message_without_a_session_claim_is_refused_before_reservation() {
+    let dir = tempfile::TempDir::new().expect("tmpdir");
+    let (state, relay) =
+        encrypted_broker_state_parts(&dir.path().to_string_lossy(), HashMap::new()).await;
+    let (writer, mut replies, _trains) = super::writer::test_writer();
+    let origin = {
+        let mut relay = relay.write().await;
+        relay.mark_surface_peer_online("surface-a");
+        FrameOrigin {
+            ingress: crate::state::next_relay_ingress(),
+            lease: relay.current_surface_lease("surface-a").unwrap(),
+        }
+    };
+    let envelope = bound_action_envelope(
+        "secret",
+        "send-without-claim",
+        &serde_json::json!({
+            "type": "send_message", "input": {"text": "hello", "thread_id": "thread-1"},
+        }),
+    )
+    .expect("bound request");
+    handle_encrypted_remote_action(
+        &state,
+        &writer,
+        origin,
+        "surface-a".to_string(),
+        "send-without-claim".to_string(),
+        None,
+        Some("phone-1".to_string()),
+        envelope,
+    )
+    .await
+    .expect("refusal delivered without ending session");
+    let (payload, result) = next_encrypted_action_reply(&mut replies).await;
+    assert_eq!(payload["action_id"], "send-without-claim");
+    assert_eq!(result["action"], "send_message");
+    assert_eq!(result["ok"], false);
+    assert_eq!(
+        result["error"],
+        "broker transport auth only grants room access; session claim is missing or expired"
+    );
+    {
+        let relay = relay.read().await;
+        assert_eq!(relay.paired_devices["phone-1"].last_peer_id, None);
+        assert_eq!(relay.paired_devices["phone-1"].last_seen_at, Some(1));
+        assert!(relay
+            .completed_remote_action("phone-1", "send-without-claim")
+            .is_none());
+    }
+    assert!(matches!(
+        state
+            .reserve_remote_action("phone-1", "send-without-claim", "send_message")
+            .await,
+        Ok(crate::state::RemoteActionReplayDecision::Execute)
+    ));
+}
+
+#[tokio::test]
 async fn invalid_action_binding_cannot_change_device_or_claim_state() {
     let dir = tempfile::TempDir::new().expect("tmpdir");
     let (state, relay) =
