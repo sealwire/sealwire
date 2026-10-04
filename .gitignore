@@ -25,6 +25,7 @@ node_modules/
 
 # Temporary files
 /tmp
+/.tmp-*/
 /local-scratch-scripts/
 *.log
 *.pid
