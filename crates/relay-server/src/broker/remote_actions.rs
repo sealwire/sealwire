@@ -1971,29 +1971,19 @@ async fn resolve_encrypted_action_context(
     from_peer_id: &str,
     action_id: &str,
     session_claim: Option<&str>,
-    device_id: Option<&str>,
+    hinted_device_id: Option<&str>,
     envelope: &EncryptedEnvelope,
 ) -> Result<ResolvedEncryptedAction, String> {
-    if let Some(claim) = session_claim {
-        let device_id = verify_session_claim(state, claim, from_peer_id).await?;
-        let response_secret = state.paired_device_payload_secret(&device_id).await?;
-        let request = decrypt_remote_action_with_secret(&response_secret, action_id, envelope)?;
-        let action_kind = request.kind();
-        return Ok(ResolvedEncryptedAction {
-            device_id,
-            action_kind,
-            request,
-            response_secret,
-        });
-    }
-
-    let device_id = device_id
-        .map(str::to_string)
-        .ok_or_else(|| "encrypted remote action is missing device_id".to_string())?;
+    let device_id = match session_claim {
+        Some(claim) => verify_session_claim(state, claim, from_peer_id).await?,
+        None => hinted_device_id
+            .map(str::to_string)
+            .ok_or_else(|| "encrypted remote action is missing device_id".to_string())?,
+    };
     let response_secret = state.paired_device_payload_secret(&device_id).await?;
     let request = decrypt_remote_action_with_secret(&response_secret, action_id, envelope)?;
     let action_kind = request.kind();
-    if requires_session_claim(action_kind) {
+    if session_claim.is_none() && requires_session_claim(action_kind) {
         return Err(SESSION_CONTROL_REQUIRED_ERROR.to_string());
     }
     Ok(ResolvedEncryptedAction {

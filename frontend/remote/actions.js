@@ -654,9 +654,11 @@ export async function dispatchRemoteActionWithoutReply(actionType, request) {
 
   const actionId = makeActionId(actionType);
   sendBrokerFrame(
-    requiresSessionClaim(actionType)
-      ? await buildClaimedActionPayload(actionId, actionType, request)
-      : await buildDeviceActionPayload(actionId, actionType, request),
+    await buildEncryptedActionPayload(
+      actionId,
+      { type: actionType, ...request },
+      requiresSessionClaim(actionType) ? state.remoteAuth.sessionClaim : undefined
+    ),
     socket
   );
 }
@@ -673,15 +675,7 @@ async function buildClaimChallengePayload(actionId) {
     deviceKeypair
   );
 
-  return {
-    kind: "encrypted_remote_action",
-    action_id: actionId,
-    device_id: state.remoteAuth.deviceId,
-    envelope: await encryptJson(state.remoteAuth.payloadSecret, {
-      action_id: actionId,
-      request: { type: "claim_challenge", proof },
-    }),
-  };
+  return buildEncryptedActionPayload(actionId, { type: "claim_challenge", proof });
 }
 
 async function buildClaimDevicePayload(actionId, request) {
@@ -701,42 +695,22 @@ async function buildClaimDevicePayload(actionId, request) {
     deviceKeypair
   );
 
-  return {
-    kind: "encrypted_remote_action",
-    action_id: actionId,
-    device_id: state.remoteAuth.deviceId,
-    envelope: await encryptJson(state.remoteAuth.payloadSecret, {
-      action_id: actionId,
-      request: {
-        type: "claim_device",
-        challenge_id: request.challenge_id,
-        proof: claimProof,
-      },
-    }),
-  };
+  return buildEncryptedActionPayload(actionId, {
+    type: "claim_device",
+    challenge_id: request.challenge_id,
+    proof: claimProof,
+  });
 }
 
-async function buildClaimedActionPayload(actionId, actionType, request) {
+async function buildEncryptedActionPayload(actionId, request, sessionClaim) {
   return {
     kind: "encrypted_remote_action",
     action_id: actionId,
-    session_claim: state.remoteAuth.sessionClaim,
+    ...(sessionClaim === undefined ? {} : { session_claim: sessionClaim }),
     device_id: state.remoteAuth.deviceId,
     envelope: await encryptJson(state.remoteAuth.payloadSecret, {
       action_id: actionId,
-      request: { type: actionType, ...request },
-    }),
-  };
-}
-
-async function buildDeviceActionPayload(actionId, actionType, request) {
-  return {
-    kind: "encrypted_remote_action",
-    action_id: actionId,
-    device_id: state.remoteAuth.deviceId,
-    envelope: await encryptJson(state.remoteAuth.payloadSecret, {
-      action_id: actionId,
-      request: { type: actionType, ...request },
+      request,
     }),
   };
 }
@@ -762,9 +736,11 @@ async function sendRemoteActionFrame(actionId, actionType, request) {
     throw new Error("device is not claimed yet");
   }
   sendBrokerFrame(
-    requiresSessionClaim(actionType)
-      ? await buildClaimedActionPayload(actionId, actionType, request)
-      : await buildDeviceActionPayload(actionId, actionType, request),
+    await buildEncryptedActionPayload(
+      actionId,
+      { type: actionType, ...request },
+      requiresSessionClaim(actionType) ? state.remoteAuth.sessionClaim : undefined
+    ),
     socket
   );
 }
