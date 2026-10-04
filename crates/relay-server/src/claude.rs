@@ -441,6 +441,24 @@ impl ClaudeCodeBridge {
             })?
     }
 
+    async fn folder_is_trusted(&self, cwd: Option<&str>) -> bool {
+        let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty()) else {
+            return false;
+        };
+        let grants = { self.state.read().await.trust_grants() };
+        grants.admit(cwd).await.trusted().is_some()
+    }
+
+    /// A repo's own settings and `.mcp.json` run hooks and servers as the user when a
+    /// query is built, before any turn, so they load only where the user trusted.
+    async fn setting_sources(&self, cwd: Option<&str>) -> Value {
+        if self.folder_is_trusted(cwd).await {
+            json!(["user", "project", "local"])
+        } else {
+            json!(["user"])
+        }
+    }
+
     /// `relay.threads` is keyed by session id, so a worker handle has to be
     /// translated before it can find its own row.
     async fn cwd_for_thread(&self, provider_session_id: &str) -> Option<String> {
@@ -568,8 +586,12 @@ impl ProviderBridge for ClaudeCodeBridge {
         _thread_id: &str,
         cwd: &str,
     ) -> Result<Option<Vec<crate::protocol::ProviderSkillView>>, String> {
+        let sources = self.setting_sources(Some(cwd)).await;
         let result = self
-            .send_request("skills/list", json!({ "cwd": cwd }))
+            .send_request(
+                "skills/list",
+                json!({ "cwd": cwd, "settingSources": sources }),
+            )
             .await?;
         let rows = value_at(&result, &["skills"])
             .and_then(Value::as_array)
@@ -588,7 +610,10 @@ impl ProviderBridge for ClaudeCodeBridge {
             return Ok(cached);
         }
 
-        let result = self.send_request("model/list", json!({})).await?;
+        let sources = self.setting_sources(None).await;
+        let result = self
+            .send_request("model/list", json!({ "settingSources": sources }))
+            .await?;
         let data = value_at(&result, &["models"])
             .and_then(Value::as_array)
             .ok_or_else(|| "model/list did not return a models array".to_string())?;
@@ -618,10 +643,14 @@ impl ProviderBridge for ClaudeCodeBridge {
         Ok(models)
     }
 
-    /// Asked of an idle SDK session in `cwd`, so user/project/local settings count.
+    /// Asked of an idle SDK session in `cwd`, so the settings it would load count.
     async fn default_model(&self, cwd: &str) -> Result<String, String> {
+        let sources = self.setting_sources(Some(cwd)).await;
         let result = self
-            .send_request("model/default", json!({ "cwd": cwd }))
+            .send_request(
+                "model/default",
+                json!({ "cwd": cwd, "settingSources": sources }),
+            )
             .await?;
         value_at(&result, &["model"])
             .and_then(Value::as_str)
@@ -695,6 +724,7 @@ impl ProviderBridge for ClaudeCodeBridge {
             "cwd": cwd,
             "model": model,
             "permissionMode": permission_mode,
+            "settingSources": self.setting_sources(Some(cwd)).await,
         });
         insert_effort(&mut cmd, &request.effort);
         if let Some(prompt) = initial_prompt {
@@ -861,6 +891,7 @@ impl ProviderBridge for ClaudeCodeBridge {
             "type": "resume",
             "provider_session_id": real_session_id,
             "permissionMode": claude_permission_mode(_approval_policy, _sandbox),
+            "settingSources": self.setting_sources(cwd.as_deref()).await,
         });
         if let Some(cwd) = cwd {
             if let Some(object) = cmd.as_object_mut() {
@@ -1061,6 +1092,58 @@ impl ProviderBridge for ClaudeCodeBridge {
         Ok(())
     }
 
+    /// Withdrawn trust cannot wait: a live query keeps the repo's hooks and MCP servers
+    /// it was built with. A grant needs nothing here; the next command rebuilds it.
+    async fn refresh_workspace_trust(&self) -> Result<(), String> {
+        let live = self.send_request("list_live_sessions", json!({})).await?;
+        let rows = value_at(&live, &["sessions"])
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for row in rows {
+            let (Some(id), Some(cwd)) = (row["provider_session_id"].as_str(), row["cwd"].as_str())
+            else {
+                continue;
+            };
+            let loaded_repo = row["setting_sources"]
+                .as_array()
+                .is_some_and(|sources| sources.iter().any(|source| source == "project"));
+            if !loaded_repo || self.folder_is_trusted(Some(cwd)).await {
+                continue;
+            }
+            self.state.write().await.push_log(
+                "info",
+                format!("Closing Claude session {id} after workspace trust was withdrawn"),
+            );
+            let outcome = self
+                .send_request(
+                    "release_session",
+                    json!({
+                        "provider_session_id": id,
+                        "force": true,
+                        "reason": "Workspace trust was withdrawn",
+                    }),
+                )
+                .await;
+            let failure = match outcome {
+                Err(error) => Some(error),
+                Ok(reply) if reply.get("released").and_then(Value::as_bool) != Some(true) => {
+                    Some(format!("worker answered {reply}"))
+                }
+                Ok(_) => None,
+            };
+            if let Some(failure) = failure {
+                self.state.write().await.push_log(
+                    "warn",
+                    format!(
+                        "Could not close Claude session {id} after trust was withdrawn: {failure}"
+                    ),
+                );
+            }
+        }
+        Ok(())
+    }
+
     async fn delete_thread_permanently(
         &self,
         thread_id: &str,
@@ -1132,6 +1215,7 @@ impl ProviderBridge for ClaudeCodeBridge {
                 "cwd": config.cwd,
                 "model": config.model,
                 "permissionMode": config.permission_mode,
+                "settingSources": self.setting_sources(Some(&config.cwd)).await,
                 "pending_thread_id": thread_id,
                 "prompt": text,
                 "images": image_payloads.clone(),
@@ -1233,6 +1317,7 @@ impl ProviderBridge for ClaudeCodeBridge {
             "user_message_uuid": user_message_uuid,
             "model": model,
             "permissionMode": permission_mode,
+            "settingSources": self.setting_sources(cwd.as_deref()).await,
         });
         // The relay has already resolved and clamped this to something the model
         // supports; an empty string means "no opinion", not "default effort", so
@@ -3929,6 +4014,178 @@ for await (const line of rl) {
             )
             .await,
             "resume must map its policy to bypassPermissions for the right session",
+        );
+    }
+
+    fn canonical_temp_dir() -> (tempfile::TempDir, String) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().canonicalize().expect("canonical tempdir");
+        (dir, path.display().to_string())
+    }
+
+    async fn assert_every_query_path_sends(
+        state: &Arc<RwLock<RelayState>>,
+        commands: &[&str],
+        sources: &str,
+    ) {
+        for command in commands {
+            let kind = format!("type={command} ");
+            assert!(
+                wait_for_log(state, &kind, 5).await,
+                "{command} never reached the worker"
+            );
+            let scoped = format!("sources={sources} force=");
+            assert_eq!(
+                count_worker_logs_containing_all(state, &[&kind, &scoped]).await,
+                count_worker_logs_containing_all(state, &[&kind]).await,
+                "every {command} must carry sources={sources}",
+            );
+        }
+    }
+
+    // A repo's `.claude/settings.json` hooks and `.mcp.json` servers run as the user
+    // when a query is built, before any turn, so every command that builds one decides.
+    #[tokio::test]
+    async fn an_untrusted_folder_gets_only_the_users_settings_on_every_path() {
+        let Some((bridge, state)) = spawn_fake_bridge().await else {
+            return;
+        };
+        let (_dir, cwd) = canonical_temp_dir();
+        state
+            .write()
+            .await
+            .upsert_thread(test_thread("sess-u", &cwd));
+
+        let mut request =
+            StartThreadRequest::new(&cwd, "claude-sonnet-4-6", "default", "workspace-write");
+        request.initial_prompt = Some("hi".into());
+        bridge.start_thread(request).await.expect("start");
+        bridge
+            .resume_thread("sess-u", "default", "workspace-write")
+            .await
+            .expect("resume");
+        bridge
+            .start_turn("sess-u", "hello", "claude-sonnet-4-6", "", &[])
+            .await
+            .expect("send");
+        ProviderBridge::list_skills(&bridge, "sess-u", &cwd)
+            .await
+            .expect("skills/list");
+        ProviderBridge::default_model(&bridge, &cwd)
+            .await
+            .expect("model/default");
+        ProviderBridge::list_models(&bridge)
+            .await
+            .expect("model/list");
+
+        assert_every_query_path_sends(
+            &state,
+            &[
+                "start",
+                "resume",
+                "send",
+                "skills/list",
+                "model/default",
+                "model/list",
+            ],
+            "user",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_trusted_folder_also_loads_the_repos_own_settings() {
+        let Some((bridge, state)) = spawn_fake_bridge().await else {
+            return;
+        };
+        let (_dir, cwd) = canonical_temp_dir();
+        {
+            let mut relay = state.write().await;
+            relay.trusted_workspaces.push(cwd.clone());
+            relay.upsert_thread(test_thread("sess-t", &cwd));
+        }
+
+        // The deferred start: its `start` is only sent with the first message.
+        let pending = bridge
+            .start_thread(StartThreadRequest::new(
+                &cwd,
+                "claude-sonnet-4-6",
+                "default",
+                "workspace-write",
+            ))
+            .await
+            .expect("deferred start");
+        bridge
+            .start_turn(&pending.thread.id, "first", "claude-sonnet-4-6", "", &[])
+            .await
+            .expect("first message");
+        bridge
+            .resume_thread("sess-t", "default", "workspace-write")
+            .await
+            .expect("resume");
+        bridge
+            .start_turn("sess-t", "hello", "claude-sonnet-4-6", "", &[])
+            .await
+            .expect("send");
+        ProviderBridge::list_skills(&bridge, "sess-t", &cwd)
+            .await
+            .expect("skills/list");
+        ProviderBridge::default_model(&bridge, &cwd)
+            .await
+            .expect("model/default");
+
+        assert_every_query_path_sends(
+            &state,
+            &["start", "resume", "send", "skills/list", "model/default"],
+            "user,project,local",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn withdrawing_trust_closes_only_sessions_that_loaded_the_repos_settings() {
+        let Some((bridge, state)) = spawn_fake_bridge().await else {
+            return;
+        };
+        let (_trusted_dir, trusted) = canonical_temp_dir();
+        let (_other_dir, other) = canonical_temp_dir();
+        {
+            let mut relay = state.write().await;
+            relay.trusted_workspaces.push(trusted.clone());
+            relay.upsert_thread(test_thread("sess-t", &trusted));
+            relay.upsert_thread(test_thread("sess-o", &other));
+        }
+        bridge
+            .resume_thread("sess-t", "default", "workspace-write")
+            .await
+            .expect("resume trusted");
+        bridge
+            .resume_thread("sess-o", "default", "workspace-write")
+            .await
+            .expect("resume untrusted");
+
+        state.write().await.trusted_workspaces.clear();
+        ProviderBridge::refresh_workspace_trust(&bridge)
+            .await
+            .expect("refresh");
+
+        assert!(
+            wait_for_log(&state, "type=release_session ", 5).await,
+            "a session still holding the repo's hooks and MCP servers was left running",
+        );
+        assert_eq!(
+            count_worker_logs_containing_all(
+                &state,
+                &["type=release_session ", "session=sess-t ", "force=yes"]
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            count_worker_logs_containing_all(&state, &["type=release_session ", "session=sess-o "])
+                .await,
+            0,
+            "a session that never loaded the repo's settings has nothing to drop",
         );
     }
 

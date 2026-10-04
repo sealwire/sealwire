@@ -19,6 +19,8 @@
 import { createInterface } from "node:readline";
 
 let counter = 0;
+// provider_session_id -> { cwd, settingSources } for sessions a command made live.
+const live = new Map();
 
 function send(obj) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
@@ -102,6 +104,16 @@ function resultFor(cmd, sessionId) {
         provider_session_id: `${sessionId}-fork`,
         source_provider_session_id: sessionId,
       };
+    case "list_live_sessions":
+      return {
+        sessions: [...live].map(([id, row]) => ({
+          provider_session_id: id,
+          cwd: row.cwd,
+          setting_sources: row.settingSources,
+        })),
+      };
+    case "release_session":
+      return { provider_session_id: sessionId, released: live.delete(sessionId) };
     default:
       return {};
   }
@@ -143,8 +155,14 @@ for await (const line of rl) {
       `systemPrompt=${typeof cmd.systemPrompt === "string" && cmd.systemPrompt.trim() ? "yes" : "no"} ` +
       `sourceCwd=${cmd.source_cwd ?? "-"} ` +
       `mcp=${cmd.mcpServers ? Object.keys(cmd.mcpServers).join(",") : "-"} ` +
-      `allowed=${Array.isArray(cmd.allowedTools) && cmd.allowedTools.length ? cmd.allowedTools.join(",") : "-"}`,
+      `allowed=${Array.isArray(cmd.allowedTools) && cmd.allowedTools.length ? cmd.allowedTools.join(",") : "-"} ` +
+      `sources=${Array.isArray(cmd.settingSources) ? cmd.settingSources.join(",") : "-"} ` +
+      `force=${cmd.force ? "yes" : "no"}`,
   );
+
+  if (cmd.type === "start" || cmd.type === "resume" || cmd.type === "send") {
+    live.set(sessionId, { cwd: cmd.cwd ?? "/tmp", settingSources: cmd.settingSources ?? ["user"] });
+  }
 
   if (cmd.type === "shutdown") {
     process.exit(0);

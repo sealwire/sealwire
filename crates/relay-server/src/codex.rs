@@ -667,6 +667,29 @@ impl CodexBridge {
             .ok_or_else(|| "Codex names no configured model and recommends none".to_string())
     }
 
+    /// Codex runs a repo's `.codex/config.toml` MCP servers only for projects its own list
+    /// trusts; this per-thread entry makes the sealwire grant the answer, both ways.
+    /// Only thread loads carry it: a thread already loaded trusted keeps its MCP after a
+    /// withdrawal, since the shared app-server has no per-thread teardown (`unsubscribe`
+    /// leaves it running) and restarting it would cut every other Codex thread.
+    async fn with_project_trust(&self, params: &mut Value, cwd: &str) {
+        let cwd = crate::state::normalize_cwd(cwd);
+        let grants = { self.state.read().await.trust_grants() };
+        let level = if grants.admit(&cwd).await.trusted().is_some() {
+            "trusted"
+        } else {
+            "untrusted"
+        };
+        // Codex looks a worktree up under its main repository, so name both.
+        let repo = crate::state::app::grant_key(&cwd).await;
+        if !params["config"].is_object() {
+            params["config"] = json!({});
+        }
+        for key in [cwd, repo] {
+            params["config"]["projects"][key] = json!({ "trust_level": level });
+        }
+    }
+
     pub async fn start_thread(
         &self,
         cwd: &str,
@@ -709,6 +732,7 @@ impl CodexBridge {
             }
             crate::provider::SealwireMcpIdentity::None => {}
         }
+        self.with_project_trust(&mut params, cwd).await;
         let result = self.send_request("thread/start", params).await?;
 
         let thread = value_at(&result, &["thread"])
@@ -730,19 +754,16 @@ impl CodexBridge {
     ) -> Result<ThreadSummaryView, String> {
         let (approval_policy, sandbox) =
             resolve_codex_policy(&request.approval_policy, &request.sandbox);
-        let result = self
-            .send_request(
-                "thread/fork",
-                json!({
-                    "threadId": request.source_thread_id,
-                    "cwd": request.cwd,
-                    "model": request.model,
-                    "approvalPolicy": approval_policy,
-                    "sandbox": sandbox,
-                    "threadSource": "agent-relay"
-                }),
-            )
-            .await?;
+        let mut params = json!({
+            "threadId": request.source_thread_id,
+            "cwd": request.cwd,
+            "model": request.model,
+            "approvalPolicy": approval_policy,
+            "sandbox": sandbox,
+            "threadSource": "agent-relay"
+        });
+        self.with_project_trust(&mut params, &request.cwd).await;
+        let result = self.send_request("thread/fork", params).await?;
 
         let thread = value_at(&result, &["thread"])
             .ok_or_else(|| "thread/fork did not return a thread".to_string())?;
@@ -804,6 +825,19 @@ impl CodexBridge {
                     params["config"] = json!({ "mcp_servers": peer_mcp_servers(&token) });
                 }
                 crate::provider::SealwireMcpIdentity::None => {}
+            }
+            let cwd = { self.state.read().await.thread_history_cwd(&session_id) };
+            match cwd {
+                Some(cwd) => self.with_project_trust(&mut params, &cwd).await,
+                // Codex then falls back to its own list for the thread's folder.
+                None => {
+                    self.state.write().await.push_log(
+                        "warn",
+                        format!(
+                            "Resuming Codex thread {thread_id} without a known folder to trust"
+                        ),
+                    );
+                }
             }
             params
         })

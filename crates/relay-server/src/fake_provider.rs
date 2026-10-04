@@ -567,9 +567,21 @@ pub struct FakeProviderBridge {
     refuse_next_start: Arc<AtomicBool>,
     /// While true, `list_models` waits: a test can stand inside a catalog read.
     list_models_hold: watch::Sender<bool>,
+    trust_refreshes: Arc<AtomicU64>,
+    refuse_trust_refresh: Arc<AtomicBool>,
 }
 
 impl FakeProviderBridge {
+    #[cfg(test)]
+    pub(crate) fn refuse_trust_refresh(&self) {
+        self.refuse_trust_refresh.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn trust_refreshes(&self) -> u64 {
+        self.trust_refreshes.load(Ordering::SeqCst)
+    }
+
     #[cfg(test)]
     pub(crate) fn set_extra_models(&self, models: &[&str]) {
         *self.extra_models.lock().expect("extra models") =
@@ -856,6 +868,8 @@ impl FakeProviderBridge {
             model_resolutions: Arc::new(std::sync::Mutex::new(HashMap::new())),
             refuse_next_start: Arc::new(AtomicBool::new(false)),
             list_models_hold: watch::channel(false).0,
+            trust_refreshes: Arc::new(AtomicU64::new(0)),
+            refuse_trust_refresh: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -881,6 +895,14 @@ impl FakeProviderBridge {
 
 #[async_trait]
 impl ProviderBridge for FakeProviderBridge {
+    async fn refresh_workspace_trust(&self) -> Result<(), String> {
+        self.trust_refreshes.fetch_add(1, Ordering::SeqCst);
+        if self.refuse_trust_refresh.load(Ordering::SeqCst) {
+            return Err("fake trust refresh failure".to_string());
+        }
+        Ok(())
+    }
+
     async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String> {
         if self.fail_lists.load(Ordering::Relaxed) {
             return Err("fake list failure".to_string());

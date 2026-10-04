@@ -161,9 +161,14 @@ function captureStderr(fn) {
     });
 }
 
-// Minimal stand-in for an SDK query: eviction and release both close it.
+// Minimal stand-in for a worker session: eviction and release tear it down via terminate.
 function fakeQuery() {
-  return { closed: false, close() { this.closed = true; }, async interrupt() {} };
+  return {
+    closed: false,
+    close() { this.closed = true; },
+    terminate() { this.closed = true; },
+    async interrupt() {},
+  };
 }
 
 function makeTracker() {

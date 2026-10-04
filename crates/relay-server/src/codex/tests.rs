@@ -6308,3 +6308,93 @@ async fn a_live_command_row_names_its_command_from_start_to_finish() {
         "completed"
     );
 }
+
+fn canonical_temp_dir() -> (tempfile::TempDir, String) {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().canonicalize().expect("canonical tempdir");
+    (dir, path.display().to_string())
+}
+
+async fn sent_project_trust(
+    state: &std::sync::Arc<RwLock<RelayState>>,
+    method: &str,
+    cwd: &str,
+) -> Option<String> {
+    codex_recv_payloads(state)
+        .await
+        .into_iter()
+        .filter(|payload| payload.get("method").and_then(Value::as_str) == Some(method))
+        .find_map(|payload| {
+            payload["params"]["config"]["projects"][cwd]["trust_level"]
+                .as_str()
+                .map(str::to_string)
+        })
+}
+
+// Codex runs a repo's `.codex/config.toml` MCP servers for any project its own list
+// trusts, so every thread it loads carries the sealwire grant for its folder instead.
+#[tokio::test]
+async fn codex_threads_carry_the_sealwire_trust_of_their_folder() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let (_trusted_dir, trusted) = canonical_temp_dir();
+    let (_other_dir, other) = canonical_temp_dir();
+    state.write().await.trusted_workspaces.push(trusted.clone());
+
+    for cwd in [&trusted, &other] {
+        bridge
+            .start_thread(
+                cwd,
+                "gpt-5-codex",
+                "never",
+                "workspace-write",
+                &crate::provider::SessionPurpose::Ordinary,
+            )
+            .await
+            .expect("start");
+    }
+    let mut resumed = test_thread_summary("thread-other");
+    resumed.cwd = other.clone();
+    state.write().await.upsert_thread(resumed);
+    bridge
+        .resume_thread("thread-other", "never", "workspace-write")
+        .await
+        .expect("resume");
+    crate::provider::ProviderBridge::fork_thread(
+        &bridge,
+        crate::provider::ProviderForkRequest {
+            source_thread_id: "thread-other".into(),
+            up_to_item_id: None,
+            cwd: trusted.clone(),
+            model: "gpt-5-codex".into(),
+            approval_policy: "never".into(),
+            sandbox: "workspace-write".into(),
+        },
+    )
+    .await
+    .expect("fork");
+
+    assert_eq!(
+        sent_project_trust(&state, "thread/start", &trusted)
+            .await
+            .as_deref(),
+        Some("trusted")
+    );
+    assert_eq!(
+        sent_project_trust(&state, "thread/start", &other)
+            .await
+            .as_deref(),
+        Some("untrusted")
+    );
+    assert_eq!(
+        sent_project_trust(&state, "thread/resume", &other)
+            .await
+            .as_deref(),
+        Some("untrusted")
+    );
+    assert_eq!(
+        sent_project_trust(&state, "thread/fork", &trusted)
+            .await
+            .as_deref(),
+        Some("trusted")
+    );
+}

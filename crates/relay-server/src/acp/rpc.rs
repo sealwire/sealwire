@@ -78,6 +78,9 @@ pub(crate) fn spawn_stdout_reader(context: ReaderContext) {
         provider_key,
     } = context;
 
+    // Another process serving this provider numbers its requests from the same start,
+    // and the relay parks every approval in one map.
+    let scoped_ids = provider_key == "opencode" || !owns_provider_connection;
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         loop {
@@ -93,6 +96,7 @@ pub(crate) fn spawn_stdout_reader(context: ReaderContext) {
                         &models,
                         models_cache.as_deref(),
                         provider_key,
+                        scoped_ids,
                     )
                     .await;
                 }
@@ -110,7 +114,9 @@ pub(crate) fn spawn_stdout_reader(context: ReaderContext) {
                     if owns_provider_connection {
                         relay.set_provider_connection(provider_key, false);
                     }
-                    if provider_key != "opencode" {
+                    // Another process's turns are still alive; this one's settle
+                    // through the requests `fail_pending` just failed.
+                    if owns_provider_connection && provider_key != "opencode" {
                         relay.fail_in_flight_turns_for_provider(provider_key);
                     }
                     relay.push_log("error", format!("{provider_key} ACP stdout closed."));
@@ -131,7 +137,7 @@ pub(crate) fn spawn_stdout_reader(context: ReaderContext) {
                     if owns_provider_connection {
                         relay.set_provider_connection(provider_key, false);
                     }
-                    if provider_key != "opencode" {
+                    if owns_provider_connection && provider_key != "opencode" {
                         relay.fail_in_flight_turns_for_provider(provider_key);
                     }
                     relay.push_log(
@@ -198,6 +204,7 @@ async fn handle_line(
     models: &Arc<tokio::sync::Mutex<Vec<crate::protocol::ModelOptionView>>>,
     models_cache: Option<&std::path::Path>,
     provider_key: &'static str,
+    scoped_ids: bool,
 ) {
     let payload: Value = match serde_json::from_str(line) {
         Ok(value) => value,
@@ -214,7 +221,7 @@ async fn handle_line(
 
     // Server → client request (permissions, and Cursor's `cursor/*` extensions).
     if has_id && has_method {
-        handle_server_request(payload, stdin, state, sessions, provider_key).await;
+        handle_server_request(payload, stdin, state, sessions, provider_key, scoped_ids).await;
         return;
     }
 
@@ -1343,13 +1350,23 @@ async fn handle_server_request(
     state: &Arc<RwLock<RelayState>>,
     sessions: &Sessions,
     provider_key: &'static str,
+    scoped_ids: bool,
 ) {
     let method = payload.get("method").and_then(Value::as_str).unwrap_or("");
     let request_id = payload.get("id").cloned().unwrap_or(Value::Null);
     let params = payload.get("params").cloned().unwrap_or(Value::Null);
 
     if method == "cursor/create_plan" {
-        handle_create_plan(request_id, params, stdin, state, sessions, provider_key).await;
+        handle_create_plan(
+            request_id,
+            params,
+            stdin,
+            state,
+            sessions,
+            provider_key,
+            scoped_ids,
+        )
+        .await;
         return;
     }
 
@@ -1504,7 +1521,7 @@ async fn handle_server_request(
     };
     relay.add_pending_approval(PendingApproval {
         request_id: {
-            let id = if provider_key == "opencode" {
+            let id = if scoped_ids {
                 format!(
                     "{PERMISSION_APPROVAL_PREFIX}{session_id}:{}",
                     normalize_id(&request_id)
@@ -1604,6 +1621,7 @@ async fn handle_create_plan(
     state: &Arc<RwLock<RelayState>>,
     sessions: &Sessions,
     provider_key: &'static str,
+    scoped_ids: bool,
 ) {
     use crate::protocol::ApprovalDecision;
 
@@ -1739,11 +1757,19 @@ async fn handle_create_plan(
 
     let mut relay = state.write().await;
     relay.add_pending_approval(PendingApproval {
-        request_id: format!(
-            "{}{}",
-            protocol::PLAN_APPROVAL_PREFIX,
-            normalize_id(&request_id)
-        ),
+        request_id: if scoped_ids {
+            format!(
+                "{}{session_id}:{}",
+                protocol::PLAN_APPROVAL_PREFIX,
+                normalize_id(&request_id)
+            )
+        } else {
+            format!(
+                "{}{}",
+                protocol::PLAN_APPROVAL_PREFIX,
+                normalize_id(&request_id)
+            )
+        },
         raw_request_id: request_id,
         kind: ApprovalKind::Plan,
         thread_id: session_id.clone(),

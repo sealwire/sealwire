@@ -206,10 +206,9 @@ no workspace related to it is available instead"
             Admission::Trusted(workspace) => {
                 super::git_context::collect_git_context(cwd.clone(), &workspace).await
             }
-            Admission::Restricted(_) => WorkspaceGitContextView {
-                restricted: true,
-                ..super::git_context::read_git_context_without_git(cwd.clone()).await
-            },
+            Admission::Restricted(_) => {
+                super::git_context::restricted_git_context(cwd.clone()).await
+            }
             Admission::Gone => WorkspaceGitContextView {
                 cwd: cwd.clone(),
                 ..WorkspaceGitContextView::default()

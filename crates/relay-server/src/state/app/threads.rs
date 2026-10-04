@@ -484,10 +484,20 @@ impl AppState {
         }
 
         drop(relay);
-        // Project configuration can change a provider's default as soon as trust changes.
+        // Project configuration can change a provider's default and skills as soon as
+        // trust changes.
         self.provider_default_models.write().await.clear();
-        for bridge in self.providers.values() {
-            bridge.refresh_workspace_trust().await?;
+        self.provider_skill_catalogs.write().await.clear();
+        // The grant is already saved, so a provider that cannot apply it is logged
+        // rather than turned into a failed answer that skips the providers after it.
+        for (name, bridge) in &self.providers {
+            if let Err(error) = bridge.refresh_workspace_trust().await {
+                self.push_runtime_log(
+                    "warn",
+                    format!("{name} could not apply the workspace trust change: {error}"),
+                )
+                .await;
+            }
         }
         Ok(WorkspaceTrustReceipt {
             cwd,

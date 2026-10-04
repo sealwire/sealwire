@@ -2,7 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { FileChangeDiff } from "../shared/transcript-react.js";
 import { RightPanelTabs } from "../shared/right-panel-tabs.js";
-import { isWorkspaceRestricted } from "../shared/workspace-chip-model.js";
+import { isWorkspaceRestricted, skippedAgentConfig } from "../shared/workspace-chip-model.js";
 import { ThreadWorkspaceField } from "../shared/workspace-picker.js";
 
 const h = React.createElement;
@@ -888,12 +888,13 @@ const TERMINAL_REVIEW = new Set(["complete", "failed", "cancelled"]);
 export function WorkspaceDiffChip({ store, onTap }) {
   const state = useStoreState(store);
   const stats = computeChangeStats(state.data);
-  const restricted = state.data?.restricted === true;
+  const skipped = skippedAgentConfig(state.workspace?.git);
+  const restricted = state.data?.restricted === true || skipped.length > 0;
   const isClean = !restricted && state.status === "loaded" && stats.fileCount === 0;
   const hasOtherWorktrees = state.workspace?.roots?.some(
     (root) => root.path && root.path !== state.workspace.cwd
   );
-  const notRepo = state.data?.not_a_git_repo;
+  const notRepo = state.data?.not_a_git_repo && skipped.length === 0;
   const unavailable = state.data?.unavailable;
   if (notRepo || (unavailable && !restricted)) return null;
   if (state.status === "idle" && !state.data) return null;
@@ -910,7 +911,9 @@ export function WorkspaceDiffChip({ store, onTap }) {
       "span",
       { className: "workspace-diff-chip-label" },
       restricted
-        ? "Trust needed"
+        ? skipped.length
+          ? "Repo config not loaded"
+          : "Trust needed"
         : isClean
           ? "Worktrees"
           : stats.fileCount === 1

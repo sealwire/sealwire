@@ -54,10 +54,7 @@ impl AppState {
         // the one field withheld.
         match self.admit(&cwd).await {
             Admission::Trusted(workspace) => Ok(collect_git_context(cwd, &workspace).await),
-            Admission::Restricted(_) => Ok(WorkspaceGitContextView {
-                restricted: true,
-                ..read_git_context_without_git(cwd).await
-            }),
+            Admission::Restricted(_) => Ok(restricted_git_context(cwd).await),
             // Not a probe: a missing directory answers exactly as a plain one does.
             Admission::Gone => Ok(WorkspaceGitContextView {
                 cwd,
@@ -72,6 +69,51 @@ impl AppState {
 // implementations drifts, and this one had — it read a merely-reachable directory as
 // granted, and a granted repo's linked worktree as restricted. `TrustGrants::admit` is now
 // the only answer, and `allowed_roots` is only ever a fence.
+
+/// What an ungranted directory gets: its git standing read without git, and the agent
+/// config its sessions are not loading.
+pub(super) async fn restricted_git_context(cwd: String) -> WorkspaceGitContextView {
+    WorkspaceGitContextView {
+        restricted: true,
+        skipped_agent_config: skipped_agent_config(&cwd).await,
+        ..read_git_context_without_git(cwd).await
+    }
+}
+
+/// Each provider's repo-local config, in the folder and at its repository root. Only
+/// names are checked; nothing is read or run.
+const AGENT_CONFIG: &[&str] = &[
+    "CLAUDE.md",
+    ".claude/",
+    ".mcp.json",
+    "AGENTS.md",
+    "opencode.json",
+    "opencode.jsonc",
+    ".opencode/",
+    ".cursor/",
+    ".codex/",
+];
+
+async fn skipped_agent_config(cwd: &str) -> Vec<String> {
+    let folder = std::path::PathBuf::from(cwd);
+    let mut places = vec![folder.clone()];
+    if let Some(root) = super::workspace_trust::repository_root(&folder).await {
+        if root != folder {
+            places.push(root);
+        }
+    }
+    let mut found = Vec::new();
+    for name in AGENT_CONFIG {
+        let path = name.trim_end_matches('/');
+        for place in &places {
+            if tokio::fs::symlink_metadata(place.join(path)).await.is_ok() {
+                found.push(name.to_string());
+                break;
+            }
+        }
+    }
+    found
+}
 
 /// Nothing here reads more than this from a directory the caller named.
 const MAX_GIT_METADATA_BYTES: u64 = 64 * 1024;
@@ -1074,6 +1116,40 @@ mod tests {
 
         assert!(!context.is_repo);
         assert_eq!(context.branch, None);
+    }
+
+    // Sessions in an ungranted folder do not load its own agent config, and the panel has
+    // to say which config that is, or the agent just seems to have forgotten its rules.
+    #[tokio::test]
+    async fn an_ungranted_folder_names_the_agent_config_its_sessions_skip() {
+        let dir = TempDir::new().expect("tmp");
+        let cwd = init_repo(dir.path()).await;
+        let root = std::path::Path::new(&cwd);
+        std::fs::write(root.join("CLAUDE.md"), "rules\n").expect("write");
+        std::fs::write(root.join(".mcp.json"), "{}\n").expect("write");
+        std::fs::create_dir_all(root.join(".cursor")).expect("mkdir");
+        let app = build_app(&cwd, Vec::new()).await;
+
+        let restricted = app
+            .workspace_git_context(None, cwd.clone())
+            .await
+            .expect("must answer");
+        assert_eq!(
+            restricted.skipped_agent_config,
+            ["CLAUDE.md", ".mcp.json", ".cursor/"]
+        );
+
+        app.set_workspace_trust(WorkspaceTrustInput {
+            cwd: cwd.clone(),
+            trusted: true,
+        })
+        .await
+        .expect("grant");
+        let granted = app
+            .workspace_git_context(None, cwd.clone())
+            .await
+            .expect("must answer");
+        assert!(granted.skipped_agent_config.is_empty());
     }
 
     // The grant is a LOCAL act. Nothing here proves the absence of a broker action —

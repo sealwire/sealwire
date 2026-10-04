@@ -244,6 +244,23 @@ impl AcpBridge {
     }
 }
 
+/// OpenCode loads plugins and `opencode.json` MCP for any directory it is asked about, and
+/// the off switch is process-wide, so only a trusted repo's own process may leave it on.
+pub(super) fn configure_launch(
+    command: &mut Command,
+    api: &Api,
+    discovery: &std::path::Path,
+    workspace: Option<&crate::state::app::TrustedWorkspace>,
+) {
+    command.current_dir(discovery);
+    api.configure(command);
+    if workspace.is_none() {
+        command.env("OPENCODE_DISABLE_PROJECT_CONFIG", "1");
+    }
+    #[cfg(unix)]
+    command.process_group(0);
+}
+
 pub(super) async fn discovery_directory() -> Result<std::path::PathBuf, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let directory = crate::state_paths::state_dir(&cwd).join("opencode-discovery");
@@ -269,4 +286,39 @@ fn plain_cli_error(value: &str) -> String {
         }
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn disable_project_config(
+        workspace: Option<&crate::state::app::TrustedWorkspace>,
+    ) -> Option<String> {
+        let discovery = tempfile::TempDir::new().expect("discovery dir");
+        let mut command = Command::new("opencode");
+        configure_launch(&mut command, &Api::for_test(1), discovery.path(), workspace);
+        command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "OPENCODE_DISABLE_PROJECT_CONFIG")
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned())
+    }
+
+    // OpenCode runs a directory's `.opencode/plugin` code for any directory it is asked
+    // about, even only to list its history, so a process with no trusted repo gets none.
+    #[test]
+    fn a_process_with_no_trusted_repo_loads_no_project_config() {
+        assert_eq!(disable_project_config(None).as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn a_process_for_a_trusted_repo_loads_its_config() {
+        let repo = tempfile::TempDir::new().expect("repo dir");
+        let workspace =
+            crate::state::app::TrustedWorkspace::granted_for_test(&repo.path().to_string_lossy())
+                .expect("live dir");
+        assert_eq!(disable_project_config(Some(&workspace)), None);
+    }
 }

@@ -5,9 +5,26 @@ use std::time::Instant;
 const MAX_IDLE_SESSIONS: usize = 2;
 const IDLE_SESSION_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// A process keeps the project config it loaded at spawn, so changed trust needs a new one:
+/// at once when withdrawn (even mid-turn), only once idle when granted.
+fn pool_reusable(closed: bool, had_trust: bool, want_trust: bool, busy: bool) -> bool {
+    if closed {
+        return false;
+    }
+    if had_trust == want_trust {
+        return true;
+    }
+    if had_trust && !want_trust {
+        return false;
+    }
+    busy
+}
+
 struct SessionConnection {
     bridge: Arc<AcpBridge>,
     last_used: Instant,
+    /// Whether this process may load the repo's own config; fixed when it was spawned.
+    trusted: bool,
 }
 
 type Connections = Arc<Mutex<HashMap<String, SessionConnection>>>;
@@ -17,11 +34,23 @@ pub(crate) struct OpenCodeBridge {
     sessions: Connections,
     catalog_directory: std::path::PathBuf,
     catalog_loaded: Mutex<bool>,
+    /// Bumped by every trust refresh, so a process that was still starting can tell it
+    /// missed one.
+    trust_epoch: AtomicU64,
+    /// Every process `spawn_for` started, weakly, so a withdrawal reaches each one.
+    spawned: Mutex<Vec<Spawned>>,
+}
+
+struct Spawned {
+    cwd: String,
+    trusted: bool,
+    process: std::sync::Weak<AcpBridge>,
 }
 
 impl OpenCodeBridge {
     pub(crate) async fn spawn(state: Arc<RwLock<RelayState>>) -> Result<Self, String> {
-        let index = Self::connection(state, true).await?;
+        // Lists history across every folder OpenCode has seen, trusted or not.
+        let index = Self::connection(state, true, None).await?;
         let sessions = Arc::new(Mutex::new(HashMap::new()));
         let weak = Arc::downgrade(&sessions);
         tokio::spawn(async move {
@@ -38,12 +67,59 @@ impl OpenCodeBridge {
             sessions,
             catalog_directory: super::discovery_directory().await?,
             catalog_loaded: Mutex::new(false),
+            trust_epoch: AtomicU64::new(0),
+            spawned: Mutex::new(Vec::new()),
         })
+    }
+
+    /// The only way an OpenCode process for a user folder starts: under the folder's
+    /// current trust, and registered where a withdrawal will stop it.
+    async fn spawn_for(&self, cwd: &str) -> Result<(Arc<AcpBridge>, bool), String> {
+        // A trust change landing while the process starts sends it round once more.
+        for _ in 0..2 {
+            let seen = self.trust_epoch.load(Ordering::SeqCst);
+            let workspace = self.trusted_workspace(cwd).await;
+            let trusted = workspace.is_some();
+            let process =
+                Arc::new(Self::connection(self.index.state.clone(), false, workspace).await?);
+            if self.register(cwd, trusted, &process, seen).await {
+                return Ok((process, trusted));
+            }
+        }
+        Err("OpenCode workspace trust kept changing while the process started".into())
+    }
+
+    /// Registered before the epoch is read, so a refresh either finds this process or is
+    /// seen here; in the second case a process whose trust moved is stopped.
+    async fn register(
+        &self,
+        cwd: &str,
+        trusted: bool,
+        process: &Arc<AcpBridge>,
+        seen: u64,
+    ) -> bool {
+        {
+            let mut spawned = self.spawned.lock().await;
+            spawned.retain(|entry| entry.process.strong_count() > 0);
+            spawned.push(Spawned {
+                cwd: cwd.to_string(),
+                trusted,
+                process: Arc::downgrade(process),
+            });
+        }
+        if self.trust_epoch.load(Ordering::SeqCst) == seen
+            || self.trusted_workspace(cwd).await.is_some() == trusted
+        {
+            return true;
+        }
+        process.kill_process_group();
+        false
     }
 
     async fn connection(
         state: Arc<RwLock<RelayState>>,
         owns_provider_connection: bool,
+        workspace: Option<crate::state::app::TrustedWorkspace>,
     ) -> Result<AcpBridge, String> {
         AcpBridge::spawn_connection(
             state,
@@ -52,25 +128,51 @@ impl OpenCodeBridge {
             "OpenCode",
             "opencode",
             owns_provider_connection,
+            workspace,
         )
         .await
+    }
+
+    async fn trusted_workspace(&self, cwd: &str) -> Option<crate::state::app::TrustedWorkspace> {
+        let grants = { self.index.state.read().await.trust_grants() };
+        grants.admit(cwd).await.trusted().cloned()
     }
 
     async fn session(&self, id: &str) -> Result<Arc<AcpBridge>, String> {
         let lock = self.index.load_lock(id).await;
         let _guard = lock.lock().await;
-        {
-            let mut sessions = self.sessions.lock().await;
-            if let Some(connection) = sessions.get_mut(id) {
-                if !connection.bridge.stream_closed.load(Ordering::Acquire) {
+        // The cwd comes off the cached connection, so the reuse check touches neither the
+        // wire nor the index.
+        let cached = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .get(id)
+                .map(|connection| (connection.bridge.clone(), connection.trusted))
+        };
+        if let Some((bridge, had_trust)) = cached {
+            let (busy, cwd) = {
+                let runtime = bridge.sessions.lock().await;
+                let session = runtime.get(id);
+                (
+                    session.is_some_and(|session| session.turn_id.is_some()),
+                    session
+                        .map(|session| session.cwd.clone())
+                        .unwrap_or_default(),
+                )
+            };
+            let closed = bridge.stream_closed.load(Ordering::Acquire);
+            let want_trust = self.trusted_workspace(&cwd).await.is_some();
+            if pool_reusable(closed, had_trust, want_trust, busy) {
+                let mut sessions = self.sessions.lock().await;
+                if let Some(connection) = sessions.get_mut(id) {
                     connection.last_used = Instant::now();
                     return Ok(connection.bridge.clone());
                 }
             }
-            sessions.remove(id);
+            self.sessions.lock().await.remove(id);
         }
         let cwd = self.index.resolve_cwd(id).await?;
-        let bridge = Arc::new(Self::connection(self.index.state.clone(), false).await?);
+        let (bridge, trusted) = self.spawn_for(&cwd).await?;
         bridge.sessions.lock().await.insert(
             id.to_string(),
             SessionRuntime {
@@ -84,13 +186,14 @@ impl OpenCodeBridge {
             SessionConnection {
                 bridge: bridge.clone(),
                 last_used: Instant::now(),
+                trusted,
             },
         );
         evict_idle_sessions(&self.sessions).await;
         Ok(bridge)
     }
 
-    async fn remember(&self, result: &StartThreadResult, bridge: Arc<AcpBridge>) {
+    async fn remember(&self, result: &StartThreadResult, bridge: Arc<AcpBridge>, trusted: bool) {
         absorb_thread_cwds(
             &mut *self.index.sessions.lock().await,
             std::slice::from_ref(&result.thread),
@@ -100,6 +203,7 @@ impl OpenCodeBridge {
             SessionConnection {
                 bridge,
                 last_used: Instant::now(),
+                trusted,
             },
         );
         evict_idle_sessions(&self.sessions).await;
@@ -126,16 +230,69 @@ impl ProviderBridge for OpenCodeBridge {
         Ok(models)
     }
     async fn default_model(&self, cwd: &str) -> Result<String, String> {
-        self.index.default_model(cwd).await
+        // The index disables project config, so a trusted repo's own `model` setting shows
+        // only in a process that loads it; this throwaway one dies when the probe returns.
+        if self.trusted_workspace(cwd).await.is_none() {
+            return self.index.default_model(cwd).await;
+        }
+        let (probe, _) = self.spawn_for(cwd).await?;
+        probe.default_model(cwd).await
+    }
+    /// A process keeps the plugins and MCP it loaded, so withdrawal stops every one started for
+    /// the folder, even mid-call; a grant only retires idle pooled ones, as Pi does.
+    async fn refresh_workspace_trust(&self) -> Result<(), String> {
+        self.trust_epoch.fetch_add(1, Ordering::SeqCst);
+        let trusted_spawns: Vec<_> = {
+            let mut spawned = self.spawned.lock().await;
+            spawned.retain(|entry| entry.process.strong_count() > 0);
+            spawned
+                .iter()
+                .filter(|entry| entry.trusted)
+                .filter_map(|entry| Some((entry.cwd.clone(), entry.process.upgrade()?)))
+                .collect()
+        };
+        for (cwd, process) in trusted_spawns {
+            if self.trusted_workspace(&cwd).await.is_none() {
+                process.kill_process_group();
+            }
+        }
+        let pool: Vec<_> = self
+            .sessions
+            .lock()
+            .await
+            .iter()
+            .map(|(id, connection)| (id.clone(), connection.bridge.clone(), connection.trusted))
+            .collect();
+        for (id, bridge, was_trusted) in pool {
+            let (cwd, running) = bridge
+                .sessions
+                .lock()
+                .await
+                .get(&id)
+                .map(|session| (session.cwd.clone(), session.turn_id.is_some()))
+                .unwrap_or_default();
+            let trusted = self.trusted_workspace(&cwd).await.is_some();
+            if trusted == was_trusted || (trusted && running) {
+                continue;
+            }
+            self.sessions.lock().await.remove(&id);
+            let mut relay = self.index.state.write().await;
+            relay.push_log(
+                "info",
+                format!("Closing OpenCode session {id} after workspace trust changed"),
+            );
+            relay.notify();
+        }
+        Ok(())
     }
     async fn start_thread(&self, request: StartThreadRequest) -> Result<StartThreadResult, String> {
         if matches!(request.purpose, crate::provider::SessionPurpose::Seat(_)) {
             return Err("OpenCode Task seats are not supported".into());
         }
         // OpenCode's ACP MCP registration is directory-wide within one process.
-        let bridge = Arc::new(Self::connection(self.index.state.clone(), false).await?);
+        let (bridge, trusted) = self.spawn_for(&request.cwd).await?;
         let result = bridge.start_thread(request).await?;
-        self.remember(&result, bridge).await;
+        self.remember(&result, bridge, trusted).await;
         Ok(result)
     }
     async fn resume_thread(&self, id: &str, approval: &str, sandbox: &str) -> Result<(), String> {
@@ -332,7 +489,7 @@ impl ProviderBridge for OpenCodeBridge {
         } else {
             None
         };
-        let bridge = Arc::new(Self::connection(self.index.state.clone(), false).await?);
+        let (bridge, trusted) = self.spawn_for(&cwd).await?;
         let forked = bridge
             .opencode_request(
                 reqwest::Method::POST,
@@ -379,7 +536,7 @@ impl ProviderBridge for OpenCodeBridge {
             started_turn_id: None,
         };
         result.thread.forked_from = Some(request.source_thread_id);
-        self.remember(&result, bridge).await;
+        self.remember(&result, bridge, trusted).await;
         Ok(Some(result))
     }
     fn provider_name(&self) -> &'static str {
@@ -463,6 +620,20 @@ fn fork_boundary(
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_pooled_process_is_reused_only_while_its_trust_still_matches() {
+        // Unchanged trust, open stream: reuse.
+        assert!(pool_reusable(false, true, true, false));
+        assert!(pool_reusable(false, false, false, true));
+        // Closed stream never reuses.
+        assert!(!pool_reusable(true, true, true, false));
+        // Withdrawn trust drops the process at once, even mid-turn, to stop its config.
+        assert!(!pool_reusable(false, true, false, true));
+        // Granted trust waits for the running turn, then respawns to load the config.
+        assert!(pool_reusable(false, false, true, true));
+        assert!(!pool_reusable(false, false, true, false));
+    }
+
     #[tokio::test]
     async fn model_catalog_cache_retries_failure_then_reuses_memory_for_its_lifetime() {
         use axum::{routing::get, Json, Router};
@@ -511,6 +682,8 @@ mod tests {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             catalog_directory: directory.path().into(),
             catalog_loaded: Mutex::new(false),
+            trust_epoch: AtomicU64::new(0),
+            spawned: Mutex::new(Vec::new()),
         };
         assert!(bridge.list_models().await.is_err());
         for result in futures_util::future::join_all((0..16).map(|_| bridge.list_models())).await {
@@ -573,6 +746,7 @@ mod tests {
                 SessionConnection {
                     bridge,
                     last_used: Instant::now() - Duration::from_secs(10 - id),
+                    trusted: false,
                 },
             );
         }
@@ -607,6 +781,156 @@ mod tests {
         );
     }
 
+    // A process keeps the plugins and MCP servers it loaded at spawn, so a trust change
+    // replaces it: at once when withdrawn, mid-turn or not; once idle when granted.
+    #[tokio::test]
+    async fn a_trust_change_replaces_processes_spawned_under_the_old_trust() {
+        let repo = tempfile::tempdir().unwrap();
+        let repo = repo.path().canonicalize().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let other = other.path().canonicalize().unwrap();
+        let (changes, _) = tokio::sync::watch::channel(0);
+        let state = Arc::new(RwLock::new(RelayState::new(
+            "/tmp".into(),
+            changes,
+            crate::state::SecurityProfile::private(),
+        )));
+        let (outbound, _index_peer) = tokio::io::duplex(8192);
+        let (_index_writer, inbound) = tokio::io::duplex(8192);
+        let index = AcpBridge::for_test(state.clone(), outbound, inbound, "opencode");
+        let mut peers = Vec::new();
+        let mut pool = HashMap::new();
+        for (id, cwd, trusted, running) in [
+            ("loaded", &repo, true, true),
+            ("plain-busy", &other, false, true),
+            ("plain-idle", &other, false, false),
+        ] {
+            let (connection, peer, writer) = mock_connection();
+            peers.push((peer, writer));
+            connection.sessions.lock().await.insert(
+                id.into(),
+                SessionRuntime {
+                    cwd: cwd.to_string_lossy().into(),
+                    turn_id: running.then(|| "turn".into()),
+                    ..Default::default()
+                },
+            );
+            pool.insert(
+                id.to_string(),
+                SessionConnection {
+                    bridge: Arc::new(connection),
+                    last_used: Instant::now(),
+                    trusted,
+                },
+            );
+        }
+        let bridge = OpenCodeBridge {
+            index,
+            sessions: Arc::new(Mutex::new(pool)),
+            catalog_directory: "/tmp".into(),
+            catalog_loaded: Mutex::new(false),
+            trust_epoch: AtomicU64::new(0),
+            spawned: Mutex::new(Vec::new()),
+        };
+
+        state.write().await.trusted_workspaces = vec![other.to_string_lossy().into()];
+        bridge.refresh_workspace_trust().await.unwrap();
+
+        let mut kept: Vec<_> = bridge.sessions.lock().await.keys().cloned().collect();
+        kept.sort();
+        assert_eq!(kept, ["plain-busy"]);
+    }
+
+    fn opencode_with(index: AcpBridge) -> OpenCodeBridge {
+        OpenCodeBridge {
+            index,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            catalog_directory: "/tmp".into(),
+            catalog_loaded: Mutex::new(false),
+            trust_epoch: AtomicU64::new(0),
+            spawned: Mutex::new(Vec::new()),
+        }
+    }
+
+    async fn trusted_repo() -> (tempfile::TempDir, String, Arc<RwLock<RelayState>>) {
+        let repo = tempfile::tempdir().unwrap();
+        let path = repo
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let (changes, _) = tokio::sync::watch::channel(0);
+        let state = Arc::new(RwLock::new(RelayState::new(
+            "/tmp".into(),
+            changes,
+            crate::state::SecurityProfile::private(),
+        )));
+        state.write().await.trusted_workspaces.push(path.clone());
+        (repo, path, state)
+    }
+
+    fn opencode_for(
+        state: &Arc<RwLock<RelayState>>,
+    ) -> (
+        OpenCodeBridge,
+        tokio::io::DuplexStream,
+        tokio::io::DuplexStream,
+    ) {
+        let (outbound, peer) = tokio::io::duplex(8192);
+        let (writer, inbound) = tokio::io::duplex(8192);
+        let index = AcpBridge::for_test(state.clone(), outbound, inbound, "opencode");
+        (opencode_with(index), peer, writer)
+    }
+
+    // A refresh cannot see a process that is still starting; one that loaded the repo's
+    // plugins and MCP servers across a withdrawal has to stop when it registers.
+    #[tokio::test]
+    async fn a_process_started_across_a_withdrawal_is_stopped() {
+        let (_repo, repo, state) = trusted_repo().await;
+        let (bridge, _peer, _writer) = opencode_for(&state);
+        let seen = bridge.trust_epoch.load(Ordering::SeqCst);
+        let (spawned, _p, _w) = mock_connection();
+        let spawned = Arc::new(spawned);
+
+        state.write().await.trusted_workspaces.clear();
+        bridge.refresh_workspace_trust().await.unwrap();
+
+        assert!(!bridge.register(&repo, true, &spawned, seen).await);
+        assert!(spawned.closing.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn a_refresh_that_leaves_the_folder_trusted_keeps_the_process() {
+        let (_repo, repo, state) = trusted_repo().await;
+        let (bridge, _peer, _writer) = opencode_for(&state);
+        let seen = bridge.trust_epoch.load(Ordering::SeqCst);
+        let (spawned, _p, _w) = mock_connection();
+        let spawned = Arc::new(spawned);
+
+        bridge.refresh_workspace_trust().await.unwrap();
+
+        assert!(bridge.register(&repo, true, &spawned, seen).await);
+        assert!(!spawned.closing.load(Ordering::Acquire));
+    }
+
+    // Covers processes outside the pool too (a default-model probe, a session a call
+    // still holds): removing them from the pool alone would leave them running.
+    #[tokio::test]
+    async fn withdrawing_trust_stops_every_process_that_loaded_the_repo() {
+        let (_repo, repo, state) = trusted_repo().await;
+        let (bridge, _peer, _writer) = opencode_for(&state);
+        let (probe, _p, _w) = mock_connection();
+        let probe = Arc::new(probe);
+        let seen = bridge.trust_epoch.load(Ordering::SeqCst);
+        assert!(bridge.register(&repo, true, &probe, seen).await);
+
+        state.write().await.trusted_workspaces.clear();
+        bridge.refresh_workspace_trust().await.unwrap();
+
+        assert!(probe.closing.load(Ordering::Acquire));
+    }
+
     #[tokio::test]
     async fn failed_close_releases_connection_without_blocking_other_sessions() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -620,6 +944,7 @@ mod tests {
                 SessionConnection {
                     bridge: Arc::new(closing),
                     last_used: Instant::now(),
+                    trusted: false,
                 },
             ),
             (
@@ -627,6 +952,7 @@ mod tests {
                 SessionConnection {
                     bridge: Arc::new(other),
                     last_used: Instant::now(),
+                    trusted: false,
                 },
             ),
         ]);
@@ -635,6 +961,8 @@ mod tests {
             sessions: Arc::new(Mutex::new(connections)),
             catalog_directory: "/tmp".into(),
             catalog_loaded: Mutex::new(false),
+            trust_epoch: AtomicU64::new(0),
+            spawned: Mutex::new(Vec::new()),
         };
         let close = bridge.release_thread("closing");
         let other = async {

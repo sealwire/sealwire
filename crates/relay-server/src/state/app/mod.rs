@@ -1668,7 +1668,7 @@ const WORKSPACE_DIFF_UNTRACKED_MAX_BYTES: usize = 64 * 1024;
 // proved only that a directory existed. Every git helper already took it, so the shape of
 // a capability was there — but anyone could mint one, so it granted nothing. It now comes
 // from `workspace_trust`, where the only constructor decides trust on the way through.
-pub(crate) use workspace_trust::{Admission, LiveDir, TrustGrants, TrustedWorkspace};
+pub(crate) use workspace_trust::{grant_key, Admission, LiveDir, TrustGrants, TrustedWorkspace};
 
 /// The result of resolving a recorded workspace.
 ///

@@ -354,8 +354,14 @@ export function query({ prompt, options = {} }) {
     }
   })();
 
+  const initDelayMs = Number.parseInt(process.env.CLAUDE_FAKE_INIT_DELAY_MS || "0", 10);
   return {
     async *[Symbol.asyncIterator]() {
+      // Hold back the `system/init` message so the session stays without a provider id —
+      // the window a trust revocation must still reach a just-started query in.
+      if (initDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, initDelayMs));
+      }
       while (true) {
         while (outQueue.length > 0) {
           yield outQueue.shift();
@@ -367,13 +373,17 @@ export function query({ prompt, options = {} }) {
       }
     },
     async interrupt() {
+      writeLine({ type: "__interrupt", session_id: sessionId });
       if (interruptDelayMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, interruptDelayMs));
       }
       ended = true;
       drain();
     },
+    // The real SDK ends the subprocess (and its MCP transports) only here, not on
+    // interrupt; the marker lets a test prove a teardown actually called it.
     close() {
+      writeLine({ type: "__close", session_id: sessionId });
       ended = true;
       drain();
     },

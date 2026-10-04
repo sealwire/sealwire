@@ -58,6 +58,12 @@ export function isWorkspaceRestricted(context) {
   return Boolean(context?.is_repo) && context?.restricted === true;
 }
 
+/** The repo's own agent config that sessions skip until the folder is trusted, repo or not. */
+export function skippedAgentConfig(context) {
+  const skipped = context?.restricted === true ? context.skipped_agent_config : null;
+  return Array.isArray(skipped) ? skipped : [];
+}
+
 // Last path segment for notes that name a tree. Never returns "".
 export function pathBasename(path) {
   const raw = typeof path === "string" ? path : "";

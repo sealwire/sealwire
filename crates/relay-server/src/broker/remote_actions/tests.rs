@@ -1268,6 +1268,7 @@ fn encrypted_fetch_workspace_git_context_result_reaches_the_device() {
             dirty: true,
             dirty_known: true,
             restricted: false,
+            skipped_agent_config: Vec::new(),
         }),
         reviews: None,
         workflows: None,

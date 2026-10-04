@@ -83,7 +83,13 @@ import {
   readSessionMessagePage,
 } from "./session-page.mjs";
 
-const DEFAULT_SETTING_SOURCES = ["user", "project", "local"];
+// A repo's own settings and `.mcp.json` run hooks and servers as the user before any
+// turn. Only the relay knows which folders the user trusted, so it alone widens this.
+const DEFAULT_SETTING_SOURCES = ["user"];
+
+function settingSourcesFor(cmd) {
+  return Array.isArray(cmd?.settingSources) ? cmd.settingSources : DEFAULT_SETTING_SOURCES;
+}
 
 // Each session pins its own ~250MB `claude` child. Explicit release is the
 // primary reclaim path; this cap is the backstop for threads nobody returns.
@@ -451,6 +457,25 @@ async function createWorkerSession(sdk, options, resume) {
     if (resume) resume();
   }
 
+  function interrupt() {
+    return typeof query.interrupt === "function"
+      ? Promise.resolve(query.interrupt()).catch(() => {})
+      : Promise.resolve();
+  }
+
+  // interrupt only aborts the turn; the child and its MCP servers live until close().
+  function closeQuery() {
+    ended = true;
+    flush();
+    if (typeof query.close === "function") {
+      try {
+        query.close();
+      } catch {
+        // Already torn down; nothing to do.
+      }
+    }
+  }
+
   return {
     sessionId: undefined,
     async send(sdkMessage) {
@@ -460,15 +485,19 @@ async function createWorkerSession(sdk, options, resume) {
     stream() {
       return query;
     },
-    close() {
+    // Cancel: the lifecycle awaits the interrupt together with the stream consumer before
+    // emitting the authoritative stopped event.
+    async close() {
       ended = true;
       flush();
-      // Stop any in-flight turn. The cancel lifecycle awaits this request together
-      // with the stream consumer before emitting the authoritative stopped event.
-      if (typeof query.interrupt === "function") {
-        return Promise.resolve(query.interrupt()).catch(() => {});
-      }
-      return Promise.resolve();
+      await interrupt();
+      closeQuery();
+    },
+    // Teardown: never wait on interrupt, so a CLI that does not answer cannot keep the
+    // child and the repo's MCP alive.
+    terminate() {
+      void interrupt();
+      closeQuery();
     },
   };
 }
@@ -565,7 +594,7 @@ async function withIdleModelProbe(sdk, cmd, read) {
   await ensureWorkspaceCwdUsable(cmd.cwd);
   const query = sdk.query({
     prompt: idlePrompt(),
-    options: { cwd: cmd.cwd || process.cwd(), settingSources: DEFAULT_SETTING_SOURCES },
+    options: { cwd: cmd.cwd || process.cwd(), settingSources: settingSourcesFor(cmd) },
   });
 
   try {
@@ -615,7 +644,7 @@ async function readSkillCommands(sdk, cmd) {
   await ensureWorkspaceCwdUsable(cmd.cwd);
   const query = sdk.query({
     prompt: idlePrompt(),
-    options: { cwd: cmd.cwd || process.cwd(), settingSources: DEFAULT_SETTING_SOURCES },
+    options: { cwd: cmd.cwd || process.cwd(), settingSources: settingSourcesFor(cmd) },
   });
 
   try {
@@ -684,6 +713,9 @@ function createSessionEntry({ key, providerSessionId = null, cmd, pendingStartRe
     cwd: cmd.cwd ?? process.cwd(),
     model: cmd.model ?? "claude-sonnet-4-6",
     pendingThreadId: cmd.pending_thread_id || null,
+    // Promotion re-keys the entry; the key it started under stays a valid handle for a
+    // relay that listed it before init and releases it after.
+    startKey: key,
   };
 }
 
@@ -695,7 +727,10 @@ function findSessionEntry(sessions, providerSessionId) {
   if (!providerSessionId) return null;
   return (
     sessions.get(sessionKey(providerSessionId)) ||
-    [...sessions.values()].find((entry) => entry.pendingThreadId === providerSessionId) ||
+    [...sessions.values()].find(
+      (entry) =>
+        entry.pendingThreadId === providerSessionId || entry.startKey === providerSessionId,
+    ) ||
     null
   );
 }
@@ -712,7 +747,7 @@ function closeSessionEntry(entry) {
   entry.stopGeneration += 1;
   entry.stopOperation = null;
   entry.cancelFlag.current = true;
-  entry.session?.close();
+  entry.session?.terminate();
   entry.progressTracker?.stop();
   entry.session = null;
   entry.streamTask = null;
@@ -827,6 +862,35 @@ function releaseSession(sessions, providerSessionId, context) {
   }
   closeAndRemoveSession(sessions, entry, context);
   return { released: true };
+}
+
+// For withdrawn trust: the repo's hooks and MCP servers live in this child, so it
+// cannot wait for the turn, which fails rather than finishing under them.
+function forceReleaseSession(sessions, providerSessionId, reason, context) {
+  const entry = findSessionEntry(sessions, providerSessionId);
+  if (!entry) return { released: false, noop: true, reason: "no live session for that id" };
+  const turnIds = [
+    ...(entry.currentTurnId ? [entry.currentTurnId] : []),
+    ...entry.pendingTurns.splice(0).map((pending) => pending.turnId),
+  ];
+  const sessionId = entry.providerSessionId || entry.pendingThreadId;
+  closeAndRemoveSession(sessions, entry, context);
+  for (const turnId of turnIds) {
+    emit({ type: "done", provider_session_id: sessionId, turn_id: turnId, failed: true, reason });
+  }
+  return { released: true };
+}
+
+function liveSessionRows(sessions) {
+  // A starting query has no provider id until init yet already loads the repo's settings;
+  // the key it started under is the handle trust revocation can release it by.
+  return [...sessions.values()]
+    .filter((entry) => entry.options)
+    .map((entry) => ({
+      provider_session_id: entry.providerSessionId || entry.pendingThreadId || entry.startKey,
+      cwd: entry.options?.cwd ?? entry.cwd,
+      setting_sources: entry.options?.settingSources ?? DEFAULT_SETTING_SOURCES,
+    }));
 }
 
 // The pinned SDK documents missing local sessions as an Error and currently
@@ -1318,6 +1382,10 @@ function sessionOptionsChanged(prev, next) {
   if (JSON.stringify(prev.allowedTools ?? null) !== JSON.stringify(next.allowedTools ?? null)) {
     return true;
   }
+  // Trust granted or withdrawn: a repo's hooks and MCP servers load only at query().
+  if (JSON.stringify(prev.settingSources ?? null) !== JSON.stringify(next.settingSources ?? null)) {
+    return true;
+  }
   return false;
 }
 
@@ -1376,6 +1444,13 @@ async function ensureLiveSession(
   entry.backgroundTasks = [];
   entry.foldedReply = null;
   entry.session = await createWorkerSession(sdk, entry.options, resumeId || undefined);
+  // A forced release (trust withdrawal) during the await above removes the entry; the
+  // query it could not yet see is loading the repo's hooks/MCP, so end it now.
+  if (!sessions.has(entry.key)) {
+    entry.session.terminate();
+    entry.session = null;
+    throw new Error("Claude session was released while it was starting");
+  }
   startSessionStream(sessions, entry, context);
 }
 
@@ -1883,9 +1958,16 @@ async function main() {
           emitErrorResponse(cmd.id, "release_session requires provider_session_id");
           break;
         }
-        const result = releaseSession(sessions, sessionId, sessionContext);
+        const result = cmd.force
+          ? forceReleaseSession(sessions, sessionId, cmd.reason || "Session was closed", sessionContext)
+          : releaseSession(sessions, sessionId, sessionContext);
         log(`release_session ${sessionId}: ${result.released ? "released" : result.reason}`);
         emitResponse(cmd.id, { provider_session_id: sessionId, ...result });
+        break;
+      }
+
+      case "list_live_sessions": {
+        emitResponse(cmd.id, { sessions: liveSessionRows(sessions) });
         break;
       }
 

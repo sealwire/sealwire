@@ -2844,6 +2844,58 @@ is also what keeps the refusal from confirming it exists: {error}"
         assert!(!granted.restricted && granted.diff.contains("CHANGED-IN-SIBLING"));
     }
 
+    // The grant is already saved when providers hear about it, so one that cannot
+    // apply it must not turn the answer into an error or keep the others from hearing.
+    #[tokio::test]
+    async fn a_provider_failing_to_apply_trust_does_not_fail_the_grant_or_skip_the_rest() {
+        let (change_tx, _) = watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            "/tmp".to_string(),
+            change_tx.clone(),
+            SecurityProfile::private(),
+        )));
+        let failing = Arc::new(FakeProviderBridge::spawn(relay.clone()).await.unwrap());
+        failing.refuse_trust_refresh();
+        let healthy = Arc::new(FakeProviderBridge::spawn(relay.clone()).await.unwrap());
+        let mut providers: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::new();
+        providers.insert("failing".into(), failing.clone() as Arc<dyn ProviderBridge>);
+        providers.insert("healthy".into(), healthy.clone() as Arc<dyn ProviderBridge>);
+        let app = AppState::from_parts(relay, providers, change_tx);
+
+        let receipt = app
+            .set_workspace_trust(crate::protocol::WorkspaceTrustInput {
+                cwd: "/work/repo".into(),
+                trusted: true,
+            })
+            .await;
+
+        assert!(receipt.is_ok(), "{receipt:?}");
+        assert_eq!(
+            (failing.trust_refreshes(), healthy.trust_refreshes()),
+            (1, 1)
+        );
+    }
+
+    // Trusting or withdrawing changes which skills a folder's sessions load.
+    #[tokio::test]
+    async fn a_trust_change_forgets_the_skill_menus_it_made_stale() {
+        let fixture = skill_fixture().await;
+        let menu = || fixture.app.thread_skills(None, "claude-skills");
+        menu().await.unwrap();
+
+        fixture
+            .app
+            .set_workspace_trust(crate::protocol::WorkspaceTrustInput {
+                cwd: fixture.b().to_string(),
+                trusted: true,
+            })
+            .await
+            .expect("grant");
+        menu().await.unwrap();
+
+        assert_eq!(fixture.claude.list_skills_calls.load(Ordering::Relaxed), 2);
+    }
+
     // `git worktree list` reports whatever `.git/worktrees/*/gitdir` names; only a tree whose
     // own `.git` points back is the same repository. Trusted, so only the relation can refuse.
     #[tokio::test]

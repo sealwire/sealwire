@@ -18,8 +18,8 @@
 //!
 //! [`LiveDir`] is the other half: a directory that exists, carrying no permission to run
 //! anything. Handing a workspace to a provider takes one of these, because starting an
-//! agent somewhere is gated by the agent's own harness, and is the user's deliberate act
-//! rather than an ambient probe.
+//! agent is the user's deliberate act. The repo's own agent config (hooks, MCP servers,
+//! plugins) still runs as the user, so each bridge asks [`TrustGrants::admit`] first.
 
 use std::path::{Path, PathBuf};
 

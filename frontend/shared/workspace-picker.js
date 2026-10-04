@@ -15,6 +15,7 @@ import {
   abbreviateHomePath,
   gitContextLabel,
   isWorkspaceRestricted,
+  skippedAgentConfig,
   workspaceOriginNote,
 } from "./workspace-chip-model.js";
 import {
@@ -519,13 +520,17 @@ function PickerRow({ row, isActive, onPick }) {
 /** Restricted-Mode strip for Diff/Review. Absent `onTrustWorkspace` ⇒ remote/read-only. */
 function trustPrompt(workspace, onTrustWorkspace) {
   const cwd = workspace?.cwd || "";
-  if (!cwd || !isWorkspaceRestricted(workspace?.git)) {
+  const skipped = skippedAgentConfig(workspace?.git);
+  if (!cwd || (!isWorkspaceRestricted(workspace?.git) && skipped.length === 0)) {
     return null;
   }
   const canGrant = typeof onTrustWorkspace === "function";
+  const state = skipped.length
+    ? `Restricted — agents here skip this folder’s own config (${skipped.join(", ")}).`
+    : "Restricted — this folder isn’t trusted.";
   const copy = canGrant
-    ? "Restricted — trusting lets this relay run git here (including hooks)."
-    : "Restricted — this folder isn’t trusted. Trust it on the computer running the relay.";
+    ? `${state} Trusting it loads that config and lets this relay run git here; its hooks, MCP servers and plugins then run as you.`
+    : `${state} Trust it on the computer running the relay.`;
   return h(
     "div",
     {
@@ -540,7 +545,7 @@ function trustPrompt(workspace, onTrustWorkspace) {
           {
             className: "thread-workspace-trust-button",
             onClick: () => onTrustWorkspace(cwd),
-            title: `Trust ${cwd} — allows this relay to run git (and repository hooks) in that folder`,
+            title: `Trust ${cwd} — agents load its own config and this relay runs git there`,
             type: "button",
           },
           "Trust this folder"

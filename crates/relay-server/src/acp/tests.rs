@@ -7,6 +7,92 @@ use super::rpc::{capture_op, plan_update, TranscriptOp};
 use super::SessionRuntime;
 use crate::protocol::TranscriptEntryView;
 
+mod in_memory {
+    use super::super::*;
+
+    impl AcpBridge {
+        /// A bridge whose peer is an in-memory duplex: send failures and stream death,
+        /// where a turn can be stranded, cannot be produced on demand by a live agent.
+        pub(crate) fn for_test(
+            state: Arc<RwLock<RelayState>>,
+            outbound: impl tokio::io::AsyncWrite + Send + Unpin + 'static,
+            inbound: impl tokio::io::AsyncRead + Send + Unpin + 'static,
+            provider_key: &'static str,
+        ) -> Self {
+            Self::for_test_owning(state, outbound, inbound, provider_key, true)
+        }
+
+        /// One of several processes serving the provider, like a trusted folder's Cursor.
+        pub(crate) fn for_test_pooled(
+            state: Arc<RwLock<RelayState>>,
+            outbound: impl tokio::io::AsyncWrite + Send + Unpin + 'static,
+            inbound: impl tokio::io::AsyncRead + Send + Unpin + 'static,
+            provider_key: &'static str,
+        ) -> Self {
+            Self::for_test_owning(state, outbound, inbound, provider_key, false)
+        }
+
+        fn for_test_owning(
+            state: Arc<RwLock<RelayState>>,
+            outbound: impl tokio::io::AsyncWrite + Send + Unpin + 'static,
+            inbound: impl tokio::io::AsyncRead + Send + Unpin + 'static,
+            provider_key: &'static str,
+            owns_provider_connection: bool,
+        ) -> Self {
+            let pending_responses: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
+            let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+            let captures: Captures = Arc::new(Mutex::new(HashMap::new()));
+            let stdin: Outbound = Arc::new(Mutex::new(Box::new(outbound)));
+            let models = Arc::new(Mutex::new(Vec::new()));
+
+            let closing = Arc::new(AtomicBool::new(false));
+            let stream_closed = Arc::new(AtomicBool::new(false));
+            rpc::spawn_stdout_reader(rpc::ReaderContext {
+                closing: closing.clone(),
+                stream_closed: stream_closed.clone(),
+                owns_provider_connection,
+                stdout: Box::new(inbound),
+                stdin: stdin.clone(),
+                pending_responses: pending_responses.clone(),
+                state: state.clone(),
+                sessions: sessions.clone(),
+                captures: captures.clone(),
+                models: models.clone(),
+                models_cache: None,
+                provider_key,
+            });
+
+            Self {
+                _child: None,
+                stdin,
+                pending_responses,
+                next_request_id: AtomicU64::new(1),
+                next_turn_id: AtomicU64::new(1),
+                owns_provider_connection,
+                state,
+                provider_name: provider_key,
+                display_name: "TestAgent",
+                // Deliberately different from the provider key, which is the whole
+                // point of the field.
+                binary_name: "cursor-agent",
+                sessions,
+                captures,
+                models,
+                models_cache: None,
+                load_locks: Arc::new(Mutex::new(HashMap::new())),
+                capabilities: Arc::new(Mutex::new(protocol::AgentCapabilities::default())),
+                authenticated: AtomicBool::new(true),
+                discovery_lock: Mutex::new(()),
+                opencode_api: None,
+                closing,
+                stream_closed,
+                #[cfg(unix)]
+                process_group: None,
+            }
+        }
+    }
+}
+
 fn session() -> SessionRuntime {
     SessionRuntime::default()
 }
@@ -852,6 +938,46 @@ fn relay_state() -> std::sync::Arc<RwLock<RelayState>> {
         change_tx,
         SecurityProfile::private(),
     )))
+}
+
+// Withdrawing trust is only real if the MCP servers a repo's config started die with the
+// agent; `closing` alone is set even when nothing is signalled.
+#[cfg(unix)]
+#[tokio::test]
+async fn stopping_a_bridge_ends_the_servers_its_agent_started() {
+    use tokio::io::AsyncBufReadExt;
+    let mut agent = tokio::process::Command::new("sh")
+        .args(["-c", "sleep 60 & echo $!; wait"])
+        .stdout(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    tokio::io::BufReader::new(agent.stdout.take().unwrap())
+        .read_line(&mut line)
+        .await
+        .unwrap();
+    let server: i32 = line.trim().parse().unwrap();
+    let (outbound, _peer) = tokio::io::duplex(64);
+    let (_writer, inbound) = tokio::io::duplex(64);
+    let mut bridge = AcpBridge::for_test(relay_state(), outbound, inbound, "opencode");
+    bridge.process_group = agent.id();
+
+    bridge.kill_process_group();
+
+    let wait = std::time::Duration::from_secs(5);
+    tokio::time::timeout(wait, agent.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    let server_gone = async {
+        while unsafe { libc::kill(server, 0) } == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(wait, server_gone)
+        .await
+        .expect("the server the agent started outlived it");
 }
 
 #[tokio::test]
@@ -3519,6 +3645,44 @@ async fn an_ordinary_unrestricted_acp_session_still_gets_peer_mcp() {
     assert_acp_peer_mcp(&session_new["params"]["mcpServers"]);
 }
 
+// Cursor runs in a folder of sealwire's or the session's, never the relay's, so a
+// script path relative to the relay names a file that is not there.
+#[tokio::test]
+async fn a_cursor_sessions_sealwire_mcp_script_is_an_absolute_path() {
+    for purpose in [
+        crate::provider::SessionPurpose::Ordinary,
+        crate::provider::SessionPurpose::Seat("run-seat".into()),
+    ] {
+        let state = relay_state();
+        let (outbound, outbound_peer) = tokio::io::duplex(8192);
+        let (inbound_writer, inbound) = tokio::io::duplex(8192);
+        let bridge = std::sync::Arc::new(AcpBridge::for_test(state, outbound, inbound, "cursor"));
+
+        let (_started, session_new) = drive_acp_start_thread(
+            bridge,
+            outbound_peer,
+            inbound_writer,
+            crate::provider::StartThreadRequest::new(
+                "/tmp/project",
+                "",
+                "bypass",
+                "workspace-write",
+            )
+            .driven_by(purpose.clone()),
+        )
+        .await;
+
+        let script = session_new["params"]["mcpServers"][0]["args"][0]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            std::path::Path::new(&script).is_absolute(),
+            "{purpose:?}: {script}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn an_acp_reviewer_or_workflow_session_gets_no_mcp() {
     for purpose in [
@@ -4707,5 +4871,152 @@ async fn opencode_release_refuses_live_turns_and_reload_precedes_the_next_prompt
     assert!(
         bridge.models_cache.is_none(),
         "in-memory test bridges must never persist the catalog"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Several processes serving one provider: a Cursor for each trusted folder beside
+// the shared one. Each numbers its own requests and turns from the start.
+// ---------------------------------------------------------------------------
+
+struct ScriptedAgent {
+    bridge: AcpBridge,
+    peer: tokio::io::DuplexStream,
+    writer: tokio::io::DuplexStream,
+}
+
+async fn scripted_cursor(
+    state: &std::sync::Arc<RwLock<crate::state::RelayState>>,
+    pooled: bool,
+    session: &str,
+) -> ScriptedAgent {
+    let (outbound, mut peer) = tokio::io::duplex(8192);
+    let (writer, inbound) = tokio::io::duplex(8192);
+    let bridge = if pooled {
+        AcpBridge::for_test_pooled(state.clone(), outbound, inbound, "cursor")
+    } else {
+        AcpBridge::for_test(state.clone(), outbound, inbound, "cursor")
+    };
+    state.write().await.remember_thread_settings(
+        session,
+        "on-request",
+        "workspace-write",
+        "high",
+        "",
+    );
+    bridge
+        .seed_session_with_policy_for_test(session, "/tmp/project", "on-request")
+        .await;
+    start_turn_and_drain_prompt(&bridge, &mut peer, session).await;
+    ScriptedAgent {
+        bridge,
+        peer,
+        writer,
+    }
+}
+
+#[tokio::test]
+async fn two_cursor_processes_asking_under_one_request_id_park_two_approvals() {
+    let state = relay_state();
+    let mut shared = scripted_cursor(&state, false, "s-shared").await;
+    let mut folder = scripted_cursor(&state, true, "s-folder").await;
+
+    for (agent, session) in [(&mut shared, "s-shared"), (&mut folder, "s-folder")] {
+        tokio::io::AsyncWriteExt::write_all(
+            &mut agent.writer,
+            format!("{}\n", permission_request(0, session)).as_bytes(),
+        )
+        .await
+        .expect("write");
+    }
+
+    let parked = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let count = state.read().await.pending_approvals.len();
+            if count == 2 {
+                return count;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        parked.is_ok(),
+        "one approval overwrote the other: {:?}",
+        state
+            .read()
+            .await
+            .pending_approvals
+            .keys()
+            .collect::<Vec<_>>()
+    );
+    drop((shared.peer, folder.peer));
+}
+
+#[tokio::test]
+async fn two_cursor_processes_never_mint_the_same_turn_id() {
+    let state = relay_state();
+    let shared = scripted_cursor(&state, false, "s-shared").await;
+    let folder = scripted_cursor(&state, true, "s-folder").await;
+    let shared_turn = shared.bridge.sessions.lock().await["s-shared"]
+        .turn_id
+        .clone();
+    let folder_turn = folder.bridge.sessions.lock().await["s-folder"]
+        .turn_id
+        .clone();
+    assert_ne!(shared_turn, folder_turn);
+}
+
+// Only the shared process speaks for the whole provider; a folder's process dying
+// takes down its own turns, which its pending requests already settle.
+#[tokio::test]
+async fn a_folder_process_dying_leaves_the_shared_processs_turns_running() {
+    let state = relay_state();
+    {
+        let mut relay = state.write().await;
+        let summary = crate::protocol::ThreadSummaryView {
+            workspace_trusted: false,
+            id: "s-shared".into(),
+            name: None,
+            preview: String::new(),
+            cwd: "/tmp/project".into(),
+            updated_at: 1,
+            source: "cursor".into(),
+            status: "active".into(),
+            model_provider: "cursor".into(),
+            provider: "cursor".into(),
+            forked_from: None,
+            renamed: false,
+            flagged: false,
+        };
+        relay.activate_thread(
+            summary,
+            "/tmp/project",
+            "",
+            "on-request",
+            "workspace-write",
+            "high",
+            "device-1",
+        );
+        relay.set_active_turn(Some("acp-turn-1".into()));
+    }
+    let (outbound, _peer) = tokio::io::duplex(8192);
+    let (writer, inbound) = tokio::io::duplex(8192);
+    let folder = AcpBridge::for_test_pooled(state.clone(), outbound, inbound, "cursor");
+
+    drop(writer);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    assert!(folder
+        .stream_closed
+        .load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(
+        state
+            .read()
+            .await
+            .runtime_for_thread("s-shared")
+            .and_then(|runtime| runtime.active_turn_id.clone())
+            .as_deref(),
+        Some("acp-turn-1"),
     );
 }

@@ -1858,7 +1858,11 @@ test("skills/list probes the session's own folder and settings without holding u
       },
     ]);
     const probe = worker.queries().find((query) => query.cwd === cwd);
-    assert.deepEqual(probe?.settingSources, ["user", "project", "local"]);
+    assert.deepEqual(
+      probe?.settingSources,
+      ["user"],
+      "a probe the relay named no settings for must not load the folder's own",
+    );
   } finally {
     await worker.close();
     await rm(cwd, { recursive: true, force: true });
@@ -1869,7 +1873,12 @@ test("model/list reads the catalog with the session's own folder and settings", 
   const cwd = await mkdtemp(path.join(os.tmpdir(), "models-probe-"));
   const worker = spawnWorker();
   try {
-    worker.send({ type: "model/list", id: "models-ctx", cwd });
+    worker.send({
+      type: "model/list",
+      id: "models-ctx",
+      cwd,
+      settingSources: ["user", "project", "local"],
+    });
     const res = await worker.waitFor(
       (event) => event.type === "response" && event.id === "models-ctx",
       { label: "model/list response" },
@@ -1890,7 +1899,7 @@ test("model/default answers the model a new session in that folder would run", a
   // The fake reports this only when user/project/local settings were loaded.
   const worker = spawnWorker({ CLAUDE_FAKE_EFFECTIVE_MODEL: "claude-fable-5-1" });
   try {
-    worker.send({ type: "model/default", id: "default-1", cwd });
+    worker.send({ type: "model/default", id: "default-1", cwd, settingSources: ["user"] });
     const res = await worker.waitFor(
       (event) => event.type === "response" && event.id === "default-1",
       { label: "model/default response" },
@@ -1898,7 +1907,7 @@ test("model/default answers the model a new session in that folder would run", a
     assert.equal(res.ok, true, JSON.stringify(res));
     assert.equal(res.result.model, "claude-fable-5-1");
     const probe = worker.queries().find((query) => query.cwd === cwd);
-    assert.deepEqual(probe?.settingSources, ["user", "project", "local"]);
+    assert.deepEqual(probe?.settingSources, ["user"]);
   } finally {
     await worker.close();
     await rm(cwd, { recursive: true, force: true });
@@ -1949,4 +1958,235 @@ test("ask_user_question_decline is a command the worker answers", async (t) => {
   );
   assert.equal(response.ok, false);
   assert.match(response.error?.message || "", /ask:missing is not pending/);
+});
+
+// A repo's own `.claude/settings.json` and `.mcp.json` run hooks and servers as the
+// user before any turn, so only the relay, which knows what the user trusted, may
+// widen the settings a session loads.
+test("a session the relay names no settings for loads only the user's own", async () => {
+  const worker = spawnWorker();
+  try {
+    worker.send(START_DEFAULT);
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    assert.deepEqual(worker.queries()[0].settingSources, ["user"]);
+  } finally {
+    await worker.close();
+  }
+});
+
+test("a session loads exactly the settings the relay names", async () => {
+  const worker = spawnWorker();
+  try {
+    worker.send({ ...START_DEFAULT, settingSources: ["user", "project", "local"] });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    assert.deepEqual(worker.queries()[0].settingSources, ["user", "project", "local"]);
+  } finally {
+    await worker.close();
+  }
+});
+
+test("a trust change on a live session rebuilds it with the new settings", async () => {
+  const worker = spawnWorker();
+  try {
+    worker.send({ ...START_DEFAULT, settingSources: ["user"] });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started#1" });
+    await worker.waitFor(isDone, { label: "done#1" });
+
+    worker.send({
+      type: "send",
+      provider_session_id: "sess-1",
+      model: "claude-sonnet-4-6",
+      permissionMode: "default",
+      settingSources: ["user", "project", "local"],
+      prompt: "after the folder was trusted",
+    });
+    await worker.waitFor(isStarted("sess-1"), { count: 2, label: "session_started#2" });
+
+    const queries = worker.queries();
+    assert.equal(queries.length, 2, "a live query keeps the settings it was built with");
+    assert.deepEqual(queries[1].settingSources, ["user", "project", "local"]);
+    assert.equal(queries[1].resume, "sess-1");
+  } finally {
+    await worker.close();
+  }
+});
+
+test("list_live_sessions reports each live session's folder and settings", async () => {
+  const worker = spawnWorker();
+  try {
+    worker.send({ ...START_DEFAULT, settingSources: ["user", "project", "local"] });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    await worker.waitFor(isDone, { label: "done" });
+
+    worker.send({ type: "list_live_sessions", id: "live-1" });
+    const response = await worker.waitFor(isResponse("live-1"), { label: "live sessions" });
+    assert.deepEqual(response.result?.sessions, [
+      {
+        provider_session_id: "sess-1",
+        cwd: "/tmp",
+        setting_sources: ["user", "project", "local"],
+      },
+    ]);
+  } finally {
+    await worker.close();
+  }
+});
+
+// Withdrawing trust cannot wait for the turn: the repo's MCP servers and hooks stay
+// loaded in this process until it is gone.
+test("a forced release closes a session mid-turn and fails its turn", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_HOLD_TURNS: "1" });
+  try {
+    worker.send({
+      ...START_DEFAULT,
+      turn_id: "relay-turn-1",
+      settingSources: ["user", "project", "local"],
+    });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+
+    worker.send({
+      type: "release_session",
+      id: "release-1",
+      provider_session_id: "sess-1",
+      force: true,
+      reason: "Workspace trust was withdrawn",
+    });
+    const response = await worker.waitFor(isResponse("release-1"), { label: "release response" });
+    assert.equal(response.result?.released, true, JSON.stringify(response.result));
+    const failed = await worker.waitFor(
+      (event) => event.type === "done" && event.turn_id === "relay-turn-1",
+      { label: "failed turn" },
+    );
+    assert.equal(failed.failed, true);
+    assert.equal(failed.reason, "Workspace trust was withdrawn");
+
+    worker.send({ type: "list_live_sessions", id: "live-after" });
+    const live = await worker.waitFor(isResponse("live-after"), { label: "live sessions" });
+    assert.deepEqual(live.result?.sessions, []);
+  } finally {
+    await worker.close();
+  }
+});
+
+// Interrupt only aborts the turn; the repo's hooks/MCP subprocess ends only on the SDK's
+// close(). A revoke that merely interrupts leaves them running, so the teardown must close.
+test("a forced release ends the SDK query, not just interrupts the turn", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_HOLD_TURNS: "1" });
+  try {
+    worker.send({
+      ...START_DEFAULT,
+      turn_id: "relay-turn-1",
+      settingSources: ["user", "project", "local"],
+    });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+
+    worker.send({
+      type: "release_session",
+      id: "release-1",
+      provider_session_id: "sess-1",
+      force: true,
+      reason: "Workspace trust was withdrawn",
+    });
+    await worker.waitFor(isResponse("release-1"), { label: "release response" });
+    await worker.waitFor(
+      (event) => event.type === "__close" && event.session_id === "sess-1",
+      { label: "query.close()" },
+    );
+  } finally {
+    await worker.close();
+  }
+});
+
+// A teardown must not hang on interrupt: if the CLI never answers it, waiting first would
+// leave the child and the repo's MCP running behind a release already reported done.
+test("a forced release closes the query at once even if interrupt never answers", async () => {
+  const worker = spawnWorker({
+    CLAUDE_FAKE_HOLD_TURNS: "1",
+    CLAUDE_FAKE_INTERRUPT_DELAY_MS: "60000",
+  });
+  try {
+    worker.send({
+      ...START_DEFAULT,
+      turn_id: "relay-turn-1",
+      settingSources: ["user", "project", "local"],
+    });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+
+    worker.send({
+      type: "release_session",
+      id: "release-1",
+      provider_session_id: "sess-1",
+      force: true,
+      reason: "Workspace trust was withdrawn",
+    });
+    await worker.waitFor(isResponse("release-1"), { label: "release response" });
+    await worker.waitFor(
+      (event) => event.type === "__close" && event.session_id === "sess-1",
+      { label: "query.close() without waiting on interrupt" },
+    );
+  } finally {
+    await worker.close();
+  }
+});
+
+// The relay lists, then releases; init may promote the entry in between, and the handle it
+// was given must still find it, or the release no-ops and the query keeps the repo's MCP.
+test("a starting query's handle still releases it after init promotes the entry", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_INIT_DELAY_MS: "300" });
+  try {
+    worker.send({ ...START_DEFAULT, settingSources: ["user", "project", "local"] });
+    let row = null;
+    for (let i = 0; i < 100 && !row; i += 1) {
+      worker.send({ type: "list_live_sessions", id: `live-${i}` });
+      const live = await worker.waitFor(isResponse(`live-${i}`), { label: "live" });
+      row = live.result?.sessions?.[0] ?? null;
+      if (!row) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(row, "the starting query must be listed");
+    await worker.waitFor(isStarted("sess-1"), { label: "init promoted the entry" });
+
+    worker.send({
+      type: "release_session",
+      id: "rel",
+      provider_session_id: row.provider_session_id,
+      force: true,
+      reason: "Workspace trust was withdrawn",
+    });
+    const resp = await worker.waitFor(isResponse("rel"), { label: "release" });
+    assert.equal(resp.result?.released, true, JSON.stringify(resp.result));
+  } finally {
+    await worker.close();
+  }
+});
+
+// A replay fork starts immediately with a prompt and no pending id; its query loads the
+// repo's hooks/MCP before init assigns a provider id. Revocation in that window must still
+// reach it — listed under a stable handle, and ended by close(), not just interrupt.
+test("an immediate start is reachable by revocation before init assigns a provider id", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_INIT_DELAY_MS: "3000" });
+  try {
+    worker.send({ ...START_DEFAULT, settingSources: ["user", "project", "local"] });
+    let row = null;
+    for (let i = 0; i < 100 && !row; i += 1) {
+      worker.send({ type: "list_live_sessions", id: `live-${i}` });
+      const live = await worker.waitFor(isResponse(`live-${i}`), { label: "live" });
+      row = live.result?.sessions?.[0] ?? null;
+      if (!row) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(row, "a starting query must be visible to revocation before it has an id");
+    assert.deepEqual(row.setting_sources, ["user", "project", "local"]);
+
+    worker.send({
+      type: "release_session",
+      id: "rel",
+      provider_session_id: row.provider_session_id,
+      force: true,
+      reason: "Workspace trust was withdrawn",
+    });
+    const resp = await worker.waitFor(isResponse("rel"), { label: "release" });
+    assert.equal(resp.result?.released, true, JSON.stringify(resp.result));
+    await worker.waitFor((event) => event.type === "__close", { label: "query.close()" });
+  } finally {
+    await worker.close();
+  }
 });

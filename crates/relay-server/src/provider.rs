@@ -1048,6 +1048,15 @@ async fn spawn_provider(
         ProviderKind::Acp if entry.provider_key == "opencode" => {
             bridge_arc(crate::acp::OpenCodeBridge::spawn(state).await)
         }
+        ProviderKind::Acp if entry.provider_key == "cursor" => bridge_arc(
+            crate::acp::CursorBridge::spawn(
+                state,
+                entry.binary_name,
+                entry.launch_args,
+                entry.display_name,
+            )
+            .await,
+        ),
         ProviderKind::Acp => bridge_arc(
             crate::acp::AcpBridge::spawn(
                 state,

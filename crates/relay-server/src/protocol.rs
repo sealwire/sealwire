@@ -1834,6 +1834,10 @@ pub struct WorkspaceGitContextView {
     /// discloses nothing the grant list would; it is the list itself that stays private.
     #[serde(default)]
     pub restricted: bool,
+    /// With `restricted`: the agent config this folder carries that sessions do not load
+    /// until it is trusted (`CLAUDE.md`, `.mcp.json`, `.cursor/`, …). Found by name only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_agent_config: Vec<String>,
     /// Short name (`refs/heads/` stripped), matching `WorkspaceRootView::branch`.
     /// `None` for a detached HEAD, an unborn branch, or a non-repo.
     pub branch: Option<String>,

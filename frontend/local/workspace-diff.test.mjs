@@ -113,6 +113,33 @@ test("the mobile Changes chip keeps restricted previews reachable after closing 
   assert.equal(missing, "", "a genuinely missing workspace still has no Changes chip");
 });
 
+// An agent in an untrusted folder runs without the repo's own rules, which reads as the
+// agent forgetting them; the chip has to say why, plain folder or repo alike.
+test("the chip says the repo's own config was not loaded when it was skipped", () => {
+  const skipped = (git, data) =>
+    renderToStaticMarkup(
+      React.createElement(WorkspaceDiffChip, {
+        store: fakeStore({
+          status: "loaded",
+          data,
+          workspace: { cwd: "/repo", roots: [], git },
+        }),
+      })
+    );
+
+  const repo = skipped(
+    { cwd: "/repo", is_repo: true, restricted: true, skipped_agent_config: ["CLAUDE.md"] },
+    { cwd: "/repo", unavailable: true, restricted: true, file_changes: [] }
+  );
+  assert.match(repo, /Repo config not loaded/);
+
+  const plain = skipped(
+    { cwd: "/repo", is_repo: false, restricted: true, skipped_agent_config: ["AGENTS.md"] },
+    { cwd: "/repo", not_a_git_repo: true, file_changes: [] }
+  );
+  assert.match(plain, /Repo config not loaded/);
+});
+
 test("a clean current tree still opens the mobile picker when a sibling can be previewed", () => {
   const clean = { status: "loaded", data: { file_changes: [] } };
   const sibling = renderToStaticMarkup(

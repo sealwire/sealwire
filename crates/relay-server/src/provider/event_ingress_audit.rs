@@ -94,9 +94,15 @@ fn only_the_reviewed_functions_read_a_raw_provider_thread_field() {
         vec!["handle_notification", "handle_server_request"],
         "acp/rpc.rs: a new reader of an ACP payload's sessionId",
     );
+    // `refresh_workspace_trust` only hands the worker's own handle back to the worker
+    // (rule 5); it never addresses `RelayState` with it.
     assert_eq!(
         functions_containing(CLAUDE, r#"["provider_session_id"]"#),
-        vec!["apply_worker_event", "fork_thread"],
+        vec![
+            "apply_worker_event",
+            "fork_thread",
+            "refresh_workspace_trust"
+        ],
         "claude.rs: a new reader of a worker event's provider_session_id",
     );
     assert_eq!(

@@ -686,6 +686,48 @@ test("an ungranted tree offers the grant where the diff was asked for", () => {
   view.cleanup();
 });
 
+// Trust now also decides whether agents load the repo's own config, and that config
+// runs as the user, so the row names what was skipped and what granting would run.
+test("an ungranted tree names the agent config its sessions skip", () => {
+  const view = mount(ThreadWorkspaceField, {
+    workspace: {
+      ...RESTRICTED_WORKSPACE,
+      git: { ...RESTRICTED_WORKSPACE.git, skipped_agent_config: ["CLAUDE.md", ".mcp.json"] },
+    },
+    sessionCwd: SESSION_CWD,
+    onView: () => {},
+    onTrustWorkspace: () => {},
+  });
+
+  const row = view.host.querySelector(".thread-workspace-trust");
+  assert.ok(row);
+  assert.match(row.textContent, /CLAUDE\.md/);
+  assert.match(row.textContent, /\.mcp\.json/);
+  assert.match(row.textContent, /MCP servers/, "granting runs the repo's own servers as you");
+  view.cleanup();
+});
+
+// A plain folder has no git to gate, but an agent started there still skips its config.
+test("an ungranted plain folder with agent config still offers the grant", () => {
+  const view = mount(ThreadWorkspaceField, {
+    workspace: {
+      ...RESTRICTED_WORKSPACE,
+      git: {
+        ...RESTRICTED_WORKSPACE.git,
+        is_repo: false,
+        branch: null,
+        skipped_agent_config: ["AGENTS.md"],
+      },
+    },
+    sessionCwd: SESSION_CWD,
+    onView: () => {},
+    onTrustWorkspace: () => {},
+  });
+
+  assert.ok(view.host.querySelector(".thread-workspace-trust-button"));
+  view.cleanup();
+});
+
 test("a granted tree is never asked about", () => {
   const view = mount(ThreadWorkspaceField, {
     workspace: { ...WORKSPACE, git: { ...WORKSPACE.git, dirty_known: true } },

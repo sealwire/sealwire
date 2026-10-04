@@ -38,6 +38,8 @@ use crate::{
 };
 
 mod config;
+mod cursor;
+pub(crate) use cursor::CursorBridge;
 mod opencode;
 pub(crate) use opencode::OpenCodeBridge;
 mod protocol;
@@ -65,6 +67,13 @@ async fn report_mcp_config(
 ) {
     let mut command = Command::new(crate::provider::resolve_binary(binary_name));
     command.arg("mcp").arg("list").kill_on_drop(true);
+    // Run where the sessions it describes run, or it reports the relay checkout's config.
+    if provider_key == "cursor" {
+        match cursor::dirs().await {
+            Ok(dirs) => cursor::configure_launch(&mut command, &dirs, None),
+            Err(_) => return,
+        }
+    }
 
     let summary = match timeout(MCP_LIST_TIMEOUT, command.output()).await {
         Ok(Ok(output)) if output.status.success() => {
@@ -409,6 +418,9 @@ pub struct AcpBridge {
     pending_responses: PendingResponses,
     next_request_id: AtomicU64,
     next_turn_id: AtomicU64,
+    /// False for one of several processes serving a provider; its counters are not the
+    /// only ones, so ids it mints must not be bare counters.
+    owns_provider_connection: bool,
     state: Arc<RwLock<RelayState>>,
     provider_name: &'static str,
     display_name: &'static str,
@@ -440,8 +452,10 @@ pub struct AcpBridge {
     process_group: Option<u32>,
 }
 
-impl Drop for AcpBridge {
-    fn drop(&mut self) {
+impl AcpBridge {
+    /// Stops the process group now, even while a caller still holds this bridge, so a
+    /// trust withdrawal does not wait for an in-flight call to let go.
+    pub(super) fn kill_process_group(&self) {
         self.closing.store(true, Ordering::Release);
         #[cfg(unix)]
         if let Some(group) = self.process_group {
@@ -450,6 +464,12 @@ impl Drop for AcpBridge {
                 libc::kill(-(group as i32), libc::SIGTERM);
             }
         }
+    }
+}
+
+impl Drop for AcpBridge {
+    fn drop(&mut self) {
+        self.kill_process_group();
     }
 }
 
@@ -483,6 +503,20 @@ fn seat_mcp_server_entry(run_id: &str) -> Value {
     })
 }
 
+/// ACP agents run in a folder of their own (OpenCode's discovery folder, Cursor's
+/// neutral or trusted one), so a script path relative to the relay would miss.
+fn absolute_script(mut entry: Value) -> Value {
+    if let Some(path) = entry["args"][0].as_str() {
+        let path = std::path::Path::new(path);
+        if path.is_relative() {
+            if let Ok(cwd) = std::env::current_dir() {
+                entry["args"][0] = json!(cwd.join(path));
+            }
+        }
+    }
+    entry
+}
+
 #[cfg(test)]
 pub(crate) fn seat_mcp_server_entry_for_test(run_id: &str) -> Value {
     seat_mcp_server_entry(run_id)
@@ -499,23 +533,12 @@ impl AcpBridge {
         let Some(token) = token else {
             return json!([]);
         };
-        let mut entry = peer_mcp_server_entry(token);
-        if self.provider_name == "opencode" {
-            if let Some(path) = entry["args"][0].as_str() {
-                let path = std::path::Path::new(path);
-                if path.is_relative() {
-                    if let Ok(cwd) = std::env::current_dir() {
-                        entry["args"][0] = json!(cwd.join(path));
-                    }
-                }
-            }
-        }
-        json!([entry])
+        json!([absolute_script(peer_mcp_server_entry(token))])
     }
 
     /// Seat MCP for ACP: array shape, env as name/value pairs, run id only.
     async fn seat_mcp_servers(&self, run_id: &str) -> Value {
-        json!([seat_mcp_server_entry(run_id)])
+        json!([absolute_script(seat_mcp_server_entry(run_id))])
     }
 
     /// Reattach MCP: retained Task seat wins, then ordinary standalone peer,
@@ -573,10 +596,13 @@ impl AcpBridge {
             display_name,
             provider_key,
             true,
+            None,
         )
         .await
     }
 
+    /// `workspace` is the trusted repo this process may load agent config from; `None`
+    /// means none, whatever folders its sessions open.
     async fn spawn_connection(
         state: Arc<RwLock<RelayState>>,
         binary_name: &'static str,
@@ -584,6 +610,7 @@ impl AcpBridge {
         display_name: &'static str,
         provider_key: &'static str,
         owns_provider_connection: bool,
+        workspace: Option<crate::state::app::TrustedWorkspace>,
     ) -> Result<Self, String> {
         // Resolved, not bare: the binary may only exist in `~/.local/bin`, which
         // is where cursor's installer puts it and is often not on `$PATH`. The
@@ -592,12 +619,17 @@ impl AcpBridge {
         command.args(launch_args);
         let opencode_api = if provider_key == "opencode" {
             let api = opencode::Api::new()?;
-            command.current_dir(opencode::discovery_directory().await?);
-            api.configure(&mut command);
-            #[cfg(unix)]
-            command.process_group(0);
+            opencode::configure_launch(
+                &mut command,
+                &api,
+                &opencode::discovery_directory().await?,
+                workspace.as_ref(),
+            );
             Some(api)
         } else {
+            if provider_key == "cursor" {
+                cursor::configure_launch(&mut command, &cursor::dirs().await?, workspace.as_ref());
+            }
             None
         };
         command
@@ -627,7 +659,9 @@ impl AcpBridge {
             .ok_or_else(|| format!("failed to capture {binary_name} stderr"))?;
 
         #[cfg(unix)]
-        let process_group = (provider_key == "opencode").then(|| child.id()).flatten();
+        let process_group = matches!(provider_key, "opencode" | "cursor")
+            .then(|| child.id())
+            .flatten();
         let child = Arc::new(Mutex::new(child));
         let pending_responses: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
@@ -667,6 +701,7 @@ impl AcpBridge {
             pending_responses,
             next_request_id: AtomicU64::new(1),
             next_turn_id: AtomicU64::new(1),
+            owns_provider_connection,
             state,
             provider_name: provider_key,
             display_name,
@@ -697,7 +732,7 @@ impl AcpBridge {
 
         // Off the startup critical path, like codex's: a hung `mcp list` must
         // not delay bridge creation or the providers queued behind it.
-        if provider_key == "cursor" {
+        if provider_key == "cursor" && owns_provider_connection {
             tokio::spawn(report_mcp_config(
                 binary_name,
                 provider_key,
@@ -861,7 +896,7 @@ impl AcpBridge {
     }
 
     fn mint_turn_id(&self) -> String {
-        if self.provider_name == "opencode" {
+        if self.provider_name == "opencode" || !self.owns_provider_connection {
             return format!("acp-turn-{}", crate::state::new_uuid_v4());
         }
         format!(
@@ -942,70 +977,6 @@ impl AcpBridge {
 }
 
 impl AcpBridge {
-    /// Build a bridge whose peer is an in-memory duplex instead of a process.
-    ///
-    /// Exists so the request/turn lifecycle can be driven against a scripted
-    /// agent: send failures and stream death are the two paths a live
-    /// `cursor-agent` cannot be asked to produce on demand, and they are exactly
-    /// where a turn can be stranded.
-    #[cfg(test)]
-    pub(crate) fn for_test(
-        state: Arc<RwLock<RelayState>>,
-        outbound: impl tokio::io::AsyncWrite + Send + Unpin + 'static,
-        inbound: impl tokio::io::AsyncRead + Send + Unpin + 'static,
-        provider_key: &'static str,
-    ) -> Self {
-        let pending_responses: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
-        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
-        let captures: Captures = Arc::new(Mutex::new(HashMap::new()));
-        let stdin: Outbound = Arc::new(Mutex::new(Box::new(outbound)));
-        let models = Arc::new(Mutex::new(Vec::new()));
-
-        let closing = Arc::new(AtomicBool::new(false));
-        let stream_closed = Arc::new(AtomicBool::new(false));
-        rpc::spawn_stdout_reader(rpc::ReaderContext {
-            closing: closing.clone(),
-            stream_closed: stream_closed.clone(),
-            owns_provider_connection: true,
-            stdout: Box::new(inbound),
-            stdin: stdin.clone(),
-            pending_responses: pending_responses.clone(),
-            state: state.clone(),
-            sessions: sessions.clone(),
-            captures: captures.clone(),
-            models: models.clone(),
-            models_cache: None,
-            provider_key,
-        });
-
-        Self {
-            _child: None,
-            stdin,
-            pending_responses,
-            next_request_id: AtomicU64::new(1),
-            next_turn_id: AtomicU64::new(1),
-            state,
-            provider_name: provider_key,
-            display_name: "TestAgent",
-            // Deliberately different from the provider key, which is the whole
-            // point of the field.
-            binary_name: "cursor-agent",
-            sessions,
-            captures,
-            models,
-            models_cache: None,
-            load_locks: Arc::new(Mutex::new(HashMap::new())),
-            capabilities: Arc::new(Mutex::new(protocol::AgentCapabilities::default())),
-            authenticated: AtomicBool::new(true),
-            discovery_lock: Mutex::new(()),
-            opencode_api: None,
-            closing,
-            stream_closed,
-            #[cfg(unix)]
-            process_group: None,
-        }
-    }
-
     #[cfg(test)]
     pub(crate) async fn initialize_for_test(&self) -> Result<(), String> {
         self.initialize().await
