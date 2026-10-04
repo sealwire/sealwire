@@ -114,6 +114,7 @@ export function installFakeRelay({ relayId, threadId, projectId, projectName, fu
     current_status: "completed",
     active_flags: [],
     current_cwd: "/tmp/e2e-mobile-header",
+    reviews_revision: 1,
     projects_revision: 1,
     model: "gpt-5.4",
     available_models: [],
@@ -192,6 +193,7 @@ export function installFakeRelay({ relayId, threadId, projectId, projectName, fu
 
   // What the fake relay currently reports; a test can move the session's folder.
   let liveSnapshot = truncatedSnapshot;
+  let liveReviews = { reviews_revision: 1, review_jobs: [], reviewer_threads: [], asks: [], handover_links: [] };
 
   class FakeWebSocket extends EventTarget {
     static OPEN = 1;
@@ -202,6 +204,14 @@ export function installFakeRelay({ relayId, threadId, projectId, projectName, fu
       window.__fakeRelay = {
         moveSession: (patch) => {
           liveSnapshot = { ...truncatedSnapshot, ...patch };
+          this.#emit({
+            type: "message",
+            payload: { protocol_version: RELAY_PROTOCOL_VERSION, kind: "session_snapshot", snapshot: liveSnapshot },
+          });
+        },
+        updateReviews: (patch) => {
+          liveReviews = { ...liveReviews, ...patch, reviews_revision: liveReviews.reviews_revision + 1 };
+          liveSnapshot = { ...liveSnapshot, reviews_revision: liveReviews.reviews_revision };
           this.#emit({
             type: "message",
             payload: { protocol_version: RELAY_PROTOCOL_VERSION, kind: "session_snapshot", snapshot: liveSnapshot },
@@ -232,6 +242,10 @@ export function installFakeRelay({ relayId, threadId, projectId, projectName, fu
       const frame = JSON.parse(raw);
       const payload = frame.payload;
       const request = payload?.request || {};
+      if (request.type === "fetch_reviews") {
+        this.#respond(payload.action_id, { action: "fetch_reviews", ok: true, snapshot: liveSnapshot, reviews: liveReviews });
+        return;
+      }
       // The provider's own skills for this thread, including one that shares a
       // name with Sealwire's `/review`.
       if (request.type === "fetch_thread_skills") {
@@ -668,6 +682,7 @@ ordinary message sends THAT instead of what the user types — ${JSON.stringify(
       timeout: TIMEOUT_MS,
     });
 
+    await assertRelationshipRefresh(page);
     await expandOnPhone(page);
     await expandOnDesktop(browser, origin);
 
@@ -693,6 +708,55 @@ ordinary message sends THAT instead of what the user types — ${JSON.stringify(
     }
     await server.close();
   }
+}
+
+async function assertRelationshipRefresh(page) {
+  const input = "#remote-message-input";
+  const rows = () => page.locator(".composer-command-name").allTextContents();
+  const waitForName = (name) => page.waitForFunction(
+    (expected) => document.querySelector(".composer-command-name")?.textContent === expected,
+    name,
+    { timeout: TIMEOUT_MS }
+  );
+  await page.fill(input, "/delegate ");
+  await page.fill(input, "@");
+  assert.deepEqual(await rows(), []);
+  const ask = {
+    id: "relationship-e2e", asker_thread_id: THREAD_ID, peer_thread_id: "old-delegate",
+    peer_provider: "codex", peer_title: "中文受托者 🦭", asker_available: true, peer_available: true,
+    status: "answered", updated_at: 1, delivered: true,
+  };
+  await page.evaluate((value) => window.__fakeRelay.updateReviews({ asks: [value] }), ask);
+  await waitForName(ask.peer_title);
+  assert.equal(await page.locator(".composer-command-kind").textContent(), "Delegatee");
+  for (const query of ["中文", "🦭"]) {
+    await page.fill(input, `@${query}`);
+    await waitForName(ask.peer_title);
+  }
+  await page.evaluate((value) => window.__fakeRelay.updateReviews({ asks: [{ ...value, peer_available: false }] }), ask);
+  await page.waitForFunction(() => !document.querySelector(".composer-command-row"), null, { timeout: TIMEOUT_MS });
+  await page.fill(input, "");
+  await page.press(input, "Backspace");
+
+  await page.fill(input, "/review ");
+  await page.fill(input, "@");
+  assert.deepEqual(await rows(), []);
+  const reviewer = {
+    reviewer_thread_id: "old-reviewer", parent_thread_id: THREAD_ID,
+    reviewer_provider: "codex", name: "中文审查员 + é", cwd: "/tmp/e2e-mobile-header", updated_at: 1,
+  };
+  await page.evaluate((value) => window.__fakeRelay.updateReviews({ reviewer_threads: [value] }), reviewer);
+  await waitForName(reviewer.name);
+  assert.equal(await page.locator(".composer-command-kind").textContent(), "Reviewer");
+  const renamed = { ...reviewer, name: "改名后的 reviewer + é", updated_at: 2 };
+  await page.evaluate((value) => window.__fakeRelay.updateReviews({ reviewer_threads: [value] }), renamed);
+  await waitForName(renamed.name);
+  for (const query of ["改名", "é", "+"]) {
+    await page.fill(input, `@${query}`);
+    await waitForName(renamed.name);
+  }
+  await page.fill(input, "");
+  await page.press(input, "Backspace");
 }
 
 // Use the browser's real touch pipeline, including native touchend; neither keyboard

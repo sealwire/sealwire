@@ -1201,6 +1201,7 @@ const renderer = createSessionRenderer({
   trustThreadWorkspace: (path) => void workspaceDiffStore.trustWorkspace(path),
   reviewsCache,
   workflowsCache,
+  onReviewsUpdated: () => composerCommandController?.refreshContext?.(),
   // Dedicated, uncompacted reviewer data. The snapshot carries only its revision
   // plus the minimal non-terminal gating projection.
   fetchReviews() {
@@ -3019,6 +3020,7 @@ const composerCommands = createComposerCommandController({
       name: thread.name || "",
       provider: thread.provider || "",
     })),
+    reviews: reviewsCache.current(),
     ...composerSkillsCatalog(),
   }),
   getContext: () => {
@@ -3028,6 +3030,9 @@ const composerCommands = createComposerCommandController({
       threadId,
       provider: composerThreadProvider(threadId),
       cwd: composerThreadCwd(threadId),
+      workspaceCwd: state.viewOnlyThread?.threadId === threadId
+        ? state.viewOnlyThread.threadWorkspaceCwd || ""
+        : session?.thread_workspace_cwd || "",
       canReview: canRequestReview(session, state.deviceId, threadId),
       defaultReviewerProvider: composerCommandLaunchModel().defaultProvider,
     };

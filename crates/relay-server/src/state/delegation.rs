@@ -298,6 +298,8 @@ impl Ask {
             id: self.id.clone(),
             asker_thread_id: self.asker_thread_id.clone(),
             peer_thread_id: self.peer_thread_id.clone(),
+            asker_available: false,
+            peer_available: false,
             peer_provider: self.peer_provider.clone(),
             asker_provider: self.asker_provider.clone(),
             peer_model: self.peer_model.clone(),

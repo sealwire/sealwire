@@ -694,7 +694,7 @@ export function createLifecycleController(ctx) {
     recapSource,
     continuesReviewId,
   } = {}) {
-    if (!reviewerProvider) {
+    if (!reviewerProvider && !reviewerThreadId) {
       logLine("Pick a reviewer provider before starting a review.");
       return null;
     }

@@ -23,6 +23,7 @@ export function createReviewsCache() {
   // Every list the channel carries. A field left out here is fetched, returned,
   // and then silently dropped — which looks exactly like the relay never sent it.
   let data = {
+    reviews_revision: null,
     review_jobs: [],
     reviewer_threads: [],
     asks: [],
@@ -66,6 +67,7 @@ export function createReviewsCache() {
         syncedRevision = snapshotRevision;
         loaded = true;
         data = {
+          reviews_revision: resp.reviews_revision ?? null,
           review_jobs: resp?.review_jobs || [],
           reviewer_threads: resp?.reviewer_threads || [],
           asks: resp?.asks || [],

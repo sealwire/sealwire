@@ -329,6 +329,7 @@ export function createSessionRenderer({
   reviewsCache = createReviewsCache(),
   workflowsCache = createWorkflowsCache(),
   fetchReviews,
+  onReviewsUpdated = () => {},
   fetchWorkflows,
   viewThread,
   // Re-render the open-session tab strip. Injected (rather than imported) because
@@ -1119,6 +1120,7 @@ export function createSessionRenderer({
           // read this cache too, so the dedicated response must repaint the list
           // instead of waiting for an unrelated snapshot or polling tick.
           renderThreads();
+          onReviewsUpdated();
         }
       );
     }

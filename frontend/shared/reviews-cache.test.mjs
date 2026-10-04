@@ -23,6 +23,7 @@ test("createReviewsCache fetches only when the snapshot reviews_revision changes
   await cache.sync(7, fetchReviews);
   assert.equal(calls, 1);
   assert.equal(cache.current().review_jobs.length, 1);
+  assert.equal(cache.current().reviews_revision, 7);
 
   // Same revision → cached, no refetch (the "don't keep fetching" guarantee).
   await cache.sync(7, fetchReviews);
@@ -35,6 +36,7 @@ test("createReviewsCache fetches only when the snapshot reviews_revision changes
     return { reviews_revision: 8, review_jobs: [], reviewer_threads: [] };
   });
   assert.equal(calls, 2);
+  assert.equal(cache.current().reviews_revision, 8);
 });
 
 test("createReviewsCache does not refetch the same snapshot revision when the response revision lags", async () => {
@@ -197,7 +199,7 @@ test("no list the channel carries is left out of the assignment", () => {
     }
     assert.deepEqual(
       Object.keys(data).sort(),
-      carried.slice().sort(),
+      [...carried, "reviews_revision"].sort(),
       "and the cache's shape is exactly the channel's, so a new list cannot be forgotten"
     );
   });

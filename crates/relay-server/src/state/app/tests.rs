@@ -15627,6 +15627,193 @@ tree; got {}",
         oldest_id
     }
 
+    #[tokio::test]
+    async fn thread_lists_keep_ask_availability_stable_across_page_sizes_and_scopes() {
+        let project = TempDir::new().expect("project");
+        let outside = TempDir::new().expect("outside");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, codex, _claude) = build_recording_provider_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(
+            &app,
+            "phone",
+            vec![outside.path().to_string_lossy().to_string()],
+        )
+        .await;
+        let peer_id = seed_listable_threads(&codex, &cwd, 120, "Old delegate").await;
+        assert_eq!(
+            app.list_threads(120, None).await.unwrap().threads.len(),
+            120
+        );
+        let before = {
+            let mut relay = app.relay.write().await;
+            assert!(relay.runtime_for_thread(&peer_id).is_none());
+            for id in ["seeded-thread-0", peer_id.as_str()] {
+                relay.remember_thread_settings(
+                    id,
+                    "never",
+                    "danger-full-access",
+                    "medium",
+                    "codex-model",
+                );
+            }
+            let mut ask = crate::state::Ask::new(
+                "page-stable-ask".to_string(),
+                "seeded-thread-0".to_string(),
+                peer_id.clone(),
+                "codex".to_string(),
+                None,
+                None,
+                "previous task".to_string(),
+                cwd.clone(),
+                None,
+                relay_api::delegation::StartedBy::Agent,
+            );
+            ask.finish("previous answer");
+            relay.insert_ask(ask);
+            relay.reviews_revision()
+        };
+        for _ in 0..2 {
+            for (limit, device) in [(80, None), (20, None), (80, Some("phone")), (120, None)] {
+                let response = app
+                    .list_threads(limit, device.map(str::to_string))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.threads.len(),
+                    if device.is_some() { 0 } else { limit }
+                );
+                let relay = app.relay.read().await;
+                let reviews = relay.reviews_response(None);
+                assert!(reviews.asks[0].asker_available && reviews.asks[0].peer_available);
+                assert_eq!(reviews.asks[0].peer_title.as_deref(), Some("Old delegate"));
+                assert_eq!(
+                    relay.reviews_revision(),
+                    before,
+                    "a client's page must not change eligibility"
+                );
+                assert!(relay.reviews_response(Some("phone")).asks.is_empty());
+                assert_eq!(relay.threads.len(), 120);
+                assert_eq!(
+                    relay
+                        .threads
+                        .iter()
+                        .map(|row| &row.id)
+                        .collect::<HashSet<_>>()
+                        .len(),
+                    120
+                );
+            }
+        }
+        app.relay
+            .write()
+            .await
+            .mark_thread_deleted("seeded-thread-30");
+        let before_filtered = app.relay.read().await.reviews_revision();
+        assert_eq!(app.list_threads(80, None).await.unwrap().threads.len(), 79);
+        assert!(app.relay.read().await.reviews_response(None).asks[0].peer_available);
+        assert_eq!(app.relay.read().await.reviews_revision(), before_filtered);
+        let reached = app
+            .delegate(
+                "seeded-thread-0",
+                relay_api::delegation::AskRequest {
+                    device_id: None,
+                    started_by: relay_api::delegation::StartedBy::Agent,
+                    peer_thread_id: Some(peer_id.clone()),
+                    provider: Some("codex".to_string()),
+                    model: None,
+                    effort: None,
+                    message: "continue the task".to_string(),
+                },
+            )
+            .await
+            .expect("the retained session can still receive a real delegate");
+        assert_eq!(reached, peer_id);
+    }
+
+    #[tokio::test]
+    async fn thread_lists_refresh_out_of_scope_routing_rows_without_exposing_them() {
+        let project = TempDir::new().expect("project");
+        let outside = TempDir::new().expect("outside");
+        let cwd = project.path().to_string_lossy().to_string();
+        let outside_cwd = outside
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let (app, codex, _claude) = build_recording_provider_app(&cwd).await;
+        pair_device(&app, "phone", vec![cwd.clone()]).await;
+        let peer_id = seed_listable_threads(&codex, &cwd, 1, "Original title").await;
+        app.list_threads(20, None).await.unwrap();
+        {
+            let mut rows = codex.threads.lock().await;
+            let row = rows.get_mut(&peer_id).unwrap();
+            row.cwd = outside_cwd.clone();
+            row.name = Some("Moved session".to_string());
+        }
+        let response = app
+            .list_threads(20, Some("phone".to_string()))
+            .await
+            .unwrap();
+        assert!(response.threads.is_empty());
+        let relay = app.relay.read().await;
+        assert_eq!(
+            relay.thread_cwd(&peer_id).as_deref(),
+            Some(outside_cwd.as_str())
+        );
+        assert_eq!(
+            relay
+                .threads
+                .iter()
+                .find(|row| row.id == peer_id)
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("Moved session")
+        );
+        assert!(
+            super::super::goal::ensure_thread_in_device_scope(&relay, &peer_id, Some("phone"))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_lists_retire_missing_routing_rows_after_a_complete_provider_scan() {
+        let project = TempDir::new().expect("project");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, codex, _claude) = build_recording_provider_app(&cwd).await;
+        let peer_id = seed_listable_threads(&codex, &cwd, 3, "Removed session").await;
+        app.list_threads(20, None).await.unwrap();
+        let before = {
+            let mut relay = app.relay.write().await;
+            let mut ask = crate::state::Ask::new(
+                "missing-peer-ask".to_string(),
+                "seeded-thread-0".to_string(),
+                peer_id.clone(),
+                "codex".to_string(),
+                None,
+                None,
+                "previous task".to_string(),
+                cwd,
+                None,
+                relay_api::delegation::StartedBy::Agent,
+            );
+            ask.finish("previous answer");
+            relay.insert_ask(ask);
+            relay.reviews_revision()
+        };
+        codex.threads.lock().await.remove(&peer_id);
+        let response = app.list_threads(20, None).await.unwrap();
+        assert_eq!(response.threads.len(), 2);
+        let relay = app.relay.read().await;
+        assert!(relay.thread_cwd(&peer_id).is_none());
+        let reviews = relay.reviews_response(None);
+        assert!(!reviews.asks[0].peer_available);
+        assert_eq!(reviews.asks[0].result.as_deref(), Some("previous answer"));
+        assert_ne!(relay.reviews_revision(), before);
+    }
+
     /// A thread the user found by searching must stay OPENABLE, not just visible.
     ///
     /// `list_threads` doubles as the writer of `relay.threads`, and the client re-polls
@@ -29675,6 +29862,87 @@ mod ask_tests {
     use crate::protocol::StartSessionInput;
     use relay_api::delegation::{AskError, AskRequest};
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn ask_availability_matches_delegation_for_a_peer_outside_the_thread_list() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let session = app
+                .start_session(StartSessionInput {
+                    cwd: Some(cwd.clone()),
+                    provider: Some("fake".to_string()),
+                    approval_policy: Some("never".to_string()),
+                    device_id: Some("dev".to_string()),
+                    initial_prompt: None,
+                    model: None,
+                    effort: None,
+                    project_id: None,
+                    sandbox: None,
+                })
+                .await
+                .expect("session starts");
+            ids.push(session.active_thread_id.expect("session has a thread"));
+        }
+        let asker_id = &ids[0];
+        let peer_id = &ids[1];
+        let peer_row = {
+            let mut relay = app.relay.write().await;
+            let row = relay
+                .threads
+                .iter()
+                .find(|row| row.id == *peer_id)
+                .unwrap()
+                .clone();
+            relay.threads.retain(|row| row.id != *peer_id);
+            relay.runtimes.remove(peer_id);
+            assert!(relay.session_bindings.binding(peer_id).is_some());
+            let mut history = crate::state::Ask::new(
+                "old-ask".to_string(),
+                asker_id.clone(),
+                peer_id.clone(),
+                "fake".to_string(),
+                None,
+                None,
+                "previous task".to_string(),
+                cwd.clone(),
+                None,
+                relay_api::delegation::StartedBy::Agent,
+            );
+            history.finish("previous answer");
+            relay.insert_ask(history);
+            assert!(!relay.reviews_response(None).asks[0].peer_available);
+            row
+        };
+        let request = || AskRequest {
+            device_id: None,
+            started_by: relay_api::delegation::StartedBy::Agent,
+            peer_thread_id: Some(peer_id.clone()),
+            provider: Some("fake".to_string()),
+            model: None,
+            effort: None,
+            message: "continue the task".to_string(),
+        };
+        assert!(matches!(
+            app.delegate(asker_id, request()).await,
+            Err(AskError::NoSuchPeer)
+        ));
+        {
+            let mut relay = app.relay.write().await;
+            relay.threads.push(peer_row);
+            relay.ensure_runtime_for_thread(peer_id);
+            relay.threads.retain(|row| row.id != *peer_id);
+            assert!(relay.reviews_response(None).asks[0].peer_available);
+        }
+        let reached = app.delegate(asker_id, request()).await;
+        assert!(
+            reached.is_ok(),
+            "a loaded runtime outside the thread list can take work: {reached:?}"
+        );
+    }
 
     #[tokio::test]
     async fn an_existing_session_can_be_asked_but_a_missing_one_and_yourself_cannot() {

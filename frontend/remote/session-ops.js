@@ -2360,7 +2360,7 @@ export async function requestRemoteReview({
   recapSource,
   continuesReviewId,
 } = {}) {
-  if (!reviewerProvider) {
+  if (!reviewerProvider && !reviewerThreadId) {
     renderLog("Pick a reviewer provider before starting a review.");
     return false;
   }

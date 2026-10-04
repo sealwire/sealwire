@@ -180,12 +180,18 @@ impl AppState {
         // the difference matters: an empty answer is otherwise read as "that session does
         // not exist" when it means "we could not look".
         let mut unavailable_providers = Vec::new();
+        let mut complete_providers = HashSet::new();
         for (provider_name, bridge) in &self.providers {
             match self
                 .list_provider_threads(provider_name, bridge, fetch_limit)
                 .await
             {
-                Ok(threads) => all_threads.extend(threads),
+                Ok(list) => {
+                    if list.complete {
+                        complete_providers.insert(provider_name.clone());
+                    }
+                    all_threads.extend(list.threads);
+                }
                 Err(error) => {
                     unavailable_providers.push(provider_name.clone());
                     self.push_runtime_log(
@@ -252,8 +258,13 @@ impl AppState {
         // reviewers are first-class seats in the task worktree, so they stay visible
         // alongside the TL and Dev sessions.
         let (reviewer_ids, hidden_reviewer_ids) = relay.reviewer_thread_ids_and_navigation_hidden();
-        let (scoped, out_of_scope): (Vec<_>, Vec<_>) = relay
-            .filter_deleted_threads(all_threads)
+        let known_threads = relay.filter_deleted_threads(all_threads);
+        let mut cache_updates = if query.is_none() && wanted_ids.is_none() {
+            known_threads.clone()
+        } else {
+            Vec::new()
+        };
+        let (scoped, out_of_scope): (Vec<_>, Vec<_>) = known_threads
             .into_iter()
             .partition(|thread| in_scope(thread));
         let out_of_scope_ids = out_of_scope
@@ -299,7 +310,7 @@ impl AppState {
         // for both ordering AND the displayed "last message" time. Threads we've
         // never resumed aren't tracked and keep their (never-polluted) provider
         // value.
-        for thread in &mut threads {
+        for thread in threads.iter_mut().chain(cache_updates.iter_mut()) {
             thread.updated_at = relay.thread_last_activity_or(&thread.id, thread.updated_at);
             thread.forked_from = relay.thread_forked_from(&thread.id);
             // Overlay the user's chosen title over the provider's auto-derived one. This
@@ -331,46 +342,34 @@ impl AppState {
         let mut response_threads = threads.clone();
 
         if query.is_some() || wanted_ids.is_some() {
-            // A search is a NARROWED VIEW, not a new authoritative list: assigning it to
-            // the routing cache would stop every non-matching thread routing while the
-            // sidebar kept rendering it. Hints go in their own map instead — see
-            // `RelayState::search_routing_hints` for why appending here is not enough.
-            //
-            // An id probe is narrower still, and unlike a search it is issued
-            // automatically on every remote boot rather than by someone typing. Its worst
-            // case is also worse: when every probed session really is gone the answer is
-            // EMPTY, so the cache would be wiped to reviewer rows and nothing would be
-            // routable at all. The hints are what keep the probed threads — old ones, by
-            // construction — routable afterwards, which is exactly what they exist for.
+            // A search or probe changes one client's view, not the shared routing
+            // inventory; separate hints also avoid waking every client per request.
             for thread in &response_threads {
                 relay.remember_search_routing_hint(thread);
             }
-            // Deliberately no `notify()`. A search is one client narrowing its own view;
-            // waking every connected client per keystroke would be pure noise. A probe is
-            // the same claim: it tells the asker something, not the room.
         } else {
-            // The routing cache (relay.threads) must retain reviewer-thread rows even
-            // though they are filtered from the nav-visible response. `find_thread_provider`
-            // looks up threads by id in this cache, and a reviewer whose binding still
-            // holds only a temporary handle is only there — the provider has no session to
-            // list yet — so losing its row would make it unroutable for
-            // `send_message_to_thread`.
-            // Preserve only rows not already returned. A task reviewer may now be in
-            // BOTH sets (nav-visible response and semantic reviewer set); blindly
-            // appending every cached reviewer would add another duplicate on every
-            // periodic refresh. Rows from an unavailable provider also survive even if
-            // the merged visible page was filled by another provider before they made
-            // the final truncation. Building the id set also collapses any duplicates a
-            // previous build left in the routing cache.
+            // A client's page is not a complete routing inventory. Only a complete
+            // provider scan proves an omitted ordinary session is gone.
             let mut cached_threads = response_threads.clone();
             let mut cached_ids: std::collections::HashSet<String> = cached_threads
                 .iter()
                 .map(|thread| thread.id.clone())
                 .collect();
+            for updated in cache_updates {
+                if relay.session_bindings.binding(&updated.id).is_none() {
+                    tracing::warn!(
+                        thread_id = %updated.id,
+                        "thread-list row lost its routing binding before cache merge"
+                    );
+                }
+                if cached_ids.insert(updated.id.clone()) {
+                    cached_threads.push(updated);
+                }
+            }
             for cached in &relay.threads {
-                let provider_unavailable =
-                    unavailable_provider_names.contains(cached.provider.as_str());
-                if (reviewer_ids.contains(&cached.id) || provider_unavailable)
+                if (!complete_providers.contains(&cached.provider)
+                    || reviewer_ids.contains(&cached.id)
+                    || relay.active_thread_id.as_deref() == Some(cached.id.as_str()))
                     && cached_ids.insert(cached.id.clone())
                 {
                     cached_threads.push(cached.clone());

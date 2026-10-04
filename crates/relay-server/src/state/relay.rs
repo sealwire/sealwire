@@ -587,19 +587,8 @@ pub struct RelayState {
     pub pending_claim_challenges: HashMap<String, ClaimChallenge>,
     pub pending_broker_messages: Vec<BrokerPendingMessage>,
     pub threads: Vec<ThreadSummaryView>,
-    /// Provider routing for threads a SEARCH surfaced from beyond the normal page.
-    ///
-    /// This cannot live in `threads`: that vector is the nav-visible list and is
-    /// wholesale REASSIGNED by every `list_threads` call, which the client re-polls every
-    /// 12s. A hint parked there survives one poll, after which the row is still on the
-    /// user's screen (they hold their own copy) but `find_thread_provider` can no longer
-    /// place it — and its last-resort probe only reads the newest 200 per provider. The
-    /// user clicks the session search just showed them and gets "not found on any
-    /// provider". Keeping hints in their own map means the authoritative rewrite cannot
-    /// erase them.
-    ///
-    /// Insertion-ordered and capped: this grows with what a user searches for, never
-    /// with time, and the oldest hint is the least likely to be clicked next.
+    /// Search-only routing hints stay separate so a client's search doesn't rewrite
+    /// the shared routing inventory. Old hints are evicted as newer searches arrive.
     search_routing_hints: HashMap<String, ThreadSummaryView>,
     search_routing_hint_order: VecDeque<String>,
     locally_deleted_thread_ids: HashSet<String>,
@@ -3259,6 +3248,8 @@ happened, then hand over again."
         jobs.into_iter()
             .map(|job| {
                 let mut view = job.view();
+                view.asker_available = self.ask_thread_available(&job.asker_thread_id);
+                view.peer_available = self.ask_thread_available(&job.peer_thread_id);
                 // Older asks predate the persisted stamp; fill from the live list.
                 if view.asker_provider.is_none() {
                     view.asker_provider = self.provider_hint_for_thread(&job.asker_thread_id);
@@ -3273,6 +3264,14 @@ happened, then hand over again."
                 view
             })
             .collect()
+    }
+
+    fn ask_thread_available(&self, thread_id: &str) -> bool {
+        // Delegation and handover require a runtime or a cached thread row.
+        // A persisted binding or history folder alone cannot pass their checks.
+        !thread_id.is_empty()
+            && !self.locally_deleted_thread_ids.contains(thread_id)
+            && self.thread_cwd(thread_id).is_some()
     }
 
     /// Best-effort provider for a thread id from the in-process caches. Used to
@@ -3832,6 +3831,8 @@ so {} never got it — hand over again when you are ready.",
             ask.status.as_str().hash(&mut h);
             ask.updated_at.hash(&mut h);
             ask.peer_thread_id.hash(&mut h);
+            self.ask_thread_available(&ask.asker_thread_id).hash(&mut h);
+            self.ask_thread_available(&ask.peer_thread_id).hash(&mut h);
             ask.delivered.hash(&mut h);
             // Starting can follow the decision within the same second, including
             // on an existing peer. The card must then show the effective model.
@@ -7974,6 +7975,92 @@ mod tests {
             Some("claude_code"),
             "the asker's provider is stamped for the inbound logo"
         );
+    }
+
+    #[test]
+    fn removed_ask_sessions_are_unavailable_without_losing_the_answer() {
+        let mut relay = test_relay();
+        relay.threads = vec![test_thread("asker", "/tmp"), test_thread("peer", "/tmp")];
+        let mut ask = crate::state::Ask::new(
+            "ask-removed".to_string(),
+            "asker".to_string(),
+            "peer".to_string(),
+            "codex".to_string(),
+            None,
+            None,
+            "check the parser".to_string(),
+            "/tmp".to_string(),
+            None,
+            relay_api::delegation::StartedBy::Agent,
+        );
+        ask.finish("The parser is correct.");
+        relay.insert_ask(ask);
+        let before = relay.reviews_revision();
+        let live = relay.reviews_response(None).asks.remove(0);
+        assert!(live.asker_available && live.peer_available);
+
+        relay.remove_thread("peer");
+        let removed = relay.reviews_response(None).asks.remove(0);
+        assert!(removed.asker_available);
+        assert!(!removed.peer_available);
+        assert_eq!(removed.peer_thread_id, "peer");
+        assert_eq!(removed.result.as_deref(), Some("The parser is correct."));
+        assert_ne!(relay.reviews_revision(), before);
+
+        relay.remove_thread("asker");
+        assert!(!relay.reviews_response(None).asks[0].asker_available);
+        assert_eq!(
+            relay.ask("ask-removed").unwrap().answer.as_deref(),
+            Some("The parser is correct.")
+        );
+    }
+
+    #[test]
+    fn ask_availability_requires_a_loaded_session_and_tracks_list_changes() {
+        let mut relay = test_relay();
+        relay
+            .register_identity_session_binding("codex", "asker")
+            .unwrap();
+        relay
+            .register_identity_session_binding("codex", "peer")
+            .unwrap();
+        relay.insert_ask(crate::state::Ask::new(
+            "ask-paged".to_string(),
+            "asker".to_string(),
+            "peer".to_string(),
+            "codex".to_string(),
+            None,
+            None,
+            "check the parser".to_string(),
+            "/tmp".to_string(),
+            None,
+            relay_api::delegation::StartedBy::Agent,
+        ));
+        assert!(relay.threads.is_empty());
+        let before = relay.reviews_revision();
+        assert!(!relay.asks_view()[0].peer_available);
+        relay
+            .thread_workspace
+            .entry("peer".to_string())
+            .or_default()
+            .history = Some(crate::state::workspace_scope::ThreadHistoryWorkspace::capture("/tmp"));
+        assert!(relay.thread_history_cwd("peer").is_some());
+        assert!(!relay.asks_view()[0].peer_available);
+
+        relay.threads.push(test_thread("peer", "/tmp"));
+        assert!(relay.asks_view()[0].peer_available);
+        assert_ne!(relay.reviews_revision(), before);
+        let loaded = relay.reviews_revision();
+        relay.threads.clear();
+        assert!(!relay.asks_view()[0].peer_available);
+        assert_ne!(relay.reviews_revision(), loaded);
+
+        relay.ensure_runtime_for_thread("peer").current_cwd = "/tmp".to_string();
+        assert!(relay.asks_view()[0].peer_available);
+        let running = relay.reviews_revision();
+        relay.remove_thread("peer");
+        assert!(!relay.asks_view()[0].peer_available);
+        assert_ne!(relay.reviews_revision(), running);
     }
 
     #[test]

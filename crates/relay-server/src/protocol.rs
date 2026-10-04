@@ -4025,6 +4025,9 @@ pub struct AskView {
     pub id: String,
     pub asker_thread_id: String,
     pub peer_thread_id: String,
+    /// The session is still routable; ask history survives archive and deletion.
+    pub asker_available: bool,
+    pub peer_available: bool,
     pub peer_provider: String,
     /// Who asked — needed when this ask is inbound on the peer's panel, because
     /// `peer_provider` then names the viewed thread (us), not the logo to show.

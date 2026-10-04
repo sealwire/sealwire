@@ -11,6 +11,11 @@ const MODEL_CATALOG_REFRESH_SECS: u64 = 30 * 60;
 
 const PROVIDER_ACCOUNT_CHECK_TIMEOUT_SECS: u64 = 20;
 
+pub(crate) struct ProviderThreadList {
+    pub(crate) threads: Vec<ThreadSummaryView>,
+    pub(crate) complete: bool,
+}
+
 impl AppState {
     /// API ingress compatibility: a known provider handle is a legacy alias for
     /// its stable relay session id. Canonicalize before any domain lookup or write.
@@ -29,8 +34,11 @@ impl AppState {
         provider_name: &str,
         bridge: &Arc<dyn ProviderBridge>,
         limit: usize,
-    ) -> Result<Vec<ThreadSummaryView>, String> {
+    ) -> Result<ProviderThreadList, String> {
         let rows = bridge.list_threads(limit).await?;
+        // Deleted or rejected rows still consume provider page slots. Filtering
+        // them must not turn a partial scan into proof that other sessions are gone.
+        let complete = rows.len() < limit;
         let mut adopted = Vec::with_capacity(rows.len());
         let mut relay = self.relay.write().await;
         for mut row in rows {
@@ -54,7 +62,10 @@ impl AppState {
                 ),
             }
         }
-        Ok(adopted)
+        Ok(ProviderThreadList {
+            threads: adopted,
+            complete,
+        })
     }
 
     /// The one AppState seam for a provider-created session.
@@ -300,8 +311,8 @@ impl AppState {
         // Fall back to probing each provider's thread list
         for (name, bridge) in &self.providers {
             match self.list_provider_threads(name, bridge, 200).await {
-                Ok(threads) => {
-                    if threads.iter().any(|t| t.id == thread_id) {
+                Ok(list) => {
+                    if list.threads.iter().any(|t| t.id == thread_id) {
                         return Ok((name.as_str(), bridge));
                     }
                 }

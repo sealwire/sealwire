@@ -2611,6 +2611,7 @@ function RemoteApp() {
                 name: thread.name || "",
                 provider: thread.provider || "",
               })),
+              reviews: remoteReviews,
               // The viewed thread's runtime cwd, which is what the relay lists for.
               skills: threadSkills.peek(remoteViewedThreadId, {
                 provider: session?.provider || "",
@@ -2629,6 +2630,7 @@ function RemoteApp() {
               threadId: remoteViewedThreadId,
               provider: session?.provider || "",
               cwd: session?.current_cwd || "",
+              workspaceCwd: remoteWorkspaceCwd || "",
               canReview: canRequestRemoteReview,
               defaultReviewerProvider: reviewLaunchModel?.defaultProvider || "",
             }),
@@ -2638,6 +2640,9 @@ function RemoteApp() {
               session?.provider || "",
               session?.current_cwd || "",
               composerModelCatalogKey,
+              remoteWorkspaceCwd || "",
+              JSON.stringify((currentState.threads || []).map(({ id, name, provider }) => [id, name, provider])),
+              remoteReviews?.reviews_revision ?? "",
             ].join("|"),
             // The command door only: the request modal shows the relay's reason inline
             // itself, and the controller turns this rejection into a bare `false`.
