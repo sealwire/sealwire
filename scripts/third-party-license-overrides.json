@@ -1,0 +1,61 @@
+[
+  {
+    "id": "template MIT",
+    "file": "MIT.txt",
+    "source": "https://raw.githubusercontent.com/spdx/license-list-data/main/text/MIT.txt"
+  },
+  {
+    "id": "template BSD-3-Clause",
+    "file": "BSD-3-Clause.txt",
+    "source": "https://raw.githubusercontent.com/spdx/license-list-data/main/text/BSD-3-Clause.txt"
+  },
+  {
+    "id": "template MPL-2.0",
+    "file": "MPL-2.0.txt",
+    "source": "https://raw.githubusercontent.com/spdx/license-list-data/main/text/MPL-2.0.txt"
+  },
+  {
+    "id": "rust claude-code-client-sdk@0.1.46",
+    "file": "claude-code-client-sdk-0.1.46.txt",
+    "source": "https://raw.githubusercontent.com/tosimpletech/agent-client-sdk-package/16f650f7bd4a0f68015ad27825204e3bc32a721b/LICENSE"
+  },
+  {
+    "id": "rust valuable@0.1.1",
+    "file": "valuable-0.1.1.txt",
+    "source": "https://raw.githubusercontent.com/tokio-rs/valuable/9efc29b6e58cef28f6566a47aa7e142a55fead77/LICENSE"
+  },
+  {
+    "id": "rust wasip2@1.0.2+wasi-0.2.9",
+    "file": "wasip2-1.0.2.txt",
+    "selectedLicense": "MIT",
+    "source": "https://raw.githubusercontent.com/bytecodealliance/wasi-rs/06ce201370fcde0d1b0d47cac8ecb1b0b312c9f9/LICENSE-MIT"
+  },
+  {
+    "id": "rust wasite@0.1.0",
+    "file": "wasite-0.1.0.txt",
+    "selectedLicense": "MIT",
+    "source": "https://raw.githubusercontent.com/ardaku/wasite/0c72934ad329ab4670eb017581640c2d6eceb289/LICENSE_MIT.txt"
+  },
+  {
+    "id": "asset vscode-oniguruma@1.7.0",
+    "file": "vscode-oniguruma-1.7.0.txt",
+    "source": "https://raw.githubusercontent.com/microsoft/vscode-oniguruma/v1.7.0/LICENSE.txt"
+  },
+  {
+    "id": "asset oniguruma@6.9.5_rev1",
+    "file": "oniguruma-6.9.5_rev1.txt",
+    "source": "https://raw.githubusercontent.com/microsoft/vscode-oniguruma/v1.7.0/NOTICES.txt"
+  },
+  {
+    "id": "asset @lobehub/icons-static-svg@1.95.0",
+    "file": "lobe-icons-1.95.0.txt",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/c8ae5438f87f05ebf72cd686c83c06efa244e253/LICENSE",
+    "shippedIn": "frontend/shared/provider-icons.js"
+  },
+  {
+    "id": "asset litellm model_prices_and_context_window.json",
+    "file": "litellm-model-prices.txt",
+    "source": "https://raw.githubusercontent.com/BerriAI/litellm/a9e79c8d4645f963c642387e2fef9b8c5474765e/LICENSE",
+    "shippedIn": "crates/relay-server/src/usage/model-prices.json"
+  }
+]

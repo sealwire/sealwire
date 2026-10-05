@@ -125,6 +125,12 @@ jobs:
           RELAY_PRIVATE_PATH: ${{ github.workspace }}/.private
         run: scripts/with-private.sh npm run build
 
+      - name: Generate binary third-party notices
+        shell: bash
+        env:
+          RELAY_PRIVATE_PATH: ${{ github.workspace }}/.private
+        run: scripts/with-private.sh npm run licenses:generate
+
       # `shell: bash` on every runner, not just the Unix ones: with-private.sh is
       # a bash script and the Windows runner defaults to pwsh, which would fail
       # to run it at all.
@@ -153,10 +159,11 @@ jobs:
         run: |
           mkdir -p "dist-bin/${{ matrix.target }}"
           cp "target/${{ matrix.cargo_target }}/release-npm/${{ matrix.executable }}" "dist-bin/${{ matrix.target }}/${{ matrix.executable }}"
+          cp THIRD_PARTY_NOTICES.txt "dist-bin/${{ matrix.target }}/THIRD_PARTY_NOTICES.txt"
 
       # Byte-scan (+ optional nm/dumpbin) the exact staged executable before
-      # upload. Upload path is the file alone — never a directory that could
-      # include PDB/dSYM sidecars.
+      # upload. Upload only the executable and its notices, never a directory
+      # that could include PDB/dSYM sidecars.
       - name: Verify staged binary
         shell: bash
         env:
@@ -171,7 +178,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: relay-server-${{ matrix.target }}
-          path: dist-bin/${{ matrix.target }}/${{ matrix.executable }}
+          path: |
+            dist-bin/${{ matrix.target }}/${{ matrix.executable }}
+            dist-bin/${{ matrix.target }}/THIRD_PARTY_NOTICES.txt
           if-no-files-found: error
 
   # A SEPARATE job from the build on purpose, and it must stay that way. The

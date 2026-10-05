@@ -29,7 +29,11 @@
     "icon": ["icons/icon.png"],
     "externalBin": ["binaries/relay-server", "binaries/node"],
     "resources": {
-      "resources/claude-worker/": "claude-worker/"
+      "resources/claude-worker/": "claude-worker/",
+      "../LICENSE": "LICENSE",
+      "../CONTRIBUTING.md": "CONTRIBUTING.md",
+      "../THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt",
+      "resources/THIRD_PARTY_NOTICES.node.txt": "THIRD_PARTY_NOTICES.node.txt"
     }
   }
 }

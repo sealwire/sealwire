@@ -28,6 +28,7 @@ if (release) {
   buildArgs.push("--release");
 }
 
+run(process.execPath, ["scripts/generate-third-party-notices.mjs", "--desktop"]);
 run("cargo", buildArgs);
 
 const binaryDir = path.join("src-tauri", "binaries");
@@ -41,7 +42,11 @@ prepareNodeRuntime(binaryDir, targetTriple);
 prepareClaudeWorkerResources();
 
 function prepareNodeRuntime(binaryDir, targetTriple) {
-  copyExecutable(resolveNodeRuntime(), sidecarPath(binaryDir, NODE_SIDECAR, targetTriple));
+  const runtime = resolveNodeRuntime();
+  copyExecutable(runtime, sidecarPath(binaryDir, NODE_SIDECAR, targetTriple));
+  const resources = path.join("src-tauri", "resources");
+  mkdirSync(resources, { recursive: true });
+  copyFileSync(path.join(path.dirname(runtime), "..", "LICENSE"), path.join(resources, "THIRD_PARTY_NOTICES.node.txt"));
 }
 
 function resolveNodeRuntime() {
@@ -67,7 +72,7 @@ function resolveNodeRuntime() {
   }
   verifySha256(archivePath, archiveName, shasumsPath);
 
-  if (!existsSync(extractedNode)) {
+  if (!existsSync(extractedNode) || !existsSync(path.join(extractRoot, distribution.name, "LICENSE"))) {
     rmSync(extractRoot, { recursive: true, force: true });
     mkdirSync(extractRoot, { recursive: true });
     run("tar", [
@@ -76,6 +81,7 @@ function resolveNodeRuntime() {
       "-C",
       extractRoot,
       `${distribution.name}/bin/${distribution.executable}`,
+      `${distribution.name}/LICENSE`,
     ]);
   }
   return extractedNode;
@@ -117,6 +123,7 @@ function prepareClaudeWorkerResources() {
     });
   }
   run("npm", ["ci", "--omit=dev"], { cwd: targetDir });
+  run(process.execPath, ["scripts/generate-third-party-notices.mjs", "--worker", targetDir]);
   console.log(`tauri: prepared claude-worker resources ${targetDir}`);
 }
 

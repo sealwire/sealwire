@@ -619,11 +619,12 @@ test("artifact verification runs before upload on the staged executable only", a
   assert.match(verify, /--private "\$\{\{\s*github\.workspace\s*\}\}\/\.private"/);
 
   const upload = jobSteps[uploadIdx];
-  // Upload the file path, not the staging directory (sidecars must not ship).
+  // Upload explicit files, not the staging directory (debug sidecars must not ship).
   assert.match(
     upload,
-    /path:\s*dist-bin\/\$\{\{\s*matrix\.target\s*\}\}\/\$\{\{\s*matrix\.executable\s*\}\}/
+    /path:\s*\|\s*dist-bin\/\$\{\{\s*matrix\.target\s*\}\}\/\$\{\{\s*matrix\.executable\s*\}\}/
   );
+  assert.match(upload, /dist-bin\/\$\{\{\s*matrix\.target\s*\}\}\/THIRD_PARTY_NOTICES\.txt/);
   assert.doesNotMatch(upload, /path:\s*dist-bin\/\$\{\{\s*matrix\.target\s*\}\}\s*$/m);
 });
 

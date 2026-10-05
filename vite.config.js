@@ -1,13 +1,13 @@
 import { defineConfig } from "vite";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+// Both broker images build the frontend from a file-scoped COPY list: anything
+// this file imports, directly or not, must be copied there too.
+import { highlighterBuildPlugin } from "./scripts/highlighter-build-plugin.mjs";
+import { thirdPartyNoticesPlugin } from "./scripts/third-party-notices-plugin.mjs";
 
 // Resolve our own directory without relying on a bare `__dirname` (which is not
-// defined when this file is imported as ESM, e.g. from the unit test). Keep the
-// dev-reload plugin defined INLINE here: vite.config.js is the only build-config
-// file the broker Dockerfile copies, so importing a helper from outside it
-// (e.g. scripts/) breaks `vite build` inside the image. See the Docker
-// frontend-build context in docker/broker.Dockerfile.
+// defined when this file is imported as ESM, e.g. from the unit test).
 const rootDir = fileURLToPath(new URL(".", import.meta.url));
 
 const relayPort = Number(process.env.RELAY_DEV_SERVER_PORT || 8787);
@@ -112,7 +112,7 @@ export default defineConfig({
   root: resolve(rootDir, "frontend"),
   base: "/static/",
   publicDir: resolve(rootDir, "frontend/public"),
-  plugins: [buildMetaPlugin(), devReloadPlugin()],
+  plugins: [highlighterBuildPlugin(rootDir), thirdPartyNoticesPlugin(rootDir), buildMetaPlugin(), devReloadPlugin()],
   server: {
     host: "127.0.0.1",
     port: vitePort,

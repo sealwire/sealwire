@@ -177,6 +177,41 @@ test("the broker image copies every out-of-tree path the frontend imports", () =
   }
 });
 
+// Third failure mode: vite.config.js loads build plugins from scripts/, and the
+// notices plugin reads license texts from docs/third-party/ while bundling.
+function viteBuildInputs(root) {
+  const seen = new Set();
+  const pending = ["vite.config.js"];
+  while (pending.length) {
+    const file = pending.pop();
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const source = readFileSync(join(root, file), "utf8");
+    for (const [, specifier] of source.matchAll(
+      /(?:^|[\s;}])(?:import|export)\s*(?:[\w*{},\s]*?\s*from\s*)?["']([^"']+)["']/g
+    )) {
+      if (specifier.startsWith(".")) pending.push(relative(root, resolve(dirname(join(root, file)), specifier)));
+    }
+  }
+  const overrides = JSON.parse(readFileSync(join(root, "scripts/third-party-license-overrides.json"), "utf8"));
+  for (const { file } of overrides) seen.add(`docs/third-party/${file}`);
+  return [...seen].sort();
+}
+
+test("the broker image copies every repo file the frontend build configuration loads", () => {
+  const building = parseStages(readDockerfile()).filter((stage) =>
+    stage.lines.some((line) => /^\s*RUN\s+.*\bnpm\s+run\s+build\b/i.test(line))
+  );
+  assert.ok(building.length > 0, `${DOCKERFILE} no longer runs \`npm run build\`.`);
+  const inputs = viteBuildInputs(repoRoot);
+  assert.ok(inputs.includes("scripts/third-party-notices.mjs"), inputs.join(", "));
+  for (const stage of building) {
+    const copied = copiedPaths(stage);
+    const missing = inputs.filter((file) => !isCovered(file, copied));
+    assert.deepEqual(missing, [], `the "${stage.name}" stage of ${DOCKERFILE} must COPY these for \`vite build\``);
+  }
+});
+
 // A tracked file that ALSO matches an ignore rule is a trap. Git keeps versioning it
 // (ignore rules do not apply to tracked paths), so it looks committed and builds fine
 // from a checkout — but every tool that packs a directory by consulting .gitignore
