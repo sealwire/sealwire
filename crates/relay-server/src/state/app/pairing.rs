@@ -350,6 +350,18 @@ impl AppState {
         Ok(request)
     }
 
+    pub(crate) async fn taken_pairing_refusal(
+        &self,
+        pairing_id: &str,
+        device_verify_key: &str,
+        peer_id: &str,
+    ) -> Option<super::PendingPairingResult> {
+        self.relay
+            .read()
+            .await
+            .taken_pairing_refusal(pairing_id, device_verify_key, peer_id)
+    }
+
     pub(crate) async fn retired_pairing_result(
         &self,
         pairing_id: &str,

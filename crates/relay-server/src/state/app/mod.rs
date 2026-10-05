@@ -747,6 +747,17 @@ impl AppState {
         relay.snapshot()
     }
 
+    pub(crate) async fn snapshot_for_device(
+        &self,
+        snapshot: &SessionSnapshot,
+        device_id: &str,
+    ) -> Option<SessionSnapshot> {
+        self.relay
+            .read()
+            .await
+            .snapshot_for_device(snapshot, device_id)
+    }
+
     /// A point-in-time local snapshot for a surface that just CONNECTED.
     ///
     /// Never served from the cache. A snapshot is not a pure function of the revision:

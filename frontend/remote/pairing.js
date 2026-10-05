@@ -3,6 +3,7 @@ import { getComposerWorkspaceStore } from "../shared/composer-workspace.js";
 import {
   clearPairingQueryFromUrl,
   decryptJson,
+  deviceKeyFingerprint,
   encryptJson,
   parsePairingPayload,
   signClientClaim,
@@ -193,6 +194,7 @@ export async function sendPairingRequest() {
   applyRemoteSurfacePatch(createPairingStatePatch({
     pairingPhase: "requesting",
     pairingError: null,
+    pairingFingerprint: deviceKeyFingerprint(deviceKeypair.verifyKey),
   }));
 
   const payload = {

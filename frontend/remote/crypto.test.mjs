@@ -188,3 +188,15 @@ test("the client claim message matches the broker contract", async () => {
     "agent-relay:client-claim:ccl-abc:cn-def:relay-1"
   );
 });
+
+// The operator compares this with the computer's screen; the same literal is pinned in
+// `the_phone_and_relay_agree_on_a_device_fingerprint` so the two formats cannot drift.
+test("the device fingerprint matches the relay's format", async () => {
+  installBrowserStubs({});
+  const crypto = await importCrypto(`fingerprint-${Date.now()}`);
+
+  assert.equal(
+    crypto.deviceKeyFingerprint("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="),
+    "ae:21:6c:2e:f5:24:7a:37"
+  );
+});

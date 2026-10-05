@@ -1,5 +1,8 @@
 use super::*;
 
+const OUTSIDE_DEVICE_FOLDERS_MSG: &str =
+    "this session is outside the folders this device is limited to";
+
 impl AppState {
     pub async fn read_ask_user_question_detail(
         &self,
@@ -23,6 +26,9 @@ impl AppState {
             match relay.team_run_cwd_for_thread(&pending.thread_id) {
                 Some(cwd) => relay.workspace_scope(Some(&device_id)).ensure(&cwd)?,
                 None => relay.ensure_device_can_approve(&device_id)?,
+            }
+            if !relay.device_reaches_thread(&pending.thread_id, &device_id) {
+                return Err(OUTSIDE_DEVICE_FOLDERS_MSG.to_string());
             }
             pending.to_view()
         };
@@ -48,6 +54,11 @@ impl AppState {
                 .get(request_id)
                 .cloned()
                 .ok_or(ApprovalError::NoPendingRequest)?;
+            if !relay.device_reaches_thread(&pending.thread_id, &device_id) {
+                return Err(ApprovalError::Bridge(
+                    OUTSIDE_DEVICE_FOLDERS_MSG.to_string(),
+                ));
+            }
             // A reviewer thread's approvals belong to the review (the orchestrator
             // auto-denies them) — block user decisions so a write can't be approved
             // out from under it. Approvals on any OTHER thread stay decidable.
@@ -153,6 +164,14 @@ impl AppState {
                 None => relay
                     .ensure_device_can_approve(&device_id)
                     .map_err(AskUserAnswerError::Bridge)?,
+            }
+            if pending
+                .as_ref()
+                .is_some_and(|pending| !relay.device_reaches_thread(&pending.thread_id, &device_id))
+            {
+                return Err(AskUserAnswerError::Bridge(
+                    OUTSIDE_DEVICE_FOLDERS_MSG.to_string(),
+                ));
             }
             pending
         };

@@ -110,6 +110,16 @@ impl RelayState {
         self.republish_thread_rows(&reviewer_thread_id);
     }
 
+    /// The provider a session's tools were attached under. Permission checks read this: a
+    /// thread row or summary that has not caught up would make the session look restricted.
+    pub(crate) fn session_provider(&self, thread_id: &str) -> String {
+        self.session_bindings
+            .binding(thread_id)
+            .map(|binding| binding.provider.clone())
+            .filter(|provider| !provider.is_empty())
+            .unwrap_or_else(|| self.provider_of_thread(thread_id))
+    }
+
     /// The provider a thread runs on, from what the relay already knows of it.
     pub(crate) fn provider_of_thread(&self, thread_id: &str) -> String {
         self.runtime_for_thread(thread_id)

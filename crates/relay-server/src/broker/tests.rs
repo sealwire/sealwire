@@ -6217,6 +6217,147 @@ async fn private_snapshot_is_sealed_for_the_live_paired_surface_only() {
     assert_eq!(snapshot["broker_can_read_content"], false);
 }
 
+fn canonical(dir: &tempfile::TempDir) -> String {
+    std::fs::canonicalize(dir.path())
+        .expect("tempdir canonicalizes")
+        .to_string_lossy()
+        .to_string()
+}
+
+/// An online phone limited to `phone_dir`, while the active session runs in
+/// `session_dir` with a reply on screen and a command waiting for approval.
+pub(super) async fn folder_limited_phone_state(phone_dir: &str, session_dir: &str) -> AppState {
+    let (change_tx, _) = watch::channel(0_u64);
+    let relay = Arc::new(RwLock::new(RelayState::new(
+        "/tmp/broker-folder-limit".to_string(),
+        change_tx.clone(),
+        SecurityProfile::private(),
+    )));
+    {
+        let mut relay = relay.write().await;
+        relay.paired_devices.insert(
+            "phone-1".to_string(),
+            crate::state::PairedDevice {
+                device_id: "phone-1".to_string(),
+                label: "phone-1".to_string(),
+                payload_secret: "secret".to_string(),
+                device_verify_key: "verify".to_string(),
+                created_at: 1,
+                last_seen_at: Some(1),
+                last_peer_id: None,
+                broker_join_ticket_expires_at: None,
+                path_scope: vec![phone_dir.to_string()],
+            },
+        );
+        relay.activate_thread(
+            crate::protocol::ThreadSummaryView {
+                workspace_trusted: false,
+                id: "session-1".to_string(),
+                name: Some("Session".to_string()),
+                preview: String::new(),
+                cwd: session_dir.to_string(),
+                updated_at: 1,
+                source: "codex".to_string(),
+                status: "active".to_string(),
+                model_provider: "codex".to_string(),
+                provider: "codex".to_string(),
+                forked_from: None,
+                renamed: false,
+                flagged: false,
+            },
+            session_dir,
+            "gpt-5",
+            "untrusted",
+            "workspace-write",
+            "medium",
+            "local-browser",
+        );
+        relay.append_agent_delta("reply-1", "the secret reply", "turn-1");
+        relay.add_pending_approval(crate::state::PendingApproval {
+            request_id: "approval-1".to_string(),
+            raw_request_id: serde_json::json!("approval-1"),
+            kind: crate::state::ApprovalKind::Command,
+            thread_id: "session-1".to_string(),
+            summary: "Run command".to_string(),
+            detail: None,
+            command: Some("cat secrets.txt".to_string()),
+            cwd: Some(session_dir.to_string()),
+            context_preview: None,
+            requested_permissions: None,
+            available_decisions: vec!["approve".to_string(), "deny".to_string()],
+            supports_session_scope: false,
+        });
+    }
+    let state = AppState::from_parts(relay, HashMap::new(), change_tx);
+    state
+        .replace_online_surface_peers(["surface-a".to_string()])
+        .await;
+    state
+        .mark_remote_device_seen("phone-1", "surface-a", None)
+        .await
+        .expect("paired phone should bind to its peer");
+    state
+}
+
+async fn published_snapshot_for_phone(state: &AppState) -> serde_json::Value {
+    let payloads = published_snapshot_payloads(state).await;
+    let message = &payloads[0]["messages"][0];
+    assert_eq!(message["payload"]["device_id"], "phone-1");
+    let envelope: EncryptedEnvelope =
+        serde_json::from_value(message["payload"]["envelope"].clone())
+            .expect("envelope deserializes");
+    decrypt_json("secret", &envelope).expect("the phone's own secret opens the snapshot")
+}
+
+#[tokio::test]
+async fn a_folder_limited_phone_gets_nothing_from_a_session_outside_its_folder() {
+    let phone_dir = tempfile::TempDir::new().expect("phone tempdir");
+    let session_dir = tempfile::TempDir::new().expect("session tempdir");
+    let session_cwd = canonical(&session_dir);
+    let state = folder_limited_phone_state(&canonical(&phone_dir), &session_cwd).await;
+
+    let snapshot = published_snapshot_for_phone(&state).await;
+
+    let text = snapshot.to_string();
+    assert!(!text.contains("the secret reply"), "transcript leaked");
+    assert!(!text.contains("cat secrets.txt"), "approval leaked");
+    assert!(!text.contains(&session_cwd), "session folder leaked");
+    assert_eq!(snapshot["pending_approvals"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn a_folder_limited_phone_still_sees_a_session_inside_its_folder() {
+    let session_dir = tempfile::TempDir::new().expect("session tempdir");
+    let session_cwd = canonical(&session_dir);
+    let state = folder_limited_phone_state(&session_cwd, &session_cwd).await;
+
+    let snapshot = published_snapshot_for_phone(&state).await;
+
+    let text = snapshot.to_string();
+    assert!(text.contains("the secret reply"), "transcript missing");
+    assert_eq!(snapshot["pending_approvals"][0]["request_id"], "approval-1");
+    assert_eq!(snapshot["current_cwd"], session_cwd);
+}
+
+// Targets are read before the snapshot is scoped, so a phone revoked in between is no
+// longer on record. It must get what a limited phone gets, not everything.
+#[tokio::test]
+async fn a_phone_no_longer_on_record_gets_nothing_outside_its_folder() {
+    let phone_dir = tempfile::TempDir::new().expect("phone tempdir");
+    let session_dir = tempfile::TempDir::new().expect("session tempdir");
+    let state = folder_limited_phone_state(&canonical(&phone_dir), &canonical(&session_dir)).await;
+    let snapshot = state.snapshot().await;
+
+    let scoped = state
+        .snapshot_for_device(&snapshot, "revoked-phone")
+        .await
+        .expect("an unknown device is scoped, not waved through");
+
+    let text = serde_json::to_string(&scoped).expect("snapshot serializes");
+    assert!(!text.contains("the secret reply"), "transcript leaked");
+    assert!(scoped.pending_approvals.is_empty(), "approval leaked");
+}
+
 #[test]
 fn plaintext_remote_actions_are_rejected() {
     for request in [
@@ -6673,4 +6814,222 @@ async fn an_invalid_encrypted_request_does_not_end_the_session() {
             .any(|kind| kind == "encrypted_remote_action_result:valid"),
         "saw {kinds:?}"
     );
+}
+
+fn signed_pairing_request(
+    pairing_id: &str,
+    pairing_secret: &str,
+    key_seed: u8,
+    device_id: &str,
+) -> EncryptedEnvelope {
+    let signing_key = SigningKey::from_bytes(&[key_seed; 32]);
+    encrypt_json(
+        pairing_secret,
+        &PairingRequestPlaintext {
+            device_id: Some(device_id.to_string()),
+            device_label: Some(device_id.to_string()),
+            device_verify_key: STANDARD.encode(signing_key.verifying_key().to_bytes()),
+            pairing_proof: STANDARD.encode(
+                signing_key
+                    .sign(pairing_proof_message(pairing_id, Some(device_id)).as_bytes())
+                    .to_bytes(),
+            ),
+        },
+    )
+    .expect("pairing request encrypts")
+}
+
+// The first key to reach a QR keeps it, so the operator approves one device only. The
+// second phone used to get no answer at all and sat on "waiting for approval" forever.
+#[tokio::test]
+async fn a_second_phone_on_a_taken_pairing_qr_is_told_to_use_a_new_one() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let relay = Arc::new(RwLock::new(RelayState::new(
+        "/tmp/pairing-second-phone".to_string(),
+        change_tx.clone(),
+        SecurityProfile::private(),
+    )));
+    let ticket = {
+        let mut relay = relay.write().await;
+        let ticket = relay
+            .prepare_pairing_ticket(Some(600), Vec::new())
+            .expect("QR prepares");
+        relay
+            .install_pairing_ticket(&ticket, unix_now())
+            .expect("QR installs");
+        ticket
+    };
+    let state = AppState::from_parts(relay.clone(), HashMap::new(), change_tx);
+    let (writer, mut now_rx, _train_rx) = super::writer::test_writer();
+
+    for (peer, seed, device) in [
+        ("surface-first", 1_u8, "phone-first"),
+        ("surface-second", 2_u8, "phone-second"),
+    ] {
+        handle_pairing_request(
+            &state,
+            &writer,
+            peer.to_string(),
+            ticket.pairing_id.clone(),
+            signed_pairing_request(&ticket.pairing_id, &ticket.pairing_secret, seed, device),
+        )
+        .await
+        .expect("pairing request is handled");
+    }
+
+    let mut answers = Vec::new();
+    while let Ok(message) = now_rx.try_recv() {
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let frame: serde_json::Value = serde_json::from_str(&text).expect("frame is json");
+        for message in frame["payload"]["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if message["payload"]["kind"] != "encrypted_pairing_result" {
+                continue;
+            }
+            let envelope: EncryptedEnvelope =
+                serde_json::from_value(message["payload"]["envelope"].clone())
+                    .expect("envelope deserializes");
+            let result: serde_json::Value =
+                decrypt_json(&ticket.pairing_secret, &envelope).expect("result decrypts");
+            answers.push((message["target_peer_id"].clone(), result));
+        }
+    }
+    assert_eq!(
+        answers.len(),
+        1,
+        "exactly the second phone is answered: {answers:?}"
+    );
+    let (target, result) = &answers[0];
+    assert_eq!(target, "surface-second");
+    assert_eq!(result["ok"], false);
+    assert!(result["device"].is_null() && result["payload_secret"].is_null());
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("new QR"),
+        "{result}"
+    );
+    let relay = relay.read().await;
+    let waiting = relay
+        .pending_pairing_requests
+        .get(&ticket.pairing_id)
+        .expect("the first phone is still waiting");
+    assert_eq!(waiting.broker_peer_id, "surface-first");
+}
+
+fn pairing_results(
+    now_rx: &mut tokio::sync::mpsc::Receiver<Message>,
+    pairing_secret: &str,
+) -> Vec<(serde_json::Value, serde_json::Value)> {
+    let mut answers = Vec::new();
+    while let Ok(message) = now_rx.try_recv() {
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let frame: serde_json::Value = serde_json::from_str(&text).expect("frame is json");
+        for message in frame["payload"]["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if message["payload"]["kind"] != "encrypted_pairing_result" {
+                continue;
+            }
+            let envelope: EncryptedEnvelope =
+                serde_json::from_value(message["payload"]["envelope"].clone())
+                    .expect("envelope deserializes");
+            let result: serde_json::Value =
+                decrypt_json(pairing_secret, &envelope).expect("result decrypts");
+            answers.push((message["target_peer_id"].clone(), result));
+        }
+    }
+    answers
+}
+
+// A Cloud join ticket outlives the decision, so a second phone can still scan the QR
+// after the first was approved or rejected; it used to wait forever then too.
+#[tokio::test]
+async fn a_second_phone_on_a_decided_pairing_qr_is_told_to_use_a_new_one() {
+    for approved in [true, false] {
+        let (change_tx, _) = watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            "/tmp/pairing-decided-qr".to_string(),
+            change_tx.clone(),
+            SecurityProfile::private(),
+        )));
+        let ticket = {
+            let mut relay = relay.write().await;
+            let ticket = relay
+                .prepare_pairing_ticket(Some(600), Vec::new())
+                .expect("QR prepares");
+            relay
+                .install_pairing_ticket(&ticket, unix_now())
+                .expect("QR installs");
+            ticket
+        };
+        let state = AppState::from_parts(relay.clone(), HashMap::new(), change_tx);
+        let (writer, mut now_rx, _train_rx) = super::writer::test_writer();
+        let request = |seed, device| {
+            signed_pairing_request(&ticket.pairing_id, &ticket.pairing_secret, seed, device)
+        };
+
+        handle_pairing_request(
+            &state,
+            &writer,
+            "surface-first".to_string(),
+            ticket.pairing_id.clone(),
+            request(1, "phone-first"),
+        )
+        .await
+        .expect("first request is handled");
+        relay
+            .write()
+            .await
+            .decide_pairing_request(&ticket.pairing_id, approved, None, unix_now())
+            .expect("the operator decides");
+        handle_pairing_request(
+            &state,
+            &writer,
+            "surface-second".to_string(),
+            ticket.pairing_id.clone(),
+            request(2, "phone-second"),
+        )
+        .await
+        .expect("second request is handled");
+        handle_pairing_request(
+            &state,
+            &writer,
+            "surface-first-again".to_string(),
+            ticket.pairing_id.clone(),
+            request(1, "phone-first"),
+        )
+        .await
+        .expect("the first phone's resend is handled");
+
+        let answers = pairing_results(&mut now_rx, &ticket.pairing_secret);
+        assert_eq!(answers.len(), 2, "approved={approved}: {answers:?}");
+        let (target, refusal) = &answers[0];
+        assert_eq!(target, "surface-second");
+        assert_eq!(refusal["ok"], false);
+        assert!(refusal["payload_secret"].is_null() && refusal["device"].is_null());
+        assert!(
+            refusal["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("new QR"),
+            "{refusal}"
+        );
+        let (target, replay) = &answers[1];
+        assert_eq!(
+            target, "surface-first-again",
+            "the decided phone still gets its answer"
+        );
+        assert_eq!(replay["ok"], approved, "{replay}");
+    }
 }

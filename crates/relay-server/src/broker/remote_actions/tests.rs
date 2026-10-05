@@ -2399,3 +2399,52 @@ fn encrypted_actions_require_the_authenticated_action_id() {
         assert!(decrypt_remote_action_with_secret("secret", "original", &unbound).is_err());
     }
 }
+
+// The reply to a phone's own action carries a snapshot too, so the folder limit has to
+// hold there as well as on the broadcast one.
+#[tokio::test]
+async fn an_action_reply_gives_a_folder_limited_phone_nothing_outside_its_folder() {
+    let canonical = |dir: &tempfile::TempDir| {
+        std::fs::canonicalize(dir.path())
+            .expect("tempdir canonicalizes")
+            .to_string_lossy()
+            .to_string()
+    };
+    let phone_dir = tempfile::TempDir::new().expect("phone tempdir");
+    let session_dir = tempfile::TempDir::new().expect("session tempdir");
+    let session_cwd = canonical(&session_dir);
+    let state =
+        super::super::tests::folder_limited_phone_state(&canonical(&phone_dir), &session_cwd).await;
+    let (writer, mut now_queue, _queued) = super::super::writer::test_writer();
+
+    publish_remote_action_result_private(
+        &state,
+        &writer,
+        "surface-a".to_string(),
+        "phone-1".to_string(),
+        "action-1".to_string(),
+        RemoteActionKind::TakeOver,
+        Some(state.snapshot().await),
+        RemoteActionOutcome::default(),
+        None,
+        true,
+        None,
+        None,
+    )
+    .await
+    .expect("the reply publishes");
+
+    let tokio_tungstenite::tungstenite::Message::Text(text) =
+        now_queue.try_recv().expect("one reply frame")
+    else {
+        panic!("broker frames are text");
+    };
+    let frame: serde_json::Value = serde_json::from_str(&text).expect("frame is json");
+    let envelope: EncryptedEnvelope =
+        serde_json::from_value(frame["payload"]["envelope"].clone()).expect("envelope");
+    let reply: serde_json::Value = decrypt_json("secret", &envelope).expect("reply decrypts");
+    let text = reply.to_string();
+    assert!(!text.contains("the secret reply"), "transcript leaked");
+    assert!(!text.contains("cat secrets.txt"), "approval leaked");
+    assert!(!text.contains(&session_cwd), "session folder leaked");
+}

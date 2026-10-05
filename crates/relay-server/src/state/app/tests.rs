@@ -10709,6 +10709,136 @@ tree; got {}",
         assert!(claude.ask_request_ids.lock().await.is_empty());
     }
 
+    /// A Codex session in `session_dir` waiting on one approval and one question, with
+    /// `device` paired and limited to `device_dir`.
+    async fn session_waiting_for(
+        session_dir: &str,
+        device: &str,
+        device_dir: &str,
+    ) -> (AppState, RecordingProvider) {
+        let (app, codex, _claude) = build_recording_provider_app(session_dir).await;
+        pair_device(&app, device, vec![device_dir.to_string()]).await;
+        let thread = codex.thread_summary("waiting-thread", session_dir);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.activate_thread(
+                thread,
+                session_dir,
+                "gpt-5",
+                "untrusted",
+                "workspace-write",
+                "medium",
+                "local-browser",
+            );
+            relay.pending_approvals.insert(
+                "a-waiting".to_string(),
+                approval_on("a-waiting", "waiting-thread"),
+            );
+            relay.pending_ask_user_questions.insert(
+                "q-waiting".to_string(),
+                question_on("q-waiting", "waiting-thread"),
+            );
+        }
+        (app, codex)
+    }
+
+    // The pairing screen promises a device limited to one folder; approving or steering
+    // a session elsewhere would break that promise.
+    #[tokio::test]
+    async fn a_folder_limited_device_cannot_answer_a_session_outside_its_folder() {
+        let session_dir = TempDir::new().expect("session tempdir");
+        let device_dir = TempDir::new().expect("device tempdir");
+        let (app, codex) = session_waiting_for(
+            session_dir.path().to_str().unwrap(),
+            "limited-phone",
+            device_dir.path().to_str().unwrap(),
+        )
+        .await;
+
+        let approval = app
+            .decide_approval(
+                "a-waiting",
+                ApprovalDecisionInput {
+                    decision: ApprovalDecision::Approve,
+                    scope: Some(ApprovalScope::Once),
+                    device_id: Some("limited-phone".to_string()),
+                },
+            )
+            .await;
+        let detail = app
+            .read_ask_user_question_detail("q-waiting", Some("limited-phone".to_string()))
+            .await;
+        let answer = app
+            .submit_ask_user_answer(
+                "q-waiting",
+                SubmitAskUserAnswerInput {
+                    answers: pick_a(),
+                    device_id: Some("limited-phone".to_string()),
+                },
+            )
+            .await;
+
+        assert!(
+            codex.approval_thread_ids.lock().await.is_empty(),
+            "the approval reached the provider"
+        );
+        assert!(
+            codex.ask_request_ids.lock().await.is_empty(),
+            "the answer reached the provider"
+        );
+        assert!(approval.is_err(), "approval was accepted");
+        assert!(detail.is_err(), "question detail was returned: {detail:?}");
+        assert!(answer.is_err(), "answer was accepted");
+        let relay = app.relay.read().await;
+        assert!(relay.pending_approvals.contains_key("a-waiting"));
+        assert!(relay.pending_ask_user_questions.contains_key("q-waiting"));
+    }
+
+    #[tokio::test]
+    async fn a_folder_limited_device_still_answers_a_session_inside_its_folder() {
+        let session_dir = TempDir::new().expect("session tempdir");
+        let cwd = session_dir.path().to_str().unwrap();
+        let (app, codex) = session_waiting_for(cwd, "limited-phone", cwd).await;
+
+        app.read_ask_user_question_detail("q-waiting", Some("limited-phone".to_string()))
+            .await
+            .expect("question detail inside the folder");
+        app.submit_ask_user_answer(
+            "q-waiting",
+            SubmitAskUserAnswerInput {
+                answers: pick_a(),
+                device_id: Some("limited-phone".to_string()),
+            },
+        )
+        .await
+        .expect("answer inside the folder");
+        app.decide_approval(
+            "a-waiting",
+            ApprovalDecisionInput {
+                decision: ApprovalDecision::Approve,
+                scope: Some(ApprovalScope::Once),
+                device_id: Some("limited-phone".to_string()),
+            },
+        )
+        .await
+        .expect("approval inside the folder");
+
+        assert_eq!(
+            *codex.approval_thread_ids.lock().await,
+            vec!["waiting-thread".to_string()]
+        );
+        assert_eq!(
+            *codex.ask_request_ids.lock().await,
+            vec!["q-waiting".to_string()]
+        );
+    }
+
     // The waiting flag used to clear only once NO thread had a question left.
     #[tokio::test]
     async fn answering_one_threads_question_clears_only_that_threads_wait() {
@@ -30539,6 +30669,9 @@ mod ask_tests {
                 .await
                 .expect_err("a restricted session may not reach past itself");
             assert!(error.contains("permissions"), "{tool}: {error}");
+            // "Auto-approve" does not ask before commands, so the reason must not say it does.
+            assert!(!error.contains("ask before"), "{tool}: {error}");
+            assert!(error.contains("Full access (YOLO)"), "{tool}: {error}");
         }
         let error = app
             .call_peer_tool(
@@ -30561,6 +30694,115 @@ mod ask_tests {
         let ask = relay.asks_of_asker(&asker)[0].clone();
         assert!(ask.answered_with_tool);
         assert_eq!(ask.answer.as_deref(), Some("It retries forever."));
+    }
+
+    // A sandbox setting alone is not "no limits": this session still asks before every
+    // command, so a peer that never asks would be more than it may have.
+    #[tokio::test]
+    async fn a_session_that_still_asks_may_not_bring_in_agents_whatever_its_sandbox() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let asker = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("untrusted".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+                sandbox: Some("danger-full-access".to_string()),
+            })
+            .await
+            .expect("asker starts")
+            .active_thread_id
+            .clone()
+            .expect("thread");
+        let token = app.ask_token_for_thread(&asker).await;
+
+        let listed: Vec<String> = app
+            .list_peer_tools_for(&token)
+            .await
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        let error = app
+            .call_peer_tool(
+                "delegate",
+                &serde_json::json!({ "message": "run the deploy" }),
+                &token,
+            )
+            .await
+            .expect_err("a session that still asks may not borrow one that does not");
+
+        assert_eq!(listed, vec!["report_back".to_string()]);
+        assert!(error.contains("permissions"), "{error}");
+        // The agent relays this to the person, so it has to say what they can do instead.
+        assert!(error.contains("/delegate"), "{error}");
+        assert!(error.contains("Full access (YOLO)"), "{error}");
+        assert!(app.relay.read().await.asks_of_asker(&asker).is_empty());
+        let goal_error = app
+            .call_peer_tool("goal_status", &serde_json::json!({}), &token)
+            .await
+            .expect_err("goal tools need the same permissions");
+        assert!(goal_error.contains("Full access (YOLO)"), "{goal_error}");
+        assert!(!goal_error.contains("/delegate"), "{goal_error}");
+        // A full-access sandbox no longer unlocks a goal, so the refusal must not offer it.
+        let set_error = app
+            .set_goal(&asker, "keep going", None, false, None)
+            .await
+            .expect_err("a session that still asks cannot run a goal");
+        assert!(set_error.contains("Full access (YOLO)"), "{set_error}");
+        assert!(!set_error.contains("sandbox"), "{set_error}");
+    }
+
+    // The tools were attached under the session's binding; a thread row or summary that has
+    // not caught up must not make a session that runs without prompts look restricted.
+    #[tokio::test]
+    async fn the_permission_check_reads_the_provider_the_session_is_bound_to() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        let thread = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some(cwd.clone()),
+                provider: Some("fake".to_string()),
+                approval_policy: Some("never".to_string()),
+                device_id: Some("dev".to_string()),
+                initial_prompt: None,
+                model: None,
+                effort: None,
+                project_id: None,
+                sandbox: Some("danger-full-access".to_string()),
+            })
+            .await
+            .expect("session starts")
+            .active_thread_id
+            .clone()
+            .expect("thread");
+        {
+            let mut relay = app.relay.write().await;
+            relay.ensure_runtime_for_thread(&thread).summary = None;
+            relay.threads.retain(|row| row.id != thread);
+            assert!(
+                relay.provider_of_thread(&thread).is_empty(),
+                "setup lost the provider"
+            );
+        }
+        let token = app.ask_token_for_thread(&thread).await;
+
+        let listed: Vec<String> = app
+            .list_peer_tools_for(&token)
+            .await
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+
+        assert!(listed.contains(&"delegate".to_string()), "{listed:?}");
     }
 
     // Codex and cursor list the tools before the session has an id to bind the token
@@ -33796,9 +34038,8 @@ watchdog settle this Blocked",
             .await
             .expect_err("a session with no way to stop must not be driven");
         assert!(
-            refused.to_lowercase().contains("bypass")
-                || refused.to_lowercase().contains("approval"),
-            "the refusal has to say what to change: {refused}",
+            refused.contains("Full access (YOLO)"),
+            "the refusal has to name the setting to change, as the UI labels it: {refused}",
         );
         assert!(
             app.relay

@@ -2260,9 +2260,15 @@ async fn publish_remote_action_result_private(
         .as_ref()
         .map(|snapshot| snapshot.transcript_truncated)
         .unwrap_or(false);
-    let snapshot = snapshot.map(|snapshot| {
-        snapshot.compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface)
-    });
+    let snapshot = match snapshot {
+        Some(snapshot) => {
+            let compacted =
+                snapshot.compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
+            let scoped = state.snapshot_for_device(&compacted, &device_id).await;
+            Some(scoped.unwrap_or(compacted))
+        }
+        None => None,
+    };
     info!(
         action = action.as_str(),
         input_transcript_entries,

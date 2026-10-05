@@ -131,6 +131,12 @@ export async function ensureDeviceKeypair() {
   return deviceKeypairPromise;
 }
 
+// Same as the relay's, so the operator can compare the two screens before approving.
+export function deviceKeyFingerprint(verifyKey) {
+  const digest = sha256(base64ToBytes(verifyKey));
+  return Array.from(digest.slice(0, 8), (byte) => byte.toString(16).padStart(2, "0")).join(":");
+}
+
 export function pairingProofMessage(pairingId, deviceId) {
   return `agent-relay:pairing:${pairingId}:${deviceId || ""}`;
 }

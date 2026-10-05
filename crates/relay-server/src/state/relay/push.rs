@@ -659,15 +659,15 @@ impl PushDispatcher {
         let payload = build_payload_bytes(&job);
         let mut gone = Vec::new();
         for subscription in subscriptions {
-            // Re-check pairing right before sending: a device revoked between the
+            // Re-checked right before sending: a device revoked or narrowed between the
             // clone above and this send must not receive one last notification.
-            if !self
-                .relay
-                .read()
-                .await
-                .is_device_paired(&subscription.device_id)
             {
-                continue;
+                let relay = self.relay.read().await;
+                if !relay.is_device_paired(&subscription.device_id)
+                    || !relay.device_reaches_thread(&job.thread_id, &subscription.device_id)
+                {
+                    continue;
+                }
             }
             match self.send_one(&subscription, &payload).await {
                 SendOutcome::Gone => gone.push(subscription.endpoint),
@@ -1167,6 +1167,130 @@ mod tests {
         assert!(
             !seen.contains("s2"),
             "the second subscription must be skipped once the device is revoked mid-batch (saw {seen:?})"
+        );
+    }
+
+    // A notification names the session, so a device limited to other folders must not
+    // get one for it.
+    #[tokio::test]
+    async fn a_folder_limited_device_is_not_notified_about_a_session_outside_its_folder() {
+        use std::collections::HashSet;
+        use std::sync::Mutex;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let canonical = |dir: &tempfile::TempDir| {
+            std::fs::canonicalize(dir.path())
+                .expect("tempdir canonicalizes")
+                .to_string_lossy()
+                .to_string()
+        };
+        let phone_dir = tempfile::TempDir::new().expect("phone tempdir");
+        let session_dir = tempfile::TempDir::new().expect("session tempdir");
+        let (change_tx, _rx) = tokio::sync::watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            canonical(&session_dir),
+            change_tx,
+            crate::state::SecurityProfile::private(),
+        )));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        {
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                while let Ok((mut sock, _)) = listener.accept().await {
+                    let seen = seen.clone();
+                    tokio::spawn(async move {
+                        // The client reuses one connection, so keep reading it until it closes.
+                        let mut buf = [0u8; 4096];
+                        while let Ok(n) = sock.read(&mut buf).await {
+                            if n == 0 {
+                                break;
+                            }
+                            let mut got = false;
+                            for path in ["limited", "inside", "open"] {
+                                let needle = format!("/{path} ");
+                                if buf[..n]
+                                    .windows(needle.len())
+                                    .any(|w| w == needle.as_bytes())
+                                {
+                                    seen.lock().unwrap().insert(path.to_string());
+                                    got = true;
+                                }
+                            }
+                            if !got {
+                                continue;
+                            }
+                            let _ = sock
+                                .write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")
+                                .await;
+                        }
+                    });
+                }
+            });
+        }
+
+        let recv = SecretKey::random(&mut OsRng);
+        let p256dh = URL_SAFE_NO_PAD.encode(recv.public_key().to_encoded_point(false).as_bytes());
+        let mut auth = [0u8; 16];
+        OsRng.fill_bytes(&mut auth);
+        let auth = URL_SAFE_NO_PAD.encode(auth);
+        {
+            let mut guard = relay.write().await;
+            for (device, path_scope) in [
+                ("limited", vec![canonical(&phone_dir)]),
+                ("inside", vec![canonical(&session_dir)]),
+                ("open", Vec::new()),
+            ] {
+                guard.paired_devices.insert(
+                    device.to_string(),
+                    crate::state::relay::device::PairedDevice {
+                        device_id: device.to_string(),
+                        label: device.to_string(),
+                        payload_secret: "secret".to_string(),
+                        device_verify_key: "verify-key".to_string(),
+                        created_at: 0,
+                        last_seen_at: None,
+                        last_peer_id: None,
+                        broker_join_ticket_expires_at: None,
+                        path_scope,
+                    },
+                );
+                guard.push_subscriptions.insert(
+                    device.to_string(),
+                    vec![PushSubscription {
+                        endpoint: format!("http://{addr}/{device}"),
+                        p256dh: p256dh.clone(),
+                        auth: auth.clone(),
+                        device_id: device.to_string(),
+                        created_at: 0,
+                    }],
+                );
+            }
+            guard.ensure_runtime_for_thread("t1").current_cwd = canonical(&session_dir);
+        }
+
+        let vapid_dir = tempfile::TempDir::new().expect("vapid tempdir");
+        let vapid = load_or_generate_vapid(&vapid_dir.path().join("vapid.key")).expect("vapid");
+        let dispatcher = PushDispatcher {
+            relay: relay.clone(),
+            http: build_push_client(),
+            vapid,
+        };
+        dispatcher
+            .handle(PushJob::new(PushKind::NeedsInput, "t1"))
+            .await;
+
+        let seen = seen.lock().unwrap().clone();
+        assert!(seen.contains("open"), "an unlimited device is notified");
+        assert!(
+            seen.contains("inside"),
+            "a device limited to this folder is notified"
+        );
+        assert!(
+            !seen.contains("limited"),
+            "the folder-limited device was notified (saw {seen:?})"
         );
     }
 

@@ -26,6 +26,8 @@ const MAX_PAIRING_TTL_SECS: u64 = 600;
 /// Each costs a Cloud request, signed or not, so all count; a refused one counts nothing.
 const MAX_PAIRING_STARTS_PER_MINUTE: usize = 10;
 const PAIRING_REPLACED_ERROR: &str = "this pairing QR was replaced by a newer one; scan the new QR";
+const PAIRING_TAKEN_ERROR: &str =
+    "another device already used this pairing QR; make a new QR and scan that";
 const CLAIM_CHALLENGE_TTL_SECS: u64 = 60;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct PendingPairing {
@@ -484,6 +486,35 @@ impl RelayState {
         Ok((approved_device.to_view(), payload_secret))
     }
 
+    /// The answer for a second device on a QR another one is waiting on or was decided for.
+    /// `None` for that device itself, which may resend over a fresh peer and must not be refused.
+    pub(crate) fn taken_pairing_refusal(
+        &self,
+        pairing_id: &str,
+        device_verify_key: &str,
+        peer_id: &str,
+    ) -> Option<PendingPairingResult> {
+        let (holder_key, pairing_secret) = match self.pending_pairing_requests.get(pairing_id) {
+            Some(waiting) => (
+                &waiting.device_verify_key,
+                &self.pending_pairings.get(pairing_id)?.pairing_secret,
+            ),
+            None => {
+                let decided = self.completed_pairings.get(pairing_id)?;
+                (&decided.device_verify_key, &decided.pairing_secret)
+            }
+        };
+        if holder_key == device_verify_key {
+            return None;
+        }
+        Some(refused_pairing_result(
+            pairing_id.to_string(),
+            peer_id.to_string(),
+            pairing_secret.clone(),
+            PAIRING_TAKEN_ERROR,
+        ))
+    }
+
     pub fn register_pairing_request(
         &mut self,
         pairing_id: &str,
@@ -515,11 +546,7 @@ impl RelayState {
             // the operator is about to grant — along with the payload_secret and
             // refresh tokens that ride the pairing result.
             if existing.device_verify_key != device_verify_key {
-                return Err(
-                    "another device is already waiting for approval on this pairing ticket; \
-                     generate a fresh pairing ticket for this device"
-                        .to_string(),
-                );
+                return Err(PAIRING_TAKEN_ERROR.to_string());
             }
             let label_fallback = requested_device_id
                 .as_deref()
@@ -1172,6 +1199,20 @@ fn replaced_pairing_result(
     target_peer_id: String,
     pairing_secret: String,
 ) -> PendingPairingResult {
+    refused_pairing_result(
+        pairing_id,
+        target_peer_id,
+        pairing_secret,
+        PAIRING_REPLACED_ERROR,
+    )
+}
+
+fn refused_pairing_result(
+    pairing_id: String,
+    target_peer_id: String,
+    pairing_secret: String,
+    error: &str,
+) -> PendingPairingResult {
     PendingPairingResult {
         pairing_id,
         target_peer_id,
@@ -1186,7 +1227,7 @@ fn replaced_pairing_result(
         device_refresh_token: None,
         device_join_ticket: None,
         device_join_ticket_expires_at: None,
-        error: Some(PAIRING_REPLACED_ERROR.to_string()),
+        error: Some(error.to_string()),
     }
 }
 
@@ -1332,4 +1373,18 @@ fn browser_url(broker_url: &str) -> Url {
     url.set_path("/");
     url.set_query(None);
     url
+}
+
+#[cfg(test)]
+mod tests {
+    // The phone shows this while it waits and the operator compares the two before approving.
+    // The literal is duplicated in `frontend/remote/crypto.test.mjs`.
+    #[test]
+    fn the_phone_and_relay_agree_on_a_device_fingerprint() {
+        assert_eq!(
+            super::device_fingerprint(Some("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="))
+                .as_deref(),
+            Some("ae:21:6c:2e:f5:24:7a:37")
+        );
+    }
 }

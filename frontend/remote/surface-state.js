@@ -83,6 +83,7 @@ export function createRemoteThreadSearchPatch(threadSearch) {
 
 export function createPairingStatePatch({
   pairingError,
+  pairingFingerprint,
   pairingPhase,
   pairingRetired,
   pairingTicket,
@@ -90,6 +91,9 @@ export function createPairingStatePatch({
   const patch = {};
   if (pairingError !== undefined) {
     patch.pairingError = pairingError;
+  }
+  if (pairingFingerprint !== undefined) {
+    patch.pairingFingerprint = pairingFingerprint;
   }
   if (pairingPhase !== undefined) {
     patch.pairingPhase = pairingPhase;

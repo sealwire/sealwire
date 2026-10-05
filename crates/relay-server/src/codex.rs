@@ -704,7 +704,8 @@ impl CodexBridge {
         // until after the tools are attached. Seat purpose attaches the
         // run-scoped bridge instead and never mints an ask token.
         let identity = crate::provider::sealwire_mcp_for_new_session(purpose);
-        let unrestricted = crate::state::session_is_unrestricted(&approval_policy, &sandbox);
+        let unrestricted =
+            crate::state::session_is_unrestricted(self.provider_name, approval_policy, sandbox);
         let ask_token = match &identity {
             crate::provider::SealwireMcpIdentity::Peer => Some(
                 self.state

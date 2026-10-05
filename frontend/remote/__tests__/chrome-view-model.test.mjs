@@ -609,3 +609,22 @@ test("a view-only thread that IS running still shows the banner", () => {
   assert.equal(model.controlBanner.summary, "Background session is running");
   assert.equal(model.controlBanner.hidden, false);
 });
+
+// The computer asks the operator to compare fingerprints before approving, so the phone
+// has to show its own while it waits.
+test("a phone waiting for approval shows its device fingerprint", () => {
+  const model = selectDeviceChromeRenderModel({
+    pairingTicket: { pairing_id: "pair-123456", expires_at: 1_900_000_000 },
+    pairingPhase: "requesting",
+    pairingFingerprint: "ae:21:6c:2e:f5:24:7a:37",
+    remoteAuth: null,
+    relayDirectory: [],
+  });
+
+  const card = model.deviceMeta.cards[0];
+  assert.equal(card.title, "Waiting for local approval");
+  assert.ok(
+    card.metaLines.includes("Fingerprint ae:21:6c:2e:f5:24:7a:37"),
+    JSON.stringify(card.metaLines),
+  );
+});

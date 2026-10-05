@@ -33,6 +33,27 @@ pub struct PeerToolReply {
     pub goal_settlement: Option<(String, u32)>,
 }
 
+/// The agent passes this on to the person, so it names what they can do instead.
+fn restricted_peer_tool_refusal(name: &str) -> &'static str {
+    match name {
+        "delegate" => {
+            "This session's permissions are not Full access (YOLO), so it cannot start another \
+             agent on its own. Tell the user they can hand the work over themselves by typing \
+             /delegate, or switch this session to Full access (YOLO)."
+        }
+        name if name.starts_with("goal_") => {
+            "This session's permissions are not Full access (YOLO), so Goal mode cannot run \
+             here. Tell the user to switch this session to Full access (YOLO) to keep the goal \
+             going."
+        }
+        _ => {
+            "This session's permissions are not Full access (YOLO), so it cannot start another \
+             agent on its own. Tell the user they can start it themselves, or switch this \
+             session to Full access (YOLO)."
+        }
+    }
+}
+
 /// First non-empty summary line, truncated on a char boundary.
 fn first_line_bounded(summary: &str) -> &str {
     let line = summary
@@ -450,12 +471,16 @@ impl AppState {
         }
         let unrestricted = relay
             .thread_settings(thread_id)
-            .map(|s| crate::state::session_is_unrestricted(&s.approval_policy, &s.sandbox))
+            .map(|s| {
+                crate::state::session_is_unrestricted(
+                    &relay.session_provider(thread_id),
+                    &s.approval_policy,
+                    &s.sandbox,
+                )
+            })
             .unwrap_or(false);
         if !unrestricted {
-            return Err(
-                "this session's permissions no longer allow bringing in another agent".to_string(),
-            );
+            return Err(restricted_peer_tool_refusal(name).to_string());
         }
         Ok(())
     }

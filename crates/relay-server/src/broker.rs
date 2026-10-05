@@ -2168,6 +2168,16 @@ async fn handle_pairing_request(
                     ),
                 )
                 .await;
+            if let Some(refusal) = state
+                .taken_pairing_refusal(
+                    &pairing_id,
+                    &pairing_request.device_verify_key,
+                    &from_peer_id,
+                )
+                .await
+            {
+                publish_pairing_result(writer, refusal).await?;
+            }
             return Ok(());
         }
     };
@@ -2184,6 +2194,7 @@ async fn handle_pairing_request(
             .await;
         return Ok(());
     }
+    let device_verify_key = pairing_request.device_verify_key.clone();
     let result = state
         .complete_pairing(
             &pairing_id,
@@ -2216,6 +2227,12 @@ async fn handle_pairing_request(
                     ),
                 )
                 .await;
+            if let Some(refusal) = state
+                .taken_pairing_refusal(&pairing_id, &device_verify_key, &from_peer_id)
+                .await
+            {
+                publish_pairing_result(writer, refusal).await?;
+            }
             Ok(())
         }
     }
@@ -2268,7 +2285,13 @@ async fn publish_snapshot(writer: &BrokerWriter, state: &AppState) -> Result<(),
     );
     let mut messages = Vec::new();
     for target in targets {
-        let envelope = encrypt_json(&target.payload_secret, &compacted)?;
+        let scoped = state
+            .snapshot_for_device(&compacted, &target.device_id)
+            .await;
+        let envelope = encrypt_json(
+            &target.payload_secret,
+            scoped.as_ref().unwrap_or(&compacted),
+        )?;
         messages.push(TargetedBrokerMessage {
             target_peer_id: target.peer_id.clone(),
             payload: Box::new(OutboundBrokerPayload::EncryptedSessionSnapshot {

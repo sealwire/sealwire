@@ -44,6 +44,7 @@ export const state = {
   deviceIdentityPromise: null,
   deviceKeypair: null,
   pairingError: null,
+  pairingFingerprint: null,
   pairingPhase: null,
   // Set when the current pairing ticket is dead for good — superseded by a later
   // client claiming its single seat, or expired. The ticket itself is KEPT so its

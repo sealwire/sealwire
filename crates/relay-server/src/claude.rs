@@ -181,7 +181,9 @@ async fn attach_orchestrator_session(
         let settings = relay.thread_settings(thread_id);
         let unrestricted = settings
             .as_ref()
-            .map(|s| crate::state::session_is_unrestricted(&s.approval_policy, &s.sandbox))
+            .map(|s| {
+                crate::state::session_is_unrestricted("claude_code", &s.approval_policy, &s.sandbox)
+            })
             .unwrap_or(false);
         (
             relay.orchestrator_session_options(thread_id),
@@ -749,6 +751,7 @@ impl ProviderBridge for ClaudeCodeBridge {
                 }
                 crate::provider::SealwireMcpIdentity::Peer => {
                     let unrestricted = crate::state::session_is_unrestricted(
+                        "claude_code",
                         &request.approval_policy,
                         &request.sandbox,
                     );
@@ -3046,19 +3049,31 @@ mod tests {
             "a restricted session is offered nothing else",
         );
 
-        assert!(session_is_unrestricted("bypass", "workspace-write"));
-        assert!(session_is_unrestricted("never", "danger-full-access"));
-        for (approval, sandbox) in [
-            ("untrusted", "read-only"),
-            ("on-request", "workspace-write"),
-            ("never", "workspace-write"),
+        assert!(session_is_unrestricted(
+            "claude_code",
+            "bypass",
+            "workspace-write"
+        ));
+        assert!(session_is_unrestricted(
+            "codex",
+            "never",
+            "danger-full-access"
+        ));
+        for (provider, approval, sandbox) in [
+            ("claude_code", "untrusted", "read-only"),
+            ("claude_code", "on-request", "workspace-write"),
+            ("claude_code", "never", "workspace-write"),
+            // Claude ignores the sandbox field, so it cannot lift a session that asks.
+            ("claude_code", "never", "danger-full-access"),
+            ("codex", "untrusted", "danger-full-access"),
+            ("opencode", "never", "danger-full-access"),
             // The reviewer sentinel, which is how a read-only reviewer thread
             // used to end up holding the tool.
-            ("review_read_only", "workspace-write"),
+            ("claude_code", "review_read_only", "workspace-write"),
         ] {
             assert!(
-                !session_is_unrestricted(approval, sandbox),
-                "{approval}+{sandbox} is restricted",
+                !session_is_unrestricted(provider, approval, sandbox),
+                "{provider} {approval}+{sandbox} is restricted",
             );
         }
     }
@@ -3797,6 +3812,42 @@ for await (const line of rl) {
         );
         assert!(cmd.get("tools").is_none(), "{cmd}");
         assert!(cmd.get("allowedTools").is_none(), "{cmd}");
+    }
+
+    // Claude never applies the sandbox field, and the UI does not show it for Claude. A
+    // full-access value left there (a fork from Pi carries one) must not unlock delegation.
+    #[tokio::test]
+    async fn a_claude_session_that_still_asks_gets_no_delegation_from_a_hidden_sandbox() {
+        let (_bridge, state) = match spawn_fake_bridge().await {
+            Some(pair) => pair,
+            None => return,
+        };
+        let thread_id = "claude-thread-hidden-sandbox".to_string();
+        state.write().await.remember_thread_settings(
+            &thread_id,
+            "never",
+            "danger-full-access",
+            "",
+            "",
+        );
+
+        let mut cmd = json!({ "type": "send" });
+        attach_orchestrator_session(
+            &state,
+            "/tmp/claude-worker/worker.mjs",
+            &thread_id,
+            &mut cmd,
+        )
+        .await;
+
+        let allowed: Vec<&str> = cmd["allowedTools"]
+            .as_array()
+            .expect("peer tools are listed")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(allowed.len(), 1, "{cmd}");
+        assert!(allowed[0].ends_with("__report_back"), "{cmd}");
     }
 
     #[tokio::test]

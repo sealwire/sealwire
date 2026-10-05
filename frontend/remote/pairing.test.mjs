@@ -438,3 +438,39 @@ test("a retired pairing ignores late results, but a merely-expired one still sur
   assert.equal(state.pairingRetired, true, "handling it must also complete retirement");
   assert.match(state.pairingError, /rejected/i);
 });
+
+// The waiting screen can only show the fingerprint the request step recorded.
+test("sending a pairing request records the fingerprint the computer will show", async () => {
+  installBrowserStubs();
+  globalThis.WebSocket = { OPEN: 1 };
+  const { sendPairingRequest } = await import("./pairing.js");
+  const { state } = await import("./state.js");
+  const sent = [];
+  const socket = { readyState: 1, send: (frame) => sent.push(frame) };
+
+  seedSocketState(state, { socket, socketConnected: true, socketPeerId: "surface-fp" });
+  seedPairingState(state, {
+    pairingTicket: {
+      pairing_id: "pair-fingerprint",
+      pairing_secret: "fingerprint-secret",
+      broker_url: "wss://broker.example.test",
+      broker_channel_id: "room-fp",
+      relay_peer_id: "local-relay",
+      security_mode: "private",
+      expires_at: Math.floor(Date.now() / 1000) + 600,
+    },
+  });
+  Object.assign(state, {
+    deviceKeypair: {
+      verifyKey: "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+      sign: async () => new Uint8Array(64),
+    },
+    requestedDeviceId: "mobile-fp",
+  });
+
+  await sendPairingRequest();
+
+  assert.equal(sent.length, 1, "the request went out");
+  assert.equal(state.pairingPhase, "requesting");
+  assert.equal(state.pairingFingerprint, "ae:21:6c:2e:f5:24:7a:37");
+});

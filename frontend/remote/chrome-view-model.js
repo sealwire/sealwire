@@ -168,6 +168,9 @@ export function selectDeviceChromeRenderModel(currentState) {
           ? [`${shortId(ticket.pairing_id)} · expires ${formatTimestamp(ticket.expires_at)}`]
           : []),
         pairingCopy(currentState),
+        ...(currentState.pairingPhase === "requesting" && currentState.pairingFingerprint
+          ? [`Fingerprint ${currentState.pairingFingerprint}`]
+          : []),
       ],
       title: pairingHeading(currentState),
     });
@@ -617,7 +620,7 @@ function pairingCopy(currentState) {
     return currentState.pairingError || "Pairing could not complete. Retry from this page or rescan the QR.";
   }
   if (currentState.pairingPhase === "requesting") {
-    return "This browser sent its device key to the local relay and is waiting for local approval.";
+    return "This browser sent its device key to the local relay. Approve it there only if the computer shows the same fingerprint.";
   }
   return "This page is connecting to the broker with the scanned pairing ticket. You should not need to press Pair again.";
 }

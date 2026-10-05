@@ -6499,6 +6499,66 @@ so {} never got it — hand over again when you are ready.",
         }
     }
 
+    /// Whether `device_id` may see and answer what `thread_id` is waiting on. A device with
+    /// no folder limit of its own skips this; the relay-wide folders bind where sessions start.
+    pub fn device_reaches_thread(&self, thread_id: &str, device_id: &str) -> bool {
+        if !self.device_is_folder_limited(device_id) {
+            return true;
+        }
+        match self.team_run_cwd_for_thread(thread_id) {
+            Some(cwd) => self.workspace_scope(Some(device_id)).allows(&cwd),
+            None => self.thread_is_readable_by_device(thread_id, device_id),
+        }
+    }
+
+    fn device_is_folder_limited(&self, device_id: &str) -> bool {
+        self.paired_devices
+            .get(device_id)
+            .is_some_and(|device| !device.path_scope.is_empty())
+    }
+
+    /// `snapshot` without what `device_id` may not reach, or `None` when it reaches all of it.
+    pub(crate) fn snapshot_for_device(
+        &self,
+        snapshot: &SessionSnapshot,
+        device_id: &str,
+    ) -> Option<SessionSnapshot> {
+        // Targets are read before this runs, so a device revoked in between is no longer on
+        // record; it gets nothing rather than being taken for one with no folder limit.
+        let on_record = self.paired_devices.contains_key(device_id);
+        if on_record && !self.device_is_folder_limited(device_id) {
+            return None;
+        }
+        let reaches =
+            |thread_id: &str| on_record && self.device_reaches_thread(thread_id, device_id);
+        let mut scoped = snapshot.clone();
+        scoped
+            .pending_approvals
+            .retain(|approval| reaches(&approval.thread_id));
+        scoped
+            .pending_ask_user_questions
+            .retain(|question| reaches(&question.thread_id));
+        scoped
+            .thread_activity
+            .retain(|activity| reaches(&activity.thread_id));
+        scoped
+            .reviewer_threads
+            .retain(|reviewer| reaches(&reviewer.parent_thread_id));
+        if scoped
+            .active_thread_id
+            .as_deref()
+            .is_some_and(|thread_id| !reaches(thread_id))
+        {
+            scoped.transcript.clear();
+            scoped.transcript_truncated = false;
+            scoped.current_cwd.clear();
+            scoped.thread_workspace_cwd = None;
+            scoped.workspace_missing = None;
+            scoped.current_tool = None;
+        }
+        Some(scoped)
+    }
+
     /// Whether a DEVICE should receive deltas for `thread_id` — true when any of its
     /// surfaces is watching. Broker delivery is per device (the payload secret is), so
     /// one device with two surfaces gets the union.

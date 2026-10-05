@@ -618,8 +618,13 @@ fn approval_rank(approval: &str) -> u8 {
 /// the second one might be able to do more than the first. If the first one is
 /// already unrestricted, there is nothing to escalate TO — so offering the tool
 /// only here removes the problem rather than guarding against it.
-pub(crate) fn session_is_unrestricted(approval: &str, sandbox: &str) -> bool {
-    approval == "bypass" || sandbox == "danger-full-access"
+pub(crate) fn session_is_unrestricted(provider: &str, approval: &str, sandbox: &str) -> bool {
+    // Only Codex applies the sandbox field. Elsewhere it is hidden and inert, and a value a
+    // fork carried over would otherwise unlock delegation for a session that still asks.
+    approval == "bypass"
+        || (matches!(provider, "codex" | "fake")
+            && approval == "never"
+            && sandbox == "danger-full-access")
 }
 
 /// Is `peer` allowed to do more than `asker`?

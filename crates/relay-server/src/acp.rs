@@ -1731,8 +1731,11 @@ impl ProviderBridge for AcpBridge {
         } else {
             crate::provider::sealwire_mcp_for_new_session(&request.purpose)
         };
-        let unrestricted =
-            crate::state::session_is_unrestricted(&request.approval_policy, &request.sandbox);
+        let unrestricted = crate::state::session_is_unrestricted(
+            self.provider_name,
+            &request.approval_policy,
+            &request.sandbox,
+        );
         let new_token = match &identity {
             crate::provider::SealwireMcpIdentity::Peer => Some(
                 self.state

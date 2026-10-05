@@ -95,7 +95,13 @@ fn thread_can_end_a_goal(relay: &crate::state::RelayState, thread_id: &str) -> b
     }
     relay
         .thread_settings(thread_id)
-        .map(|s| crate::state::session_is_unrestricted(&s.approval_policy, &s.sandbox))
+        .map(|s| {
+            crate::state::session_is_unrestricted(
+                &relay.session_provider(thread_id),
+                &s.approval_policy,
+                &s.sandbox,
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -252,7 +258,7 @@ impl AppState {
         if !thread_can_end_a_goal(&relay, thread_id) {
             return Err(
                 "a goal runs this session on its own, so it needs a session that can \
-stop itself — switch its approval to bypass (or its sandbox to full access) and set it again"
+stop itself — switch it to Full access (YOLO) and set it again"
                     .to_string(),
             );
         }
