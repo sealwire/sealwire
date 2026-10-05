@@ -32,6 +32,77 @@ function page(threadId, text, { cursor = null, revision = 1 } = {}) {
   };
 }
 
+function numberedPage(start, end) {
+  return {
+    thread_id: "a", transcript_generation: "run-1", revision: 2,
+    prev_cursor: start ? `before-${start}` : null,
+    entries: Array.from({ length: end - start }, (_, offset) => ({
+      item_id: `a-${start + offset}`, order_seq: (start + offset) * 1048576,
+      kind: "agent_text", text: `message ${start + offset}`, status: "completed",
+    })),
+  };
+}
+
+for (const becameLive of [false, true]) {
+  test(`a cached window reconnects to a distant tail after ${becameLive ? "becoming live" : "running in the background"}`, async () => {
+    const { state, pending, ops } = harness();
+    const first = ops.loadViewOnlyTranscript("a");
+    pending.shift().resolve(numberedPage(20, 30));
+    await first;
+    const older = ops.loadOlderViewOnlyTranscript();
+    pending.shift().resolve(numberedPage(10, 20));
+    await older;
+
+    if (becameLive) state.session.active_thread_id = "a";
+    else state.viewThreadId = "live";
+    ops.maybeRefreshViewOnly(state.session);
+    assert.equal(state.viewOnlyThread, null);
+    state.session.active_thread_id = "live";
+    state.viewThreadId = "a";
+    const returning = ops.loadViewOnlyTranscript("a");
+    assert.deepEqual(state.viewOnlyThread.entries.map(row => row.item_id), numberedPage(10, 30).entries.map(row => row.item_id));
+    pending.shift().resolve(numberedPage(90, 100));
+    await Promise.resolve();
+    for (let start = 80; start >= 20; start -= 10) {
+      const request = pending.shift();
+      assert.ok(request, "the missing middle must be fetched before retaining the old history cursor");
+      assert.equal(request.options.before, `before-${start + 10}`);
+      request.resolve(numberedPage(start, start + 10));
+      for (let tick = 0; tick < 8; tick++) await Promise.resolve();
+    }
+    await returning;
+    assert.deepEqual(state.viewOnlyThread.entries.map(row => row.item_id), numberedPage(10, 100).entries.map(row => row.item_id));
+    assert.equal(state.viewOnlyThread.olderCursor, "before-10");
+    const oldest = ops.loadOlderViewOnlyTranscript();
+    assert.equal(pending[0].options.before, "before-10");
+    pending.shift().resolve(numberedPage(0, 10));
+    await oldest;
+    assert.deepEqual(state.viewOnlyThread.entries.map(row => row.item_id), numberedPage(0, 100).entries.map(row => row.item_id));
+  });
+}
+
+test("leaving a tab during gap backfill cannot overwrite the newer tab", async () => {
+  const { state, pending, ops } = harness();
+  state.viewOnlyThread = {
+    threadId: "a", relayGeneration: "run-1", generation: 0, loading: false,
+    entries: numberedPage(10, 30).entries, olderCursor: "before-10", historyExtended: true,
+  };
+  const returning = ops.loadViewOnlyTranscript("a");
+  pending.shift().resolve(numberedPage(90, 100));
+  for (let tick = 0; tick < 8; tick++) await Promise.resolve();
+  const backfill = pending.shift();
+  assert.equal(backfill.options.before, "before-90");
+  state.viewThreadId = "b";
+  const newer = ops.loadViewOnlyTranscript("b");
+  pending.shift().resolve(page("b", "newer tab"));
+  await newer;
+  backfill.resolve(numberedPage(80, 90));
+  await returning;
+  assert.equal(state.viewOnlyThread.threadId, "b");
+  assert.equal(state.viewOnlyThread.entries[0].text, "newer tab");
+  assert.equal(pending.length, 0, "backfill stops when the viewed thread changes");
+});
+
 test("switching tabs restores loaded older rows before the new tail arrives", async () => {
   const { state, pending, ops } = harness();
   const first = ops.loadViewOnlyTranscript("a");

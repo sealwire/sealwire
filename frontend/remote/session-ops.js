@@ -256,6 +256,7 @@ function settleTranscriptProjection() {
 }
 
 function invalidateViewOnlyNavigation() {
+  if (state.viewedThreadRefreshError) patchRemoteState({ viewedThreadRefreshError: null });
   viewOnlyNavigationGeneration += 1;
   viewOnlyThreadId = null;
   viewOnlyNavigationTarget = null;
@@ -1902,6 +1903,7 @@ export async function viewRemoteThread(threadId) {
   }
 
   const navigationGeneration = ++viewOnlyNavigationGeneration;
+  if (state.viewedThreadRefreshError) patchRemoteState({ viewedThreadRefreshError: null });
   rememberRenderedThread();
   renderLog(`Viewing remote session ${threadId}.`);
   if (state.realSession?.active_thread_id === threadId) {
@@ -2017,10 +2019,14 @@ export async function viewRemoteThread(threadId) {
     if (navigationGeneration !== viewOnlyNavigationGeneration) {
       return null;
     }
-    return Boolean(
+    const restoredViewShown = Boolean(
       state.session?.active_thread_id === threadId
       && (state.session.transcript_generation || "") === viewedCacheIdentity().generation
     );
+    if (restoredViewShown) {
+      patchRemoteState({ viewedThreadRefreshError: { threadId } });
+    }
+    return restoredViewShown;
   } finally {
     if (navigationGeneration === viewOnlyNavigationGeneration) {
       viewOnlyNavigationTarget = null;

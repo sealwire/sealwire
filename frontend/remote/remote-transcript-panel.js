@@ -11,7 +11,7 @@ import { canAskInThread } from "../shared/thread-compose.js";
 import { copyTextToClipboard } from "../shared/clipboard.js";
 import { quoteForMessage } from "../shared/message-quote.js";
 import { saveRelayNickname } from "./relay-nicknames.js";
-import { maybeLoadOlderTranscriptHistory } from "./session-ops.js";
+import { maybeLoadOlderTranscriptHistory, viewRemoteThread } from "./session-ops.js";
 import { shortId } from "./utils.js";
 import { useRemoteTranscriptScrollBookkeeping } from "./use-transcript-scroll-bookkeeping.js";
 import { useRelayNicknames } from "./use-relay-nicknames.js";
@@ -261,12 +261,14 @@ export function RemoteTranscriptPanel({
   });
 
   return h(
-    "div",
-    {
-      className: "chat-thread",
-      id: "remote-transcript",
-      ref: transcriptRef,
-    },
-    body
+    React.Fragment,
+    null,
+    session?.active_thread_id && currentState.viewedThreadRefreshError?.threadId === session.active_thread_id
+      ? h("div", { className: "transcript-refresh-notice", role: "status" },
+          h("span", null, "Couldn’t refresh this conversation. Showing saved messages."),
+          h("button", { type: "button", onClick: () => void viewRemoteThread(session.active_thread_id) }, "Retry")
+        )
+      : null,
+    h("div", { className: "chat-thread", id: "remote-transcript", ref: transcriptRef }, body)
   );
 }

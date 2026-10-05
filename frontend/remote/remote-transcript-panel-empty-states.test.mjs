@@ -89,6 +89,7 @@ test("the no-session empty state renders with sessionView === null instead of cr
 
   assert.equal(caught, null, `must not throw: ${caught?.message}`);
   assert.match(host.textContent, /No remote session yet/);
+  assert.equal(host.querySelector(".transcript-refresh-notice"), null);
 
   act(() => root.unmount());
   host.remove();

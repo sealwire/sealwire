@@ -5244,15 +5244,25 @@ test("a superseded cached remote navigation cannot replace the newer tab", async
   }
 });
 
-test("a failed refresh keeps the restored remote tab displayed", async () => {
-  const { state, ops, pages, cleanup } = await cachedRemoteTabFixture();
+test("a failed refresh after a cached remote thread went idle exposes a retry", async () => {
+  const { state, ops, pages, page, snapshot, cleanup } = await cachedRemoteTabFixture();
   try {
+    ops.applySessionSnapshot({ ...snapshot, thread_activity: [] });
     const returning = ops.viewRemoteThread("thread-b");
     await waitFor(() => pages.pending === 1);
     await pages.fail(0);
     assert.equal(await returning, true);
     assert.equal(state.session.active_thread_id, "thread-b");
     assert.equal(state.session.transcript[0].text, "cached B");
+    assert.equal(state.viewedThreadRefreshError.threadId, "thread-b");
+    ops.applySessionSnapshot({ ...snapshot, thread_activity: [] });
+    assert.equal(state.viewedThreadRefreshError.threadId, "thread-b", "live snapshots must not hide the failed viewed refresh");
+    const retry = ops.viewRemoteThread("thread-b");
+    await waitFor(() => pages.pending === 1);
+    await pages.answer(0, page("thread-b", "latest B", 4));
+    assert.equal(await retry, true);
+    assert.equal(state.session.transcript[0].text, "latest B");
+    assert.equal(state.viewedThreadRefreshError, null);
   } finally {
     cleanup();
   }

@@ -209,6 +209,25 @@
   margin-top: 24px;
 }
 
+.transcript-refresh-notice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--status-alert-bg);
+  color: var(--status-alert-text);
+  font-size: var(--text-sm);
+}
+
+.transcript-refresh-notice span {
+  flex: 1;
+  min-width: 0;
+}
+
+.transcript-refresh-notice button {
+  flex-shrink: 0;
+}
+
 .thread-empty-badge {
   display: inline-flex;
   padding: 4px 8px;
@@ -2790,4 +2809,3 @@ button.handover-section-label:hover {
   border-radius: 999px;
   background: currentColor;
 }
-

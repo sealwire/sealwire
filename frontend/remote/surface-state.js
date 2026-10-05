@@ -18,6 +18,7 @@ export function createClearedRemoteSurfaceSessionStatePatch() {
     currentApprovalId: null,
     realSession: null,
     session: null,
+    viewedThreadRefreshError: null,
     threads: [],
     // Results belong to the relay that answered them, and thread ids are only unique
     // within a relay — the same reason fetched Projects are forgotten below.

@@ -3,7 +3,8 @@ import {
   fetchOlderPageUntilRead,
   isTranscriptCursorRejected,
 } from "../shared/transcript-protocol.js";
-import { refreshedPinPage } from "./pin-page.js";
+import { normalizeTranscriptPage, refreshedPinPage } from "./pin-page.js";
+import { transcriptRowKey } from "../shared/transcript-row-key.js";
 import { cacheViewedThread, getCachedViewedThread } from "../shared/viewed-thread-cache.js";
 import {
   buildViewOnlyPin,
@@ -129,7 +130,7 @@ export function createViewOnlyRefreshOps({
 
     try {
       const readSentAt = noteSettingsReadSent();
-      const page = await fetchTranscriptPage(threadId, {});
+      let page = await fetchTranscriptPage(threadId, {});
       if (generation !== state.viewOnlyGeneration) return;
       if (
         (state.session?.transcript_generation || "") !== liveGeneration
@@ -141,8 +142,39 @@ export function createViewOnlyRefreshOps({
         // flight" and refuses to retry, so the pin would stay blank for good.
         throw new Error("transcript page came from another relay generation");
       }
+      const retainedIds = new Set(prior?.historyExtended ? prior.entries.map(transcriptRowKey) : []);
+      let connected = page.entries?.some(entry => retainedIds.has(transcriptRowKey(entry)));
+      if (retainedIds.size && page.entries?.length && !connected) {
+        // The cached history and new tail may be separated by unread pages.
+        // Reconnect them before retaining the cache's older-history cursor.
+        let bridge = { threadId, entries: normalizeTranscriptPage(page, threadId).entries, olderCursor: page.prev_cursor };
+        const isCurrent = () =>
+          generation === state.viewOnlyGeneration
+          && state.viewThreadId === threadId
+          && viewOnlyEligible(state.session, threadId);
+        while (!connected && bridge.olderCursor != null) {
+          const before = bridge.olderCursor;
+          const older = await fetchOlderPageUntilRead(
+            () => fetchTranscriptPage(threadId, { before }),
+            { isCurrent, wait: waitBeforeHistoryRetry }
+          );
+          if (!isCurrent()) return;
+          if (
+            (state.session?.transcript_generation || "") !== liveGeneration
+            || transcriptPageIsFromAnotherGeneration(state.session, older)
+          ) {
+            throw new Error("transcript page came from another relay generation");
+          }
+          const normalizedOlder = normalizeTranscriptPage(older, threadId);
+          if (older.prev_cursor === before) throw new Error("transcript history cursor did not advance");
+          bridge = mergeOlderViewOnlyPage(bridge, normalizedOlder);
+          connected = normalizedOlder.entries.some(entry => retainedIds.has(transcriptRowKey(entry)));
+        }
+        page = { ...page, entries: bridge.entries, prev_cursor: bridge.olderCursor };
+      }
       const livePin = pinForGeneration(state, threadId, generation, prior);
-      const { page: normalized, ...refreshed } = refreshedPinPage(livePin, page, threadId);
+      const mergePin = retainedIds.size && !connected ? { ...livePin, historyExtended: false } : livePin;
+      const { page: normalized, ...refreshed } = refreshedPinPage(mergePin, page, threadId);
       const exactReview = Boolean(normalized.thread_state?.review_locked ?? review);
       const pageSettings = normalized.thread_state
         ? {

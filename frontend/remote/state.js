@@ -77,6 +77,7 @@ export const state = {
   requestedDeviceId: null,
   realSession: null,
   session: null,
+  viewedThreadRefreshError: null,
   socket: null,
   socketPeerId: null,
   socketConnected: false,
