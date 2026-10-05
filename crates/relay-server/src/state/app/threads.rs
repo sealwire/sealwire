@@ -59,9 +59,8 @@ fn normalize_thread_query(query: Option<&str>) -> Option<String> {
 /// second searchable field, so a titled row never answers to a query that happens to
 /// look like its id.
 ///
-/// `name` is already the user's rename when one exists: `apply_custom_thread_name`
-/// overlays it BEFORE this runs. That ordering is what makes a renamed session findable
-/// under its new title and not under the provider's old one.
+/// Called before the display-name overlay; the caller resolves user renames
+/// separately so an override replaces the provider's title.
 fn thread_display_title(thread: &ThreadSummaryView) -> &str {
     match thread.name.as_deref() {
         Some(name) if !name.is_empty() => name,
@@ -304,6 +303,23 @@ impl AppState {
             }
         }
 
+        // Search the full provider title before deriving its shorter display label;
+        // a user rename replaces the original title for matching.
+        let search_matches = query.as_ref().map(|needle| {
+            threads
+                .iter()
+                .filter(|thread| {
+                    relay
+                        .thread_custom_name(&thread.id)
+                        .as_deref()
+                        .unwrap_or_else(|| thread_display_title(thread))
+                        .to_lowercase()
+                        .contains(needle)
+                })
+                .map(|thread| thread.id.clone())
+                .collect::<std::collections::HashSet<_>>()
+        });
+
         // Replace the provider's session-file mtime — which any resume/selection
         // bumps to ~now (a no-prompt click spins up a live SDK session that
         // rewrites the session file) — with our honest last-activity timestamp,
@@ -320,11 +336,8 @@ impl AppState {
             relay.apply_custom_thread_name(thread);
             relay.apply_thread_flag(thread);
         }
-        // AFTER the rename overlay, so a renamed session is findable under the title it
-        // shows and not under the provider's superseded one. BEFORE `truncate`, which is
-        // the entire point: filtering the page would only search rows already on screen.
-        if let Some(needle) = &query {
-            threads.retain(|thread| thread_display_title(thread).to_lowercase().contains(needle));
+        if let Some(matches) = search_matches {
+            threads.retain(|thread| matches.contains(&thread.id));
         }
         // Applied AFTER the active-thread re-add above, so a probe cannot be handed a row
         // it did not ask about.

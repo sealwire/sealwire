@@ -2511,7 +2511,7 @@ fn persist_skips_reviewer_ids_whose_session_never_materialized() {
 }
 
 #[test]
-fn reviewer_thread_views_enrich_provider_and_label_from_summary() {
+fn reviewer_thread_views_enrich_provider_and_keep_names_without_summary() {
     let mut relay = test_state();
     // A reviewer thread whose summary is known in-process (its row is cached).
     let mut summary = test_thread("reviewer-1", "/tmp/project");
@@ -2528,12 +2528,11 @@ fn reviewer_thread_views_enrich_provider_and_label_from_summary() {
         .expect("reviewer-1 view");
     assert_eq!(view.parent_thread_id, "parent-1");
     assert_eq!(view.reviewer_provider.as_deref(), Some("codex"));
-    assert_eq!(view.name.as_deref(), Some("Codex reviewer"));
+    assert_eq!(view.name.as_deref(), Some("Reviewer 1"));
     assert_eq!(view.updated_at, Some(99));
 
-    // A reviewer with NO in-process summary (e.g. after a restart, where only the
-    // durable id→parent map survives) degrades to None — the picker still offers it
-    // and the backend re-derives the provider on submit.
+    // The name remains useful without a summary; the relay resolves an unknown
+    // provider when this reviewer is reused.
     relay.register_reviewer_thread("reviewer-ghost".to_string(), "parent-1".to_string());
     let views = relay.reviewer_thread_views();
     let ghost = views
@@ -2541,7 +2540,7 @@ fn reviewer_thread_views_enrich_provider_and_label_from_summary() {
         .find(|v| v.reviewer_thread_id == "reviewer-ghost")
         .expect("ghost view");
     assert_eq!(ghost.reviewer_provider, None);
-    assert_eq!(ghost.name, None);
+    assert_eq!(ghost.name.as_deref(), Some("Reviewer 2"));
     assert_eq!(ghost.updated_at, None);
 }
 

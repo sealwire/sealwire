@@ -304,6 +304,7 @@ impl Ask {
             asker_provider: self.asker_provider.clone(),
             peer_model: self.peer_model.clone(),
             peer_effort: self.peer_effort.clone(),
+            asker_title: None,
             peer_title: None,
             title: title.clone(),
             result: result.clone(),
@@ -346,22 +347,7 @@ impl Ask {
 /// request path. Markdown decoration is presentation noise, and fenced code commonly
 /// precedes the actual ask title.
 pub(crate) fn intent_title(message: &str) -> Option<String> {
-    let mut fenced = false;
-    let first = message.lines().find_map(|raw| {
-        if raw.trim().starts_with("```") {
-            fenced = !fenced;
-            return None;
-        }
-        if fenced {
-            return None;
-        }
-        let line = strip_ledger_markers(raw);
-        if line.is_empty() || is_separator(&line) {
-            None
-        } else {
-            Some(line)
-        }
-    })?;
+    let first = intent_title_line(message)?;
 
     if first.chars().count() <= ASK_TITLE_MAX_CHARS {
         return Some(first);
@@ -380,6 +366,35 @@ pub(crate) fn intent_title(message: &str) -> Option<String> {
         Some(index) => Some(chars[..=index].iter().collect()),
         None => Some(truncate_ledger_text(first, ASK_TITLE_MAX_CHARS)),
     }
+}
+
+pub(crate) fn intent_title_line(message: &str) -> Option<String> {
+    let mut fenced = false;
+    message.lines().find_map(|raw| {
+        if raw.trim().starts_with("```") {
+            fenced = !fenced;
+            return None;
+        }
+        if fenced {
+            return None;
+        }
+        let line = strip_ledger_markers(raw);
+        let structural_heading = raw.trim_start().starts_with('#')
+            && [
+                "context",
+                "instructions",
+                "what to do",
+                "上下文",
+                "任务说明",
+            ]
+            .iter()
+            .any(|heading| line.eq_ignore_ascii_case(heading));
+        if line.is_empty() || is_separator(&line) || structural_heading {
+            None
+        } else {
+            Some(line)
+        }
+    })
 }
 
 /// Match `oneLineResult`: markdown-light cleanup, whitespace flattening, and a bounded
@@ -521,6 +536,25 @@ mod tests {
             "{answer}"
         );
         assert!(!answer.contains("TAIL"));
+    }
+
+    #[test]
+    fn intent_titles_skip_structural_headings_fences_and_separators() {
+        for prefix in [
+            "## Context\n\n",
+            "# Instructions\n\n",
+            "### What to do\n\n",
+            "## 上下文\n\n",
+            "```rust\nfn example() {}\n```\n\n",
+            "---\n\n",
+        ] {
+            let message = format!("{prefix}## 检查中文 retry-loop\n\nDetailed instructions.");
+            assert_eq!(
+                intent_title(&message).as_deref(),
+                Some("检查中文 retry-loop"),
+                "{prefix}"
+            );
+        }
     }
 
     #[test]

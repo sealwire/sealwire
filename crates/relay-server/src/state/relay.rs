@@ -1086,17 +1086,23 @@ impl RelayState {
         )
     }
 
-    /// Best-effort human label for a thread, for push notification copy.
+    /// Resolve a thread's label for cards, session selection and notifications.
     fn thread_display_name(&self, thread_id: &str) -> Option<String> {
-        self.threads
-            .iter()
-            .find(|t| t.id == thread_id)
-            .and_then(|t| {
-                t.name
-                    .as_ref()
-                    .map(|name| name.trim().to_string())
-                    .filter(|name| !name.is_empty())
-            })
+        self.thread_custom_name(thread_id).or_else(|| {
+            self.threads
+                .iter()
+                .find(|thread| thread.id == thread_id)
+                .and_then(Self::thread_summary_title)
+        })
+    }
+
+    fn thread_summary_title(thread: &ThreadSummaryView) -> Option<String> {
+        thread
+            .name
+            .as_ref()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .or_else(|| super::delegation::intent_title_line(&thread.preview))
     }
 
     /// Feed the published snapshot to the attention tracker and enqueue any
@@ -1697,7 +1703,10 @@ impl RelayState {
                 thread.name = Some(name.clone());
                 thread.renamed = true;
             }
-            None => thread.renamed = false,
+            None => {
+                thread.name = Self::thread_summary_title(thread);
+                thread.renamed = false;
+            }
         }
     }
 
@@ -1999,6 +2008,12 @@ impl RelayState {
     ) {
         let seq = self.reviewer_thread_seq;
         self.reviewer_thread_seq += 1;
+        // Hidden reviewers need stable labels even when provider summaries are
+        // absent or replaced by review-prompt titles.
+        if !navigation_visible && self.thread_custom_name(&reviewer_id).is_none() {
+            let name = self.default_reviewer_thread_name(&parent_id, seq);
+            self.set_thread_custom_name(&reviewer_id, Some(name));
+        }
         self.reviewer_threads.insert(
             reviewer_id,
             ReviewerThread {
@@ -2007,6 +2022,20 @@ impl RelayState {
                 navigation_visible: Some(navigation_visible),
             },
         );
+    }
+
+    fn default_reviewer_thread_name(&self, parent_id: &str, seq: u64) -> String {
+        let title = format!("Reviewer {}", seq + 1);
+        let parent_name = self
+            .thread_custom_name(parent_id)
+            .or_else(|| self.thread_display_name(parent_id));
+        match parent_name {
+            Some(parent_name) => format!("{title} · {parent_name}"),
+            None => title,
+        }
+        .chars()
+        .take(96)
+        .collect()
     }
 
     /// State written before reviewer origin was persisted inferred task reviewers from
@@ -2175,7 +2204,17 @@ impl RelayState {
                     reviewer_thread_id: reviewer.clone(),
                     parent_thread_id: record.parent_thread_id.clone(),
                     reviewer_provider: self.reviewer_thread_provider(reviewer),
-                    name: summary.and_then(|s| s.name.clone()),
+                    name: Some(
+                        self.thread_custom_name(reviewer)
+                            .or_else(|| summary.and_then(|s| s.name.clone()))
+                            .filter(|name| !name.trim().is_empty())
+                            .unwrap_or_else(|| {
+                                self.default_reviewer_thread_name(
+                                    &record.parent_thread_id,
+                                    record.seq,
+                                )
+                            }),
+                    ),
                     updated_at: summary.map(|s| s.updated_at),
                     // The reviewer's OWN tree, not its parent's: the parent may have
                     // moved since, and the reuse gate compares against the reviewer.
@@ -3878,7 +3917,7 @@ so {} never got it — hand over again when you are ready.",
         let named: std::collections::HashSet<&str> = self
             .asks
             .values()
-            .map(|ask| ask.peer_thread_id.as_str())
+            .flat_map(|ask| [ask.asker_thread_id.as_str(), ask.peer_thread_id.as_str()])
             .chain(self.injections.handovers().flat_map(|mark| {
                 [
                     mark.source_thread_id.as_str(),
@@ -3888,14 +3927,10 @@ so {} never got it — hand over again when you are ready.",
             .filter(|id| !id.is_empty())
             .collect();
         if !named.is_empty() {
-            for thread in self
-                .threads
-                .iter()
-                .filter(|t| named.contains(t.id.as_str()))
-            {
+            for id in named {
                 let mut h = std::collections::hash_map::DefaultHasher::new();
-                thread.id.hash(&mut h);
-                thread.name.hash(&mut h);
+                id.hash(&mut h);
+                self.thread_display_name(id).hash(&mut h);
                 acc ^= h.finish().rotate_left(5);
             }
         }
@@ -3958,7 +3993,10 @@ so {} never got it — hand over again when you are ready.",
                             || self.thread_history_in_scope(&ask.peer_thread_id, device_id))
                 })
                 .map(|mut ask| {
-                    ask.peer_title = self.thread_display_name(&ask.peer_thread_id);
+                    ask.asker_title = self.thread_display_name(&ask.asker_thread_id);
+                    ask.peer_title = self
+                        .thread_display_name(&ask.peer_thread_id)
+                        .or_else(|| (!ask.title.is_empty()).then(|| ask.title.clone()));
                     ask
                 })
                 .collect(),
@@ -8318,6 +8356,127 @@ mod tests {
     }
 
     #[test]
+    fn session_and_relationship_titles_resolve_previews_without_a_client_page() {
+        use crate::state::Ask;
+
+        let mut relay = test_relay();
+        let mut asker = test_thread("asker", "/tmp");
+        asker.preview = "## Context\n\n检查中文路由".into();
+        let mut peer = test_thread("peer", "/tmp");
+        peer.preview = "```rust\nfn example() {}\n```\n\n## 修复 retry-loop\n\nDo not display these instructions.".into();
+        relay.upsert_thread(asker);
+        relay.upsert_thread(peer);
+        assert_eq!(
+            relay
+                .threads
+                .iter()
+                .find(|t| t.id == "peer")
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("修复 retry-loop")
+        );
+        assert_eq!(
+            relay.custom_thread_name_count(),
+            0,
+            "automatic titles are not persisted renames"
+        );
+        relay.insert_ask(Ask::new(
+            "ask-preview".into(),
+            "asker".into(),
+            "peer".into(),
+            "codex".into(),
+            None,
+            None,
+            "A different follow-up task".into(),
+            "/tmp".into(),
+            None,
+            relay_api::delegation::StartedBy::Agent,
+        ));
+        relay.injections.put_handover(super::HandoverMark {
+            id: "handover-preview".into(),
+            source_thread_id: "asker".into(),
+            target_thread_id: "peer".into(),
+            source_cwd: "/tmp".into(),
+            target_cwd: "/tmp".into(),
+            status: "done".into(),
+            ..super::HandoverMark::default()
+        });
+        let response = relay.reviews_response(None);
+        assert_eq!(
+            response.asks[0].peer_title.as_deref(),
+            Some("修复 retry-loop")
+        );
+        let ask = serde_json::to_value(&response.asks[0]).unwrap();
+        assert_eq!(ask["asker_title"], "检查中文路由");
+        assert_eq!(
+            response.handover_links[0].source_title.as_deref(),
+            Some("检查中文路由")
+        );
+        assert_eq!(
+            response.handover_links[0].target_title.as_deref(),
+            Some("修复 retry-loop")
+        );
+        let before = relay.reviews_revision();
+        relay.set_thread_custom_name("asker", Some("用户改过的名称".into()));
+        assert_ne!(relay.reviews_revision(), before);
+        let before = relay.reviews_revision();
+        let peer = relay.threads.iter_mut().find(|t| t.id == "peer").unwrap();
+        peer.name = None;
+        peer.preview = "---\n\n更新后的标题".into();
+        assert_ne!(relay.reviews_revision(), before);
+        assert_eq!(
+            relay.reviews_response(None).asks[0].peer_title.as_deref(),
+            Some("更新后的标题")
+        );
+        let full_title = format!("中文 {} 尾部搜索词 🦭", "长标题".repeat(40));
+        let mut peer = relay
+            .threads
+            .iter()
+            .find(|t| t.id == "peer")
+            .unwrap()
+            .clone();
+        peer.name = None;
+        peer.preview = format!("## Context\n\n## {full_title}\n\nDo not display this body.");
+        relay.upsert_thread(peer);
+        assert_eq!(
+            relay
+                .threads
+                .iter()
+                .find(|t| t.id == "peer")
+                .unwrap()
+                .name
+                .as_deref(),
+            Some(full_title.as_str()),
+            "only the displayed label is shortened; search retains the full title"
+        );
+        assert_eq!(
+            relay.reviews_response(None).asks[0].peer_title.as_deref(),
+            Some(full_title.as_str())
+        );
+        let remote_threads = crate::protocol::ThreadsResponse {
+            threads: relay.threads.clone(),
+            unavailable_providers: Vec::new(),
+        }
+        .compact_for(crate::protocol::ThreadsResponseCompactProfile::RemoteSurface);
+        let compacted = remote_threads
+            .threads
+            .iter()
+            .find(|t| t.id == "peer")
+            .unwrap();
+        assert_eq!(
+            compacted.name.as_deref(),
+            Some(format!("{}...", full_title.chars().take(93).collect::<String>()).as_str())
+        );
+        assert!(!compacted.renamed);
+        assert_eq!(
+            relay.reviews_response(None).asks[0].peer_title.as_deref(),
+            Some(full_title.as_str()),
+            "the remote list is compacted, but relationship titles retain the tail"
+        );
+    }
+
+    #[test]
     fn a_listed_ask_is_titled_by_the_session_it_went_to() {
         // Every round with one peer is one group in the panel, and a group reads by the
         // session's name, as a handover card does — not by whichever brief came last.
@@ -8356,7 +8515,7 @@ mod tests {
             title("ask-named").as_deref(),
             Some("Held failure → remove feature")
         );
-        assert_eq!(title("ask-unnamed"), None);
+        assert_eq!(title("ask-unnamed").as_deref(), Some("unnamed"));
 
         // A session is named after it starts, so the name has to move the key the panel
         // refetches on, or a delegation keeps its brief's first line until it settles.
@@ -8375,10 +8534,10 @@ mod tests {
             .find(|thread| thread.id == "asker")
             .expect("asker")
             .name = Some("Not a peer".to_string());
-        assert_eq!(
+        assert_ne!(
             relay.reviews_revision(),
             before,
-            "only the sessions the panel names move it"
+            "the incoming picker also names the asking session"
         );
     }
 
@@ -10469,6 +10628,64 @@ mod tests {
         let mut restored = test_relay();
         restored.apply_persisted(&persisted);
         assert!(restored.thread_project_id.get("t1").is_none());
+    }
+
+    #[test]
+    fn hidden_reviewers_have_distinct_persistent_names_and_respect_renames() {
+        let mut relay = test_relay();
+        for id in ["parent", "reviewer-a", "reviewer-b", "task-reviewer"] {
+            relay
+                .register_identity_session_binding("codex", id)
+                .unwrap();
+            relay.threads.push(test_thread(id, "/tmp/project"));
+        }
+        relay.set_thread_custom_name("parent", Some("中文工作".to_string()));
+        relay.register_reviewer_thread("reviewer-a".to_string(), "parent".to_string());
+        relay.register_reviewer_thread("reviewer-b".to_string(), "parent".to_string());
+        relay.register_task_reviewer_thread("task-reviewer".to_string(), "parent".to_string());
+        let names: Vec<_> = relay
+            .reviewer_thread_views()
+            .into_iter()
+            .map(|view| view.name.unwrap())
+            .collect();
+        assert_eq!(names, ["Reviewer 1 · 中文工作", "Reviewer 2 · 中文工作"]);
+        assert!(relay.thread_custom_name("task-reviewer").is_none());
+        let (_, hidden) = relay.reviewer_thread_ids_and_navigation_hidden();
+        assert!(hidden.contains("reviewer-a") && hidden.contains("reviewer-b"));
+        assert!(!hidden.contains("task-reviewer"));
+
+        let persisted = PersistedRelayState::from_relay(&relay);
+        let mut restored = test_relay();
+        restored.apply_persisted(&persisted);
+        assert!(restored.threads.is_empty());
+        assert_eq!(
+            restored.reviewer_thread_views()[0].name.as_deref(),
+            Some("Reviewer 1 · 中文工作")
+        );
+        let before = restored.reviews_revision();
+        restored.set_thread_custom_name("reviewer-a", Some("错误路径审查员".to_string()));
+        assert_eq!(
+            restored.reviewer_thread_views()[0].name.as_deref(),
+            Some("错误路径审查员")
+        );
+        assert_ne!(restored.reviews_revision(), before);
+    }
+
+    #[test]
+    fn unnamed_reviewers_get_readable_names_and_generated_names_fit_the_title_limit() {
+        let mut relay = test_relay();
+        relay.register_reviewer_thread("reviewer".to_string(), "parent".to_string());
+        relay.set_thread_custom_name("reviewer", None);
+        assert_eq!(
+            relay.reviewer_thread_views()[0].name.as_deref(),
+            Some("Reviewer 1")
+        );
+        relay.set_thread_custom_name("parent", Some("中".repeat(96)));
+        relay.register_reviewer_thread("second".to_string(), "parent".to_string());
+        assert_eq!(
+            relay.thread_custom_name("second").unwrap().chars().count(),
+            96
+        );
     }
 
     /// A nav-hidden reviewer has no row to file. A task reviewer does — it sits in

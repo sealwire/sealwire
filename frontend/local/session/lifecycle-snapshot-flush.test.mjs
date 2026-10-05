@@ -39,6 +39,9 @@ globalThis.document = {
 };
 globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
 globalThis.window = {
+  location: { origin: "http://127.0.0.1:9999" },
+  setTimeout,
+  clearTimeout,
   addEventListener() {},
   removeEventListener() {},
   dispatchEvent() {},
@@ -48,8 +51,10 @@ globalThis.window = {
 };
 
 const { createLifecycleController, snapshotIsInteractive } = await import("./lifecycle.js");
+const { createSessionController } = await import("../session-controller.js");
 const { createStreamController } = await import("./stream.js");
 const { settleTranscriptProjection } = await import("../transcript/store.js");
+const { createThreadListStore } = await import("../../shared/thread-list-store.js");
 const {
   createTranscriptFlushScheduler,
   TRANSCRIPT_FLUSH_MIN_WINDOW_MS,
@@ -126,7 +131,7 @@ function baseSnapshot(overrides = {}) {
 /// instance, the same way session-controller.js wires ctx in production —
 /// the seam where a snapshot landing between a delta's state write and its
 /// pending frame used to paint twice.
-function buildHarness() {
+function buildHarness({ apiFetch, onThreadsUpdated } = {}) {
   const clock = createManualClock();
   const rendered = [];
   const state = {
@@ -175,7 +180,8 @@ function buildHarness() {
 
   const ctx = {
     state,
-    apiFetch: async () => ({ ok: true, json: async () => ({ ok: true, data: {} }) }),
+    apiFetch: apiFetch || (async () => ({ ok: true, json: async () => ({ ok: true, data: {} }) })),
+    onThreadsUpdated,
     logLine: () => {},
     renderSession: renderSessionAndClearPendingFlush,
     canCurrentDeviceWrite: () => true,
@@ -198,14 +204,38 @@ function buildHarness() {
     cancelSessionPoll: () => {},
     cancelStreamReconnect: () => {},
     scheduleSessionPoll: () => {},
+    scheduleThreadsPoll: () => {},
     scheduleStreamReconnect: () => {},
   };
 
   const lifecycle = createLifecycleController(ctx);
   const stream = createStreamController(ctx);
 
-  return { clock, lifecycle, rendered, state, stream, transcriptFlushScheduler };
+  return { clock, ctx, lifecycle, rendered, state, stream, transcriptFlushScheduler };
 }
+
+test("thread-list loads notify the composer after updated titles land without a session render", async () => {
+  let rows = [{ id: "peer", name: "中文安全审查", provider: "codex", cwd: "/tmp/project" }];
+  const updates = [];
+  const harness = buildHarness({
+    apiFetch: async () => ({ ok: true, json: async () => ({ ok: true, data: { threads: rows } }) }),
+    onThreadsUpdated: () => updates.push(harness.state.threads.map((thread) => thread.name)),
+  });
+  harness.state.threadListStore = createThreadListStore();
+  harness.state.session = baseSnapshot();
+  const controller = createSessionController(harness.ctx);
+  try {
+    await controller.loadThreads("poll");
+    rows = [{ ...rows[0], name: "更新后的内容标题" }];
+    await controller.loadThreads("poll");
+    rows = [{ ...rows[0], name: "用户改名", renamed: true }];
+    await controller.loadThreads("session renamed", { fresh: true });
+    assert.deepEqual(updates, [["中文安全审查"], ["更新后的内容标题"], ["用户改名"]]);
+    assert.equal(harness.rendered.length, 0, "no snapshot or session render is needed");
+  } finally {
+    controller.cancelThreadsPoll();
+  }
+});
 
 test("a snapshot interleaved with a pending delta flush renders exactly once, keeping the longer delta text over the truncated preview", () => {
   const h = buildHarness();

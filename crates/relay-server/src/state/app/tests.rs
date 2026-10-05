@@ -15771,6 +15771,12 @@ tree; got {}",
         )
         .await;
         let peer_id = seed_listable_threads(&codex, &cwd, 120, "Old delegate").await;
+        {
+            let mut rows = codex.threads.lock().await;
+            let peer = rows.get_mut(&peer_id).unwrap();
+            peer.name = None;
+            peer.preview = "## Context\n\n```rust\nfn example() {}\n```\n\n## 中文 Old delegate\n\nDetailed instructions".into();
+        }
         assert_eq!(
             app.list_threads(120, None).await.unwrap().threads.len(),
             120
@@ -15813,10 +15819,20 @@ tree; got {}",
                     response.threads.len(),
                     if device.is_some() { 0 } else { limit }
                 );
+                if limit < 120 {
+                    assert!(response.threads.iter().all(|row| row.id != peer_id));
+                }
                 let relay = app.relay.read().await;
                 let reviews = relay.reviews_response(None);
                 assert!(reviews.asks[0].asker_available && reviews.asks[0].peer_available);
-                assert_eq!(reviews.asks[0].peer_title.as_deref(), Some("Old delegate"));
+                assert_eq!(
+                    reviews.asks[0].peer_title.as_deref(),
+                    Some("中文 Old delegate")
+                );
+                assert_eq!(
+                    reviews.asks[0].asker_title.as_deref(),
+                    Some("Routine session 0")
+                );
                 assert_eq!(
                     relay.reviews_revision(),
                     before,

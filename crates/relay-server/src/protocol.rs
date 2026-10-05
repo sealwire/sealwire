@@ -4036,6 +4036,8 @@ pub struct AskView {
     pub asker_provider: Option<String>,
     pub peer_model: Option<String>,
     pub peer_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asker_title: Option<String>,
     /// The peer session's name, which titles every round with it in the panel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_title: Option<String>,

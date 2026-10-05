@@ -35,6 +35,7 @@ export function createSessionController({
   renderSessionUnavailable,
   renderThreadListMessage,
   renderThreads,
+  onThreadsUpdated,
   runViewTransition,
   renderSettings = () => {},
 }) {
@@ -158,6 +159,7 @@ export function createSessionController({
     renderSessionUnavailable,
     renderThreadListMessage,
     renderThreads,
+    onThreadsUpdated,
     runViewTransition,
     renderSettings,
     setStartControlsBusy,

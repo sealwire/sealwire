@@ -1568,6 +1568,7 @@ controller = createSessionController({
   renderSessionUnavailable: renderer.renderSessionUnavailable,
   renderThreadListMessage: renderer.renderThreadListMessage,
   renderThreads: renderer.renderThreads,
+  onThreadsUpdated: () => composerCommandController?.refreshContext?.(),
   runViewTransition: renderer.runViewTransition,
   renderSettings: () => settings.render(),
 });
@@ -3018,6 +3019,7 @@ const composerCommands = createComposerCommandController({
     sessions: (state.threads || []).map((thread) => ({
       id: thread.id,
       name: thread.name || "",
+      renamed: Boolean(thread.renamed),
       provider: thread.provider || "",
     })),
     reviews: reviewsCache.current(),

@@ -273,6 +273,7 @@ export function createLifecycleController(ctx) {
       state.threads = state.threadGroups.flatMap((group) => group.threads);
       state.threadListStore.getState().finishRefresh();
       renderThreads();
+      ctx.onThreadsUpdated?.();
       renderOverviewState(state.session);
       // A read-only view-only pin sources its cwd/provider from the thread
       // summary, which may have just loaded — re-render the session so the
@@ -292,6 +293,7 @@ export function createLifecycleController(ctx) {
       state.threadGroups = [];
       state.threads = [];
       renderThreadListMessage("Error", error.message);
+      ctx.onThreadsUpdated?.();
       logLine(`Session list fetch failed: ${error.message}`);
     } finally {
       scheduleThreadsPoll();

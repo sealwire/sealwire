@@ -2609,6 +2609,7 @@ function RemoteApp() {
               sessions: (currentState.threads || []).map((thread) => ({
                 id: thread.id,
                 name: thread.name || "",
+                renamed: Boolean(thread.renamed),
                 provider: thread.provider || "",
               })),
               reviews: remoteReviews,
@@ -2641,7 +2642,7 @@ function RemoteApp() {
               session?.current_cwd || "",
               composerModelCatalogKey,
               remoteWorkspaceCwd || "",
-              JSON.stringify((currentState.threads || []).map(({ id, name, provider }) => [id, name, provider])),
+              JSON.stringify((currentState.threads || []).map(({ id, name, provider, renamed }) => [id, name, provider, renamed])),
               remoteReviews?.reviews_revision ?? "",
             ].join("|"),
             // The command door only: the request modal shows the relay's reason inline

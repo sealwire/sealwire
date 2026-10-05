@@ -193,6 +193,7 @@ export function installFakeRelay({ relayId, threadId, projectId, projectName, fu
 
   // What the fake relay currently reports; a test can move the session's folder.
   let liveSnapshot = truncatedSnapshot;
+  let liveThreads = [threadSummary];
   let liveReviews = { reviews_revision: 1, review_jobs: [], reviewer_threads: [], asks: [], handover_links: [] };
 
   class FakeWebSocket extends EventTarget {
@@ -202,6 +203,14 @@ export function installFakeRelay({ relayId, threadId, projectId, projectName, fu
       this.url = url;
       this.readyState = FakeWebSocket.OPEN;
       window.__fakeRelay = {
+        updateThreads: (rows) => {
+          liveThreads = [threadSummary, ...rows];
+          liveSnapshot = { ...liveSnapshot, threads_revision: (liveSnapshot.threads_revision || 0) + 1 };
+          this.#emit({
+            type: "message",
+            payload: { protocol_version: RELAY_PROTOCOL_VERSION, kind: "session_snapshot", snapshot: liveSnapshot },
+          });
+        },
         moveSession: (patch) => {
           liveSnapshot = { ...truncatedSnapshot, ...patch };
           this.#emit({
@@ -242,6 +251,14 @@ export function installFakeRelay({ relayId, threadId, projectId, projectName, fu
       const frame = JSON.parse(raw);
       const payload = frame.payload;
       const request = payload?.request || {};
+      if (request.type === "list_providers") {
+        this.#respond(payload.action_id, { action: "list_providers", ok: true, providers: ["codex", "claude_code"] });
+        return;
+      }
+      if (request.type === "list_provider_models") {
+        this.#respond(payload.action_id, { action: "list_provider_models", ok: true, models: [] });
+        return;
+      }
       if (request.type === "fetch_reviews") {
         this.#respond(payload.action_id, { action: "fetch_reviews", ok: true, snapshot: liveSnapshot, reviews: liveReviews });
         return;
@@ -335,7 +352,7 @@ export function installFakeRelay({ relayId, threadId, projectId, projectName, fu
           action: "list_threads",
           ok: true,
           snapshot: liveSnapshot,
-          threads: { threads: [threadSummary] },
+          threads: { threads: liveThreads },
         });
         return;
       }
@@ -724,7 +741,7 @@ async function assertRelationshipRefresh(page) {
   const ask = {
     id: "relationship-e2e", asker_thread_id: THREAD_ID, peer_thread_id: "old-delegate",
     peer_provider: "codex", peer_title: "中文受托者 🦭", asker_available: true, peer_available: true,
-    status: "answered", updated_at: 1, delivered: true,
+    status: "done", updated_at: 1, delivered: true,
   };
   await page.evaluate((value) => window.__fakeRelay.updateReviews({ asks: [value] }), ask);
   await waitForName(ask.peer_title);
@@ -733,6 +750,14 @@ async function assertRelationshipRefresh(page) {
     await page.fill(input, `@${query}`);
     await waitForName(ask.peer_title);
   }
+  await page.fill(input, "");
+  await waitForName(ask.peer_title);
+  assert.ok((await rows()).indexOf("codex") > 0, "the previous delegate is above providers without @");
+  await page.press(input, "Enter");
+  assert.equal(await page.locator(".composer-command-pill.is-peer .composer-command-pill-kind").textContent(), "@");
+  await page.fill(input, "");
+  await page.press(input, "Backspace");
+  await page.fill(input, "@中文");
   await page.evaluate((value) => window.__fakeRelay.updateReviews({ asks: [{ ...value, peer_available: false }] }), ask);
   await page.waitForFunction(() => !document.querySelector(".composer-command-row"), null, { timeout: TIMEOUT_MS });
   await page.fill(input, "");
@@ -748,14 +773,99 @@ async function assertRelationshipRefresh(page) {
   await page.evaluate((value) => window.__fakeRelay.updateReviews({ reviewer_threads: [value] }), reviewer);
   await waitForName(reviewer.name);
   assert.equal(await page.locator(".composer-command-kind").textContent(), "Reviewer");
-  const renamed = { ...reviewer, name: "改名后的 reviewer + é", updated_at: 2 };
+  const renamed = { ...reviewer, name: `改名后的 reviewer + é ${"reviewer".repeat(9)}`, updated_at: 2 };
   await page.evaluate((value) => window.__fakeRelay.updateReviews({ reviewer_threads: [value] }), renamed);
   await waitForName(renamed.name);
+  const geometry = await page.locator(".composer-command-row").first().evaluate((row) => {
+    const name = row.querySelector(".composer-command-name");
+    const role = row.querySelector(".composer-command-kind");
+    const box = row.getBoundingClientRect();
+    return { right: box.right, roleRight: role.getBoundingClientRect().right, nameRight: name.getBoundingClientRect().right, roleLeft: role.getBoundingClientRect().left, scroll: name.scrollWidth, width: name.clientWidth };
+  });
+  assert.ok(geometry.scroll <= geometry.width + 1 && geometry.nameRight <= geometry.roleLeft && geometry.roleRight <= geometry.right, "a long reviewer name and its role fit on the phone");
   for (const query of ["改名", "é", "+"]) {
     await page.fill(input, `@${query}`);
     await waitForName(renamed.name);
   }
   await page.fill(input, "");
+  await waitForName(renamed.name);
+  assert.ok((await rows()).indexOf("codex") > 0, "the previous reviewer is above providers without @");
+  await page.press(input, "Enter");
+  assert.equal(await page.locator(".composer-command-pill.is-peer .composer-command-pill-kind").textContent(), "@");
+  await page.fill(input, "");
+  await page.press(input, "Backspace");
+  await page.press(input, "Backspace");
+  const link = { source_thread_id: THREAD_ID, target_thread_id: "old-successor", target_title: "旧接手者", target_provider: "codex", created_at: 2 };
+  await page.evaluate(({ ask, link }) => window.__fakeRelay.updateReviews({ asks: [ask], handover_links: [link] }), { ask, link });
+  await page.fill(input, "/handover ");
+  await waitForName(link.target_title);
+  assert.deepEqual((await rows()).slice(0, 2), [link.target_title, ask.peer_title]);
+  assert.ok((await rows()).indexOf("codex") >= 2, "both previous targets appear above providers");
+  await page.locator(".composer-command-row").filter({ hasText: ask.peer_title }).click();
+  assert.equal(await page.locator(".composer-command-pill.is-peer .composer-command-pill-label").textContent(), ask.peer_title);
+  await page.fill(input, "");
+  await page.press(input, "Backspace");
+  await page.press(input, "Backspace");
+
+  const fullTitle = `中文 Codex — Analyze four security findings that are still open in the relay ${"审查".repeat(40)} 尾部关键词 🦭`;
+  const previewLabel = `${[...fullTitle].slice(0, 95).join("")}…`;
+  const compactedName = `${[...fullTitle].slice(0, 93).join("")}...`;
+  const unnamed = {
+    id: "unnamed-codex-preview", name: compactedName, renamed: false, preview: "## Context...",
+    provider: "codex", cwd: "/tmp/e2e-mobile-header", updated_at: 3, status: "completed",
+  };
+  await page.evaluate(({ thread, ask, fullTitle }) => {
+    window.__fakeRelay.updateThreads([thread]);
+    window.__fakeRelay.updateReviews({ asks: [{ ...ask, peer_thread_id: thread.id, peer_title: fullTitle }] });
+  }, { thread: unnamed, ask, fullTitle });
+  await page.fill(input, "/delegate ");
+  await waitForName(previewLabel);
+  assert.ok((await rows()).indexOf("codex") > 0, "the relay-derived delegate title appears above providers");
+  for (const [surface, viewport] of [["mobile", MOBILE_VIEWPORT], ["desktop", { width: 1280, height: 850 }]]) {
+    await page.setViewportSize(viewport);
+    const geometry = await page.locator(".composer-command-row").first().evaluate((row) => {
+      const name = row.querySelector(".composer-command-name");
+      const role = row.querySelector(".composer-command-kind");
+      return { scroll: name.scrollWidth, width: name.clientWidth, nameRight: name.getBoundingClientRect().right, roleLeft: role.getBoundingClientRect().left, roleRight: role.getBoundingClientRect().right, right: row.getBoundingClientRect().right };
+    });
+    assert.ok(geometry.scroll <= geometry.width + 1 && geometry.nameRight <= geometry.roleLeft && geometry.roleRight <= geometry.right, `the bounded preview and role fit on ${surface}`);
+    if (process.env.RELATED_PREVIEW_SCREENSHOT) await page.screenshot({ path: `${process.env.RELATED_PREVIEW_SCREENSHOT}-${surface}.png` });
+  }
+  await page.setViewportSize(MOBILE_VIEWPORT);
+  await page.fill(input, "codex");
+  assert.deepEqual(await rows(), ["codex"], "typing the provider does not pick a previous Codex session");
+  await page.press(input, "Enter");
+  assert.equal(await page.locator(".composer-command-pill.is-provider .composer-command-pill-label").textContent(), "codex");
+  await page.fill(input, "");
+  await page.press(input, "Backspace");
+  await page.fill(input, "@security findings");
+  await waitForName(previewLabel);
+  await page.fill(input, "@尾部关键词");
+  await waitForName(previewLabel);
+  assert.equal(await page.locator(".composer-command-row").first().getAttribute("title"), fullTitle);
+  await page.fill(input, "");
+  await page.evaluate((thread) => window.__fakeRelay.updateThreads([{ ...thread, renamed: true }]), unnamed);
+  await waitForName(compactedName);
+  assert.equal(await page.locator(".composer-command-row").first().getAttribute("title"), compactedName, "a deliberate rename wins even when it resembles wire compaction");
+  await page.evaluate((thread) => window.__fakeRelay.updateThreads([thread]), unnamed);
+  await waitForName(previewLabel);
+  await page.fill(input, "@");
+  await page.evaluate(({ ask, thread }) => {
+    window.__fakeRelay.updateThreads([]);
+    window.__fakeRelay.updateReviews({ asks: [{ ...ask, peer_thread_id: thread.id, peer_title: "分页之外的中文受托者" }] });
+  }, { ask, thread: unnamed });
+  await waitForName("分页之外的中文受托者");
+  assert.equal((await rows())[0], "分页之外的中文受托者", "relationship metadata names a session missing from the client page");
+  await page.fill(input, "");
+  const updated = { ...unnamed, name: "更新后的 Codex 内容标题", preview: "```rust…" };
+  await page.evaluate((thread) => window.__fakeRelay.updateThreads([thread]), updated);
+  await waitForName("更新后的 Codex 内容标题");
+  await page.evaluate((thread) => window.__fakeRelay.updateThreads([{ ...thread, name: "手动改名的 Codex", renamed: true }]), updated);
+  await waitForName("手动改名的 Codex");
+  await page.press(input, "Enter");
+  assert.equal(await page.locator(".composer-command-pill.is-peer .composer-command-pill-label").textContent(), "手动改名的 Codex");
+  await page.fill(input, "");
+  await page.press(input, "Backspace");
   await page.press(input, "Backspace");
 }
 
