@@ -9,10 +9,16 @@
   "theme_color": "#171717",
   "icons": [
     {
-      "src": "/static/sealwire_logo.png",
+      "src": "/static/icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
+    },
+    {
+      "src": "/static/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }

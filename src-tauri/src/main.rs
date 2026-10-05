@@ -735,13 +735,14 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         &[&open_local, &open_remote, &open_launcher, &separator, &quit],
     )?;
 
-    let mut tray = TrayIconBuilder::with_id(TRAY_ID)
+    // A template image is drawn from its alpha alone, so the opaque app icon would
+    // render as a solid disc; the tray needs its own cut-out silhouette.
+    let tray = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .tooltip("Sealwire");
-    if let Some(icon) = app.default_window_icon().cloned() {
-        tray = tray.icon(icon).icon_as_template(true);
-    }
+        .tooltip("Sealwire")
+        .icon(tauri::include_image!("icons/tray.png"))
+        .icon_as_template(true);
     tray.on_menu_event(|app, event| match event.id().as_ref() {
         TRAY_OPEN_LOCAL_ID => bring_app_to_front(app),
         TRAY_OPEN_REMOTE_ID => {
