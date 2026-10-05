@@ -12,7 +12,7 @@
     <img src="https://img.shields.io/github/stars/sealwire/sealwire?style=flat&logo=github" alt="GitHub stars">
   </a>
   <a href="LICENSE">
-    <img src="https://img.shields.io/badge/license-Elastic--2.0-555" alt="License">
+    <img src="https://img.shields.io/badge/license-PolyForm%20Internal%20Use-555" alt="PolyForm Internal Use 及附加授权">
   </a>
 </p>
 
@@ -33,7 +33,7 @@ Sealwire 把 Claude Code、Codex 和 Cursor 收进同一个简洁界面。在书
 - **像团队一样干活。** 设一个目标让智能体自己跑完，把支线交给另一个，或把整件事交接出去 —— 每一步都是一条斜杠命令。
 - **走到哪，接到哪。** 同一会话跟着你从笔记本到浏览器到手机。智能体需要你时会通知你，当场就能批准。
 - **默认私密。** Sealwire 不存你的代码，也不存你的对话。手机从外网连进来时，全程端到端加密 —— 中间的服务器也读不懂。
-- **本机免费。** 不用注册、不用部署 —— 一条命令就能跑起来。用手机远程访问要走 SealWire Cloud，需要一把 access key。
+- **个人及公司内部使用免费。** 不用注册、不用部署 —— 一条命令就能跑起来。用手机远程访问要走 SealWire Cloud，需要一把 access key。
 
 ## 开始使用
 
@@ -149,7 +149,15 @@ npm test
 
 ## 许可
 
-以 Elastic License 2.0 源码可用。见 [`LICENSE`](LICENSE)。
+以 **PolyForm Internal Use License 1.0.0** 源码可用，并附加个人私下使用及向 Sealwire 贡献代码的授权。完整条款见 [`LICENSE`](LICENSE)。
+
+- 允许为公司内部业务使用和修改，包括商业软件开发；也允许为个人私下用途使用和修改。
+- 用 Sealwire 作为工具独立开发的软件，不会仅因使用了这个工具就受本许可限制。
+- 对外分发原版或修改版、集成到对外产品，或提供客户可用的服务，需要另行授权；免费、非竞争性产品也一样。贡献例外仅允许为向本项目贡献而进行必要的分享。
+- 客户通过其他产品的后台使用或触发 Sealwire 的功能，也需要另行授权。自己或公司人员（包括为公司工作的承包商）内部使用它完成并交付客户的工作，则允许。
+
+另行授权请联系 [sealwire.dev@gmail.com](mailto:sealwire.dev@gmail.com)。第三方组件仍采用各自的许可。
+第三方版权和许可原文以 `THIRD_PARTY_NOTICES.txt` 随每个发布版本附带，也可以从 `/static/THIRD_PARTY_NOTICES.txt` 获取。依赖变更后，先构建前端，再运行 `npm run licenses:generate`，然后构建发布用二进制；npm 打包会保留各预编译二进制附带的声明。
 
 ## 贡献
 

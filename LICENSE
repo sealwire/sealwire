@@ -1,97 +1,160 @@
 Copyright (c) 2026 Yikai Lan <sealwire.dev@gmail.com>
 
-This repository is made available under the Elastic License 2.0.
-The license terms begin below.
+Sealwire is licensed under the PolyForm Internal Use License 1.0.0,
+reproduced unchanged below, together with the additional permissions that
+follow it. The licensor is Yikai Lan.
 
-Elastic License 2.0
+Third-party components remain subject to their own licenses.
 
-Acceptance
+# PolyForm Internal Use License 1.0.0
 
-By using the software, you agree to all of the terms and conditions below.
+<https://polyformproject.org/licenses/internal-use/1.0.0>
 
-Copyright License
+## Acceptance
 
-The licensor grants you a non-exclusive, royalty-free, worldwide,
-non-sublicensable, non-transferable license to use, copy, distribute, make
-available, and prepare derivative works of the software, in each case subject
-to the limitations and conditions below.
+In order to get any license under these terms, you must agree
+to them as both strict obligations and conditions to all
+your licenses.
 
-Limitations
+## Copyright License
 
-You may not provide the software to third parties as a hosted or managed
-service, where the service provides users with access to any substantial set of
-the features or functionality of the software.
+The licensor grants you a copyright license for the software
+to do everything you might do with the software that would
+otherwise infringe the licensor's copyright in it for any
+permitted purpose.  However, you may only make changes or
+new works based on the software according to [Changes and New
+Works License](#changes-and-new-works-license), and you may
+not distribute the software.
 
-You may not move, change, disable, or circumvent the license key functionality
-in the software, and you may not remove or obscure any functionality in the
-software that is protected by the license key.
+## Changes and New Works License
 
-You may not alter, remove, or obscure any licensing, copyright, or other
-notices of the licensor in the software. Any use of the licensor's trademarks
-is subject to applicable law.
+The licensor grants you an additional copyright license to
+make changes and new works based on the software for any
+permitted purpose.
 
-Patents
+## Patent License
 
-The licensor grants you a license, under any patent claims the licensor can
-license, or becomes able to license, to make, have made, use, sell, offer for
-sale, import and have imported the software, in each case subject to the
-limitations and conditions in this license. This license does not cover any
-patent claims that you cause to be infringed by modifications or additions to
-the software.
+The licensor grants you a patent license for the software that
+covers patent claims the licensor can license, or becomes able
+to license, that you would infringe by using the software.
 
-If you or your company make any written claim that the software infringes or
-contributes to infringement of any patent, your patent license for the software
-granted under these terms ends immediately. If your company makes such a claim,
-your patent license ends immediately for work on behalf of your company.
+## Fair Use
 
-Notices
+You may have "fair use" rights for the software under the
+law. These terms do not limit them.
 
-You must ensure that anyone who gets a copy of any part of the software from
-you also gets a copy of these terms.
+## Internal Business Use
 
-If you modify the software, you must include in any modified copies of the
-software prominent notices stating that you have modified the software.
+Use of the software for the internal business operations of
+you and your company is use for a permitted purpose.
 
-No Other Rights
+## No Other Rights
 
-These terms do not imply any licenses other than those expressly granted in
-these terms.
+These terms do not allow you to sublicense or transfer any of
+your licenses to anyone else, or prevent the licensor from
+granting licenses to anyone else.  These terms do not imply
+any other licenses.
 
-Termination
+## Patent Defense
 
-If you use the software in violation of these terms, such use is not licensed,
-and your licenses will automatically terminate. If the licensor provides you
-with a notice of your violation, and you cease all violation of this license no
-later than 30 days after you receive that notice, your licenses will be
-reinstated retroactively. However, if you violate these terms after such
-reinstatement, any additional violation of these terms will cause your licenses
-to terminate automatically and permanently.
+If you make any written claim that the software infringes or
+contributes to infringement of any patent, your patent license
+for the software granted under these terms ends immediately. If
+your company makes such a claim, your patent license ends
+immediately for work on behalf of your company.
 
-No Liability
+## Violations
 
-As far as the law allows, the software comes as is, without any warranty or
-condition, and the licensor will not be liable to you for any damages arising
-out of these terms or the use or nature of the software, under any kind of
-legal claim.
+The first time you are notified in writing that you have
+violated any of these terms, or done anything with the software
+not covered by your licenses, your licenses can nonetheless
+continue if you come into full compliance with these terms,
+and take practical steps to correct past violations, within
+32 days of receiving notice.  Otherwise, all your licenses
+end immediately.
 
-Definitions
+## No Liability
 
-The licensor is the entity offering these terms, and the software is the
-software the licensor makes available under these terms, including any portion
-of it.
+***As far as the law allows, the software comes as is, without
+any warranty or condition, and the licensor will not be liable
+to you for any damages arising out of these terms or the use
+or nature of the software, under any kind of legal claim.***
 
-you refers to the individual or entity agreeing to these terms.
+## Definitions
 
-your company is any legal entity, sole proprietorship, or other kind of
-organization that you work for, plus all organizations that have control over,
-are under the control of, or are under common control with that organization.
-control means ownership of substantially all the assets of an entity, or the
-power to direct its management and policies by vote, contract, or otherwise.
-Control can be direct or indirect.
+The **licensor** is the individual or entity offering these
+terms, and the **software** is the software the licensor makes
+available under these terms.
 
-your licenses are all the licenses granted to you for the software under these
+**You** refers to the individual or entity agreeing to these
 terms.
 
-use means anything you do with the software requiring one of your licenses.
+**Your company** is any legal entity, sole proprietorship,
+or other kind of organization that you work for, plus all
+organizations that have control over, are under the control of,
+or are under common control with that organization.  **Control**
+means ownership of substantially all the assets of an entity,
+or the power to direct its management and policies by vote,
+contract, or otherwise.  Control can be direct or indirect.
 
-trademark means trademarks, service marks, and similar rights.
+**Your licenses** are all the licenses granted to you for the
+software under these terms.
+
+**Use** means anything you do with the software requiring one
+of your licenses.
+
+# Additional permissions for Sealwire
+
+These permissions supplement the PolyForm Internal Use License 1.0.0;
+they are not an alternative license. All of its terms continue to apply,
+except to the extent expressly permitted below.
+
+## Private personal use
+
+If you are an individual, the licensor additionally permits you to use and
+modify the software solely for your own private personal purposes,
+including learning, experimentation, and hobby projects.
+
+This permission does not grant you the right to distribute the software,
+modified versions, or derivative works, or to make the software or those
+works available to others as a product or hosted or managed service,
+whether free of charge or for a fee.
+
+## Contributions to Sealwire
+
+Solely to prepare, submit, and participate in the review of a contribution
+to https://github.com/sealwire/sealwire, you may fork, copy, modify, and
+publicly share the software and your changes to the extent reasonably
+necessary for that contribution. This permission is conditional on your
+agreement to the contribution terms in CONTRIBUTING.md accompanying the
+software, also available at
+https://github.com/sealwire/sealwire/blob/main/CONTRIBUTING.md.
+
+This permission does not authorize publishing an independent release,
+maintaining an independent fork for purposes other than contributing to
+Sealwire, or offering the software or a derivative as a product or service.
+Copies shared under this permission must retain the copyright notice and
+include this license, including these additional permissions.
+
+# Scope and separate licensing
+
+Internal business use and private personal use do not include providing
+the software or a modified version to customers or other third parties
+as a product or service. Distributing the software, including bundling it
+in another product, requires a separate license unless expressly allowed
+by the contribution permission above. This applies to both free and paid
+offerings and to both competing and non-competing products.
+
+This includes running the software, directly or as part of another product
+or service, so that customers or other third parties can use or trigger
+its functionality. It does not include you or your company's personnel,
+including contractors working for your company, using the software as an
+internal tool to produce work that you deliver.
+
+Merely using Sealwire as a development tool does not subject independently
+created code or other outputs to this license. Copies or derivative works
+of Sealwire included in those outputs remain subject to these terms.
+
+For distribution, product integration, customer-facing hosting, or other
+uses outside these permissions, contact sealwire.dev@gmail.com for a
+separate license.

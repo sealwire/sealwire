@@ -12,7 +12,7 @@
     <img src="https://img.shields.io/github/stars/sealwire/sealwire?style=flat&logo=github" alt="GitHub stars">
   </a>
   <a href="LICENSE">
-    <img src="https://img.shields.io/badge/license-Elastic--2.0-555" alt="License">
+    <img src="https://img.shields.io/badge/license-PolyForm%20Internal%20Use-555" alt="PolyForm Internal Use with additional permissions">
   </a>
 </p>
 
@@ -46,9 +46,9 @@ sees it.
 - **Private by default.** Sealwire has no copy of your code or your
   conversations. When your phone connects from outside, everything is end-to-end encrypted — even the server
   in the middle can't read it.
-- **Free on your own machine.** No account and nothing to deploy — one command
-  and you're running. Reaching it from your phone goes through SealWire Cloud,
-  which needs an access key.
+- **Free for personal and internal business use.** No account and nothing to
+  deploy — one command and you're running. Reaching it from your phone goes
+  through SealWire Cloud, which needs an access key.
 
 ## Get started
 
@@ -194,7 +194,29 @@ npm test
 
 ## License
 
-Source-available under the Elastic License 2.0. See [`LICENSE`](LICENSE).
+Source-available under the **PolyForm Internal Use License 1.0.0**, with
+additional permissions for private personal use and contributions to Sealwire.
+See [`LICENSE`](LICENSE) for the complete terms.
+
+- Use and modify Sealwire for your company's internal business operations,
+  including commercial development, or for your own private personal use.
+- Software you independently develop using Sealwire is not subject to this
+  license merely because you used Sealwire as a tool.
+- Distributing Sealwire or a modified version, bundling it in a product, or
+  providing it to customers as a service requires a separate license, even for
+  free or non-competing offerings. The contribution exception only permits
+  sharing needed to contribute to this project.
+- Allowing customers to use or trigger Sealwire's functionality through another
+  product's backend also requires a separate license. Using it internally to
+  produce work you deliver to a client is permitted, including use by your
+  company's contractors.
+
+For a separate license, contact [sealwire.dev@gmail.com](mailto:sealwire.dev@gmail.com).
+Third-party components retain their own licenses. Their copyright and license
+texts ship as `THIRD_PARTY_NOTICES.txt` in every release and are served at
+`/static/THIRD_PARTY_NOTICES.txt`. After changing dependencies, build the
+frontend and run `npm run licenses:generate` before building release binaries.
+npm packaging preserves the notices supplied with each prebuilt binary.
 
 ## Contributions
 

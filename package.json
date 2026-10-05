@@ -2,7 +2,7 @@
   "name": "sealwire",
   "version": "0.11.3",
   "description": "Local-first, privacy-first control plane for coding agents (Codex & Claude Code) with optional public broker pairing.",
-  "license": "Elastic-2.0",
+  "license": "SEE LICENSE IN LICENSE",
   "author": "Yikai Lan <sealwire.dev@gmail.com>",
   "repository": {
     "type": "git",
@@ -18,6 +18,7 @@
     "bin/**",
     "Cargo.lock",
     "Cargo.toml",
+    "CONTRIBUTING.md",
     "LICENSE",
     "README.md",
     "crates/**",

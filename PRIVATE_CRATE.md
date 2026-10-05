@@ -69,7 +69,9 @@ grows something new.
 Not secrecy. A user can open any agent's transcript from the team card, and the
 provider CLIs write their own session files to disk, so the prompts a run uses are
 visible to anyone who runs one. The relay ships as a binary to user machines, and
-the Elastic 2.0 licence — not obscurity — is what stops a competitor reselling it.
+the PolyForm Internal Use licence with Sealwire's additional permissions — not
+obscurity — limits redistribution and providing it to customers. The same terms
+cover the shipped private components.
 
 What a private repository does protect is the **history**: which prompts changed,
 when, why, and what was tried and abandoned. That is the part worth having, it only
