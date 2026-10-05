@@ -24,6 +24,7 @@ import {
 } from "../../shared/transcript-hydration-store.js";
 import { prepareTranscriptEntryForSurface } from "./details.js";
 import { applyRemoteSurfacePatch } from "../surface-state.js";
+import { clearViewedThreadCache } from "../../shared/viewed-thread-cache.js";
 
 export function clearTranscriptHydration(state) {
   // Genuine reset (disconnect / unpair / relay reset), not a thread switch —
@@ -31,6 +32,7 @@ export function clearTranscriptHydration(state) {
   // remote `state` object (the same one patchRemoteState mutates).
   if (state) {
     clearTranscriptHydrationThreadCache(state);
+    clearViewedThreadCache(state);
   }
   applyRemoteSurfacePatch(createClearedTranscriptHydrationPatch());
 }

@@ -109,6 +109,7 @@ import {
   staleTranscriptRowGuard,
 } from "../shared/transcript-hydration-store.js";
 import { preserveVisibleTranscriptText } from "../shared/preserve-visible-transcript-text.js";
+import { cacheViewedThread, getCachedViewedThread } from "../shared/viewed-thread-cache.js";
 import { reviewerPreviewEntriesFromPage } from "../shared/reviewer-panel.js";
 import {
   keepConfirmedSettings,
@@ -1877,6 +1878,22 @@ export async function updateRemoteSessionSettings({ approval_policy, sandbox, ef
   }
 }
 
+function viewedCacheIdentity() {
+  return {
+    generation: (state.realSession || state.session)?.transcript_generation || "",
+    scope: `${remoteQueryScope()}:${state.remoteAuth?.deviceId || ""}`,
+  };
+}
+
+function rememberRenderedThread() {
+  settleTranscriptProjection();
+  const session = state.session;
+  const identity = viewedCacheIdentity();
+  if (session && (session.transcript_generation || "") === identity.generation) {
+    cacheViewedThread(state, session.active_thread_id, session, identity);
+  }
+}
+
 // Resolves true once shown, false if the view failed, and null if a newer navigation
 // replaced it: only a failure may send the reload's restore back to the live session.
 export async function viewRemoteThread(threadId) {
@@ -1885,6 +1902,7 @@ export async function viewRemoteThread(threadId) {
   }
 
   const navigationGeneration = ++viewOnlyNavigationGeneration;
+  rememberRenderedThread();
   renderLog(`Viewing remote session ${threadId}.`);
   if (state.realSession?.active_thread_id === threadId) {
     viewOnlyNavigationTarget = null;
@@ -1898,8 +1916,24 @@ export async function viewRemoteThread(threadId) {
   }
 
   viewOnlyNavigationTarget = threadId;
+  const viewOnlyGeneration = viewedCacheIdentity().generation;
+  const cached = getCachedViewedThread(state, threadId, viewedCacheIdentity());
+  if (cached && state.session?.active_thread_id !== threadId) {
+    switchTranscriptHydrationThread(state, threadId);
+    viewOnlyThreadId = threadId;
+    viewOnlyRelayGeneration = viewOnlyGeneration;
+    viewOnlyLastRefreshAt = Date.now();
+    seedViewOnlyWasWorking(threadId);
+    applyRenderedSession(
+      restoreHydratedTranscript(
+        state,
+        projectRemoteViewedSession(state.realSession || state.session, threadId, cached)
+      ),
+      { hydrateTranscript: false }
+    );
+    declareWatchedThreads();
+  }
   try {
-    const viewOnlyGeneration = (state.realSession || state.session)?.transcript_generation || "";
     const readSentAt = noteSettingsReadSent();
     const page = await fetchTranscriptPage({
       before: null,
@@ -1936,12 +1970,10 @@ export async function viewRemoteThread(threadId) {
     const heldRevision = heldTranscriptRevision(threadId);
     const pageRevision = numericRevision(page.revision);
     const pageIsOlderThanView = heldRevision != null && pageRevision != null && pageRevision < heldRevision;
-    // Retain the leaving thread's loaded window and restore the target thread's
-    // retained window (if any) instead of clearing — so switching between remote
-    // threads and back keeps the older history scrolled into view. The page fetch
-    // above still refreshes the tail; hydration merges it onto the restored
-    // window, and scroll-up reuses the retained older pages without a refetch.
-    switchTranscriptHydrationThread(state, threadId);
+    if (state.transcriptHydrationThreadId !== threadId) {
+      rememberRenderedThread();
+      switchTranscriptHydrationThread(state, threadId);
+    }
     // Pin this thread so incoming live snapshots update state.realSession while
     // leaving the user's local view in place.
     viewOnlyThreadId = threadId;
@@ -1982,7 +2014,13 @@ export async function viewRemoteThread(threadId) {
     return true;
   } catch (error) {
     renderLog(`Remote session view failed: ${error.message}`);
-    return navigationGeneration === viewOnlyNavigationGeneration ? false : null;
+    if (navigationGeneration !== viewOnlyNavigationGeneration) {
+      return null;
+    }
+    return Boolean(
+      state.session?.active_thread_id === threadId
+      && (state.session.transcript_generation || "") === viewedCacheIdentity().generation
+    );
   } finally {
     if (navigationGeneration === viewOnlyNavigationGeneration) {
       viewOnlyNavigationTarget = null;

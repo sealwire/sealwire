@@ -4,6 +4,7 @@ import {
   isTranscriptCursorRejected,
 } from "../shared/transcript-protocol.js";
 import { refreshedPinPage } from "./pin-page.js";
+import { cacheViewedThread, getCachedViewedThread } from "../shared/viewed-thread-cache.js";
 import {
   buildViewOnlyPin,
   mergeOlderViewOnlyPage,
@@ -49,9 +50,24 @@ export function createViewOnlyRefreshOps({
   let viewOnlyOlderLoading = false;
   const viewOnlyRefreshLatch = createViewedThreadRefreshLatch();
 
+  function rememberPin(state) {
+    const pin = state.viewOnlyThread;
+    const generation = state.session?.transcript_generation || "";
+    if (
+      pin
+      && !pin.error
+      && (!pin.loading || pin.entries?.length)
+      && (pin.relayGeneration || "") === generation
+    ) {
+      cacheViewedThread(state, pin.threadId, pin, { generation });
+    }
+  }
+
   async function loadViewOnlyTranscript(threadId, { terminal = false } = {}) {
     const state = getState();
     const session = state.session;
+    rememberPin(state);
+    const generation = (state.viewOnlyGeneration = (state.viewOnlyGeneration || 0) + 1);
     if (!viewOnlyEligible(session, threadId)) {
       if (state.viewOnlyThread) {
         state.viewOnlyThread = null;
@@ -62,11 +78,8 @@ export function createViewOnlyRefreshOps({
 
     const review = isReviewInProgressForThread(session, threadId);
     const workflowLocked = isWorkflowInProgressForThread(session, threadId);
-    const generation = (state.viewOnlyGeneration = (state.viewOnlyGeneration || 0) + 1);
     const reviewSig = review ? reviewSignature(session, threadId) : null;
     const summary = findVisible(threadId);
-    const cwd = summary?.cwd ?? null;
-    const provider = summary?.provider ?? null;
     const liveGeneration = session?.transcript_generation || "";
     const sameThreadPin =
       state.viewOnlyThread?.threadId === threadId ? state.viewOnlyThread : null;
@@ -76,7 +89,9 @@ export function createViewOnlyRefreshOps({
     const prior =
       sameThreadPin && (sameThreadPin.relayGeneration || "") !== liveGeneration
         ? null
-        : sameThreadPin;
+        : sameThreadPin || getCachedViewedThread(state, threadId, { generation: liveGeneration });
+    const cwd = summary?.cwd ?? prior?.cwd ?? null;
+    const provider = summary?.provider ?? prior?.provider ?? null;
     const isWorking = viewOnlyThreadIsWorking(session, threadId);
     const status = !isWorking && prior?.wasWorking ? "idle" : summary?.status ?? null;
     const loadingPin = buildViewOnlyPin({
@@ -116,7 +131,10 @@ export function createViewOnlyRefreshOps({
       const readSentAt = noteSettingsReadSent();
       const page = await fetchTranscriptPage(threadId, {});
       if (generation !== state.viewOnlyGeneration) return;
-      if (transcriptPageIsFromAnotherGeneration(session, page)) {
+      if (
+        (state.session?.transcript_generation || "") !== liveGeneration
+        || transcriptPageIsFromAnotherGeneration(state.session, page)
+      ) {
         // The relay restarted mid-fetch: these ids are from the previous run. Settle
         // through the error path rather than returning — a bare return leaves
         // `loading: true`, and the self-heal reads that as "a request is still in
@@ -238,6 +256,7 @@ export function createViewOnlyRefreshOps({
         reviewSignature,
       });
       if (action.kind === "release") {
+        rememberPin(state);
         state.viewOnlyThread = null;
       } else if (action.kind === "refresh") {
         void loadViewOnlyTranscript(pin.threadId);

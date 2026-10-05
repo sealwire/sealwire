@@ -5163,6 +5163,116 @@ test("gap repair updates the live session while preserving a view-only thread", 
   remoteQueryClient.clear();
 });
 
+async function cachedRemoteTabFixture() {
+  activeBrowser = installBrowserStubs();
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const ops = await import("./session-ops.js");
+  const { remoteQueryClient } = await import("./query-client.js");
+  ops.clearSessionRuntime();
+  seedRemoteViewedTerminalRefreshFixture(state, saveRemoteAuth);
+  remoteQueryClient.clear();
+  const pages = createHeldTranscriptPageSocket(handleRemoteBrokerPayload);
+  state.socket = pages.socket;
+  const snapshot = {
+    active_thread_id: "thread-a", active_turn_id: null, current_cwd: "/tmp/a", current_status: "idle",
+    pending_approvals: [], pending_ask_user_questions: [], transcript_generation: "run-1",
+    transcript: [{ item_id: "a-1", kind: "agent_text", text: "live A", turn_id: "turn-a" }],
+    transcript_revision: 1, transcript_truncated: false,
+  };
+  const page = (threadId, text, revision = 2) => ({
+    thread_id: threadId, transcript_generation: "run-1", revision, prev_cursor: null,
+    entries: [{ item_id: `${threadId}-1`, kind: "agent_text", text, status: "running", turn_id: `turn-${threadId}` }],
+    thread_state: { current_cwd: `/tmp/${threadId}`, model: "cached-model", provider: "codex", current_status: "idle" },
+  });
+  ops.applySessionSnapshot(snapshot);
+  const first = ops.viewRemoteThread("thread-b");
+  await waitFor(() => pages.pending === 1);
+  await pages.answer(0, page("thread-b", "cached B"));
+  assert.equal(await first, true);
+  await ops.viewRemoteThread("thread-a");
+  return {
+    state, ops, pages, page, snapshot,
+    cleanup() {
+      ops.clearSessionRuntime();
+      state.socket = null;
+      state.pendingActions.clear();
+      remoteQueryClient.clear();
+    },
+  };
+}
+
+test("returning to a remote tab renders its cached messages before the tail request resolves", async () => {
+  const { state, ops, pages, page, cleanup } = await cachedRemoteTabFixture();
+  try {
+    const returning = ops.viewRemoteThread("thread-b");
+    assert.equal(state.session.active_thread_id, "thread-b");
+    assert.equal(state.session.transcript[0].text, "cached B");
+    assert.equal(state.session.model, "cached-model");
+    assert.equal(state.realSession.active_thread_id, "thread-a");
+    await waitFor(() => pages.pending === 1);
+    ops.applyTranscriptDelta({
+      thread_id: "thread-b", transcript_generation: "run-1", base_revision: 2, revision: 3,
+      item_id: "thread-b-1", turn_id: "turn-thread-b", delta: " streamed", delta_kind: "agent_text", text_offset: 8,
+    });
+    ops.flushRemoteTranscriptRenderForTest();
+    await pages.answer(0, page("thread-b", "cached B", 2));
+    assert.equal(await returning, true);
+    assert.equal(state.session.transcript[0].text, "cached B streamed");
+    assert.equal(state.session.transcript_revision, 3);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a superseded cached remote navigation cannot replace the newer tab", async () => {
+  const { state, ops, pages, page, cleanup } = await cachedRemoteTabFixture();
+  try {
+    const returning = ops.viewRemoteThread("thread-b");
+    assert.equal(state.session.active_thread_id, "thread-b");
+    await waitFor(() => pages.pending === 1);
+    const other = ops.viewRemoteThread("thread-c");
+    await waitFor(() => pages.pending === 2);
+    await pages.answer(1, page("thread-c", "latest C"));
+    assert.equal(await other, true);
+    await pages.answer(0, page("thread-b", "late B"));
+    assert.equal(await returning, null);
+    assert.equal(state.session.active_thread_id, "thread-c");
+    assert.equal(state.session.transcript[0].text, "latest C");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a failed refresh keeps the restored remote tab displayed", async () => {
+  const { state, ops, pages, cleanup } = await cachedRemoteTabFixture();
+  try {
+    const returning = ops.viewRemoteThread("thread-b");
+    await waitFor(() => pages.pending === 1);
+    await pages.fail(0);
+    assert.equal(await returning, true);
+    assert.equal(state.session.active_thread_id, "thread-b");
+    assert.equal(state.session.transcript[0].text, "cached B");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a relay restart discards the previous remote tab's cached messages", async () => {
+  const { state, ops, pages, page, snapshot, cleanup } = await cachedRemoteTabFixture();
+  try {
+    ops.applySessionSnapshot({ ...snapshot, transcript_generation: "run-2" });
+    const returning = ops.viewRemoteThread("thread-b");
+    assert.equal(state.session.active_thread_id, "thread-a");
+    await waitFor(() => pages.pending === 1);
+    await pages.answer(0, { ...page("thread-b", "new run"), transcript_generation: "run-2" });
+    assert.equal(await returning, true);
+    assert.equal(state.session.transcript[0].text, "new run");
+  } finally {
+    cleanup();
+  }
+});
+
 // Answers each transcript page request only when the test says so, with the page it picks.
 function createHeldTranscriptPageSocket(handleRemoteBrokerPayload) {
   const held = [];
@@ -5189,6 +5299,14 @@ function createHeldTranscriptPageSocket(handleRemoteBrokerPayload) {
         ok: true,
         snapshot: {},
         thread_transcript: threadTranscript,
+      });
+    },
+    fail(index) {
+      const [actionId] = held.splice(index, 1);
+      assert.ok(actionId, "expected a held transcript page request");
+      return deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
+        kind: "remote_action_result", action_id: actionId, action: "fetch_thread_transcript",
+        ok: false, error: "offline",
       });
     },
   };

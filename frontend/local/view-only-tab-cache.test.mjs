@@ -1,0 +1,116 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createViewOnlyRefreshOps } from "./view-only-refresh-ops.js";
+import { applyDeltaToViewOnlyPin } from "./view-only-thread.js";
+import { clearTranscriptHydration } from "./transcript/store.js";
+
+function harness() {
+  const state = {
+    session: { active_thread_id: "live", transcript_generation: "run-1", thread_activity: [] },
+    viewThreadId: "a",
+    viewOnlyGeneration: 0,
+    viewOnlyThread: null,
+  };
+  const pending = [];
+  const ops = createViewOnlyRefreshOps({
+    getState: () => state,
+    fetchTranscriptPage: (threadId, options) => new Promise((resolve, reject) => {
+      pending.push({ threadId, options, resolve, reject });
+    }),
+    renderSession: () => {},
+  });
+  return { state, pending, ops };
+}
+
+function page(threadId, text, { cursor = null, revision = 1 } = {}) {
+  return {
+    thread_id: threadId,
+    transcript_generation: "run-1",
+    revision,
+    entries: [{ item_id: `${threadId}-1`, kind: "agent_text", text, status: "running", turn_id: "turn-1" }],
+    prev_cursor: cursor,
+  };
+}
+
+test("switching tabs restores loaded older rows before the new tail arrives", async () => {
+  const { state, pending, ops } = harness();
+  const first = ops.loadViewOnlyTranscript("a");
+  pending.shift().resolve(page("a", "tail", { cursor: "older" }));
+  await first;
+  const older = ops.loadOlderViewOnlyTranscript();
+  const request = pending.shift();
+  assert.equal(request.options.before, "older");
+  request.resolve({ ...page("a", "history"), entries: [{ item_id: "a-old", kind: "user_text", text: "history" }] });
+  await older;
+
+  state.viewThreadId = "b";
+  ops.maybeRefreshViewOnly(state.session);
+  pending.shift().resolve(page("b", "other tab"));
+  await Promise.resolve();
+  state.viewThreadId = "a";
+  ops.maybeRefreshViewOnly(state.session);
+  assert.equal(state.viewOnlyThread.loading, true);
+  assert.deepEqual(state.viewOnlyThread.entries.map(row => row.text), ["history", "tail"]);
+  assert.equal(state.viewOnlyThread.historyExtended, true);
+  assert.equal(state.viewOnlyThread.olderCursor, null);
+  assert.equal(pending.length, 1, "the latest tail is still fetched");
+  pending.shift().resolve(page("a", "fresh tail", { revision: 2 }));
+  await Promise.resolve();
+  assert.deepEqual(state.viewOnlyThread.entries.map(row => row.text), ["history", "fresh tail"]);
+});
+
+test("rapid A-B-A navigation and a streamed delta survive a stale tail response", async () => {
+  const { state, pending, ops } = harness();
+  const first = ops.loadViewOnlyTranscript("a");
+  pending.shift().resolve(page("a", "Hello"));
+  await first;
+  state.viewThreadId = "b";
+  const b = ops.loadViewOnlyTranscript("b");
+  state.viewThreadId = "a";
+  const a = ops.loadViewOnlyTranscript("a");
+  assert.equal(state.viewOnlyThread.entries[0].text, "Hello");
+  state.viewOnlyThread = applyDeltaToViewOnlyPin(state.viewOnlyThread, {
+    thread_id: "a", transcript_generation: "run-1", item_id: "a-2", turn_id: "turn-1",
+    base_revision: 1, revision: 2, delta_kind: "agent_text", text_offset: 0, delta: "streamed next row",
+  });
+  pending[1].resolve(page("a", "Hello"));
+  await a;
+  pending[0].resolve(page("b", "late B"));
+  await b;
+  assert.equal(state.viewOnlyThread.threadId, "a");
+  assert.deepEqual(state.viewOnlyThread.entries.map(row => row.text), ["Hello", "streamed next row"]);
+});
+
+test("a failed background refresh keeps cached messages visible", async () => {
+  const { state, pending, ops } = harness();
+  const first = ops.loadViewOnlyTranscript("a");
+  pending.shift().resolve(page("a", "cached"));
+  await first;
+  state.viewThreadId = "live";
+  ops.maybeRefreshViewOnly(state.session);
+  state.viewThreadId = "a";
+  const restored = ops.loadViewOnlyTranscript("a");
+  pending.shift().reject(new Error("offline"));
+  await restored;
+  assert.equal(state.viewOnlyThread.entries[0].text, "cached");
+  assert.equal(state.viewOnlyThread.loadError, "offline");
+});
+
+for (const reset of ["relay restart", "session teardown"]) {
+  test(`${reset} drops cached messages before a tab is restored`, async () => {
+    const { state, pending, ops } = harness();
+    const first = ops.loadViewOnlyTranscript("a");
+    pending.shift().resolve(page("a", "old run"));
+    await first;
+    state.viewThreadId = "live";
+    ops.maybeRefreshViewOnly(state.session);
+    if (reset === "relay restart") state.session.transcript_generation = "run-2";
+    else clearTranscriptHydration(state);
+    state.viewThreadId = "a";
+    const next = ops.loadViewOnlyTranscript("a");
+    assert.deepEqual(state.viewOnlyThread.entries, []);
+    pending.shift().resolve({ ...page("a", "new run"), transcript_generation: state.session.transcript_generation });
+    await next;
+    assert.equal(state.viewOnlyThread.entries[0].text, "new run");
+  });
+}

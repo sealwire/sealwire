@@ -27,6 +27,7 @@ import {
   markTranscriptWindowProjectionPending,
   settleTranscriptProjection as settlePendingTranscriptProjection,
 } from "../../shared/transcript-projection.js";
+import { clearViewedThreadCache } from "../../shared/viewed-thread-cache.js";
 
 function applyLocalTranscriptPatch(state, patch) {
   if (!patch) {
@@ -40,6 +41,7 @@ export function clearTranscriptHydration(state) {
   // Genuine reset (auth loss / session unavailable), not a thread switch — drop
   // the retained per-thread windows too.
   clearTranscriptHydrationThreadCache(state);
+  clearViewedThreadCache(state);
   applyLocalTranscriptPatch(state, createClearedTranscriptHydrationPatch());
 }
 
