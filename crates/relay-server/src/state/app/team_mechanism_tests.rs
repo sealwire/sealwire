@@ -2058,8 +2058,11 @@ async fn committing_never_executes_repository_hooks() {
             format!("#!/bin/sh\ntouch {}\n", sentinel.to_string_lossy()),
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 
     let (app, _providers) = build_review_app(&root, &["codex"]).await;

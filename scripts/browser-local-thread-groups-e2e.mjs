@@ -13,6 +13,7 @@ import { prepareSeededCodexHome } from "./e2e-codex-home.mjs";
 import { deleteThreadAndWait, fetchSession } from "./e2e-thread-cleanup.mjs";
 import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
 import { launchBrowser } from "./e2e/harness/browser.mjs";
+import { openSessionsDrawer } from "./e2e/harness/drawer.mjs";
 import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
 import { getFreePort } from "./e2e/harness/ports.mjs";
 import {
@@ -184,21 +185,15 @@ async function main() {
       "current workspace should follow the newest active session on initial load"
     );
 
-    const rootWorkspaceSelector = `[data-select-workspace="${cssEscapeForSelector(workspaces.root)}"]`;
-    await page.evaluate(({ expectedWorkspace, selector }) => {
-      const button = document.querySelector(selector);
-      if (!(button instanceof HTMLButtonElement)) {
-        throw new Error(`missing workspace header for ${expectedWorkspace}`);
-      }
-      button.click();
-    }, { expectedWorkspace: workspaces.root, selector: rootWorkspaceSelector });
+    await openSessionsDrawer(page);
+    await page.locator(`#threads-list [data-thread-id="${cssEscapeForSelector(threadFixtures[0].id)}"]`).click();
 
     await page.waitForFunction(
-      (expectedWorkspace) => {
-        const selectedGroup = document.querySelector(".thread-group.is-selected-workspace");
-        return selectedGroup?.dataset.threadGroupCwd === expectedWorkspace;
+      ({ cwd, id }) => {
+        const activeRow = document.querySelector("#threads-list .conversation-item.is-active");
+        return activeRow?.dataset.threadCwd === cwd && activeRow?.dataset.threadId === id;
       },
-      workspaces.root,
+      threadFixtures[0],
       { timeout: LOCAL_TIMEOUT_MS }
     );
 
@@ -207,7 +202,7 @@ async function main() {
         {
           relayPort,
           grouping,
-          selectedWorkspaceAfterClick: workspaces.root,
+          viewedWorkspaceAfterClick: workspaces.root,
         },
         null,
         2

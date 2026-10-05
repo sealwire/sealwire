@@ -30,7 +30,7 @@ test("the Postgres dev stack passes a persistent generated issuer secret to the 
     }
     const stub = path.join(root, "child-stub.mjs");
     writeFileSync(stub, `
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 if (args.includes("relay-broker")) {
   writeFileSync(process.env.SEALWIRE_TEST_CAPTURE, JSON.stringify({
@@ -39,7 +39,11 @@ if (args.includes("relay-broker")) {
     postgres: process.env.RELAY_BROKER_PUBLIC_POSTGRES_URL,
   }));
 }
-if (args[0] === "npm" && !args.includes("--watch")) process.exit(0);
+if (args[0] === "npm" && !args.includes("--watch")) {
+  mkdirSync("web", { recursive: true });
+  writeFileSync("web/build-meta.json", JSON.stringify({ buildId: "fixture-build" }));
+  process.exit(0);
+}
 setInterval(() => {}, 1000);
 `);
     // The restart script must never send its broad kill patterns to system pkill.

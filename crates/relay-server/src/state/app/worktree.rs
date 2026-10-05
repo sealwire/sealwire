@@ -1351,6 +1351,7 @@ mod tests {
             format!("#!/bin/sh\ntouch {}\n", sentinel.to_string_lossy()),
         )
         .unwrap();
+        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1371,6 +1372,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn exclusion_hygiene_refuses_to_follow_a_symlinked_exclude() {
         let (_repo, root) = init_repo().await;
@@ -1396,6 +1398,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn exclusion_hygiene_refuses_a_symlinked_info_directory() {
         // The parent redirects the write just as effectively as the leaf, and

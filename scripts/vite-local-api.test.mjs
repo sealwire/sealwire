@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
+import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -15,6 +16,8 @@ async function verifyLocalProxy(script, context) {
     context.skip("LAN isolation requires a non-loopback IPv4 interface");
     return;
   }
+  const previewDir = script === "preview" ? await mkdtemp(path.join(os.tmpdir(), "sealwire-vite-preview-")) : null;
+  if (previewDir) await writeFile(path.join(previewDir, "index.html"), "<!doctype html><title>Proxy fixture</title>");
   const upstream = http.createServer((_request, response) => response.end("isolated-relay"));
   upstream.listen(0, "127.0.0.1");
   await once(upstream, "listening");
@@ -26,7 +29,7 @@ async function verifyLocalProxy(script, context) {
   const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const [command, ...args] = pkg.scripts[script].split(/\s+/);
   assert.equal(command, "vite");
-  const child = spawn(process.execPath, [fileURLToPath(new URL("../node_modules/vite/bin/vite.js", import.meta.url)), ...args, "--port", String(port), "--strictPort"], {
+  const child = spawn(process.execPath, [fileURLToPath(new URL("../node_modules/vite/bin/vite.js", import.meta.url)), ...args, ...(previewDir ? ["--outDir", previewDir] : []), "--port", String(port), "--strictPort"], {
     cwd: fileURLToPath(new URL("..", import.meta.url)),
     env: {
       ...process.env,
@@ -63,6 +66,7 @@ async function verifyLocalProxy(script, context) {
       await stopped;
     }
     await new Promise((resolve) => upstream.close(resolve));
+    if (previewDir) await rm(previewDir, { recursive: true, force: true });
   }
 }
 

@@ -23,6 +23,7 @@ import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
 import { attachPageDebugLogging, launchBrowser } from "./e2e/harness/browser.mjs";
 import { openSessionsDrawer } from "./e2e/harness/drawer.mjs";
 import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
+import { showProviderModelsInPage } from "./e2e/harness/start-session-dialog.mjs";
 import { startLocalSession } from "./e2e/harness/local-session.mjs";
 import { getFreePort } from "./e2e/harness/ports.mjs";
 import { dumpProcessLogs, stopManagedProcess, waitForHealth } from "./e2e/harness/process.mjs";
@@ -283,7 +284,7 @@ async function assertMenuFollowsContentChanges(page, { menuSel, name, triggerSel
 // capture-phase window `scroll` listener also hears scrolls that ORIGINATE
 // inside the menu, scrolling a long list would re-place it and yank it back to
 // the top — making exactly the long lists this work exists to support unusable.
-async function assertMenuStaysScrolled(page, { menuSel, name, scrollerSel, triggerSel }) {
+async function assertMenuStaysScrolled(page, { menuSel, name, provider, scrollerSel, triggerSel }) {
   // The workspace panel does not scroll itself — it caps at `overflow: hidden`
   // and delegates to a nested row list, which is a separate scroll container
   // that the same measurement collapses.
@@ -292,6 +293,8 @@ async function assertMenuStaysScrolled(page, { menuSel, name, scrollerSel, trigg
   await trigger.waitFor({ state: "visible", timeout: TIMEOUT_MS });
   await trigger.click();
   await page.waitForSelector(menuSel, { state: "attached", timeout: TIMEOUT_MS });
+
+  if (provider) await page.evaluate(showProviderModelsInPage, provider);
 
   const overflow = await page.evaluate(
     ({ menuSel: sel }) => {
@@ -361,7 +364,7 @@ function pickersFor(dialogId) {
       triggerSel: `${within} .workspace-picker-trigger`,
     },
     {
-      menuSel: `${within} .setting-pill-menu`,
+      menuSel: `${within} .model-picker-menu`,
       name: `${dialogId} model`,
       triggerSel: `#${dialogId}-model`,
     },
@@ -437,15 +440,16 @@ async function main() {
     }
     await assertMenuFillsAvailableHeight(page, {
       menuSel: "#launch-start-session-dialog .setting-pill-menu",
-      name: "phone model",
+      name: "phone effort",
       touch: true,
-      triggerSel: "#launch-start-session-dialog-model",
+      triggerSel: "#launch-start-session-dialog-effort",
     });
     // The phone dialog is the tight fixture: the model list genuinely exceeds the
     // room available, so the menu is capped and must scroll.
     await assertMenuStaysScrolled(page, {
-      menuSel: "#launch-start-session-dialog .setting-pill-menu",
+      menuSel: "#launch-start-session-dialog .model-picker-menu",
       name: "phone model",
+      provider: "fake",
       triggerSel: "#launch-start-session-dialog-model",
     });
 
