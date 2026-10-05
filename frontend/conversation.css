@@ -2650,6 +2650,7 @@ button.ask-user-summary:focus-visible {
 .handover-card-heading {
   flex: 1;
   min-width: 0;
+  overflow-wrap: anywhere;
   display: flex;
   flex-direction: column;
   gap: 1px;
