@@ -9,8 +9,11 @@ import { resolveDevBrokerIssuerSecret, resolveDevBrokerTicketSecret } from "./de
 
 function runWindowsScript(script, target) {
   const powershell = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  // Node passes PowerShell 7's module paths to Windows PowerShell, whose cmdlets
+  // then resolve to incompatible modules. Let the child rebuild its own paths.
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== "PSMODULEPATH"));
   return execFileSync(powershell, ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
-    env: { ...process.env, SEALWIRE_ACL_TEST_PATH: target },
+    env: { ...env, SEALWIRE_ACL_TEST_PATH: target },
     encoding: "utf8",
     windowsHide: true,
     timeout: 10000,
