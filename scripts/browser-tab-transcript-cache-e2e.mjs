@@ -193,8 +193,18 @@ async function checkRemoteCache(context, base, artifactDir) {
     await page.waitForFunction(previous => window.__tabCacheFixture.tailReads > previous, readsBeforeRetry);
     await scroller.evaluate(element => { element.scrollTop = element.scrollHeight; });
     await page.waitForFunction(() => document.querySelector('[data-transcript-entry-id="a-43"]')?.textContent.includes("Fresh a"));
+    await page.locator('.conversation-item[data-thread-id="b"]').click();
+    await page.waitForSelector('[data-transcript-entry-id^="b-"]');
+    await page.evaluate(() => { window.__tabCacheFixture.holdTail = true; });
+    await page.locator('.session-tab[data-thread-id="a"] .session-tab-main').click();
+    await page.waitForFunction(() => window.__tabCacheFixture.held.length === 1);
+    await page.evaluate(() => window.__tabCacheFixture.release(true));
+    await notice.waitFor({ state: "visible" });
+    await page.evaluate(() => window.__tabCacheFixture.activateA());
+    await notice.waitFor({ state: "hidden" });
+    await page.screenshot({ path: path.join(artifactDir, "remote-became-live.png") });
     assert.deepEqual(errors, []);
-    console.log(JSON.stringify({ surface: "remote", before, restored, noticeRect, retry: "latest page loaded" }, null, 2));
+    console.log(JSON.stringify({ surface: "remote", before, restored, noticeRect, retry: "latest page loaded", becameLive: "warning cleared" }, null, 2));
   } catch (error) {
     await page.screenshot({ path: path.join(artifactDir, "remote-failure.png") });
     throw error;
@@ -222,12 +232,17 @@ function installRemoteFixture({ snapshot, generation, cwd, threads, cachedRows, 
     tx.oncomplete = () => { window.__tabCacheSecretReady = true; };
   };
   const controls = window.__tabCacheFixture = { holdTail: false, held: [], tailReads: 0, olderReads: 0, fresh: false };
+  let liveSnapshot = snapshot;
   class MockSocket extends EventTarget {
     static OPEN = 1;
     constructor(url) {
       super();
       this.url = url;
       this.readyState = 1;
+      controls.activateA = () => {
+        liveSnapshot = { ...snapshot, active_thread_id: "a", transcript_revision: 3, transcript: freshRows.slice(22) };
+        this.emit({ type: "message", payload: { protocol_version: 3, kind: "session_snapshot", snapshot: liveSnapshot } });
+      };
       queueMicrotask(() => {
         this.dispatchEvent(new Event("open"));
         this.emit({ type: "welcome", protocol_version: 1, peer_id: "surface-e2e", channel_id: "room-e2e", peers: [{ peer_id: "relay-peer-e2e", role: "relay" }] });
@@ -238,7 +253,7 @@ function installRemoteFixture({ snapshot, generation, cwd, threads, cachedRows, 
       this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ from_role: "relay", from_peer_id: "relay-peer-e2e", ...frame }) }));
     }
     respond(actionId, action, data = {}) {
-      this.emit({ type: "message", payload: { protocol_version: 3, kind: "remote_action_result", action_id: actionId, action, ok: true, snapshot, ...data } });
+      this.emit({ type: "message", payload: { protocol_version: 3, kind: "remote_action_result", action_id: actionId, action, ok: true, snapshot: liveSnapshot, ...data } });
     }
     send(raw) {
       const { payload } = JSON.parse(raw);

@@ -3,6 +3,7 @@ import test from "node:test";
 import { createViewOnlyRefreshOps } from "./view-only-refresh-ops.js";
 import { applyDeltaToViewOnlyPin } from "./view-only-thread.js";
 import { clearTranscriptHydration } from "./transcript/store.js";
+import { relayError } from "../shared/transcript-protocol.js";
 
 function harness() {
   const state = {
@@ -44,7 +45,7 @@ function numberedPage(start, end) {
 }
 
 for (const becameLive of [false, true]) {
-  test(`a cached window reconnects to a distant tail after ${becameLive ? "becoming live" : "running in the background"}`, async () => {
+  test(`a cached window reconnects to a nearby tail after ${becameLive ? "becoming live" : "running in the background"}`, async () => {
     const { state, pending, ops } = harness();
     const first = ops.loadViewOnlyTranscript("a");
     pending.shift().resolve(numberedPage(20, 30));
@@ -61,9 +62,9 @@ for (const becameLive of [false, true]) {
     state.viewThreadId = "a";
     const returning = ops.loadViewOnlyTranscript("a");
     assert.deepEqual(state.viewOnlyThread.entries.map(row => row.item_id), numberedPage(10, 30).entries.map(row => row.item_id));
-    pending.shift().resolve(numberedPage(90, 100));
+    pending.shift().resolve(numberedPage(50, 60));
     await Promise.resolve();
-    for (let start = 80; start >= 20; start -= 10) {
+    for (let start = 40; start >= 20; start -= 10) {
       const request = pending.shift();
       assert.ok(request, "the missing middle must be fetched before retaining the old history cursor");
       assert.equal(request.options.before, `before-${start + 10}`);
@@ -71,15 +72,97 @@ for (const becameLive of [false, true]) {
       for (let tick = 0; tick < 8; tick++) await Promise.resolve();
     }
     await returning;
-    assert.deepEqual(state.viewOnlyThread.entries.map(row => row.item_id), numberedPage(10, 100).entries.map(row => row.item_id));
+    assert.deepEqual(state.viewOnlyThread.entries.map(row => row.item_id), numberedPage(10, 60).entries.map(row => row.item_id));
     assert.equal(state.viewOnlyThread.olderCursor, "before-10");
     const oldest = ops.loadOlderViewOnlyTranscript();
     assert.equal(pending[0].options.before, "before-10");
     pending.shift().resolve(numberedPage(0, 10));
     await oldest;
-    assert.deepEqual(state.viewOnlyThread.entries.map(row => row.item_id), numberedPage(0, 100).entries.map(row => row.item_id));
+    assert.deepEqual(state.viewOnlyThread.entries.map(row => row.item_id), numberedPage(0, 60).entries.map(row => row.item_id));
   });
 }
+
+function retainedWindow(state) {
+  state.viewOnlyThread = {
+    threadId: "a", relayGeneration: "run-1", generation: 0, loading: false,
+    entries: numberedPage(10, 30).entries, olderCursor: "before-10", historyExtended: true,
+  };
+}
+
+async function settle() {
+  for (let tick = 0; tick < 8; tick++) await Promise.resolve();
+}
+
+test("a very large gap gives way to the latest page after three history reads", async () => {
+  const { state, pending, ops } = harness();
+  retainedWindow(state);
+  const returning = ops.loadViewOnlyTranscript("a");
+  pending.shift().resolve(numberedPage(5000, 5010));
+  await settle();
+  state.viewOnlyThread = applyDeltaToViewOnlyPin(state.viewOnlyThread, {
+    thread_id: "a", transcript_generation: "run-1", item_id: "a-5010", turn_id: "turn-new",
+    delta_kind: "agent_text", text_offset: 0, delta: "message 5010", order_seq: 5010 * 1048576,
+  });
+  for (const start of [4990, 4980, 4970]) {
+    const request = pending.shift();
+    assert.equal(request.options.before, `before-${start + 10}`);
+    request.resolve(numberedPage(start, start + 10));
+    await settle();
+  }
+  assert.equal(pending.length, 0, "automatic backfill must stop after three reads");
+  await returning;
+  assert.deepEqual(state.viewOnlyThread.entries.map(row => row.item_id), numberedPage(5000, 5011).entries.map(row => row.item_id), "the latest page and a new streamed row survive dropping disconnected history");
+  assert.equal(state.viewOnlyThread.olderCursor, "before-5000");
+  assert.equal(state.viewOnlyThread.historyExtended, false);
+  const older = ops.loadOlderViewOnlyTranscript();
+  assert.equal(pending[0].options.before, "before-5000", "the missing middle is reachable from the latest page's cursor");
+  pending.shift().resolve(numberedPage(4990, 5000));
+  await older;
+  assert.deepEqual(state.viewOnlyThread.entries.map(row => row.item_id), numberedPage(4990, 5011).entries.map(row => row.item_id));
+});
+
+test("a pending history read does not delay the latest page with repeated retries", async () => {
+  const { state, pending, ops } = harness();
+  retainedWindow(state);
+  const returning = ops.loadViewOnlyTranscript("a");
+  pending.shift().resolve(numberedPage(5000, 5010));
+  await settle();
+  pending.shift().reject(relayError("still reading history", "transcript_history_pending"));
+  await returning;
+  assert.equal(pending.length, 0);
+  assert.equal(state.viewOnlyThread.loading, false);
+  assert.equal(state.viewOnlyThread.error, false);
+  assert.deepEqual(state.viewOnlyThread.entries.map(row => row.item_id), numberedPage(5000, 5010).entries.map(row => row.item_id));
+  assert.equal(state.viewOnlyThread.olderCursor, "before-5000");
+});
+
+test("a failed gap page settles on the saved window and a subsequent retry can finish", async () => {
+  const { state, pending, ops } = harness();
+  retainedWindow(state);
+  const returning = ops.loadViewOnlyTranscript("a");
+  pending.shift().resolve(numberedPage(50, 60));
+  await settle();
+  pending.shift().reject(new Error("history unavailable"));
+  await returning;
+  assert.equal(state.viewOnlyThread.loading, false);
+  assert.equal(state.viewOnlyThread.error, true);
+  assert.equal(state.viewOnlyThread.loadError, "history unavailable");
+  assert.deepEqual(state.viewOnlyThread.entries.map(row => row.item_id), numberedPage(10, 30).entries.map(row => row.item_id));
+  assert.equal(state.viewOnlyThread.olderCursor, "before-10");
+  ops.maybeRefreshViewOnly(state.session);
+  assert.equal(pending.length, 0, "a failed read must settle before any later retry");
+  const retry = ops.loadViewOnlyTranscript("a");
+  pending.shift().resolve(numberedPage(50, 60));
+  await settle();
+  for (const start of [40, 30, 20]) {
+    pending.shift().resolve(numberedPage(start, start + 10));
+    await settle();
+  }
+  await retry;
+  assert.equal(pending.length, 0);
+  assert.equal(state.viewOnlyThread.error, false);
+  assert.deepEqual(state.viewOnlyThread.entries.map(row => row.item_id), numberedPage(10, 60).entries.map(row => row.item_id));
+});
 
 test("leaving a tab during gap backfill cannot overwrite the newer tab", async () => {
   const { state, pending, ops } = harness();

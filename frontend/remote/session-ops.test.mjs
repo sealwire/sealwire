@@ -5268,6 +5268,27 @@ test("a failed refresh after a cached remote thread went idle exposes a retry", 
   }
 });
 
+test("a cached refresh warning clears when the viewed thread becomes live", async () => {
+  const { state, ops, pages, snapshot, cleanup } = await cachedRemoteTabFixture();
+  try {
+    const returning = ops.viewRemoteThread("thread-b");
+    await waitFor(() => pages.pending === 1);
+    await pages.fail(0);
+    await returning;
+    assert.equal(state.viewedThreadRefreshError.threadId, "thread-b");
+    ops.applySessionSnapshot({
+      ...snapshot, active_thread_id: "thread-b", current_cwd: "/tmp/b", transcript_revision: 4,
+      transcript: [{ item_id: "thread-b-1", kind: "agent_text", text: "cached B now live", status: "completed", turn_id: "turn-thread-b" }],
+    });
+    assert.equal(Boolean(state.session.view_only), false);
+    assert.equal(state.session.transcript[0].text, "cached B now live");
+    assert.equal(state.viewedThreadRefreshError, null);
+    assert.equal(pages.pending, 0);
+  } finally {
+    cleanup();
+  }
+});
+
 test("a relay restart discards the previous remote tab's cached messages", async () => {
   const { state, ops, pages, page, snapshot, cleanup } = await cachedRemoteTabFixture();
   try {

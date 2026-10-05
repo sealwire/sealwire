@@ -1014,6 +1014,9 @@ export function applySessionSnapshot(snapshot) {
     preserveVisibleTranscriptText(state.realSession, snapshot)
   );
   state.realSession = displaySnapshot;
+  if (state.viewedThreadRefreshError && state.viewedThreadRefreshError.threadId === displaySnapshot.active_thread_id) {
+    patchRemoteState({ viewedThreadRefreshError: null });
+  }
   const previousThreadId = state.session?.active_thread_id || "-";
   const viewingLiveThread =
     viewOnlyThreadId && displaySnapshot.active_thread_id === viewOnlyThreadId;
