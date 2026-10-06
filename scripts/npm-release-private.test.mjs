@@ -278,6 +278,20 @@ test("the embedded frontend is built while the private surface is swapped in", a
   assert.match(build, /RELAY_PRIVATE_PATH: \$\{\{ github\.workspace \}\}\/\.private/);
 });
 
+test("binary third-party notices are generated against the public lock, not the swapped crate", async () => {
+  // The public Cargo.lock never records the private crate's dependencies, so the
+  // notices' `cargo metadata --locked` fails once it has a test-only one (v0.11.4).
+  const notices = stepMatching(await releaseWorkflow(), /npm run licenses:generate/);
+
+  assert.ok(notices, "the release no longer generates binary third-party notices");
+  assert.doesNotMatch(
+    notices,
+    /with-private\.sh/,
+    "with the private crate swapped in, `cargo metadata --locked` needs lock entries the public " +
+      "Cargo.lock deliberately omits, and every platform's build fails"
+  );
+});
+
 test("npm publish is wired to the guard that refuses a swapped tree", async () => {
   const manifest = JSON.parse(await readFile(path.join(repoRoot, "package.json"), "utf8"));
 

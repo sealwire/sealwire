@@ -125,11 +125,11 @@ jobs:
           RELAY_PRIVATE_PATH: ${{ github.workspace }}/.private
         run: scripts/with-private.sh npm run build
 
+      # Not swapped on purpose: the public Cargo.lock omits the private crate's test-only
+      # deps, so `cargo metadata --locked` fails with it in. Everything it links is public too.
       - name: Generate binary third-party notices
         shell: bash
-        env:
-          RELAY_PRIVATE_PATH: ${{ github.workspace }}/.private
-        run: scripts/with-private.sh npm run licenses:generate
+        run: npm run licenses:generate
 
       # `shell: bash` on every runner, not just the Unix ones: with-private.sh is
       # a bash script and the Windows runner defaults to pwsh, which would fail
